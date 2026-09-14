@@ -408,8 +408,13 @@ async def test_e2e_inject_prompt_every_source_type_value() -> None:
                 f"msg-{st.value}", source_type=st.value,
             )
 
-        # 5 SourceType values → 5 calls in order.
-        assert len(session.calls) == 5
+        # One call per SourceType member, in order.  Counted against
+        # the enum rather than a literal: the loop above already
+        # enumerates ``SourceType``, so a literal only asserts that
+        # nobody has added a member -- which is what broke when
+        # ``SIBLING`` landed and every value still crossed the wire and
+        # reconstituted correctly (#736).
+        assert len(session.calls) == len(SourceType)
         for (text, _sid, source_type), expected in zip(
             session.calls, list(SourceType),
         ):

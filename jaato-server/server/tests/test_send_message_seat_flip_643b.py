@@ -384,7 +384,10 @@ def test_demuxer_continuation_when_model_running_stashes() -> None:
     handler("continuation_needed", {"child_messages": "stash me"})
 
     # Stashed for the model_thread finally block.
-    assert srv._pending_continuations == ["stash me"], (
+    # ``(text, attachments)`` pairs since #877: a stash of TEXT alone
+    # discarded the payload that WAS the message for a voice turn.  Child
+    # messages are prose by construction, so this one's byte half is empty.
+    assert srv._pending_continuations == [("stash me", [])], (
         "a stash must ACCUMULATE -- a single slot silently drops all but "
         "the last when several land in one wind-down window"
     )

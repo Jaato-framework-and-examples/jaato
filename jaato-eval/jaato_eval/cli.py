@@ -25,6 +25,7 @@ from .manifest import ManifestError, discover_tasks
 from .report import render_markdown
 from .report_html import ReportDependencyError, write_html, write_pdf
 from .results import ResultStore
+from .runner import arm_ceiling_advice
 from .sweep import DEFAULT_CONCURRENCY, build_matrix, pool_size_advice, run_sweep
 from .verdict import BLOCKED, FAIL, PASS
 
@@ -93,6 +94,10 @@ def cmd_run(args: argparse.Namespace) -> int:
     print(f"{len(tasks)} task(s), {len(arms)} arm(s), concurrency {args.concurrency}",
           file=sys.stderr)
     print(pool_size_advice(args.concurrency), file=sys.stderr)
+    # A pool allowance no single arm can reach is always a silent
+    # downgrade, so it is said BEFORE the sweep spends anything (#724).
+    for line in arm_ceiling_advice(tasks, args.arm_timeout):
+        print(f"warning: {line}", file=sys.stderr)
 
     results = asyncio.run(run_sweep(
         arms, store=store, workspace_root=_absolute(args.workspaces),

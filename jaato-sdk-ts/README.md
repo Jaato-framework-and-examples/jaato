@@ -387,7 +387,8 @@ event stream and are correlated by `request_id` where applicable.
 | Method | WS verb |
 |---|---|
 | `sendMessage(text, attachments?, parallelTools?)` | `message.send` |
-| `injectPrompt(text, sourceType?, sourceId?)` | `inject_prompt.request` (steer / follow-up) |
+| `injectPrompt(text, sourceType?, sourceId?, attachments?)` | `inject_prompt.request` (steer / follow-up). `attachments` needs protocol 1.5+ and makes the delivery **idle-only** — a busy target answers `"busy"` with nothing enqueued, because the queued path folds a message into the running turn as text and cannot carry bytes. |
+| `wakeSession(sessionId, text?, {attachments?, source?, eventId?})` | `session.wake` (command) — revive a cold session and drive a turn. `text` may be empty when `attachments` are the message (a spoken utterance). |
 | `replayMessages(requestId, messages?, timeoutSeconds?)` | `replay_messages.request` (continue from current) |
 | `resolveForkPoint(requestId, opts)` | `resolve_fork_point.request` |
 | `stop(agentId?)` | `stop` |
@@ -413,7 +414,7 @@ event stream and are correlated by `request_id` where applicable.
 | `respondToToolExecution(callId, result?, error?)` | `tool.execute_result` (return result for client-registered tool) |
 | `disableTool(toolName)` | `tool.disable.request` |
 | `requestCommandList()` | `command_list.request` |
-| `executeCommand(command, args?)` | `command.execute` (escape hatch for any command-router verb without a typed method) |
+| `executeCommand(command, args?, payload?)` | `command.execute` (escape hatch for any command-router verb without a typed method). `payload` is the structured body verbs like `cascade.budget.set` and `session.wake` take. |
 | `sendRawEvent(envelope)` | _arbitrary type_ (escape hatch for daemon-extension verbs that register their OWN top-level message type — premium's `reconnect.list` / `reconnect.delete` / `auth.token` / `assets.list`, etc.) |
 
 **File staging**
@@ -622,7 +623,13 @@ daemon. On `connect()` the client checks that the daemon's
 required minor; mismatch raises `IncompatibleServerError`. The
 daemon's package version (`server_version`) is surfaced as
 `client.serverVersion` for diagnostics but is **not** the compat
-signal. See [`docs/sdk-protocol-versioning.md`](../docs/sdk-protocol-versioning.md)
+signal.
+
+A newer field a client only sometimes uses does not belong in that
+floor: `MIN_ATTACHMENT_RESUME_PROTOCOL` (`"1.5"`) is exported and
+checked **per call** by `injectPrompt` / `wakeSession`, so a client that
+never sends binary content still talks to any 1.x daemon, while one that
+does is refused rather than having its payload silently dropped. See [`docs/sdk-protocol-versioning.md`](../docs/sdk-protocol-versioning.md)
 for the bump policy and CHANGELOG.
 
 ## License

@@ -345,3 +345,74 @@ class TestClarificationResponse:
         answer = response.get_answer(99)
 
         assert answer is None
+
+
+class TestAttachmentFields:
+    """The two shape decisions #989 landed, and their serialisation.
+
+    ``Choice.expects_attachment`` and ``Answer.attachments`` are widenings
+    of dataclasses that already round-trip through ``to_dict`` /
+    ``from_dict``, so the contract is: a value set survives the round
+    trip, and an UNSET one leaves the dict byte-identical to what every
+    existing consumer has always received.
+    """
+
+    def test_a_choice_declares_an_attach_affordance(self):
+        choice = Choice(text="You attach a screenshot",
+                        expects_attachment=True)
+
+        assert choice.to_dict() == {"text": "You attach a screenshot",
+                                    "expects_attachment": True}
+        assert Choice.from_dict(choice.to_dict()).expects_attachment is True
+
+    def test_a_plain_choice_serialises_exactly_as_before(self):
+        assert Choice(text="We discuss it").to_dict() == {
+            "text": "We discuss it"}
+
+    def test_a_legacy_choice_dict_and_a_bare_string_still_parse(self):
+        assert Choice.from_dict({"text": "a"}).expects_attachment is False
+        assert Choice.from_dict("a").expects_attachment is False
+
+    def test_an_answer_round_trips_its_attachments_as_base64(self):
+        import base64
+        from jaato_sdk.plugins.model_provider.types import Attachment
+
+        raw = b"\x00\x01\x02\x03voice"
+        answer = Answer(
+            question_index=1,
+            free_text="",
+            attachments=[Attachment(mime_type="audio/wav", data=raw,
+                                    display_name="answer.wav")],
+        )
+
+        data = answer.to_dict()
+        entry = data["attachments"][0]
+        assert base64.b64decode(entry["data"]) == raw
+        assert entry["attachment_id"].startswith("att_")
+
+        restored = Answer.from_dict(data)
+        assert restored.attachments[0].data == raw
+        assert restored.attachments[0].mime_type == "audio/wav"
+        assert restored.attachments[0].display_name == "answer.wav"
+
+    def test_an_answer_with_no_media_serialises_exactly_as_before(self):
+        assert Answer(question_index=1, selected_choices=[2]).to_dict() == {
+            "question_index": 1,
+            "selected_choices": [2],
+            "free_text": None,
+            "skipped": False,
+        }
+
+    def test_attachments_are_orthogonal_to_the_answer_type(self):
+        """The design note's correction: a CHOICE answer may carry media."""
+        from jaato_sdk.plugins.model_provider.types import Attachment
+
+        answer = Answer(
+            question_index=1,
+            selected_choices=[1],
+            attachments=[Attachment(mime_type="image/png", data=b"png")],
+        )
+
+        restored = Answer.from_dict(answer.to_dict())
+        assert restored.selected_choices == [1]
+        assert restored.attachments[0].mime_type == "image/png"

@@ -60,7 +60,7 @@ def test_recovery_batch_clarification_delegates():
     rc._client = AsyncMock()
     asyncio.run(rc.respond_to_clarification_batch("rid", ["a", "b"]))
     rc._client.respond_to_clarification_batch.assert_awaited_once_with(
-        "rid", ["a", "b"], cancelled=False)
+        "rid", ["a", "b"], cancelled=False, answer_attachments=None)
 
 
 def test_recovery_batch_clarification_delegates_a_cancel():
@@ -72,4 +72,23 @@ def test_recovery_batch_clarification_delegates_a_cancel():
     rc._client = AsyncMock()
     asyncio.run(rc.respond_to_clarification_batch("rid", [], cancelled=True))
     rc._client.respond_to_clarification_batch.assert_awaited_once_with(
-        "rid", [], cancelled=True)
+        "rid", [], cancelled=True, answer_attachments=None)
+
+
+def test_recovery_batch_clarification_carries_the_attachments():
+    """Media must survive the proxy for the same reason the cancel must.
+
+    A recovery client is what a long-lived chat client uses, which is
+    exactly the client whose user answers by voice note (#989).  Dropped
+    here, the daemon is handed an empty answer and the agent proceeds on
+    nothing -- and the inner client's protocol refusal never fires,
+    because it only fires on a call that carries attachments.
+    """
+    media = {"1": [{"mime_type": "audio/wav", "data": "AAAA"}]}
+    rc = IPCRecoveryClient.__new__(IPCRecoveryClient)
+    rc._check_can_send = lambda: None
+    rc._client = AsyncMock()
+    asyncio.run(rc.respond_to_clarification_batch(
+        "rid", [""], answer_attachments=media))
+    rc._client.respond_to_clarification_batch.assert_awaited_once_with(
+        "rid", [""], cancelled=False, answer_attachments=media)

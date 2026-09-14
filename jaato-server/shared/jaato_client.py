@@ -94,7 +94,8 @@ class JaatoClient:
                  workspace_path: Optional[str] = None,
                  config_root: Optional[str] = None,
                  instruction_token_cache: Optional[InstructionTokenCache] = None,
-                 daemon_session_id: Optional[str] = None):
+                 daemon_session_id: Optional[str] = None,
+                 telemetry_config: Optional[Dict[str, Any]] = None):
         """Initialize JaatoClient with specified provider.
 
         Args:
@@ -116,6 +117,14 @@ class JaatoClient:
             daemon_session_id: Session manager ID (e.g. ``"20260328_204308"``).
                 Propagated to telemetry spans as ``jaato.session_id`` for
                 correlating Phoenix traces to jaato sessions.
+            telemetry_config: The profile's ``plugin_configs.telemetry``
+                block, forwarded to ``JaatoRuntime`` at ``connect()``.
+                Telemetry is runtime-scoped, so it is configured once here
+                rather than per session; ``None`` leaves the
+                environment-derived behaviour unchanged.  Settable after
+                construction with :meth:`set_telemetry_config`, which is how
+                the embedded client (whose factory builds this object before
+                the profile's configs have been resolved) supplies it (#858).
         """
         self._runtime: Optional[JaatoRuntime] = None
         self._session: Optional[JaatoSession] = None
@@ -123,6 +132,7 @@ class JaatoClient:
         self._workspace_path: Optional[str] = workspace_path
         self._config_root: Optional[str] = config_root
         self._instruction_token_cache: Optional[InstructionTokenCache] = instruction_token_cache
+        self._telemetry_config: Optional[Dict[str, Any]] = telemetry_config
 
         # Store model name for session creation
         self._model_name: Optional[str] = None
@@ -136,6 +146,21 @@ class JaatoClient:
         self._agent_id: str = "main"
         self._agent_name: str = "Main Agent"
         self._daemon_session_id: Optional[str] = daemon_session_id
+
+    def set_telemetry_config(
+        self, config: Optional[Dict[str, Any]]
+    ) -> None:
+        """Supply the profile's ``plugin_configs.telemetry`` block.
+
+        Must be called BEFORE :meth:`connect`, which is where the
+        ``JaatoRuntime`` — and with it the runtime-scoped telemetry plugin —
+        is built; a later call has nothing left to configure.  Exists
+        because the embedded client constructs this object through a
+        pluggable factory whose signature predates the block, so passing it
+        as a constructor argument would break every injected test seam
+        (#858).
+        """
+        self._telemetry_config = config
 
     def _trace(self, msg: str) -> None:
         """Write trace message to the provider trace log.
@@ -429,6 +454,7 @@ class JaatoClient:
             workspace_path=ws,
             config_root=self._config_root,
             instruction_token_cache=self._instruction_token_cache,
+            telemetry_config=self._telemetry_config,
         )
         self._runtime.connect(project, location)
 

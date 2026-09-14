@@ -27,7 +27,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from ..config import SubagentConfig
 from ..plugin import SubagentPlugin, _is_isolated_optin
+from shared.tool_result_builder import split_executor_result as _split
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -101,9 +103,15 @@ def _make_initialized_plugin() -> SubagentPlugin:
       arg is set).
     - The §4.3.1 detection branch runs fifth — and that's the branch
       under test.
+
+    These spawns name no ``profile``, which the #944 gate refuses by
+    default, so the config here opts into inline spawning: the branch
+    under test is the isolation routing, not the gate (which
+    ``test_inline_spawn_gate.py`` covers).
     """
     plugin = SubagentPlugin()
     plugin._initialized = True
+    plugin._config = SubagentConfig(project="", location="", allow_inline=True)
     return plugin
 
 
@@ -145,10 +153,10 @@ class TestSpawnSubagentDetectsOptin:
         }
         plugin._dispatch_isolated_spawn = MagicMock(return_value=sentinel)
 
-        result = plugin._execute_spawn_subagent({
+        ok, result = _split(plugin._execute_spawn_subagent({
             "task": "do something",
             "agent_params": {"isolated": True},
-        })
+        }))
 
         # Dispatcher was called.
         plugin._dispatch_isolated_spawn.assert_called_once()
@@ -182,7 +190,7 @@ class TestSpawnSubagentDefaultShareUnchanged:
         # Leave _config, _runtime, _workspace_path unset so the
         # downstream flow surfaces a different error.
 
-        result = plugin._execute_spawn_subagent({"task": "do something"})
+        ok, result = _split(plugin._execute_spawn_subagent({"task": "do something"}))
 
         # The detection branch did NOT fire; a different downstream
         # error path produced the result.
@@ -195,10 +203,10 @@ class TestSpawnSubagentDefaultShareUnchanged:
         downstream error as the no-flag case."""
         plugin = _make_initialized_plugin()
 
-        result = plugin._execute_spawn_subagent({
+        ok, result = _split(plugin._execute_spawn_subagent({
             "task": "do something",
             "agent_params": {"isolated": False},
-        })
+        }))
 
         assert result["success"] is False
         assert "not yet implemented" not in result["error"].lower()
@@ -209,10 +217,10 @@ class TestSpawnSubagentDefaultShareUnchanged:
         passes; same downstream error as the no-flag case."""
         plugin = _make_initialized_plugin()
 
-        result = plugin._execute_spawn_subagent({
+        ok, result = _split(plugin._execute_spawn_subagent({
             "task": "do something",
             "agent_params": {"username": "alice", "case_id": "42"},
-        })
+        }))
 
         assert result["success"] is False
         assert "not yet implemented" not in result["error"].lower()

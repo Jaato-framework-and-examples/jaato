@@ -16,6 +16,15 @@ vantage, the questions that otherwise cost an hour of trial-and-error:
   ``/proc/<pid>/environ`` and compares it to yours.
 - Does a given ``pass://`` secret actually resolve — from the daemon's
   HOME *and* from yours?
+- **Does the daemon resolve ``jaato_sdk`` / ``server`` from the same
+  checkout I do?**  Two trees and one venv is all it takes: the daemon
+  launched with a ``PYTHONPATH`` at a feature branch, the client without
+  one and inheriting the editable install.  Both are "installed
+  correctly" and they speak different event shapes, so a field the
+  daemon sends lands nowhere and surfaces as an ``AttributeError``
+  several frames from anything the reader wrote.  The daemon's
+  ``PYTHONPATH`` is in the same ``/proc/<pid>/environ`` block read for
+  HOME, so this costs one comparison.
 - Where will profiles be discovered and session logs be written?
 - Is ``connect()``'s default timeout adequate for a cold daemon start?
 
@@ -88,6 +97,7 @@ class DaemonInfo:
     user: Optional[str] = None
     password_store_dir: Optional[str] = None
     env: Optional[dict] = None           # the daemon's full /proc/<pid>/environ
+    executable: Optional[str] = None     # /proc/<pid>/exe — which interpreter
 
 
 # --------------------------------------------------------------------------
@@ -150,11 +160,33 @@ def _proc_environ(pid: int) -> Optional[dict]:
     return env
 
 
+def _proc_exe(pid: int) -> Optional[str]:
+    """The daemon's interpreter, via ``/proc/<pid>/exe``; ``None`` if unreadable.
+
+    Read for :func:`check_checkout_skew`: when the daemon's ``PYTHONPATH``
+    names no copy of a package, the daemon is using the *installed* one — and
+    "installed" means installed in the DAEMON's interpreter.  If that is a
+    different interpreter from the caller's, the client cannot resolve it and
+    must say so rather than compare against its own site-packages.
+
+    ``None`` on non-Linux, or when the daemon belongs to another user.
+    ``readlink`` rather than ``realpath``: the latter answers with the path it
+    was handed when nothing is there, so a dead pid would be reported as an
+    interpreter that does not exist — a probe that lies is worse than one that
+    declines.
+    """
+    try:
+        return os.path.realpath(os.readlink(f"/proc/{pid}/exe"))
+    except (OSError, ValueError):
+        return None
+
+
 def probe_daemon(socket_path: str, pidfile: str) -> DaemonInfo:
     """Observe the daemon behind ``socket_path`` without mutating anything.
 
     Reads listen-state, then (best-effort) the pidfile → liveness →
-    ``/proc/<pid>/environ`` for HOME/USER/PASSWORD_STORE_DIR.
+    ``/proc/<pid>/environ`` for HOME/USER/PASSWORD_STORE_DIR, and
+    ``/proc/<pid>/exe`` for the interpreter running it.
     """
     info = DaemonInfo(
         socket_path=socket_path,
@@ -165,6 +197,7 @@ def probe_daemon(socket_path: str, pidfile: str) -> DaemonInfo:
     if info.pid is not None:
         info.pid_alive = _pid_alive(info.pid)
         if info.pid_alive:
+            info.executable = _proc_exe(info.pid)
             env = _proc_environ(info.pid)
             if env is not None:
                 info.env = env
@@ -223,6 +256,163 @@ def _premium_pyproject_reactors(spec) -> Optional[List[str]]:
                .get("entry-points", {})
                .get("jaato.premium_reactors", {}))
     return sorted(eps.keys()) if isinstance(eps, dict) else None
+
+
+def check_dependency_coherence() -> List[Check]:
+    """Do this environment's jaato distributions agree with their own sources?
+
+    `pip` records a version at install time; an editable install keeps pointing
+    at a working tree that moves. When they part company, every version-derived
+    answer in the environment names a build that is not the one running — the
+    provenance stamp `jaato-scaffold integration` writes, a bug report's "installed
+    version", a compatibility decision.  Nothing else notices, because the
+    import still succeeds.
+
+    WARN, not FAIL: a skew misleads, it does not stop work.
+    """
+    try:
+        from shared.scaffold import dependencies as _deps
+    except Exception:      # noqa: BLE001 — sdk installed without the server
+        return [Check("dependency coherence", WARN,
+                      "cannot check: `shared.scaffold` is not importable "
+                      "(jaato-server not installed in this env)")]
+
+    # framework_dists() rather than the JAATO_DISTS literal: a jaato
+    # distribution shipped apart from this repo (jaato-premium, and whatever
+    # comes next) is discovered from installed metadata, so its skew is
+    # checked here without anyone editing a tuple (#966).  Resolved with
+    # getattr because this very module diagnoses environments where the SDK
+    # and jaato-server come from different checkouts (#823) — a doctor that
+    # raises on the skewed install is a doctor nobody can run.
+    listing = getattr(_deps, "framework_dists", None)
+    skewed, seen = [], []
+    for name in (listing() if listing else _deps.JAATO_DISTS):
+        st = _deps.dist_state(name)
+        if not st["installed"]:
+            continue
+        seen.append(f"{name} {st['installed']}")
+        if st["skew"]:
+            skewed.append(f"{name}: metadata {st['installed']} vs source "
+                          f"{st['source_version']}")
+    if not seen:
+        return [Check("dependency coherence", WARN, "no jaato distributions found")]
+    if skewed:
+        return [Check("dependency coherence", WARN,
+                      "; ".join(skewed) +
+                      " — reinstall the editable distribution (`pip install -e "
+                      "<source>`) so version-derived answers stop naming a build "
+                      "that is not running. `jaato-scaffold explain dependencies` "
+                      "shows the full picture.")]
+    return [Check("dependency coherence", PASS,
+                  ", ".join(seen) + " — metadata agrees with sources")]
+
+
+def check_mcp_sdk() -> List[Check]:
+    """Can the MCP plugin still find the installed SDK's JSON-RPC decode seam?
+
+    ``mcp[cli]`` is an unpinned dependency, so this environment's version is
+    whatever pip resolved.  The plugin filters a server's own stdout log lines
+    out before decoding them, and the SDK moved that decode between
+    generations: 1.x decodes through ``JSONRPCMessage.model_validate_json``,
+    2.x through a ``jsonrpc_message_adapter`` TypeAdapter, because
+    ``JSONRPCMessage`` became a PEP 604 union with no such method.
+
+    Reading only the 1.x seam raised ``AttributeError: 'types.UnionType'
+    object has no attribute 'model_validate_json'`` out of the MCP thread and
+    took every MCP server in the workspace with it — visible only as a
+    traceback in that thread's log.  Both seams are handled now, so this check
+    exists for the NEXT move: a shape the plugin does not recognise.
+
+    WARN, not FAIL: with no seam the plugin logs a warning and leaves decoding
+    unfiltered, so MCP still works and only the noise filter is lost.
+    """
+    import importlib.util as _u
+    if _u.find_spec("mcp") is None:
+        return [Check("mcp sdk", WARN,
+                      "the `mcp` package is not importable — the MCP plugin "
+                      "will be skipped at discovery")]
+    try:
+        import importlib.metadata as _md
+        version = _md.version("mcp")
+    except Exception:                    # noqa: BLE001 — diagnostic only
+        version = "unknown"
+    try:
+        from mcp import types as mcp_types
+        from shared.plugins.mcp.plugin import detect_jsonrpc_seam
+    except Exception as exc:             # noqa: BLE001 — sdk without the server
+        return [Check("mcp sdk", WARN,
+                      f"mcp {version} installed, but the plugin is not "
+                      f"importable here ({exc}) — cannot check the decode seam")]
+    seam = detect_jsonrpc_seam(mcp_types)
+    if seam is None:
+        return [Check("mcp sdk", WARN,
+                      f"mcp {version} exposes neither known JSON-RPC decode "
+                      "seam — MCP still works, but a server that logs to "
+                      "stdout will report parse errors.  Pin a version the "
+                      "plugin knows, or teach `detect_jsonrpc_seam` this one.")]
+    return [Check("mcp sdk", PASS,
+                  f"mcp {version} — stdout noise filter wired to the "
+                  f"'{seam}' decode seam")]
+
+
+def check_integrations() -> List[Check]:
+    """Are this build's integrations applied, and do they match it?
+
+    The skill ships as package data of `jaato-server` so a copy cannot describe
+    a different framework than the one running — but only if the copy on disk
+    came from THIS build.  Hand-copied skills drift silently: a survey of one
+    org found the same skill in four repos at four lengths, and user-global
+    installs 2.5 months behind the originals, with nothing detecting it.
+
+    So this reports the stamp `jaato-scaffold install` leaves against the
+    installed framework version.  WARN, never FAIL — a stale guide misleads a
+    reader but breaks no run, and the doctor's FAIL exit is a gate for things
+    that stop work.
+    """
+    try:
+        from shared.scaffold import integrations as _install
+    except Exception:      # noqa: BLE001 — sdk installed without the server
+        return [Check("integrations", WARN,
+                      "cannot check: `shared.scaffold` is not importable "
+                      "(jaato-server not installed in this env)")]
+
+    names = _install.available()
+    if not names:
+        return [Check("integrations", WARN, "this framework build ships no integrations")]
+
+    out: List[Check] = []
+    for name in names:
+        user = _install.target_dir(name, user=True, workspace=None)
+        state, detail = _install.compare(name, user)
+        if state == "current":
+            out.append(Check(f"integration ({name})", PASS,
+                             f"{user} — from jaato-server {detail}"))
+        elif state == "absent":
+            out.append(Check(f"integration ({name})", WARN,
+                             f"not applied — `jaato-scaffold integration {name}` "
+                             f"puts it in {user} for every repo on this machine"))
+        elif state == "stale":
+            out.append(Check(f"integration ({name})", WARN,
+                             f"{detail} — re-run `jaato-scaffold integration {name} --force`"))
+        elif state == "unstamped":
+            out.append(Check(f"integration ({name})", WARN,
+                             f"{user} was {detail}; it may describe a different "
+                             f"build — `jaato-scaffold integration {name} --force` "
+                             f"replaces it with this one"))
+        elif state == "outdated":
+            # NOT a local edit: the payload moved upstream at the same version.
+            # This case used to be reported as a local edit, which told the
+            # operator the exact opposite of the truth.
+            out.append(Check(f"integration ({name})", WARN,
+                             f"{detail} — `jaato-scaffold integration {name} --force`"))
+        elif state == "edited":
+            out.append(Check(f"integration ({name})", WARN,
+                             f"{detail} — `--force` would discard it"))
+        else:      # diverged
+            out.append(Check(f"integration ({name})", WARN,
+                             f"{detail} — reconcile by hand, or `--force` and "
+                             f"lose the local side"))
+    return out
 
 
 def check_premium_reactors() -> List[Check]:
@@ -349,6 +539,300 @@ def check_home_match(info: DaemonInfo) -> List[Check]:
                   f"{my_home}/.password-store.  Fix: stop targeting that "
                   f"daemon; let the client autostart its own on a fresh "
                   f"socket so it inherits your HOME.")]
+
+
+#: The top-level packages whose EVENT SHAPES both sides must agree on.
+#: ``jaato_sdk`` holds the client's event classes and ``server`` the daemon's
+#: emitters; they are the two halves of the wire contract #823 is about.
+#: ``shared`` ships in the same distribution as ``server`` and from the same
+#: ``PYTHONPATH`` entry, so listing it would add a row and no information.
+_SKEW_PACKAGES = ("jaato_sdk", "server")
+
+#: Quote characters a ``pyproject.toml`` version may be wrapped in.
+_QUOTES = "\"'"
+
+
+def _resolve_package_on(entries: List[str], pkg: str) -> Optional[Path]:
+    """First ``<entry>/<pkg>/__init__.py`` along ``entries``, or ``None``.
+
+    This is ``sys.path`` resolution for one package, done by hand because the
+    path being resolved belongs to ANOTHER process.  ``PYTHONPATH`` entries
+    precede site-packages, and are searched in order, so the first hit is what
+    that process imports.
+    """
+    for entry in entries:
+        cand = Path(entry) / pkg
+        try:
+            if (cand / "__init__.py").is_file():
+                return cand
+        except (OSError, ValueError):   # unreadable, or an embedded NUL
+            continue
+    return None
+
+
+def _my_pythonpath() -> List[str]:
+    """The caller's own ``PYTHONPATH`` entries, in order."""
+    return [p for p in os.environ.get("PYTHONPATH", "").split(os.pathsep) if p]
+
+
+def _installed_package_dir(pkg: str) -> Optional[Path]:
+    """Where ``pkg`` resolves with the CALLER's own ``PYTHONPATH`` discounted.
+
+    "The daemon has no ``PYTHONPATH``, so it uses the installed package" is
+    only answerable from here when the two processes share an interpreter —
+    :func:`check_checkout_skew` establishes that before trusting this.  The
+    caller's own ``PYTHONPATH`` entries are removed because they are precisely
+    what the daemon does not have.
+
+    Two tiers, and the second is not optional.  Walking ``sys.path`` finds a
+    wheel unpacked into ``site-packages`` and a ``.pth``-style editable, and
+    finds NOTHING for a PEP 660 editable install, which installs a meta-path
+    finder rather than a path entry — the dominant shape in exactly the dev
+    loop #823 is about.  So a miss falls through to installed metadata, which
+    records the source directory an editable install points at.
+    """
+    mine = {os.path.realpath(p) for p in _my_pythonpath()}
+    entries = [p for p in sys.path if p and os.path.realpath(p) not in mine]
+    return _resolve_package_on(entries, pkg) or _editable_source_dir(pkg)
+
+
+def _editable_source_dir(pkg: str) -> Optional[Path]:
+    """The working tree a PEP 660 editable install of ``pkg`` points at.
+
+    ``direct_url.json`` is where pip records that a distribution was installed
+    from a directory in editable mode; the import name → distribution mapping
+    is measured with ``packages_distributions()`` rather than guessed, since
+    ``jaato_sdk`` → ``jaato-sdk`` holds here and is not a rule.
+
+    Best-effort throughout: this runs inside a diagnostic, and every failure
+    mode (no metadata, unreadable JSON, a distribution that ships the package
+    somewhere else) answers ``None``, which the caller reports as "could not
+    resolve" rather than as a comparison.
+    """
+    try:
+        import json
+        from importlib.metadata import distribution, packages_distributions
+
+        for dist_name in packages_distributions().get(pkg, ()):
+            raw = distribution(dist_name).read_text("direct_url.json")
+            if not raw:
+                continue
+            info = json.loads(raw)
+            url = str(info.get("url", ""))
+            if not info.get("dir_info", {}).get("editable") or \
+                    not url.startswith("file://"):
+                continue
+            cand = Path(url[len("file://"):]) / pkg
+            if (cand / "__init__.py").is_file():
+                return cand
+    except Exception:            # noqa: BLE001 — diagnostics never raise
+        return None
+    return None
+
+
+def _daemon_package_dir(pkg: str, entries: List[str],
+                        client: Optional[Path]) -> Tuple[Optional[Path], str]:
+    """Where the DAEMON imports ``pkg`` from, and how that was established.
+
+    CPython's own order: the process's ``PYTHONPATH`` entries first, then the
+    installed package.  The middle case is the one worth naming — when the
+    daemon has no ``PYTHONPATH`` for this package and neither does the CALLER,
+    the caller's own resolution IS the installed package, so the comparison is
+    the straight one #823 describes and needs no second resolution that could
+    disagree with it.
+
+    Args:
+        pkg: The top-level package name.
+        entries: The daemon's ``PYTHONPATH``, split and in order.
+        client: Where this process resolves ``pkg``, or ``None``.
+
+    Returns:
+        ``(path_or_None, source)`` — ``source`` names the derivation for the
+        detail line, so a reader can see which rule produced the comparison.
+    """
+    found = _resolve_package_on(entries, pkg)
+    if found is not None:
+        return found, "daemon PYTHONPATH"
+    if _resolve_package_on(_my_pythonpath(), pkg) is None:
+        return client, "the installed package — the same one you resolve"
+    return _installed_package_dir(pkg), "the installed package"
+
+
+def _client_package_dir(pkg: str) -> Optional[Path]:
+    """Where THIS process imports ``pkg`` from — the fact, not a derivation.
+
+    ``find_spec`` rather than importing: ``server`` is heavy, and the doctor
+    must be able to report on a package it would rather not execute.
+    """
+    import importlib.util as _u
+    try:
+        spec = _u.find_spec(pkg)
+    except Exception:            # noqa: BLE001 — an unimportable pkg is a FINDING
+        return None
+    origin = getattr(spec, "origin", None) if spec else None
+    return Path(origin).parent if origin else None
+
+
+def _is_working_tree(pkgdir: Path) -> bool:
+    """Is this resolved package a source CHECKOUT rather than an install?
+
+    The discriminator for #823's severity split.  A checkout has the
+    distribution's ``pyproject.toml`` as its parent's sibling file
+    (``jaato-sdk/pyproject.toml`` beside ``jaato-sdk/jaato_sdk/``); a copy
+    unpacked into ``site-packages`` has no such file.  Two checkouts that
+    differ are two branches of the source — never intentional in a dev loop.
+    Two installs that differ are at worst a rolling upgrade.
+    """
+    try:
+        return (pkgdir.parent / "pyproject.toml").is_file()
+    except OSError:
+        return False
+
+
+def _version_at(pkgdir: Path) -> str:
+    """``" (0.19.0)"`` for a resolved package directory, or ``""``.
+
+    Best-effort and cosmetic: it turns "these two paths differ" into "these
+    two paths differ, and here is by how much", which is what tells a reader
+    a rolling upgrade from a branch mix-up at a glance.  Never raises — a
+    version that cannot be read simply is not shown.
+    """
+    try:
+        pyproject = pkgdir.parent / "pyproject.toml"
+        if pyproject.is_file():
+            for line in pyproject.read_text(encoding="utf-8",
+                                            errors="replace").splitlines():
+                text = line.strip()
+                if text.startswith("version") and "=" in text:
+                    value = text.split("=", 1)[1].strip().strip(_QUOTES)
+                    return f" ({value})"
+            return ""
+        for info in sorted(pkgdir.parent.glob("*.dist-info")):
+            found = _version_from_dist_info(info, pkgdir.name)
+            if found:
+                return f" ({found})"
+    except OSError:
+        return ""
+    return ""
+
+
+def _version_from_dist_info(info: Path, pkg: str) -> Optional[str]:
+    """The ``Version:`` of a ``.dist-info`` that actually ships ``pkg``.
+
+    A site-packages directory holds many ``.dist-info`` directories; matching
+    the wrong one would report a stranger's version as this package's. The
+    ownership claim is read from ``top_level.txt`` where it exists, and
+    otherwise from the directory name, which is ``<name>-<version>.dist-info``.
+    """
+    top = info / "top_level.txt"
+    if top.is_file():
+        if pkg not in top.read_text(encoding="utf-8", errors="replace").split():
+            return None
+    elif info.name.split("-")[0].replace("-", "_").lower() != pkg.lower():
+        return None
+    meta = info / "METADATA"
+    if not meta.is_file():
+        return None
+    for line in meta.read_text(encoding="utf-8", errors="replace").splitlines():
+        if line.startswith("Version:"):
+            return line.split(":", 1)[1].strip()
+        if not line.strip():     # end of the header block
+            break
+    return None
+
+
+def _skew_verdict(pkg: str, client: Path, daemon: Path, source: str) -> Check:
+    """Compare one package's two resolved paths and grade the difference.
+
+    Args:
+        pkg: The top-level package name (``"jaato_sdk"``).
+        client: Where this process imports it from.
+        daemon: Where the daemon imports it from.
+        source: How ``daemon`` was derived, for the detail line.
+
+    Returns:
+        PASS when the two resolve to one tree; FAIL when they are different
+        working trees (#823 — the daemon emits fields the client's event
+        classes cannot hold, and pydantic drops them silently on ingest);
+        WARN when two *installed* copies differ, which is what a legitimate
+        rolling upgrade looks like.
+    """
+    label = f"{pkg} checkout"
+    detail = (f"client={client}{_version_at(client)}  "
+              f"daemon={daemon}{_version_at(daemon)} (via {source})")
+    if os.path.realpath(client) == os.path.realpath(daemon):
+        return Check(label, PASS,
+                     f"client and daemon both resolve {pkg} from "
+                     f"{client}{_version_at(client)}.")
+    if _is_working_tree(client) or _is_working_tree(daemon):
+        return Check(label, FAIL,
+                     f"DIFFERENT WORKING TREES: {detail}. The two sides speak "
+                     f"different event shapes: a field the daemon sends that "
+                     f"the client's class cannot hold is dropped silently on "
+                     f"ingest, and surfaces later as an AttributeError inside "
+                     f"an event handler. Fix: point both at one tree — unset "
+                     f"PYTHONPATH for the daemon, or restart it with the same "
+                     f"PYTHONPATH the client uses.")
+    return Check(label, WARN,
+                 f"different installed copies of {pkg}: {detail}. Neither is a "
+                 f"source checkout, so this is what a rolling upgrade looks "
+                 f"like — harmless if the versions are wire-compatible, and "
+                 f"the cause of missing event fields if they are not.")
+
+
+def check_checkout_skew(info: DaemonInfo) -> List[Check]:
+    """Do the client and the daemon resolve the framework from the same tree?
+
+    Beside the HOME comparison, and for the same reason: an invisible property
+    of the daemon PROCESS that changes behaviour, recoverable from the environ
+    block the doctor already reads (#823).  Every surface reports healthy —
+    socket listening, handshake fine, session running, events arriving — and
+    then a handler dies several frames from anything the reader wrote, because
+    the daemon sent ``ToolOutputEvent.mime_type`` and the client's class had
+    nowhere to put it.
+
+    The daemon's resolution is derived the way CPython would — see
+    :func:`_daemon_package_dir`.  The installed-package fallback is only
+    trustworthy while both processes share an interpreter, so when they
+    demonstrably do not, this reports that it cannot tell rather than
+    comparing against the caller's own site-packages and answering PASS.
+
+    Returns:
+        Empty when there is no daemon to compare against — nothing observed is
+        not a finding.  One WARN when the daemon is up but its environ cannot
+        be read.  Otherwise one :class:`Check` per package in
+        :data:`_SKEW_PACKAGES`.
+    """
+    if not info.listening:
+        return []
+    if info.env is None:
+        return [Check("checkout skew", WARN,
+                      "daemon environ unavailable (not listening / non-Linux / "
+                      "no pidfile) — cannot tell whether it resolves jaato from "
+                      "your checkout or another one.")]
+    entries = [x for x in (info.env.get("PYTHONPATH") or "").split(os.pathsep) if x]
+    other_interpreter = bool(
+        info.executable
+        and os.path.realpath(info.executable) != os.path.realpath(sys.executable))
+    out: List[Check] = []
+    for pkg in _SKEW_PACKAGES:
+        client = _client_package_dir(pkg)
+        if other_interpreter and _resolve_package_on(entries, pkg) is None:
+            out.append(Check(f"{pkg} checkout", WARN,
+                             f"the daemon's PYTHONPATH names no {pkg}, so it uses "
+                             f"the copy installed for ITS interpreter "
+                             f"({info.executable}), which is not yours "
+                             f"({sys.executable}) — cannot resolve it from here."))
+            continue
+        daemon, source = _daemon_package_dir(pkg, entries, client)
+        if client is None or daemon is None:
+            out.append(Check(f"{pkg} checkout", WARN,
+                             f"could not resolve {pkg} for both sides "
+                             f"(client={client or '?'}, daemon={daemon or '?'}) "
+                             f"— checkout skew unchecked."))
+            continue
+        out.append(_skew_verdict(pkg, client, daemon, source))
+    return out
 
 
 def load_known_env_vars() -> Optional[Dict[str, str]]:
@@ -639,11 +1123,57 @@ def check_workspace(workspace: str, config_root: Optional[str]) -> List[Check]:
     ]
 
 
+def check_secret_scrub(workspace: str, config_root: Optional[str]) -> List[Check]:
+    """Preflight the workspace's profiles for an unscrubbed subprocess surface.
+
+    Secret env scrubbing is ON by default (#863), so the only way a
+    profile's ``cli`` / ``interactive_shell`` / ``mcp`` plugin hands the
+    daemon's provider keys to model-driven commands is a deliberate
+    ``scrub_secret_env: none`` (profile-level or per-surface).  That is a
+    legitimate developer-desktop choice, but it should be a VISIBLE one
+    before a session starts — so this check runs the same
+    ``secret_scrub_disabled`` / ``invalid_scrub_secret_env`` rules as
+    ``jaato-scaffold validate`` over the resolved workspace profiles
+    (workspace tier and the inherited ``~/.jaato`` tier alike) and WARNs
+    naming each profile.  Soft-imports the server-side validator; a
+    client-only install WARNs that it could not check rather than
+    reporting PASS on nothing.
+    """
+    try:
+        from shared.scaffold.validate import validate_workspace  # type: ignore
+    except Exception:
+        return [Check("secret scrub", WARN,
+                      "jaato-server's validator is not importable here — cannot "
+                      "check the workspace profiles' scrub_secret_env (install "
+                      "jaato-server / run from its env).")]
+    try:
+        diags = validate_workspace(workspace, config_root=config_root)
+    except Exception as exc:  # noqa: BLE001 — a preflight never crashes
+        return [Check("secret scrub", WARN,
+                      f"could not resolve the workspace profiles: {exc}")]
+    disabled = sorted({
+        f"{d.profile} ({d.where})" for d in diags
+        if d.code in ("secret_scrub_disabled", "invalid_scrub_secret_env")
+    })
+    if disabled:
+        return [Check("secret scrub", WARN,
+                      "model-driven subprocesses inherit the daemon's FULL "
+                      "environment (provider keys, tokens) in: "
+                      + ", ".join(disabled)
+                      + " — set `scrub_secret_env: default`, or exempt only "
+                      "the names a tool needs: [default, '!GH_TOKEN'].  "
+                      "Details: `jaato-scaffold validate`.")]
+    return [Check("secret scrub", PASS,
+                  "every profile's cli / interactive_shell / mcp subprocesses "
+                  "run with secret env vars scrubbed (the default set, or the "
+                  "profile's own patterns).")]
+
+
 # --------------------------------------------------------------------------
 # WebSocket transport (daemon-side preflight)
 #
 # The Python SDK is IPC-only; WebSocket clients use the TypeScript SDK
-# (``jaato-sdk-ts``) / the browser web-client.  The doctor can't preflight a
+# (``jaato-sdk-ts``) / the browser client (``jaato-web``).  The doctor can't preflight a
 # TS client, but it CAN verify the daemon side those clients depend on — which
 # is exactly the part that's easy to get wrong (port not up, missing/loose
 # bearer token, auth accidentally disabled).
@@ -878,15 +1408,20 @@ def run_checks(
     checks: List[Check] = []
     checks += check_python_env()
     checks += check_premium_reactors()
+    checks += check_dependency_coherence()
+    checks += check_integrations()
+    checks += check_mcp_sdk()
     checks += check_socket(info, auto_start=auto_start)
     checks += check_daemon_identity(info)
     if web_socket:
         checks += check_websocket(web_socket, info, ws_token_file=ws_token_file)
     checks += check_home_match(info)
+    checks += check_checkout_skew(info)
     checks += check_daemon_env(info, load_known_env_vars())
     checks += check_secret(info, secret)
     checks += check_env_file(env_file, workspace)
     checks += check_workspace(workspace, config_root)
+    checks += check_secret_scrub(workspace, config_root)
     checks += check_driver(workspace)
     return checks
 

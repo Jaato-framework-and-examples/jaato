@@ -34,6 +34,32 @@ All decisions are made from the entry point's *metadata*
 (``ep.name`` / ``ep.value`` / ``ep.dist``) — that is, **before**
 ``ep.load()`` — so a refused entry point never gets its module
 imported.
+
+Passing trust is not the same as being loaded (issue #917)
+----------------------------------------------------------
+This module answers *may* this distribution supply a plugin.  A second,
+independent gate answers *which tier* loads it, and an out-of-tree
+author has no reason to know it exists.  Discovery is tier-filtered
+(``PluginRegistry.discover(tier_filter="runner")`` is what the session
+runner calls), and a plugin whose package declares no module-level
+``PLUGIN_TIER`` is excluded under **every** filter — see
+:func:`~shared.plugins.registry._tier_filter_matches`.
+
+So a distribution can pass every check in this module, be listed by
+``jaato-scaffold explain plugins``, be named in a profile, and still
+have none of its tools reach the model.  A plugin that provides tools
+wants::
+
+    # jaato_m365/__init__.py
+    PLUGIN_KIND = "tool"
+    PLUGIN_TIER = "runner"        # "daemon" = daemon-side only;
+                                  # "daemon_callable" = both sides
+
+The registry now announces a missing annotation at WARNING rather than
+at debug, ``explain plugins`` marks the row, and ``jaato-scaffold
+validate`` errors on a profile naming such a plugin — but the cheapest
+place to learn the rule is here, next to the rest of the out-of-tree
+contract.
 """
 
 from __future__ import annotations

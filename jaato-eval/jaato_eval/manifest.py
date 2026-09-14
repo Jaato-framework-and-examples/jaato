@@ -137,7 +137,33 @@ class BudgetSpec:
     """The task's CASCADE POOL — an aggregate over all of its arms.
 
     This is **not** the per-arm ceiling.  jaato has two independent budget
-    gates and this block drives only the second:
+    gates and this block drives only the second.
+
+    THREE WALL-CLOCK GATES, and only two of them are budget gates (#724).
+    An author who sets ``seconds`` here and watches an arm cut at 900s is
+    meeting the third, which lives in the harness rather than in any
+    budget and was previously named in no manifest documentation at all:
+
+    * ``budget.seconds`` — declared in THIS block.  Bounds the POOL:
+      every arm of the task together.  Reconciled when a session ENDS.
+    * ``budget_control.limits.seconds`` — declared in the arm's PROFILE.
+      Bounds ONE session, enforced daemon-side.
+    * the per-arm ceiling, default 900s, set with ``--arm-timeout``
+      (``0`` disables) — declared on the HARNESS command line, and
+      nowhere in any manifest.  Bounds ONE arm's wall clock.  This is
+      the gate that produces ``arm exceeded the per-arm ceiling``.
+
+    The third exists because neither budget gate can do its job: a pool's
+    ``seconds`` is reconciled when a session ends, so a session that never
+    ends never consumes it and the pool cannot abort it.  See
+    :data:`jaato_eval.runner.DEFAULT_ARM_TIMEOUT_SECONDS`.
+
+    Feeding ``budget.seconds`` into the arm ceiling would be wrong, not
+    merely unimplemented: an arm whose ceiling moved with what earlier
+    arms spent is not a reproducible measurement.  They stay separate, and
+    ``jaato-eval run`` warns before spending anything when a ``seconds``
+    here is larger than the arm ceiling, because no single arm can then
+    reach the allowance.
 
     - **per-arm ceiling** — ``budget_control:`` in the arm's own profile,
       under the task's ``config_root``.  A session carrying one is on its

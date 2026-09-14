@@ -108,6 +108,7 @@ from .oauth import (
     Account,
     AccountManager,
     get_valid_access_token,
+    refresh_account_under_lock,
     load_accounts,
     login as oauth_login,
     refresh_tokens,
@@ -673,21 +674,46 @@ class AntigravityProvider(ModalityCapabilityMixin):
         )
 
     def _refresh_token_if_needed(self) -> None:
-        """Refresh the OAuth token if expired."""
+        """Refresh the OAuth token if stale.
+
+        Delegates to :func:`refresh_account_under_lock` rather than
+        refreshing in place.  Two things make that necessary and not
+        merely tidier (#683):
+
+        - Google rotates the refresh token, so two processes refreshing
+          at once leave one of them holding a superseded credential that
+          fails at its *next* refresh — surfacing as an unexplained
+          logout.  The lock and the re-read behind it collapse that to
+          one refresh.
+        - ``save_accounts`` rewrites the WHOLE account file from the
+          manager it is handed.  ``self._account_manager`` is loaded once
+          at connect and lives for the session, so saving it here
+          republishes every other account's stale tokens over whatever
+          another process refreshed in the meantime.  The helper writes
+          back the copy it read under the lock instead.
+        """
         if not self._current_account:
             return
 
-        if self._current_account.tokens.is_expired:
-            try:
-                new_tokens = refresh_tokens(self._current_account.tokens.refresh_token)
-                new_tokens.email = self._current_account.email
-                new_tokens.project_id = self._current_account.project_id
-                self._current_account.tokens = new_tokens
+        if not self._current_account.tokens.is_expired:
+            return
 
-                if self._account_manager:
-                    save_accounts(self._account_manager)
-            except Exception as e:
-                raise TokenRefreshError(f"Failed to refresh token: {e}")
+        try:
+            refreshed = refresh_account_under_lock(self._current_account.email)
+        except Exception as e:
+            raise TokenRefreshError(f"Failed to refresh token: {e}")
+
+        if refreshed is None:
+            # The account is no longer in the file — another process
+            # logged it out while this session held it.  Say so rather
+            # than proceeding with a token known to be stale, which would
+            # surface one request later as an opaque 401.
+            raise TokenRefreshError(
+                f"Account {self._current_account.email} is no longer stored; "
+                "it was logged out elsewhere. Re-authenticate with "
+                "`antigravity-auth login`."
+            )
+        self._current_account.tokens = refreshed
 
     def _rotate_account_on_rate_limit(self) -> bool:
         """Rotate to next account on rate limit.

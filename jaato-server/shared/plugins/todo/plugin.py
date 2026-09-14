@@ -27,7 +27,7 @@ from .channels import TodoReporter, ConsoleReporter, create_reporter
 from shared.trace import trace as _trace_write
 from .config_loader import load_config, TodoConfig
 from .event_bus import TaskEventBus
-from jaato_sdk.plugins.base import UserCommand
+from jaato_sdk.plugins.base import TRAIT_SLOT_SCOPED, UserCommand
 from shared.plugins.runner_forwarding import RunnerForwardingMixin
 
 
@@ -111,7 +111,17 @@ class TodoPlugin(RunnerForwardingMixin):
 
     Progress is reported through configurable reporters (console, webhook, file)
     using the same transport protocol patterns as the permissions plugin.
+
+    **Lifetime is the pool slot, not the session.**  ``_storage`` and
+    ``_current_plan_ids`` are per-AGENT, not per-session — a later cascade
+    stage reads the plan an earlier one wrote, which is why both
+    :meth:`shutdown` and :meth:`reset_for_next_session` preserve them.
+    :data:`TRAIT_SLOT_SCOPED` is what makes that preservation reachable:
+    without it the next ``session.bootstrap`` constructed a fresh instance
+    with an empty storage and the preserved plans were unreadable (#890).
     """
+
+    plugin_traits = frozenset({TRAIT_SLOT_SCOPED})
 
     def __init__(self):
         self._config: Optional[TodoConfig] = None
@@ -384,6 +394,11 @@ class TodoPlugin(RunnerForwardingMixin):
         the existing ``shutdown()`` preservation policy (the docstring
         above already documents the principle for the non-cascade
         case).
+
+        Preserving it only means something because the class declares
+        :data:`TRAIT_SLOT_SCOPED`; until #890 the instance holding the
+        preserved plans was discarded at the same boundary this hook runs
+        on.
         """
         self._trace("reset_for_next_session: NO-OP (per-agent plan map is cross-session by design)")
 

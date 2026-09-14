@@ -1630,6 +1630,11 @@ export type SessionId11 = string;
 export type AgentId9 = string;
 export type CallId2 = string;
 export type Chunk = string;
+export type StreamId = string;
+export type Sequence = number | null;
+export type MimeType = string | null;
+export type DataB64 = string | null;
+export type Final = boolean;
 /**
  * All event types in the protocol.
  */
@@ -2019,6 +2024,8 @@ export type ToolName4 = string;
 export type Granted = boolean;
 export type Method = string;
 export type Comment = string;
+export type UserId = string | null;
+export type Approver = string | null;
 /**
  * All event types in the protocol.
  */
@@ -4140,7 +4147,7 @@ export type Timestamp31 = string;
 export type SessionId31 = string;
 export type AgentId21 = string;
 export type StepId = string;
-export type Sequence = number;
+export type Sequence1 = number;
 export type Content = string;
 export type Status1 = string;
 export type Result = string | null;
@@ -12507,6 +12514,9 @@ export type SessionId98 = string;
 export type Text5 = string;
 export type SourceType = string;
 export type SourceId = string | null;
+export type Attachments1 = {
+  [k: string]: unknown;
+}[];
 export type RequestId29 = string | null;
 /**
  * All event types in the protocol.
@@ -14549,6 +14559,43 @@ export interface ToolCallEndEvent {
 }
 /**
  * Live output chunk from a running tool (tail -f style).
+ *
+ * Carries text, binary media, or both.  This event is widened rather
+ * than joined by a rival media event because it already correlates by
+ * ``call_id``, is already mapped onto the in-process bus, and clients
+ * already subscribe to it -- so widening the payload lights up all
+ * three subscription surfaces (SDK client, ``subscribeToEvents`` agent
+ * tool, ``EventBus``) at once, with no new API on any of them.
+ *
+ * A whole-blob delivery -- a tool returning one finished WAV -- is just
+ * a single-chunk stream: ``sequence=0, final=True``.
+ *
+ * Attributes:
+ *     agent_id: Which agent produced the chunk.
+ *     call_id: Correlates the chunk with a specific tool call.
+ *     chunk: Output text (may contain newlines).  Empty for a
+ *         pure-media chunk -- except the ``final`` chunk of MODEL
+ *         speech (:meth:`is_model_speech`), which carries the
+ *         utterance's transcript (#869) when the model wrote no text
+ *         of its own that turn; a turn that both wrote and spoke
+ *         delivered its words as ``AGENT_OUTPUT`` and this stays
+ *         empty, so a client never receives the same words twice.
+ *     stream_id: Correlates chunks belonging to one media stream.
+ *         Empty for unstreamed text, preserving existing frames.
+ *     sequence: Ordering, passed through from
+ *         :attr:`StreamChunk.sequence` rather than re-counted here --
+ *         a second counter would be a second source of truth.
+ *     mime_type: Tags the ``data_b64`` payload (e.g. ``"audio/wav"``).
+ *     data_b64: Base64-encoded binary payload (+33% over the raw
+ *         bytes; the frame is UTF-8 JSON).
+ *     final: Last chunk of this stream, so a client can close its
+ *         playback buffer or finish writing the file without waiting
+ *         on a separate completion event.
+ *
+ * Note:
+ *     When ``mime_type``/``data_b64`` are set the chunk MUST bypass the
+ *     text formatter pipeline -- see ``server/core.py`` ``on_tool_output``.
+ *     A formatter that reflows text corrupts bytes.
  */
 export interface ToolOutputEvent {
   type?: EventType11;
@@ -14557,6 +14604,11 @@ export interface ToolOutputEvent {
   agent_id?: AgentId9;
   call_id?: CallId2;
   chunk?: Chunk;
+  stream_id?: StreamId;
+  sequence?: Sequence;
+  mime_type?: MimeType;
+  data_b64?: DataB64;
+  final?: Final;
 }
 /**
  * Permission is requested for a tool execution.
@@ -14600,6 +14652,24 @@ export interface PermissionInputModeEvent {
 }
 /**
  * Permission has been resolved (granted or denied).
+ *
+ * ``method`` says HOW the decision was reached (a policy rule, an
+ * evaluator, or the channel the ASK went through); ``user_id`` and
+ * ``approver`` say WHO reached it (issue #859).  Both identity fields
+ * are ``None`` for policy decisions and for unauthenticated sessions,
+ * so an auditor can tell "nobody was asked" from "somebody answered":
+ *
+ * - ``user_id`` is the identity the DAEMON authenticated for the client
+ *   that answered the prompt (``set_client_user()`` — WS/SSO
+ *   deployments; local IPC carries no user).  It is stamped by the
+ *   transport that received the ``PermissionResponseRequest``, never
+ *   by the client itself, so it is the verified half of the trail.
+ * - ``approver`` is an identity ASSERTED by whoever answered on the
+ *   decision's channel: the ``approver`` key of a webhook / file
+ *   channel response, naming the human an external approval system
+ *   consulted.  The daemon cannot verify it; it is recorded as
+ *   claimed, so the trail can still say who the external system says
+ *   approved.
  */
 export interface PermissionResolvedEvent {
   type?: EventType14;
@@ -14611,6 +14681,8 @@ export interface PermissionResolvedEvent {
   granted?: Granted;
   method?: Method;
   comment?: Comment;
+  user_id?: UserId;
+  approver?: Approver;
 }
 /**
  * Permission status update for client toolbar display.
@@ -14731,6 +14803,12 @@ export interface ClarificationBatchResponseEvent {
   request_id?: RequestId9;
   answers?: Answers;
   cancelled?: Cancelled;
+  answer_attachments?: AnswerAttachments;
+}
+export interface AnswerAttachments {
+  [k: string]: {
+    [k: string]: unknown;
+  }[];
 }
 /**
  * Reference selection has been requested.
@@ -14866,7 +14944,7 @@ export interface PlanStepUpdatedEvent {
   session_id?: SessionId31;
   agent_id?: AgentId21;
   step_id?: StepId;
-  sequence?: Sequence;
+  sequence?: Sequence1;
   content?: Content;
   status?: Status1;
   result?: Result;
@@ -16052,8 +16130,17 @@ export interface GateState {
  *   model at the next safe point).
  * * ``"child"`` — CHILD priority (queued behind in-flight work; runs
  *   when the agent would otherwise stop, the "follow-up" pattern).
+ * * ``"sibling"`` — SIBLING priority (idle-only, like ``"child"``,
+ *   and never mid-turn): another SESSION sharing this cascade's
+ *   ``cascade_driver_id``.  Siblings coordinate, they do not
+ *   control, which is what keeps them out of the high-priority
+ *   tier.
  * * ``"system"`` / ``"event"`` / ``"parent"`` — other priority
  *   tiers from :class:`SourceType` for reactor / hook callers.
+ *
+ * The daemon derives the accepted set from ``SourceType`` itself and
+ * rejects anything outside it, so this list is the whole vocabulary —
+ * all six members, not a selection from them.
  *
  * Single verb covers both pi-agent's ``steer`` and ``followUp``
  * patterns via the priority dimension.
@@ -16065,6 +16152,7 @@ export interface InjectPromptRequest {
   text?: Text5;
   source_type?: SourceType;
   source_id?: SourceId;
+  attachments?: Attachments1;
   request_id?: RequestId29;
 }
 /**
@@ -16081,6 +16169,11 @@ export interface InjectPromptRequest {
  * * ``"accepted"``    — the target was idle, so a turn was STARTED on it.
  * * ``"queued"``      — the target is mid-turn; its running turn will
  *   drain the message.
+ * * ``"busy"``        — the target is mid-turn and NOTHING was enqueued.
+ *   Reachable when the inject carried ``attachments``: the queued path
+ *   folds a message into the running turn as text and cannot carry bytes,
+ *   so an attachment-bearing inject is offered idle-only rather than
+ *   accepted with its payload dropped.  Retry-safe; retry when idle.
  * * ``"terminated"``  — the target is loaded but terminal and will run no
  *   further turns.  Reported from the target's own terminal stamp, never
  *   inferred from silence.

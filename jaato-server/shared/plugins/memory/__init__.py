@@ -13,7 +13,7 @@ Usage:
     # Plugin is auto-discovered by PluginRegistry
     # Configure in your code or config file:
     registry.expose_plugin("memory", config={
-        "storage_path": ".jaato/memories.jsonl"
+        "storage_path": ".jaato/memories"   # directory, not a file
     })
 """
 

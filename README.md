@@ -38,7 +38,7 @@ jaato is a framework for building agentic AI applications with LLM function call
 
 **Core capabilities:**
 
-- **16 Model Providers** - hosted APIs (Google GenAI/Vertex AI, Anthropic Claude, Claude CLI, GitHub Models, Google Antigravity, ZhipuAI), local & self-hosted engines (Ollama, LM Studio, vLLM, TensorRT-LLM, Triton, NVIDIA NIM), and unified gateways (OpenRouter, Nebius, OVHcloud) — all behind one provider abstraction, switchable by configuration
+- **24 Model Providers** - hosted APIs (Google GenAI/Vertex AI, Anthropic Claude, Claude CLI, GitHub Models, Google Antigravity, ZhipuAI, MiniMax, Moonshot AI Kimi, Xiaomi MiMo), local & self-hosted engines (Ollama, LM Studio, vLLM, TensorRT-LLM, Triton, NVIDIA NIM), and unified gateways (OpenRouter, Nebius, OVHcloud, AWS Bedrock) — all behind one provider abstraction, switchable by configuration
 - **40+ Plugins** - file editing, shell execution, interactive PTY sessions, MCP servers, subagent delegation, AST search, LSP diagnostics, memory, web search, inbound webhooks, and more — auto-discovered and auto-wired
 - **Server-First Architecture** - daemon mode with IPC (Unix socket) and WebSocket (bearer-authenticated) transports, multi-session orchestration, and disk persistence
 - **Agent Profiles & Subagents** - YAML/JSON profiles configure model, provider, plugins, and GC per agent; subagents spawn as lightweight sessions that share the parent's runtime (provider config, plugin registry, permissions, token ledger)
@@ -79,6 +79,9 @@ jaato abstracts model providers behind a unified interface. Switch providers by 
 | **GitHub Models** | Hosted API | Models via GitHub API | Device code OAuth or Personal Access Token |
 | **Google Antigravity** | Hosted API | Gemini 3, Claude (via Google OAuth) | PKCE OAuth flow |
 | **ZhipuAI** | Hosted API | GLM family (native + OpenAI-compatible surfaces) | API key |
+| **MiniMax** | Hosted API | MiniMax-M3 (1M, adaptive thinking, vision), M2.7 (200K, always thinking) | API key or Token Plan key |
+| **Moonshot AI Kimi** | Hosted API | Kimi K3 (1M), K2.7 Code, K2.6 (256K) — catalog-detected context + modalities | API key (or Kimi Code plan key) |
+| **Xiaomi MiMo** | Hosted API | MiMo-V2.5-Pro (text), MiMo-V2.5 (omnimodal), both 1M | API key (or Token Plan key) |
 | **Ollama** | Local | Any Ollama model (Qwen, Llama, Mistral, …) | Local — no auth |
 | **LM Studio** | Local | Any LM Studio model (+ native load-control) | Local — optional bearer |
 | **vLLM** | Self-hosted | Any `vllm serve` model | Local — optional `--api-key` bearer |
@@ -88,8 +91,9 @@ jaato abstracts model providers behind a unified interface. Switch providers by 
 | **OpenRouter** | Gateway | 300+ models across vendors (`vendor/model`) | API key |
 | **Nebius Token Factory** | Gateway | Serverless open models (Llama, Qwen, DeepSeek-R1, …) | API key |
 | **OVHcloud AI Endpoints** | Gateway | Serverless open models on EU cloud (Llama, Mistral, Qwen, gpt-oss, …) | API key (or opt-in anonymous free tier) |
+| **AWS Bedrock** | Gateway (your AWS account) | Anthropic, Amazon Nova, Meta, Mistral, Cohere, AI21, DeepSeek — one `Converse` API | SigV4 via boto3's own chain: env, profile, SSO, ECS/EKS or EC2 role (jaato holds no credential) |
 
-ZhipuAI ships as two registry entries — `zhipuai` (native API) and `zhipuai_openai` (OpenAI-compatible surface) — for **16 providers** total. Run `jaato-scaffold explain providers` for the live capability matrix: per-provider vision, PDF input, tool-choice forwarding, thinking, prompt caching, and streaming/cancellation support.
+ZhipuAI ships as two registry entries — `zhipuai` (native API) and `zhipuai_openai` (OpenAI-compatible surface) — for **24 providers** total. The three newest (MiniMax, Kimi, MiMo) replay an assistant turn's reasoning on the next request of a tool loop, which their thinking models require. Run `jaato-scaffold explain providers` for the live capability matrix: per-provider vision, PDF input, tool-choice forwarding, thinking, prompt caching, and streaming/cancellation support.
 
 ## Plugin Ecosystem
 
@@ -155,7 +159,7 @@ jaato ships with **40+ built-in plugins** organized by function. Plugins are aut
 ### Infrastructure
 | | Plugin | Description |
 |:--:|--------|-------------|
-| <img src="docs/web/assets/images/plugins/plugin-model-provider.png" width="32"> | **model_provider** | Provider-agnostic abstraction layer (15 providers) |
+| <img src="docs/web/assets/images/plugins/plugin-model-provider.png" width="32"> | **model_provider** | Provider-agnostic abstraction layer (24 providers) |
 | <img src="docs/web/assets/images/plugins/plugin-registry.png" width="32"> | **registry** | Plugin discovery, lifecycle management, and tool exposure control |
 | | **introspection** | Runtime self-inspection for tool and plugin discovery |
 | | **streaming** | Token-level streaming with cancellation support |
@@ -174,7 +178,7 @@ For the complete reference, see the **[Plugin Documentation](https://jaato-frame
 ### Prerequisites
 
 - Python 3.10+
-- An AI provider account (any of the 15 supported providers) — or a local engine (Ollama / LM Studio / vLLM) that needs no account
+- An AI provider account (any of the 24 supported providers) — or a local engine (Ollama / LM Studio / vLLM) that needs no account
 
 ### Installation
 
@@ -374,7 +378,7 @@ jaato/
 │   ├── output_buffer.py           # Output rendering engine
 │   ├── pt_display.py              # Prompt toolkit display layer
 │   └── backend.py                 # IPC/WebSocket client backend
-├── web-client/                    # Web client (React/Vite/Tailwind)
+├── jaato-web/                     # Browser client (React 19 / Vite / Tailwind, on @jaato/sdk)
 ├── docs/                          # Comprehensive documentation (45+ docs)
 ├── examples/                      # Usage examples
 ├── out-of-tree-plugins/           # Third-party plugin template

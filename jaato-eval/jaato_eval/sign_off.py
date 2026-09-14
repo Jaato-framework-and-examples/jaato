@@ -64,6 +64,12 @@ from typing import Optional
 #:
 #: If the framework raises its ceiling, this constant is stale in exactly
 #: one direction — an arm reported at the ceiling that had a nudge left.
+#: Since #919 that ceiling is a PER-PROFILE knob
+#: (``max_completion_nudges:``, defaulting to the framework's
+#: ``shared.completion_nudge.DEFAULT_MAX_COMPLETION_NUDGES`` = 2), so an arm
+#: whose profile raised its own budget is reported against this default
+#: rather than against the budget it actually had — the same one-directional
+#: staleness, now reachable without a framework release.
 MAX_COMPLETION_NUDGES = 2
 
 #: Daemon ``error_type`` values whose workspace is still worth grading.

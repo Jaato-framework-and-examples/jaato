@@ -98,11 +98,16 @@ budget_control:
       model_tiers:
         planner:    { model: google/gemini-flash, provider: openrouter }
         dispatcher: { model: google/gemini-flash, provider: openrouter }
+    - at: 95%
+      action: finalize         # graceful: inject "wrap up and answer now".
+                               # Advice — a looping model may decline it.
     - at: 100%
-      action: finalize         # graceful terminal: inject "wrap up and answer now"
-      # alternative terminals: `abort` (ends the session: cancels the
-      #   in-flight turn AND refuses further turns, §5.1)
-      #   | `escalate` (hand to cascade owner)
+      action: abort            # the CEILING: ends the session (cancels the
+                               # in-flight turn AND refuses further turns,
+                               # §5.1).  Only `abort` stops a run; a ladder
+                               # without one is a brownout, not a ceiling
+                               # (trap 5 below).  `escalate` (hand to the
+                               # cascade owner) is the third terminal.
 ```
 
 **Field notes:**
@@ -114,15 +119,21 @@ budget_control:
   same path. `provider` is the plugin name (`openrouter`, `anthropic`,
   `ollama`, …); for OpenRouter the `vendor/model` form lives inside
   `model`.
-- Overlays may **only** reference the officially declared tier names
-  (`VALID_TIER_NAMES` = `planner` / `dispatcher` / `executor` /
-  `vision`). They introduce no ad-hoc labels, so no widening of the tier
-  vocabulary or the `enter_tier` tool schema is required.
+- Overlays reference tier names, and since #831 that means the four
+  canonical ones (`planner` / `dispatcher` / `executor` / `vision`) **or**
+  whatever names the profile's own `model_tiers` declares. What an overlay
+  still cannot do is widen the vocabulary the MODEL sees: the `enter_tier`
+  schema is built once at configure time from the base table, so a rung
+  naming a tier that table does not declare rebinds something the agent can
+  never enter. The parser cannot see the base table, so
+  `jaato-scaffold validate` — which sees both halves — is what catches it,
+  as `budget_overlay_undeclared_tier`.
 
 ### 3.0 Authoring a budgeted profile — four traps
 
-Found while authoring the first budgeted profiles; none is caught by
-`jaato-scaffold validate`, so they are documented rather than enforced.
+Found while authoring the first budgeted profiles.  Traps 1-4 are not
+caught by `jaato-scaffold validate`, so they are documented rather than
+enforced; trap 5 is, since #947.
 
 1. **`max_turns` must exceed `limits.turns`.** If both are `4` the run
    stops at turn 4 either way and the abort is *unattributable* — a
@@ -155,6 +166,21 @@ Found while authoring the first budgeted profiles; none is caught by
    `anthropic/claude-haiku-4.5` (dot), while the Anthropic-native
    spelling is `claude-haiku-4-5-20251001`. This bites hardest on a
    `fallback` tier, which may not be entered until late in a run.
+
+5. **`limits` are OBSERVED, not enforced — only an `abort` rung stops a
+   run.** The most expensive trap of the five, and the least visible,
+   because the profile looks protected. `BudgetTracker` accumulates
+   against `limits` and turns them into a percentage, and the `degrade`
+   ladder is the *only* consumer of that percentage: a profile declaring
+   `limits` and no ladder sails through 100%, 200%, 1000% in silence.
+   Of the three terminal actions only `abort` reaches `request_stop`
+   (§5.1); `finalize` and `escalate` are latched on
+   `_budget_terminal_action` for a layer above to act on, which a looping
+   model can decline — and did (#947: 35 consecutive failed tool calls
+   without ever emitting text). Since #947 `validate` says so, as
+   `budget_limits_without_abort`; and a profile with no `budget_control`
+   at all draws `budget_control_absent`, because unbounded-on-every-
+   dimension was previously something an author learned from the bill.
 
 Also note `system_instructions` is deprecated at profile level — put the
 persona in `.jaato/agents/<name>.md`.
@@ -298,6 +324,47 @@ silent: the budget looks configured and is inert. A live OpenRouter run
 with no pricing table reported `cost_usd: None` on every turn. **Verify
 `usd` advances before relying on it**; `tokens` / `turns` / `tool_calls`
 are always exact.
+
+**When each dimension is observed decides whether it can bind at all
+(#955).** ``tokens`` and ``usd`` are fed per *response*, so they cross
+inside a turn. Until #955, ``tool_calls``, ``seconds`` and ``turns`` were
+fed once, in the turn's ``finally`` — and a runaway tool loop is exactly
+the turn that does not end. A subagent made 196 tool calls under
+``tool_calls: 100`` with an ``abort`` rung at 100% and nothing fired,
+because every one of them happened inside one ``send_message``; it outlived
+its driver and was stopped by hand. Now:
+
+| Dimension | Observed | Overshoot bound |
+|---|---|---|
+| `tokens`, `usd` | per response (unchanged) | one response |
+| `tool_calls` | per completed call (sequential + parts loops), per batch (parallel loop) | one call, or one parallel batch (at most `max_parallel_tools`) |
+| `seconds` | with every tool-call observation, plus the tail at turn end | one tool call's duration |
+| `turns` | at turn end (a turn is the unit) | none |
+
+`_budget_observe_tool_calls` is called by every path that records a call in
+`turn_data['function_calls']` (an AST guard, `test_budget_mid_turn_955.py`,
+holds that invariant); `_budget_observe_turn` remains as the closing entry
+that settles whatever was not observed mid-turn, and pops its bookkeeping
+before the turn lands in `turn_accounting`. ``abort`` mid-turn cancels the
+session's token: the sequential loop checks it before the next call and the
+main chat loop before the next model round-trip, so the ceiling stops the
+run on the call that crosses it, not at the end of a turn that never comes.
+The parts loop (attachment-carrying turns) has no check of its own — it
+finishes the batch in flight and is cancelled by the provider on the first
+chunk of the next response, so its overshoot is one batch plus one request
+that returns nothing. An exhausted session is also no longer
+completion-nudged: the re-prompt would be refused at turn start, and each
+refusal spent a nudge.
+
+**Crossing a ceiling is traced whether or not a rung fires.** The reporter
+grepped the session trace for the ladder and found nothing, unable to tell
+"evaluated, did not fire" from "not wired". Every observation now writes
+`BUDGET CEILING dim=... used=... limit=...` the first time a dimension
+reaches 100%, and every fired rung writes `BUDGET RUNG at=...% action=...`
+(`RUNG_SKIPPED` for a backwards rebind the pool already passed,
+`EXHAUSTED` for the abort latch) — on both the per-agent provider trace and
+the application trace (`trace.session_log`), beside the permission
+DECISION lines an operator correlates them against.
 
 ---
 
@@ -516,11 +583,12 @@ Landed (runtime):
 |---|---|
 | `BudgetTracker` + `BudgetUsage` + `overlay_tier_table` (§6.1) | `shared/budget_control.py` — pure logic, no session coupling |
 | §6.2 resolved-entry re-resolve + extracted `_is_connected_to` / `_connect_tier_entry` | `shared/jaato_session.py:switch_tier` |
-| Observation hooks (tokens+usd per response; turns+seconds+tool_calls per turn) | `jaato_session._budget_observe_response` / `_budget_observe_turn`, folded into the EXISTING `_record_token_usage` and turn-end accounting — no new measurement path |
+| Observation hooks (tokens+usd per response; tool_calls+seconds per completed call / batch (#955); turns + the unobserved remainder at turn end) | `jaato_session._budget_observe_response` / `_budget_observe_tool_calls` / `_budget_observe_turn`, folded into the EXISTING `_record_token_usage`, the three tool-execution paths and turn-end accounting — no new measurement path |
 | Rung application (brownout + `abort`) | `jaato_session._apply_budget_rungs` / `_reconnect_active_tier_if_rebound` |
 | Wire: envelope v5 `budget_control` + `to_dict`/`from_dict` round-trip | `shared/session_envelope.py`, `server/session_manager.py` |
 | Plumbing: profile → session | `server/core.py`, `server/runner/session.py`, `jaato_runtime.create_session`, `JaatoSession.configure` |
 | 17 runtime tests | `shared/tests/test_budget_runtime.py` |
+| Mid-turn binding + trace lines + AST guard (#955) | `shared/tests/test_budget_mid_turn_955.py` |
 
 Cost resolution reuses `_resolve_span_cost` (provider-reported → pricing
 table → `None`), so the budget and the telemetry span always agree, and

@@ -100,11 +100,14 @@ PROVIDER_CAPABILITIES = ProviderCapabilities(
     user_message_images=False,   # Prompt API has image input; adapter is text-only (v1)
     tool_result_images=False,
     pdf_input=False,
+    audio_input=False,
     tool_choice_forwarding=False,  # no such control in the Prompt API
     thinking=False,
     prompt_caching=False,
     streaming=True,                # promptStreaming -> on_chunk
     cancellation=True,             # cancel token -> page-side AbortController
+    output_media=False,
+    reasoning_replay=False,
 )
 
 # --- Provider config-knob contract (authored from provider.py read sites) ---

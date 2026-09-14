@@ -31,6 +31,16 @@ jobs:
   # pure-Python, in the `dev` extra) rather than a behavioural test, so it
   # adds ~6s and no new failure mode to a job that must stay reliable.
   #
+  # And the CI-coverage ratchet: every test_*.py on disk must be named by
+  # a step of a workflow that fires on a COMMIT, with a commented
+  # UNCOVERED allowlist for deliberate exclusions. The recurring failure
+  # it closes is that nothing asserted the mapping between test files and
+  # the paths CI hands to pytest -- eight directories and ~1560 tests
+  # accumulated outside it, 31 of them already red, and each of the five
+  # earlier instances was found by someone noticing (#736). It is a
+  # source + YAML scan that imports none of the tree, so it costs ~5s and
+  # adds no new failure mode here.
+  #
   # Kept deliberately light + reliable: the only optional backend any of
   # these guards imports is the interactive_shell plugin's `pexpect`
   # (.[interactive]). No system-dependency extras (notably `kerberos`,
@@ -44,8 +54,10 @@ jobs:
     # sabotage-plus-test cycle per declared reversion. At 10 the job was
     # being killed in post-cleanup while its tests had already passed
     # (9m44s of tests against a 10m ceiling on dde49dd9). 20 matches the
-    # `suite` legs below and leaves room for the next guard.
-    timeout-minutes: 20
+    # `suite` legs below and leaves room for the next guard.  Measured
+    # 2026-09-13 at 12-15 min as the guard set grew; 30 keeps the same
+    # proportional headroom the original 20 was chosen for.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -75,6 +87,8 @@ jobs:
             jaato-server/shared/tests/test_truncation_is_not_reported_as_tool_use.py \
             jaato-server/shared/tests/test_a_dead_stream_is_not_a_finished_turn.py \
             jaato-server/shared/tests/test_env_scope_catalog.py \
+            jaato-server/shared/tests/test_docs_do_not_contradict_the_tree.py \
+            jaato-server/shared/tests/test_ci_runs_every_test_file.py \
             jaato-server/shared/tests/test_every_guard_detects_its_own_reversion.py
 
   # ---------------------------------------------------------------
@@ -94,6 +108,22 @@ jobs:
   # Separate jobs strengthen that isolation rather than weaken it — the three
   # legs that carry more than one suite keep them in separate `pytest` calls.
   #
+  # ONE OF THOSE CAUSES IS GONE, and the split still stands. #974 was a
+  # *current-session* ContextVar (not the workspace-root one named above):
+  # a guard driving a tool-dispatch path against a
+  # `JaatoSession.__new__(JaatoSession)` shell published it process-wide,
+  # and `PermissionPlugin` / `ReferencesPlugin` then resolved a session off
+  # it. Measured at 4e5c95ba, `shared/tests` + `shared/plugins` in one
+  # process produced 122 failures that NEITHER leg produces alone (113
+  # permission, 9 references); with #974 fixed the same comparison is 0 —
+  # the combined failure set is exactly the union of the two separate ones.
+  # That is one pair of legs and one cause: apparmor and the bootstrap
+  # helpers were not re-measured, the reversion meta-suite was excluded
+  # (it rewrites source, #995), and this container cannot reproduce the
+  # `0 + 0` baseline at all because `shared/plugins` needs optional extras
+  # it does not have. So: evidence that merging legs is *less* dangerous
+  # than it was, not evidence that it is safe.
+  #
   # `fail-fast: false` replaces the old per-step `if: always()`: one red leg
   # must not hide the other legs' failure lists.
   #
@@ -104,6 +134,21 @@ jobs:
   # conformance ~27s). A dedicated runner for the 1s suite would cost a
   # minute of setup to save nothing.
   #
+  # THOSE NUMBERS GO STALE, and the one that did nearly stopped this leg
+  # running at all. `shared/tests` reached 18m36s on main against the 20
+  # minute cap below -- fifteen seconds of headroom -- because
+  # test_every_guard_detects_its_own_reversion.py runs one subprocess per
+  # declared REVERSIONS entry and every guard added since has lengthened
+  # it. It cleared the WHOLE jaato-server bytecode cache before each of
+  # those subprocesses, so each one recompiled the tree for a guarantee
+  # about the single file it rewrites (#913): 16.8s per case against 8.8s
+  # with the cache warm. Scoped to that one file the same nine cases went
+  # 183s -> 110s, which takes the leg back to roughly 8 minutes.
+  #
+  # The lesson for whoever balances these legs next: this leg's cost is a
+  # FUNCTION OF HOW MANY GUARDS THE REPO HAS, so it grows on commits that
+  # touch nothing here. Re-measure it, do not assume the numbers above.
+  #
   # `--continue-on-collection-errors` so a single bad import (e.g. a stale
   # symbol) doesn't mask the rest of the suite.
   #
@@ -113,12 +158,67 @@ jobs:
   # headers — install them first; graphviz covers the diagrams plugin's
   # render path.
   # ---------------------------------------------------------------
+  # ---------------------------------------------------------------
+  # Browser client (jaato-web). Type-checks against the TS SDK's built
+  # declarations, runs the framework-free protocol/store unit tests, and
+  # drives the real UI end-to-end against the scripted mock daemon
+  # (mock/daemon.ts speaks the wire protocol, so this exercises the same
+  # frames a python -m server --web-socket daemon would send).  No model
+  # provider or Python install is needed, which keeps the job cheap.
+  # ---------------------------------------------------------------
+  web-client:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: |
+            jaato-sdk-ts/package-lock.json
+            jaato-web/package-lock.json
+      - name: Install + build the TS SDK (declarations for the type-check)
+        working-directory: jaato-sdk-ts
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+      - name: Install jaato-web
+        working-directory: jaato-web
+        run: npm ci --no-audit --no-fund
+      - name: Type-check
+        working-directory: jaato-web
+        run: npx tsc -p tsconfig.json --noEmit
+      - name: Unit tests (protocol, store)
+        working-directory: jaato-web
+        run: npx vitest run
+      - name: Production build
+        working-directory: jaato-web
+        run: npx vite build
+      # `--with-deps` shells out to apt-get update, so this job needs the
+      # same drop as the suite job -- see the note there.
+      - name: Drop the unused third-party apt sources
+        run: sudo rm -f /etc/apt/sources.list.d/google-chrome.list
+                        /etc/apt/sources.list.d/google-chrome.sources
+      - name: Install Playwright Chromium
+        working-directory: jaato-web
+        run: npx playwright install --with-deps chromium
+      - name: End-to-end against the mock daemon
+        working-directory: jaato-web
+        run: npx playwright test
+
   suite:
     name: suite (${{ matrix.leg.name }})
     runs-on: ubuntu-latest
-    # Longest leg is ~2 min of tests plus install; 20 leaves headroom on a
-    # slow runner without letting a hung leg hold the run for half an hour.
-    timeout-minutes: 20
+    # Measured 2026-09-13: the `shared/tests` leg is ~16-20 min of tests plus
+    # install, not the ~2 min this comment claimed for a year.  Three PRs were
+    # killed at 20:15 on the day ~100 tests were added to that leg, and one
+    # passed at 19:51 -- by nine seconds.  A timed-out leg reports as
+    # `cancelled`, not `timed out`, so it reads as a flake and invites re-runs
+    # that fail identically.  35 restores headroom without letting a genuinely
+    # hung leg hold the run indefinitely.  If this needs raising again, split
+    # the leg instead -- see the issue this comment's history points to.
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
@@ -136,10 +236,59 @@ jobs:
           # three files had not been touched since May while the code moved on
           # through August, and 4 of the 7 budget_control test files had never
           # executed in CI at all.
-          - name: server/tests (daemon tier)
+          #
+          # The daemon tier is SIX trees, not one. This leg was named
+          # "daemon tier" while its path named a single subdirectory of it,
+          # and the other five gated nothing -- #736. A reader checking "is
+          # the daemon covered?" saw a step whose NAME said yes.
+          #
+          # Each tree keeps its OWN pytest process, for the
+          # process-global-state reason documented at the top of this matrix;
+          # `rc` collects the verdicts so one red tree does not hide the
+          # others' failure lists. Same shape as the SDK leg below, and the
+          # same reason.
+          #
+          # Measured locally: +30s on top of this leg's ~114s (runner/tests
+          # 712 tests / 7.6s, runner_rpc_handlers 199 / 1.4s, egress_proxy
+          # 57 / 10.6s, root-level server/test_*.py 178 / 7.9s,
+          # jaato-server/tests 3 passed + 1 apparmor-gated skip / 2.2s,
+          # test_safe_pool 5 / 0.5s). 1154 tests that gated nothing -- and
+          # 28 of them were RED, which is what the fix commits preceding
+          # this one were for. No new runner, no install change: all six
+          # run under the `.[all]` install this job already does.
+          # egress_proxy is the only one with environment surface (it binds
+          # loopback sockets) and is the one to watch on the first real CI
+          # run.
+          #
+          # test_safe_pool.py is a shared-tier FILE parked on this leg
+          # deliberately: it is 0.5s, and the `shared/tests` leg is the one
+          # already sitting near the 20-minute cap.
+          #
+          # jaato-server/tests/ is directory-shaped on purpose. It holds only
+          # integration/ today, and a directory-shaped path cannot silently
+          # miss a file the way a hand-listed one can -- which is also why
+          # the root-level files below are a GLOB rather than a list. They
+          # sit directly in jaato-server/server/ rather than in
+          # server/tests/; moving them there would make this line
+          # unnecessary, and is left as its own change.
+          - name: server (daemon tier)
             run: |
+              rc=0
               pytest -q --continue-on-collection-errors \
-                jaato-server/server/tests/
+                jaato-server/server/tests/ || rc=1
+              pytest -q --continue-on-collection-errors \
+                jaato-server/server/runner/tests/ || rc=1
+              pytest -q --continue-on-collection-errors \
+                jaato-server/server/runner_rpc_handlers/tests/ || rc=1
+              pytest -q --continue-on-collection-errors \
+                jaato-server/server/egress_proxy/tests/ || rc=1
+              pytest -q --continue-on-collection-errors \
+                jaato-server/server/test_*.py || rc=1
+              pytest -q --continue-on-collection-errors \
+                jaato-server/tests/ || rc=1
+              pytest -q --continue-on-collection-errors \
+                jaato-server/shared/test_safe_pool.py || rc=1
+              exit $rc
 
           - name: shared/plugins (plugin tier)
             run: |
@@ -147,16 +296,29 @@ jobs:
                 jaato-server/shared/plugins/
 
           # jaato-tui/tests ran in NO merge-gating workflow — only in the
-          # TestPyPI publish job, which runs AFTER the merge it should have
+          # release publish job, which runs AFTER the merge it should have
           # been able to block. Same shape as the directories below: a suite
           # exists, is green, and gates nothing. It is the cheapest leg here
           # (~2s of tests), and the client is where #704 shipped — a daemon
           # event that no handler on the other end ever answered, which hung
           # the turn behind it.
+          #
+          # jaato-tui/clipboard/tests is a SECOND directory in the same
+          # package that no workflow ran (#736), and the one that proves
+          # the cost is not only rot: its three failures were a real,
+          # user-visible defect in `_truncate_utf8_safe`, which discarded a
+          # whole UTF-8 character that fit whenever the byte limit landed
+          # on a character boundary. Silently lossy, for non-ASCII users
+          # only -- so it shipped green-looking behind a suite nobody ran.
+          # Own `pytest` call + `rc`, per the isolation note above.
           - name: jaato-tui (client tier)
             run: |
+              rc=0
               pytest -q --continue-on-collection-errors \
-                jaato-tui/tests/
+                jaato-tui/tests/ || rc=1
+              pytest -q --continue-on-collection-errors \
+                jaato-tui/clipboard/tests/ || rc=1
+              exit $rc
 
           # Three directories that no workflow ran, plus live conformance.
           #
@@ -234,6 +396,23 @@ jobs:
           cache-dependency-path: |
             jaato-sdk/pyproject.toml
             jaato-server/pyproject.toml
+      # The runner image ships an apt source for Google Chrome that nothing
+      # here installs from -- `libkrb5-dev` and `graphviz` come from Ubuntu's
+      # archive, and Playwright fetches its own browser build from its own
+      # CDN (`--with-deps` only wants Ubuntu's shared libraries). But
+      # `apt-get update` exits 100 if ANY configured source is broken, so an
+      # index race on dl.google.com takes down every leg that touches apt.
+      # It did, on 2026-09-09: `Hash Sum mismatch` on
+      # chrome-stable/deb/dists/stable/main/binary-amd64/Packages.gz,
+      # reproduced identically on a re-run, red on five suite legs plus
+      # web-client (whose `playwright install --with-deps` shells out to
+      # apt), while nothing in the tree had changed.
+      # Dropping the source we do not use makes `apt-get update` depend only
+      # on the Ubuntu archive -- so it still fails loudly if THAT breaks,
+      # which is the failure worth hearing about.
+      - name: Drop the unused third-party apt sources
+        run: sudo rm -f /etc/apt/sources.list.d/google-chrome.list
+                        /etc/apt/sources.list.d/google-chrome.sources
       - name: System build deps (gssapi / diagrams)
         run: sudo apt-get update && sudo apt-get install -y libkrb5-dev graphviz
       - name: Install (editable, all extras)

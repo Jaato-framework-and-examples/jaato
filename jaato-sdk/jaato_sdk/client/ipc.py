@@ -88,6 +88,7 @@ from jaato_sdk.events import (
     PermissionClearRequest,
     PermissionSetDefaultRequest,
     PermissionPolicySnapshotRequest,
+    describe_event_type_problems,
 )
 
 
@@ -112,7 +113,16 @@ def _parse_protocol_version(v: str) -> Tuple[int, int]:
 
     Lenient — extra components ("1.0.5") are tolerated; the trailing
     parts are dropped.  Non-numeric tokens yield ``ValueError``.
+
+    A non-string is a ``ValueError`` too, not an ``AttributeError``.
+    The distinction matters because this is called from inside
+    :class:`IncompatibleServerError`'s constructor to build its own
+    message: an exception type the caller does not expect there turns a
+    clear "your daemon is too old" into an unrelated crash during error
+    reporting.  A reporter must survive the worst input it describes.
     """
+    if not isinstance(v, str):
+        raise ValueError(f"Protocol version must be MAJOR.MINOR, got {v!r}")
     parts = v.split(".")
     if len(parts) < 2:
         raise ValueError(f"Protocol version must be MAJOR.MINOR, got {v!r}")
@@ -211,6 +221,18 @@ class IncompatibleServerError(Exception):
         return self.min_protocol
 
 
+def _created_session_id(event: Any) -> Optional[str]:
+    """The session a failed ``session.new`` left behind, if the daemon named one.
+
+    A refusal normally means nothing was allocated; a failure raised AFTER
+    the session was registered inverts that, and the daemon states which it
+    was on ``ErrorEvent.details['created_session_id']`` (#975).  Read, never
+    inferred -- absence is what makes "retrying is safe" provable.
+    """
+    value = (getattr(event, "details", None) or {}).get("created_session_id")
+    return value if isinstance(value, str) and value else None
+
+
 class IPCClient:
     r"""Client for connecting to Jaato server via IPC.
 
@@ -262,13 +284,27 @@ class IPCClient:
                 absolutised, because ``../proj`` and ``~/proj`` both look
                 relative and mean different things; resolve it yourself
                 (e.g. ``Path(p).expanduser().resolve()``).
-            config_root: Optional override for where the daemon reads
-                read-only framework config (profiles, agents, prompts,
-                references, completion_schemas, instructions, scripts,
-                services).  When unset, the daemon falls back to
-                ``<workspace_path>/.jaato/``; when set, that
-                workspace-anchored search is replaced with this path.
-                The ``~/.jaato/`` user-tier fallback is always honored.
+            config_root: Where the daemon reads read-only framework config
+                (profiles, agents, prompts, references, completion_schemas,
+                instructions, scripts, services) — and the root plugins
+                WRITE framework state under (``file_edit`` puts its backups
+                in ``<config_root>/sessions/<id>/backups/``).
+                **Defaults to ``<workspace_path>/.jaato``** when a workspace
+                is given; pass a path to root it elsewhere.  The
+                ``~/.jaato/`` user-tier fallback is always honored.
+
+                The default is applied HERE, client-side, and that is the
+                fix for a real asymmetry: the config SEARCH PATH falls back
+                to ``<workspace>/.jaato`` on the daemon side whether or not
+                this is set, so profiles and agents always resolved — but a
+                plugin that writes under the root reads the VALUE, and
+                ``file_edit`` raises at ``initialize()`` without one.  A
+                session that omitted this came up with no ``writeNewFile``
+                at all, logged at ERROR in the daemon and reported to
+                neither the model nor the driver.  The in-process client has
+                defaulted it since it shipped; the daemon transports did
+                not, so the same driver got a different session depending on
+                how it connected.
                 Pair with a ``workspace_path`` that does **not** contain
                 a ``.jaato/`` symlink to give the agent's filesystem
                 tools no visibility into the framework config.  See
@@ -357,6 +393,31 @@ class IPCClient:
             config_root, field="config_root",
             origin="the daemon boundary",
         )
+        # ``config_root`` DEFAULTS to ``<workspace_path>/.jaato`` — the value
+        # this parameter's contract, ``shared/config_resolver.py`` and
+        # ``jaato-scaffold explain paths`` have all named all along, and which
+        # the in-process client has applied since it shipped ("config-rooted
+        # plugins like file_edit fail to init without a config_root").  The
+        # daemon transports did not, so the SAME driver got a different session
+        # depending on how it connected.
+        #
+        # The gap is not cosmetic: ``config_root`` has TWO consumers and only
+        # one of them falls back.  The config SEARCH PATH does
+        # (``resolve_config_search_path`` appends ``<workspace>/.jaato`` when
+        # the override is absent), which is why profiles and agents resolve
+        # fine; but a plugin that WRITES under the root reads the VALUE, and
+        # ``file_edit`` raises at ``initialize()`` without one.  The session
+        # then comes up with no ``writeNewFile`` at all — a core plugin, absent
+        # from the model's surface, over an unset optional argument.
+        #
+        # Derived, not required: an explicit value still wins, and pairing an
+        # elsewhere-rooted ``config_root`` with a ``.jaato``-free workspace to
+        # hide framework config from the agent works exactly as before.  It is
+        # absolute by construction (``workspace_path`` is validated absolute
+        # just above), so it satisfies the #742 boundary rule; with no
+        # workspace there is nothing to derive from and it stays ``None``.
+        if config_root is None and workspace_path:
+            config_root = str(Path(workspace_path) / ".jaato")
         self.socket_path = socket_path
         self.auto_start = auto_start
         self.env_file = env_file
@@ -802,11 +863,19 @@ class IPCClient:
                         self._server_protocol_version,
                         self._min_protocol_version,
                     ):
+                        # Read what the daemon told us BEFORE tearing the
+                        # connection down: ``disconnect()`` clears both
+                        # fields, so building the error from instance
+                        # state afterwards reported ``None`` for the two
+                        # versions the message exists to name -- and
+                        # ``None`` then crashed the constructor itself.
+                        server_protocol = self._server_protocol_version
+                        server_version = self._server_version
                         await self.disconnect()
                         raise IncompatibleServerError(
-                            server_protocol=self._server_protocol_version,
+                            server_protocol=server_protocol,
                             min_protocol=self._min_protocol_version,
-                            server_version=self._server_version,
+                            server_version=server_version,
                         )
 
                     # Send our working directory to the server
@@ -1472,6 +1541,17 @@ class IPCClient:
                 what persists across turns, sessions and profiles.
             agent_params: Parameter values for the agent's ``{{param}}``
                 placeholders.  Only used when *agent* is specified.
+
+                **String-shaped, and the annotation is the contract.**
+                Each pair is flattened into a ``key=value`` argv token
+                below, so a non-string value arrives at the daemon as
+                its ``str()`` and nothing on the far side restores the
+                type.  A profile's ``spawn_payload_schema`` is validated
+                against what arrives, so declaring a property
+                ``integer`` / ``boolean`` / ``object`` / ``array``
+                refuses every spawn whatever you pass here — declare it
+                ``string`` with a ``pattern`` and parse it in the
+                prefetch or persona (#883).
             sibling_name: Cascade-scoped ADDRESS other sessions use to
                 reach this one via ``send_to_sibling`` — the same string
                 they pass, so there is no translation between what you
@@ -1563,6 +1643,15 @@ class IPCClient:
         if agent:
             args.extend(["--agent", agent])
         if agent_params:
+            # The string-shaped spawn boundary (#883).  ``key=value``
+            # argv tokens are the whole transport for agent_params, and
+            # ``command_router._handle_session_new`` partitions them back
+            # on the first ``=`` — so the daemon validates strings and
+            # ``spawn_payload_schema`` is a string-typed schema.  Carrying
+            # them as JSON instead was considered and rejected on record:
+            # it restores a symmetry a ``pattern`` already expresses, at
+            # the cost of the argv protocol and the string-oriented
+            # ``{{param}}`` persona substitution.
             for key, value in agent_params.items():
                 args.append(f"{key}={value}")
         # Phase 2 cascade-sharing (server 0.6.144+): forward the
@@ -1762,9 +1851,17 @@ class IPCClient:
                     # summarise it into a likely cause -- the caller that
                     # used to guess "check provider auth" was wrong for
                     # every refusal that was not an auth failure.
+                    #
+                    # It also states whether a session survives the failure
+                    # (#975).  Read it rather than assuming "refused means
+                    # nothing was created": that assumption is right for
+                    # every refusal raised before the session is registered
+                    # and wrong for one raised after, and only the daemon
+                    # can tell the two apart.
                     raise SessionRefused(
                         f"the daemon refused session.new: {event.error}",
                         error_type=event.error_type,
+                        session_id=_created_session_id(event),
                     )
 
                 # Non-target event — track for re-buffer when solo.
@@ -1835,6 +1932,114 @@ class IPCClient:
             args=[session_id],
         ))
 
+    #: Wire-protocol minor from which the daemon serves ``session.orphans``
+    #: and ``session.stop``.  Below it an unknown command is ignored, so a
+    #: stop call is a silent no-op that reads to its caller exactly like a
+    #: successful stop -- the one degraded outcome worse than an error, and
+    #: the reason these two are checked rather than sent blind (#812).
+    MIN_SESSION_STOP_PROTOCOL = "1.7"
+
+    def _require_session_stop_protocol(self, verb: str) -> None:
+        """Refuse an orphan-management verb against a daemon too old to serve it.
+
+        The sibling of :meth:`_require_attachment_resume_protocol`, refused on
+        the same principle and for a sharper reason: an unrecognised COMMAND
+        produces no answer at all, so ``stop_session`` against an old daemon
+        would return normally having stopped nothing.  A supervisor process
+        acting on that answer concludes a runaway session has been dealt with.
+
+        An UNKNOWN version (no handshake yet) is refused too:
+        ``_protocol_compatible`` answers ``False`` for ``None``, and "I have
+        not been told what this daemon can do" is not a licence to report a
+        stop that may not have happened.
+
+        Args:
+            verb: The calling method name, for the message.
+
+        Raises:
+            ValueError: When the connected daemon is below
+                :attr:`MIN_SESSION_STOP_PROTOCOL`.
+        """
+        if _protocol_compatible(
+                self.server_protocol_version,
+                self.MIN_SESSION_STOP_PROTOCOL):
+            return
+        spoken = self.server_protocol_version or "unknown (not connected)"
+        raise ValueError(
+            f"{verb}: this daemon speaks protocol {spoken} and does not serve "
+            f"the orphan-management verbs (needs >= "
+            f"{self.MIN_SESSION_STOP_PROTOCOL}).  It would ignore the command "
+            f"silently, which reads like success.  Upgrade the daemon."
+        )
+
+    async def list_orphan_sessions(self) -> None:
+        """Request the LOADED sessions with no client attached (#812).
+
+        The daemon answers with a ``SessionListEvent`` whose rows carry
+        ``session_id``, ``orphaned_seconds``, the effective
+        ``max_orphan_seconds`` / ``max_session_seconds`` bounds, whether the
+        session ``is_processing`` (spending, right now), and the ``runner``
+        identity — the runner pid, pool slot and cascade executing it.
+
+        An orphan is a session nothing is consuming: no attached client, not
+        even the synthetic headless marker a woken or cascade-driven session
+        carries.  It is NOT "the client disconnected" — the framework
+        deliberately supports sessions that outlive their client, and every
+        documented resume path keeps a marker or is unloaded to disk.
+
+        Pair with :meth:`stop_session`, which takes a ``session_id`` from a
+        row here.
+
+        Raises:
+            ValueError: Against a daemon below
+                :attr:`MIN_SESSION_STOP_PROTOCOL`, which would ignore the
+                command and answer nothing — leaving the caller waiting or
+                concluding there are no orphans.
+        """
+        self._require_session_stop_protocol("list_orphan_sessions")
+        await self._send_event(CommandRequest(
+            command="session.orphans",
+            args=[],
+        ))
+
+    async def stop_session(self, session_id: str) -> None:
+        """Stop ANY loaded session by id, not just this client's own (#812).
+
+        ``end_session`` stops the session THIS client is attached to.  This
+        stops the one you name, which is what an operator or a supervisor
+        process needs when the client that created a session is gone: #812
+        reports a session that kept executing tools and spending money for
+        seven minutes past its client's death, with no way to stop it short
+        of killing a circumstantially-identified runner on a shared daemon.
+
+        Cancellation, not a kill.  The daemon trips the session's cancel
+        token — the same path ``budget_control``'s ``abort`` rung uses — so a
+        mid-turn session stops at its next check point and is then saved to
+        disk, and nothing signals the runner pid (which may be a pool slot
+        other sessions of the same cascade are going to reuse).
+
+        The daemon confirms with a ``SystemMessageEvent`` naming what
+        happened — mid-turn cancellation, an idle termination, or no such
+        loaded session — because an operator acts differently on each.
+
+        Args:
+            session_id: The session to stop, e.g. from
+                :meth:`list_orphan_sessions`.
+
+        Raises:
+            ValueError: When ``session_id`` is empty, or against a daemon
+                below :attr:`MIN_SESSION_STOP_PROTOCOL` — which would ignore
+                the command silently and leave the session running while its
+                caller believed otherwise.
+        """
+        if not session_id:
+            raise ValueError("stop_session: session_id is required")
+        self._require_session_stop_protocol("stop_session")
+        await self._send_event(CommandRequest(
+            command="session.stop",
+            args=[session_id],
+        ))
+
     async def list_profiles(self) -> None:
         """Request list of available agent profiles.
 
@@ -1853,35 +2058,45 @@ class IPCClient:
     @staticmethod
     def _normalize_attachments(attachments: Optional[list]) -> List[Dict[str, Any]]:
         """Normalize user-message attachments to the canonical wire shape
-        ``{mime_type, data: base64-str, display_name}`` (client-expanded — the
-        daemon/runner can't read client-side paths, esp. cross-host WS).
+        ``{mime_type, data: base64-str, display_name, attachment_id}``
+        (client-expanded — the daemon/runner can't read client-side paths,
+        esp. cross-host WS).
 
         Accepts, per item:
           - a file-path ``str`` → read bytes, base64-encode, guess mime from ext
           - a ``dict`` with ``bytes`` ``data`` → base64-encode it
-          - a ``dict`` with base64-``str`` ``data`` → pass through unchanged
+          - a ``dict`` with base64-``str`` ``data`` → payload passed through
         Unknown shapes are skipped (no fabricated content).
+
+        ``attachment_id`` is minted here (#850) rather than only daemon-side
+        so the SENDER learns the id of what it sent — it is the side holding
+        the file, and therefore the side that archives it and needs the id to
+        file the recording under.  It is a digest of the payload
+        (:func:`jaato_sdk.media_identity.mint_attachment_id`), so the daemon
+        back-filling it for a client that does not send one produces the same
+        value; and an id the caller supplied itself is left alone.
         """
         import base64
         import mimetypes
         import os
+        from jaato_sdk.media_identity import ensure_attachment_id
         out: List[Dict[str, Any]] = []
         for a in attachments or []:
             if isinstance(a, str):
                 with open(a, "rb") as fh:
                     raw = fh.read()
-                out.append({
+                out.append(ensure_attachment_id({
                     "mime_type": mimetypes.guess_type(a)[0]
                                  or "application/octet-stream",
                     "data": base64.b64encode(raw).decode("ascii"),
                     "display_name": os.path.basename(a),
-                })
+                }))
             elif isinstance(a, dict):
                 d = dict(a)
                 data = d.get("data")
                 if isinstance(data, (bytes, bytearray)):
                     d["data"] = base64.b64encode(bytes(data)).decode("ascii")
-                out.append(d)
+                out.append(ensure_attachment_id(d))
         return out
 
     async def send_message(
@@ -1952,6 +2167,7 @@ class IPCClient:
         answers: List[str],
         *,
         cancelled: bool = False,
+        answer_attachments: Optional[Dict[Any, list]] = None,
     ) -> None:
         """Respond to a batched clarification — all answers at once.
 
@@ -1970,11 +2186,47 @@ class IPCClient:
             cancelled: Abandon the clarification instead of answering it.
                 The tool returns ``{"cancelled": True}`` to the model and
                 the turn continues; ``answers`` is ignored.
+            answer_attachments: Media attached to individual answers
+                (#989), as ``{question_index: [attachment, ...]}`` with a
+                1-BASED index (``int`` or its decimal string; both are
+                accepted).  Each attachment takes the same forms
+                :meth:`send_message` accepts — a file-path ``str``, or a
+                ``{mime_type, data, display_name}`` dict whose ``data``
+                is raw ``bytes`` or a base64 ``str`` — and is normalised
+                by the same encoder, so a client that can attach to a
+                message can attach to an answer with no second code path.
+
+                A voice note answering a ``free_text`` question is the
+                motivating case, and the answer string is then legitimately
+                ``""``: the utterance IS the answer (#838), and the daemon
+                does not read it as a skip.  Attachments are equally valid
+                on a CHOICE answer — picking "1. you attach a screenshot"
+                and attaching it is the ordinal plus the image, two axes
+                rather than alternatives.
+
+                Requires a daemon at protocol
+                >= :attr:`MIN_CLARIFICATION_ATTACHMENT_PROTOCOL`; below
+                that the call is REFUSED rather than degraded, because an
+                older daemon would answer the clarification with the
+                payload dropped and, for a voice-only answer, report an
+                empty answer as a success.
+
+        Raises:
+            ValueError: when attachments are supplied and the connected
+                daemon is too old to carry them.
         """
+        wire: Dict[str, List[Dict[str, Any]]] = {}
+        if answer_attachments and not cancelled:
+            self._require_clarification_attachment_protocol()
+            for index, items in answer_attachments.items():
+                normalized = self._normalize_attachments(items)
+                if normalized:
+                    wire[str(index)] = normalized
         await self._send_event(ClarificationBatchResponseEvent(
             request_id=request_id,
             answers=answers,
             cancelled=cancelled,
+            answer_attachments=wire,
         ))
 
     async def respond_to_reference_selection(
@@ -2092,6 +2344,83 @@ class IPCClient:
         await self._send_event(CommandRequest(
             command=command,
             args=args or [],
+            payload=payload,
+        ))
+
+    async def wake_session(
+        self,
+        session_id: str,
+        text: str = "",
+        *,
+        attachments: Optional[list] = None,
+        source: str = "user",
+        event_id: Optional[str] = None,
+    ) -> None:
+        """Wake ``session_id`` — revive it if cold and start a USER turn on it.
+
+        The typed form of ``execute_command("session.wake", payload=...)``,
+        and the reason it exists is ``attachments``: the payload dict is
+        free-form, so a caller could always have put bytes in it, but nothing
+        told them the field existed or normalised a file path into the wire
+        shape.  ``send_message`` accepts ``attachments`` and the two resume
+        verbs did not, which made the limitation invisible from the API
+        surface a reader starts at (#845).
+
+        Fire-and-forget, like the command it wraps: refusals arrive on the
+        event stream as an ``ErrorEvent`` with ``error_type="WakeError"``, and
+        the woken turn's output flows to the session's attached clients (the
+        caller need not be one).
+
+        The wake payload is UNTRUSTED — it may be a public PR comment, a
+        webhook body, a recording left by a caller — so the daemon wraps it in
+        the untrusted-content boundary before the model sees it.  Attachments
+        cannot be wrapped (bytes have no marker to carry), so the daemon
+        instead names each one INSIDE the boundary and states that the media
+        delivered with it came from the same source: the model is told that
+        the audio is data to interpret, never instructions to follow.
+
+        Args:
+            session_id: The session to wake.  Cold sessions are revived from
+                disk; the workspace is resolved daemon-side, never from here.
+            text: The wake message.  May be empty when ``attachments`` carry
+                the content — an attachment IS content (#838), and for a
+                spoken utterance it is the whole message.
+            attachments: Optional binary content — each a file-path ``str`` OR
+                a ``{mime_type, data, display_name}`` dict, as
+                :meth:`send_message` accepts, normalised here by the same
+                :meth:`_normalize_attachments`.  Requires daemon protocol
+                >= :attr:`MIN_ATTACHMENT_RESUME_PROTOCOL`.
+            source: Provenance tag recorded in the untrusted-content wrapper
+                (e.g. ``"user"``, ``"github"``, ``"cron"``).
+            event_id: Idempotency key.  A redelivered id is a benign no-op, so
+                an at-least-once ingress can retry safely.
+
+        Raises:
+            ValueError: if neither ``text`` nor ``attachments`` is given (a
+                wake with no content would drive an empty turn), or if the
+                daemon is too old to carry attachments.
+        """
+        wire_attachments: List[Dict[str, Any]] = []
+        if attachments:
+            self._require_attachment_resume_protocol("session.wake")
+            wire_attachments = self._normalize_attachments(attachments)
+        if not text and not wire_attachments:
+            raise ValueError(
+                "session.wake requires text or attachments — a wake with no "
+                "content drives a turn the model has nothing to answer"
+            )
+        payload: Dict[str, Any] = {
+            "session_id": session_id,
+            "text": text,
+            "source": source,
+        }
+        if event_id is not None:
+            payload["event_id"] = event_id
+        if wire_attachments:
+            payload["attachments"] = wire_attachments
+        await self._send_event(CommandRequest(
+            command="session.wake",
+            args=[],
             payload=payload,
         ))
 
@@ -2214,12 +2543,82 @@ class IPCClient:
     #: nothing answers, so waiting would hang every call.
     MIN_INJECT_RESULT_PROTOCOL = "1.3"
 
+    #: Wire-protocol minor from which the two RESUME verbs (``inject_prompt``
+    #: and ``session.wake``) carry ``attachments``.  Below this the daemon
+    #: ignores the field — and for BYTES that is not a benign no-op, so the
+    #: SDK refuses the call instead of letting the payload vanish.
+    MIN_ATTACHMENT_RESUME_PROTOCOL = "1.5"
+
+    #: Wire-protocol minor from which a clarification ANSWER carries
+    #: ``answer_attachments``.  Below it the daemon ignores the field and
+    #: answers the clarification with the media gone — which for a
+    #: voice-only answer is a BLANK answer reported as a successful one,
+    #: since ``_parse_answer`` reads an empty response as ``free_text=""``.
+    #: Same verdict as #838 and #845: refused, not degraded.
+    MIN_CLARIFICATION_ATTACHMENT_PROTOCOL = "1.6"
+
+    def _require_clarification_attachment_protocol(self) -> None:
+        """Refuse attachments on a clarification answer against an old daemon.
+
+        The sibling of :meth:`_require_attachment_resume_protocol`, and
+        refused for the same reason: an additive optional field is safe to
+        send blind only when the degraded call still means what the caller
+        asked for.  Here the degraded call answers the question with the
+        recording thrown away — and the agent proceeds on it, because a
+        clarification answer is a tool result the model reads as fact.
+
+        An UNKNOWN version (no handshake yet) is refused too:
+        ``_protocol_compatible`` answers ``False`` for ``None``, and "I
+        have not been told what this daemon can do" is not a licence to
+        send bytes it may drop.
+        """
+        if _protocol_compatible(
+                self.server_protocol_version,
+                self.MIN_CLARIFICATION_ATTACHMENT_PROTOCOL):
+            return
+        spoken = self.server_protocol_version or "unknown (not connected)"
+        raise ValueError(
+            f"respond_to_clarification_batch: this daemon speaks protocol "
+            f"{spoken} and would DROP the answer attachments (needs >= "
+            f"{self.MIN_CLARIFICATION_ATTACHMENT_PROTOCOL}).  Answer the "
+            f"clarification in text, or upgrade the daemon."
+        )
+
+    def _require_attachment_resume_protocol(self, verb: str) -> None:
+        """Refuse an attachment-bearing resume against a daemon too old to
+        carry it.
+
+        An additive optional field is normally safe to send blind: an older
+        peer ignores it and the call degrades to what it always did.  That
+        reasoning holds for a ``request_id`` and NOT for an attachment — the
+        degraded call is a turn driven with the text and WITHOUT the audio
+        that was the whole message, which for a blank-text voice utterance is
+        an empty turn reported as a success.  So this is checked, not hoped.
+
+        An UNKNOWN version (no handshake yet) is refused on the same
+        principle: ``_protocol_compatible`` answers ``False`` for ``None``,
+        and "I have not been told what this daemon can do" is not a licence
+        to send bytes it may drop.
+        """
+        if _protocol_compatible(
+                self.server_protocol_version,
+                self.MIN_ATTACHMENT_RESUME_PROTOCOL):
+            return
+        spoken = self.server_protocol_version or "unknown (not connected)"
+        raise ValueError(
+            f"{verb}: this daemon speaks protocol {spoken} and would DROP "
+            f"the attachments (needs >= "
+            f"{self.MIN_ATTACHMENT_RESUME_PROTOCOL}).  Send the content "
+            f"through send_message() on a live session, or upgrade the daemon."
+        )
+
     async def inject_prompt(
         self,
         text: str,
         source_type: str = "user",
         source_id: Optional[str] = None,
         timeout: float = 10.0,
+        attachments: Optional[list] = None,
     ) -> Optional[str]:
         """Inject a prompt into the session's message queue.
 
@@ -2239,15 +2638,35 @@ class IPCClient:
         Args:
             text: Prompt text to inject.
             source_type: Queue priority — ``"user"`` (steer),
-                ``"child"`` (follow-up), or ``"system"`` / ``"event"``
-                / ``"parent"`` for reactor / hook callers.
+                ``"child"`` (follow-up), ``"sibling"`` (idle-only
+                coordination from another session in the same cascade),
+                or ``"system"`` / ``"event"`` / ``"parent"`` for
+                reactor / hook callers.  The daemon derives the
+                accepted set from its ``SourceType`` enum, so these six
+                are the whole vocabulary and anything else is refused.
             source_id: Caller identifier for telemetry / logs.
             timeout: Seconds to wait for the daemon's result event.
+            attachments: Optional binary user content — each a file-path
+                ``str`` OR a ``{mime_type, data, display_name}`` dict, exactly
+                as :meth:`send_message` accepts, normalised here by the same
+                :meth:`_normalize_attachments`.  Requires daemon protocol
+                >= :attr:`MIN_ATTACHMENT_RESUME_PROTOCOL` (an older daemon
+                would silently drop the bytes, so the call is refused).
+
+                **An attachment-bearing inject is idle-only.**  Only the
+                drive branch of an inject can carry bytes — a queued message
+                is folded into the running turn as text, and there is nowhere
+                in that shape to put an ``inline_data`` part — so the daemon
+                offers it with ``require_idle`` and a busy target answers
+                ``"busy"`` with nothing enqueued.  That is a retry-safe
+                refusal, not a delivery.
 
         Returns:
             One of ``"accepted"`` (the target was idle, so a turn was
             STARTED), ``"queued"`` (the target is mid-turn and its running
-            turn will drain the message), ``"terminated"`` (loaded but dead),
+            turn will drain the message), ``"busy"`` (attachments were sent
+            and the target is mid-turn, so NOTHING was enqueued — retry when
+            it goes idle), ``"terminated"`` (loaded but dead),
             ``"no_session"`` (not loaded), ``"unreachable"`` (live, but
             nothing was sent -- re-sending is SAFE), or ``"not_confirmed"``
             (an offer was made and its answer was lost -- re-sending MAY
@@ -2268,6 +2687,14 @@ class IPCClient:
             string so that "I was not told" stays checkable instead of
             being mistaken for a real state.
         """
+        wire_attachments: List[Dict[str, Any]] = []
+        if attachments:
+            # Refuse BEFORE normalising: reading the files is pointless work
+            # if the daemon cannot carry them, and a raise here is the whole
+            # point — the alternative is a turn that runs without them.
+            self._require_attachment_resume_protocol("inject_prompt")
+            wire_attachments = self._normalize_attachments(attachments)
+
         if not _protocol_compatible(
                 self.server_protocol_version,
                 self.MIN_INJECT_RESULT_PROTOCOL):
@@ -2286,6 +2713,7 @@ class IPCClient:
                 text=text,
                 source_type=source_type,
                 source_id=source_id,
+                attachments=wire_attachments,
             ))
             return None
 
@@ -2295,6 +2723,7 @@ class IPCClient:
             source_type=source_type,
             source_id=source_id,
             request_id=req_id,
+            attachments=wire_attachments,
         ))
         try:
             return await asyncio.wait_for(
@@ -2607,11 +3036,18 @@ class IPCClient:
             cascade_driver_id: The cid this iterator observes.
                 Sessions stamped with this cid will route their
                 events to the iterator.
-            event_types: Optional list of event type-names to
+            event_types: Optional list of event CLASS names to
                 filter for (e.g., ``["SessionTerminatedEvent",
-                "AgentCompletedEvent"]``).  ``None`` (default)
-                subscribes to all event types.  Empty list also
-                subscribes to all (no filter).
+                "AgentCompletedEvent"]``).  These are the names
+                ``type(event).__name__`` produces -- NOT the
+                ``EventType`` wire values (``"session.terminated"``),
+                which match nothing on either side of the
+                connection.  A name that can never match is logged
+                at WARNING when the iterator starts, because a deaf
+                observer is otherwise indistinguishable from a
+                cascade that produced no events (jaato #821).
+                ``None`` (default) subscribes to all event types.
+                Empty list also subscribes to all (no filter).
             role: ``"owner"`` (lifecycle authority; single per cid)
                 or ``"observer"`` (read-only; multiple allowed).
                 Default ``"observer"`` for the common observe-only
@@ -2663,6 +3099,23 @@ class IPCClient:
             "cascade_events(): subscribing cid=%s role=%s event_types=%s",
             cascade_driver_id, role, event_types,
         )
+        # A FILTER THAT CANNOT MATCH IS ANNOUNCED, NOT OBEYED IN SILENCE.
+        #
+        # Both filters below -- the daemon's and this iterator's own -- compare
+        # ``type(event).__name__``, so an ``EventType`` WIRE VALUE
+        # ("session.terminated") matches nothing while registration succeeds
+        # and the daemon logs a healthy entry.  The result is an observer that
+        # yields nothing for the life of the cascade and is indistinguishable
+        # from a cascade that produced no events (jaato #821).
+        #
+        # Warned rather than raised: this SDK and the daemon can be different
+        # checkouts (#823), so a class name this build has never heard of may
+        # still be real on the other end.  A warning names the mistake without
+        # refusing a subscription that might be correct; logging's last-resort
+        # handler puts it on stderr even in a script that configures nothing.
+        problem = describe_event_type_problems(event_types)
+        if problem:
+            logger.warning("cascade_events(): %s", problem)
         # Build CommandRequest args: [cid, role, *event_types].
         # Server-side _handle_cascade_register parses this shape.
         args = [cascade_driver_id, role]

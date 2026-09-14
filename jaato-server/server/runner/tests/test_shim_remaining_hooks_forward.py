@@ -249,11 +249,14 @@ class TestOnAgentGCConfig:
 
 class TestOnAgentHistoryUpdated:
     def test_emits_with_history_snapshot(self):
-        """Pin: history payload flows verbatim across the wire.
+        """Pin: an already-dict history flows verbatim across the wire.
 
-        The history snapshot is an opaque list of message dicts;
-        the daemon-side hook just stores it on agent state.  The
-        shim must not re-shape or filter the data."""
+        The daemon-side hook just stores the snapshot on agent state,
+        so the shim must not re-shape or filter what it is given.
+        ``Message`` objects ARE re-shaped since #920 — they are
+        serialized with the canonical session serializer instead of
+        being stringified by the frame encoder — which
+        ``test_rpc_bytes_wire_encoding.py`` pins."""
         rpc = _FakeRPC()
         shim = _AgentUIHooksNotificationShim(rpc, request_id=1)
         history = [

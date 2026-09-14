@@ -1,6 +1,6 @@
 name: "Publish @jaato/sdk to npm"
 
-# Mirror of publish-testpypi-{sdk,server,tui}.yml — manual trigger,
+# Mirror of publish-pypi-{sdk,server,tui,eval}.yml — manual trigger,
 # tests gate, version-already-on-registry check, then publish.
 #
 # Setup once on the npm side:

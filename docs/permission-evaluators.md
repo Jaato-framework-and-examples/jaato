@@ -1,6 +1,6 @@
 # Permission Evaluators
 
-Permission evaluators are Python scripts that run at permission-check time, letting you add dynamic logic to jaato's declarative permission system. They sit between sanitization checks and the standard blacklist/whitelist pipeline.
+Permission evaluators are Python scripts that run at permission-check time, letting you add dynamic logic to jaato's declarative permission system. They sit between sanitization checks and the standard blacklist/whitelist pipeline — able to *tighten* a decision freely, and never able to loosen one past the operator's blacklist (see [Evaluation order](#evaluation-order)).
 
 ## When to use evaluators
 
@@ -195,11 +195,11 @@ This follows the same precedence as profiles and other jaato configs.
 
 ## Evaluation order
 
-Evaluators run after sanitization but before the blacklist/whitelist pipeline:
+Evaluators run after sanitization but before the whitelist/default pipeline:
 
 ```
 1. Sanitization checks         -> DENY if violations
-2. Evaluator (this feature)    -> ALLOW/DENY/FALLBACK
+2. Evaluator (this feature)    -> DENY, FALLBACK, or a provisional ALLOW
 3. Session blacklist            -> DENY if matched
 4. Static blacklist             -> DENY if matched
 5. Session whitelist            -> ALLOW if matched
@@ -207,7 +207,35 @@ Evaluators run after sanitization but before the blacklist/whitelist pipeline:
 7. Default policy               -> allow/deny/ask
 ```
 
-If an evaluator returns `ALLOW` or `DENY`, the remaining steps are skipped. If it returns `FALLBACK`, evaluation continues from step 3.
+If an evaluator returns `DENY`, the remaining steps are skipped. If it returns
+`FALLBACK`, evaluation continues from step 3.
+
+### An evaluator ALLOW does not outrank the blacklist
+
+An `ALLOW` skips steps 5-7 but **not** steps 3-4. This is deliberately
+asymmetric with `DENY`, and the asymmetry is a security boundary rather than a
+detail (issue #679):
+
+| Evaluator says | Outranks whitelist / `allow_all` / pre-approval | Outranks blacklist |
+|----------------|--------------------------------------------------|--------------------|
+| `DENY` (and `DENY_SESSION`, `DENY_WITH_COMMENT`) | yes | n/a — already a deny |
+| any `ALLOW` variant (incl. `ALLOW_WITH_COMMENT`) | yes | **no** |
+| `FALLBACK` | no (the pre-approval stands) | no |
+
+Evaluator scripts are resolved through the workspace `script_loader` chain, so
+a *repository* can ship one; `blacklist_patterns` / `blacklist_tools` /
+`blacklist_arguments` are the deny the *operator* controls. An evaluator
+tightening a decision is the point of the feature; an evaluator loosening past
+an operator deny would let workspace-supplied code disable the operator's
+policy. So an `ALLOW` means "no objection from me", never "final".
+
+When a blacklist stops an evaluator `ALLOW`, the reported `method` is the
+blacklist's own (`blacklist` / `session_blacklist`) — the rule that actually
+decided — and the reason names both:
+
+```
+Tool 'admin_dangerous_tool' is blacklisted (evaluator ALLOW does not override the blacklist)
+```
 
 ## Evaluators and pre-approved tools
 
@@ -216,7 +244,7 @@ Evaluators run **even for pre-approved tools** (whitelisted tools, turn-suspende
 The key behavior:
 - If the evaluator returns **DENY**, **DENY_SESSION**, or **DENY_WITH_COMMENT**, the pre-approval is overridden and the tool is blocked.
 - If the evaluator returns **FALLBACK**, the pre-approval stands and the tool is allowed as before.
-- If the evaluator returns any **ALLOW** variant, the tool is allowed (same outcome as the pre-approval, but the evaluator confirmed it).
+- If the evaluator returns any **ALLOW** variant, the tool is allowed (same outcome as the pre-approval, but the evaluator confirmed it) — *unless* the blacklist refuses it, which it still may (see [An evaluator ALLOW does not outrank the blacklist](#an-evaluator-allow-does-not-outrank-the-blacklist)).
 
 This lets you set up broad pre-approvals (e.g. `allow_all` for a trusted profile) while still maintaining evaluator-enforced guardrails on specific tools or argument patterns.
 

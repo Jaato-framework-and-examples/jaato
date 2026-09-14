@@ -24,6 +24,36 @@ from shared.session_id import is_safe_session_id
 logger = logging.getLogger(__name__)
 
 
+def _decode_wake_request(
+    args: List[Any], payload: Optional[dict],
+) -> "tuple[Optional[str], Optional[str], str, Optional[str], List[dict]]":
+    """Decode a ``session.wake`` request from either accepted shape.
+
+    Returns ``(session_id, text, source, event_id, attachments)``.  The
+    structured ``payload`` wins over positional ``args`` field by field, as
+    it always has.
+
+    ``attachments`` (#845) is payload-only: bytes have no positional
+    spelling, and a positional string would be a CLIENT-SIDE path the daemon
+    cannot read (the whole reason ``_normalize_attachments`` expands paths on
+    the sending side, especially cross-host WS).  Only mapping entries
+    survive; anything else is dropped here rather than being handed onward
+    as something the multimodal path would have to re-check.  Dropping is
+    not silent in effect — a wake whose attachments were ALL unusable and
+    carried no text fails the caller's usage check and is refused by name.
+    """
+    p = payload or {}
+    session_id = p.get("session_id") or (args[0] if len(args) > 0 else None)
+    text = p.get("text") or (args[1] if len(args) > 1 else None)
+    source = p.get("source") or (args[2] if len(args) > 2 else "user")
+    event_id = p.get("event_id") or (args[3] if len(args) > 3 else None)
+    raw = p.get("attachments")
+    attachments = (
+        [a for a in raw if isinstance(a, dict)] if isinstance(raw, list) else []
+    )
+    return session_id, text, source, event_id, attachments
+
+
 class CommandRouter:
     """Transport-agnostic command dispatcher for the Jaato daemon.
 
@@ -245,6 +275,10 @@ class CommandRouter:
                 self._handle_session_delete(client_id, event.args)
                 return
 
+            elif cmd in ("session.orphans", "session.stop"):
+                self._dispatch_orphan_command(cmd, client_id, event.args)
+                return
+
             elif cmd == "session.help":
                 self._handle_session_help(client_id)
                 return
@@ -273,29 +307,10 @@ class CommandRouter:
                 self._handle_session_unbind_wake(client_id, event.args, event.payload)
                 return
 
-            elif cmd == "cascade.register":
-                self._handle_cascade_register(client_id, event.args)
-                return
-
-            elif cmd == "cascade.unregister":
-                self._handle_cascade_unregister(client_id, event.args)
-                return
-
-            elif cmd == "cascade.budget.set":
-                self._handle_cascade_budget_set(client_id, event.args, event.payload)
-                return
-
-            elif cmd == "cascade.budget.get":
-                self._handle_cascade_budget_get(client_id, event.args)
-                return
-
-            elif cmd == "cascade.budget.clear":
-                self._handle_cascade_budget_clear(client_id, event.args)
-                return
-
-            elif cmd == "cascade.cancel":
-                self._handle_cascade_cancel(client_id, event.args)
-                return
+            elif cmd.startswith("cascade."):
+                if self._dispatch_cascade_command(
+                        cmd, client_id, event.args, event.payload):
+                    return
 
             # Tools commands - handled per-session
             elif cmd.startswith("tools."):
@@ -329,12 +344,78 @@ class CommandRouter:
             self._handle_post_auth_response(client_id, event)
             return
 
-        # Route to session
-        self._session_manager.handle_request(client_id, session_id, event)
+        # Route to session.  The transport's authenticated user rides
+        # along so a permission response can be attributed (#859).
+        self._session_manager.handle_request(
+            client_id, session_id, event,
+            user_id=self._event_sink.get_client_user(client_id),
+        )
 
     # ------------------------------------------------------------------
     # Session commands
     # ------------------------------------------------------------------
+
+    def _dispatch_orphan_command(
+        self, cmd: str, client_id: str, args: list,
+    ) -> None:
+        """Route the two orphan-management verbs (#812).
+
+        One branch in :meth:`_dispatch` for both, rather than two: that
+        method sits at its cyclomatic-complexity baseline and may not grow,
+        and the pair is one feature — you list orphans in order to stop one.
+
+        Args:
+            cmd: ``"session.orphans"`` or ``"session.stop"``.
+            client_id: The requesting client.
+            args: The command's argv tail.
+        """
+        if cmd == "session.orphans":
+            self._handle_session_orphans(client_id)
+        else:
+            self._handle_session_stop(client_id, args)
+
+    def _dispatch_cascade_command(
+        self, cmd: str, client_id: str, args: list, payload: Any = None,
+    ) -> bool:
+        """Route a ``cascade.*`` command to its handler.
+
+        Extracted from :meth:`_dispatch` as a table rather than left as six
+        ``elif`` arms: that method is over the complexity ceiling and frozen
+        at its recorded size, so a feature that needs a new branch has to
+        pay for one somewhere.  This block was the cheapest to lift — six
+        uniform arms differing only in the handler and whether it takes the
+        payload.
+
+        Behaviour is unchanged: each command reaches the same handler with
+        the same arguments, and an unrecognised ``cascade.*`` string falls
+        through to the caller's remaining dispatch exactly as before.
+
+        Args:
+            cmd: The full command string, e.g. ``"cascade.budget.set"``.
+            client_id: The requesting client.
+            args: The command's argv tail.
+            payload: The request's structured payload, for the two commands
+                that read one.
+
+        Returns:
+            True when the command was handled; False when ``cmd`` is not a
+            known ``cascade.*`` verb, so the caller keeps dispatching.
+        """
+        if cmd == "cascade.register":
+            self._handle_cascade_register(client_id, args)
+        elif cmd == "cascade.unregister":
+            self._handle_cascade_unregister(client_id, args)
+        elif cmd == "cascade.budget.set":
+            self._handle_cascade_budget_set(client_id, args, payload)
+        elif cmd == "cascade.budget.get":
+            self._handle_cascade_budget_get(client_id, args)
+        elif cmd == "cascade.budget.clear":
+            self._handle_cascade_budget_clear(client_id, args)
+        elif cmd == "cascade.cancel":
+            self._handle_cascade_cancel(client_id, args)
+        else:
+            return False
+        return True
 
     def _handle_session_new(
         self,
@@ -383,6 +464,11 @@ class CommandRouter:
                                   and parsing happen in
                                   ``SessionManager.create_session``.
         """
+        # Read FIRST, not at the call site below: every refusal this parser
+        # can emit is an answer to this ``session.new``, and the client's
+        # create-wait discards an ErrorEvent that does not carry the
+        # correlation id (#882).
+        request_id = (payload or {}).get("request_id")
         name = None
         profile_name = None
         agent_name = None
@@ -405,10 +491,11 @@ class CommandRouter:
                         error="--instructions requires a value (text or @filepath)",
                         error_type="UsageError",
                         recoverable=True,
+                        request_id=request_id,
                     ))
                     return
                 system_instruction_override = self._resolve_instructions_value(
-                    raw, workspace_path, client_id,
+                    raw, workspace_path, client_id, request_id=request_id,
                 )
                 if system_instruction_override is None:
                     return  # error already emitted
@@ -455,7 +542,7 @@ class CommandRouter:
             # Correlation id from the generic payload escape hatch.  Echoed on
             # whichever event answers this create, so the caller can tell its
             # own answer from a concurrent one.
-            request_id=(payload or {}).get("request_id"),
+            request_id=request_id,
         )
         if new_session_id:
             # Update logging context now that session_id is known.
@@ -659,29 +746,38 @@ class CommandRouter:
         if cold, for the client-agnostic wake primitive.
 
         Accepts a structured ``payload`` (SDK callers) —
-        ``{session_id, text, source?, event_id?}`` — or positional ``args``
-        ``[session_id, text, source?, event_id?]``.  Authentication is the
+        ``{session_id, text, source?, event_id?, attachments?}`` — or
+        positional ``args`` ``[session_id, text, source?, event_id?]``.
+        Authentication is the
         transport's boundary (IPC socket-mode / WS bearer token / the HTTP
         shim's #498 fail-closed check); this handler runs only for callers
         already past that gate.  On refusal it emits an ``ErrorEvent`` with the
         reason; on success the woken turn's output flows to the session's
         attached clients (the caller need not be one).
+
+        ``attachments`` (protocol 1.5+, payload form only — bytes have no
+        positional spelling) carries binary content in the same canonical wire
+        shape ``SendMessageRequest`` accepts, so a session whose input is
+        audio can be resumed with an utterance rather than only described in
+        text (#845).  AN ATTACHMENT IS CONTENT: a wake carrying attachments
+        and no text is valid — for a spoken utterance the attachment IS the
+        message (#838) — so the usage check requires text OR attachments,
+        not text.
         """
         from jaato_sdk.events import ErrorEvent
-        p = payload or {}
-        session_id = p.get("session_id") or (args[0] if len(args) > 0 else None)
-        text = p.get("text") or (args[1] if len(args) > 1 else None)
-        source = p.get("source") or (args[2] if len(args) > 2 else "user")
-        event_id = p.get("event_id") or (args[3] if len(args) > 3 else None)
-        if not session_id or not text:
+        session_id, text, source, event_id, attachments = _decode_wake_request(
+            args, payload)
+        if not session_id or not (text or attachments):
             self._event_sink.send_event(client_id, ErrorEvent(
-                error="session.wake requires session_id and text",
+                error=("session.wake requires session_id and text "
+                       "(or attachments)"),
                 error_type="UsageError",
                 recoverable=True,
             ))
             return
         outcome, detail = self._session_manager.wake_session(
-            session_id, text, source=source, event_id=event_id,
+            session_id, text or "", source=source, event_id=event_id,
+            attachments=attachments,
         )
         # Only genuine failures surface as an error.  OK and DUPLICATE are both
         # successes — a redelivered event_id is an idempotent no-op, not a
@@ -799,6 +895,11 @@ class CommandRouter:
             "client_count": s.client_count,
             "turn_count": s.turn_count,
             "workspace_path": s.workspace_path or "",
+            # #812: which sessions nothing is consuming, and which process
+            # each is using.  Additive keys on an already free-form dict, so
+            # no protocol bump and an older client simply ignores them.
+            "orphaned": s.orphaned,
+            "runner": s.runner,
         } for s in sessions]
 
         self._event_sink.send_event(client_id, SessionListEvent(sessions=session_data))
@@ -1118,6 +1219,86 @@ class CommandRouter:
             client_id, cascade_driver_id, result["stopped_count"],
         )
 
+    def _handle_session_orphans(self, client_id: str) -> None:
+        """Handle ``session.orphans`` — list sessions nothing is consuming (#812).
+
+        Wire: no args.  Answers with a :class:`SessionListEvent` whose rows
+        are :meth:`SessionManager.list_orphan_sessions` dicts — the same
+        event type ``session.list`` uses, so a client that can render one can
+        render the other, and the richer per-orphan keys (``orphaned_seconds``,
+        the effective bounds, the ``runner`` identity) ride along.
+
+        An orphan is a LOADED session with no attached client at all — not
+        even the synthetic headless marker a woken or cascade-driven session
+        carries.  See :meth:`SessionManager._is_orphaned`.
+
+        Pairs with ``session.stop <id>``: the ``session_id`` of a row here is
+        exactly what that verb takes.
+
+        Args:
+            client_id: The IPC/WS client that asked.  Receives the listing.
+        """
+        from jaato_sdk.events import SessionListEvent
+
+        orphans = self._session_manager.list_orphan_sessions()
+        self._event_sink.send_event(
+            client_id, SessionListEvent(sessions=orphans))
+        logger.info(
+            "session.orphans: client=%s reported %d orphaned session(s): %s",
+            client_id, len(orphans), [o["session_id"] for o in orphans],
+        )
+
+    def _handle_session_stop(self, client_id: str, args: list) -> None:
+        """Handle ``session.stop <session_id>`` — stop ONE session by id (#812).
+
+        Wire: ``args = [session_id]``.
+
+        Distinct from ``session.end``, which stops the CALLER's own session,
+        and from ``cascade.cancel``, which stops a whole cascade.  Neither
+        could stop the one session an operator is looking at — which is what
+        left "kill a circumstantially-identified runner on a shared daemon,
+        or wait for the budget to burn" as the only two options in #812.
+
+        Confirms back to the caller naming what happened, because "stopped a
+        session that was mid-turn" and "stopped a session that was already
+        idle" and "no such session is loaded" are three different answers and
+        an operator acts differently on each.
+
+        Args:
+            client_id: The IPC/WS client that sent the command.
+            args: Single-element list containing the session id to stop.
+        """
+        from jaato_sdk.events import ErrorEvent, SystemMessageEvent
+
+        if not args:
+            self._event_sink.send_event(client_id, ErrorEvent(
+                error=("session.stop requires args: [session_id].  Use "
+                       "session.orphans or session.list to find one."),
+                error_type="UsageError",
+                recoverable=True,
+            ))
+            return
+
+        target = args[0]
+        result = self._session_manager.stop_session(
+            target, reason="operator_request")
+
+        if not result["found"]:
+            msg = (f"session.stop: {target} is not loaded — nothing to stop "
+                   f"(a cold session consumes nothing)")
+        elif result["was_processing"]:
+            msg = (f"session.stop: {target} was mid-turn; cancellation "
+                   f"requested (it stops at its next check point)")
+        else:
+            msg = f"session.stop: {target} was idle; terminated"
+        self._event_sink.send_event(client_id, SystemMessageEvent(
+            message=msg, style="system",
+        ))
+        logger.info(
+            "session.stop: client=%s target=%s found=%s was_processing=%s",
+            client_id, target, result["found"], result["was_processing"],
+        )
+
     def _handle_session_end(self, client_id: str, session_id: str) -> None:
         """Handle ``session.end`` command.
 
@@ -1216,6 +1397,18 @@ class CommandRouter:
             ("    save [id]         Flush a live session's state to disk", "dim"),
             ("                      Defaults to the attached session.", "dim"),
             ("", ""),
+            ("    orphans           List LOADED sessions with no client", "dim"),
+            ("                      attached — nothing is consuming their", "dim"),
+            ("                      results.  Shows how long each has been", "dim"),
+            ("                      orphaned, its wall-clock bounds, and the", "dim"),
+            ("                      runner pid executing it.", "dim"),
+            ("", ""),
+            ("    stop <id>         Stop ANY loaded session by id", "dim"),
+            ("                      Cancels it mid-turn if it is running.", "dim"),
+            ("                      Unlike 'end' (your own session) this", "dim"),
+            ("                      takes an id, so an operator can stop a", "dim"),
+            ("                      session whose client is gone.", "dim"),
+            ("", ""),
             ("    send <cid> <name> <message>", "dim"),
             ("                      Nudge a NAMED session in a cascade directly.", "dim"),
             ("                      Reaches a LOADED session only — use wake to", "dim"),
@@ -1229,6 +1422,8 @@ class CommandRouter:
             ("    session new myproject      Create session named 'myproject'", "dim"),
             ("    session attach 20251207    Attach to session by ID", "dim"),
             ("    session delete 20251207    Delete session by ID", "dim"),
+            ("    session orphans            List sessions nobody is watching", "dim"),
+            ("    session stop 20251207      Stop that session, whoever made it", "dim"),
             ("", ""),
             ("SESSION STATES", "bold"),
             ("    Sessions can be in different states:", ""),
@@ -1588,6 +1783,7 @@ class CommandRouter:
         raw: str,
         workspace_path: Optional[str],
         client_id: str,
+        request_id: Optional[str] = None,
     ) -> Optional[str]:
         """Resolve a ``--instructions`` value into the literal text the session sees.
 
@@ -1600,9 +1796,20 @@ class CommandRouter:
           Relative paths resolve against ``workspace_path``; absolute
           paths are honoured as-is.  ``~`` expands.
 
+        Args:
+            raw: The flag's value, literal text or ``@path``.
+            workspace_path: Base for a relative ``@path``.
+            client_id: Who to report a failure to.
+            request_id: Correlation id of the ``session.new`` this flag
+                belongs to.  STAMPED ON THE REFUSAL: the client's
+                create-wait accepts only a correlated ``ErrorEvent``, so
+                an unstamped one is discarded and the caller waits out its
+                full timeout instead of learning the path was unreadable
+                (#882).
+
         Returns the resolved text, or ``None`` if the file reference
-        could not be read (an ``ErrorEvent`` has been emitted to the
-        client in that case).
+        could not be read (a correlated ``ErrorEvent`` has been emitted to
+        the client in that case).
         """
         from jaato_sdk.events import ErrorEvent
 
@@ -1615,6 +1822,7 @@ class CommandRouter:
                 error="--instructions @ requires a path after the @",
                 error_type="UsageError",
                 recoverable=True,
+                request_id=request_id,
             ))
             return None
 
@@ -1628,6 +1836,7 @@ class CommandRouter:
                 error=f"--instructions @{path_str}: {exc}",
                 error_type="UsageError",
                 recoverable=True,
+                request_id=request_id,
             ))
             return None
 

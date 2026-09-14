@@ -13,6 +13,22 @@ from jaato_sdk.plugins.model_provider.types import (
     untrusted_boundary_instruction,
     wrap_untrusted_content,
 )
+from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+
+
+#: Put #857 back: strip TRAIT_UNTRUSTED_CONTENT off ``call_service`` and
+#: leave it greppable-only, the state the issue was filed against.
+REVERSIONS = [
+    Reversion(
+        target="jaato-server/shared/plugins/service_connector/plugin.py",
+        find="traits=frozenset({TRAIT_GREPPABLE_CONTENT, TRAIT_UNTRUSTED_CONTENT}),",
+        replace="traits=frozenset({TRAIT_GREPPABLE_CONTENT}),",
+        test="test_call_service_declares_the_trait_alongside_greppable",
+        because="a REST response body reaching the model outside the "
+                "untrusted-content boundary — third-party text presented as "
+                "an ordinary tool result rather than as data",
+    ),
+]
 
 
 # ---- render_result_for_model -------------------------------------------------
@@ -91,3 +107,17 @@ def test_web_fetch_and_search_declare_the_trait():
     assert TRAIT_UNTRUSTED_CONTENT in wf.traits
     ws = make_search().get_tool_schemas()[0]
     assert TRAIT_UNTRUSTED_CONTENT in ws.traits
+
+
+def test_call_service_declares_the_trait_alongside_greppable():
+    # #857: a REST response body is authored by the remote service — a
+    # third party, or an internal one relaying outsider-written text — so it
+    # belongs inside the boundary for the same reason a fetched page does.
+    # GREPPABLE (result_grep enrichment) and UNTRUSTED (boundary wrapper) are
+    # orthogonal routes; both are membership-tested, so they must compose.
+    from jaato_sdk.plugins.model_provider.types import TRAIT_GREPPABLE_CONTENT
+    from shared.plugins.service_connector.plugin import ServiceConnectorPlugin
+    schemas = {s.name: s for s in ServiceConnectorPlugin().get_tool_schemas()}
+    cs = schemas["call_service"]
+    assert TRAIT_UNTRUSTED_CONTENT in cs.traits
+    assert TRAIT_GREPPABLE_CONTENT in cs.traits

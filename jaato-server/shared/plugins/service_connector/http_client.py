@@ -222,6 +222,11 @@ class ServiceHttpClient:
         elif service_config:
             auth_config = service_config.auth
 
+        # Header names a credential was resolved INTO, so the preview can
+        # redact by provenance rather than by a name list that cannot know an
+        # operator-chosen header (``PRIVATE-TOKEN``, ``X-Acme-Key``, ...).
+        injected_auth_headers: List[str] = []
+        auth_unresolved: Optional[str] = None
         if auth_config and auth_config.type != AuthType.NONE:
             try:
                 auth_headers, auth_query, _attempts = (
@@ -231,13 +236,18 @@ class ServiceHttpClient:
                     )
                 )
                 request_headers.update(auth_headers)
+                injected_auth_headers = list(auth_headers)
                 if auth_query:
                     # Add auth query params to URL
                     separator = "&" if "?" in full_url else "?"
                     full_url = f"{full_url}{separator}{urlencode(auth_query)}"
-            except AuthError:
-                # For preview, we can skip auth errors
-                pass
+            except AuthError as exc:
+                # A preview must not RAISE — the whole point is to show what
+                # would be sent — but it must not stay quiet either.  It used
+                # to swallow this and return a request with no auth header at
+                # all, which reads as "this endpoint needs none": the one
+                # answer the caller would act on and the one that is wrong.
+                auth_unresolved = str(exc)
 
         # Serialize body
         body_str = None
@@ -249,10 +259,12 @@ class ServiceHttpClient:
                 body_str = str(body)
 
         # Build curl command
+        safe_headers = self._auth_manager.redact_headers(
+            request_headers, injected=injected_auth_headers)
         curl = _build_curl_command(
             method.upper(),
             full_url,
-            self._auth_manager.redact_headers(request_headers),
+            safe_headers,
             body_str,
             redact_auth=True
         )
@@ -260,9 +272,10 @@ class ServiceHttpClient:
         return PreviewedRequest(
             method=method.upper(),
             url=full_url,
-            headers=self._auth_manager.redact_headers(request_headers),
+            headers=safe_headers,
             body=body_str,
             curl=curl,
+            auth_unresolved=auth_unresolved,
         )
 
     def execute(

@@ -475,12 +475,21 @@ def _run_slot_mode(slot_fd: int, log) -> None:
     # Build the executor + dispatcher.  workspace_root is None at this
     # point — the bootstrap envelope carries the real workspace and
     # the runner-side ``session.bootstrap`` handler updates the
-    # session host's workspace_path.  ToolExecutor uses its compile-
-    # time defaults for cli caps; runtime_limits from the envelope
-    # are forwarded to the session host the same way session-mode
-    # does it (env propagation isn't a pool-slot concern because
-    # cli-plugin reads its caps from the runtime, not from env in the
-    # slot process).
+    # session host's workspace_path.
+    #
+    # This ToolExecutor is the PHASE-2, cli-only ``execute_fn``, and it
+    # keeps its compile-time caps deliberately: ``RunnerRPC`` only
+    # dispatches through it when no session host exists, and a slot that
+    # has bootstrapped a session routes every tool call to
+    # ``host.session._executor`` instead.  The session's own caps come
+    # off ``SessionInitEnvelope.runtime_limits`` (envelope v7, #735) and
+    # are armed by ``JaatoSession.configure``.
+    #
+    # #735 corrected the claim that stood here — that "runtime_limits
+    # from the envelope are forwarded to the session host the same way
+    # session-mode does it".  Neither mode forwarded them: the envelope
+    # had no such field, and session-mode's env pair configures this
+    # Phase-2 object, not the session's.
     from .rpc import RunnerRPC
     from .tool_executor import ToolExecutor
 
@@ -599,7 +608,11 @@ def main() -> None:
     executor = ToolExecutor(
         workspace_root=workspace_root,
         # When env didn't override, ToolExecutor falls back to its
-        # cli-runner default cap.
+        # cli-runner default cap.  These two env vars bound the PHASE-2
+        # cli-only surface below, which a bootstrapped session never
+        # dispatches through; a session's caps ride the envelope (v7,
+        # #735).  Kept rather than deleted so a runner with no session
+        # host -- cli-only runners, harnesses -- stays configurable.
         **({"max_output_chars": max_output_chars} if max_output_chars is not None else {}),
         **({"tool_timeout_seconds": tool_timeout_seconds} if tool_timeout_seconds is not None else {}),
     )

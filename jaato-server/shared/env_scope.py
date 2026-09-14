@@ -153,6 +153,18 @@ CATALOG: Dict[str, EnvClass] = {
     # Per-session attribution is a real need and is served by the typed
     # provider knobs (``plugin_configs.openrouter.app_title`` /
     # ``http_referer``), which outrank these.  See shared/app_identity.py.
+    "AZURE_OPENAI_API_KEY": EnvClass(SESSION, "plugin_configs.azure_openai.api_key",
+        "credential; azure_openai exposes the knob, so a profile can carry "
+        "a pass:// URI instead of the env var"),
+    "AZURE_OPENAI_API_VERSION": EnvClass(SESSION, "plugin_configs.azure_openai.api_version",
+        "the vendor's own name for the api-version date; azure_openai "
+        "exposes the knob"),
+    "AZURE_OPENAI_DEPLOYMENT": EnvClass(SESSION, "model",
+        "on Azure the profile's own `model` field carries the DEPLOYMENT "
+        "name; this is only its default"),
+    "AZURE_OPENAI_ENDPOINT": EnvClass(SESSION, "plugin_configs.azure_openai.endpoint",
+        "the vendor's own name for the resource URL; azure_openai exposes "
+        "the knob"),
     "JAATO_APP_CATEGORIES": EnvClass(HOST, None,
         "comma-separated marketplace categories the application claims; a "
         "property of the product, not of a conversation"),
@@ -172,11 +184,91 @@ CATALOG: Dict[str, EnvClass] = {
     # ---- daemon / runner lifecycle -----------------------------------
     "JAATO_APPARMOR_COMPLAIN": EnvClass(HOST, None,
         "kernel policy load mode; a host-wide diagnostic posture"),
+    "JAATO_AZURE_OPENAI_API_KEY": EnvClass(SESSION, "plugin_configs.azure_openai.api_key",
+        "credential; azure_openai exposes the knob, so a profile can carry "
+        "a pass:// URI instead of the env var"),
+    "JAATO_AZURE_OPENAI_API_VERSION": EnvClass(SESSION, "plugin_configs.azure_openai.api_version",
+        "the api-version date pins which request fields exist; "
+        "azure_openai exposes the knob"),
+    "JAATO_AZURE_OPENAI_AUTH": EnvClass(SESSION, "plugin_configs.azure_openai.auth",
+        "key vs Microsoft Entra ID; azure_openai exposes the knob"),
+    "JAATO_AZURE_OPENAI_CONTEXT_LENGTH": EnvClass(SESSION, "plugin_configs.azure_openai.context_length",
+        "manual context-window override; azure_openai exposes the knob"),
+    "JAATO_AZURE_OPENAI_DEPLOYMENT": EnvClass(SESSION, "model",
+        "on Azure the profile's own `model` field carries the DEPLOYMENT "
+        "name; this is only its default"),
+    "JAATO_AZURE_OPENAI_ENDPOINT": EnvClass(SESSION, "plugin_configs.azure_openai.endpoint",
+        "the resource URL; azure_openai exposes the knob"),
+    # Bedrock reads NO AWS CREDENTIAL variable of its own: SigV4 signing is
+    # botocore's and so is the chain behind it, so AWS_ACCESS_KEY_ID and
+    # friends are read by boto3 and never by this tree -- which is why they
+    # are absent from this catalog rather than tagged `ambient`.  What jaato
+    # resolves is where the request goes and how to size it.
+    "AWS_REGION": EnvClass(SESSION, "plugin_configs.bedrock.region",
+        "the vendor's documented region variable, read by the bedrock "
+        "provider because Python's botocore maps `region` to "
+        "AWS_DEFAULT_REGION alone -- so a host configured the documented way "
+        "resolves nothing through boto3"),
+    "JAATO_BEDROCK_CONTEXT_LENGTH": EnvClass(SESSION, "plugin_configs.bedrock.context_length",
+        "required window; Bedrock's catalog reports no capacity, and bedrock "
+        "exposes the knob"),
+    "JAATO_BEDROCK_ENDPOINT_URL": EnvClass(SESSION, "plugin_configs.bedrock.endpoint_url",
+        "bedrock-runtime endpoint override (VPC endpoint); bedrock exposes "
+        "the knob"),
+    "JAATO_BEDROCK_MODEL": EnvClass(SESSION, "model",
+        "the profile's own `model` field carries the Bedrock model or "
+        "inference-profile id; this is only its default"),
+    "JAATO_BEDROCK_PROFILE": EnvClass(SESSION, "plugin_configs.bedrock.profile",
+        "which AWS profile signs the request -- session-scoped precisely so "
+        "two sessions can bill two accounts; bedrock exposes the knob"),
+    "JAATO_BEDROCK_REGION": EnvClass(SESSION, "plugin_configs.bedrock.region",
+        "Bedrock is regional and model availability differs by region; "
+        "bedrock exposes the knob"),
     "JAATO_BOOTSTRAP_TIMING": EnvClass(HOST, None,
         "prints a bootstrap timing report; a developer toggle, not agent "
         "behaviour"),
     "JAATO_CGROUPS_ROOT": EnvClass(HOST, None,
         "where the host delegated cgroup v2 subtree_control; one per host"),
+    "JAATO_CREDENTIAL_LOCK_TIMEOUT": EnvClass(HOST, None,
+        "seconds a caller waits for another process to finish refreshing "
+        "a rotating OAuth credential before giving up (#683).  Host-"
+        "scoped for the reason JAATO_RUNNER_ACK_TIMEOUT is: the thing "
+        "being bounded is contention on a FILE, and the contenders are "
+        "the daemon, its runner subprocesses and every pool slot -- "
+        "several of which serve sessions that have no say in each "
+        "other's timeouts.  A per-session value would also be "
+        "incoherent, since the waiter and the holder are different "
+        "sessions by construction"),
+    "JAATO_OAUTH_REFRESH_MARGIN": EnvClass(HOST, None,
+        "seconds before real expiry at which an OAuth access token is "
+        "treated as stale and refreshed (#683).  Host-scoped because "
+        "every process sharing one credential file must agree on when "
+        "that file's token is stale: two sessions disagreeing would have "
+        "the shorter-margin one repeatedly decline to refresh a token "
+        "the other has already replaced, which is the desynchronisation "
+        "the margin exists to prevent"),
+    # chrome_ai reads its knobs through get_session_env, which is the
+    # framework's own recommended API -- and until the scan learned to see
+    # that call (#508) these seven were read by the installed tree,
+    # documented in CLAUDE.md, and absent from `explain env` entirely.
+    "JAATO_CHROME_AI_BINARY": EnvClass(SESSION, "plugin_configs.chrome_ai.binary",
+        "which browser binary to launch; chrome_ai exposes the knob"),
+    "JAATO_CHROME_AI_CDP_URL": EnvClass(SESSION, "plugin_configs.chrome_ai.cdp_url",
+        "attach to an already-running browser instead of launching one; "
+        "chrome_ai exposes the knob"),
+    "JAATO_CHROME_AI_CONTEXT_LENGTH": EnvClass(SESSION, "plugin_configs.chrome_ai.context_length",
+        "manual context-window override; chrome_ai exposes the knob"),
+    "JAATO_CHROME_AI_HEADLESS": EnvClass(SESSION, "plugin_configs.chrome_ai.headless",
+        "headless vs headed launch; chrome_ai exposes the knob"),
+    "JAATO_CHROME_AI_MODEL": EnvClass(SESSION, "model",
+        "the profile's own `model` field is the typed equivalent; the "
+        "Prompt API has no model selection, so this is nominal"),
+    "JAATO_CHROME_AI_PAGE_URL": EnvClass(SESSION, "plugin_configs.chrome_ai.page_url",
+        "the page the Prompt API calls are made from; chrome_ai exposes "
+        "the knob"),
+    "JAATO_CHROME_AI_USER_DATA_DIR": EnvClass(SESSION, "plugin_configs.chrome_ai.user_data_dir",
+        "the browser profile the model download is bound to; chrome_ai "
+        "exposes the knob"),
     "JAATO_CONFIG_ROOT": EnvClass(SESSION, "client.config_root",
         "per-connection config search root; typed on the handshake, not "
         "the profile"),
@@ -188,6 +280,22 @@ CATALOG: Dict[str, EnvClass] = {
     "JAATO_EPHEMERAL_TIMEOUT_S": EnvClass(HOST, None,
         "the daemon's reaper deadline for relay sessions, applied to all "
         "of them"),
+    "JAATO_OPENAI_API": EnvClass(SESSION, "plugin_configs.openai.api",
+        "which wire to speak (chat / responses); openai exposes the knob"),
+    "JAATO_OPENAI_API_KEY": EnvClass(SESSION, "plugin_configs.openai.api_key",
+        "credential; openai exposes the knob, so a profile can carry a "
+        "pass:// URI instead of the env var"),
+    "JAATO_OPENAI_BASE_URL": EnvClass(SESSION, "plugin_configs.openai.base_url",
+        "endpoint override; openai exposes the knob"),
+    "JAATO_OPENAI_CONTEXT_LENGTH": EnvClass(SESSION, "plugin_configs.openai.context_length",
+        "the context window, which OpenAI's catalog never reports; openai "
+        "exposes the knob"),
+    "JAATO_OPENAI_MODEL": EnvClass(SESSION, "model",
+        "the profile's own `model` field selects the model"),
+    "JAATO_OPENAI_ORG_ID": EnvClass(SESSION, "plugin_configs.openai.organization",
+        "billing attribution header; openai exposes the knob"),
+    "JAATO_OPENAI_PROJECT_ID": EnvClass(SESSION, "plugin_configs.openai.project",
+        "billing attribution header; openai exposes the knob"),
     "JAATO_PROVIDER_TRACE": EnvClass(SESSION, "trace.provider_log",
         "the incident in issue #775; now typed and validated"),
     "JAATO_REVIVE_PERSONA": EnvClass(HOST, None,
@@ -200,14 +308,31 @@ CATALOG: Dict[str, EnvClass] = {
         "resolved profile (default) or re-resolve the name from disk.  "
         "Self-referential as a profile key: the daemon would have to load "
         "the file to learn whether it may load the file (#787)"),
+    "JAATO_RUNNER_ACK_TIMEOUT": EnvClass(HOST, None,
+        "seconds a dispatched runner RPC may go unacknowledged before "
+        "the daemon reconciles it against the runner and fails it "
+        "(#856).  A property of the daemon<->runner TRANSPORT, which "
+        "is owned by the channel and not by a session -- the same "
+        "reading JAATO_IPC_EVENT_QUEUE_MAX gets.  Sessions on one "
+        "channel cannot disagree about it, because a pool slot serves "
+        "several of them in turn through one RunnerRPCClient"),
     "JAATO_RUNNER_DISABLE_CONFINE": EnvClass(HOST, None,
         "disables runner self-confinement host-wide; deliberately NOT per "
         "session"),
+    "JAATO_IPC_EVENT_QUEUE_MAX": EnvClass(HOST, None,
+        "how many events the daemon buffers per IPC client before it "
+        "starts dropping lossy chunks; one bound per daemon, and a "
+        "per-session value would be meaningless because the queue is "
+        "owned by the transport, not by a session"),
     "JAATO_RUNNER_LOG_PATH": EnvClass(INTERNAL, None,
         "daemon tells the runner subprocess where to log"),
     "JAATO_RUNNER_POOL_ENABLED": EnvClass(HOST, None,
         "pre-warm pool routing; a property of the daemon, not of one "
         "session"),
+    "JAATO_RUNNER_POOL_MAX_SIZE": EnvClass(HOST, None,
+        "ceiling on the daemon's total warm slots, cascade "
+        "reservations included; one memory budget per daemon, and a "
+        "per-session value would be a lie about a shared pool"),
     "JAATO_RUNNER_POOL_SIZE": EnvClass(HOST, None,
         "how many warm slots the daemon keeps; one number per daemon"),
     "JAATO_RUNNER_PROFILE": EnvClass(INTERNAL, None,
@@ -233,8 +358,26 @@ CATALOG: Dict[str, EnvClass] = {
         "google_genai knob"),
     "MODEL_NAME": EnvClass(SESSION, "model",
         "the profile's own `model` field is the typed equivalent"),
+    "OPENAI_API_KEY": EnvClass(SESSION, "plugin_configs.openai.api_key",
+        "credential; openai exposes the knob, so a profile can carry a "
+        "pass:// URI instead of the env var"),
+    "OPENAI_BASE_URL": EnvClass(SESSION, "plugin_configs.openai.base_url",
+        "the vendor's own name for the endpoint override; openai exposes "
+        "the knob"),
+    "OPENAI_ORG_ID": EnvClass(SESSION, "plugin_configs.openai.organization",
+        "the vendor's own name for the organization header; openai "
+        "exposes the knob"),
+    "OPENAI_PROJECT_ID": EnvClass(SESSION, "plugin_configs.openai.project",
+        "the vendor's own name for the project header; openai exposes the "
+        "knob"),
     "PATH": EnvClass(AMBIENT, None,
         "the host environment being read"),
+    "PYTHONPATH": EnvClass(AMBIENT, None,
+        "the host environment being read -- `explain dependencies` reports "
+        "whether it is set, because importlib.metadata resolves a "
+        "distribution along sys.path, so a PYTHONPATH pointing at a source "
+        "checkout answers INSTEAD of the installed copy and hides a version "
+        "skew.  Never set by the framework"),
     "PROJECT_ID": EnvClass(SESSION, None,
         "the GCP project -- connection identity with no "
         "google_genai knob"),
@@ -253,6 +396,10 @@ CATALOG: Dict[str, EnvClass] = {
     "JAATO_PARALLEL_TOOLS": EnvClass(SESSION, None,
         "tool-loop behaviour; today one host-wide setting for "
         "every agent"),
+    "JAATO_PROFILE_SET": EnvClass(SESSION, None,
+        "which profile-set directory this workspace resolves profiles "
+        "from -- emphatically per-session, and read through "
+        "get_session_env for exactly that reason"),
     "JAATO_PROVIDER": EnvClass(SESSION, "provider",
         "the profile's own `provider` field is the typed equivalent"),
     "JAATO_SSL_VERIFY": EnvClass(HOST, None,
@@ -303,17 +450,21 @@ CATALOG: Dict[str, EnvClass] = {
         "tool-runner debug logging; a developer toggle"),
 
     # ---- telemetry ---------------------------------------------------
-    "JAATO_TELEMETRY_BACKEND": EnvClass(SESSION, None,
+    # Promoted by #858: the five keys existed and the factory overwrote
+    # them all, so the whole block was inert.  create_plugin() now takes
+    # plugin_configs.telemetry and layers these env vars BENEATH it.
+    "JAATO_TELEMETRY_BACKEND": EnvClass(SESSION, "plugin_configs.telemetry.backend",
         "per-session tracing is exactly what one profile wants "
         "and the rest do not"),
-    "JAATO_TELEMETRY_ENABLED": EnvClass(SESSION, None,
+    "JAATO_TELEMETRY_ENABLED": EnvClass(SESSION, "plugin_configs.telemetry.enabled",
         "see JAATO_TELEMETRY_BACKEND"),
-    "JAATO_TELEMETRY_EXPORTER": EnvClass(SESSION, None,
+    "JAATO_TELEMETRY_EXPORTER": EnvClass(SESSION, "plugin_configs.telemetry.exporter",
         "see JAATO_TELEMETRY_BACKEND"),
-    "JAATO_TELEMETRY_FILE": EnvClass(SESSION, None,
+    "JAATO_TELEMETRY_FILE": EnvClass(SESSION, "plugin_configs.telemetry.file_path",
         "a per-session path, same shape as the trace incident"),
-    "JAATO_TELEMETRY_REDACT_CONTENT": EnvClass(SESSION, None,
-        "redaction posture may legitimately differ per agent"),
+    "JAATO_TELEMETRY_REDACT_CONTENT": EnvClass(SESSION, "plugin_configs.telemetry.redact_content",
+        "a PRIVACY control -- redaction posture may legitimately differ "
+        "per agent, and an operator who sets it must be obeyed"),
     "LANGFUSE_HOST": EnvClass(HOST, None,
         "the Langfuse deployment the host reports to; one per host"),
     "LANGFUSE_PUBLIC_KEY": EnvClass(SESSION, None,
@@ -365,6 +516,8 @@ CATALOG: Dict[str, EnvClass] = {
         "opposite values"),
     "JAATO_FILE_BACKUP_COUNT": EnvClass(SESSION, None,
         "belongs to plugin_configs.file_edit"),
+    "JAATO_GC_MEDIA_BYTES": EnvClass(SESSION, "gc.media_bytes_threshold",
+        "the env var IS the GCConfig field's default_factory"),
     "JAATO_GC_PRESSURE": EnvClass(SESSION, "gc.pressure_percent",
         "the env var IS the GCConfig field's default_factory"),
     "JAATO_GC_TARGET": EnvClass(SESSION, "gc.target_percent",
@@ -503,6 +656,33 @@ CATALOG: Dict[str, EnvClass] = {
     "JAATO_GOOGLE_USE_VERTEX": EnvClass(SESSION, None,
         "Vertex-vs-API backend selection with no google_genai "
         "knob"),
+    "JAATO_KIMI_API_KEY": EnvClass(SESSION, "plugin_configs.kimi.api_key",
+        "credential; kimi exposes the knob, so a profile can carry a "
+        "pass:// URI instead of the env var"),
+    "JAATO_KIMI_BASE_URL": EnvClass(SESSION, "plugin_configs.kimi.base_url",
+        "endpoint override (.cn platform, Kimi Code plan); kimi exposes the knob"),
+    "JAATO_KIMI_CONTEXT_LENGTH": EnvClass(SESSION, "plugin_configs.kimi.context_length",
+        "manual context-window override; kimi exposes the knob"),
+    "JAATO_KIMI_MODEL": EnvClass(SESSION, "model",
+        "the profile's own `model` field selects the model"),
+    "JAATO_MIMO_API_KEY": EnvClass(SESSION, "plugin_configs.mimo.api_key",
+        "credential; mimo exposes the knob, so a profile can carry a "
+        "pass:// URI instead of the env var"),
+    "JAATO_MIMO_BASE_URL": EnvClass(SESSION, "plugin_configs.mimo.base_url",
+        "endpoint override (region / plan hosts); mimo exposes the knob"),
+    "JAATO_MIMO_CONTEXT_LENGTH": EnvClass(SESSION, "plugin_configs.mimo.context_length",
+        "manual context-window override; mimo exposes the knob"),
+    "JAATO_MIMO_MODEL": EnvClass(SESSION, "model",
+        "the profile's own `model` field selects the model"),
+    "JAATO_MINIMAX_API_KEY": EnvClass(SESSION, "plugin_configs.minimax.api_key",
+        "credential; minimax exposes the knob, so a profile can carry a "
+        "pass:// URI instead of the env var"),
+    "JAATO_MINIMAX_BASE_URL": EnvClass(SESSION, "plugin_configs.minimax.base_url",
+        "endpoint override (the .cn platform); minimax exposes the knob"),
+    "JAATO_MINIMAX_CONTEXT_LENGTH": EnvClass(SESSION, "plugin_configs.minimax.context_length",
+        "manual context-window override; minimax exposes the knob"),
+    "JAATO_MINIMAX_MODEL": EnvClass(SESSION, "model",
+        "the profile's own `model` field selects the model"),
     "JAATO_NEBIUS_API_KEY": EnvClass(SESSION, "plugin_configs.nebius.api_key",
         "credential; nebius exposes the knob, so a profile can carry a "
         "pass:// URI instead of the env var"),
@@ -559,6 +739,12 @@ CATALOG: Dict[str, EnvClass] = {
         "endpoint override; lmstudio exposes the knob"),
     "LMSTUDIO_MODEL": EnvClass(SESSION, "model",
         "the profile's own `model` field selects the model"),
+    "MIMO_API_KEY": EnvClass(SESSION, "plugin_configs.mimo.api_key",
+        "credential; the vendor's own documented variable, honoured beneath JAATO_MIMO_API_KEY"),
+    "MINIMAX_API_KEY": EnvClass(SESSION, "plugin_configs.minimax.api_key",
+        "credential; the vendor's own documented variable, honoured beneath JAATO_MINIMAX_API_KEY"),
+    "MOONSHOT_API_KEY": EnvClass(SESSION, "plugin_configs.kimi.api_key",
+        "credential; the vendor's own documented variable, honoured beneath JAATO_KIMI_API_KEY"),
     "NEBIUS_API_KEY": EnvClass(SESSION, "plugin_configs.nebius.api_key",
         "credential; nebius exposes the knob, so a profile can carry a "
         "pass:// URI instead of the env var"),
@@ -695,32 +881,11 @@ AWAITING_TYPED_KEY: Dict[str, Awaiting] = {
     "JAATO_PARALLEL_TOOLS": Awaiting(
         "A", "tools.parallel",
     ),
-    "JAATO_TELEMETRY_BACKEND": Awaiting(
-        "A", "plugin_configs.telemetry.backend",
-    ),
-    "JAATO_TELEMETRY_ENABLED": Awaiting(
-        "A", "plugin_configs.telemetry.enabled",
-        "the key EXISTS; create_plugin() gates construction on the env "
-        "var and returns NullTelemetryPlugin, so no profile key can "
-        "reach it. Needs the factory to consult the profile -- wiring, "
-        "not a key",
-    ),
-    "JAATO_TELEMETRY_EXPORTER": Awaiting(
-        "A", "plugin_configs.telemetry.exporter",
-        "the key EXISTS; create_plugin() builds the config dict from "
-        "env and passes it to initialize(), so plugin_configs.telemetry "
-        "never arrives",
-    ),
-    "JAATO_TELEMETRY_FILE": Awaiting(
-        "A", "plugin_configs.telemetry.file_path",
-        "the key EXISTS and already wins (config.get(file_path, env)) "
-        "-- but create_plugin() never passes it, so the win is "
-        "unreachable",
-    ),
-    "JAATO_TELEMETRY_REDACT_CONTENT": Awaiting(
-        "A", "plugin_configs.telemetry.redact_content",
-        "as JAATO_TELEMETRY_EXPORTER -- the key exists, the factory "
-        "overwrites it",
+    "JAATO_PROFILE_SET": Awaiting(
+        "A", "client.profile_set",
+        "cannot live IN a profile -- it selects WHICH profile file is "
+        "read, so it belongs on the handshake beside client.config_root "
+        "rather than in the thing it selects",
     ),
 
     # ---- tier B: plugin knobs --------------------------------

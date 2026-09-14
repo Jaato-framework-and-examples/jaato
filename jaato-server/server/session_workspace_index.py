@@ -29,6 +29,25 @@ behavior.)
 default, the same home as ``ws.token`` and the apparmor cache) so wake survives
 a daemon restart or a reboot — the "wake me hours/days later" case that the
 runner-bound webhook listener cannot serve.
+
+**Runner identity (#812).**  The index is also the one daemon-owned,
+cross-workspace place an operator can look up a session id, so it carries a
+second, independent section: ``identity``, mapping session id to the
+``RunnerIdentity`` dict (runner pid, pool slot, cascade, AppArmor profile).
+#812 reports an operator who found a session here, got its workspace, and had
+nothing to act on — no runner, pid or slot anywhere in the index or the record.
+
+The two sections are deliberately independent maps rather than one map of
+richer values:
+
+* ``map`` keeps its exact pre-#812 shape, so a file written by this daemon is
+  still read correctly by an older one (which ignores the new key) and a file
+  written by an older one loads here with no identities;
+* an ambiguous id is refused for WAKE (waking the wrong session is
+  unrecoverable) and still yields its identity, because two sessions sharing a
+  timestamp is not a reason to withhold diagnostic information from an
+  operator — the identity says which process, and the ambiguity is about which
+  workspace.
 """
 from __future__ import annotations
 
@@ -59,6 +78,10 @@ class SessionWorkspaceIndex:
         self._lock = threading.Lock()
         self._map: Dict[str, str] = {}
         self._ambiguous: Set[str] = set()
+        #: ``session_id -> RunnerIdentity.to_dict()`` (#812).  Independent of
+        #: ``_map``: written by :meth:`record_identity`, read by
+        #: :meth:`identity`, and never consulted by :meth:`resolve`.
+        self._identity: Dict[str, Dict[str, object]] = {}
         self._load()
 
     def _load(self) -> None:
@@ -79,12 +102,20 @@ class SessionWorkspaceIndex:
             return
         mapping = raw.get("map", {})
         ambiguous = raw.get("ambiguous", [])
+        identity = raw.get("identity", {})
         if isinstance(mapping, dict):
             self._map = {
                 str(k): str(v) for k, v in mapping.items() if isinstance(v, str)
             }
         if isinstance(ambiguous, list):
             self._ambiguous = {str(x) for x in ambiguous}
+        # Absent on every file written before #812 -- an index with no
+        # identities behaves exactly as it did, which is what makes this
+        # section additive rather than a format change.
+        if isinstance(identity, dict):
+            self._identity = {
+                str(k): v for k, v in identity.items() if isinstance(v, dict)
+            }
 
     def _save_locked(self) -> None:
         """Atomically persist (caller holds ``self._lock``)."""
@@ -92,7 +123,11 @@ class SessionWorkspaceIndex:
             self._path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self._path.with_name(self._path.name + ".tmp")
             tmp.write_text(
-                json.dumps({"map": self._map, "ambiguous": sorted(self._ambiguous)}),
+                json.dumps({
+                    "map": self._map,
+                    "ambiguous": sorted(self._ambiguous),
+                    "identity": self._identity,
+                }),
                 encoding="utf-8",
             )
             tmp.replace(self._path)
@@ -126,11 +161,74 @@ class SessionWorkspaceIndex:
             self._map[session_id] = workspace_path
             self._save_locked()
 
+    def record_identity(
+        self, session_id: str, identity: Optional[Dict[str, object]],
+    ) -> None:
+        """Record which process is executing ``session_id`` (#812).
+
+        Independent of :meth:`record`: a session's workspace never changes
+        while its runner does (a revive, or a pool slot handed on), so the two
+        are written separately and an identity update does not touch the
+        workspace map or its ambiguity marks.
+
+        Skips the disk write when nothing changed — this runs from
+        ``_save_session`` on every turn, and a stable session would otherwise
+        rewrite the file each save (the same reasoning :meth:`record` gives).
+
+        Args:
+            session_id: The session.
+            identity: ``RunnerIdentity.to_dict()``, or ``None`` to drop the
+                entry (a session that no longer has a runner).
+        """
+        if not session_id:
+            return
+        with self._lock:
+            existing = self._identity.get(session_id)
+            if identity is None:
+                if existing is None:
+                    return
+                self._identity.pop(session_id, None)
+            else:
+                if existing == identity:
+                    return
+                self._identity[session_id] = dict(identity)
+            self._save_locked()
+
+    def identity(self, session_id: str) -> Optional[Dict[str, object]]:
+        """Return the recorded runner identity for ``session_id`` (#812).
+
+        Unlike :meth:`resolve`, an AMBIGUOUS id is **not** refused: ambiguity
+        is about which workspace a timestamp-colliding id belongs to, and
+        refusing to say which process ran it would withhold exactly the
+        diagnostic #812 was missing.  Nothing acts on this value — it names a
+        process for an operator, and the daemon stops a session by id, never
+        by pid.
+
+        Args:
+            session_id: The session to look up.
+
+        Returns:
+            The stored dict (a copy), or ``None`` when unknown.
+        """
+        with self._lock:
+            found = self._identity.get(session_id)
+            return dict(found) if found is not None else None
+
+    def identities(self) -> Dict[str, Dict[str, object]]:
+        """Snapshot of every recorded runner identity.
+
+        Returns:
+            A fresh ``session_id -> identity dict`` map, safe to iterate
+            outside the lock.
+        """
+        with self._lock:
+            return {k: dict(v) for k, v in self._identity.items()}
+
     def forget(self, session_id: str) -> None:
         """Drop any mapping (and ambiguity mark) for ``session_id``.
 
-        Called when a session is DELETED so its id→workspace entry doesn't
-        outlive the session — a stale entry is otherwise only reaped never
+        Also drops the #812 runner identity.  Called when a session is
+        DELETED so its id→workspace entry doesn't outlive the session — a stale entry is otherwise only reaped never
         (the index has no TTL), and a later second-granularity id collision
         would resolve against a workspace for a session that no longer exists.
         Idempotent — a no-op for an unknown id.
@@ -138,9 +236,17 @@ class SessionWorkspaceIndex:
         if not session_id:
             return
         with self._lock:
-            present = session_id in self._map or session_id in self._ambiguous
+            present = (
+                session_id in self._map
+                or session_id in self._ambiguous
+                or session_id in self._identity
+            )
             self._map.pop(session_id, None)
             self._ambiguous.discard(session_id)
+            # The identity goes with the mapping: a deleted session's pid is
+            # not evidence about anything, and leaving it would let a later
+            # timestamp collision inherit a dead process's record.
+            self._identity.pop(session_id, None)
             if present:
                 self._save_locked()
 

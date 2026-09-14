@@ -556,6 +556,13 @@ This configuration:
 
 **Key principle**: Blacklist ALWAYS takes priority over whitelist.
 
+Permission **evaluators** (optional workspace-supplied scripts) run above this
+table, after sanitization. They can DENY — overriding the whitelist,
+`allow_all` and every other pre-approval, which is what they exist for — but an
+evaluator ALLOW is still put to tiers 1 and 2 before it is honored, so a
+workspace script cannot disable the operator's blacklist (issue #679). See
+[Permission Evaluators](../../../../docs/permission-evaluators.md#evaluation-order).
+
 ### Evaluation Order Within Each List
 
 Within blacklist (or whitelist), rules are checked in this order:

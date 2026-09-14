@@ -279,6 +279,29 @@ class TestValidateConfig:
         })
         assert not is_valid
         assert any("hmac-sha256" in e for e in errors)
+        # The error names every mode the operator may choose from.
+        assert any("token" in e for e in errors)
+
+    def test_token_secret_algo_is_valid(self):
+        # The GitLab shape (#930): a plain shared secret in a header.
+        is_valid, errors = validate_config({
+            "routes": {
+                "gitlab": {
+                    "path": "/webhook/gitlab",
+                    "secret_header": "X-Gitlab-Token",
+                    "secret_algo": "token",
+                },
+            },
+        })
+        assert is_valid, errors
+
+    def test_secret_algo_is_case_sensitive(self):
+        # 'TOKEN' is not 'token'.  A near-miss must be a hard error, not a
+        # normalisation that quietly picks a mode for the operator.
+        is_valid, errors = validate_config({
+            "routes": {"x": {"path": "/x", "secret_algo": "TOKEN"}},
+        })
+        assert not is_valid
 
     def test_invalid_max_body_size(self):
         is_valid, errors = validate_config({"max_body_size": -1})

@@ -9,7 +9,7 @@ from unittest import mock
 
 import pytest
 
-from shared.plugins.webhook.config import RouteConfig, WebhookConfig
+from shared.plugins.webhook.config import RouteConfig, TLSConfig, WebhookConfig
 from shared.plugins.webhook.http_server import WebhookHTTPServer
 
 
@@ -190,6 +190,79 @@ class TestWebhookHTTPServer:
         server, port, _ = self._make_server()
         stats = server.get_stats()
         assert stats["tls_enabled"] is False
+
+
+class TestTokenModeStartupWarning:
+    """The plain-token mode announces itself at startup (#930).
+
+    A shared secret in a header is weaker than an HMAC over the body — it is
+    replayable and readable by every TLS-terminating hop — so it must not
+    become the quiet path of least resistance for a producer that DOES sign
+    bodies.  The announcement is the same posture as ``--ws-unsafe-no-auth``
+    and ``scrub_secret_env: none``.
+    """
+
+    def _server(self, route, tls=None):
+        config = WebhookConfig(
+            port=_find_free_port(),
+            host="127.0.0.1",
+            secret="s3cr3t",
+            routes={"gitlab": route},
+            tls=tls or TLSConfig(),
+        )
+        return WebhookHTTPServer(config, lambda *a: None)
+
+    _TOKEN_ROUTE = RouteConfig(
+        path="/webhook/gitlab",
+        secret_header="X-Gitlab-Token",
+        secret_algo="token",
+    )
+
+    def test_token_route_warns_at_startup(self, caplog):
+        server = self._server(self._TOKEN_ROUTE)
+        with caplog.at_level("WARNING"):
+            server.start()
+        try:
+            text = caplog.text
+            assert "gitlab" in text
+            assert "PLAIN" in text
+            assert "X-Gitlab-Token" in text
+        finally:
+            server.stop()
+
+    def test_token_route_without_tls_names_the_plaintext_risk(self, caplog):
+        server = self._server(self._TOKEN_ROUTE)
+        with caplog.at_level("WARNING"):
+            server.start()
+        try:
+            assert "PLAINTEXT HTTP" in caplog.text
+        finally:
+            server.stop()
+
+    def test_token_route_with_tls_warns_without_the_plaintext_clause(self, caplog):
+        tls = TLSConfig(enabled=True, certfile="/x/cert.pem", keyfile="/x/key.pem")
+        server = self._server(self._TOKEN_ROUTE, tls=tls)
+        # start() would try to load the (nonexistent) cert; the posture check
+        # runs before that, so assert on the log and let the load fail.
+        with caplog.at_level("WARNING"):
+            with pytest.raises((FileNotFoundError, OSError)):
+                server.start()
+        assert "PLAIN shared secret" in caplog.text
+        assert "PLAINTEXT HTTP" not in caplog.text
+
+    def test_hmac_route_does_not_warn(self, caplog):
+        route = RouteConfig(
+            path="/webhook/github",
+            secret_header="X-Hub-Signature-256",
+            secret_algo="hmac-sha256",
+        )
+        server = self._server(route)
+        with caplog.at_level("WARNING"):
+            server.start()
+        try:
+            assert "PLAIN" not in caplog.text
+        finally:
+            server.stop()
 
 
 class TestIPAllowlist:

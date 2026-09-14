@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from .plugins.reliability import ReliabilityPlugin
     from .plugins.model_provider.base import ModelProviderPlugin
     from .model_tiers import ModelTierConfig
+    from .runtime_limits import RuntimeLimits
 
 logger = logging.getLogger(__name__)
 
@@ -241,6 +242,15 @@ CACHE_FIELD_DELIVERY: Dict[str, Dict[str, Any]] = {
         # knobs from the api_params sub-dict.
         "layer": "api_params",
         "enabled": "cache_prompt", "ttl": "cache_ttl",
+    },
+    "bedrock": {
+        # Converse's ``cachePoint`` block is Bedrock's spelling of
+        # Anthropic's ``cache_control``, and the provider places one after
+        # the system prompt and one after the tool list -- so the knobs
+        # match Anthropic's names but there is no ``history`` control to
+        # map: no third breakpoint exists to switch on.
+        "layer": None,
+        "enabled": "enable_caching", "ttl": "cache_ttl",
     },
 }
 
@@ -461,7 +471,8 @@ class JaatoRuntime:
                  workspace_path: Optional[Path] = None,
                  config_root: Optional[str] = None,
                  instruction_token_cache: Optional[InstructionTokenCache] = None,
-                 app_identity: Optional[AppIdentity] = None):
+                 app_identity: Optional[AppIdentity] = None,
+                 telemetry_config: Optional[Dict[str, Any]] = None):
         """Initialize JaatoRuntime.
 
         Args:
@@ -490,6 +501,17 @@ class JaatoRuntime:
                 resolved from ``JAATO_APP_*`` at provider-creation time and
                 falls back to jaato's own identity, so an unconfigured
                 deployment behaves exactly as before.
+            telemetry_config: The session profile's
+                ``plugin_configs.telemetry`` block, or ``None``.  Telemetry
+                is a RUNTIME-scoped plugin — one per runtime, shared by the
+                main session and every in-process subagent — so its config
+                is taken here rather than at ``create_session``, and a
+                caller that has no profile passes nothing and gets the
+                environment-derived behaviour unchanged.  Before #858 there
+                was no parameter at all and the factory built its config
+                from the environment alone, which made every key a profile
+                wrote (``redact_content`` above all) silently inert.  See
+                ``shared/plugins/telemetry/__init__.py`` for the precedence.
         """
         self._provider_name: str = provider_name
         self._workspace_path: Optional[Path] = workspace_path
@@ -555,8 +577,12 @@ class JaatoRuntime:
         # Connection state
         self._connected: bool = False
 
-        # Telemetry plugin (created lazily, opt-in)
-        self._telemetry: TelemetryPlugin = create_telemetry_plugin()
+        # Telemetry plugin (opt-in; a no-op NullTelemetryPlugin when off).
+        # The profile's ``plugin_configs.telemetry`` block outranks the
+        # JAATO_TELEMETRY_* env vars inside the factory (#858).
+        self._telemetry: TelemetryPlugin = create_telemetry_plugin(
+            telemetry_config
+        )
 
         # Per-runtime event bus for session-isolated event coordination.
         # Subagents within this runtime share the bus; different runtimes
@@ -1172,6 +1198,8 @@ class JaatoRuntime:
         completion_processors: Optional[List[Any]] = None,
         agent_id: str = "main",
         tool_scopes: Optional[Dict[str, List[str]]] = None,
+        max_parallel_tools: Optional[int] = None,
+        runtime_limits: Optional['RuntimeLimits'] = None,
         tools: Optional[List[str]] = None,  # DEPRECATED alias for ``plugins``
     ) -> 'JaatoSession':
         """Create a new session from this runtime.
@@ -1222,6 +1250,22 @@ class JaatoRuntime:
                 plugin ships from its own wire body + grammar surface.
                 Applied per-session — the shared registry is never mutated,
                 so sibling sessions on this runtime keep their own scopes.
+            max_parallel_tools: Ceiling on concurrent tool execution for
+                this session (profile ``runtime_limits.max_parallel_tools``,
+                #862).  ``None`` applies the framework default.  Sessions
+                sharing a runtime may each carry their own — a narrow
+                subagent under a wide parent is the point.
+            runtime_limits: The profile's whole resolved
+                :class:`~shared.runtime_limits.RuntimeLimits` block
+                (#735), forwarded to ``configure()`` — the one place
+                that arms the subprocess plugins with
+                ``tool_timeout_seconds`` / ``max_output_bytes``.  Also
+                supplies ``max_parallel_tools`` when the standalone
+                kwarg above is absent.  NOTE for in-process callers:
+                sessions on one runtime SHARE the plugin registry, so
+                the subprocess caps land on plugin instances a sibling
+                session also uses.  ``None`` is therefore a no-op, not
+                a clear — see ``JaatoSession._apply_runtime_limits``.
             tools: DEPRECATED alias for ``plugins`` (it always took plugin
                 names, never tool names). Pass ``plugins=`` instead; ``tools=``
                 still works with a one-time deprecation warning. ``plugins``
@@ -1285,6 +1329,8 @@ class JaatoRuntime:
             agent_params=agent_params,
             completion_processors=completion_processors,
             tool_scopes=tool_scopes,
+            max_parallel_tools=max_parallel_tools,
+            runtime_limits=runtime_limits,
         )
         session_configure_ms = (time.perf_counter() - t1) * 1000
 

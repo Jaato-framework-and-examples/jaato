@@ -63,6 +63,7 @@ from jaato_sdk.plugins.model_provider.types import (
     TurnResult,
     Part,
     normalize_inclusive_usage,
+    reported_cache_count,
     require_terminated_stream,
     resolve_tool_use_finish,
 )
@@ -115,13 +116,21 @@ MODEL_CONTEXT_LIMITS: Dict[str, int] = {
 }
 
 # INPUT modalities per Gemini model family.  Gemini 1.5 / 2.x / 3.x are
-# multimodal (accept image input); legacy Gemini 1.0 / "gemini-pro" were
-# text-only and are absent here (-> text-only floor in modalities()).
-# Prefix-matched like MODEL_CONTEXT_LIMITS.
+# multimodal (accept image, document AND audio input); legacy Gemini 1.0 /
+# "gemini-pro" were text-only and are absent here (-> text-only floor in
+# modalities()).  Prefix-matched like MODEL_CONTEXT_LIMITS.
+#
+# ``audio`` was missing until #830 even though the converter always carried
+# it: ``_part_to_google`` marshals ANY ``inline_data`` into a ``Blob`` with
+# the part's own mime, so an audio Blob has always reached Gemini intact.
+# The table was the whole blockage — the tool-result gate
+# (``_gate_one_tool_result``) stripped ``audio/*`` before it got there and
+# the tier validator refused an ``audio: inbound`` tier, so the framework
+# declined content the wire underneath it would have carried.
 MODEL_INPUT_MODALITIES: Dict[str, FrozenSet[str]] = {
-    "gemini-1.5": frozenset({"text", "image", "file"}),
-    "gemini-2": frozenset({"text", "image", "file"}),
-    "gemini-3": frozenset({"text", "image", "file"}),
+    "gemini-1.5": frozenset({"text", "image", "file", "audio"}),
+    "gemini-2": frozenset({"text", "image", "file", "audio"}),
+    "gemini-3": frozenset({"text", "image", "file", "audio"}),
 }
 
 
@@ -1206,8 +1215,13 @@ class GoogleGenAIProvider(ModalityCapabilityMixin):
                         output_tokens=getattr(metadata, 'candidates_token_count', 0) or 0,
                         total_tokens=getattr(metadata, 'total_token_count', 0) or 0,
                     )
-                    cached_tokens = getattr(metadata, 'cached_content_token_count', None)
-                    if isinstance(cached_tokens, int) and cached_tokens > 0:
+                    # A reported zero is kept -- Gemini saying "no cached
+                    # content served this call" is a measurement, and folding
+                    # it into None makes it indistinguishable from a model
+                    # that reports no cache dimension at all.
+                    cached_tokens = reported_cache_count(
+                        getattr(metadata, 'cached_content_token_count', None))
+                    if cached_tokens is not None:
                         usage.cache_read_tokens = cached_tokens
                         # ``prompt_token_count`` counted these; TokenUsage
                         # does not.  See extract_usage_from_response.

@@ -34,6 +34,7 @@ except ImportError:
     HAS_WEBSOCKETS = False
     ServerConnection = Any
 
+from shared.apparmor_label import SANDBOX_MODE_SOFT, sandbox_mode_for_profile
 from .core import JaatoServer
 from .workspace_provisioner import WorkspaceProvisioner, ProvisionedWorkspace
 from .apparmor import AppArmorManager
@@ -632,9 +633,15 @@ class JaatoWSServer:
                     workspace_path=workspace_path,
                     config_root=None,
                 )
+                # #1033: the profile is named after the BOUNDARY, so a
+                # pre-warm slot that already wears it needs no
+                # ``aa_change_profile`` — which it could not perform for
+                # the threads it already has (#1023).
                 if apparmor.provision_profile(
                     session_id, workspace_path,
                     plugin_rules=plugin_rules,
+                    confinement_id=apparmor.confinement_id_for_boundary(
+                        workspace_path, plugin_rules=plugin_rules),
                 ):
                     profile_name = apparmor.get_profile_name(session_id)
                 else:
@@ -836,7 +843,7 @@ class JaatoWSServer:
             #   file-write rule that the profile doesn't grant).
             if not apparmor or not apparmor.is_available():
                 if apparmor is not None:
-                    sess.sandbox_mode = "soft"
+                    sess.sandbox_mode = SANDBOX_MODE_SOFT
                 return
 
             # Profile provisioning happens in the pre-initialize hook
@@ -858,8 +865,10 @@ class JaatoWSServer:
             if not apparmor.provision_profile(
                 session_id, sess.workspace_path,
                 plugin_rules=plugin_rules,
+                confinement_id=apparmor.confinement_id_for_boundary(
+                    sess.workspace_path, plugin_rules=plugin_rules),
             ):
-                sess.sandbox_mode = "soft"
+                sess.sandbox_mode = SANDBOX_MODE_SOFT
                 return
 
             # Phase 2 (confined runner): kernel-level profile is loaded
@@ -879,7 +888,15 @@ class JaatoWSServer:
             authorizer = ws_server.get_reference_authorizer(session_id)
             if authorizer is not None:
                 server.set_reference_authorizer(authorizer)
-            sess.sandbox_mode = "apparmor"
+            # #1014: record the MODE, not merely that a profile loaded.
+            # Under ``JAATO_APPARMOR_COMPLAIN`` the kernel logs denials and
+            # allows them, and a record asserting ``"apparmor"`` about that
+            # session is a durable false claim of enforcement.  Same
+            # vocabulary as the IPC path
+            # (``SessionManager._provision_apparmor_for_session``).
+            sess.sandbox_mode = sandbox_mode_for_profile(
+                complain=apparmor.profile_is_complain_mode(session_id),
+            )
             # Record mapping so the workspace reaper can teardown
             # the profile by workspace ID.  (Uses the module-level ``os``
             # imported at the top — a local ``import os`` here would make
@@ -1074,7 +1091,21 @@ class JaatoWSServer:
                     workspace_id, workspace_id
                 )
                 if self._apparmor and self._apparmor.is_available():
-                    self._apparmor.teardown_profile(session_id)
+                    # #1033: a boundary-derived profile outlives its
+                    # session — a pooled slot may still be idle inside
+                    # it, waiting for the next session of its cascade —
+                    # so ask the pool before unloading.  Without a pool
+                    # this is exactly the call it always was.
+                    _pool = getattr(self, "_pool_manager_ref", None)
+                    _name = self._apparmor.get_profile_name(session_id)
+                    if _pool is not None and _pool.profile_in_use(_name):
+                        logger.info(
+                            "Workspace reaper: leaving AppArmor profile %s "
+                            "loaded — a pooled runner slot is still "
+                            "confined to it", _name,
+                        )
+                    else:
+                        self._apparmor.teardown_profile(session_id)
                 if self._cgroups and self._cgroups.is_available():
                     self._cgroups.teardown_cgroup(session_id)
                 self._workspace_to_session_id.pop(workspace_id, None)
@@ -1537,6 +1568,8 @@ class JaatoWSServer:
                 event.request_id,
                 event.response,
                 edited_arguments=event.edited_arguments,
+                # Attribute the decision to the authenticated WS user (#859).
+                user_id=self.get_client_user(client_id),
             )
 
         elif isinstance(event, ClarificationResponseRequest):
@@ -1550,6 +1583,7 @@ class JaatoWSServer:
                 event.request_id,
                 event.answers,
                 cancelled=event.cancelled,
+                answer_attachments=event.answer_attachments,
             )
 
         elif isinstance(event, ReferenceSelectionResponseRequest):

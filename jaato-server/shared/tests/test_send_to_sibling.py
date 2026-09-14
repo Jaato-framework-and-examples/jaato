@@ -72,7 +72,7 @@ def _sm(*sessions):
         sm.delivered.append((sid, text, source_id, source_type)) or True
     )
     sm.send_message_to_session = (
-        lambda sid, text:
+        lambda sid, text, attachments=None:
         sm.delivered.append((sid, text, "driven", None)) or True
     )
     sm._get_persisted_sessions = lambda **kw: []

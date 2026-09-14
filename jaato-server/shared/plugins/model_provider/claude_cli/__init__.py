@@ -93,11 +93,14 @@ PROVIDER_CAPABILITIES = ProviderCapabilities(
     user_message_images=False,
     tool_result_images=False,
     pdf_input=False,
+    audio_input=False,
     tool_choice_forwarding=False,
     thinking=True,
     prompt_caching=False,
     streaming=True,
     cancellation=False,
+    output_media=False,
+    reasoning_replay=False,
 )
 
 # --- Provider config-knob contract (authored from provider.py read sites) ---

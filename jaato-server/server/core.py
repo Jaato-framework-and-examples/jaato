@@ -16,7 +16,7 @@ import pathlib
 import queue
 import threading
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional, Set, TYPE_CHECKING
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, TYPE_CHECKING
 
 if TYPE_CHECKING:  # pragma: no cover — types only
     from server.runner_rpc_client import RunnerRPCClient
@@ -51,6 +51,10 @@ from shared.dynamic_instructions import DynamicInstructionsError
 from shared.instruction_suppression import normalize_suppression
 from shared.instruction_token_cache import InstructionTokenCache
 from shared.message_queue import SourceType
+from shared.plugins.clarification.attachments import (
+    validate_answer_attachments,
+)
+from shared.plugins.clarification.channels import question_payload
 from shared.plugins.session import create_plugin as create_session_plugin, load_session_config
 from jaato_sdk.plugins.base import parse_command_args, HelpLines
 from shared.plugins.gc import load_gc_from_file
@@ -272,7 +276,32 @@ class AgentState:
         self.pending_formatter_feedback: Optional[str] = None
 
 
-from shared.model_tiers import bound_model_for_profile
+from shared.completion_nudge import resolve_max_completion_nudges
+from shared.model_tiers import (bound_model_for_profile,
+                                bound_provider_for_profile)
+
+
+def _transport_error_details(exc: BaseException) -> Optional[Dict[str, Any]]:
+    """Machine-readable evidence for a transport failure, or ``None``.
+
+    Today only a lost dispatch (#856) has any: it knows whether the work
+    MAY ALREADY HAVE RUN, which decides whether the caller may send the
+    turn again or would be duplicating side effects that have already
+    happened.  Every other ``RunnerRPCTimeout`` carries nothing
+    structured, and ``None`` leaves ``ErrorEvent.details`` absent rather
+    than present-and-empty — an absent key says "this failure has no
+    structured evidence", an empty dict says "it has some and it is
+    blank".
+
+    A module-level function rather than a ternary at the emit site
+    because ``model_thread`` sits at its complexity ceiling, and a
+    branch there would have cost a baseline bump for one expression.
+    """
+    from server.runner_rpc_client import RunnerDispatchLost
+
+    if isinstance(exc, RunnerDispatchLost):
+        return exc.as_details()
+    return None
 
 
 def _profile_binds_a_model(profile: Any) -> bool:
@@ -285,6 +314,168 @@ def _profile_binds_a_model(profile: Any) -> bool:
     runner" instead of a configuration error.
     """
     return bound_model_for_profile(profile) is not None
+
+
+def _runtime_limit_session_kwargs(profile: Any) -> Dict[str, Any]:
+    """Session-level ``create_session`` kwargs a profile's ``runtime_limits``
+    contributes.
+
+    Both of them, since #735: ``max_parallel_tools`` (the field the
+    SESSION enforces, #862) and the whole ``runtime_limits`` block, which
+    ``JaatoSession.configure`` forwards to the subprocess plugins that
+    enforce ``tool_timeout_seconds`` / ``max_output_bytes``.  The width is
+    sent separately as well as inside the block, so a caller reading that
+    key sees exactly what it saw before.
+
+    Returns an EMPTY dict when the profile declares none, so a caller
+    merging this into an overrides bag does not turn an empty bag into a
+    non-empty one.
+
+    Args:
+        profile: The resolved :class:`SubagentProfile`, or ``None``.
+
+    Returns:
+        ``{}``, or a dict carrying ``runtime_limits`` and — when one was
+        declared — ``max_parallel_tools``.
+    """
+    limits = getattr(profile, "runtime_limits", None)
+    if limits is None:
+        return {}
+    width = getattr(limits, "max_parallel_tools", None)
+    kwargs: Dict[str, Any] = {"runtime_limits": limits}
+    if width is not None:
+        kwargs["max_parallel_tools"] = width
+    return kwargs
+
+
+def _deserialize_wire_history(history: Any) -> List[Any]:
+    """Turn a runner ``agent_history_updated`` payload into ``Message``s.
+
+    The runner serializes the snapshot with the canonical session
+    serializer (#920), the same wire shape ``session.get_history``
+    uses, so this is the symmetric read: ``AgentState.history`` holds
+    ``Message`` objects, which is what every consumer of it expects —
+    ``emit_current_state``'s transcript replay for a reconnecting
+    client, and the disk-restore path that assigns ``list(state.history)``
+    into the same slot.
+
+    Before #920 the notification carried raw ``Message`` objects into a
+    JSON encoder that stringified them, so this slot quietly held a list
+    of Python reprs.  Falls back to the payload as received if it isn't
+    the serialized shape — a rolling upgrade where the runner predates
+    the fix leaves the field exactly as it was rather than dropping it.
+    """
+    if not history:
+        return []
+    if not all(isinstance(m, dict) for m in history):
+        return list(history)
+    try:
+        from shared.plugins.session.serializer import deserialize_history
+        return deserialize_history(history)
+    except Exception:  # noqa: BLE001 — display/persistence path, never fatal
+        logger.warning(
+            "agent_history_updated: history deserialize failed; "
+            "keeping the wire form", exc_info=True,
+        )
+        return list(history)
+
+
+def _dispatch_tool_output(hooks, payload, default_agent_id: str) -> None:
+    """Forward a runner ``tool_output`` notification to the UI hooks.
+
+    Media keys ride in the payload only when the runner actually sent
+    bytes, and they are forwarded only then -- so a text chunk calls
+    exactly the arity it always did, and a hooks implementation predating
+    media keeps working untouched.
+
+    Extracted from the notification dispatcher rather than inlined so that
+    already-oversized function does not grow further.
+    """
+    agent_id = payload.get("agent_id") or default_agent_id
+    call_id = payload.get("call_id", "")
+    chunk = payload.get("chunk", "")
+
+    mime_type = payload.get("mime_type")
+    data_b64 = payload.get("data_b64")
+    if not (mime_type and data_b64):
+        hooks.on_tool_output(agent_id=agent_id, call_id=call_id, chunk=chunk)
+        return
+
+    hooks.on_tool_output(
+        agent_id=agent_id,
+        call_id=call_id,
+        chunk=chunk,
+        stream_id=payload.get("stream_id", ""),
+        sequence=payload.get("sequence"),
+        mime_type=mime_type,
+        data_b64=data_b64,
+        final=bool(payload.get("final", False)),
+    )
+
+
+def merge_pending_continuations(
+    stashed: List[Tuple[str, List[Dict]]],
+) -> Tuple[str, List[Dict]]:
+    """Fold the wind-down stash into the ONE turn the drain will start.
+
+    ``_pending_continuations`` collects every message that arrived while the
+    model thread was unwinding, and the drain turns all of them into a single
+    turn -- taking only the newest would re-introduce #623's silent loss with
+    extra steps.
+
+    The two halves merge differently, and each way is the one that preserves
+    content:
+
+    * **texts join** with a blank line, as ``_drain_child_messages`` already
+      joined a batch it collected;
+    * **attachments concatenate**, so two utterances landing in one window
+      become one turn carrying both parts rather than one losing the other
+      (#877).
+
+    Module-level and named rather than inlined in the drain: it is the one
+    piece of that ``finally`` block a test can drive without standing up a
+    model thread, and the drain's rule is exactly what #877 got wrong.
+
+    Args:
+        stashed: The ``(text, attachments)`` pairs, oldest first.
+
+    Returns:
+        ``(text, attachments)`` for one turn.  Either half may be empty --
+        including the text, since an attachment is content (#838) and a
+        blank-text utterance is a voice agent's normal case.  Both empty
+        means there is nothing to drive.
+    """
+    text = "\n\n".join(t for t, _atts in stashed if t)
+    attachments = [a for _t, atts in stashed for a in atts]
+    return text, attachments
+
+
+
+def _slot_return_phrase(pooled: bool) -> str:
+    """How to describe what the pool did with a returned slot (#1058).
+
+    A free function because :meth:`JaatoServer.shutdown` sits on its
+    cyclomatic-complexity baseline and may not grow — and because the
+    distinction is worth a name.  ``PoolManager.return_slot_after_session``
+    does not always keep the slot: at capacity it drops the returner, and
+    it refuses a slot it already holds.  Either way the slot belongs to
+    the pool and the caller must not close the transport, so only the
+    LOG differs — but that log is what an operator reads when a later
+    session fails on that slot, and asserting "returned to pool" for a
+    slot on its way to teardown is how #1058 was mis-diagnosed twice.
+
+    Args:
+        pooled: What ``return_slot_after_session`` reported.
+
+    Returns:
+        The phrase to splice into the teardown log line.
+    """
+    if pooled:
+        return "returned to pool"
+    return (
+        "handed to the pool and NOT retained (dropped at capacity or "
+        "refused as a duplicate) — the pool will tear it down"
+    )
 
 
 class JaatoServer:
@@ -473,6 +664,22 @@ class JaatoServer:
         # on this (attach has no synchronous ready-gate like session.new, and the
         # §7c seat-flip forwards both to the runner).  Cleared on teardown.
         self._runner_ready: threading.Event = threading.Event()
+        # #1033: why ``session.bootstrap`` did not install a runner-side
+        # session host, or ``None`` when it did (and ``None`` on a session
+        # that never dispatched one at all — the embedded and standalone-WS
+        # paths).  Written by ``runner_spawn.dispatch_bootstrap_envelope``,
+        # which is the one place that knows the outcome, and read by
+        # ``SessionManager._initialize_or_refuse`` before the daemon asks
+        # the runner its first ``session.*`` question.
+        #
+        # WHY IT IS RECORDED RATHER THAN RAISED.  The dispatch deliberately
+        # does not propagate — it emits ``SessionTerminatedEvent`` and marks
+        # the runner ready so a warm pool slot cannot strand a client-tool
+        # push on a readiness timeout — and both of those must keep
+        # happening.  What was missing is that the outcome then reached
+        # nobody, so session creation carried on and discovered the dead
+        # runner at whichever ``session.*`` verb happened to come first.
+        self._runner_bootstrap_error: Optional[str] = None
         # Phase 2 cascade-sharing (server 0.6.144+): pool manager
         # reference for the cascade-aware teardown path in shutdown().
         # When the runner was served from the pool AND the cascade
@@ -570,6 +777,11 @@ class JaatoServer:
         self._pending_permission_request_id: Optional[str] = None
         # Edited arguments from client-side editing (set before "e" is put in queue)
         self._pending_edited_arguments: Optional[Dict[str, Any]] = None
+        # Daemon-authenticated user of the client whose response is in the
+        # queue (legacy daemon-side ASK path, #859).  The queue carries only
+        # the response key, so the identity is parked here and read back by
+        # the resolved hook when it fires for that request_id.
+        self._pending_permission_user_id: Optional[str] = None
         self._pending_clarification_request_id: Optional[str] = None
         self._pending_reference_selection_request_id: Optional[str] = None
 
@@ -587,7 +799,7 @@ class JaatoServer:
         # advancement on an error-terminated session (the recovery path
         # re-spawns it).  See docs/design/agent-error-recovery-event.md.
         self._terminal_reason: Optional[str] = None
-        # Texts stashed for the model thread's ``finally`` to turn into the
+        # Messages stashed for the model thread's ``finally`` to turn into the
         # next turn: continuations drained from child/sibling messages, and
         # sends that arrived for an idle SESSION while THIS thread was still
         # unwinding its previous turn.
@@ -598,7 +810,18 @@ class JaatoServer:
         # reproduced live at 4 deliveries -> 2 turn inputs.  Before #620 that
         # path went to the runner's ``_message_queue``, which is a real queue;
         # the regression was replacing a queue with a variable.
-        self._pending_continuations: List[str] = []
+        #
+        # A LIST OF ``(text, attachments)`` PAIRS, not of texts (#877).  A
+        # voice turn's attachment IS the message (#838), and a stash that
+        # held text alone discarded the bytes of every user send that landed
+        # in the wind-down window -- silently, since the drain then produced
+        # a text-only turn whose ``_evict_consumed_media`` correctly purged
+        # the PREVIOUS turn's audio, leaving an audio-requiring model a
+        # request with no audio at all.  ``attachments`` is the
+        # client-expanded list of ``{mime_type, data, display_name}`` dicts,
+        # empty for every continuation that has no bytes (child messages,
+        # nudges, formatter feedback).
+        self._pending_continuations: List[Tuple[str, List[Dict]]] = []
         #: Guards :attr:`_pending_continuations`.  The stash is written from
         #: the RPC client's asyncio READ LOOP (notification dispatch, see
         #: ``runner_rpc_client._read_loop``) and from ``send_message`` on a
@@ -893,28 +1116,34 @@ class JaatoServer:
         limits: Optional[Any] = None,
         event_reader: Optional[Callable[[], Optional[Any]]] = None,
     ) -> None:
-        """Install per-session cgroup attach + app-layer caps + event reader.
+        """No-op retained for the WS caller.  Installs NOTHING (#735).
 
-        Mirrors :meth:`set_apparmor_confinement` on the runtime-limits
-        axis: AppArmor controls *what's reachable*, this controls *how
-        much can be consumed*.
+        Historically this wired the daemon-side ``ToolExecutor`` with a
+        cgroup attach callback, the app-layer caps and a cgroup event
+        reader.  Since the §7c seat-flip there is no daemon-side
+        executor to wire — tool execution happens in the runner
+        subprocess.  ``server/websocket.py`` still calls this on every
+        cgroup-provisioned session, so the method stays; it is called
+        for its signature, not for any effect.
 
-        Called by the WebSocket server after :class:`CgroupsManager`
-        provisions the session's cgroup.  Subprocess-launching plugins
-        (cli, interactive_shell) read attach + limits via the executor's
-        accessors:
+        Where each argument's job actually lives now:
 
-        * ``attach_callback`` is passed as ``Popen(preexec_fn=...)``,
-          migrating each forked child into the session's cgroup before
-          ``exec``.
-        * ``limits`` carries application-layer caps
-          (``tool_timeout_seconds``, ``max_output_bytes``) that have no
-          cgroup equivalent — plugins apply them at the Python layer.
-        * ``event_reader`` is consumed by ``ToolExecutor.execute`` (not
-          forwarded to plugins) — snapshots ``cgroup.events`` before /
-          after each tool call and injects deltas into the result's
-          ``_telemetry`` dict, where the session's tool span picks
-          them up as OTel attributes.
+        * ``attach_callback`` — superseded.  The runner PROCESS is
+          migrated into the session's cgroup at fork time
+          (``Popen(preexec_fn=...)`` in ``RunnerSpawner.spawn``) and its
+          children inherit it, so no per-plugin ``preexec_fn`` is
+          needed.
+        * ``limits`` — superseded by ``SessionInitEnvelope.runtime_limits``
+          (envelope v7).  The runner rebuilds the block and
+          :meth:`shared.jaato_session.JaatoSession._apply_runtime_limits`
+          arms the subprocess plugins with it.  Before #735 the text
+          here claimed the runner received its ``RuntimeLimits`` "at
+          spawn time"; it received them on no path at all, and a
+          profile declaring ``tool_timeout_seconds: 2`` ran a
+          ``sleep 60`` to completion.
+        * ``event_reader`` — genuinely unconsumed.  Nothing reads cgroup
+          events since the seat-flip; §7d may reintroduce a runner RPC
+          that streams them back for OTel.
 
         Args:
             attach_callback: Zero-arg callable for ``preexec_fn``, or
@@ -925,25 +1154,14 @@ class JaatoServer:
                 ``cgroup.events`` snapshot dict, or ``None`` when
                 cgroups are unavailable.
         """
-        # Phase 3 §7c step 6.2: this method is now a no-op kept
-        # for back-compat with WS callers (websocket.py:721) that
-        # still invoke it on every WS-provisioned session.  The
-        # daemon-side ``ToolExecutor`` is dead post-§7b.2 (tool
-        # execution flows through the runner subprocess); the
-        # runner-side cgroup attach is set via env vars at
-        # spawn time (``JAATO_RUNNER_CGROUP_PATH`` etc., see
-        # ``server/runner_spawner.py``), and the runner-side
-        # executor reads its app-layer ``RuntimeLimits`` from the
-        # bootstrap envelope's ``env_overrides`` mechanism +
-        # provider config — neither of which travels through this
-        # method.  The pre-§7c daemon-side wiring this method
-        # installed had no effect post-§7b.2 even when called.
-        #
-        # Future cleanup: §7d (cgroup attach migration) may
-        # introduce a runner-RPC for streaming live-cgroup-events
-        # back to daemon for OTel; until then the
-        # ``event_reader`` argument simply isn't consumed by
-        # anyone post-seat-flip.
+        # Phase 3 §7c step 6.2: a no-op kept for back-compat with the
+        # WS caller that still invokes it on every WS-provisioned
+        # session.  See the docstring for where each argument's job
+        # moved to.  #735 removed the claim that used to sit here --
+        # that the runner-side executor "reads its app-layer
+        # RuntimeLimits from the bootstrap envelope's env_overrides
+        # mechanism + provider config".  It read them from neither: the
+        # envelope carried no such field until v7.
         if attach_callback is not None or limits is not None:
             logger.debug(
                 "set_runtime_limits called (no-op since §7c step 6.2; "
@@ -1157,6 +1375,15 @@ class JaatoServer:
         # still reaches for `env:` gets the old stringly-typed
         # behaviour; the env vars stay the lower-precedence default and
         # nothing downstream changed.
+        #
+        # `as_env()` expands ${VAR} exactly as the `env:` map above does --
+        # the two typed routes to one variable must not disagree about their
+        # own value syntax.  No workspace_root_override here on purpose: the
+        # daemon does not know the session's workspace at this point, which
+        # is why ${workspaceRoot} / ${cwd} in a TRACE path are reported by
+        # `jaato-scaffold validate` rather than silently resolving to the
+        # daemon's.  The per-agent {agent} placeholders are a different
+        # vocabulary and pass through to jaato_sdk.trace untouched.
         if self._profile and getattr(self._profile, 'trace', None):
             self._session_env.update(self._profile.trace.as_env())
 
@@ -2125,18 +2352,37 @@ class JaatoServer:
             provider_to_use = session_provider or self._provider
 
             # Apply agent profile overrides for model and provider.
-            # Use the SAME binder the gate above used: reading
-            # ``profile.model`` alone left ``self._model_name`` None for a
-            # tiers-only profile, so ``SessionInfoEvent(model_name=None)``
+            # Use the SAME binder the gate above used, FOR BOTH HALVES:
+            # reading ``profile.model`` alone left ``self._model_name`` None
+            # for a tiers-only profile, so ``SessionInfoEvent(model_name=None)``
             # failed pydantic validation inside _create_session_impl and the
             # caller saw a dropped IPC connection -- the third time this
             # mismatch surfaced as "spawn refused".
+            #
+            # ``provider`` was still read from the flat key when #822 fixed
+            # the other two producers of this binding (``runner_spawn`` and
+            # the isolated-subagent envelope), and this site is the one where
+            # the mismatch does NOT fail loudly.  There, an unbound provider
+            # is refused by the runner with "envelope.provider_name is empty".
+            # Here it simply falls through to ``JAATO_PROVIDER`` from the
+            # workspace .env, so a profile whose initial tier declares
+            # ``openai/gpt-audio-mini`` on ``openrouter`` builds a JaatoRuntime
+            # bound to whatever the .env named -- the tier's model handed to a
+            # different vendor's provider, with nothing said.  Silence is the
+            # worse outcome of the two, which is why the halves must not
+            # diverge again.
+            #
+            # Precedence is unchanged: the binder returns the flat key first
+            # and consults the initial tier only when there is none, so a
+            # profile-level ``provider:`` still wins over the tier exactly as
+            # it did, and both still win over the session env.
             if self._profile:
                 _bound = bound_model_for_profile(self._profile)
                 if _bound:
                     model_name = _bound
-                if self._profile.provider:
-                    provider_to_use = self._profile.provider
+                _bound_provider = bound_provider_for_profile(self._profile)
+                if _bound_provider:
+                    provider_to_use = _bound_provider
 
             # Get provider-specific settings (may be None for non-Google providers)
             project_id = get_config("PROJECT_ID")
@@ -2173,11 +2419,21 @@ class JaatoServer:
                                     _Path(self._workspace_path)
                                     if self._workspace_path else None
                                 )
+                                # Telemetry is runtime-scoped and is built
+                                # here, before any session exists, so its
+                                # profile block reaches it on this argument
+                                # or not at all (#858).
+                                _telemetry_cfg = (
+                                    (self._profile.plugin_configs or {}).get(
+                                        "telemetry")
+                                    if self._profile else None
+                                )
                                 self._runtime = JaatoRuntime(
                                     provider_name=provider_to_use,
                                     workspace_path=_ws,
                                     config_root=self._config_root,
                                     instruction_token_cache=self._instruction_token_cache,
+                                    telemetry_config=_telemetry_cfg,
                                 )
                             with _s2.sub("runtime_connect"):
                                 self._runtime.connect(project_id, location)
@@ -2807,7 +3063,9 @@ class JaatoServer:
         kwargs: Dict[str, Any] = {}
 
         if self._profile:
-            from shared.plugins.subagent.config import expand_plugin_configs
+            from shared.plugins.subagent.config import (
+                expand_plugin_configs, inject_scrub_secret_env,
+            )
 
             # ALWAYS pass ``profile.plugins`` through — including the
             # empty-list case.  Pre-fix this branch used a falsy check
@@ -2837,11 +3095,17 @@ class JaatoServer:
             if self._profile.system_instructions:
                 kwargs["system_instructions"] = self._profile.system_instructions
 
-            if self._profile.plugin_configs:
-                expanded = expand_plugin_configs(
-                    self._profile.plugin_configs,
-                    workspace_root_override=self._workspace_path,
-                )
+            # Expand even an empty plugin_configs: the profile-level
+            # ``scrub_secret_env`` (#863) is folded into the cli /
+            # interactive_shell / mcp sections here, and a profile that
+            # says ``scrub_secret_env: none`` with no plugin_configs of
+            # its own still has to reach those plugins.
+            expanded = expand_plugin_configs(
+                self._profile.plugin_configs,
+                workspace_root_override=self._workspace_path,
+            )
+            inject_scrub_secret_env(self._profile, expanded)
+            if expanded:
                 kwargs["plugin_configs"] = expanded
 
             if self._profile.provider:
@@ -2895,6 +3159,11 @@ class JaatoServer:
         if self._profile is not None and getattr(
                 self._profile, "budget_control", None) is not None:
             kwargs["budget_control"] = self._profile.budget_control
+
+        # Tool-pool width (#862).  Profile-declared; absent contributes no
+        # key at all, so an otherwise-empty kwargs bag stays empty and the
+        # ``kwargs or None`` return below keeps meaning "no overrides".
+        kwargs.update(_runtime_limit_session_kwargs(self._profile))
 
         # Apply the per-session system-instruction knobs last so they
         # win over any profile-supplied system_instructions.  Distinct
@@ -3623,12 +3892,27 @@ class JaatoServer:
                             services=svc_plugin.get_service_metadata(),
                         ))
 
-            def on_tool_output(self, agent_id, call_id, chunk):
-                # Process tool output through formatter pipeline for syntax highlighting
-                # and marker transformation (e.g., <notebook-cell> → <nb-row>)
+            def on_tool_output(self, agent_id, call_id, chunk,
+                               stream_id="", sequence=None, mime_type=None,
+                               data_b64=None, final=False):
+                """Emit a tool-output chunk, formatting text but never bytes.
+
+                The formatter pipeline does syntax highlighting and marker
+                transformation (e.g. ``<notebook-cell>`` -> ``<nb-row>``)
+                on TEXT.  A binary payload must bypass it entirely: it
+                reflows and rewrites its input, which corrupts bytes.  The
+                bypass is on the payload, not the event -- a media chunk
+                may still carry a text label in ``chunk``, and that label
+                is deliberately left unformatted too, because the pipeline
+                is stateful across chunks and feeding it a media chunk's
+                stray label would corrupt the formatting state of the
+                surrounding text stream.
+                """
+                is_media = bool(mime_type and data_b64)
+
                 # Use agent-specific pipeline to prevent cross-contamination
                 agent_pipeline = server._get_agent_pipeline(agent_id)
-                if agent_pipeline:
+                if agent_pipeline and not is_media:
                     formatted_parts = []
                     for output in agent_pipeline.process_chunk(chunk):
                         formatted_parts.append(output)
@@ -3641,6 +3925,11 @@ class JaatoServer:
                     agent_id=agent_id,
                     call_id=call_id,
                     chunk=chunk,
+                    stream_id=stream_id,
+                    sequence=sequence,
+                    mime_type=mime_type,
+                    data_b64=data_b64,
+                    final=final,
                 ))
 
             def on_agent_instruction_budget_updated(self, agent_id, budget_snapshot):
@@ -4060,7 +4349,9 @@ class JaatoServer:
 
         def on_permission_resolved(tool_name: str, request_id: str,
                                    granted: bool, method: str,
-                                   comment: str = ""):
+                                   comment: str = "",
+                                   user_id: Optional[str] = None,
+                                   approver: Optional[str] = None):
             # Only clear pending-prompt state when the resolution targets
             # the currently-displayed prompt. Whitelist/blacklist auto-
             # decisions fire this hook with an empty request_id and can
@@ -4071,6 +4362,12 @@ class JaatoServer:
             if request_id and server._pending_permission_request_id == request_id:
                 server._pending_permission_request_id = None
                 server._waiting_for_channel_input = False
+                # Legacy daemon-side ASK (#859): the QueueChannel cannot
+                # carry the responder's identity, so respond_to_permission
+                # parked it; a runner-relayed ASK arrives with it set.
+                if user_id is None:
+                    user_id = server._pending_permission_user_id
+                server._pending_permission_user_id = None
 
             # Resolution status is shown in the tool tree (e.g., "✓ [once]")
             # No need to emit separate output text
@@ -4082,6 +4379,8 @@ class JaatoServer:
                 granted=granted,
                 method=method,
                 comment=comment,
+                user_id=user_id,
+                approver=approver,
             ))
 
             # Emit updated permission status (a/t/i responses change the policy)
@@ -4181,25 +4480,14 @@ class JaatoServer:
             delivery and answering it is mandatory (#704).
             """
             request_id = server._pending_clarification_request_id or ""
-            questions_payload = []
-            for i, q in enumerate(request.questions, 1):
-                q_data = {
-                    "index": i,
-                    "text": q.text,
-                    "question_type": q.question_type.value,
-                    "required": q.required,
-                }
-                if q.choices:
-                    choices_list = []
-                    for j, c in enumerate(q.choices, 1):
-                        choice_entry = {"text": c.text}
-                        if q.default_choice == j:
-                            choice_entry["default"] = True
-                        choices_list.append(choice_entry)
-                    q_data["choices"] = choices_list
-                if q.default_choice:
-                    q_data["default_choice"] = q.default_choice
-                questions_payload.append(q_data)
+            # ONE builder, shared with the runner-tier relay channel: this
+            # was a byte-for-byte copy of that loop, and a copy is how a
+            # per-question field reaches one emitter and not the other
+            # (``expects_attachment``, #989).
+            questions_payload = [
+                question_payload(i, q)
+                for i, q in enumerate(request.questions, 1)
+            ]
 
             server.emit(ClarificationBatchEvent(
                 agent_id=server._current_tool_agent_id,
@@ -4442,12 +4730,102 @@ class JaatoServer:
     # Client Request Handlers
     # =========================================================================
 
+    def _emit_attachment_dropped(
+        self,
+        text: str,
+        attachments: List[Dict],
+        because: str,
+    ) -> None:
+        """Report by name that a send's binary payload was NOT delivered.
+
+        #877's whole cost was that the drop had no witness.  A send whose
+        attachments could not be carried emitted ``MidTurnPromptQueuedEvent``
+        -- an event carrying only ``text`` -- and was indistinguishable, from
+        the client's side, from a healthy queue.  The turn then ran without
+        the bytes and the failure surfaced as a provider ``400`` several
+        layers away, naming nothing.
+
+        The same posture as ``EmptyMessageError`` (#838): a request that
+        cannot be honoured is refused by name rather than reported as a
+        degraded success.  ``recoverable=True`` because the caller CAN act --
+        re-send once the session is idle.
+
+        Never logs or emits the payload itself: mime, size and display name
+        only, which is the rule ``_wrap_wake_content`` follows for the same
+        reason (#845).
+
+        Args:
+            text: The send's text, echoed in ``details`` so the caller can
+                identify WHICH send lost its payload.
+            attachments: The dropped attachments.  Described, never emitted.
+            because: One clause naming the path that could not carry them,
+                spliced into the human sentence.
+        """
+        described = [
+            {
+                "mime_type": (a or {}).get("mime_type") or "unknown",
+                "display_name": (a or {}).get("display_name"),
+                "bytes": len((a or {}).get("data") or ""),
+            }
+            for a in attachments
+        ]
+        logger.error(
+            "ATTACHMENT_DROPPED: %d attachment(s) not delivered -- %s",
+            len(described), because,
+        )
+        self.emit(ErrorEvent(
+            error=(
+                f"{len(described)} attachment(s) were not delivered to the "
+                f"model: {because}. Re-send once the session is idle."
+            ),
+            error_type="AttachmentDropped",
+            recoverable=True,
+            details={"text": text, "attachments": described},
+        ))
+
     def send_message(self, text: str, attachments: Optional[List[Dict]] = None) -> None:
         """Send a message to the model.
 
+        Three arrival shapes, and the bytes survive all three (#877).
+
+        A user send does not always meet an idle daemon.  ``ask()`` returns on
+        ``TurnCompletedEvent``, which is emitted from INSIDE the turn -- before
+        the model thread's ``finally`` clears ``_model_running`` -- so the
+        caller's next send structurally lands in the wind-down window.  This
+        method therefore has to answer for:
+
+        ============  ==============================================
+        arrival       what happens to ``attachments``
+        ============  ==============================================
+        idle          ``_start_model_thread(text, attachments=...)``
+        session busy  ``require_idle`` refuses the QUEUE (see below)
+                      and the send falls through to the stash
+        unwinding     stashed as ``(text, attachments)`` for the
+                      model thread's ``finally`` to drive
+        ============  ==============================================
+
+        AN ATTACHMENT-BEARING SEND IS NEVER QUEUED.  This is #845's rule,
+        which ``SessionManager.deliver_prompt_to_session`` has held since it
+        shipped and this path did not: the mid-turn queue folds a message into
+        the running turn as TEXT and has nowhere to put an ``inline_data``
+        part, so queuing one trades the payload that WAS the message for a
+        ``MidTurnPromptQueuedEvent`` naming only the text.  For a voice turn
+        the attachment IS the message (#838), and the drop was silent --
+        which is the whole cost of the bug: the resulting text-only turn ran
+        ``_evict_consumed_media`` (correctly) over the PREVIOUS turn's audio
+        and reached an audio-requiring model with no audio at all.
+
+        So ``require_idle`` is set from the payload, not from a caller
+        preference, and a "queued" answer to an attachment-bearing offer --
+        which a runner honouring ``require_idle`` cannot give -- is reported
+        as ``ErrorEvent(error_type="AttachmentDropped")`` rather than passed
+        off as a normal queue.  Nothing here may drop bytes quietly again.
+
         Args:
-            text: The message text.
-            attachments: Optional list of attachments.
+            text: The message text.  May be empty when *attachments* is not:
+                an attachment is content (#838).
+            attachments: Optional list of client-expanded attachment dicts
+                (``{mime_type, data, display_name, ...}``).
         """
         # Phase 3 §7c step 6.6.4.5e: ``if not self._jaato: emit error;
         # return`` guard dropped (always-true branch post-seat-flip;
@@ -4475,6 +4853,11 @@ class JaatoServer:
                         text,
                         source_id="user",
                         source_type=SourceType.USER.value,
+                        # #845's rule, applied to the USER path (#877): the
+                        # queue cannot carry bytes, so the only delivery that
+                        # keeps them is a drive.  ``busy`` enqueues NOTHING,
+                        # which is what makes the fall-through below safe.
+                        attachments=attachments,
                         timeout=2.0,
                     )
                 except Exception as exc:  # noqa: BLE001 — boundary
@@ -4496,6 +4879,20 @@ class JaatoServer:
                 text=text,
                 position_in_queue=0,
             ))
+            if attachments:
+                # UNREACHABLE against a runner that honours ``require_idle``
+                # -- which is exactly why it is reported rather than trusted.
+                # An older runner ignores the flag and answers "queued", and
+                # the text is now in a queue this daemon cannot recall it
+                # from; the bytes are not, and never could have been.  Saying
+                # so BY NAME is the whole lesson of #877: the drop's only
+                # witness was an event that said ``text=...`` and looked like
+                # a healthy queue.
+                self._emit_attachment_dropped(
+                    text, attachments,
+                    "the message was queued into the running turn, which "
+                    "carries text only",
+                )
             return
 
         # ``needs_turn``: the SESSION is idle.  This daemon-side model thread
@@ -4505,7 +4902,13 @@ class JaatoServer:
         # actually IS (is MY thread alive), not as a proxy for session state.
         with self._pending_continuation_lock:
             if self._model_running:
-                self._pending_continuations.append(text)
+                # The pair, not the text (#877).  The drain below turns this
+                # into a real turn via ``_start_model_thread``, which already
+                # routes ``attachments`` to the multimodal parts loop -- so
+                # carrying them here is the entire fix for this arrival.
+                self._pending_continuations.append(
+                    (text, list(attachments or [])),
+                )
                 # INFO, not debug.  This and its partner below are the ONLY
                 # witnesses that #623's accumulate path ran, and #623 shipped
                 # on inspection with no live reproduction -- so at debug the
@@ -4672,7 +5075,12 @@ class JaatoServer:
                     else:
                         # Stash for the model_thread finally block to pick up.
                         with server._pending_continuation_lock:
-                            server._pending_continuations.append(child_messages)
+                            # Child messages are text by construction -- a
+                            # subagent returns prose, never bytes -- so the
+                            # attachment half of the pair is empty here.
+                            server._pending_continuations.append(
+                                (child_messages, []),
+                            )
                         server._trace(
                             f"CONTINUATION: Stashed {len(child_messages)} "
                             f"chars (model still running)",
@@ -4844,10 +5252,8 @@ class JaatoServer:
                 if event_type == "tool_output":
                     hooks = server._get_ui_hooks()
                     if hooks is not None:
-                        hooks.on_tool_output(
-                            agent_id=payload.get("agent_id") or server._main_agent_id,
-                            call_id=payload.get("call_id", ""),
-                            chunk=payload.get("chunk", ""),
+                        _dispatch_tool_output(
+                            hooks, payload, server._main_agent_id
                         )
                     return
 
@@ -5013,7 +5419,9 @@ class JaatoServer:
                     if hooks is not None:
                         hooks.on_agent_history_updated(
                             agent_id=payload.get("agent_id") or server._main_agent_id,
-                            history=payload.get("history"),
+                            history=_deserialize_wire_history(
+                                payload.get("history"),
+                            ),
                         )
                     return
 
@@ -5055,9 +5463,15 @@ class JaatoServer:
         """Start the model call in a background thread.
 
         ``attachments`` (user-message multimodal: ``[{mime_type, data:
-        base64-str, display_name}, ...]``) ride only the FIRST send to the
-        runner session; continuation sends (formatter feedback, nudges, child
-        messages) are text-only.
+        base64-str, display_name}, ...]``) ride the send that carries them to
+        the runner session's multimodal parts loop.  That is a USER send --
+        either straight from :meth:`send_message` when the daemon is idle, or
+        the ``_pending_continuations`` drain replaying one that arrived while
+        this thread was unwinding (#877).  The framework's own continuation
+        sends (formatter feedback, completion nudges, child messages) carry
+        none, because none of them has bytes to carry: they are generated
+        text.  ``prompt`` may be empty when *attachments* is not -- an
+        attachment is content (#838).
 
         Phase 3 §7c step 6.6.4.3b: switched from
         ``server._jaato.send_message(...)`` (daemon-side
@@ -5256,10 +5670,28 @@ class JaatoServer:
                         "is daemon-side plumbing, not the agent.",
                         type(e).__name__, str(e),
                     )
+                    # #856: a lost dispatch carries whether the work MAY
+                    # ALREADY HAVE RUN, and that decides whether sending
+                    # the turn again is safe or duplicates side effects
+                    # that already happened.  It rides ``details``, which
+                    # is the field documented as "what a driver branches
+                    # on" while ``error`` stays the human sentence -- the
+                    # same shape ``SessionRefused.may_exist`` takes, and
+                    # for the same reason.
+                    #
+                    # NOT ``recoverable``.  In this tree that flag means
+                    # "this session can continue" (every recoverable=False
+                    # site is a config or provider-connect failure that
+                    # ends initialisation), and the whole point of sparing
+                    # a RunnerRPCTimeout here is that the session DOES
+                    # continue.  Flipping it to encode retry-safety would
+                    # assert something false about session viability to
+                    # every existing consumer.
                     server.emit(ErrorEvent(
                         error=str(e),
                         error_type=type(e).__name__,
                         recoverable=True,
+                        details=_transport_error_details(e),
                     ))
                     # RETURN.  Without it the terminal path below runs anyway:
                     # ``terminal_error = e`` is reached unconditionally and the
@@ -5343,11 +5775,19 @@ class JaatoServer:
                 with server._pending_continuation_lock:
                     stashed = server._pending_continuations
                     server._pending_continuations = []
-                # ALL of them, joined -- the same shape
+                # ALL of them, merged -- the same shape
                 # ``_drain_child_messages`` uses for a batch it collected.
-                # Taking only one would re-introduce the loss with extra steps.
-                pending = "\n\n".join(stashed) if stashed else None
-                if pending:
+                # Taking only one would re-introduce the loss with extra
+                # steps.  ``merge_pending_continuations`` owns the two merge
+                # rules (texts join, attachments concatenate) and is where a
+                # test can reach them; see #877.
+                merged = merge_pending_continuations(stashed)
+                # ``any`` asks whether EITHER half survived: an attachment IS
+                # content (#838), so bytes with no text is a turn, and
+                # reading the text alone would drop exactly the blank-text
+                # utterance that is a voice agent's normal case.
+                if any(merged):
+                    pending, pending_attachments = merged
                     # INFO for the same reason as SEND_WHILE_UNWINDING above.
                     # ``count>1`` is the case that USED to lose messages: the
                     # stash was a single slot until #623, so every message but
@@ -5355,8 +5795,9 @@ class JaatoServer:
                     # one grep separates "the fix ran" from "the fix mattered".
                     logger.info(
                         "CONTINUATION: Processing %d stashed message(s), "
-                        "%d chars%s",
+                        "%d chars, %d attachment(s)%s",
                         len(stashed), len(pending),
+                        len(pending_attachments),
                         "  <- MULTIPLE: pre-#623 this lost all but the last"
                         if len(stashed) > 1 else "",
                     )
@@ -5364,7 +5805,12 @@ class JaatoServer:
                         agent_id=server._main_agent_id,
                         status="active",
                     ))
-                    server._start_model_thread(pending)
+                    # An empty list is wire-identical to None here: the send
+                    # RPC adds an ``attachments`` key only ``if attachments``,
+                    # so a text continuation's request is unchanged.
+                    server._start_model_thread(
+                        pending, attachments=pending_attachments,
+                    )
                     clear_logging_context()
                     return  # new thread handles idle/done status
 
@@ -5379,6 +5825,15 @@ class JaatoServer:
                 # Atomically pop it and start a fresh turn.  Mirrors the
                 # ``_pending_continuations`` drain above; runner-tier only
                 # (daemon-local sessions have no ``_runner_rpc``).
+                #
+                # TEXT-ONLY BY CONSTRUCTION, not by omission (#877).  This
+                # drains the runner-side ``_message_queue``, which stores
+                # strings; nothing there could hold an ``inline_data`` part.
+                # Since ``send_message`` now sets ``require_idle`` from the
+                # payload, an attachment-bearing send can no longer be queued
+                # into it at all -- it is either driven or stashed above.  So
+                # this path carries no bytes because none can reach it, which
+                # is the property, not an accepted loss.
                 if server._runner_rpc is not None:
                     drained = None
                     try:
@@ -5444,7 +5899,19 @@ class JaatoServer:
                 # tool was filtered preserves the user's expected
                 # contract: TUI / web / chat sessions stay alive across
                 # turns until the user disconnects.
-                MAX_COMPLETION_NUDGES = 2
+                #
+                # The BUDGET is the profile's (#919).  It was a
+                # function-local ``= 2`` here and in two other files,
+                # which made it the one bound in this path a deployment
+                # could not express -- ``max_turns``, ``runtime_limits``
+                # and a processor's ``max_refusals`` all are.  The number
+                # now lives once, in ``shared.completion_nudge``, and the
+                # resolver falls back to it for a session with no profile
+                # or a profile predating the field, so an unconfigured
+                # deployment is byte-identical to before.
+                MAX_COMPLETION_NUDGES = resolve_max_completion_nudges(
+                    server._profile,
+                )
                 # Phase 3 §7c step 6.6.4.3b: completion-nudge
                 # guard now goes through the runner-RPC
                 # ``session.try_completion_nudge`` handler (shipped
@@ -5511,6 +5978,13 @@ class JaatoServer:
                     and not should_nudge
                     and nudges_fired >= MAX_COMPLETION_NUDGES
                 ):
+                    # Written for a reader of the agent record; it does NOT
+                    # reach TurnCompletedEvent.completion_gap.  That event was
+                    # built and the field cleared by on_agent_turn_completed
+                    # before this line runs, and the session terminates below,
+                    # so no later turn event carries it (#771).  The consumer
+                    # signal is the NudgeExhausted terminal emitted a few lines
+                    # down -- typed, terminal, and unconditional.
                     _agent = server._agents.get(server._main_agent_id)
                     if _agent is not None:
                         _agent.completion_gap = "not_signalled_after_nudges"
@@ -5518,7 +5992,9 @@ class JaatoServer:
                         f"COMPLETION_GAP: agent ended without "
                         f"signal_completion after "
                         f"{nudges_fired}/{MAX_COMPLETION_NUDGES} nudges — "
-                        f"no terminal event will fire for this session"
+                        f"terminating NudgeExhausted (watch "
+                        f"SessionTerminatedEvent/ErrorEvent "
+                        f"error_type='NudgeExhausted')"
                     )
 
                 if should_nudge:
@@ -5612,7 +6088,8 @@ class JaatoServer:
         self._model_thread.start()
 
     def respond_to_permission(self, request_id: str, response: str,
-                              edited_arguments: Optional[Dict[str, Any]] = None) -> None:
+                              edited_arguments: Optional[Dict[str, Any]] = None,
+                              user_id: Optional[str] = None) -> None:
         """Respond to a permission request.
 
         Phase 3 §7c Step 7.3: tries two resolution paths.
@@ -5637,12 +6114,19 @@ class JaatoServer:
             response: The response (y, n, a, never, etc.).
             edited_arguments: Optional edited tool arguments (when response is "e"
                 and the client handled editing locally).
+            user_id: The identity the transport authenticated for the
+                responding client (``get_client_user(client_id)``), or
+                ``None`` when the transport has none.  Recorded as
+                ``PermissionResolvedEvent.user_id`` so the audit trail
+                names who answered (issue #859).  Callers resolve it
+                from the transport, never from the request body.
         """
         # Path 1: try the runner-RPC handler first.
         prompt_handler = getattr(self, "_prompt_operator_handler", None)
         if prompt_handler is not None:
             if prompt_handler.resolve_response(
                 request_id, response, edited_arguments=edited_arguments,
+                user_id=user_id,
             ):
                 # Runner-fired ASK resolved.  No need to touch the
                 # daemon-side queue or ``_pending_edited_arguments``;
@@ -5657,6 +6141,9 @@ class JaatoServer:
             # edit_callback can retrieve them synchronously
             if edited_arguments is not None:
                 self._pending_edited_arguments = edited_arguments
+            # Park the responder's identity for the resolved hook (#859);
+            # the queue itself carries only the response key.
+            self._pending_permission_user_id = user_id
             self._channel_input_queue.put(response)
             return
 
@@ -5687,6 +6174,7 @@ class JaatoServer:
         request_id: str,
         answers: List[str],
         cancelled: bool = False,
+        answer_attachments: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Respond to a batch clarification request with all answers at once.
 
@@ -5705,12 +6193,27 @@ class JaatoServer:
                 returns ``{"cancelled": True}`` and the turn continues,
                 which is what keeps an unanswerable question from blocking
                 a turn forever (#704).  ``answers`` is ignored.
+            answer_attachments: Media attached to individual answers
+                (#989), keyed by 1-based question index (a decimal string
+                on the wire), each entry a ``{mime_type, data,
+                display_name}`` dict with a base64 payload — the same
+                shape ``send_message(attachments=...)`` uses.  Validated
+                here; on ANY problem an ``ErrorEvent`` is emitted and the
+                clarification is left PENDING, so the client can fix the
+                submission and answer the same request again.  Ignored
+                when ``cancelled``: there is no answer to attach to.
         """
         # Runner→daemon relay path (post-seat-flip runner sessions) — mirror
         # of respond_to_permission's prompt_operator_handler.resolve_response.
         relay = getattr(self, "_clarification_relay_handler", None)
+        media, accepted = self._resolve_clarification_attachments(
+            relay, request_id, answer_attachments, cancelled,
+        )
+        if not accepted:
+            return
         if relay is not None and relay.resolve_response(
-            request_id, answers, cancelled=cancelled
+            request_id, answers, cancelled=cancelled,
+            answer_attachments=media,
         ):
             return
 
@@ -5730,6 +6233,65 @@ class JaatoServer:
 
         for answer in answers:
             self._channel_input_queue.put(answer)
+
+    def _resolve_clarification_attachments(
+        self,
+        relay: Any,
+        request_id: str,
+        answer_attachments: Optional[Dict[str, Any]],
+        cancelled: bool,
+    ) -> Tuple[Optional[Dict[int, List[Dict[str, Any]]]], bool]:
+        """Validate a clarification submission's attachments (#989).
+
+        Returns ``(media, accepted)``.  ``accepted=False`` means an
+        ``ErrorEvent`` has been emitted and the caller must NOT resolve
+        the clarification — leaving the future pending is precisely what
+        lets the client retry the same ``request_id``, where resolving it
+        with the media silently dropped would report an answer the user
+        never gave (and, for a voice-only answer, an EMPTY one: #838).
+
+        Two refusals, and what each protects:
+
+        * **no relay is waiting for this id** — the daemon-local
+          ``QueueChannel`` path carries answer STRINGS through a queue
+          and has nowhere to put bytes.  Accepting them there would drop
+          the payload that was the message.
+        * **the batch is malformed or too large** — see
+          ``validate_answer_attachments``; over the cap the RPC response
+          frame is never written at all and the turn hangs behind a
+          clarification nobody can answer.
+        """
+        if not answer_attachments or cancelled:
+            return None, True
+        question_count = (
+            relay.pending_question_count(request_id)
+            if relay is not None else None
+        )
+        if question_count is None:
+            self.emit(ErrorEvent(
+                error=(
+                    f"Clarification {request_id} cannot carry attachments: "
+                    f"no relayed batch is awaiting it. Attachments are "
+                    f"supported on runner-tier sessions (the default); the "
+                    f"daemon-local clarification channel carries text only."
+                ),
+                error_type="ClarificationAttachmentError",
+            ))
+            return None, False
+        media, errors = validate_answer_attachments(
+            answer_attachments, question_count,
+        )
+        if errors:
+            self.emit(ErrorEvent(
+                error=(
+                    f"Clarification {request_id} attachments rejected; the "
+                    f"request is still open, answer it again. "
+                    + " | ".join(errors)
+                ),
+                error_type="ClarificationAttachmentError",
+            ))
+            return None, False
+        return media, True
 
     def respond_to_reference_selection(self, request_id: str, response: str) -> None:
         """Respond to a reference selection request.
@@ -6213,8 +6775,47 @@ class JaatoServer:
         after the bootstrap RPC settles (success OR the daemon-authoritative
         failure path) so a reused warm pool slot doesn't strand the push/send on
         a readiness timeout.  Idempotent.
+
+        Readiness is NOT a claim that the bootstrap SUCCEEDED — the two
+        questions were conflated until #1033, and the docstring line above
+        ("the daemon-authoritative failure path") names a rollout window
+        that has since closed: a runner whose bootstrap failed hosts no
+        session, and every ``session.*`` verb answers ``no_host``.  Ask
+        :meth:`runner_bootstrap_error` for the other question.
         """
         self._runner_ready.set()
+
+    def note_runner_bootstrap_outcome(self, error: Optional[str]) -> None:
+        """Record whether ``session.bootstrap`` installed a runner-side host.
+
+        Called from ``runner_spawn.dispatch_bootstrap_envelope`` on every
+        path it can take — with a summary string on each failure path, with
+        ``None`` on success.
+
+        Success CLEARS a previous failure rather than merely not setting
+        one: a pool slot's ``RunnerRPCClient`` outlives the session that
+        used it, and this server object does not, but the symmetry is what
+        keeps the field meaning "the outcome of THIS session's bootstrap"
+        rather than "a bootstrap failed once".
+
+        Args:
+            error: One-line summary naming the failure (its exception type
+                and message, or the runner's own ``stage``), or ``None``
+                when the bootstrap acknowledged.
+        """
+        self._runner_bootstrap_error = error or None
+
+    @property
+    def runner_bootstrap_error(self) -> Optional[str]:
+        """Why this session's ``session.bootstrap`` installed no host.
+
+        ``None`` means either that it succeeded or that no bootstrap was
+        dispatched for this server at all (the embedded and standalone-WS
+        paths construct a server with no runner).  Both are "nothing known
+        to be wrong", which is what the consumer — the session-creation
+        refusal in ``SessionManager._initialize_or_refuse`` — needs.
+        """
+        return self._runner_bootstrap_error
 
     def set_runner_rpc(
         self,
@@ -6497,14 +7098,26 @@ class JaatoServer:
                                               # session stashed it here;
                                               # subsequent sessions
                                               # re-affirm the binding.
-                        pool_manager.return_slot_after_session(pool_slot)
+                        # The pool decides whether it KEEPS the slot:
+                        # at capacity it drops the returner instead, and
+                        # it refuses a slot it already holds.  Either way
+                        # the slot is the pool's now — so this path still
+                        # must not close the transport — but the log has
+                        # to say which happened.  It used to assert
+                        # "returned to pool ... transport preserved"
+                        # unconditionally, which is the sentence an
+                        # operator reads when a later session fails on
+                        # that slot (#1058).
+                        pooled = pool_manager.return_slot_after_session(
+                            pool_slot)
                         cascade_returned = True
                         logger.info(
-                            "JaatoServer.shutdown: pool slot pid=%d "
-                            "returned to pool after session_end "
-                            "(plugins_reset=%d cascade=%s last_session=%s; "
-                            "rpc reset, transport preserved)",
+                            "JaatoServer.shutdown: pool slot pid=%d %s "
+                            "after session_end (plugins_reset=%d "
+                            "cascade=%s last_session=%s; rpc reset, "
+                            "transport preserved)",
                             pool_slot.pid,
+                            _slot_return_phrase(pooled),
                             result.get("plugins_reset", 0),
                             pool_slot.cascade_id or "(standalone)",
                             self._session_id,

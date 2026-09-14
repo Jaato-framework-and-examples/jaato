@@ -173,22 +173,27 @@ MCP tool schemas may contain JSON Schema fields not supported by Vertex AI. The 
 ### Secret scrubbing (`scrub_secret_env`)
 
 An MCP server is model-invokable, possibly third-party code named in `.mcp.json`.
-By default a stdio server subprocess inherits the runner's **full environment**,
+A stdio server subprocess would otherwise inherit the runner's **full environment**,
 including framework secrets it was never granted (the model-provider API key, and
-tokens the framework itself uses). Set `scrub_secret_env` in the mcp plugin config
-to strip declared secrets from that **inherited** environment:
+tokens the framework itself uses). Since #863 the plugin strips the framework's
+default secret set (`*_API_KEY`, `*_TOKEN`, `*_SECRET`, `*_PASSWORD`,
+`*_CREDENTIALS`, `GH_TOKEN`, ...) from that **inherited** environment unless the
+profile says otherwise; `scrub_secret_env` in the mcp plugin config (or the same
+key at the profile top level, which covers `cli` and `interactive_shell` too)
+tunes it:
 
 ```yaml
 plugin_configs:
   mcp:
-    scrub_secret_env:
-      - "*_API_KEY"
-      - "*_TOKEN"
-      - "*_SECRET"
-      - "ANTHROPIC_AUTH_TOKEN"
+    scrub_secret_env: default          # the framework set (also what omitted means)
+    # scrub_secret_env: none           # opt out — announced at WARNING
+    # scrub_secret_env:                # your own set; 'default' expands in place,
+    #   - default                      # '!NAME' exempts a variable a server needs
+    #   - "!GH_TOKEN"
 ```
 
-- Case-insensitive `fnmatch` globs over env-var **names**. Empty/omitted = off.
+- Case-insensitive `fnmatch` globs over env-var **names**. A malformed value fails
+  closed (the default set is applied). `jaato-scaffold validate` warns on `none`.
 - A secret listed in a **server's own `env`** (in `.mcp.json`) is an explicit
   operator grant and is **not** scrubbed — that server still receives it. Only
   the inherited `os.environ` is filtered.

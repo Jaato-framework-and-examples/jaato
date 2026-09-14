@@ -53,6 +53,7 @@ _FULL_SPEC = {
     "budget_control": {"limits": {"usd": 1.5}},
     "model_tiers": {"vision": {"model": "some-vision-model"}},
     "quirks": {"prose_tool_calls": True},
+    "scrub_secret_env": ["default", "!GH_TOKEN"],
     "completion_processors": [
         {"script": "scripts/p.py", "output": "out/p", "name": "acceptance"},
     ],

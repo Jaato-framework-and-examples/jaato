@@ -85,3 +85,41 @@ def _disable_runner_apparmor_helpers(request):
     finally:
         for p in reversed(patchers):
             p.stop()
+
+
+class StubSession:
+    """Minimal stand-in for ``JaatoSession``, satisfying every stamp
+    ``bootstrap_session`` makes on the session it has just created.
+
+    Lives in conftest ON PURPOSE.  Four separate test files each carried
+    a private ``class _StubSession: pass`` nested inside their stub
+    runtime's ``create_session``.  When production grew
+    ``_stamp_daemon_identity`` (``set_daemon_session_id``, and #859's
+    ``set_client_user_id`` beside it) two files were updated and four
+    were not -- invisibly, because no commit-triggered workflow ran this
+    directory (#736).  One shared stub means the next stamp breaks once,
+    loudly, in one place.
+
+    ``set_client_user_id`` is implemented even though no envelope in
+    this directory currently carries ``created_by``: production calls it
+    under ``if created_by:``, so today it is latent, and the next test
+    that sets ``created_by`` would otherwise rediscover this whole
+    cluster.
+
+    Construction kwargs are recorded on ``create_session_kwargs`` so a
+    stub runtime can hand the object straight back and tests can assert
+    what flowed through.
+    """
+
+    def __init__(self, **kwargs: object) -> None:
+        self.create_session_kwargs = dict(kwargs)
+        self._daemon_session_id = None
+        self._client_user_id = None
+
+    def set_daemon_session_id(self, session_id: str) -> None:
+        """Bootstrap step 3b stamps ``envelope.session_id`` here."""
+        self._daemon_session_id = session_id
+
+    def set_client_user_id(self, user_id: object) -> None:
+        """Bootstrap step 3c stamps ``envelope.created_by`` here (#859)."""
+        self._client_user_id = user_id

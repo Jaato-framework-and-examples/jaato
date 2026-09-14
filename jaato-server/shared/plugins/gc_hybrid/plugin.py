@@ -26,6 +26,7 @@ from ..gc import (
     create_summary_message,
     estimate_history_tokens,
     flatten_turns,
+    media_pressure_reason,
     split_into_turns,
 )
 
@@ -159,6 +160,18 @@ class HybridGCPlugin:
     ) -> Tuple[bool, Optional[GCTriggerReason]]:
         """Check if garbage collection should be triggered.
 
+        Triggers on media payload exceeding ``media_bytes_threshold`` (in
+        BYTES), on context usage exceeding ``threshold_percent``, or on the
+        turn count exceeding ``max_turns``.
+
+        Triggers on two independent denominators: context usage as a
+        percentage of the token budget, and binary payload in BYTES
+        (``media_bytes`` vs ``config.media_bytes_threshold``).  The second
+        exists because a voice session can sit far below its token
+        threshold while carrying megabytes of audio -- the payload that
+        dominates such a request is not a token quantity, which is why GC
+        could not see media at all before #850.
+
         Args:
             context_usage: Current context window usage stats.
             config: GC configuration with thresholds.
@@ -168,6 +181,18 @@ class HybridGCPlugin:
         """
         if not config.auto_trigger:
             return False, None
+
+        # Media pressure: an independent denominator, in bytes.  A voice
+        # session can sit far below its token threshold while carrying
+        # megabytes of audio, which is the state GC could not see (#850).
+        media_reason = media_pressure_reason(context_usage, config)
+        if media_reason is not None:
+            self._trace(
+                f"should_collect: triggered by media pressure "
+                f"({context_usage.get('media_bytes', 0)} bytes >= "
+                f"{config.media_bytes_threshold})"
+            )
+            return True, media_reason
 
         # Check threshold percentage
         percent_used = context_usage.get('percent_used', 0)

@@ -74,6 +74,79 @@ won't see any field that was added after its minimum.
 
 ## CHANGELOG
 
+### 1.5 — the resume verbs carry bytes
+
+`InjectPromptRequest.attachments` (optional), and the same field on the
+`session.wake` command's `payload`, so the two ways of driving an
+EXISTING session accept the binary content `send_message` already
+accepted. Before this both were text-only, and `attachments` lived only
+on the live-session path — so a session whose input is audio could be
+started with an utterance and never driven again with one. That closed
+the resume path to exactly the sessions 1.4's inbound media opened (see
+#845).
+
+`session.wake` takes it in the structured `payload` only. Bytes have no
+positional spelling, and a positional string would be a *client-side
+path* the daemon cannot read — which is why `_normalize_attachments`
+expands paths on the sending side in the first place.
+
+**This one is not safe to send blind.** An additive optional field
+normally degrades harmlessly: an older peer ignores it and the call does
+what it always did. That reasoning holds for a `request_id` and fails for
+an attachment, because the degraded call is a turn driven with the text
+and *without* the audio that was the whole message — and for a blank-text
+utterance, an empty turn reported as a success. So the Python SDK
+**raises** when `server_protocol_version < 1.5` and the caller passed
+attachments (`IPCClient.MIN_ATTACHMENT_RESUME_PROTOCOL`), rather than
+letting the payload vanish between two versions that both claim to be
+compatible.
+
+The other asymmetry is inside `inject_prompt`, and it is a property of
+the daemon rather than the wire: an attachment-bearing inject is
+**idle-only**. A queued message is folded into the running turn as text —
+appended to the last tool result's model suffix, or replayed as a user
+text message — and neither shape has anywhere to put an `inline_data`
+part. So the daemon offers such a message with `require_idle`, and a busy
+target answers `busy` with **nothing enqueued**. `busy` was previously
+reachable only when a caller asked for backpressure; it is now reachable
+whenever attachments are sent, and it is a retry-safe refusal, not a
+delivery.
+
+### 1.4 — tool output can carry bytes
+
+`ToolOutputEvent` gains `stream_id`, `sequence`, `mime_type`, `data_b64`
+and `final` (all optional), so binary content reaches a client on the
+channel it already subscribes to rather than through a rival event. Two
+producers use it: a tool returning attachments a person should see, and
+the **model's own speech**, delivered under the reserved `call_id`
+`"model-output"`. A whole-blob delivery is a single-chunk stream
+(`sequence=0`, `final=True`).
+
+Additive and backward compatible in the ordinary sense: a pre-1.4 client
+ignores the fields and reads the text stream exactly as before.
+
+**The generated TypeScript surface is not purely additive**, and the
+regeneration is not as mechanical as it looks. `ToolOutputEvent.sequence`
+is `Optional[int]`, and the codegen names types by first use, so it took
+the unqualified name and renamed the existing one:
+
+```ts
+// before          export type Sequence  = number;        // PlanStepUpdatedEvent
+// after           export type Sequence  = number | null; // ToolOutputEvent
+//                 export type Sequence1 = number;        // PlanStepUpdatedEvent
+```
+
+A consumer importing `Sequence` therefore gets a widened, nullable type
+under a stable name, and the type it was actually using is now called
+`Sequence1`. The wire is additive; this name is not. Anything importing
+these aliases by name should be checked on upgrade.
+
+The asymmetry worth stating is on the other side. A client that needs to
+**receive** media must declare `min_protocol_version="1.4"`, because a
+1.3 daemon does not send those fields at all — and "no media fields" is
+indistinguishable from "the model chose not to speak". Without the
+declaration the failure is silence, not an error.
+
 ### 1.3 — inject_prompt reports its delivery
 
 `InjectPromptRequest.request_id` (optional) plus the new

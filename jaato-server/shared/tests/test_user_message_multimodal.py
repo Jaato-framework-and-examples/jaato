@@ -1,16 +1,24 @@
 """User-message multimodal ferry — the two pure keystones:
 
 - SDK ``IPCClient._normalize_attachments``: client-side expansion to the
-  canonical wire shape ``{mime_type, data: base64-str, display_name}``.
+  canonical wire shape
+  ``{mime_type, data: base64-str, display_name, attachment_id}``.
 - Runner-side ``JaatoSession._parts_from_user_message``: wire dicts → Parts
   (text + inline image bytes) for the multimodal loop.
 
 Both are self-free so they test without a live client/session.
+
+``attachment_id`` joined the shape in #850: an inbound attachment carried
+no identifier of any kind, which is what made purging consumed audio from
+history untraceable.  It is a digest of the payload, so both layers mint
+the same value independently — see
+``test_heard_audio_does_not_accumulate`` for what depends on that.
 """
 
 import base64
 
 from jaato_sdk.client.ipc import IPCClient
+from jaato_sdk.media_identity import ATTACHMENT_ID_KEY, mint_attachment_id
 from jaato_sdk.plugins.model_provider.types import Part
 from shared.jaato_session import JaatoSession
 
@@ -21,7 +29,21 @@ def test_normalize_dict_base64_passthrough():
     out = IPCClient._normalize_attachments(
         [{"mime_type": "image/png", "data": "QUJD", "display_name": "x.png"}])
     assert out == [{"mime_type": "image/png", "data": "QUJD",
-                    "display_name": "x.png"}]
+                    "display_name": "x.png",
+                    ATTACHMENT_ID_KEY: mint_attachment_id("QUJD")}]
+
+
+def test_normalize_keeps_an_id_the_caller_supplied():
+    """A caller with an id scheme of its own is not overwritten.
+
+    The framework's digest is a default, not a claim of ownership: an
+    integrator whose archive already keys recordings by its own reference
+    needs THAT reference in the marker, not one jaato invented.
+    """
+    out = IPCClient._normalize_attachments(
+        [{"mime_type": "audio/wav", "data": "QUJD",
+          ATTACHMENT_ID_KEY: "call-2026-09-07-0031"}])
+    assert out[0][ATTACHMENT_ID_KEY] == "call-2026-09-07-0031"
 
 
 def test_normalize_dict_bytes_to_base64():

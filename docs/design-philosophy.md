@@ -97,7 +97,8 @@ Some systems (e.g., pi-mono) deliberately exclude MCP, arguing it wastes 7-9% of
 
 ### Implementation
 
-- Thread pool executes up to 8 concurrent tools per turn
+- Thread pool executes up to 8 concurrent tools per turn (the default; a profile
+  narrows it with `runtime_limits.max_parallel_tools`)
 - Thread-safe callbacks via thread-local storage
 - Enabled by default (`JAATO_PARALLEL_TOOLS=true`)
 

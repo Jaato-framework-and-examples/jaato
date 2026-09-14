@@ -56,7 +56,7 @@ _PROVIDER_NS = {
 }
 
 _WANTED_CONSTS = ("PROVIDER_CAPABILITIES", "PROVIDER_KNOBS", "PROVIDER_QUIRKS",
-                  "PROVIDER_AUTH_RESOLUTION")
+                  "PROVIDER_AUTH_RESOLUTION", "PROVIDER_NOTES")
 
 
 # -------------------------------------------------------------------- models
@@ -70,6 +70,14 @@ class ProviderInfo:
     knobs: Optional[_pbase.ProviderKnobs] = None
     quirks: frozenset = field(default_factory=frozenset)
     auth: tuple = ()                    # ordered AuthSource credential chain
+    #: Free-text caveats this provider declares about ITSELF, in
+    #: ``PROVIDER_NOTES``.  For facts no other contract field can carry —
+    #: notably what the profile's ``model:`` field MEANS here, which for
+    #: Azure is a DEPLOYMENT name, not a catalog model id.  Declared beside
+    #: the capabilities and knobs so the note cannot drift from the
+    #: provider it describes; empty for a provider with nothing unusual
+    #: to say.
+    notes: tuple = ()
 
     def normalized_names(self) -> set:
         """Names a profile's ``provider:`` field might use for this provider.
@@ -120,11 +128,48 @@ class CommandInfo:
 
 @dataclass
 class ConfigSetting:
-    """One configurable plugin setting (from ``get_config_schema``)."""
+    """One configurable plugin setting (from ``get_config_schema``).
+
+    ``type`` and ``enum`` are the plugin's OWN machine-readable declaration
+    of what a knob may hold, normalized across the two schema shapes the
+    tree carries (a JSON-Schema ``properties`` dict, or a list of
+    :class:`~jaato_sdk.plugins.base.PluginSetting` objects).  They are what
+    lets :mod:`shared.scaffold.validate` check a knob's VALUE and not only
+    its name (#925) — a knob violating its own declared enum validated
+    clean and then fell back silently at runtime.
+
+    ``type`` is a lowercase token, or ``"a|b"`` for a JSON-Schema union
+    (``"type": ["string", "array"]``, as ``cli.scrub_secret_env`` declares).
+    ``enum`` is the declared closed value set (JSON Schema ``enum``, or a
+    ``PluginSetting.choices`` list) — ``None`` when the knob declares none,
+    which is not the same as an empty one.
+
+    ``children`` carries a knob whose value is itself a declared object.
+    ``permission.policy`` is the only one in the tree today — and it is the
+    one that matters, carrying ``defaultPolicy`` with its enum, the
+    ``whitelist`` / ``blacklist`` tool lists, and a four-deep
+    ``sanitization.path_scope`` sub-tree.  Those declarations were always
+    machine-readable and were thrown away here, so
+    ``explain plugin permission`` rendered the whole policy vocabulary as one
+    line reading ``policy  object  Permission policy rules`` and the only
+    route to the real shape was ``shared/plugins/permission/policy.py``.  Now
+    both surfaces descend it: ``explain`` prints the tree, ``validate``
+    checks names and values at every declared depth.
+
+    ``free_form`` marks the frontier where descending must STOP — a knob
+    declaring ``additionalProperties`` (``permission.evaluators``, a map from
+    tool name to script path) accepts keys nobody enumerated, so a name below
+    it is not a typo and must never be reported as one.  ``children`` is
+    ``None`` for the object form (:class:`~jaato_sdk.plugins.base.PluginSetting`
+    declares no nesting) and for a scalar knob.
+    """
     name: str
     type: str = ""
     default: Any = None
     description: str = ""
+    enum: Optional[List[Any]] = None
+    children: Optional[List["ConfigSetting"]] = None
+    free_form: bool = False
 
 
 @dataclass
@@ -147,6 +192,15 @@ class PluginInfo:
     # visible in ``jaato-scaffold plugins`` without reading daemon logs.
     source: str = ""
     builtin: bool = True
+    # Tier reachability (issue #917).  ``introspect.plugins()`` discovers
+    # with NO tier filter, so it lists plugins the runner would skip:
+    # ``PluginRegistry.discover(tier_filter="runner")`` excludes anything
+    # without a ``PLUGIN_TIER`` annotation, and this is the surface an
+    # author consults to answer "is my plugin wired?".  Reporting such a
+    # plugin as present, with nothing said, is how a third-party
+    # distribution reaches a profile that then comes up without its
+    # tools.  True when the annotation is missing entirely.
+    tier_missing: bool = False
 
 
 @dataclass
@@ -260,6 +314,7 @@ def providers() -> Dict[str, ProviderInfo]:
             knobs=consts.get("PROVIDER_KNOBS"),
             quirks=consts.get("PROVIDER_QUIRKS") or frozenset(),
             auth=consts.get("PROVIDER_AUTH_RESOLUTION") or (),
+            notes=tuple(consts.get("PROVIDER_NOTES") or ()),
         )
     return out
 
@@ -289,6 +344,357 @@ def gc_strategies() -> Dict[str, List[str]]:
     return {name: fields for name in sorted(discover_gc_plugins().keys())}
 
 
+# ------------------------------------------------------- SDK client timeouts
+
+#: Sentinel for "this signature has no such parameter" — distinct from a
+#: parameter whose default IS ``None`` (an unbounded wait, which is a fact).
+_NO_PARAM = object()
+
+
+@dataclass
+class ClientTimeout:
+    """One clock a driver author can hit, READ from the live SDK signature.
+
+    Every default here is introspected from the installed ``jaato_sdk``
+    rather than written down, so a number that moves in the SDK moves in
+    ``explain clients`` with it.
+
+    ``settable_via`` records WHERE a caller may change it, which is the half
+    #904 went to the source for: a knob that exists on the bare client and
+    not on the convenience facade is, for a facade user, a knob that does
+    not exist.
+
+    Attributes:
+        name: The parameter as a caller spells it.
+        where: The callable carrying it.
+        default: The live default; ``None`` means an unbounded wait.
+        bounds: What the clock measures.
+        settable_via: ``"facade"``, ``"bare client only"``, or ``"both"``.
+        on_expiry: What the caller is handed when it fires.
+    """
+
+    name: str
+    where: str
+    default: Optional[float]
+    bounds: str
+    settable_via: str
+    on_expiry: str
+
+
+def _sig_default(fn: Any, param: str) -> Any:
+    """The live default of *param* on *fn*; ``_NO_PARAM`` when it has none.
+
+    Wrapped rather than called inline so a signature that loses a parameter
+    degrades to a missing number instead of crashing the walk — this module
+    backs ``explain``, which must keep answering when one fact will not
+    resolve.
+    """
+    import inspect
+
+    try:
+        p = inspect.signature(fn).parameters.get(param)
+    except (TypeError, ValueError):  # pragma: no cover - C callables
+        return _NO_PARAM
+    if p is None or p.default is inspect.Parameter.empty:
+        return _NO_PARAM
+    return p.default
+
+
+def _accepts(fn: Any, param: str) -> bool:
+    """Whether *fn* accepts *param* at all.
+
+    This is what keeps ``settable_via`` from being prose: the convenience
+    facade can forward a knob only if ``open_session`` takes one, so the day
+    a parameter is added the answer flips with no edit here.
+    """
+    import inspect
+
+    try:
+        return param in inspect.signature(fn).parameters
+    except (TypeError, ValueError):  # pragma: no cover - C callables
+        return False
+
+
+def client_timeouts() -> List[ClientTimeout]:
+    """Every clock between ``jaato.session(...)`` and a turn's terminus.
+
+    Returns ``[]`` when the SDK is not importable, so ``explain clients``
+    degrades to its class table rather than failing.
+    """
+    try:
+        from jaato_sdk.client.ipc import IPCClient
+        from jaato_sdk.client.convenience import Session, open_session
+    except Exception:  # pragma: no cover - SDK not installed alongside
+        return []
+
+    def _num(value: Any) -> Optional[float]:
+        return value if isinstance(value, (int, float)) else None
+
+    # Can a facade caller set the session.new budget?  Asked of the
+    # signature, never assumed.
+    create_via = ("both" if _accepts(open_session, "create_timeout")
+                  else "bare client only")
+    return [
+        ClientTimeout(
+            name="connect_timeout",
+            # Every ``where`` SPELLS its parameter, because that spelling is
+            # what an author greps for — #904 asked for a block "naming
+            # connect_timeout", and a row reading only ``jaato.session(...)``
+            # is the same silence one layer in.
+            where="jaato.session(connect_timeout=)",
+            default=_num(_sig_default(open_session, "connect_timeout")),
+            bounds="connecting to (or autostarting) the daemon",
+            settable_via="facade",
+            on_expiry="ConnectionError — nothing was created",
+        ),
+        ClientTimeout(
+            name="timeout",
+            where="IPCClient.connect(timeout=)",
+            default=_num(_sig_default(IPCClient.connect, "timeout")),
+            bounds="the same connect, on the BARE client",
+            settable_via="bare client only",
+            on_expiry="connect() returns False",
+        ),
+        ClientTimeout(
+            name="autostart_timeout",
+            where="IPCClient(autostart_timeout=)",
+            default=_num(_sig_default(IPCClient.__init__, "autostart_timeout")),
+            bounds="waiting for a daemon this client COLD-STARTED",
+            settable_via="bare client only",
+            on_expiry="the connect above fails",
+        ),
+        ClientTimeout(
+            name="timeout",
+            where="IPCClient.create_session(timeout=)",
+            default=_num(_sig_default(IPCClient.create_session, "timeout")),
+            bounds="the `session.new` confirmation — provider init included",
+            settable_via=create_via,
+            on_expiry="SessionNotConfirmed — A SESSION MAY EXIST",
+        ),
+        ClientTimeout(
+            name="timeout",
+            where="Session.ask / .complete / .stream(timeout=)",
+            default=_num(_sig_default(Session.ask, "timeout")),
+            bounds="ONE turn, caller-side",
+            settable_via="facade",
+            on_expiry="TurnTimeout — stops WAITING, not the session",
+        ),
+    ]
+
+
+# ------------------------------------------------------ session-level tools
+
+#: The profile conditions ``LifecycleTools`` gates its tools on, cheapest
+#: first.  The GATES are named here; WHICH tools each yields is PROBED
+#: below, so a tool added to ``lifecycle_tools.py`` appears with no edit.
+_LIFECYCLE_GATES = (
+    ("completion_payload_schema declared", True, False),
+    ("model_tiers declared", True, True),
+)
+
+
+@dataclass
+class SessionToolInfo:
+    """One model-facing tool registered by the SESSION, not by a plugin.
+
+    ``shared/lifecycle_tools.py`` is wired by ``JaatoSession.configure()``
+    straight onto the session, so it is absent from ``PluginRegistry`` and
+    therefore from :func:`plugins`.  That absence is #905: the profile
+    loader names ``lifecycle`` as part of the minimal framework set while
+    ``explain plugin lifecycle`` denied it existed.
+
+    Attributes:
+        name: The tool as the model sees it.
+        gate: The profile condition that puts it on the wire.
+        description: First line of the live tool description.
+    """
+
+    name: str
+    gate: str
+    description: str = ""
+
+
+class _StubTierConfig:
+    """Duck-typed stand-in for a resolved ``model_tiers`` config.
+
+    Only the three members ``_enter_tier_schema`` reads; the placeholder
+    names never reach a reader because only the tool NAME is kept.
+    """
+
+    initial_tier = "<tier>"
+
+    def ordered_tier_names(self) -> List[str]:
+        return ["<tier>"]
+
+    def describe_tier(self, name: str) -> str:
+        return ""
+
+
+def _probe_lifecycle(schema: bool, tiers: bool) -> List[Any]:
+    """``LifecycleTools`` schemas for a stub session with the given gates.
+
+    Probing beats restating: the gates live in ``lifecycle_tools.py`` and are
+    read here by exercising them, so a tool added or re-gated there is
+    reflected without anyone remembering to edit ``explain``.
+    """
+    import types
+
+    from shared.lifecycle_tools import LifecycleTools
+
+    stub = types.SimpleNamespace()
+    if schema:
+        stub._completion_payload_schema = {"type": "object", "properties": {}}
+    if tiers:
+        stub._tier_config = _StubTierConfig()
+    return LifecycleTools(stub).get_tool_schemas()
+
+
+def client_gate() -> Dict[str, List[str]]:
+    """Which CLIENT types a ROOT session keeps ``signal_completion`` under.
+
+    The second gate on ``signal_completion`` is not a profile key and so
+    cannot appear in :data:`_LIFECYCLE_GATES`: an interactive root session
+    (``client_type`` in TERMINAL / WEB / CHAT) hides the tool because those
+    clients expect the session to stay available for more turns, while a
+    headless ``API`` driver keeps it because that is what a cascade
+    entry-point completes with.
+
+    Which makes it the one gate an author cannot see in their own profile.
+    A persona instructing the model to call ``signal_completion`` is correct
+    under the driver and broken under the TUI, with the same profile, and
+    ``explain`` said nothing about the difference — so this is probed the
+    same way the profile gates are, by exercising it rather than restating
+    it.
+
+    Returns:
+        ``{"keeps": [...], "hides": [...]}`` — client-type VALUES, sorted.
+        Empty lists if the probe raises (a subagent-shaped session is
+        unaffected either way, so there is nothing to warn about).
+    """
+    import types
+
+    out: Dict[str, List[str]] = {"keeps": [], "hides": []}
+    try:
+        from jaato_sdk.events import ClientType
+
+        from shared.lifecycle_tools import LifecycleTools
+        for ct in ClientType:
+            stub = types.SimpleNamespace()
+            stub._completion_payload_schema = {"type": "object", "properties": {}}
+            stub._presentation_context = types.SimpleNamespace(client_type=ct)
+            names = {getattr(s, "name", "") for s in LifecycleTools(stub).get_tool_schemas()}
+            bucket = "keeps" if "signal_completion" in names else "hides"
+            out[bucket].append(str(getattr(ct, "value", ct)))
+    except Exception:  # pragma: no cover - probe is best-effort
+        return {"keeps": [], "hides": []}
+    return {k: sorted(v) for k, v in out.items()}
+
+
+def session_tools() -> List[SessionToolInfo]:
+    """The lifecycle tool surface, probed gate by gate.
+
+    Each gate is exercised against a stub session; a tool first seen under a
+    gate is attributed to it.  Returns ``[]`` if the probe raises — a
+    diagnostic that crashes is worse than one that is silent.
+    """
+    out: List[SessionToolInfo] = []
+    seen: set = set()
+    try:
+        for gate, schema, tiers in _LIFECYCLE_GATES:
+            for s in _probe_lifecycle(schema, tiers):
+                name = getattr(s, "name", "?")
+                if name in seen:
+                    continue
+                seen.add(name)
+                doc = (getattr(s, "description", "") or "").split("\n")[0]
+                out.append(SessionToolInfo(name=name, gate=gate,
+                                           description=doc.strip()))
+    except Exception:  # pragma: no cover - probe is best-effort
+        return []
+    return out
+
+
+
+# ------------------------------------------------------------- placeholders
+
+@dataclasses.dataclass
+class Placeholder:
+    """One substitution token an author may write into a config value.
+
+    NOT called ``token``, which is what it is: ``token`` is in
+    ``shared.secret_repr.SECRET_FIELD_NAMES``, so
+    ``test_credential_hygiene`` reads any dataclass carrying that field as
+    credential-bearing and requires a redacting ``__repr__``.  Redacting a
+    substitution placeholder would empty the very table this type exists to
+    print.  ``name`` matches every sibling here (``EnvVar``, ``ProfileField``,
+    ``PluginInfo``) and collides with nothing.
+
+    Attributes:
+        name: What the author writes, verbatim, syntax included
+            (``${workspaceRoot}``, ``{agent}``).
+        meaning: What it resolves to, for humans.
+        resolved_by: The component that substitutes it — used as the grouping
+            key, because WHEN a token resolves is the property authors get
+            wrong (a per-agent value cannot be supplied by a daemon-side
+            expander, and a daemon-side value is already fixed by the time the
+            reader sees it).
+        applies_to: Where the token is honoured, for humans.
+    """
+
+    name: str
+    meaning: str
+    resolved_by: str
+    applies_to: str
+
+
+def placeholders() -> List[Placeholder]:
+    """Every substitution token the installed framework honours in a config value.
+
+    Computed from the two registries rather than restated, so a token added to
+    either appears here — and therefore in ``jaato-scaffold explain`` — without
+    anyone remembering to write it down.  That is not hypothetical: the
+    reference doc's table has been missing ``${jdtlsStateRoot}`` since it was
+    added, because the only complete list lived inside a function body.
+
+    Returns:
+        The ``${...}`` context vars first (profile-resolution time), then the
+        ``{...}`` trace placeholders (write time).
+    """
+    from shared.plugins.subagent.config import EXPANSION_CONTEXT_VARS
+    from jaato_sdk.trace import TRACE_PATH_PLACEHOLDERS
+
+    out = [
+        Placeholder(
+            name=f"${{{name}}}",
+            meaning=meaning,
+            resolved_by="expand_variables (daemon, at profile resolution)",
+            applies_to="env:, plugin_configs:, trace:, and plugin configs "
+                       "that expand (lsp, webhook, web_fetch, "
+                       "service_connector, references)",
+        )
+        for name, meaning in EXPANSION_CONTEXT_VARS.items()
+    ]
+    out.append(Placeholder(
+        name="${ANY_ENV_VAR}",
+        meaning="any process / session env var; an UNDEFINED name is left "
+                "literal, and a literal ${...} in a path is created as a "
+                "directory",
+        resolved_by="expand_variables (daemon, at profile resolution)",
+        applies_to="same as above",
+    ))
+    out += [
+        Placeholder(
+            name=token,
+            meaning=meaning,
+            resolved_by="jaato_sdk.trace (the writer, per line)",
+            applies_to="trace.session_log / trace.provider_log and their env "
+                       "vars",
+        )
+        for token, meaning in TRACE_PATH_PLACEHOLDERS.items()
+    ]
+    return out
+
+
 # ------------------------------------------------------------------ profile
 
 def _type_name(t) -> str:
@@ -311,16 +717,32 @@ def _profile_field_constraints() -> Dict[str, str]:
     sees the ACTUAL allowed values, not a source symbol to chase.
 
     e.g. ``model_tiers`` keys are constrained by
-    ``shared.model_tiers.VALID_TIER_NAMES``; surfaced here as the real tier
-    names (the same "introspect the installed code" principle as the rest of
-    ``explain``).  Soft — a field with no resolvable constraint is simply absent.
+    ``shared.model_tiers`` (the canonical names, the free-name pattern and the
+    arity ceiling); surfaced here as the real values (the same "introspect the
+    installed code" principle as the rest of ``explain``).  Soft — a field with
+    no resolvable constraint is simply absent.
     """
     out: Dict[str, str] = {}
     try:
         from shared import model_tiers as mt
-        tiers = ", ".join(sorted(mt.VALID_TIER_NAMES))
+        tiers = ", ".join(sorted(mt.CANONICAL_TIER_NAMES))
         reserved = ", ".join(sorted(mt.RESERVED_KEYS))
-        out["model_tiers"] = f"tier keys: {tiers}  |  reserved control keys: {reserved}"
+        out["model_tiers"] = (
+            f"canonical tier keys: {tiers}  |  or any name matching "
+            f"{mt.TIER_NAME_PATTERN} (a 'description' is then required)  |  "
+            f"at most {mt.MAX_DECLARED_TIERS} tiers  |  "
+            f"reserved control keys: {reserved}")
+    except Exception:
+        pass
+    try:
+        from shared import secret_scrub as ss
+        out["scrub_secret_env"] = (
+            f"'{ss.SCRUB_DEFAULT}' (also when absent) = the framework set "
+            f"[{', '.join(ss.DEFAULT_SECRET_ENV_PATTERNS)}]  |  "
+            f"'{ss.SCRUB_NONE}' = off, announced at WARNING  |  "
+            f"a list of globs; the entry '{ss.SCRUB_DEFAULT}' expands in place and "
+            f"'{ss.EXEMPT_PREFIX}NAME' exempts a variable  |  applies to plugins: "
+            f"{', '.join(ss.SCRUB_SURFACES)}")
     except Exception:
         pass
     try:
@@ -366,10 +788,81 @@ def profile_schema() -> List[ProfileField]:
             name=f.name,
             type=_type_name(f.type),
             default=default,
-            description=f.metadata.get("description", ""),
+            description=_field_description(f),
             allowed=constraints.get(f.name, ""),
         ))
     return out
+
+
+def _field_description(f) -> str:
+    """One profile field's description, saying so when it is NOT a file key.
+
+    This page renders ``dataclasses.fields(SubagentProfile)``, and two of
+    those fields cannot be written into a profile file at all:
+    ``preloaded_plugins`` and ``tool_scopes`` are DERIVED by
+    ``parse_plugin_list`` from the ``plugins:`` list's own modifiers.
+    Listing them beside the twenty-odd keys that ARE authored is an
+    invitation to write one — and the loader then reads it by nobody, in
+    silence, which is what ``validate`` now reports as
+    ``derived_profile_key``.  The two surfaces read the same constant so
+    they cannot disagree about which fields those are.
+    """
+    from shared.plugins.subagent.config import PROFILE_DERIVED_FIELDS
+
+    described = f.metadata.get("description", "")
+    derived = PROFILE_DERIVED_FIELDS.get(f.name)
+    if not derived:
+        return described
+    note = f"NOT a profile-file key — {derived}."
+    return f"{note}  {described}" if described else note
+
+
+# ------------------------------------------------------- completion processors
+
+def processor_schema() -> Dict[str, Any]:
+    """The ``completion_processors`` entry schema — the OUTPUT-side script hook.
+
+    Sibling of :func:`profile_schema`, and read the same way: names /
+    types / defaults come from ``dataclasses.fields(CompletionProcessor)``,
+    the closed vocabularies from the framework's own
+    ``PROCESSOR_*`` constants, and the ``validate`` return channels from
+    ``ProcessorResult.__annotations__``.  Nothing here is spelled.
+
+    That matters more than usual for this scope.  ``explain prefetch``
+    documented the INPUT-side hook while the output-side one had no
+    scaffold coverage at all (``grep -rn completion_processor
+    jaato-server/shared/scaffold/`` returned nothing — jaato #769), and
+    the reason a doc-shaped fix is not enough is visible one directory
+    over: an archetype doc asserted framework behaviour in prose and
+    outlived the behaviour it described.  A rendering computed from the
+    dataclass cannot: adding a field to ``CompletionProcessor`` without
+    documenting it fails ``test_scaffold_completion_contract``.
+
+    Returns:
+        ``{"fields": [ProfileField], "vocabularies": {key: [values]},
+        "channels": [str], "defaults": {key: value}}``.
+    """
+    from shared.plugins.subagent import config as _cfg
+    from jaato_sdk.cascade_authoring import ProcessorResult
+
+    fields: List[ProfileField] = []
+    for f in dataclasses.fields(_cfg.CompletionProcessor):
+        default = ("<required>" if f.default is dataclasses.MISSING
+                   else f.default)
+        fields.append(ProfileField(
+            name=f.name,
+            type=_type_name(f.type),
+            default=default,
+        ))
+    return {
+        "fields": fields,
+        "vocabularies": {
+            "on_error": list(_cfg.PROCESSOR_ON_ERROR),
+            "phase": list(_cfg.PROCESSOR_PHASES),
+            "on_exhausted": list(_cfg.PROCESSOR_ON_EXHAUSTED),
+        },
+        "channels": list(ProcessorResult.__annotations__),
+    }
 
 
 # ----------------------------------------------------------------- plugins
@@ -434,6 +927,116 @@ def _command_subcommands(plugin: Any, command: str) -> List[str]:
     return subs
 
 
+def _stamp_kind_and_tier(info: "PluginInfo", module_name: str) -> None:
+    """Copy ``PLUGIN_KIND`` / ``PLUGIN_TIER`` onto *info* from the module.
+
+    Mirrors ``PluginRegistry._lookup_module_tier``: the annotation may
+    sit on the factory's own module OR on its parent package, and both
+    are legitimate — so reading only the package would report a
+    correctly-annotated plugin as un-annotated and print an alarming,
+    wrong warning on every ``explain plugins``.
+
+    Best-effort by design: this walk is offline introspection over
+    whatever happens to be installed, and one plugin whose package
+    cannot be re-imported must cost its own row, not the inventory.  A
+    failure therefore leaves the defaults, which report the plugin as
+    annotated — the quiet answer, chosen because the alternative is
+    accusing a working plugin.
+
+    Args:
+        info: The row being built; mutated in place.
+        module_name: ``type(plugin).__module__``.
+
+    A separate function rather than inlined: :func:`plugins` is over the
+    complexity ceiling and frozen in the audit baseline, so new logic
+    belongs in a helper (see ``test_cyclomatic_complexity_audit``).
+    """
+    import importlib
+    try:
+        pkg = importlib.import_module(module_name.rsplit(".", 1)[0])
+        info.kind = getattr(pkg, "PLUGIN_KIND", "tool")
+        info.tier = getattr(pkg, "PLUGIN_TIER", None)
+        if info.tier is None:
+            info.tier = getattr(
+                importlib.import_module(module_name), "PLUGIN_TIER", None,
+            )
+        info.tier_missing = info.tier is None
+    except Exception:
+        pass
+
+
+def _schema_type(declared: Any) -> str:
+    """Render a declared knob type as one lowercase token, or ``"a|b"``.
+
+    JSON Schema allows a union (``"type": ["string", "array"]`` —
+    ``cli.scrub_secret_env`` and ``mcp.scrub_secret_env`` both declare one),
+    and ``str()`` on that list yields a Python repr (``"['string', 'array']"``)
+    that is wrong in the ``explain plugins`` type column and useless to a
+    value check.  Members are joined with ``|`` instead, which both read.
+    """
+    if isinstance(declared, (list, tuple)):
+        return "|".join(str(x) for x in declared if x)
+    return str(declared or "")
+
+
+def _schema_enum(declared: Any) -> Optional[List[Any]]:
+    """The declared closed value set, or ``None`` when there is none.
+
+    ``None`` and an empty list mean different things — "this knob declares
+    no enum" vs "this knob permits nothing" — and only the former occurs in
+    practice, so an empty/none-list declaration is normalized to ``None``
+    rather than becoming a rule that rejects every value.
+    """
+    if isinstance(declared, (list, tuple)) and declared:
+        return list(declared)
+    return None
+
+
+#: How deep :func:`_settings_from_properties` will descend a declared object.
+#: ``permission.policy.sanitization.path_scope.allowed_roots`` is four, which
+#: is the deepest declaration in the tree; the cap exists so a plugin that
+#: declares a recursive or pathological schema cannot hang an ``explain``.
+_MAX_KNOB_DEPTH = 6
+
+
+def _settings_from_properties(props: Any, depth: int = 0) -> List["ConfigSetting"]:
+    """Normalize one JSON-Schema ``properties`` dict into knob settings.
+
+    Recursive, because a knob's declared value may itself be an object with
+    its own ``properties`` — which is the shape of every knob that actually
+    decides behaviour (``permission.policy``), and which both consumers used
+    to be unable to see past.
+
+    Descent stops at three places, each for its own reason:
+
+    * a knob with no ``properties`` — nothing is declared, so nothing is
+      asserted;
+    * ``additionalProperties`` — the plugin has said the key set is open, so
+      ``free_form`` is set and the declared ``properties`` (if any) are still
+      carried as children, because a declared key is still describable even
+      where undeclared ones are permitted;
+    * :data:`_MAX_KNOB_DEPTH`.
+    """
+    out: List["ConfigSetting"] = []
+    if not isinstance(props, dict):
+        return out
+    for knob, spec in props.items():
+        spec = spec if isinstance(spec, dict) else {}
+        kids = None
+        if depth < _MAX_KNOB_DEPTH:
+            kids = _settings_from_properties(spec.get("properties"), depth + 1)
+        out.append(ConfigSetting(
+            name=str(knob),
+            type=_schema_type(spec.get("type")),
+            default=spec.get("default", None),
+            description=str(spec.get("description", "") or ""),
+            enum=_schema_enum(spec.get("enum")),
+            children=kids or None,
+            free_form=bool(spec.get("additionalProperties")),
+        ))
+    return out
+
+
 def plugins() -> Dict[str, PluginInfo]:
     """All tool/enrichment plugins, best-effort offline.
 
@@ -454,15 +1057,7 @@ def plugins() -> Dict[str, PluginInfo]:
         info = PluginInfo(name=name)
         plugin = reg.get_plugin(name)
         _stamp_origin(info, reg.get_plugin_source(name))
-        # kind / tier from the plugin's module (module-level constants)
-        mod = type(plugin).__module__
-        try:
-            import importlib
-            pkg = importlib.import_module(mod.rsplit(".", 1)[0])
-            info.kind = getattr(pkg, "PLUGIN_KIND", "tool")
-            info.tier = getattr(pkg, "PLUGIN_TIER", None)
-        except Exception:
-            pass
+        _stamp_kind_and_tier(info, type(plugin).__module__)
         # tools (best-effort)
         try:
             for schema in plugin.get_tool_schemas() or []:
@@ -482,7 +1077,9 @@ def plugins() -> Dict[str, PluginInfo]:
         # plugin-level description (class docstring, first line)
         doc = (type(plugin).__doc__ or "").strip()
         info.description = doc.split("\n", 1)[0].strip() if doc else ""
-        # config schema (best-effort) — names + descriptions / types / defaults.
+        # config schema (best-effort) — names + descriptions / types /
+        # defaults / enums.  The last three are what let validate check a
+        # knob's VALUE and not only its name (#925).
         # Two shapes exist in the wild; normalize BOTH into ConfigSetting so
         # explain/validate see the knobs either way:
         #   - a list of ``PluginSetting`` objects (``.name`` / ``.type`` / …),
@@ -494,24 +1091,20 @@ def plugins() -> Dict[str, PluginInfo]:
             schema = reg.get_plugin_config_schema(name) or []
             settings: List[ConfigSetting] = []
             if isinstance(schema, dict):
-                props = schema.get("properties")
-                if isinstance(props, dict):
-                    for knob, spec in props.items():
-                        spec = spec if isinstance(spec, dict) else {}
-                        settings.append(ConfigSetting(
-                            name=str(knob),
-                            type=str(spec.get("type", "") or ""),
-                            default=spec.get("default", None),
-                            description=str(spec.get("description", "") or ""),
-                        ))
+                settings.extend(_settings_from_properties(
+                    schema.get("properties")))
             else:
                 for s in schema:
                     if hasattr(s, "name"):
                         settings.append(ConfigSetting(
                             name=s.name,
-                            type=str(getattr(s, "type", "") or ""),
+                            type=_schema_type(getattr(s, "type", None)),
                             default=getattr(s, "default", None),
                             description=getattr(s, "description", "") or "",
+                            # The object form spells the closed set
+                            # ``choices``; JSON Schema spells it ``enum``.
+                            # Both land on ConfigSetting.enum.
+                            enum=_schema_enum(getattr(s, "choices", None)),
                         ))
             info.config_keys = [s.name for s in settings]
             info.config_settings = settings
@@ -585,39 +1178,90 @@ def _env_doc_comments(source: str) -> Dict[int, str]:
     return out
 
 
-def _env_reads(node: ast.AST, const_map: Dict[str, str]):
-    """Yield (name, default_node_or_None, lineno) for each os.environ read.
+#: The session-scoped read.  ``get_session_env`` checks the per-session
+#: ``ContextVar`` before falling back to ``os.environ`` and is what
+#: ``test_session_env_audit`` tells authors to migrate TO -- so a scan that
+#: only knew ``os.environ`` went blind exactly where the framework's own rule
+#: was followed.  Measured: every ``JAATO_CHROME_AI_*`` var, and
+#: ``JAATO_PROFILE_SET`` itself, were read by the installed tree, documented
+#: in CLAUDE.md, and absent from ``explain env``.
+_SESSION_ENV_READERS = frozenset({"get_session_env"})
 
-    Matches ``os.getenv``/``os.environ.get``/``environ.get`` (call) and
-    ``os.environ[...]``/``environ[...]`` (subscript).  Keys may be string
-    literals OR same-file string constants (resolved via ``const_map``).
-    ``lineno`` is the read site's line, for `# env:` doc-comment lookup.
+
+def _session_env_read(n: ast.AST, const_map: Dict[str, str]):
+    """``get_session_env("X")`` -> ``(name, default_node, lineno)``, else None.
+
+    The session-scoped read, which ``test_session_env_audit`` tells authors
+    to migrate TO -- so a scan that knew only ``os.environ`` went blind
+    exactly where the framework's own rule was followed.
+    """
+    if not (isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+            and n.func.id in _SESSION_ENV_READERS and n.args):
+        return None
+    key = _key_of(n.args[0], const_map)
+    if key is None:
+        return None
+    return key, (n.args[1] if len(n.args) >= 2 else None), getattr(n, "lineno", 0)
+
+
+def _os_environ_call_read(n: ast.AST, const_map: Dict[str, str]):
+    """``os.getenv(...)`` / ``os.environ.get(...)`` / ``environ.get(...)``."""
+    if not (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+            and n.args):
+        return None
+    attr, v = n.func.attr, n.func.value
+    is_getenv = attr == "getenv" and isinstance(v, ast.Name) and v.id == "os"
+    is_environ_get = attr == "get" and (
+        (isinstance(v, ast.Attribute) and v.attr == "environ")
+        or (isinstance(v, ast.Name) and v.id == "environ")
+    )
+    if not (is_getenv or is_environ_get):
+        return None
+    key = _key_of(n.args[0], const_map)
+    if key is None:
+        return None
+    return key, (n.args[1] if len(n.args) >= 2 else None), getattr(n, "lineno", 0)
+
+
+def _os_environ_subscript_read(n: ast.AST, const_map: Dict[str, str]):
+    """``os.environ["X"]`` / ``environ["X"]``."""
+    if not isinstance(n, ast.Subscript):
+        return None
+    v = n.value
+    if not ((isinstance(v, ast.Attribute) and v.attr == "environ")
+            or (isinstance(v, ast.Name) and v.id == "environ")):
+        return None
+    key = _key_of(n.slice, const_map)
+    if key is None:
+        return None
+    return key, None, getattr(n, "lineno", 0)
+
+
+#: The read shapes, in the order they are tried.  A node matches at most
+#: one, so the first hit wins and the rest are skipped.
+_ENV_READ_SHAPES = (
+    _session_env_read,
+    _os_environ_call_read,
+    _os_environ_subscript_read,
+)
+
+
+def _env_reads(node: ast.AST, const_map: Dict[str, str]):
+    """Yield (name, default_node_or_None, lineno) for each env read.
+
+    Covers the session-scoped ``get_session_env(...)`` and both
+    ``os.environ`` shapes; each is recognised by its own helper in
+    :data:`_ENV_READ_SHAPES` so adding a fourth shape is a new function
+    rather than another branch here.  Keys may be string literals OR
+    same-file string constants (resolved via ``const_map``).  ``lineno`` is
+    the read site's line, for `# env:` doc-comment lookup.
     """
     for n in ast.walk(node):
-        # Call forms: os.getenv / os.environ.get / environ.get
-        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute):
-            attr = n.func.attr
-            v = n.func.value
-            is_getenv = attr == "getenv" and isinstance(v, ast.Name) and v.id == "os"
-            is_environ_get = (
-                attr == "get" and (
-                    (isinstance(v, ast.Attribute) and v.attr == "environ")
-                    or (isinstance(v, ast.Name) and v.id == "environ")
-                )
-            )
-            if (is_getenv or is_environ_get) and n.args:
-                key = _key_of(n.args[0], const_map)
-                if key is not None:
-                    default = n.args[1] if len(n.args) >= 2 else None
-                    yield key, default, getattr(n, "lineno", 0)
-        # Subscript form: os.environ["X"] / environ["X"]
-        elif isinstance(n, ast.Subscript):
-            v = n.value
-            if (isinstance(v, ast.Attribute) and v.attr == "environ") or \
-               (isinstance(v, ast.Name) and v.id == "environ"):
-                key = _key_of(n.slice, const_map)
-                if key is not None:
-                    yield key, None, getattr(n, "lineno", 0)
+        for shape in _ENV_READ_SHAPES:
+            hit = shape(n, const_map)
+            if hit is not None:
+                yield hit
+                break
 
 
 def _categorize(name: str, rel_path: str) -> str:
@@ -791,6 +1435,175 @@ def plugin_config_keys(plugin: str) -> FrozenSet[str]:
     result = frozenset(keys)
     _PLUGIN_CONFIG_KEYS_CACHE[plugin] = result
     return result
+
+
+#: Memo for :func:`plugin_config_read_sites` — plugin name → its read sites,
+#: or ``None`` when the plugin's source is not in the scanned tree.
+_PLUGIN_READ_SITE_CACHE: Dict[str, Optional[Dict[str, str]]] = {}
+
+#: Receiver names a TOP-LEVEL ``plugin_configs.<plugin>`` dict is read
+#: through.  Deliberately narrower than :func:`plugin_config_keys`' ``base
+#: endswith "config"`` rule, which also matches ``reporter_config.get("x")``
+#: — a NESTED dict whose inner keys are not ``plugin_configs`` knobs at all.
+_TOP_LEVEL_CONFIG_RECEIVERS = frozenset({"config", "cfg", "opts", "_config"})
+
+
+def _read_site_key(node: ast.AST) -> Optional[str]:
+    """The literal key one ``config.get("k")`` / ``config["k"]`` node reads.
+
+    ``None`` for every other node, and for a read through a receiver outside
+    :data:`_TOP_LEVEL_CONFIG_RECEIVERS` or with a non-literal key (a
+    ``config.get(name)`` the scan cannot resolve offline).
+    """
+    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "get" and node.args
+            and _config_base(node.func.value) in _TOP_LEVEL_CONFIG_RECEIVERS
+            and isinstance(node.args[0], ast.Constant)
+            and isinstance(node.args[0].value, str)):
+        return node.args[0].value
+    if (isinstance(node, ast.Subscript)
+            and _config_base(node.value) in _TOP_LEVEL_CONFIG_RECEIVERS
+            and isinstance(node.slice, ast.Constant)
+            and isinstance(node.slice.value, str)):
+        return node.slice.value
+    return None
+
+
+def plugin_config_read_sites(plugin: str) -> Optional[Dict[str, str]]:
+    """Where a plugin's source READS each top-level config key (#910).
+
+    Maps key → ``"<file>:<line>"`` of the first site found, by AST-scanning
+    the plugin package for ``config.get("key")`` / ``config["key"]``.  No
+    imports: the same offline discipline as :func:`plugin_config_keys`.
+
+    WHY A SECOND SCANNER, AND WHY IT RETURNS LOCATIONS.
+    :func:`plugin_config_keys` answers "may this plugin honour this name at
+    all", and unions in every ``"properties"`` block it finds — which for
+    ``memory`` means the ``store_memory`` TOOL parameters (``content``,
+    ``tags``, ``confidence``) land in the set.  That is the right bias for
+    its caller and the wrong one here: ``validate`` uses this to tell an
+    author their knob is live, so a hit must be a **config read**, not a
+    same-named tool argument.  Hence the narrower receiver rule, no schema
+    properties, and a file:line the reader can check rather than a claim
+    they must take on trust.
+
+    ``None`` means the plugin's source is NOT in the scanned tree (an
+    out-of-tree distribution, installed via an entry point) — "not checked",
+    which callers must not render as "not read".  An empty dict is the
+    different answer "scanned, and it reads no config key literally".
+
+    A key NESTED inside an object-valued knob is not in here, and must not
+    be: this set answers "is this a top-level ``plugin_configs.<plugin>``
+    knob", and a nested dict's inner names are not.  Nested evidence has its
+    own scanner, :func:`plugin_nested_config_read_sites`.
+
+    The scan still over-approximates: a shared helper that reads its own
+    ``config`` dict contributes its keys to the plugin that vends it.  That
+    bias is deliberate (#910) — the cost of not flagging a typo is a puzzled
+    hour, the cost of calling a working knob dead is a config change that
+    silently moves someone's data — and quoting the site keeps it checkable.
+    """
+    if plugin in _PLUGIN_READ_SITE_CACHE:
+        return _PLUGIN_READ_SITE_CACHE[plugin]
+
+    root = _PLUGIN_DIR / plugin
+    sites: Optional[Dict[str, str]] = None
+    if root.is_dir():
+        sites = {}
+        for py in sorted(root.rglob("*.py")):
+            if "__pycache__" in py.parts or "tests" in py.parts:
+                continue
+            try:
+                tree = ast.parse(py.read_text(encoding="utf-8"))
+            except (SyntaxError, OSError, UnicodeDecodeError):
+                continue
+            for node in ast.walk(tree):
+                key = _read_site_key(node)
+                if key and key not in sites:
+                    sites[key] = f"{py.name}:{node.lineno}"
+    _PLUGIN_READ_SITE_CACHE[plugin] = sites
+    return sites
+
+
+#: Memo for :func:`plugin_nested_config_read_sites`.
+_PLUGIN_NESTED_READ_SITE_CACHE: Dict[str, Optional[Dict[str, str]]] = {}
+
+
+def _nested_read_site_key(node: ast.AST) -> Optional[str]:
+    """The literal key read off ANY config-shaped receiver.
+
+    The wide counterpart of :func:`_read_site_key`.  A key inside an
+    object-valued knob is read off a LOCAL rather than off ``config`` —
+    ``permission`` unpacks ``policy.sanitization`` into ``san_cfg`` and
+    ``…path_scope`` into ``ps_cfg``, then reads
+    ``ps_cfg.get("resolve_symlinks")`` — so the narrow receiver set sees
+    none of them.
+    """
+    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "get" and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and isinstance(node.args[0].value, str)
+            and _is_config_receiver(node.func.value)):
+        return node.args[0].value
+    if (isinstance(node, ast.Subscript)
+            and isinstance(node.slice, ast.Constant)
+            and isinstance(node.slice.value, str)
+            and _is_config_receiver(node.value)):
+        return node.slice.value
+    return None
+
+
+def _is_config_receiver(node: ast.AST) -> bool:
+    """Whether a ``.get`` / subscript receiver names a config-shaped mapping."""
+    base = _config_base(node).lower()
+    return base.endswith("config") or base.endswith("cfg") or base == "opts"
+
+
+def plugin_nested_config_read_sites(plugin: str) -> Optional[Dict[str, str]]:
+    """Where a plugin's source reads each key, at ANY depth.
+
+    The evidence :func:`plugin_config_read_sites` provides for a top-level
+    knob, extended to the names inside an object-valued one — which is what
+    the validator needs once it descends a declared ``properties`` tree.
+
+    WHY A THIRD SCANNER.  The top-level set is narrow ON PURPOSE (a nested
+    dict's inner names are not ``plugin_configs`` knobs), and
+    :func:`plugin_config_keys` is wide for a different question and unions
+    in schema ``properties``, including tool parameters.  Neither answers
+    "does this plugin read a key by this name anywhere", which is the only
+    thing that can stand behind telling an author a NESTED key is dead.
+
+    It over-approximates by construction — a nested name is not attributed
+    to the parent it sits under, so a key declared under one object and read
+    under another reads as live.  That is the #910 bias, deliberately: the
+    cost of not flagging a typo is a puzzled hour; the cost of calling a
+    working knob dead is an author deleting a line that was doing something.
+    Measured against ``permission``: the schema omits sixteen names its own
+    reader consumes, so a completeness claim here would be wrong far more
+    often than right.
+
+    ``None`` means the plugin's source is not in the scanned tree, the same
+    "not checked" its top-level sibling returns.
+    """
+    if plugin in _PLUGIN_NESTED_READ_SITE_CACHE:
+        return _PLUGIN_NESTED_READ_SITE_CACHE[plugin]
+    root = _PLUGIN_DIR / plugin
+    sites: Optional[Dict[str, str]] = None
+    if root.is_dir():
+        sites = {}
+        for py in sorted(root.rglob("*.py")):
+            if "__pycache__" in py.parts or "tests" in py.parts:
+                continue
+            try:
+                tree = ast.parse(py.read_text(encoding="utf-8"))
+            except (SyntaxError, OSError, UnicodeDecodeError):
+                continue
+            for node in ast.walk(tree):
+                key = _nested_read_site_key(node)
+                if key and key not in sites:
+                    sites[key] = f"{py.name}:{node.lineno}"
+    _PLUGIN_NESTED_READ_SITE_CACHE[plugin] = sites
+    return sites
 
 
 def _key_from_config_get(node: ast.AST) -> set:
@@ -1086,3 +1899,235 @@ def events() -> Dict[str, EventInfo]:
             fields=list(cls[2]) if cls else [],
         )
     return out
+
+
+# ------------------------------------------- provider api_params forwarding
+
+#: The class attribute an OpenAI-shaped provider uses to allow-list the
+#: ``api_params`` keys it forwards.  Everything else it is handed is dropped
+#: BEFORE the request, with a WARNING naming the keys — see
+#: ``_openai_compat/base.py::_read_api_params``.
+_FORWARD_ATTR = "_FORWARDED_API_PARAMS"
+
+#: Set methods spelled as calls rather than operators.  ``kimi`` writes
+#: ``Base._FORWARDED_API_PARAMS.intersection({...})``.
+_SET_METHODS = {"union": "or_", "intersection": "and_", "difference": "sub"}
+
+#: Module-level set constants share the class index under this key, which is
+#: not a legal Python identifier and so cannot collide with a class name.
+_CONSTS_KEY = "<module-consts>"
+
+_FORWARD_INDEX_CACHE: Optional[Dict[str, Any]] = None
+_FORWARD_SITE_CACHE: Dict[str, Optional[Dict[str, Any]]] = {}
+
+
+def _provider_class_index() -> Dict[str, Any]:
+    """Every provider-tier class: its bases, its file, its allow-list (if any).
+
+    One AST pass over ``model_provider/**``, no imports — the same offline
+    discipline the provider-constant reader keeps, and for the same reason: a
+    provider whose vendor SDK is not installed must still be explainable.
+
+    A class maps to ``{bases, file, line, expr}``, the last two set only for a
+    class whose BODY assigns :data:`_FORWARD_ATTR`; ``expr`` is the unevaluated
+    right-hand side, handed to :func:`_eval_set_expr`.
+    """
+    global _FORWARD_INDEX_CACHE
+    if _FORWARD_INDEX_CACHE is not None:
+        return _FORWARD_INDEX_CACHE
+    index: Dict[str, Any] = {}
+    consts: Dict[str, Any] = {}
+    index[_CONSTS_KEY] = consts
+    for py in sorted(_PROVIDER_DIR.rglob("*.py")):
+        if "__pycache__" in py.parts or "tests" in py.parts:
+            continue
+        try:
+            tree = ast.parse(py.read_text(encoding="utf-8"))
+        except (SyntaxError, OSError, UnicodeDecodeError):
+            continue
+        rel = py.relative_to(_PROVIDER_DIR).as_posix()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ClassDef):
+                index[node.name] = _class_entry(node, rel)
+            elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+                _note_module_const(node, consts)
+    _FORWARD_INDEX_CACHE = index
+    return index
+
+
+def _note_module_const(node: ast.AST, consts: Dict[str, Any]) -> None:
+    """Record a module-level ``NAME = frozenset({...})`` for the evaluator.
+
+    ``_openai_compat``'s allow-list is ``frozenset({...}) | MEDIA_API_PARAMS``,
+    so without these the base set itself is unevaluable and every provider
+    inheriting it reports "not statically known".  A name defined twice with
+    DIFFERENT values is poisoned to ``None``: this index is flat across the
+    tree, and guessing which module a reference meant is how a diagnostic
+    starts inventing facts.
+    """
+    targets = (node.targets if isinstance(node, ast.Assign) else [node.target])
+    for target in targets:
+        if not isinstance(target, ast.Name) or node.value is None:
+            continue
+        value = _literal_str_set(node.value)
+        if value is None and isinstance(node.value, ast.Call):
+            func = node.value.func
+            if (isinstance(func, ast.Name) and func.id in ("frozenset", "set")
+                    and node.value.args):
+                value = _literal_str_set(node.value.args[0])
+        if value is None:
+            continue
+        if target.id in consts and consts[target.id] != value:
+            consts[target.id] = None
+        else:
+            consts.setdefault(target.id, value)
+
+
+def _class_entry(node: "ast.ClassDef", rel: str) -> Dict[str, Any]:
+    """One class's bases and its ``_FORWARDED_API_PARAMS`` assignment, if any."""
+    bases = [b.id if isinstance(b, ast.Name) else
+             b.attr if isinstance(b, ast.Attribute) else ""
+             for b in node.bases]
+    entry: Dict[str, Any] = {"bases": [b for b in bases if b], "file": rel,
+                             "line": None, "expr": None}
+    for stmt in node.body:
+        if not isinstance(stmt, ast.Assign):
+            continue
+        if any(isinstance(t, ast.Name) and t.id == _FORWARD_ATTR
+               for t in stmt.targets):
+            entry["line"], entry["expr"] = stmt.lineno, stmt.value
+    return entry
+
+
+def _literal_str_set(node: ast.AST) -> Optional[FrozenSet[str]]:
+    """``{"a", "b"}`` / ``["a"]`` → the set of strings, else ``None``."""
+    if not isinstance(node, (ast.Set, ast.List, ast.Tuple)):
+        return None
+    out = set()
+    for elt in node.elts:
+        if not (isinstance(elt, ast.Constant) and isinstance(elt.value, str)):
+            return None
+        out.add(elt.value)
+    return frozenset(out)
+
+
+def _eval_set_expr(node: ast.AST, index: Dict[str, Any],
+                   seen: Optional[set] = None) -> Optional[FrozenSet[str]]:
+    """Evaluate a provider's allow-list expression EXACTLY, or answer ``None``.
+
+    Exactly, because the alternative was measured and is unsafe: collecting
+    the string literals of the assignment over-approximates, and ``minimax``
+    and ``mimo`` SUBTRACT three keys from the base set --
+
+        (OpenAICompatProvider._FORWARDED_API_PARAMS
+         - frozenset({"frequency_penalty", "presence_penalty", "seed"}))
+
+    -- so a literal scan reports the removed keys as forwarded, and the caller
+    then tells an author a key reaches the request when the provider strips
+    it.  That is #1008's own defect committed by its fix.
+
+    Handles the four forms the tree uses: a literal set, ``frozenset(...)``,
+    the ``|`` / ``-`` / ``&`` operators, a reference to another class's
+    attribute (resolved through *index*), and the method spellings in
+    :data:`_SET_METHODS`.  Anything else is ``None`` -- *not statically
+    known*, which callers must render as a withheld claim and never as an
+    empty set.
+    """
+    seen = seen if seen is not None else set()
+    lit = _literal_str_set(node)
+    if lit is not None:
+        return lit
+    if isinstance(node, ast.BinOp):
+        return _eval_binop(node, index, seen)
+    if isinstance(node, ast.Name):
+        return index.get(_CONSTS_KEY, {}).get(node.id)
+    if isinstance(node, ast.Attribute) and node.attr == _FORWARD_ATTR:
+        return _eval_class_attr(node, index, seen)
+    if isinstance(node, ast.Call):
+        return _eval_set_call(node, index, seen)
+    return None
+
+
+def _eval_binop(node: "ast.BinOp", index, seen) -> Optional[FrozenSet[str]]:
+    left = _eval_set_expr(node.left, index, seen)
+    right = _eval_set_expr(node.right, index, seen)
+    if left is None or right is None:
+        return None
+    if isinstance(node.op, ast.BitOr):
+        return left | right
+    if isinstance(node.op, ast.Sub):
+        return left - right
+    if isinstance(node.op, ast.BitAnd):
+        return left & right
+    return None
+
+
+def _eval_class_attr(node: "ast.Attribute", index, seen) -> Optional[FrozenSet[str]]:
+    """``SomeProvider._FORWARDED_API_PARAMS`` → that class's evaluated set."""
+    owner = node.value.id if isinstance(node.value, ast.Name) else None
+    if owner is None or owner in seen:
+        return None
+    entry = index.get(owner)
+    if entry is None or entry["expr"] is None:
+        return None
+    return _eval_set_expr(entry["expr"], index, seen | {owner})
+
+
+def _eval_set_call(node: "ast.Call", index, seen) -> Optional[FrozenSet[str]]:
+    """``frozenset({...})`` / ``x.intersection({...})`` and friends."""
+    if isinstance(node.func, ast.Name) and node.func.id in ("frozenset", "set"):
+        if not node.args:
+            return frozenset()
+        return _eval_set_expr(node.args[0], index, seen)
+    if not (isinstance(node.func, ast.Attribute)
+            and node.func.attr in _SET_METHODS and len(node.args) == 1):
+        return None
+    recv = _eval_set_expr(node.func.value, index, seen)
+    arg = _eval_set_expr(node.args[0], index, seen)
+    if recv is None or arg is None:
+        return None
+    op = _SET_METHODS[node.func.attr]
+    return {"or_": recv | arg, "and_": recv & arg, "sub": recv - arg}[op]
+
+
+def provider_api_params_forwarding(dir_name: str) -> Optional[Dict[str, Any]]:
+    """How *dir_name* treats an ``api_params`` key it does not recognize.
+
+    Returns ``{"where": "<file>:<line>", "forwarded": frozenset | None}`` when
+    the provider — or a base it inherits inside the provider tree —
+    allow-lists the ``api_params`` keys it forwards.  For such a provider a key
+    outside the allow-list is **dropped before the request, with a WARNING
+    naming it**, which is the opposite of "silently ignored" (#1008).
+
+    ``forwarded is None`` means the expression could not be evaluated
+    statically: the allow-list exists, and which keys are in it was not
+    established.  Callers must withhold the consequence rather than assume
+    either answer.
+
+    A ``None`` return means no allow-list governs the provider at all: it reads
+    ``api_params`` key by key (``anthropic``, ``google_genai`` and
+    ``openrouter`` all do), so a key it does not read is simply never looked
+    at.  That too is *not established* rather than evidence of silence —
+    conflating the two is the defect this exists to end.
+    """
+    if dir_name in _FORWARD_SITE_CACHE:
+        return _FORWARD_SITE_CACHE[dir_name]
+
+    index = _provider_class_index()
+    prefix = f"{dir_name}/"
+    frontier = [n for n, e in index.items()
+                if n != _CONSTS_KEY
+                and (e["file"] == f"{dir_name}.py" or e["file"].startswith(prefix))]
+    seen, result = set(), None
+    while frontier:
+        cls = frontier.pop(0)
+        if cls in seen or cls not in index:
+            continue
+        seen.add(cls)
+        entry = index[cls]
+        if entry["line"] is not None and result is None:
+            result = {"where": f"{entry['file']}:{entry['line']}",
+                      "forwarded": _eval_set_expr(entry["expr"], index)}
+        frontier.extend(entry["bases"])
+    _FORWARD_SITE_CACHE[dir_name] = result
+    return result

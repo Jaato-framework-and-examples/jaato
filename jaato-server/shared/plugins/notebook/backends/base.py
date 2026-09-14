@@ -1,7 +1,7 @@
 """Base interface for notebook backends."""
 
 from abc import ABC, abstractmethod
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 
 from ..types import (
     BackendCapabilities,
@@ -39,6 +39,62 @@ class NotebookBackend(ABC):
     def shutdown(self) -> None:
         """Shutdown the backend and release resources."""
         ...
+
+    def execution_boundary(self) -> Tuple[bool, str]:
+        """State the boundary this backend executes model-authored code inside.
+
+        Every notebook backend runs code the *model* wrote, so each one owes
+        the plugin an answer to "what stops this cell reaching the rest of the
+        host?".  ``NotebookPlugin`` asks before dispatching a cell and refuses
+        the execution when the answer is no (issue #710) — the gate is a
+        property of notebook execution rather than of one backend, so a
+        backend that cannot state a boundary declines instead of quietly
+        running uncontained.
+
+        The default is a refusal, deliberately: a backend added later is
+        contained only once its author has decided how, and inheriting
+        "allowed" would reproduce the exact defect this method exists to
+        close.  Implementations today:
+
+        - ``LocalJupyterBackend`` — the in-process gate
+          (``_inprocess_exec_allowed``): AppArmor, or an explicit opt-in.
+        - ``SubprocessKernelBackend`` — AppArmor inherited by the kernel
+          subprocess, else the kernel's audit-hook workspace containment, else
+          an explicit opt-out.
+        - ``KaggleBackend`` — the code never touches this host.
+
+        Returns:
+            ``(allowed, description)``.  ``description`` names the boundary
+            when allowed, and is the refusal message (naming the escape
+            hatch) when not.
+        """
+        return False, (
+            f"Notebook execution refused: the {type(self).__name__} backend "
+            "states no filesystem boundary for model-authored code. A backend "
+            "must implement execution_boundary() before it may run cells."
+        )
+
+    def boundary_kind(self) -> Optional[str]:
+        """Name the boundary tier this backend would execute a cell under.
+
+        The machine-readable sibling of :meth:`execution_boundary`, whose
+        return value is prose.  ``NotebookPlugin`` asks this to tell the model
+        which boundary it is under *before* its first cell (issue #1012), and
+        renders the answer through
+        ``kernel_sandbox.boundary_notice`` — which is the only place a tier's
+        consequences are written down.
+
+        This is an expectation, not an observation: the process that runs the
+        code decides its own boundary and reports it on the READY handshake,
+        and that answer outranks this one wherever the two can be compared.
+        Backends whose containment is not one of the ``BOUNDARY_*`` tiers
+        return ``None``, which renders as no claim rather than as a wrong one.
+
+        Returns:
+            A ``kernel_sandbox.BOUNDARY_*`` constant, or ``None`` when this
+            backend's containment is not described by that vocabulary.
+        """
+        return None
 
     @abstractmethod
     def is_available(self) -> bool:

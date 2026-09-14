@@ -233,6 +233,9 @@ class TestJaatoSessionSendMessage:
         mock_response = MagicMock()
         mock_response.parts = [Part.from_text("Hello back!")]
         mock_response.finish_reason = FinishReason.STOP
+        # Real int: the empty-response nudge asks whether the model
+        # produced media, and a MagicMock cannot be compared to 0.
+        mock_response.media_chunks = 0
         mock_response.usage = TokenUsage(prompt_tokens=10, output_tokens=5, total_tokens=15)
         mock_response.get_text.return_value = "Hello back!"
 
@@ -276,6 +279,9 @@ class TestJaatoSessionSendMessage:
         mock_response = MagicMock()
         mock_response.parts = [Part.from_text("Hello back!")]
         mock_response.finish_reason = FinishReason.STOP
+        # Real int: the empty-response nudge asks whether the model
+        # produced media, and a MagicMock cannot be compared to 0.
+        mock_response.media_chunks = 0
         mock_response.usage = TokenUsage(prompt_tokens=10, output_tokens=5, total_tokens=15)
         mock_response.get_text.return_value = "Hello back!"
 
@@ -319,6 +325,9 @@ class TestJaatoSessionSendMessage:
         mock_response = MagicMock()
         mock_response.parts = [Part.from_text("hi")]
         mock_response.finish_reason = FinishReason.STOP
+        # Real int: the empty-response nudge asks whether the model
+        # produced media, and a MagicMock cannot be compared to 0.
+        mock_response.media_chunks = 0
         mock_response.usage = TokenUsage(prompt_tokens=1, output_tokens=1, total_tokens=2)
         mock_response.get_text.return_value = "hi"
         mock_provider.supports_streaming.return_value = True
@@ -684,6 +693,9 @@ class TestJaatoSessionGenerate:
         mock_response.parts = [Part.from_text("Generated text")]
         mock_response.get_text.return_value = "Generated text"
         mock_response.finish_reason = FinishReason.STOP
+        # Real int: the empty-response nudge asks whether the model
+        # produced media, and a MagicMock cannot be compared to 0.
+        mock_response.media_chunks = 0
         mock_provider.complete.return_value = TurnResult.from_provider_response(mock_response)
 
         mock_runtime.create_provider.return_value = mock_provider

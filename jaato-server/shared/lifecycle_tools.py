@@ -226,8 +226,9 @@ class LifecycleTools:
 
     def __init__(self, session: 'JaatoSession') -> None:
         self._session = session
+        declared = getattr(session, '_completion_payload_schema', None)
         self._payload_schema: Optional[Dict[str, Any]] = resolve_completion_schema(
-            getattr(session, '_completion_payload_schema', None),
+            declared,
             workspace_path=getattr(session, 'workspace_path', None),
             # JaatoSession adopts the runtime's config_root via
             # ``runtime._config_root``; honor it here so a profile that
@@ -238,6 +239,29 @@ class LifecycleTools:
                 getattr(session, 'runtime', None), '_config_root', None,
             ),
         )
+        # DECLARED-BUT-UNRESOLVED is a different fact from NOT DECLARED, and
+        # only one of them is a mistake.  ``_should_hide_signal_completion``
+        # reads ``_payload_schema is None`` and cannot tell them apart, so a
+        # profile whose schema path was wrong got the same treatment as one
+        # that never wanted the tool: ``signal_completion`` vanished from the
+        # surface, the model hunted for it through ``list_tools``, the
+        # framework spent its nudges re-prompting, and the driver was handed
+        # ``None`` by a session that looked like it ran.  The only trace was a
+        # WARNING from the resolver about a path — nothing connecting that path
+        # to the tool that disappeared because of it.
+        self._schema_declared_but_unresolved = bool(
+            declared is not None and self._payload_schema is None)
+        if self._schema_declared_but_unresolved:
+            logger.warning(
+                "completion_payload_schema %r is declared but did not resolve "
+                "— signal_completion is HIDDEN from this session's tool "
+                "surface, so the agent cannot complete and the session will "
+                "end without a payload.  A relative path is joined onto the "
+                "config root, so it must NOT start with '.jaato/'; "
+                "`jaato-scaffold validate <workspace>` reports both mistakes "
+                "before a run.",
+                declared,
+            )
         # Lazy-loaded completion processors (kb-authored Python).  None
         # until the first ``signal_completion`` call resolves the
         # configured entries via
@@ -247,6 +271,20 @@ class LifecycleTools:
         # ``CompletionProcessor`` entry plus probed ``render`` /
         # ``validate`` callables; ``load_error`` surfaces typos /
         # missing symbols to the agent at signal time.
+        #
+        # LOAD-ONCE-PER-SESSION IS A CONTRACT, NOT AN OPTIMISATION
+        # (issues #765, #768).  Because the same ``LoadedProcessor``
+        # instances are handed to every ``signal_completion`` /
+        # ``prepare_completion`` call of this session, they are the
+        # framework's declared home for per-session processor state —
+        # the ``max_refusals`` counter lives there.  Before that was
+        # stated, authors relied on the same caching from the outside,
+        # by keeping their refusal counter in a module-level global; a
+        # change to per-call loading would have left those processors
+        # working while their ceiling silently stopped existing.  Do
+        # not reload per call.
+        # Guard: shared/tests/test_completion_processor_refusal_budget.py
+        # ::test_processors_are_loaded_once_per_session.
         self._processors_loaded: Optional[List[Any]] = None
 
         # Accumulated payload state (server 0.6.198+, 2026-06-09) for the
@@ -498,6 +536,12 @@ class LifecycleTools:
         # Gate 1 (2026-06-07+): no schema → hide.  Applies to root
         # AND subagent.  If you want signal_completion, declare a
         # completion_payload_schema in your profile.
+        #
+        # A schema that was DECLARED and failed to resolve reaches this line
+        # looking identical to one that was never declared, which is why the
+        # constructor logs that case by name: the outcome is the same tool
+        # surface, but one of the two is an author mistake and the other is
+        # the documented way to opt out.
         if self._payload_schema is None:
             return True
 
@@ -522,7 +566,7 @@ class LifecycleTools:
 
         Both the ``name`` enum and the per-tier bullets in the description
         are derived from ``session._tier_config.tiers`` — not from the
-        framework's ``VALID_TIER_NAMES``.  Two consequences:
+        framework's canonical name table.  Two consequences:
 
         * The model is never offered a tier the profile didn't declare.
           Previously all four names were advertised unconditionally, so a
@@ -540,10 +584,15 @@ class LifecycleTools:
         (canonical, not set-iteration) because this schema sits in the
         prompt-cache prefix and must be byte-stable across processes.
 
-        Falls back to advertising every known tier when the session has no
-        tier config — unreachable through :meth:`get_tool_schemas`, which
-        only appends this schema when ``_tier_config`` is set, but this
-        method is called directly by tests.
+        Falls back to advertising every CANONICAL tier when the session has
+        no tier config — unreachable through :meth:`get_tool_schemas`,
+        which only appends this schema when ``_tier_config`` is set, but
+        this method is called directly by tests.  That path can only offer
+        names the framework has prose for, which is why it filters
+        ``TIER_ORDER`` through ``DEFAULT_TIER_DESCRIPTIONS`` rather than
+        subscripting it: a canonical name added to the order tuple without
+        prose used to raise ``KeyError`` here, turning a table
+        inconsistency into a crash on a path with no config to blame.
         """
         from .model_tiers import (
             TIER_ORDER,
@@ -555,7 +604,7 @@ class LifecycleTools:
             names = list(cfg.ordered_tier_names())
             described = [(n, cfg.describe_tier(n)) for n in names]
         else:
-            names = list(TIER_ORDER)
+            names = [n for n in TIER_ORDER if n in DEFAULT_TIER_DESCRIPTIONS]
             described = [(n, DEFAULT_TIER_DESCRIPTIONS[n]) for n in names]
 
         bullets = "\n".join(
@@ -623,15 +672,25 @@ class LifecycleTools:
     def _execute_enter_tier(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Switch the session's active tier per the model's request.
 
-        Validates the ``name`` argument against the three valid tier
-        identifiers (the schema's ``enum`` already constrains compliant
-        providers, but defence-in-depth — providers without enum
-        enforcement could leak through), then delegates to
+        Validates the ``name`` argument (the schema's ``enum`` already
+        constrains compliant providers, but defence-in-depth — providers
+        without enum enforcement could leak through), then delegates to
         ``JaatoSession.switch_tier`` for the actual provider mutation.
         Tool errors are returned as ``error`` fields the model can
         read and self-correct from.
+
+        The addressable set is the canonical names UNION whatever this
+        session declared.  Both halves matter: dropping the canonical
+        names would break the documented "a valid-but-undeclared tier
+        routes to ``fallback`` and reports ``fallback_used``" behaviour,
+        and dropping the declared ones would have this executor reject a
+        deployment-named tier its own schema advertises (#831) — the
+        schema is built from ``ordered_tier_names()``, so validating
+        against a fixed table here would contradict it.  A name in
+        neither is a hallucination and is refused, which is the signal
+        this check exists to preserve.
         """
-        from .model_tiers import VALID_TIER_NAMES
+        from .model_tiers import CANONICAL_TIER_NAMES
 
         requested = args.get("name")
         if not isinstance(requested, str) or not requested.strip():
@@ -640,12 +699,16 @@ class LifecycleTools:
                 "message": "enter_tier requires 'name' to be a non-empty string.",
             }
         requested = requested.strip()
-        if requested not in VALID_TIER_NAMES:
+        cfg = getattr(self._session, '_tier_config', None)
+        addressable = set(CANONICAL_TIER_NAMES)
+        if cfg is not None:
+            addressable |= set(cfg.tiers)
+        if requested not in addressable:
             return {
                 "error": "invalid_tier",
                 "message": (
                     f"unknown tier {requested!r}; "
-                    f"must be one of {sorted(VALID_TIER_NAMES)}."
+                    f"must be one of {sorted(addressable)}."
                 ),
             }
         try:

@@ -714,14 +714,21 @@ class IPCRecoveryClient:
         answers: List[str],
         *,
         cancelled: bool = False,
+        answer_attachments: Optional[Dict[Any, list]] = None,
     ) -> None:
         """Respond to a batched clarification (all answers at once) — proxied
-        to the inner client (see ``IPCClient.respond_to_clarification_batch``)."""
+        to the inner client (see ``IPCClient.respond_to_clarification_batch``).
+
+        ``answer_attachments`` maps a 1-based question index to the media
+        attached to THAT answer (#989); the inner client normalises each
+        entry and REFUSES the call against a daemon below protocol 1.6
+        rather than letting the payload be dropped."""
         self._check_can_send()
 
         if self._client:
             await self._client.respond_to_clarification_batch(
                 request_id, answers, cancelled=cancelled,
+                answer_attachments=answer_attachments,
             )
 
     async def register_client_tools(self, tools: List[Dict[str, Any]]) -> None:
@@ -789,6 +796,29 @@ class IPCRecoveryClient:
         self._check_can_send()
         if self._client:
             await self._client.delete_session(session_id)
+
+    async def list_orphan_sessions(self) -> None:
+        """Request the LOADED sessions with no client attached (#812).
+
+        See :meth:`IPCClient.list_orphan_sessions` for full docs.  The
+        inner client raises against a daemon too old to serve the verb.
+        """
+        self._check_can_send()
+        if self._client:
+            await self._client.list_orphan_sessions()
+
+    async def stop_session(self, session_id: str) -> None:
+        """Stop ANY loaded session by id, not just this client's own (#812).
+
+        See :meth:`IPCClient.stop_session` for full docs.  The inner client
+        raises against a daemon too old to serve the verb -- which matters
+        here more than anywhere: a supervisor reconnecting to an unknown
+        daemon must not be told a runaway session was stopped when the
+        command was ignored.
+        """
+        self._check_can_send()
+        if self._client:
+            await self._client.stop_session(session_id)
 
     async def respond_to_post_auth_setup(
         self,
@@ -971,12 +1001,14 @@ class IPCRecoveryClient:
         source_type: str = "user",
         source_id: Optional[str] = None,
         timeout: float = 10.0,
+        attachments: Optional[list] = None,
     ) -> Optional[str]:
         """Inject a prompt into the session's message queue.
 
         See :meth:`IPCClient.inject_prompt` for full docs, including what
-        each status means and why ``None`` is "not told" rather than
-        "not delivered".
+        each status means, why ``None`` is "not told" rather than
+        "not delivered", and why an ``attachments``-bearing inject is
+        idle-only (a busy target answers ``"busy"`` with nothing enqueued).
 
         Returns ``None`` when no underlying client is connected — the same
         unknown-status signal the delegate uses, since a recovery client
@@ -986,8 +1018,31 @@ class IPCRecoveryClient:
         if self._client:
             return await self._client.inject_prompt(
                 text, source_type, source_id, timeout=timeout,
+                attachments=attachments,
             )
         return None
+
+    async def wake_session(
+        self,
+        session_id: str,
+        text: str = "",
+        *,
+        attachments: Optional[list] = None,
+        source: str = "user",
+        event_id: Optional[str] = None,
+    ) -> None:
+        """Wake a session by id, optionally carrying binary content.
+
+        See :meth:`IPCClient.wake_session`.  A no-op when no underlying
+        client is connected — the same shape as the other fire-and-forget
+        command wrappers here, which cannot report a refusal either.
+        """
+        self._check_can_send()
+        if self._client:
+            await self._client.wake_session(
+                session_id, text, attachments=attachments,
+                source=source, event_id=event_id,
+            )
 
     async def replay_messages(
         self,

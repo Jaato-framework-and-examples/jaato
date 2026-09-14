@@ -16,8 +16,35 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..subagent.config import expand_variables
+from .replay import DEFAULT_REPLAY_CACHE_SIZE
+from .signature_schemes import (
+    DEFAULT_MAX_AGE_SECONDS,
+    SCHEME_BODY,
+    SCHEME_STRIPE_V1,
+    SIGNATURE_SCHEMES,
+    TIMESTAMP_BOUND_SCHEMES,
+    TIMESTAMP_FROM_HEADER,
+    SCHEME_TIMESTAMP_SOURCE,
+)
 
 logger = logging.getLogger(__name__)
+
+# The vocabulary of ``RouteConfig.secret_algo`` — how the route's shared secret
+# is checked against the request.  Anything outside this set is a hard error at
+# validation time and a refusal at request time (see ``verify_signature``); the
+# fail-closed posture is what makes the set safe to extend.
+#
+#   'hmac-sha256' — the secret keys an HMAC over the request BODY, and the
+#                   header carries the resulting digest.  Not replayable, not
+#                   readable by anything that terminates TLS.  (GitHub, Stripe.)
+#   'token'       — the header carries the shared secret VERBATIM and is
+#                   compared for equality in constant time.  Strictly weaker:
+#                   replayable, and exposed to every hop that terminates TLS.
+#                   The only mode a producer that does not sign bodies can use
+#                   (GitLab's ``X-Gitlab-Token``, Jira, many internal senders).
+SECRET_ALGO_HMAC_SHA256 = 'hmac-sha256'
+SECRET_ALGO_TOKEN = 'token'
+SECRET_ALGOS = (SECRET_ALGO_HMAC_SHA256, SECRET_ALGO_TOKEN)
 
 
 def _as_bool_strict(value: Any) -> bool:
@@ -38,21 +65,89 @@ def _as_bool_strict(value: Any) -> bool:
     return False
 
 
+def _as_int_or(value: Any, default: int) -> int:
+    """Coerce a config value to int, falling back to ``default``.
+
+    ``${VAR}`` expansion turns every value into a string, so an operator's
+    ``"max_age_seconds": "${WEBHOOK_MAX_AGE}"`` arrives as ``'300'`` and must
+    still be a number.  A value that is not a whole number of seconds falls
+    back to the default rather than to ``0``: ``0`` is this key's explicit
+    "no freshness window", and a typo must never land on the disabled posture.
+    ``validate_config`` reports the same value as an error, so the fallback is
+    a safe landing rather than a silent fix.
+
+    Args:
+        value: The raw config value.
+        default: What to use when ``value`` is absent or unusable.
+
+    Returns:
+        The parsed integer, or ``default``.
+    """
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, int):
+        return value
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        logger.warning(
+            "webhook config: %r is not a whole number of seconds; "
+            "using the default (%d)", value, default,
+        )
+        return default
+
+
 @dataclass
 class RouteConfig:
     """Configuration for a single webhook route.
 
-    Each route maps a URL path to an event source with optional HMAC
+    Each route maps a URL path to an event source with optional shared-secret
     verification and event type extraction from headers.
 
     Attributes:
         path: URL path for this route (e.g., '/webhook/github').
-        secret_header: Header containing the HMAC signature (e.g., 'X-Hub-Signature-256').
-        secret_algo: HMAC algorithm (e.g., 'hmac-sha256'). Only 'hmac-sha256' supported.
-        event_type_header: Header to extract event type from (e.g., 'X-GitHub-Event').
+        secret_header: Header carrying the route's credential — an HMAC digest
+            under ``secret_algo='hmac-sha256'`` (e.g., 'X-Hub-Signature-256'),
+            or the shared secret itself under ``secret_algo='token'``
+            (e.g., 'X-Gitlab-Token').
+        secret_algo: How that header is verified — one of ``SECRET_ALGOS``.
+            ``'hmac-sha256'`` verifies a digest over the request body;
+            ``'token'`` compares the header value to the secret in constant
+            time.  ``'token'`` is the WEAKER mode (replayable, and readable by
+            anything that terminates TLS) and exists for producers that do not
+            sign bodies; pair it with TLS.  Both halves of the pair are
+            required — declaring one without the other is refused, never
+            downgraded to unsigned.
+        signature_scheme: How the signed payload is CONSTRUCTED — one of
+            ``SIGNATURE_SCHEMES``.  ``'body'`` (default, and every pre-#713
+            route) signs the request body alone, so the signature never
+            expires.  ``'slack-v0'`` and ``'stripe-v1'`` bind a timestamp into
+            the signature, which is what makes a freshness window enforceable.
+            See :mod:`.signature_schemes`.
+        timestamp_header: Header carrying the signed timestamp, for a scheme
+            that reads it from a separate header (``'slack-v0'``:
+            ``X-Slack-Request-Timestamp``).  REFUSED on ``'stripe-v1'``, which
+            carries its own ``t=`` field, and on ``'body'``, where the
+            timestamp would not be covered by the signature and so could be
+            rewritten by whoever is replaying the request — a window that
+            checks an attacker-controlled value is theatre, not protection.
+        max_age_seconds: Freshness window in seconds (default
+            ``DEFAULT_MAX_AGE_SECONDS``, Slack's documented 5 minutes).  A
+            signed timestamp more than this far from now — in EITHER direction
+            — is refused.  ``0`` disables the window and is announced at
+            WARNING.  Also sizes the replay cache's TTL.
+        replay_key_header: Header carrying a unique delivery id (GitHub's
+            ``X-GitHub-Delivery``, GitLab's ``X-Gitlab-Event-UUID``).  On a
+            ``'body'`` or ``'token'`` route this is the ONLY thing a replay
+            cache can key on, since the credential there is a pure function of
+            the body (or constant).  Bounded protection: it refuses a verbatim
+            replay and a sender retry within the TTL, and an attacker who
+            rewrites the id defeats it, because no sender here signs headers.
         metadata: Static metadata merged into every event from this route.
         allow_unauthenticated: Explicit opt-in to accept UNSIGNED requests on
-            this route. Default False (fail-closed). A route without an HMAC
+            this route. Default False (fail-closed). A route without a shared
             secret is refused unless the deployment provides mutual TLS or an
             IP allowlist, or this flag is set — so an operator cannot expose an
             open ingestion endpoint by omission.
@@ -61,6 +156,10 @@ class RouteConfig:
     secret_header: Optional[str] = None
     secret_algo: Optional[str] = None
     event_type_header: Optional[str] = None
+    signature_scheme: str = SCHEME_BODY
+    timestamp_header: Optional[str] = None
+    max_age_seconds: int = DEFAULT_MAX_AGE_SECONDS
+    replay_key_header: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
     allow_unauthenticated: bool = False
 
@@ -72,9 +171,46 @@ class RouteConfig:
             secret_header=data.get('secret_header'),
             secret_algo=data.get('secret_algo'),
             event_type_header=data.get('event_type_header'),
+            # An absent scheme is 'body' — what every route meant before the
+            # key existed.  A present but unrecognised one is carried through
+            # VERBATIM rather than coerced, so validate_config() and the
+            # request path both see the typo and refuse it (fail-closed);
+            # defaulting it here would silently verify a mistyped route the
+            # old way.
+            signature_scheme=data.get('signature_scheme') or SCHEME_BODY,
+            timestamp_header=data.get('timestamp_header'),
+            max_age_seconds=_as_int_or(
+                data.get('max_age_seconds'), DEFAULT_MAX_AGE_SECONDS
+            ),
+            replay_key_header=data.get('replay_key_header'),
             metadata=data.get('metadata', {}),
             allow_unauthenticated=_as_bool_strict(data.get('allow_unauthenticated', False)),
         )
+
+    def binds_timestamp(self) -> bool:
+        """Whether this route's scheme covers a timestamp with the signature.
+
+        Only such a route can carry a freshness window that means anything:
+        elsewhere the timestamp is not signed, so whoever replays the request
+        can set it to now.
+
+        Returns:
+            True for ``'slack-v0'`` / ``'stripe-v1'``.
+        """
+        return self.signature_scheme in TIMESTAMP_BOUND_SCHEMES
+
+    def replay_protected(self) -> bool:
+        """Whether a delivery on this route can be recorded against replay.
+
+        True when the route has something unique-per-delivery to key on: a
+        timestamp-bound signature, or a ``replay_key_header`` the sender fills
+        in.  False means a replay inside the freshness window (or, for a
+        ``'body'`` route, at any time) is indistinguishable from the original.
+
+        Returns:
+            True when the replay cache is active for this route.
+        """
+        return bool(self.binds_timestamp() or self.replay_key_header)
 
 
 @dataclass
@@ -118,8 +254,10 @@ class WebhookConfig:
     Attributes:
         port: HTTP listener port (default: 9100).
         host: Bind address (default: '127.0.0.1' — localhost only).
-        secret: Global shared secret for HMAC verification. Per-route secrets
-            override this when the route's secret_header is set. Use
+        secret: Global shared secret used by whichever verification mode a
+            route declares — the HMAC key under ``'hmac-sha256'``, the expected
+            header value under ``'token'``. Per-route secrets
+            (``routes.<name>.metadata.secret``) override this. Use
             ``${ENV_VAR}`` syntax to avoid storing secrets in plain text.
         routes: Named routes mapping source names to RouteConfig.
         max_body_size: Maximum request body size in bytes (default: 1 MB).
@@ -130,6 +268,13 @@ class WebhookConfig:
             are allowed. Supports both IPv4 and IPv6.
         rate_limit_per_second: Maximum requests per second per source IP
             (default: 0 = unlimited). Excess requests receive 429.
+        replay_cache_size: Maximum delivery keys the listener remembers for
+            replay refusal (default ``DEFAULT_REPLAY_CACHE_SIZE``). One cache
+            serves every route; entries expire after the route's
+            ``max_age_seconds``, so this only binds the pathological case where
+            valid deliveries arrive faster than the window retires them. An
+            eviction under this ceiling re-opens a replay window for that key
+            and is counted and announced — see :class:`.replay.ReplayCache`.
     """
     port: int = 9100
     host: str = '127.0.0.1'
@@ -140,11 +285,12 @@ class WebhookConfig:
     tls: TLSConfig = field(default_factory=TLSConfig)
     allowed_ips: List[str] = field(default_factory=list)
     rate_limit_per_second: float = 0
+    replay_cache_size: int = DEFAULT_REPLAY_CACHE_SIZE
 
     # Never print the shared secret (#721).  The config is loaded
     # from ``.jaato/webhook.json`` with ``${ENV_VAR}`` expansion, so
     # by the time it is an object the placeholder has been resolved
-    # to the real HMAC key.
+    # to the real secret.
     __repr__ = secret_safe_repr("secret")
 
     def __post_init__(self):
@@ -185,6 +331,9 @@ class WebhookConfig:
             tls=tls,
             allowed_ips=data.get('allowed_ips', []),
             rate_limit_per_second=data.get('rate_limit_per_second', 0),
+            replay_cache_size=_as_int_or(
+                data.get('replay_cache_size'), DEFAULT_REPLAY_CACHE_SIZE
+            ),
         )
 
 
@@ -373,26 +522,203 @@ def validate_config(data: Dict[str, Any]) -> Tuple[bool, List[str]]:
                 except ValueError as e:
                     errors.append(f"allowed_ips[{i}] is not a valid IP/CIDR: {e}")
 
-    routes = data.get('routes')
-    if routes is not None:
-        if not isinstance(routes, dict):
-            errors.append("'routes' must be an object")
-        else:
-            for name, route in routes.items():
-                if not isinstance(route, dict):
-                    errors.append(f"routes['{name}'] must be an object")
-                    continue
-                path = route.get('path')
-                if not path or not isinstance(path, str):
-                    errors.append(f"routes['{name}'].path is required and must be a string")
-                elif not path.startswith('/'):
-                    errors.append(f"routes['{name}'].path must start with '/'")
-
-                algo = route.get('secret_algo')
-                if algo is not None and algo != 'hmac-sha256':
-                    errors.append(
-                        f"routes['{name}'].secret_algo must be 'hmac-sha256' "
-                        f"(got '{algo}')"
-                    )
+    errors.extend(_validate_replay_cache_size(data.get('replay_cache_size')))
+    errors.extend(_validate_routes(data.get('routes')))
 
     return len(errors) == 0, errors
+
+
+def _validate_replay_cache_size(value: Any) -> List[str]:
+    """Validate the top-level ``replay_cache_size`` knob.
+
+    A free function called with ``extend`` rather than an ``if`` inside
+    ``validate_config``: that function's cyclomatic score is a frozen ratchet
+    entry, and a plain call adds no decision point to it.
+
+    Args:
+        value: The raw ``replay_cache_size`` value, or None when absent.
+
+    Returns:
+        Human-readable error strings (empty when valid).
+    """
+    if value is None:
+        return []
+    if not isinstance(value, int) or isinstance(value, bool):
+        return ["'replay_cache_size' must be an integer"]
+    if value < 1:
+        return [
+            "'replay_cache_size' must be at least 1 — a zero-size cache would "
+            "accept every replay. To run a route without replay protection, "
+            "leave its replay_key_header unset instead."
+        ]
+    return []
+
+
+def _validate_routes(routes: Any) -> List[str]:
+    """Validate the ``routes`` block of a webhook config.
+
+    Split out of ``validate_config`` so route rules can grow without growing
+    that function (its cyclomatic-complexity baseline is a ratchet).
+
+    Args:
+        routes: The raw ``routes`` value, or None when the key is absent.
+
+    Returns:
+        A list of human-readable error strings (empty when valid).
+    """
+    if routes is None:
+        return []
+    if not isinstance(routes, dict):
+        return ["'routes' must be an object"]
+
+    errors: List[str] = []
+    for name, route in routes.items():
+        if not isinstance(route, dict):
+            errors.append(f"routes['{name}'] must be an object")
+            continue
+
+        path = route.get('path')
+        if not path or not isinstance(path, str):
+            errors.append(f"routes['{name}'].path is required and must be a string")
+        elif not path.startswith('/'):
+            errors.append(f"routes['{name}'].path must start with '/'")
+
+        # An unrecognised algo is a HARD ERROR, not a fallback: a typo must
+        # never leave a route unverified.  Widening the vocabulary widens this
+        # set and nothing else — the incomplete-pair check in
+        # ``parse_webhook_request`` is untouched by it.
+        algo = route.get('secret_algo')
+        if algo is not None and algo not in SECRET_ALGOS:
+            allowed = ' or '.join(repr(a) for a in SECRET_ALGOS)
+            errors.append(
+                f"routes['{name}'].secret_algo must be {allowed} (got '{algo}')"
+            )
+
+        errors.extend(_validate_route_freshness(name, route))
+
+    return errors
+
+
+def _validate_route_freshness(name: str, route: Dict[str, Any]) -> List[str]:
+    """Validate one route's replay-protection keys (#713).
+
+    Every finding here is an **error**, not a warning, and every one of them is
+    also refused at request time with a 500.  That is deliberate: each case is
+    a configuration that is expressible and *does not do what it says*, which
+    is the silent-ignore family this tree keeps closing (#910, #925, #947,
+    #950).  A window that never fires reads, to whoever wrote it, exactly like
+    a window that does.
+
+    The rules:
+
+    * ``signature_scheme`` outside ``SIGNATURE_SCHEMES`` — a typo must not fall
+      back to ``'body'``, or a route meant to verify Slack's construction would
+      verify something else entirely and say nothing.
+    * A timestamp-bound scheme with ``secret_algo`` other than
+      ``'hmac-sha256'`` — there is no constant-time-token form of Slack's or
+      Stripe's construction, so this is the cross-mode leniency the plugin
+      already refuses between ``token`` and ``hmac-sha256``.
+    * ``'slack-v0'`` with no ``timestamp_header`` — the scheme has no other
+      source for the timestamp it signs.
+    * ``'stripe-v1'`` WITH a ``timestamp_header`` — the scheme takes its
+      timestamp from ``t=`` inside the signature header, so a second source
+      could disagree with the signed one.
+    * ``timestamp_header`` on ``'body'`` — the value would not be covered by
+      the signature, so whoever replays the request rewrites it. A freshness
+      check against an attacker-controlled value is theatre; refusing is how
+      the operator finds out before shipping it.
+    * ``max_age_seconds`` that is not a non-negative whole number.
+
+    Args:
+        name: The route's config key, for the message.
+        route: The raw route dict.
+
+    Returns:
+        Human-readable error strings (empty when valid).
+    """
+    errors: List[str] = []
+
+    scheme = route.get('signature_scheme')
+    if scheme is not None and scheme not in SIGNATURE_SCHEMES:
+        allowed = ' or '.join(repr(s) for s in SIGNATURE_SCHEMES)
+        errors.append(
+            f"routes['{name}'].signature_scheme must be {allowed} (got '{scheme}')"
+        )
+        scheme = None
+
+    max_age = route.get('max_age_seconds')
+    if max_age is not None:
+        if not isinstance(max_age, int) or isinstance(max_age, bool):
+            errors.append(f"routes['{name}'].max_age_seconds must be an integer")
+        elif max_age < 0:
+            errors.append(
+                f"routes['{name}'].max_age_seconds must be non-negative "
+                f"(0 disables the freshness window)"
+            )
+
+    has_ts_header = bool(route.get('timestamp_header'))
+
+    if scheme in TIMESTAMP_BOUND_SCHEMES:
+        errors.extend(
+            _validate_timestamp_bound_route(name, route, scheme, has_ts_header)
+        )
+    elif has_ts_header:
+        errors.append(
+            f"routes['{name}'] sets timestamp_header on signature_scheme "
+            f"'{scheme or SCHEME_BODY}', which does not cover the timestamp "
+            f"with the signature — anyone replaying the request can rewrite "
+            f"it, so the freshness window would check an attacker-controlled "
+            f"value. Use signature_scheme 'slack-v0' or '{SCHEME_STRIPE_V1}' "
+            f"if the sender signs a timestamp, or replay_key_header for "
+            f"delivery-id deduplication."
+        )
+
+    return errors
+
+
+def _validate_timestamp_bound_route(
+    name: str,
+    route: Dict[str, Any],
+    scheme: str,
+    has_ts_header: bool,
+) -> List[str]:
+    """Validate the keys a timestamp-bound scheme requires.
+
+    Split from :func:`_validate_route_freshness` to keep both under the
+    cyclomatic ceiling, and because these three rules share one premise the
+    caller has already established: this route's scheme signs a timestamp.
+
+    Args:
+        name: The route's config key, for the message.
+        route: The raw route dict.
+        scheme: The route's (already vocabulary-checked) signature scheme.
+        has_ts_header: Whether the route names a ``timestamp_header``.
+
+    Returns:
+        Human-readable error strings (empty when valid).
+    """
+    errors: List[str] = []
+
+    algo = route.get('secret_algo')
+    if algo is not None and algo != SECRET_ALGO_HMAC_SHA256:
+        errors.append(
+            f"routes['{name}'].signature_scheme '{scheme}' signs an "
+            f"HMAC-SHA256 digest, so secret_algo must be "
+            f"'{SECRET_ALGO_HMAC_SHA256}' (got '{algo}')"
+        )
+
+    wants_header = SCHEME_TIMESTAMP_SOURCE[scheme] == TIMESTAMP_FROM_HEADER
+    if wants_header and not has_ts_header:
+        errors.append(
+            f"routes['{name}'].signature_scheme '{scheme}' signs a "
+            f"timestamp carried in its own header, so timestamp_header is "
+            f"required (Slack sends 'X-Slack-Request-Timestamp')"
+        )
+    elif not wants_header and has_ts_header:
+        errors.append(
+            f"routes['{name}'].signature_scheme '{scheme}' reads its "
+            f"timestamp from the signature header itself, so "
+            f"timestamp_header must not be set"
+        )
+
+    return errors

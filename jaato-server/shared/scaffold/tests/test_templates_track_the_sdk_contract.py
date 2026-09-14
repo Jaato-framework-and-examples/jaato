@@ -26,29 +26,37 @@ contract is the thing that rots.
 
 from __future__ import annotations
 
+import argparse
 import ast
+import functools
 import inspect
+import pathlib
+import tempfile
 
 import pytest
 
+from shared.scaffold import build, introspect
 from shared.scaffold._client_templates import TEMPLATES
 
-PLACEHOLDERS = {
-    "__TITLE__": "T", "__PROVENANCE__": "p", "__WORKSPACE__": "/ws",
-    "__ENV_FILE__": ".env", "__MODEL__": "echo", "__PROVIDER__": "echo",
-    "__CLIENT_IMPORT__": "from jaato_sdk import IPCClient, ClientType, EventType",
-    "__CONN_CONSTANTS__": "SOCKET='/x'", "__ON_STATUS_DEF__": "",
-    "__NEW_CLIENT_CALL__": "IPCClient(socket_path=SOCKET)",
-    "__CASCADE_ID__": "cid", "__CLIENT_CLASS__": "IPCClient",
-    "__SOCKET__": "/x", "__KEY_ENV__": "K", "__ARCHETYPE__": "a",
-}
-
-
+#: One rendered script per archetype, produced by the REAL builder.
+#:
+#: Rendering by hand here needed a substitution table kept in step with
+#: ``build.py`` — a second statement of the generator's contract, which is
+#: precisely the thing this module exists to say rots.  Running the builder
+#: also means these tests read what a reader actually receives, placeholders
+#: and import line and factory block included.
+@functools.lru_cache(maxsize=None)
 def _render(name: str) -> str:
-    _, tmpl, _ = TEMPLATES[name]
-    for k, v in PLACEHOLDERS.items():
-        tmpl = tmpl.replace(k, v)
-    return tmpl
+    providers = sorted(introspect.providers())
+    assert providers, "no providers installed — cannot scaffold a client"
+    ws = pathlib.Path(tempfile.mkdtemp(prefix=f"scaffold_{name}_"))
+    rc = build.run(argparse.Namespace(
+        archetype=name, workspace=str(ws), provider=providers[0],
+        model="test-model", set=None, agents=None, force=True,
+        recoverable=False, json=False,
+    ))
+    assert rc == 0, f"build.run({name}) returned {rc}"
+    return (ws / f"run_{name}.py").read_text(encoding="utf-8")
 
 
 def _code(rendered: str) -> str:
@@ -56,8 +64,14 @@ def _code(rendered: str) -> str:
     return "\n".join(l.split("#", 1)[0] for l in rendered.splitlines())
 
 
+#: The archetypes that CREATE a session.
+#:
+#: They no longer call ``create_session`` themselves — the facade's session
+#: context manager does, and it is the facade that turns a refusal into a
+#: raised ``SessionCreateFailed``.  So the marker is opening a session at all,
+#: which is what makes an archetype subject to every contract below.
 CREATORS = sorted(
-    n for n in TEMPLATES if "create_session" in _code(_render(n))
+    n for n in TEMPLATES if "_open_session(" in _code(_render(n))
 )
 
 
@@ -65,6 +79,19 @@ def test_there_are_session_creating_archetypes():
     """Guard the guard: if this list empties, every test below vacuously
     passes and the contract goes unchecked."""
     assert CREATORS, "no archetype creates a session; these tests are inert"
+
+
+def test_create_session_is_reached_through_the_facade(name="client"):
+    """...and the reason CREATORS stopped keying on ``create_session``.
+
+    Pinned so the marker above cannot silently start meaning "no archetype
+    creates a session" again if the facade call is renamed: the generated
+    script must reach a session through ``<Client>.session(...)``.
+    """
+    assert ".session(" in _render(name), (
+        "the generated client no longer opens a session through the facade; "
+        "CREATORS keys on _open_session and would go empty"
+    )
 
 
 @pytest.mark.parametrize("name", CREATORS)

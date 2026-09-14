@@ -82,6 +82,27 @@ class TestTruncateUtf8Safe:
         result = _truncate_utf8_safe(text, 3)
         assert result == "日"
 
+    def test_cut_on_a_character_boundary_keeps_that_character(self):
+        """A budget a whole character exactly fills is spent on it.
+
+        Regression for #736: the helper used to back up past the final
+        sequence unconditionally -- continuation bytes AND lead byte --
+        without asking whether the cut had actually split anything.  So
+        a limit landing exactly on a character boundary discarded a
+        complete, in-budget character: this asserted `"日"` where
+        `"日本"` fits.  Non-ASCII users only, no error, no marker.
+        """
+        for text, limit, expected in (
+            ("日本語", 6, "日本"),   # 3-byte chars, cut between 2nd and 3rd
+            ("日本語", 9, "日本語"),  # exact total fit -> early return
+            ("a中b", 4, "a中"),      # 1-byte + 3-byte, cut on the boundary
+            ("a😀b", 5, "a😀"),     # 1-byte + 4-byte, cut on the boundary
+            ("café", 5, "café"),    # 2-byte tail, exact total fit
+            ("caféx", 5, "café"),   # 2-byte char ends exactly at the limit
+        ):
+            assert _truncate_utf8_safe(text, limit) == expected
+            assert len(_truncate_utf8_safe(text, limit).encode("utf-8")) <= limit
+
     def test_empty_result_when_first_char_too_large(self):
         """Returns empty string when first char doesn't fit."""
         text = "😀hello"  # First char is 4 bytes

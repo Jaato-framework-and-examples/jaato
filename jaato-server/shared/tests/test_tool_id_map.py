@@ -139,3 +139,53 @@ class TestStability:
         # the result must be the same regardless of what else was registered
         id_a2 = name_to_id("alpha_tool")
         assert id_a == id_a2
+
+
+class TestWireNameTraceFields:
+    """The one renderer of a tool-call trace record (#873).
+
+    A journal line carried only the hashed wire id, and the reverse map
+    that could resolve it is an in-process dict — so a reader in a later
+    process saw ``t_75386892`` and nothing else.  The record now carries
+    both: ``name`` keeps meaning "what the wire said", ``tool_name`` is the
+    resolution made in the only process that can make it.
+    """
+
+    def test_carries_wire_id_under_name_and_resolution_under_tool_name(self):
+        from shared.tool_id_map import wire_name_trace_fields
+        wire = name_to_id("renderTemplateToFile")
+        assert (wire_name_trace_fields(wire)
+                == f"name={wire!r} tool_name='renderTemplateToFile'")
+
+    def test_existing_name_field_does_not_change_meaning(self):
+        """``name`` stays the wire value — an existing reader keyed on it
+        must not silently start seeing the human name."""
+        from shared.tool_id_map import wire_name_trace_fields
+        wire = name_to_id("readFile")
+        assert wire_name_trace_fields(wire).startswith(f"name={wire!r} ")
+
+    def test_unknown_id_is_recorded_honestly(self):
+        """A hallucinated id resolves to itself, so the record shows the
+        invention rather than hiding it behind a resolved-looking name."""
+        from shared.tool_id_map import wire_name_trace_fields
+        assert (wire_name_trace_fields("t_deadbeef")
+                == "name='t_deadbeef' tool_name='t_deadbeef'")
+
+    def test_unhashed_wire_name_renders_both_fields_equal(self):
+        """A provider that does not hash writes the real name on the wire;
+        both fields agree, so one grep works across providers."""
+        from shared.tool_id_map import wire_name_trace_fields
+        assert (wire_name_trace_fields("readFile")
+                == "name='readFile' tool_name='readFile'")
+
+    def test_empty_wire_name_is_not_an_error(self):
+        """Some upstreams send the name on a later delta than the one that
+        opens the call; the START record is then nameless, not broken."""
+        from shared.tool_id_map import wire_name_trace_fields
+        assert wire_name_trace_fields("") == "name='' tool_name=''"
+
+    def test_none_wire_name_renders_as_empty(self):
+        """The SDK types a missing streaming name as ``None``; the record
+        must not read ``name=None tool_name=None``."""
+        from shared.tool_id_map import wire_name_trace_fields
+        assert wire_name_trace_fields(None) == "name='' tool_name=''"

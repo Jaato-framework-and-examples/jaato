@@ -18,10 +18,13 @@ from datetime import datetime
 from .config import (
     SubagentConfig, SubagentProfile, SubagentResult, GCProfileConfig,
     detect_workspace_tech_stack, discover_profiles, expand_plugin_configs,
+    inject_scrub_secret_env,
     expand_variables, _find_workspace_root, gc_profile_to_plugin_config,
     validate_profile,
 )
+from shared.completion_nudge import resolve_max_completion_nudges
 from shared.instruction_suppression import suppression_to_wire
+from shared.spawn_schema_loader import validate_spawn_params
 from jaato_sdk.plugins.base import UserCommand, CommandCompletion, CommandParameter, HelpLines
 from jaato_sdk.plugins.model_provider.types import (
     ToolSchema,
@@ -39,6 +42,26 @@ if TYPE_CHECKING:
     from ...retry_utils import RetryCallback
 
 logger = logging.getLogger(__name__)
+
+
+def _profile_max_parallel_tools(profile) -> Optional[int]:
+    """A profile's ``runtime_limits.max_parallel_tools``, or ``None`` (#862).
+
+    In-process subagents cannot be given kernel limits (see
+    :func:`shared.runtime_limits.assert_inprocess_can_honor`), but
+    ``max_parallel_tools`` is enforced by the session itself, so it is the
+    one ``runtime_limits`` field this path CAN honour — and the field a
+    fan-out profile most wants, since every in-process subagent's tool
+    pool competes for the same host.
+
+    Args:
+        profile: The resolved :class:`SubagentProfile`.
+
+    Returns:
+        The declared width, or ``None`` when the profile declares none.
+    """
+    limits = getattr(profile, "runtime_limits", None)
+    return getattr(limits, "max_parallel_tools", None) if limits else None
 
 
 def _get_env_connection() -> Dict[str, str]:
@@ -118,7 +141,11 @@ def _apply_trace_env(profile: Any, saved: Dict[str, Optional[str]]) -> None:
     trace = getattr(profile, 'trace', None)
     if not trace:
         return
-    for key, value in trace.as_env().items():
+    # workspace_root_override: this path knows the subagent's own workspace,
+    # so ${workspaceRoot} in a trace path resolves to the session's rather
+    # than the daemon's (the main-session path in core.py cannot).
+    for key, value in trace.as_env(
+            workspace_root_override=os.environ.get("JAATO_WORKSPACE_ROOT")).items():
         if key not in saved:
             saved[key] = os.environ.get(key)
         os.environ[key] = value
@@ -291,8 +318,13 @@ class SubagentPlugin(DaemonForwardingMixin):
                 - location: Vertex AI region
                 - default_model: Default model for subagents
                 - profiles: Dict of named subagent profiles
-                - allow_inline: Whether to allow inline subagent creation
-                - inline_allowed_plugins: Plugins allowed for inline creation
+                - allow_inline: Whether ``spawn_subagent`` may be called
+                  WITHOUT a ``profile``, inheriting the parent's whole
+                  plugin set with no system instructions (default False
+                  since #944; announced at WARNING when enabled)
+                - inline_allowed_plugins: Plugins an inline subagent may
+                  hold — enforced on the inherited set as well as on an
+                  explicit ``inline_config.plugins``
                 - auto_discover_profiles: Whether to auto-discover profiles from
                   profiles_dir (default: True)
                 - profiles_dir: Directory to scan for profile files
@@ -366,11 +398,55 @@ class SubagentPlugin(DaemonForwardingMixin):
         except Exception as e:  # pragma: no cover - defensive
             logger.debug("Failed to register profiles bundle handler: %s", e)
 
+        self._announce_inline_posture()
+
         logger.info(
             "Subagent plugin initialized with %d profiles (connection: %s)",
             len(self._config.profiles) if self._config else 0,
             "configured" if (self._config.project and self._config.location) else "pending"
         )
+
+    def _announce_inline_posture(self) -> None:
+        """Log the permissive posture, if this deployment chose it.
+
+        The leaky posture is ANNOUNCED, never silent — the rule
+        ``--ws-unsafe-no-auth`` and ``scrub_secret_env: none`` already
+        follow.  An inline subagent holds every plugin its parent holds
+        and runs with no persona, so a deployment that wants that should
+        be able to see in its own logs that it asked for it (#944).
+        """
+        if not self._inline_allowed():
+            return
+        allow_list = self._config.inline_allowed_plugins if self._config else []
+        logger.warning(
+            "Subagent plugin: allow_inline is ON — spawn_subagent may be "
+            "called without a 'profile', and such a subagent inherits this "
+            "agent's ENTIRE plugin set with no system instructions.%s Set "
+            "allow_inline: false (the default) to require a profile.",
+            f" Restricted to {sorted(allow_list)}." if allow_list else "",
+        )
+
+    def set_agent_name(self, agent_name: Optional[str]) -> None:
+        """Adopt a new agent label without a shutdown/initialize cycle.
+
+        Called by
+        :meth:`shared.plugins.registry.PluginRegistry._config_requires_reinit`
+        when a session re-exposes this plugin with a config carrying
+        nothing but its own ``agent_name`` — which every in-process
+        subagent spawn does for each plugin its profile lists.  For most
+        plugins ``agent_name`` is only the label their traces carry; here
+        it is also ``_self_profile_name``, the self-spawn guard
+        ``spawn_subagent`` compares against the profile it is asked to
+        spawn, and the profile ``list_subagent_profiles`` excludes.  So
+        it has to keep tracking the most recent spawner exactly as the
+        re-initialize path did, now without tearing the plugin down
+        underneath the parent's running subagents (#951).
+
+        Args:
+            agent_name: Profile name of the session re-exposing this
+                plugin, or ``None``.
+        """
+        self._self_profile_name = agent_name
 
     def shutdown(self) -> None:
         """Clean up plugin configuration state for re-initialisation.
@@ -449,13 +525,24 @@ class SubagentPlugin(DaemonForwardingMixin):
                 "allow_inline": {
                     "type": "boolean",
                     "default": False,
-                    "description": "Allow inline subagent creation",
+                    "description": (
+                        "Allow spawn_subagent without a 'profile'. Such a "
+                        "subagent inherits the parent's entire plugin set "
+                        "and gets no system instructions, so this is off by "
+                        "default and enabling it is announced at WARNING. "
+                        "While off, 'profile' is a required parameter of "
+                        "spawn_subagent and 'inline_config' is rejected."
+                    ),
                 },
                 "inline_allowed_plugins": {
                     "type": "array",
                     "items": {"type": "string"},
                     "default": [],
-                    "description": "Plugins allowed for inline subagent creation",
+                    "description": (
+                        "Plugins an inline subagent may hold. Enforced on "
+                        "the inherited set as well as on an explicit "
+                        "inline_config.plugins. Empty = no restriction."
+                    ),
                 },
                 "auto_discover_profiles": {
                     "type": "boolean",
@@ -594,6 +681,9 @@ class SubagentPlugin(DaemonForwardingMixin):
                     )
                     provider_cfg["quirks"] = dict(profile.quirks)
                     effective_plugin_configs[provider] = provider_cfg
+                # Profile-level scrub_secret_env (#863) -> subprocess
+                # surfaces, beneath their explicit knobs.
+                inject_scrub_secret_env(profile, effective_plugin_configs)
 
                 # Save parent session before create_session because configure() on
                 # the new session will overwrite self._parent_session
@@ -612,6 +702,10 @@ class SubagentPlugin(DaemonForwardingMixin):
                     # See the sibling call site: a subagent's own declared
                     # budget was omitted, leaving it silently unbudgeted.
                     budget_control=getattr(profile, "budget_control", None),
+                    # The one ``runtime_limits`` field an in-process
+                    # subagent can honour (#862): the session owns the
+                    # thread pool, so no subprocess boundary is needed.
+                    max_parallel_tools=_profile_max_parallel_tools(profile),
                     # Per-plugin tool allow-lists (profile ``tools:[...]``).
                     # In-process subagents share the parent's registry, so
                     # the scope MUST be per-session (the session applies it
@@ -681,6 +775,228 @@ class SubagentPlugin(DaemonForwardingMixin):
         logger.info("Restored %d/%d subagents", restored_count, len(agents))
         return restored_count
 
+    # ── spawn_subagent schema, built per exposure (#944) ───────────────
+    #
+    # ``allow_inline`` decides whether ``spawn_subagent`` may be called
+    # with no ``profile``.  Three surfaces have to agree about that, and
+    # before #944 none of them was even read: the ``required`` array (what
+    # the provider's function-calling validator enforces), the tool and
+    # parameter DESCRIPTIONS (what the model reads), and the executor's
+    # own gate (what actually runs).  A ``required`` field is a contract
+    # the model cannot step outside of; a runtime error alone is a retry
+    # loop that spends turns and can exhaust the completion-nudge budget.
+    #
+    # These are recomputed on every ``get_tool_schemas()`` call rather than
+    # memoised: subagents share the parent's ``PluginRegistry``, so a
+    # cached schema would leak one agent's knob into another's tool list.
+    #
+    # #1052 extends the same reasoning one step further, from whether a
+    # ``profile`` must be given to WHICH names exist: ``profile`` was an
+    # unconstrained string, so an invented name reached execution, returned
+    # "not found", and read as retryable.  ``_spawn_profile_enum`` names the
+    # discovered set in the schema.  Unlike ``required``, an ``enum`` binds
+    # only where the provider constrains decoding, so it is a strong default
+    # rather than a contract — the runtime not-found check stays.
+
+    def _inline_allowed(self) -> bool:
+        """Whether ``spawn_subagent`` may be called without a ``profile``.
+
+        Reads the live config each time (never cached — see the note
+        above).  Defaults to ``False`` when there is no config at all,
+        matching :class:`SubagentConfig`'s own default and the config
+        schema this plugin has always advertised.
+        """
+        return bool(self._config.allow_inline) if self._config else False
+
+    def _spawn_required_fields(self) -> List[str]:
+        """``required`` for ``spawn_subagent``'s parameters.
+
+        ``["task", "profile"]`` when inline spawning is disallowed (the
+        default), so an omitted profile is unrepresentable rather than
+        corrected after the fact; ``["task"]`` when a deployment has opted
+        into inline spawning.
+        """
+        return ["task"] if self._inline_allowed() else ["task", "profile"]
+
+    def _spawn_profile_requirement_text(self) -> str:
+        """The tool description's closing paragraph about ``profile``.
+
+        Changes with the knob as well as ``required`` does: models read
+        descriptions, and leaving "provide EITHER ... OR ..." in place
+        while ``required`` says otherwise reproduces the very mismatch
+        this fix exists to remove.
+        """
+        if self._inline_allowed():
+            return (
+                'IMPORTANT: Provide EITHER a profile name (preconfigured) '
+                'OR a descriptive name (inline).'
+            )
+        return (
+            'IMPORTANT: `profile` is REQUIRED. Call list_subagent_profiles '
+            'to see the available profiles and pick the one whose tools fit '
+            'the task. Spawning without a profile is disabled in this '
+            'deployment: such a subagent would inherit your plugins and run '
+            'with no instructions at all, which silently produces a worker '
+            'that cannot do the job.'
+        )
+
+    def _spawn_profile_param_text(self) -> str:
+        """Description of ``spawn_subagent``'s ``profile`` parameter."""
+        base = (
+            "Name of a runtime profile (model, plugins, permissions). "
+            "Use list_subagent_profiles to see available profiles."
+        )
+        if self._inline_allowed():
+            return base
+        return (
+            "REQUIRED. " + base + " The profile decides which tools the "
+            "subagent has; a profile may also bind its own persona via "
+            "`default_agent`, so naming the profile alone is usually enough."
+        )
+
+    def _spawn_profile_enum(self) -> Dict[str, Any]:
+        """The ``enum`` fragment for ``spawn_subagent``'s ``profile`` (#1052).
+
+        ``profile`` was an unconstrained string, so a model could name a
+        profile that exists nowhere; the not-found result reads as
+        retryable and weaker models re-word the task and spawn again.  A
+        production bot looped on ``profile="summarizer"`` — a name present
+        in no profiles tier — until the operator denied the tool.  Naming
+        the real set in the schema is the #944 move applied to the VALUE
+        rather than to ``required``: the model is told what exists at the
+        same layer that already tells it what is mandatory.
+
+        What this does NOT do, stated because the issue overstated it: an
+        ``enum`` is only *enforced* under grammar-constrained decoding
+        (``strict: true``, opt-in here via ``api_params.strict_tools``,
+        which the framework deliberately does not turn on for you).  Every
+        other provider treats it as part of the description — usually
+        respected, never guaranteed — and under the ``prose_tool_calls``
+        quirk the whole parameter schema is prompt-injected text
+        (``model_provider/_prose_tools.py``), i.e. exactly the tier whose
+        models are likeliest to invent a name.  Nothing in this framework
+        validates tool arguments against the schema before dispatch, so
+        the not-found check in :meth:`_execute_spawn_subagent` remains the
+        only layer that actually refuses an invented name.  This raises the
+        floor; it is not a wall.
+
+        Returns an empty dict — so ``profile`` keeps its previous,
+        unconstrained shape — in two cases:
+
+        * inline spawning is allowed.  Hung off :meth:`_inline_allowed`,
+          the predicate ``required`` and ``inline_config`` already read, so
+          the surfaces cannot disagree about the knob.
+        * no profile is available.  ``enum: []`` makes every value invalid
+          and is rejected outright by some providers; the honest report of
+          that state is the runtime prose ``_inline_spawn_denial`` and
+          ``list_subagent_profiles`` already produce ("No subagent profiles
+          are configured in this workspace").  The ``profile`` PROPERTY is
+          kept either way: it is in ``required`` when inline is disallowed,
+          and a required property that is absent from ``properties`` is an
+          unsatisfiable schema.
+
+        Sorted, not in discovery order: ``_scan_profiles_dir`` builds the
+        profile dict from an unsorted ``iterdir()``, and the tool schema
+        sits in the prompt-cache prefix — an order that varies per host
+        would re-read the whole prefix for nothing.
+
+        REMOTE SPAWN IS NOT EXEMPTED, deliberately, and it is the one known
+        cost of this change.  ``spawn_subagent(server=...)`` forwards
+        ``profile_name`` verbatim to a PEER, which resolves it against the
+        peer's own ``config_root``; this enum is built from
+        ``self._config.profiles``, which is purely local.  No predicate
+        available here decides whether a peer is reachable:
+        ``_remote_spawn_handler`` is registered by jaato-premium on the
+        DAEMON-side instance through a post-initialization session hook,
+        while this schema is built RUNNER-side, where the attribute is
+        ``None`` even when remote spawn works (the runner→daemon bridge in
+        :meth:`_execute_spawn_subagent` is what carries the call).  So
+        gating on it would read ``None`` on every path — an unconditional
+        enum wearing a comment that claims otherwise — and would be
+        silently wrong on the one path where remote spawn is live.  The
+        inverse (withhold the enum wherever a ``runner_rpc_client`` bridge
+        exists) holds on every runner-served session, i.e. the default, so
+        it would fix nothing.  A JSON Schema conditional is the third
+        option and is refused: ``oneOf``/``if`` break strict mode and
+        several providers.
+
+        The consequence, in full: under ``strict_tools: true`` a spawn
+        naming a peer-only profile becomes schema-invalid.  Under every
+        other configuration it still executes — nothing validates here, and
+        the remote branch never resolves the name locally — the model is
+        merely steered away from it.  The workaround is a local profile
+        declaring that name: the remote branch runs BEFORE profile
+        resolution, so a local stub satisfies the schema and changes
+        nothing about what the peer runs.
+        """
+        if self._inline_allowed():
+            return {}
+        names = self._available_profile_names()
+        if not names:
+            return {}
+        return {"enum": sorted(names)}
+
+    def _spawn_inline_config_property(self) -> Dict[str, Any]:
+        """The ``inline_config`` schema property, or nothing.
+
+        Returns an empty dict when inline spawning is disallowed, so the
+        parameter is absent from the wire body rather than advertised and
+        then refused at execution time.
+        """
+        if not self._inline_allowed():
+            return {}
+        return {
+            "inline_config": {
+                "type": "object",
+                "description": (
+                    "Optional overrides for subagent configuration. By default, "
+                    "subagents inherit your current plugins. Only specify properties "
+                    "you want to override."
+                ),
+                "properties": {
+                    "plugins": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Override inherited plugins. If not specified, inherits "
+                            "parent's plugins. Use plugin names (e.g., 'cli'), NOT "
+                            "tool names (e.g., 'cli_based_tool')."
+                        )
+                    },
+                    "system_instructions": {
+                        "type": "string",
+                        "description": "Additional system instructions for the subagent"
+                    },
+                    "max_turns": {
+                        "type": "integer",
+                        "description": "Maximum conversation turns (default: 10)"
+                    },
+                    "gc": {
+                        "type": "object",
+                        "description": (
+                            "Garbage collection configuration for the subagent. "
+                            "Allows setting a different GC threshold than the parent."
+                        ),
+                        "properties": {
+                            "type": {
+                                "type": "string",
+                                "enum": ["truncate", "summarize", "hybrid"],
+                                "description": "GC strategy type (default: truncate)"
+                            },
+                            "threshold_percent": {
+                                "type": "number",
+                                "description": "Trigger GC when context usage exceeds this percentage"
+                            },
+                            "preserve_recent_turns": {
+                                "type": "integer",
+                                "description": "Number of recent turns to always preserve"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
     def get_tool_schemas(self) -> List[ToolSchema]:
         """Return function declarations for subagent tools."""
         declarations = [
@@ -704,7 +1020,7 @@ class SubagentPlugin(DaemonForwardingMixin):
                     '3. When the subagent completes, you receive a COMPLETED event\n'
                     '4. THEN process results or spawn follow-up tasks\n\n'
                     'DO NOT poll list_active_subagents in a loop - wait for completion events.\n\n'
-                    'IMPORTANT: Provide EITHER a profile name (preconfigured) OR a descriptive name (inline).'
+                    + self._spawn_profile_requirement_text()
                 ),
                 parameters={
                     "type": "object",
@@ -719,10 +1035,13 @@ class SubagentPlugin(DaemonForwardingMixin):
                         },
                         "profile": {
                             "type": "string",
-                            "description": (
-                                "Name of a runtime profile (model, plugins, permissions). "
-                                "Use list_subagent_profiles to see available profiles."
-                            )
+                            # Constrained to the profiles this session
+                            # actually discovered, when there are any and
+                            # inline spawning is disallowed (#1052).  A
+                            # strong default, not a guarantee — see
+                            # :meth:`_spawn_profile_enum`.
+                            **self._spawn_profile_enum(),
+                            "description": self._spawn_profile_param_text(),
                         },
                         "agent": {
                             "type": "string",
@@ -792,60 +1111,19 @@ class SubagentPlugin(DaemonForwardingMixin):
                                 "Optional: name of a remote peer server to run the subagent on. "
                                 "When specified, the subagent is delegated to the remote server "
                                 "instead of running locally. Use the environment tool's cluster "
-                                "topology to see available servers and their capabilities."
+                                "topology to see available servers and their capabilities. "
+                                "NOTE: 'profile' is resolved by the PEER, but the values listed "
+                                "for it here are this server's own profiles (#1052) — a "
+                                "peer-only profile name must also be declared locally for the "
+                                "call to satisfy the schema."
                             )
                         },
-                        "inline_config": {
-                            "type": "object",
-                            "description": (
-                                "Optional overrides for subagent configuration. By default, "
-                                "subagents inherit your current plugins. Only specify properties "
-                                "you want to override."
-                            ),
-                            "properties": {
-                                "plugins": {
-                                    "type": "array",
-                                    "items": {"type": "string"},
-                                    "description": (
-                                        "Override inherited plugins. If not specified, inherits "
-                                        "parent's plugins. Use plugin names (e.g., 'cli'), NOT "
-                                        "tool names (e.g., 'cli_based_tool')."
-                                    )
-                                },
-                                "system_instructions": {
-                                    "type": "string",
-                                    "description": "Additional system instructions for the subagent"
-                                },
-                                "max_turns": {
-                                    "type": "integer",
-                                    "description": "Maximum conversation turns (default: 10)"
-                                },
-                                "gc": {
-                                    "type": "object",
-                                    "description": (
-                                        "Garbage collection configuration for the subagent. "
-                                        "Allows setting a different GC threshold than the parent."
-                                    ),
-                                    "properties": {
-                                        "type": {
-                                            "type": "string",
-                                            "enum": ["truncate", "summarize", "hybrid"],
-                                            "description": "GC strategy type (default: truncate)"
-                                        },
-                                        "threshold_percent": {
-                                            "type": "number",
-                                            "description": "Trigger GC when context usage exceeds this percentage"
-                                        },
-                                        "preserve_recent_turns": {
-                                            "type": "integer",
-                                            "description": "Number of recent turns to always preserve"
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                        # ``inline_config`` exists only while inline
+                        # spawning is allowed — see
+                        # :meth:`_spawn_inline_config_property`.
+                        **self._spawn_inline_config_property(),
                     },
-                    "required": ["task"]
+                    "required": self._spawn_required_fields(),
                 },
                 category="coordination",
                 discoverability=DISCOVERABILITY_DEFERRED,
@@ -1265,6 +1543,37 @@ class SubagentPlugin(DaemonForwardingMixin):
             'active': self._execute_list_active_subagents,
         }
 
+    def _profile_first_rules_text(self) -> str:
+        """The profile-first rules, phrased for the active ``allow_inline``.
+
+        The prompt layer is the third surface that has to agree with the
+        knob (alongside ``spawn_subagent``'s ``required`` array and the
+        executor's gate).  Telling a model "only spawn inline when no
+        profile matches" while the gate refuses every inline spawn buys a
+        wasted turn and a confused retry.
+        """
+        if self._inline_allowed():
+            return (
+                "Rules:\n"
+                "1. If a matching profile exists for the task → use spawn_subagent(profile=...)\n"
+                "2. If an idle profiled subagent can handle the task → use send_to_subagent\n"
+                "3. Only spawn inline (no profile) when NO profile matches AND the task is genuinely\n"
+                "   one-off exploration that doesn't fit any specialist\n\n"
+                "Inline subagents inherit your plugins but lack domain constraints. They MUST NOT be\n"
+                "used for tasks where a specialist profile would produce better, safer results (e.g.,\n"
+                "code generation in a specific language, structured operations on a specific tech stack).\n\n"
+            )
+        return (
+            "Rules:\n"
+            "1. If a matching profile exists for the task → use spawn_subagent(profile=...)\n"
+            "2. If an idle profiled subagent can handle the task → use send_to_subagent\n"
+            "3. If NO profile matches, do NOT spawn. Spawning without a profile is disabled\n"
+            "   here — the subagent would inherit your plugins and run with no instructions,\n"
+            "   so it would look spawned and do nothing useful. Do the work yourself, or tell\n"
+            "   the user which profile is missing.\n\n"
+            "'profile' is a REQUIRED argument of spawn_subagent.\n\n"
+        )
+
     def get_system_instructions(self) -> Optional[str]:
         """Return system instructions describing subagent capabilities."""
         base_instructions = (
@@ -1417,14 +1726,7 @@ class SubagentPlugin(DaemonForwardingMixin):
             "PROFILE-FIRST SPAWNING (MANDATORY):\n"
             "Before spawning any subagent, you MUST call list_subagent_profiles to review available\n"
             "profiles. This is not optional — the system enforces this as a prerequisite.\n\n"
-            "Rules:\n"
-            "1. If a matching profile exists for the task → use spawn_subagent(profile=...)\n"
-            "2. If an idle profiled subagent can handle the task → use send_to_subagent\n"
-            "3. Only spawn inline (no profile) when NO profile matches AND the task is genuinely\n"
-            "   one-off exploration that doesn't fit any specialist\n\n"
-            "Inline subagents inherit your plugins but lack domain constraints. They MUST NOT be\n"
-            "used for tasks where a specialist profile would produce better, safer results (e.g.,\n"
-            "code generation in a specific language, structured operations on a specific tech stack).\n\n"
+            + self._profile_first_rules_text() +
             "Specific principle overrides general: \"profile-first\" takes precedence over\n"
             "\"autonomous action\" and \"parallel exploration\" when both could apply.\n\n"
             "SPAWN ECONOMY - AVOID UNNECESSARY SPAWNS:\n"
@@ -1457,8 +1759,11 @@ class SubagentPlugin(DaemonForwardingMixin):
         profile_descriptions = []
         for name, profile in self._config.profiles.items():
             plugins_str = ", ".join(profile.plugins) if profile.plugins else "none"
+            persona = getattr(profile, 'default_agent', None)
+            persona_str = f", persona: {persona}" if persona else ""
             profile_descriptions.append(
-                f"- {name}: {profile.description} (tools: {plugins_str})"
+                f"- {name}: {profile.description} "
+                f"(tools: {plugins_str}{persona_str})"
             )
 
         profiles_text = "\n".join(profile_descriptions)
@@ -1468,7 +1773,11 @@ class SubagentPlugin(DaemonForwardingMixin):
             "Available subagent profiles:\n"
             f"{profiles_text}\n\n"
             "Use spawn_subagent with a profile name and task to delegate work. "
-            "Without a profile, subagents inherit your current plugin configuration."
+            + ("Without a profile, subagents inherit your current plugin "
+               "configuration." if self._inline_allowed() else
+               "A profile name is required; a profile that declares a "
+               "default_agent also supplies its own instructions, so naming "
+               "the profile alone is enough.")
         )
 
     def get_prerequisite_policies(self):
@@ -1980,11 +2289,21 @@ class SubagentPlugin(DaemonForwardingMixin):
             return self._cmd_help()
 
         if not self._config or not self._config.profiles:
+            # The message has to follow the knob: telling a model to "just
+            # call spawn_subagent with a task" while the gate requires a
+            # profile is the same description/contract mismatch #944 is
+            # about, one layer up.
             return {
                 'profiles': [],
+                'inline_allowed': self._inline_allowed(),
                 'message': (
                     'No predefined profiles. Subagents inherit your current plugins by default - '
                     'just call spawn_subagent with a task.'
+                    if self._inline_allowed() else
+                    'No subagent profiles are configured in this workspace '
+                    '(.jaato/profiles/), and spawning without a profile is '
+                    'disabled. There is nothing to delegate to — do the work '
+                    'yourself or tell the user.'
                 ),
             }
 
@@ -1993,18 +2312,28 @@ class SubagentPlugin(DaemonForwardingMixin):
             # Exclude this agent's own profile to prevent self-spawning loops
             if name == self._self_profile_name:
                 continue
-            profiles.append({
+            entry: Dict[str, Any] = {
                 'name': name,
                 'description': profile.description,
                 'plugins': profile.plugins,
                 'max_turns': profile.max_turns,
-            })
+            }
+            # Surfaced so the model can tell a profile that arrives with a
+            # persona from one it must pair with an ``agent`` itself.
+            if getattr(profile, 'default_agent', None):
+                entry['default_agent'] = profile.default_agent
+            profiles.append(entry)
 
         result: Dict[str, Any] = {
             'profiles': profiles,
-            'inline_allowed': self._config.allow_inline,
+            # Read from the same helper the gate and the tool schema read,
+            # so this can no longer report a posture the runtime does not
+            # hold (#944 defect 1: this field was the ONLY reader).
+            'inline_allowed': self._inline_allowed(),
             'inline_allowed_plugins': self._config.inline_allowed_plugins,
         }
+        if not self._inline_allowed():
+            result['profile_required'] = True
         if self._self_profile_name:
             result['current_profile'] = self._self_profile_name
         return result
@@ -2079,13 +2408,13 @@ class SubagentPlugin(DaemonForwardingMixin):
         message = args.get('message', '')
 
         if not subagent_id:
-            return {
+            return False, {
                 'success': False,
                 'error': 'No subagent_id provided'
             }
 
         if not message:
-            return {
+            return False, {
                 'success': False,
                 'error': 'No message provided'
             }
@@ -2098,7 +2427,7 @@ class SubagentPlugin(DaemonForwardingMixin):
                 session_info = None  # Not owned by this parent
 
         if not session_info:
-            return {
+            return False, {
                 'success': False,
                 'error': f'No active session found with ID: {subagent_id}. Use list_active_subagents to see available sessions.'
             }
@@ -2168,7 +2497,7 @@ class SubagentPlugin(DaemonForwardingMixin):
 
         except Exception as e:
             logger.exception(f"Error sending to subagent {subagent_id}")
-            return {
+            return False, {
                 'success': False,
                 'error': f'Error processing message: {str(e)}'
             }
@@ -2302,7 +2631,7 @@ class SubagentPlugin(DaemonForwardingMixin):
         subagent_id = args.get('subagent_id', '')
 
         if not subagent_id:
-            return {
+            return False, {
                 'success': False,
                 'message': 'No subagent_id provided'
             }
@@ -2311,7 +2640,7 @@ class SubagentPlugin(DaemonForwardingMixin):
         with self._sessions_lock:
             info = self._active_sessions.get(subagent_id)
             if not info or info.get('owner_id') != owner_id:
-                return {
+                return False, {
                     'success': False,
                     'message': f'No active session found with ID: {subagent_id}'
                 }
@@ -2361,7 +2690,7 @@ class SubagentPlugin(DaemonForwardingMixin):
         subagent_id = args.get('subagent_id', '')
 
         if not subagent_id:
-            return {
+            return False, {
                 'success': False,
                 'message': 'No subagent_id provided'
             }
@@ -2372,28 +2701,28 @@ class SubagentPlugin(DaemonForwardingMixin):
             if session_info and session_info.get('owner_id') != owner_id:
                 session_info = None  # Not owned by this parent
         if not session_info:
-            return {
+            return False, {
                 'success': False,
                 'message': f'No active session found with ID: {subagent_id}'
             }
 
         session = session_info.get('session')
         if not session:
-            return {
+            return False, {
                 'success': False,
                 'message': f'Session {subagent_id} has no valid session object'
             }
 
         # Check if session is currently running
         if not session.is_running:
-            return {
+            return False, {
                 'success': False,
                 'message': f'Session {subagent_id} is not currently running (status: waiting)'
             }
 
         # Check if cancellation is supported
         if not session.supports_stop:
-            return {
+            return False, {
                 'success': False,
                 'message': f'Session {subagent_id} does not support cancellation (provider limitation)'
             }
@@ -2417,7 +2746,7 @@ class SubagentPlugin(DaemonForwardingMixin):
                 },
             }
         else:
-            return {
+            return False, {
                 'success': False,
                 'message': f'Failed to cancel session {subagent_id} - may have already completed'
             }
@@ -2682,7 +3011,7 @@ class SubagentPlugin(DaemonForwardingMixin):
                 "agent_params.isolated=true",
                 agent_id,
             )
-            return SubagentResult(
+            return False, SubagentResult(
                 success=False,
                 response='',
                 error=(
@@ -2794,7 +3123,7 @@ class SubagentPlugin(DaemonForwardingMixin):
                 "_dispatch_isolated_spawn: RPC failed for subagent %s",
                 agent_id,
             )
-            return SubagentResult(
+            return False, SubagentResult(
                 success=False,
                 response='',
                 error=(
@@ -2838,7 +3167,7 @@ class SubagentPlugin(DaemonForwardingMixin):
             }
 
         # ok=False — domain failure.  Surface the stage + error.
-        return SubagentResult(
+        return False, SubagentResult(
             success=False,
             response='',
             error=(
@@ -2974,6 +3303,163 @@ class SubagentPlugin(DaemonForwardingMixin):
             "error": f"unrecognized event_kind: {event_kind!r}",
         }
 
+    def _available_profile_names(self) -> List[str]:
+        """Profile names a spawn may legitimately name.
+
+        Excludes this agent's own profile, which ``_execute_spawn_subagent``
+        refuses anyway (self-spawn loop) — listing it in an error message
+        would invite exactly the retry that is already blocked.
+        """
+        if not self._config:
+            return []
+        return [
+            name for name in self._config.profiles
+            if name != self._self_profile_name
+        ]
+
+    def _inline_spawn_denial(
+        self,
+        profile_name: Optional[str],
+        inline_config: Optional[Dict[str, Any]],
+    ) -> Optional[str]:
+        """Refuse an inline spawn when the deployment disallows one.
+
+        "Inline" is any spawn that names no ``profile``: the subagent then
+        inherits the parent's entire plugin set and gets no persona.  It is
+        also any spawn carrying ``inline_config``, whose whole purpose is
+        to shape that inherited session.
+
+        Returns the error message to surface, or ``None`` when the spawn
+        may proceed.  The wording mirrors the not-found error a WRONG
+        profile name has always produced, so both failures read the same
+        way and both name what is available.
+        """
+        if self._inline_allowed():
+            return None
+
+        available = self._available_profile_names()
+        if not profile_name:
+            listing = (
+                f"Available: {available}." if available else
+                "No profiles are configured in this workspace "
+                "(.jaato/profiles/), so there is nothing to delegate to — "
+                "tell the user rather than retrying."
+            )
+            return (
+                "spawn_subagent requires a 'profile'. Spawning without one "
+                "would inherit every plugin you hold and give the subagent "
+                "no instructions at all, which produces a worker that "
+                f"cannot do the job. {listing} "
+                "Call list_subagent_profiles to see what each one carries."
+            )
+        if inline_config:
+            return (
+                "'inline_config' is not accepted: inline subagent creation "
+                "is disabled in this deployment (subagent plugin config "
+                "allow_inline). Spawn the profile on its own, or use a "
+                "profile whose runtime config already matches."
+            )
+        return None
+
+    def _disallowed_inline_plugins(self, plugins: List[str]) -> Optional[str]:
+        """Check an inline subagent's plugin set against the allow-list.
+
+        ``inline_allowed_plugins`` means "an inline subagent may hold only
+        these".  Its only enforcement site used to be nested inside
+        ``if inline_config:`` / ``if 'plugins' in inline_config:``, so the
+        restriction bound only an agent that opted into being restricted:
+        omitting ``inline_config`` inherited the parent's whole set
+        unvalidated (#944).  Both paths call this now.
+
+        Returns the error message, or ``None`` when every plugin is
+        allowed (including when no allow-list is configured).
+        """
+        if not self._config or not self._config.inline_allowed_plugins:
+            return None
+        disallowed = set(plugins) - set(self._config.inline_allowed_plugins)
+        if not disallowed:
+            return None
+        return (
+            f"Plugins not allowed for inline creation: {sorted(disallowed)}. "
+            f"Inline subagents may hold only "
+            f"{sorted(self._config.inline_allowed_plugins)} — pass "
+            f"inline_config.plugins naming a subset, or spawn a profile."
+        )
+
+    def _self_spawn_error(self, profile_name: str) -> str:
+        """Message for a spawn of the agent's OWN profile (loop guard)."""
+        hint = (" or use inline_config for a specialized variant."
+                if self._inline_allowed() else ".")
+        return (
+            f"Cannot spawn profile '{profile_name}' — this is your own "
+            f"profile. Spawning yourself would create an infinite loop. "
+            f"Choose a different profile{hint}"
+        )
+
+    def _apply_persona(
+        self,
+        profile: 'SubagentProfile',
+        agent_name_arg: Optional[str],
+        agent_params_arg: Dict[str, Any],
+        parent_cwd: str,
+    ) -> Optional[str]:
+        """Set ``profile.system_instructions`` from an agent definition.
+
+        A profile supplies PLUGINS; an agent supplies the PERSONA.  When
+        the caller names no agent, the profile's own ``default_agent``
+        stands in (#944), so ``spawn_subagent(profile="documentalista")``
+        yields a subagent that has both instead of a correctly-tooled one
+        with no instructions at all.  An explicit ``agent=`` always wins —
+        the profile's binding is a default, not a ceiling.
+
+        Note this MUTATES ``profile.system_instructions`` — and the profile
+        object belongs to ``self._config.profiles`` when the spawn named
+        one, so the render is visible to later spawns of the same profile.
+        Pre-existing behaviour, and idempotent for a ``default_agent``
+        (the same persona resolves to the same text each time).
+
+        Returns an error message when the named agent cannot be resolved,
+        or ``None`` on success (including when no persona was named).
+        """
+        agent_name = agent_name_arg or getattr(profile, 'default_agent', None)
+        if not agent_name:
+            return None
+
+        from server.session_manager import SessionManager
+        agent_result = SessionManager._resolve_agent(
+            agent_name, agent_params_arg, parent_cwd,
+            config_root=self._config_root,
+        )
+        from_profile = not agent_name_arg
+        if agent_result is None:
+            if from_profile:
+                # The caller did nothing wrong — the profile names a
+                # persona that is not on disk.  Say so, rather than
+                # blaming an ``agent`` argument the model never passed.
+                return (
+                    f"Profile '{profile.name}' declares default_agent "
+                    f"'{agent_name}', which is not in .jaato/agents/ or "
+                    f".jaato/prompts/. This is a workspace configuration "
+                    f"error — report it rather than retrying."
+                )
+            return (
+                f"Agent '{agent_name}' not found in .jaato/agents/ "
+                f"or .jaato/prompts/"
+            )
+
+        profile.system_instructions = agent_result["system_instructions"]
+        if from_profile:
+            logger.debug(
+                "Subagent profile '%s' supplied its default_agent '%s'",
+                profile.name, agent_name,
+            )
+        if agent_result.get("missing_params"):
+            logger.warning(
+                "Subagent agent '%s' has unresolved params: %s",
+                agent_name, agent_result["missing_params"],
+            )
+        return None
+
     def _execute_spawn_subagent(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Spawn a subagent to handle a task.
 
@@ -2981,19 +3467,27 @@ class SubagentPlugin(DaemonForwardingMixin):
         to a remote peer server instead of running locally. Requires a
         remote spawn handler registered by a daemon extension.
 
+        ``profile`` is REQUIRED unless the deployment opted into inline
+        spawning (``allow_inline``, default False since #944) — see
+        :meth:`_inline_spawn_denial`.  The gate runs before the
+        remote-spawn branch, so it binds ``server=`` too.
+
         Args:
             args: Tool arguments containing:
                 - task: The task to perform
-                - profile: Optional profile name
+                - profile: Profile name (required unless allow_inline)
+                - agent / agent_params: Persona override; a profile's own
+                  ``default_agent`` stands in when no agent is named
                 - context: Optional additional context
-                - inline_config: Optional inline configuration
+                - inline_config: Optional inline configuration — accepted
+                  only while ``allow_inline`` is on
                 - server: Optional remote server name
 
         Returns:
             SubagentResult as a dict.
         """
         if not self._initialized:
-            return SubagentResult(
+            return False, SubagentResult(
                 success=False,
                 response='',
                 error='Subagent plugin not initialized'
@@ -3001,7 +3495,7 @@ class SubagentPlugin(DaemonForwardingMixin):
 
         task = args.get('task', '')
         if not task:
-            return SubagentResult(
+            return False, SubagentResult(
                 success=False,
                 response='',
                 error='No task provided'
@@ -3018,15 +3512,28 @@ class SubagentPlugin(DaemonForwardingMixin):
         # Prevent self-spawning loops: reject spawning the same profile
         # this agent was created from.
         if profile_name and profile_name == self._self_profile_name:
-            return SubagentResult(
+            return False, SubagentResult(
                 success=False,
                 response='',
-                error=(
-                    f"Cannot spawn profile '{profile_name}' — this is "
-                    f"your own profile. Spawning yourself would create an "
-                    f"infinite loop. Choose a different profile or use "
-                    f"inline_config for a specialized variant."
-                ),
+                error=self._self_spawn_error(profile_name),
+            ).to_dict()
+
+        # ── Inline-spawn gate (#944) ───────────────────────────────────
+        # Placed BEFORE the remote-spawn branch deliberately: that branch
+        # forwards ``profile_name or ''`` to the peer and returns, so a
+        # gate sitting with the profile resolution below would bind local
+        # spawns and let ``server=`` through unprofiled.
+        #
+        # An omitted ``profile`` used to be a SUCCESS that silently handed
+        # the subagent the parent's whole plugin set and no system
+        # instructions — indistinguishable, from the caller's side, from a
+        # correct delegation.  A wrong profile name has always been a hard
+        # error listing what is available; an absent one now reads the
+        # same way.
+        inline_denied = self._inline_spawn_denial(profile_name, inline_config)
+        if inline_denied:
+            return False, SubagentResult(
+                success=False, response='', error=inline_denied,
             ).to_dict()
 
         # ── Remote spawn path ──────────────────────────────────────────
@@ -3069,7 +3576,7 @@ class SubagentPlugin(DaemonForwardingMixin):
                 # No runner→daemon channel AND no handler → premium
                 # genuinely isn't installed (or this is a non-runner
                 # context).  Surface the actionable error.
-                return SubagentResult(
+                return False, SubagentResult(
                     success=False,
                     response='',
                     error=(
@@ -3116,10 +3623,9 @@ class SubagentPlugin(DaemonForwardingMixin):
         # ``workspace_path is None`` branch: a conditional import binds the name
         # function-local, so when the workspace resolves early (self._workspace_path
         # or registry.get_workspace_path() non-None — the common case, ALWAYS true
-        # for an embedded session) the branch is skipped and the later uses (the
-        # spawn-schema workspace fallback at ``or get_workspace_root()`` and the
-        # debug line) raise UnboundLocalError. Binding it once up-front keeps the
-        # name a proper local for every path.
+        # for an embedded session) the branch is skipped and the later use (the
+        # debug line below) raises UnboundLocalError. Binding it once up-front
+        # keeps the name a proper local for every path.
         from shared.session_context import get_workspace_root
         workspace_path = self._workspace_path
         if workspace_path is None and self._runtime and self._runtime.registry:
@@ -3133,7 +3639,7 @@ class SubagentPlugin(DaemonForwardingMixin):
             profile = self._config.get_profile(profile_name) if self._config else None
             if not profile:
                 available = list(self._config.profiles.keys()) if self._config else []
-                return SubagentResult(
+                return False, SubagentResult(
                     success=False,
                     response='',
                     error=f"Profile '{profile_name}' not found. Available: {available}"
@@ -3141,7 +3647,7 @@ class SubagentPlugin(DaemonForwardingMixin):
         else:
             # No profile specified - use inherited plugins with optional overrides
             if not self._parent_plugins:
-                return SubagentResult(
+                return False, SubagentResult(
                     success=False,
                     response='',
                     error='No plugins available to inherit. Configure parent plugins first.'
@@ -3157,15 +3663,6 @@ class SubagentPlugin(DaemonForwardingMixin):
                 # Override plugins only if explicitly specified
                 if 'plugins' in inline_config:
                     plugins = inline_config['plugins']
-                    # Validate plugins against allowed list if configured
-                    if self._config and self._config.inline_allowed_plugins:
-                        disallowed = set(plugins) - set(self._config.inline_allowed_plugins)
-                        if disallowed:
-                            return SubagentResult(
-                                success=False,
-                                response='',
-                                error=f"Plugins not allowed for inline creation: {disallowed}"
-                            ).to_dict()
                 if 'system_instructions' in inline_config:
                     system_instructions = inline_config['system_instructions']
                 if 'max_turns' in inline_config:
@@ -3180,8 +3677,24 @@ class SubagentPlugin(DaemonForwardingMixin):
                         notify_on_gc=gc_data.get('notify_on_gc', True),
                         summarize_middle_turns=gc_data.get('summarize_middle_turns'),
                         max_turns=gc_data.get('max_turns'),
+                        media_bytes_threshold=gc_data.get('media_bytes_threshold'),
+                        evict_consumed_media=gc_data.get('evict_consumed_media'),
+                        media_evict_mime_prefixes=gc_data.get(
+                            'media_evict_mime_prefixes'),
                         plugin_config=gc_data.get('plugin_config', {}),
                     )
+
+            # ``inline_allowed_plugins`` binds BOTH inline paths (#944).
+            # Checking it here rather than inside ``if 'plugins' in
+            # inline_config`` is the fix: the inherited set — what a spawn
+            # that mentions no inline_config gets — used to reach the
+            # session unvalidated, so the restriction only ever bound an
+            # agent that opted into being restricted.
+            plugin_denial = self._disallowed_inline_plugins(plugins)
+            if plugin_denial:
+                return False, SubagentResult(
+                    success=False, response='', error=plugin_denial,
+                ).to_dict()
 
             # Use provided name, or fall back to legacy behavior
             if custom_name:
@@ -3214,25 +3727,14 @@ class SubagentPlugin(DaemonForwardingMixin):
                 gc=gc_config,
             )
 
-        # Resolve agent if specified — sets profile.system_instructions
-        if agent_name_arg:
-            from server.session_manager import SessionManager
-            agent_result = SessionManager._resolve_agent(
-                agent_name_arg, agent_params_arg, parent_cwd,
-                config_root=self._config_root,
-            )
-            if agent_result is None:
-                return SubagentResult(
-                    success=False,
-                    response='',
-                    error=f"Agent '{agent_name_arg}' not found in .jaato/agents/ or .jaato/prompts/"
-                ).to_dict()
-            profile.system_instructions = agent_result["system_instructions"]
-            if agent_result.get("missing_params"):
-                logger.warning(
-                    "Subagent agent '%s' has unresolved params: %s",
-                    agent_name_arg, agent_result["missing_params"],
-                )
+        # Resolve the persona: an explicit ``agent`` argument, else the
+        # profile's own ``default_agent`` (#944).
+        persona_error = self._apply_persona(
+            profile, agent_name_arg, agent_params_arg, parent_cwd)
+        if persona_error:
+            return False, SubagentResult(
+                success=False, response='', error=persona_error,
+            ).to_dict()
 
         # ── Spawn-payload schema validation ──────────────────────────
         # Symmetric to ``signal_completion``'s ``completion_payload_schema``:
@@ -3243,62 +3745,38 @@ class SubagentPlugin(DaemonForwardingMixin):
         # prefetch's runtime check.  The detector for rewind-with-hint
         # picks up the error message and lets the supervisor re-call
         # spawn_subagent with the missing fields populated.
-        if profile.spawn_payload_schema is not None:
-            try:
-                from shared.spawn_schema_loader import resolve_spawn_schema
-                workspace_for_schema = (
-                    parent_cwd
-                    or (self._runtime.registry.get_workspace_path()
-                        if self._runtime and self._runtime.registry else None)
-                    or get_workspace_root()
-                )
-                resolved_schema = resolve_spawn_schema(
-                    profile.spawn_payload_schema,
-                    workspace_path=workspace_for_schema,
-                    config_root=self._config_root,
-                )
-                if resolved_schema is not None:
-                    import jsonschema
-                    try:
-                        jsonschema.validate(
-                            instance=agent_params_arg or {},
-                            schema=resolved_schema,
-                        )
-                    except jsonschema.ValidationError as exc:
-                        # Collect every required field that's still
-                        # missing so the supervisor can fix them all in
-                        # one retry instead of hammering the spawn-loop.
-                        required = list(resolved_schema.get('required') or [])
-                        missing = [
-                            f for f in required
-                            if not agent_params_arg or f not in agent_params_arg
-                        ]
-                        details = (
-                            f"missing required fields: {missing}. "
-                            if missing
-                            else f"first failure: {exc.message}. "
-                        )
-                        return SubagentResult(
-                            success=False,
-                            response='',
-                            error=(
-                                f"spawn_subagent({profile_name!r}) failed "
-                                f"agent_params validation: {details}"
-                                f"The '{profile_name}' profile requires "
-                                f"agent_params matching its spawn_payload_schema "
-                                f"({profile.spawn_payload_schema!r}). "
-                                f"Re-call spawn_subagent with the missing "
-                                f"fields populated from the prompt's case data — "
-                                f"do not paraphrase or omit."
-                            ),
-                        ).to_dict()
-            except Exception as exc:
-                # Schema-loader bug or jsonschema crash — degrade gracefully:
-                # log and skip validation rather than blocking the spawn.
-                logger.warning(
-                    "spawn_payload_schema validation skipped for profile "
-                    "%s: %s", profile_name, exc,
-                )
+        #
+        # Shared with the daemon's ``create_session`` boundary (#883), so
+        # a profile's schema cannot mean one thing here and another over
+        # IPC.  This is the path where the difference was real: a model
+        # emitting ``{"iteration": 1}`` hands us a Python ``int``, while
+        # the same params over the wire arrive as ``"1"``.  The helper
+        # validates the wire's string view either way; the params handed
+        # to the session, the persona and the prefetch are untouched.
+        spawn_details = validate_spawn_params(
+            profile.spawn_payload_schema,
+            agent_params_arg,
+            # ``parent_cwd`` already IS the resolved workspace (it falls
+            # back to ``os.getcwd()``), so the registry/get_workspace_root
+            # chain this replaces could never be reached.
+            workspace_path=parent_cwd,
+            config_root=self._config_root,
+        )
+        if spawn_details:
+            return False, SubagentResult(
+                success=False,
+                response='',
+                error=(
+                    f"spawn_subagent({profile_name!r}) failed "
+                    f"agent_params validation: {spawn_details}"
+                    f"The '{profile_name}' profile requires "
+                    f"agent_params matching its spawn_payload_schema "
+                    f"({profile.spawn_payload_schema!r}). "
+                    f"Re-call spawn_subagent with the missing "
+                    f"fields populated from the prompt's case data — "
+                    f"do not paraphrase or omit."
+                ),
+            ).to_dict()
 
         # Build the full prompt
         full_prompt = task
@@ -3310,7 +3788,7 @@ class SubagentPlugin(DaemonForwardingMixin):
                 # Validate context.files shape: must be dict {path: content}, not a list
                 files_val = context.get('files')
                 if files_val is not None and isinstance(files_val, list):
-                    return SubagentResult(
+                    return False, SubagentResult(
                         success=False,
                         response='',
                         error=(
@@ -3577,6 +4055,11 @@ class SubagentPlugin(DaemonForwardingMixin):
                 )
                 provider_cfg["quirks"] = dict(profile.quirks)
                 effective_plugin_configs[provider] = provider_cfg
+            # Profile-level scrub_secret_env (#863) -> the cli /
+            # interactive_shell / mcp sections, beneath their explicit
+            # knobs.  Mirrors the runner-envelope site in
+            # ``server/runner_spawn.py``.
+            inject_scrub_secret_env(profile, effective_plugin_configs)
 
             # Save parent session reference BEFORE create_session, because
             # create_session calls session.configure() which overwrites
@@ -3614,6 +4097,9 @@ class SubagentPlugin(DaemonForwardingMixin):
                 # runtime-level sessions, so they are also invisible to the
                 # daemon-side pool; this is their ONLY budget.
                 budget_control=getattr(profile, "budget_control", None),
+                # See the sibling call site: application-enforced, so it
+                # survives the in-process path that refuses kernel limits.
+                max_parallel_tools=_profile_max_parallel_tools(profile),
                 suppress_base_instructions=getattr(profile, 'suppress_base_instructions', False),
                 # Per-plugin tool allow-lists (profile ``tools:[...]``) —
                 # per-session, never mutates the shared registry.
@@ -3813,22 +4299,34 @@ class SubagentPlugin(DaemonForwardingMixin):
             # THE BOUND IS THE COUNTER GOING UP, which is a claim on
             # ``JaatoSession`` and not on this loop: ``send_message``
             # below starts a turn, and while a turn start cleared
-            # ``_completion_nudges_fired`` this ``while`` could not
-            # terminate at all -- each pass refunded the token it had
-            # just spent (#767).
+            # ``_completion_nudges_fired`` unconditionally this ``while``
+            # could not terminate at all -- each pass refunded the token
+            # it had just spent (#767).  A turn start now clears it only
+            # when the turn is NOT the one a nudge created (#934), and
+            # ``try_completion_nudge`` is what marks the turn: it spends
+            # the budget and latches ``_completion_nudge_turn_pending`` in
+            # one step.  So this loop must go through that method rather
+            # than incrementing the counter itself -- an in-place bump
+            # leaves the re-prompt looking caller-originated, the reset
+            # refills the budget, and the ``while`` unbounds again.
             # The flag ``session._signal_completion_called`` is flipped
             # in ``LifecycleTools._execute_signal_completion`` on
-            # successful invocation.
-            MAX_COMPLETION_NUDGES = 2
-            while (
-                not getattr(session, '_signal_completion_called', False)
-                and getattr(session, '_completion_nudges_fired', 0) < MAX_COMPLETION_NUDGES
-            ):
-                session._completion_nudges_fired += 1
+            # successful invocation, and is read by the same method.
+            #
+            # The budget is this subagent's PROFILE's (#919), resolved
+            # through the one shared default so this loop, the daemon's
+            # top-level guard and the embedded lead cannot drift.
+            MAX_COMPLETION_NUDGES = resolve_max_completion_nudges(profile)
+            while True:
+                should_nudge, nudges_fired = session.try_completion_nudge(
+                    MAX_COMPLETION_NUDGES,
+                )
+                if not should_nudge:
+                    break
                 logger.info(
                     "COMPLETION_NUDGE [%s]: agent ended its loop without "
                     "signal_completion (nudge %d/%d) — re-prompting",
-                    agent_id, session._completion_nudges_fired, MAX_COMPLETION_NUDGES,
+                    agent_id, nudges_fired, MAX_COMPLETION_NUDGES,
                 )
                 nudge = (
                     "Your session is about to end without calling "

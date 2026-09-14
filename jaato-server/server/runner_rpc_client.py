@@ -52,9 +52,16 @@ if TYPE_CHECKING:  # pragma: no cover — types only
     from shared.session_envelope import SessionInitEnvelope
 
 from shared.framing import (
+    MAX_MESSAGE_SIZE,
     FrameTooLargeError,
     read_frame,
     write_frame,
+)
+
+from server.runner.json_codec import (
+    dumps as _json_dumps,
+    frame_size,
+    loads as _json_loads,
 )
 
 from server.runner.envelope import (
@@ -71,6 +78,67 @@ from server.runner.envelope import (
 
 
 logger = logging.getLogger(__name__)
+
+
+#: Seconds a dispatched RPC may go with NO frame bearing its id before the
+#: daemon stops assuming and asks the runner what it actually has (#856).
+#:
+#: Not a cap on how long an RPC may take.  A turn legitimately runs for
+#: minutes, and killing one on a wall clock is the opposite of the fix; what
+#: this bounds is how long the daemon will believe, unchecked, that a request
+#: it wrote is being worked on.  Expiry triggers a reconciliation over the
+#: CONTROL lane, and a runner that says "yes, that id is mine" buys the call
+#: another full window, indefinitely.
+#:
+#: **Why 120s and not 5s.**  The probe travels the same channel, so it cannot
+#: answer while the runner's reader thread is blocked -- which it is, for the
+#: whole of ``session.bootstrap`` (run synchronously on the runner's main
+#: thread so ``aa_change_profile`` confines the thread that later spawns the
+#: workers).  Bootstrap's own timeout is 30s, and every named wrapper in this
+#: module carries a finite timeout of 30s or less.  A window comfortably above
+#: all of them means those callers keep their own tighter bounds and this
+#: watchdog only ever acts on the calls that have NO other bound -- which is
+#: exactly the set that hung: ``session.send_message`` and ``call_threadsafe``
+#: both default to ``timeout=None``.
+DEFAULT_DISPATCH_ACK_TIMEOUT = 120.0
+
+
+def _resolve_dispatch_ack_timeout() -> Optional[float]:
+    """Read :data:`DEFAULT_DISPATCH_ACK_TIMEOUT`'s env override.
+
+    ``0`` disables the watchdog, following the convention the provider
+    deadlines already use (``request_timeout: 0``, ``stream_idle_timeout: 0``).
+    A negative or unparseable value falls back to the default rather than
+    disabling: "unbounded" is the bug this exists to fix, so it must not be
+    reachable by typo.
+    """
+    raw = os.getenv("JAATO_RUNNER_ACK_TIMEOUT")   # env: seconds a dispatched runner RPC may go unacknowledged before the daemon reconciles it against the runner (0 disables)
+    if raw is None:
+        return DEFAULT_DISPATCH_ACK_TIMEOUT
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning(
+            "JAATO_RUNNER_ACK_TIMEOUT=%r is not a number; using the default "
+            "%.0fs", raw, DEFAULT_DISPATCH_ACK_TIMEOUT,
+        )
+        return DEFAULT_DISPATCH_ACK_TIMEOUT
+    if value == 0:
+        return None
+    if value < 0:
+        logger.warning(
+            "JAATO_RUNNER_ACK_TIMEOUT=%r is negative; using the default "
+            "%.0fs (pass 0 to disable)", raw, DEFAULT_DISPATCH_ACK_TIMEOUT,
+        )
+        return DEFAULT_DISPATCH_ACK_TIMEOUT
+    return value
+
+
+#: Methods whose dispatch is NOT watched.  ``session.health_check`` is the
+#: reconciliation probe itself: watching it would have the watchdog answer its
+#: own question, recursively.  It carries a finite timeout of its own, so it
+#: is bounded either way.
+_UNWATCHED_METHODS = frozenset({"session.health_check"})
 
 
 # Type alias for the per-call streaming callback (mirrors
@@ -133,6 +201,293 @@ class DaemonLoopTimeout(RunnerRPCTimeout):
 
 class RunnerAnswerTimeout(RunnerRPCTimeout):
     """The runner did not answer an RPC that its loop DID run."""
+
+
+class RunnerDispatchLost(RunnerRPCTimeout):
+    """A dispatched RPC the runner, when asked, cannot account for (#856).
+
+    The third failure mode of this channel, and until now the only one
+    with no bound and no name:
+
+    ====================  ==========================  ==================
+    what happened         how it surfaces             session survives?
+    ====================  ==========================  ==================
+    runner died (#851)    ``RunnerCallError``         no -- terminal
+    runner slow           ``RunnerAnswerTimeout``     yes
+    **dispatch lost**     ``RunnerDispatchLost``      yes
+    ====================  ==========================  ==================
+
+    Observed once as a two-turn voice session whose second turn was
+    registered in ``_in_flight`` and never happened: sixty-eight
+    minutes later every thread in all three processes was idle, the
+    pipe healthy, the runner alive with an empty work queue, and the
+    client still blocked in ``ask()``.  Nothing was *waiting* on
+    anything -- the work was gone, and no deadline noticed.
+
+    **Subclasses ``RunnerRPCTimeout`` deliberately**, which is what
+    decides the blast radius.  ``core.py``'s model-thread handler
+    terminates the session for anything it catches EXCEPT a
+    ``RunnerRPCTimeout``; a lost dispatch is our own plumbing losing a
+    frame while the runner-side session sits there healthy, so the
+    TURN must fail and the SESSION must live.  That is also what makes
+    it distinguishable from #851 in the client-visible error: a dead
+    runner reaches the client as ``RunnerCallError`` on a terminating
+    ``ErrorEvent``, a lost dispatch as one of the three subclasses
+    below on a ``recoverable=True`` one.
+
+    The message always names the request id and the session, because
+    the only artefacts of the original incident were four
+    ``_in_flight SET id=N`` lines that named neither.
+
+    **CATCH THIS BASE to handle every lost dispatch; catch a subclass
+    when the recovery differs -- and it does.**  ``never_received`` and
+    ``finished`` have opposite consequences for a caller, and a single
+    type hid that:
+
+    * the work did not happen -- the runner-side session is untouched
+      and **retrying is safe**;
+    * the work RAN -- history advanced, tools executed, files were
+      written, a provider was billed, an external API was called, and
+      only the daemon's view of the result was lost.  **Retrying
+      re-executes it.**
+
+    The axis is :attr:`may_have_run`, deliberately shaped after
+    :attr:`jaato_sdk.client.errors.SessionCreateFailed.may_exist` --
+    whose own docstring makes the case ("``True`` means the outcome is
+    genuinely unknown and a blind retry may create a SECOND session")
+    and whose ``SessionNotConfirmed`` sibling states the design rule
+    this follows: *"the one failure where the correct action depends on
+    something the caller cannot see, which is why it is a distinct type
+    rather than a detail in a message"*.
+
+    :attr:`verdict` is the machine-readable token for the MECHANISM, the
+    way ``SessionCreateFailed.cause`` is: stable, greppable and safe to
+    branch on where the human message is not.
+
+    ``may_have_run`` FAILS SAFE.  Only a verdict that positively
+    establishes the runner never received the call may claim ``False``;
+    every form of "we could not find out" reports ``True``.  A wrong
+    ``True`` costs a caller a redundant check, a wrong ``False`` costs
+    it a duplicated turn.
+
+    Attributes:
+        verdict: One of ``never_received``, ``finished``,
+            ``indeterminate``, ``unreachable``.
+        may_have_run: Whether the runner may already have executed this
+            call.  ``False`` only when that is provably excluded.
+        request_id: The RPC id, for correlation against the daemon's
+            ``DISPATCHED`` trace line.
+        method: The RPC method, e.g. ``session.send_message``.
+        session_id: The session this channel serves, when bootstrap has
+            named one.
+    """
+
+    #: Class-level defaults are the SAFE reading, so introspecting the
+    #: base (or a subclass that forgets to override) never yields
+    #: "safe to retry" by omission.
+    verdict: str = "unknown"
+    may_have_run: bool = True
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        request_id: Optional[int] = None,
+        method: Optional[str] = None,
+        session_id: Optional[str] = None,
+    ) -> None:
+        super().__init__(message)
+        self.request_id = request_id
+        self.method = method
+        self.session_id = session_id
+
+    def as_details(self) -> Dict[str, Any]:
+        """The machine-readable evidence for ``ErrorEvent.details``.
+
+        ``ErrorEvent.details`` is documented as "what a driver branches
+        on", with ``error`` left as the human sentence -- so the
+        retry-safety answer travels there rather than being recoverable
+        from a message string.  See
+        :meth:`server.core.JaatoServer` 's model-thread handler for the
+        emission, and the module docstring of
+        ``test_lost_dispatch_deadline_856`` for why ``recoverable`` is
+        NOT the field for this.
+        """
+        return {
+            "verdict": self.verdict,
+            "may_have_run": self.may_have_run,
+            "request_id": self.request_id,
+            "method": self.method,
+            "session_id": self.session_id or None,
+        }
+
+
+class RunnerDispatchNotReceived(RunnerDispatchLost):
+    """The runner positively does not have the call, and never did.
+
+    Its seen-id window covers the id and does not contain it, so the
+    request never reached the dispatcher.  The runner-side session is
+    untouched.
+
+    **RETRY IS SAFE** -- this is the only lost-dispatch verdict that may
+    say so, and it says so because the runner's answer excluded the
+    alternative rather than because nothing contradicted it.
+    """
+
+    verdict = "never_received"
+    may_have_run = False
+
+
+class RunnerResultLost(RunnerDispatchLost):
+    """The runner RAN the call and the RESPONSE never arrived.
+
+    The id has left ``active_call_ids`` and is still inside the seen-id
+    window, so the dispatcher took it and finished with it.  Every side
+    effect of that work is already in the world; the only casualty is
+    the daemon's view of the result.
+
+    **RETRY RE-EXECUTES THE WORK.**  Prefer reading the session's state
+    (``get_history``, the artefacts the turn was meant to produce) over
+    sending it again -- the counterpart of ``SessionNotConfirmed``'s
+    "prefer looking for the session over creating another".
+    """
+
+    verdict = "finished"
+    may_have_run = True
+
+
+class RunnerDispatchUnknown(RunnerDispatchLost):
+    """Nobody could say whether the call ran.
+
+    Two mechanisms, one consequence, told apart by :attr:`verdict`:
+
+    * ``unreachable`` -- the reconciliation probe itself did not come
+      back, so the runner was never asked;
+    * ``indeterminate`` -- the runner answered, and its seen-id window
+      had already rolled past the id, so its answer does not cover the
+      question.  This is the case that makes
+      :data:`server.runner.rpc.SEEN_REQUEST_ID_MEMORY` a correctness
+      bound rather than a tuning parameter: without this verdict a
+      rolled window reads as ``never_received``, which is the one
+      misclassification that says "safe to retry" about work that ran.
+
+    **TREAT AS POSSIBLY EXECUTED.**
+    """
+
+    verdict = "unreachable"
+    may_have_run = True
+
+    def __init__(self, message: str, *, verdict: str = "unreachable",
+                 **kwargs: Any) -> None:
+        super().__init__(message, **kwargs)
+        #: Per-instance, because the two mechanisms share this type and
+        #: differ only in which one happened.
+        self.verdict = verdict
+
+
+#: verdict token -> the exception that carries it.  One table rather than a
+#: chain of ``if``s, so a verdict added later cannot silently fall through to
+#: a class whose ``may_have_run`` is wrong for it.
+_VERDICT_EXCEPTIONS: Dict[str, type] = {
+    "never_received": RunnerDispatchNotReceived,
+    "finished": RunnerResultLost,
+    "indeterminate": RunnerDispatchUnknown,
+    "unreachable": RunnerDispatchUnknown,
+}
+
+
+def classify_reconciliation(
+    request_id: int, status: Dict[str, Any],
+) -> Tuple[str, str]:
+    """Turn one ``session.health_check`` answer into a verdict (#856).
+
+    Pure, so the dangerous cases are unit-testable without a socket:
+    every branch below is a claim about whether the runner may already
+    have executed *request_id*, and one of them is allowed to say "no".
+
+    Args:
+        request_id: The id under reconciliation.
+        status: The runner's ``session.health_check`` result.
+
+    Returns:
+        ``(verdict, detail)``.  Verdict is one of ``running``,
+        ``finished``, ``never_received``, ``indeterminate``; ``detail``
+        is a human sentence for the log and the exception message.
+
+    The ordering is load-bearing:
+
+    1. **active** -> ``running``.  The runner has it; nothing is wrong.
+    2. **in the window** -> ``finished``.  It ran, so the response is
+       what was lost.
+    3. **the window has EVICTED, and the id is below its floor** ->
+       ``indeterminate``.  The runner's answer is then silent about the
+       id rather than negative, and reading silence as "never received"
+       is the one misclassification that says "safe to retry" about work
+       that ran.
+    4. otherwise -> ``never_received``, the one safe-to-retry verdict.
+
+    **Absence is proof only while the window has never evicted.**  It is
+    a ``deque(maxlen=...)``, so it has dropped something iff it is FULL
+    -- and the runner reports its own capacity
+    (``seen_window_capacity``) rather than the daemon assuming a
+    constant, because a number asserted on one side of a wire about the
+    other is exactly the kind of claim that goes stale silently.  A
+    partly-filled window has evicted nothing, so an id missing from it
+    was genuinely never registered, and `min()` is merely the oldest id
+    the runner happens to have seen -- NOT a floor.  Treating it as one
+    would report ``indeterminate`` for the ordinary lost dispatch (whose
+    id is, by construction, older than the probe's), and the safe
+    verdict would then be the only verdict ever reached: fail-safe, and
+    useless.
+
+    With no capacity reported the window is assumed full whenever it is
+    non-empty, which is the conservative reading -- it can only move an
+    answer from ``never_received`` towards ``indeterminate``.
+    """
+    active = set(status.get("active_call_ids") or ())
+    known = set(status.get("known_request_ids") or ())
+    highest = status.get("highest_request_id")
+
+    if request_id in active:
+        return "running", f"the runner reports id={request_id} running"
+
+    if request_id in known:
+        return "finished", (
+            f"the runner ran id={request_id} and it is no longer active, "
+            f"so the RESPONSE frame is what was lost.  Its side effects "
+            f"have already happened"
+        )
+
+    if not known and highest:
+        # A runner that has registered calls and remembers none of them:
+        # its answer cannot be interpreted either way.
+        return "indeterminate", (
+            f"the runner reports no remembered ids beside a high-water "
+            f"mark of {highest}, so its answer does not cover "
+            f"id={request_id}"
+        )
+
+    capacity = status.get("seen_window_capacity")
+    evicted = (
+        len(known) >= capacity if isinstance(capacity, int) and capacity > 0
+        else bool(known)
+    )
+    floor = min(known) if known else 0
+    if evicted and request_id < floor:
+        return "indeterminate", (
+            f"id={request_id} is below the runner's seen-id window, which "
+            f"is full ({len(known)} of {capacity}) and now starts at "
+            f"{floor} -- it has rolled past the id, so the answer is "
+            f"silent about it rather than negative, and it may have run"
+        )
+
+    return "never_received", (
+        f"the runner has never been asked to run id={request_id} "
+        f"(it is running {sorted(active)}, and its seen-id window holds "
+        f"{len(known)} of {capacity} ids, so it has evicted nothing and "
+        f"its silence about this id is conclusive).  The frame was "
+        f"written to the wire and the runner does not have it"
+    )
 
 
 async def _await_runner(coro: Any, timeout: Optional[float], method: str) -> Any:
@@ -232,6 +587,7 @@ class RunnerRPCClient:
         runner_pid: int,
         loop: Optional[asyncio.AbstractEventLoop] = None,
         rpc_server: Optional["RunnerRPCServer"] = None,
+        dispatch_ack_timeout: Optional[float] = -1.0,
     ) -> None:
         """Construct the client.
 
@@ -240,6 +596,14 @@ class RunnerRPCClient:
             runner_pid: Spawned runner PID — for waitpid + signal
                 escalation in ``close``.
             loop: Optional event-loop override (defaults to current).
+            dispatch_ack_timeout: Seconds a dispatched RPC may go
+                unacknowledged before the daemon reconciles it against
+                the runner (#856).  ``None`` disables the watchdog.
+                The default sentinel ``-1.0`` means "resolve from
+                :data:`DEFAULT_DISPATCH_ACK_TIMEOUT` and
+                ``JAATO_RUNNER_ACK_TIMEOUT``" — a sentinel rather than
+                ``None`` because ``None`` is a meaningful value here
+                (disabled) and a caller must be able to say it.
             rpc_server: Optional :class:`RunnerRPCServer` for handling
                 runner → daemon RPCs (Phase 3 §3.2).  When ``None``,
                 incoming ``request`` frames from the runner are
@@ -255,6 +619,12 @@ class RunnerRPCClient:
         self._writer: Optional[asyncio.StreamWriter] = None
         self._read_task: Optional[asyncio.Task] = None
         self._closed = False
+        #: Why this channel closed, or ``None`` while it is live (#1058).
+        #: Set exactly once, by :meth:`_mark_closed`, from whichever of
+        #: the two writers of ``_closed`` gets there first.  The pool
+        #: reads it through :attr:`close_reason` so an evicted slot's
+        #: log line names the cause instead of only the symptom.
+        self._close_reason: Optional[str] = None
         self._next_id = 1
 
         # In-flight calls — resolved by the read loop when the
@@ -277,10 +647,198 @@ class RunnerRPCClient:
         # Tasks dispatching incoming request frames; tracked so we
         # can cancel on close().
         self._dispatch_tasks: Dict[int, asyncio.Task] = {}
+        # #988: cancel frames that failed to reach the wire.  Nonzero
+        # means a caller's stop() was accepted and never delivered.
+        self._cancel_write_failures = 0
+
+        # ---------------- #856: the dispatch watchdog -------------------
+        #
+        # ``_in_flight`` records what the daemon INTENDS; these record
+        # what happened to it.  The three move together and are only
+        # ever touched from the event-loop thread (``call`` and the read
+        # loop both run there), so they need no lock.
+        #
+        # ``_dispatched``      id -> method, set AFTER the frame reached
+        #                      the wire.  Its absence beside an
+        #                      ``_in_flight`` entry is "registered, never
+        #                      written" — the gap the original incident
+        #                      fell into and which nothing recorded.
+        # ``_frame_seen``      id -> loop time of the last frame of ANY
+        #                      kind bearing that id.  Evidence the runner
+        #                      has the call; refreshed by streaming, so a
+        #                      chatty turn never reaches the watchdog.
+        # ``_dispatch_watchdogs``  id -> the watching task, cancelled when
+        #                      the call settles.
+        self._dispatch_ack_timeout: Optional[float] = (
+            _resolve_dispatch_ack_timeout()
+            if dispatch_ack_timeout == -1.0
+            else dispatch_ack_timeout
+        )
+        self._dispatched: Dict[int, str] = {}
+        self._frame_seen: Dict[int, float] = {}
+        self._dispatch_watchdogs: Dict[int, asyncio.Task] = {}
+        #: Session this channel serves, learned at bootstrap.  Only job is
+        #: to appear in a :class:`RunnerDispatchLost` message: the original
+        #: incident's whole record was four id numbers naming no session.
+        self._session_id: str = ""
+        #: How many calls this channel has failed as lost dispatches.
+        #: Counted, not merely logged, so a harness can assert on it —
+        #: the posture ``cancel_write_failures`` already takes (#988).
+        self._dispatch_lost = 0
+        #: Of those, how many MAY ALREADY HAVE RUN — the subset whose
+        #: side effects are in the world and whose result is gone.  A
+        #: separate number because the two need different operator
+        #: responses: the first is lost work, the second is work that
+        #: happened and cannot be safely repeated.
+        self._dispatch_lost_may_have_run = 0
 
     @property
     def runner_pid(self) -> int:
         return self._runner_pid
+
+    @property
+    def is_closed(self) -> bool:
+        """Whether this channel is dead — every later :meth:`call` will fail.
+
+        The public form of ``_closed``, which has two writers:
+        :meth:`close` (explicit teardown) and the read loop's ``finally``
+        (EOF, a frame-level error, a crash, or cancellation) — plus
+        :meth:`_on_read_task_done` for the one cancellation the
+        ``finally`` cannot see.
+
+        "Closed" is not always "unrecoverable": see :attr:`can_revive`
+        for the single cause — an externally cancelled read task — that
+        leaves the runner and the transport intact and can be reopened.
+        Every other cause is terminal for this channel.
+
+        Read by :mod:`server.runner_pool` so a pool slot whose client has
+        died is never handed to the next session (#1058).  It is a POLL —
+        the pool asks at the two points where a slot's liveness is
+        load-bearing — rather than a callback the pool would have to have
+        registered: a registration nobody performs is inert and silent,
+        which is the shape #735 is named after.
+        """
+        return self._closed
+
+    @property
+    def close_reason(self) -> Optional[str]:
+        """Why the channel closed, or ``None`` while it is live (#1058).
+
+        One of ``"explicit-close"``, ``"eof"``, ``"read-loop-crash"``,
+        ``"oversized-frame"``, ``"malformed-frame"`` or ``"cancelled"``.
+
+        Exists because the two shapes that end the read loop are
+        operationally different — the runner process died, versus the
+        loop raised on a frame — and the daemon log did not distinguish
+        them at the point where the consequence is felt.  The pool's
+        eviction line names this, so the next occurrence is diagnosable
+        from one line rather than from a correlated read of the whole
+        daemon log.
+        """
+        return self._close_reason
+
+    @property
+    def can_revive(self) -> bool:
+        """Whether a closed channel can be REOPENED on its own transport.
+
+        True for exactly one cause of death: somebody outside this class
+        cancelled the read task (#1058).  That case is special in three
+        ways that no other is:
+
+        * the runner was never signalled, so the process is alive;
+        * the socket and its asyncio transport were never closed, so the
+          writer still works and the bytes still arrive;
+        * nothing was in flight — a pooled idle slot has no traffic — so
+          the reader is parked on a frame boundary with an empty buffer
+          and no half-read frame to desynchronise on.
+
+        What died is only the task that was consuming frames, and a task
+        cannot be un-cancelled — but a NEW one can be created on the same
+        reader.  That is what :meth:`revive_read_loop` does, and this is
+        the evidence it requires first.
+
+        Every other cause is refused, and each for its own reason:
+
+        ====================  ====================================
+        ``close_reason``      Why no revive
+        ====================  ====================================
+        ``eof``               the peer is gone; a new reader would
+                              read EOF and close again
+        ``explicit-close``    :meth:`close` reaped the runner — a
+                              reader on a socket whose peer is a
+                              corpse is worse than no slot
+        ``oversized-frame``   the stream is desynchronised: the
+        ``malformed-frame``   length prefix was consumed and the
+                              body was not
+        ``None`` (live)       nothing to revive
+        ====================  ====================================
+
+        Note that ``close()`` can never produce ``"cancelled"``: it
+        stamps ``"explicit-close"`` BEFORE cancelling the read task, and
+        :meth:`_mark_closed` keeps the first cause.  So this predicate is
+        also a precise statement about provenance — a channel that
+        answers True was cancelled by something outside this module.
+        """
+        if not self._closed or self._close_reason != "cancelled":
+            return False
+        if self._in_flight:
+            return False
+        if self._writer is None or self._writer.is_closing():
+            return False
+        return self._reader is not None and not self._reader.at_eof()
+
+    async def revive_read_loop(self) -> bool:
+        """Start a fresh read task on the surviving transport (#1058).
+
+        Must be awaited ON the client's own event loop — it creates a
+        task — which is why the caller drives it through
+        ``run_coroutine_threadsafe`` exactly as it drives :meth:`start`.
+
+        Re-checks :attr:`can_revive` here rather than trusting the
+        caller's check: the caller runs off the loop, so the state it
+        read may have moved by the time this is scheduled, and reviving a
+        channel whose peer has since gone would install a reader that
+        immediately closes it again — the same failure, one layer later.
+
+        Returns:
+            ``True`` when a new reader is running and the channel is
+            usable again; ``False`` when the evidence did not support it,
+            in which case the channel is left exactly as it was and the
+            caller should discard the slot.
+        """
+        if not self.can_revive:
+            return False
+        self._closed = False
+        self._close_reason = None
+        self._read_task = asyncio.get_running_loop().create_task(
+            self._read_loop(),
+            name=f"runner-rpc-read-{self._runner_pid}",
+        )
+        self._read_task.add_done_callback(self._on_read_task_done)
+        logger.warning(
+            "RunnerRPCClient: read task for runner pid=%d had been "
+            "CANCELLED by something outside this client; a fresh reader "
+            "was started on the surviving transport (#1058).  Nothing in "
+            "this tree cancels it — if this line appears, find what does.",
+            self._runner_pid,
+        )
+        return True
+
+    def _mark_closed(self, reason: str) -> None:
+        """Record that the channel is closed, and why.
+
+        First writer wins: ``close()`` and the read loop's ``finally``
+        can both run for one teardown (``close`` cancels the read task),
+        and the FIRST cause is the informative one — a reader told
+        ``"cancelled"`` about a channel that actually died on EOF learns
+        the wrong thing.
+
+        Args:
+            reason: One of the vocabulary listed on :attr:`close_reason`.
+        """
+        self._closed = True
+        if self._close_reason is None:
+            self._close_reason = reason
 
     # --------------------------- lifecycle -----------------------------
 
@@ -308,6 +866,33 @@ class RunnerRPCClient:
             self._read_loop(),
             name=f"runner-rpc-read-{self._runner_pid}",
         )
+        self._read_task.add_done_callback(self._on_read_task_done)
+
+    def _on_read_task_done(self, task: "asyncio.Task") -> None:
+        """Catch a read task cancelled BEFORE its first step (#1058).
+
+        The loop body's ``finally`` records every way the reader can
+        end — except one.  ``Task.cancel()`` on a task that has not been
+        scheduled yet cancels it without ever entering the coroutine, so
+        no ``except`` and no ``finally`` runs and ``_closed`` stays
+        ``False``.  The channel then reports itself HEALTHY while having
+        no reader at all: writes reach the runner, replies are never
+        consumed, and every ``call`` waits out its deadline.  That is
+        worse than the closed-client failure this whole change is about,
+        because the pool's liveness poll is answered "alive" and #856's
+        reconciliation is the only thing left between it and a hang.
+
+        Narrow on purpose: it fires only when the task was CANCELLED and
+        nothing has recorded a cause, which is exactly that window.
+        Every other ending has already been through ``_mark_closed`` and
+        is left alone, so this cannot overwrite a real reason with
+        ``"cancelled"``.
+
+        Args:
+            task: The finished read task (the callback's own argument).
+        """
+        if not self._closed and task.cancelled():
+            self._mark_closed("cancelled")
 
     def reset_for_slot_reuse(self) -> None:
         """Phase 2 cascade-sharing: clear per-session RPC state while
@@ -332,6 +917,9 @@ class RunnerRPCClient:
           - ``_stream_cbs``, ``_notification_cbs``: per-session
             output/notification subscribers are dropped — the next
             session installs fresh callbacks via session_send_message.
+          - ``_dispatch_watchdogs`` and their bookkeeping (#856): the
+            deadline is per call, and a call from the outgoing session
+            must not be reconciled against the incoming one.
 
         What this preserves (transport state tied to the socket):
 
@@ -363,6 +951,12 @@ class RunnerRPCClient:
         self._dispatch_tasks.clear()
         self._stream_cbs.clear()
         self._notification_cbs.clear()
+        # #856: the dispatch watchdogs are per-CALL, so a slot reused by
+        # the next cascade session must not inherit one.  ``_session_id``
+        # is deliberately NOT cleared: the next ``bootstrap_session``
+        # overwrites it, and until then the outgoing session's id is a
+        # better label than none.
+        self._settle_all_dispatches()
         logger.debug(
             "RunnerRPCClient.reset_for_slot_reuse: cleared per-session "
             "state; transport (sock fd=%s pid=%d) stays alive",
@@ -381,7 +975,7 @@ class RunnerRPCClient:
         """
         if self._closed:
             return
-        self._closed = True
+        self._mark_closed("explicit-close")
 
         # #284/#280: capture the slot's process group BEFORE teardown
         # begins.  The slot leads its own session (os.setsid at fork),
@@ -427,6 +1021,10 @@ class RunnerRPCClient:
         self._in_flight.clear()
         self._stream_cbs.clear()
         self._notification_cbs.clear()
+        # #856: no call is outstanding any more, so nothing is left to
+        # reconcile.  Settling here as well as in the read loop's
+        # teardown covers the ordering where ``close`` wins the race.
+        self._settle_all_dispatches()
 
         # 2. Wait for runner to exit.
         await self._wait_runner_exit(timeout)
@@ -591,7 +1189,17 @@ class RunnerRPCClient:
         On peer-EOF (graceful) or any transport error, fail every
         in-flight future and return — the caller's ``close()`` cleans
         up the rest.
+
+        Every exit path names itself in ``reason`` before leaving, and
+        the ``finally`` hands that to :meth:`_mark_closed` (#1058).  A
+        pooled slot's client dies HERE, silently, long after the session
+        that created it ended; the pool learns of it by polling
+        :attr:`is_closed`, and the recorded reason is what tells an
+        operator whether the RUNNER died (``"eof"``) or the loop did
+        (``"read-loop-crash"`` and friends) — two different incidents
+        that used to leave the same evidence.
         """
+        reason = "eof"
         try:
             while True:
                 try:
@@ -601,17 +1209,22 @@ class RunnerRPCClient:
                         "RunnerRPCClient: peer sent oversized frame: %s",
                         exc,
                     )
+                    reason = "oversized-frame"
                     break
                 if raw is None:
-                    logger.info("RunnerRPCClient: runner closed connection")
+                    logger.info(
+                        "RunnerRPCClient: runner closed connection "
+                        "(pid=%d)", self._runner_pid,
+                    )
                     break
 
                 try:
-                    payload = json.loads(raw)
+                    payload = _json_loads(raw)
                 except json.JSONDecodeError as exc:
                     logger.error(
                         "RunnerRPCClient: malformed JSON frame: %s", exc,
                     )
+                    reason = "malformed-frame"
                     break
 
                 kind = payload.get("kind")
@@ -624,6 +1237,7 @@ class RunnerRPCClient:
                         )
                         continue
                     fut = self._in_flight.pop(env.id, None)
+                    self._note_frame_seen(env.id)
                     logger.info(   # [RPC_DIAG] DIAG BRANCH — daemon reply match
                         "[RPC_DIAG] daemon read_loop RESPONSE id=%s in_flight_had=%s client=%s",
                         env.id, fut is not None, id(self))
@@ -644,6 +1258,7 @@ class RunnerRPCClient:
                             "RunnerRPCClient: bad stream frame: %s", exc,
                         )
                         continue
+                    self._note_frame_seen(sf.id)
                     cb = self._stream_cbs.get(sf.id)
                     if cb is not None:
                         try:
@@ -691,6 +1306,7 @@ class RunnerRPCClient:
                             payload,
                         )
                         continue
+                    self._note_frame_seen(nf.id)
                     cb = self._notification_cbs.get(nf.id)
                     if cb is None:
                         # No registered handler for this in-flight
@@ -716,15 +1332,21 @@ class RunnerRPCClient:
                         "RunnerRPCClient: unknown frame kind=%r", kind,
                     )
         except asyncio.CancelledError:
+            reason = "cancelled"
             raise
         except Exception:  # noqa: BLE001
-            logger.exception("RunnerRPCClient: read loop crashed")
+            reason = "read-loop-crash"
+            logger.exception(
+                "RunnerRPCClient: read loop crashed (pid=%d)",
+                self._runner_pid,
+            )
         finally:
             # Mark the channel closed so subsequent ``call()`` attempts
             # raise RunnerCallError up front instead of writing to a
             # dead transport (which would surface as ConnectionResetError
-            # at a confusing layer).
-            self._closed = True
+            # at a confusing layer).  ``_mark_closed`` also records WHY,
+            # which is what the pool's eviction line reports (#1058).
+            self._mark_closed(reason)
             for fid, fut in list(self._in_flight.items()):
                 if not fut.done():
                     fut.set_exception(
@@ -735,6 +1357,27 @@ class RunnerRPCClient:
             self._in_flight.clear()
             self._stream_cbs.clear()
             self._notification_cbs.clear()
+            # #856: the channel is gone, so every watchdog's question is
+            # answered — by EOF, which is #851's failure and not this one.
+            self._settle_all_dispatches()
+
+    def _note_frame_seen(self, request_id: int) -> None:
+        """Record that the runner spoke about *request_id* just now (#856).
+
+        Called from the read loop for every response, stream and
+        notification frame — i.e. for every frame kind that names an
+        outgoing call.  This is what keeps the watchdog off a
+        legitimately long turn: a streaming model refreshes the
+        timestamp continuously, so the reconciliation probe is reached
+        only by a call that has gone COMPLETELY silent, which is the
+        state the lost dispatch leaves behind.
+
+        No-op when the watchdog is disabled, so the bookkeeping costs
+        nothing where it cannot be read.
+        """
+        if self._dispatch_ack_timeout is None:
+            return
+        self._frame_seen[request_id] = self._loop.time()
 
     # --------------------- runner → daemon dispatch --------------------
 
@@ -762,6 +1405,36 @@ class RunnerRPCClient:
         """
         return self._rpc_server
 
+    async def _write_frame_json(self, payload: Dict[str, Any]) -> None:
+        """Encode *payload* and write it as one frame (#920).
+
+        The single daemon→runner write path.  Encoding goes through
+        :mod:`server.runner.json_codec`, so ``bytes`` anywhere in the
+        payload crosses as base64 and arrives as ``bytes`` — where a
+        bare ``json.dumps`` raised ``TypeError`` and the runner's
+        ``default=str`` produced a 4.2x-larger Python repr that never
+        decoded back.
+
+        Raises:
+            FrameTooLargeError: when the encoded frame exceeds
+                ``MAX_MESSAGE_SIZE``.  The peer cannot skip an
+                oversized frame — it reads the length prefix, not the
+                body, so the stream desynchronises and the whole
+                channel dies with every call on it.  Failing the one
+                write is the cheaper outcome.
+        """
+        if self._writer is None:
+            raise RuntimeError("RunnerRPCClient: no writer")
+        encoded = _json_dumps(payload)
+        size = frame_size(encoded)
+        if size > MAX_MESSAGE_SIZE:
+            raise FrameTooLargeError(
+                f"RunnerRPCClient: refusing to send oversized frame "
+                f"(kind={payload.get('kind')} id={payload.get('id')}): "
+                f"{size} bytes (cap {MAX_MESSAGE_SIZE})"
+            )
+        await write_frame(self._writer, encoded)
+
     async def _handle_runner_request(self, env: RequestEnvelope) -> None:
         """Dispatch one runner → daemon request and write the response.
 
@@ -781,7 +1454,7 @@ class RunnerRPCClient:
             )
             return
         try:
-            await write_frame(self._writer, json.dumps(response.to_dict()))
+            await self._write_frame_json(response.to_dict())
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "RunnerRPCClient: failed to write response for id=%d: %s",
@@ -823,6 +1496,12 @@ class RunnerRPCClient:
         Raises:
             RunnerCallError: transport-level failure (peer
                 disconnect, malformed frame, etc).
+            FrameTooLargeError: the encoded request exceeded the frame
+                cap (#920).  Raised BEFORE anything is written, and
+                the call is deregistered, so this one request fails
+                while the channel and every other in-flight call live
+                on — the pre-#920 outcome was a desynchronised stream
+                and a dead session.
         """
         if self._closed:
             raise RunnerCallError("RunnerRPCClient is closed")
@@ -868,32 +1547,332 @@ class RunnerRPCClient:
                     await self._send_cancel(request_id)
             self._loop.create_task(_waiter(), name=f"cancel-waiter-{request_id}")
 
-        # Send the request.
-        await write_frame(self._writer, json.dumps(env.to_dict()))
+        # Send the request.  An oversized frame raises here (#920) —
+        # BEFORE it reaches the socket — so the caller gets a typed
+        # error for its own call instead of the runner reading a frame
+        # it cannot skip and closing the channel on every other one.
+        try:
+            await self._write_frame_json(env.to_dict())
+        except FrameTooLargeError:
+            self._in_flight.pop(request_id, None)
+            self._stream_cbs.pop(request_id, None)
+            self._notification_cbs.pop(request_id, None)
+            raise
+
+        # The frame is on the wire.  Record THAT, not only the intent
+        # (#856): ``_in_flight SET id=N`` says the daemon meant to send,
+        # and the failure this watchdog exists for lives in the gap
+        # between meaning to and having done it.
+        self._dispatched[request_id] = method
+        logger.info(   # [RPC_DIAG] DIAG BRANCH — daemon frame on the wire
+            "[RPC_DIAG] daemon DISPATCHED id=%s method=%s runner_pid=%s "
+            "client=%s", request_id, method, self._runner_pid, id(self))
+        self._arm_dispatch_watchdog(request_id, method, fut)
 
         try:
             return await fut
         finally:
+            self._settle_dispatch(request_id)
             self._in_flight.pop(request_id, None)
             self._stream_cbs.pop(request_id, None)
             self._notification_cbs.pop(request_id, None)
 
+    # --------------------- #856: the dispatch watchdog -----------------
+
+    def _arm_dispatch_watchdog(
+        self,
+        request_id: int,
+        method: str,
+        fut: "asyncio.Future[ResponseEnvelope]",
+    ) -> None:
+        """Start watching *request_id* for silence, unless exempt.
+
+        Two exemptions, both deliberate:
+
+        * the watchdog is **disabled** (``JAATO_RUNNER_ACK_TIMEOUT=0``);
+        * *method* is in :data:`_UNWATCHED_METHODS`, i.e. it IS the
+          reconciliation probe, which cannot be allowed to answer its
+          own question.
+
+        The task is stashed in ``_dispatch_watchdogs`` and cancelled by
+        :meth:`_settle_dispatch` when the call ends, so a completed call
+        leaves nothing running.
+        """
+        if self._dispatch_ack_timeout is None or method in _UNWATCHED_METHODS:
+            return
+        self._dispatch_watchdogs[request_id] = self._loop.create_task(
+            self._watch_dispatch(request_id, method, fut),
+            name=f"runner-rpc-dispatch-watchdog-{request_id}",
+        )
+
+    def _settle_all_dispatches(self) -> None:
+        """Settle every outstanding watchdog — a channel-wide teardown.
+
+        Called from the read loop's teardown, from :meth:`close` and from
+        :meth:`reset_for_slot_reuse`, all of which have just emptied
+        ``_in_flight``.  A watchdog surviving any of those would wake up
+        and probe about a call nobody is waiting on: after EOF it would
+        replace a correct ``RunnerCallError`` (#851) with a misleading
+        lost-dispatch report, and after a slot handover it would ask the
+        next cascade session about an id from the previous one.
+
+        A loop rather than three inlined loops because ``_read_loop`` is
+        at its complexity ceiling and this is its teardown, not its
+        logic.
+        """
+        for fid in list(self._dispatch_watchdogs):
+            self._settle_dispatch(fid)
+
+    def _settle_dispatch(self, request_id: int) -> None:
+        """Drop every watchdog-side record for a call that has ended.
+
+        Called from ``call``'s ``finally`` — so it runs for a response,
+        an exception and a cancellation alike — and from the read loop's
+        teardown.  Cancelling the task here is what keeps a finished
+        call from probing the runner about itself forever.
+        """
+        task = self._dispatch_watchdogs.pop(request_id, None)
+        if task is not None and not task.done():
+            task.cancel()
+        self._dispatched.pop(request_id, None)
+        self._frame_seen.pop(request_id, None)
+
+    async def _watch_dispatch(
+        self,
+        request_id: int,
+        method: str,
+        fut: "asyncio.Future[ResponseEnvelope]",
+    ) -> None:
+        """Fail *request_id* if the runner turns out not to have it.
+
+        The loop is: sleep one window; if the call settled or a frame
+        bearing its id arrived meanwhile, there is nothing to ask about,
+        so sleep again.  Otherwise reconcile, and act on the verdict:
+
+        ==================  ==============================================
+        verdict             action
+        ==================  ==============================================
+        ``running``         the runner has it — sleep another full window.
+                            This is the legitimate long turn, and it is
+                            why the watchdog is not a wall-clock cap.
+        ``finished``        the runner ran it and the RESPONSE is what got
+                            lost.  Fail the call — the distinction matters
+                            to whoever reads the log, not to the caller,
+                            who is stuck either way.
+        ``never_received``  **the bug.**  Fail the call.
+        ``unreachable``     the probe itself did not come back, over the
+                            control lane, which is bounded work.  Fail the
+                            call: a channel that cannot answer a lock and
+                            a dict read is not one to keep waiting on.
+        ==================  ==============================================
+
+        Every failing verdict raises :class:`RunnerDispatchLost`, which
+        is a ``RunnerRPCTimeout`` — so the turn dies and the session
+        does not.  See that class for why.
+        """
+        timeout = self._dispatch_ack_timeout
+        assert timeout is not None   # _arm_dispatch_watchdog guarantees it
+        while True:
+            await asyncio.sleep(timeout)
+            if fut.done():
+                return
+            last_seen = self._frame_seen.get(request_id)
+            if last_seen is not None and (
+                self._loop.time() - last_seen
+            ) < timeout:
+                continue          # the runner is demonstrably talking
+            if self._bootstrap_in_flight():
+                # The runner's reader thread is blocked for the whole of
+                # ``session.bootstrap`` (it runs on the main thread so
+                # AppArmor confinement applies to the thread that spawns
+                # the workers), so the control lane cannot answer and a
+                # probe would time out and read as "lost".  Bootstrap
+                # carries its own 30s deadline; wait for it to clear.
+                continue
+            verdict, detail = await self._reconcile_dispatch(request_id)
+            if verdict == "running":
+                continue
+            self._fail_lost_dispatch(request_id, method, fut, verdict, detail)
+            return
+
+    def _bootstrap_in_flight(self) -> bool:
+        """Is a main-thread-blocking RPC outstanding on this channel?
+
+        ``session.bootstrap`` is the only one today (``rpc.py``'s
+        ``MAIN_THREAD_METHODS``).  While it runs, the runner's reader
+        thread is inside it, so NOTHING on either lane is answered —
+        including the reconciliation probe.  Read from ``_dispatched``
+        rather than from a flag, so a second blocking method added later
+        is covered by naming it in one frozenset.
+        """
+        from server.runner.rpc import MAIN_THREAD_METHODS
+        return any(m in MAIN_THREAD_METHODS for m in self._dispatched.values())
+
+    async def _reconcile_dispatch(
+        self, request_id: int,
+    ) -> Tuple[str, str]:
+        """Ask the runner whether it has *request_id*, over the control lane.
+
+        This is ask 2 of #856: the daemon believed four ids were in
+        flight while the runner's work queue was empty, and that
+        divergence was detectable the whole time — nothing asked.
+
+        The predicate is the runner's ``known_request_ids`` window, NOT
+        its ``highest_request_id``: this probe is itself a request, and
+        it is registered on the runner's reader thread before its own
+        handler runs, so the high-water mark at answer time is always
+        the probe's own id.  Comparing against it would report every id
+        as received, including the ones that never arrived.
+
+        The reasoning is :func:`classify_reconciliation`, which is pure
+        and therefore unit-testable without a socket -- it decides
+        whether the work MAY ALREADY HAVE RUN, which is the one answer
+        a caller acts on differently.  This method owns only the I/O
+        and the one verdict the classifier cannot reach: a probe that
+        did not come back at all.
+
+        Returns:
+            ``(verdict, detail)`` where verdict is one of ``running``,
+            ``finished``, ``never_received``, ``indeterminate`` or
+            ``unreachable``, and detail is a human-readable account for
+            the log and the exception message.
+        """
+        try:
+            status = await self.session_health_check(timeout=10.0)
+        except Exception as exc:   # noqa: BLE001 — any failure is "no answer"
+            return "unreachable", (
+                f"the runner did not answer session.health_check "
+                f"({type(exc).__name__}: {exc}), so nobody can say whether "
+                f"id={request_id} ran"
+            )
+        return classify_reconciliation(request_id, status)
+
+    def _fail_lost_dispatch(
+        self,
+        request_id: int,
+        method: str,
+        fut: "asyncio.Future[ResponseEnvelope]",
+        verdict: str,
+        detail: str,
+    ) -> None:
+        """Resolve *fut* with :class:`RunnerDispatchLost` and say why.
+
+        WARNING rather than DEBUG, and counted: the failure this
+        replaces produced no log line at any level for sixty-eight
+        minutes.  The message names the id, the method and the session
+        because the incident's entire record named none of them.
+        """
+        if fut.done():
+            return
+        self._dispatch_lost += 1
+        exc_cls = _VERDICT_EXCEPTIONS.get(verdict, RunnerDispatchLost)
+        kwargs: Dict[str, Any] = {
+            "request_id": request_id,
+            "method": method,
+            "session_id": self._session_id,
+        }
+        if exc_cls is RunnerDispatchUnknown:
+            # The two mechanisms share the type and differ in the token.
+            kwargs["verdict"] = verdict
+        exc = exc_cls(
+            f"runner RPC id={request_id} ({method}) was dispatched and is "
+            f"lost: {detail}.  "
+            f"session={self._session_id or '<unbootstrapped>'} "
+            f"runner_pid={self._runner_pid} verdict={verdict} "
+            f"may_have_run={exc_cls.may_have_run}.  The channel is open and "
+            f"the runner is answering, so this is NOT a dead runner (#851) "
+            f"— the turn failed, the session is still loaded.",
+            **kwargs,
+        )
+        # WARNING for a retry-safe verdict, ERROR for one that is not: a
+        # call whose side effects have already happened and whose result
+        # is gone is the one an operator must see, and the two used to be
+        # the same line at the same level.
+        logger.log(
+            logging.ERROR if exc.may_have_run else logging.WARNING,
+            "RunnerRPCClient: %s", str(exc),
+        )
+        if exc.may_have_run:
+            self._dispatch_lost_may_have_run += 1
+        fut.set_exception(exc)
+
+    def dispatch_lost_count(self) -> int:
+        """How many calls this channel failed as lost dispatches (#856).
+
+        Nonzero means at least one request reached the wire and the
+        runner, asked directly, could not account for it.  The companion
+        to :meth:`cancel_write_failures`, and the daemon-side half of the
+        runner's ``cancel_stats()['unknown']`` (#988): both count a peer
+        disagreeing with us about what is in flight.
+
+        Counts every verdict.  :meth:`dispatch_lost_may_have_run_count`
+        is the subset that matters operationally.
+        """
+        return self._dispatch_lost
+
+    def dispatch_lost_may_have_run_count(self) -> int:
+        """Of the lost dispatches, how many may already have EXECUTED.
+
+        The difference between this and :meth:`dispatch_lost_count` is
+        the difference between work that never happened and work that
+        happened with nobody to receive the result — and therefore
+        between a turn that is safe to send again and one that is not.
+        Nonzero on a healthy-looking daemon is the signal to go and
+        reconcile side effects by hand.
+        """
+        return self._dispatch_lost_may_have_run
+
     async def _send_cancel(self, request_id: int) -> None:
-        """Send a cancel frame for *request_id* if the call is still in flight."""
+        """Send a cancel frame for *request_id* if the call is still in flight.
+
+        This is the daemon end of ``client.stop()`` /
+        ``session.request_stop()`` for a runner-served tool, so its
+        failure modes are a user's stop request not happening.  The
+        three outcomes are deliberately not logged alike (#988):
+
+        * **the call already finished** — nothing to cancel, and the
+          overwhelmingly common case for a token tripped near the end
+          of a turn.  Silent.
+        * **the channel is closed** — the runner is going away, which
+          cancels the call by construction.  DEBUG.
+        * **the write FAILED** — the runner is alive and never heard
+          about it, so the tool runs on and the caller is told it
+          succeeded.  **WARNING**, and counted.
+
+        The third used to be a DEBUG line indistinguishable from "no
+        cancel was requested", which is half of why #988 spent a day
+        wearing "flaky test".
+        """
         if self._closed or self._writer is None:
+            logger.debug(
+                "RunnerRPCClient: not sending cancel for id=%d — channel "
+                "already closed (the call dies with it)", request_id,
+            )
             return
         if request_id not in self._in_flight:
             return  # already finished
         try:
-            await write_frame(
-                self._writer,
-                json.dumps(CancelFrame(id=request_id).to_dict()),
+            await self._write_frame_json(
+                CancelFrame(id=request_id).to_dict(),
             )
         except Exception as exc:  # noqa: BLE001
-            logger.debug(
-                "RunnerRPCClient: cancel-write for id=%d failed: %s",
-                request_id, exc,
+            self._cancel_write_failures += 1
+            logger.warning(
+                "RunnerRPCClient: cancel for id=%d was NOT delivered — the "
+                "write to runner pid=%s failed (%s: %s).  The tool keeps "
+                "running and its result will report success; the stop "
+                "request is lost.",
+                request_id, self._runner_pid, type(exc).__name__, exc,
             )
+
+    def cancel_write_failures(self) -> int:
+        """How many cancel frames failed to reach the wire (#988).
+
+        Nonzero means at least one ``stop()`` was accepted from a
+        caller and never delivered to the runner.  Counted rather than
+        only logged so a harness can assert on it.
+        """
+        return self._cancel_write_failures
 
     # --------- threadsafe wrapper for the cli plugin's sync stub ---------
 
@@ -1009,6 +1988,13 @@ class RunnerRPCClient:
                 f"bootstrap_session: expected SessionInitEnvelope, got "
                 f"{type(envelope).__name__}"
             )
+
+        # #856: remember whose channel this is BEFORE the call, so a
+        # bootstrap that is itself lost still names its session.  The id
+        # is on the envelope the caller just handed us; nothing else on
+        # this class knew it, which is why the original incident's four
+        # log lines named a client object address and no session.
+        self._session_id = str(getattr(envelope, "session_id", "") or "")
 
         coro = self.call("session.bootstrap", envelope.to_dict())
         response = await _await_runner(coro, timeout, "session.bootstrap")
@@ -2059,6 +3045,7 @@ class RunnerRPCClient:
         source_id: Optional[str] = None,
         source_type: Optional[str] = None,
         require_idle: bool = False,
+        attachments: Optional[List[Dict[str, Any]]] = None,
         timeout: Optional[float] = 5.0,
     ) -> str:
         """Ask the SESSION to queue this message, or to say a turn is needed.
@@ -2087,6 +3074,24 @@ class RunnerRPCClient:
             cannot start its own turn, which is why the answer comes back
             here rather than being acted on runner-side.
 
+        AN ATTACHMENT-BEARING OFFER IS IDLE-ONLY (#877, from #845's rule).
+
+        *attachments* does NOT travel on the wire and is not enqueued -- the
+        session's ``_message_queue`` stores strings, and a queued message is
+        folded into the running turn as TEXT (a tool result's model suffix,
+        or a replayed user text message), neither of which has anywhere to
+        put an ``inline_data`` part.  Passing it here forces *require_idle*,
+        so a busy session answers ``"busy"`` with NOTHING enqueued and the
+        caller must drive a turn with the bytes instead of trading them for a
+        ``"queued"``.  The parameter lives on the verb rather than at each
+        call site so the rule holds for every caller: cloning a
+        queue-or-drive decision per caller is what produced #877 in the first
+        place, exactly as ``shared.message_delivery`` records for #612.
+
+        Passing *attachments* alongside an explicit ``require_idle=False`` is
+        not a way to opt out: the flag can only be raised here, never
+        lowered.
+
         Raises:
             RunnerCallError: on transport failure or a malformed response --
             an undelivered message must never be reported as delivered.
@@ -2101,6 +3106,10 @@ class RunnerRPCClient:
             body["source_id"] = source_id
         if source_type is not None:
             body["source_type"] = source_type
+        if attachments:
+            # Not a caller preference: the queue cannot carry bytes, so the
+            # only delivery that keeps them is a drive.  See the docstring.
+            require_idle = True
         if require_idle:
             body["require_idle"] = True
         result = await self._call_named(
@@ -2123,14 +3132,21 @@ class RunnerRPCClient:
         source_id: Optional[str] = None,
         source_type: Optional[str] = None,
         require_idle: bool = False,
+        attachments: Optional[List[Dict[str, Any]]] = None,
         timeout: Optional[float] = 5.0,
     ) -> str:
+        """Thread-safe wrapper around :meth:`session_offer_message`.
+
+        Same contract, including the idle-only rule *attachments* imposes --
+        see that method.
+        """
         return self._run_threadsafe(
             self.session_offer_message(
                 text,
                 source_id=source_id,
                 source_type=source_type,
                 require_idle=require_idle,
+                attachments=attachments,
                 timeout=timeout,
             ),
             timeout=timeout,

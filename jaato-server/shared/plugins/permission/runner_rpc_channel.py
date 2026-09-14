@@ -283,4 +283,8 @@ class RunnerRPCChannel(Channel):
                 else None
             ),
             was_edited=was_edited,
+            # #859: the daemon stamped the responding client's
+            # authenticated identity on the PromptResponse; carry it so
+            # the resolved hook / event / ledger can name the approver.
+            user_id=response.user_id,
         )

@@ -115,6 +115,13 @@ gives you the plumbing; premium gives you the recipes.
       "event_type_header": null,
       "metadata": { "source": "slack" }
     },
+    "gitlab": {
+      "path": "/webhook/gitlab",
+      "secret_header": "X-Gitlab-Token",
+      "secret_algo": "token",
+      "event_type_header": "X-Gitlab-Event",
+      "metadata": { "source": "gitlab" }
+    },
     "generic": {
       "path": "/webhook",
       "allow_unauthenticated": true,
@@ -459,7 +466,19 @@ class WebhookHTTPServer:
 3. **Body size check** — reject bodies exceeding `max_body_size` (413).
 4. **Content-Type** — must be `application/json` (415).
 5. **Secret verification** — if route has `secret_header` + `secret_algo`,
-   verify HMAC signature. Reject with 403 on mismatch.
+   verify the header against the route's shared secret in the mode
+   `secret_algo` names (`hmac-sha256`, or a constant-time equality against a
+   plain `token` header), over the payload `signature_scheme` constructs.
+   Reject with 403 on mismatch.
+5a. **Freshness** — for a scheme that binds a timestamp into the signature
+   (`slack-v0`, `stripe-v1`), reject with 403 when the *signed* timestamp is
+   more than `max_age_seconds` from now in either direction. Checked AFTER
+   the signature, because the signature is what makes the timestamp evidence.
+5b. **Replay** — record the delivery in the listener's bounded, TTL'd replay
+   cache, keyed on the signature (timestamp-bound schemes) or on
+   `replay_key_header` (a delivery id). A repeat is 409. Recorded LAST, so a
+   request that failed 5 or 5a never writes — otherwise a guessed delivery id
+   could pre-empt the genuine one.
 6. **Parse body** — JSON-decode the body.
 7. **Extract event type** — from the header specified in `event_type_header`,
    or `"unknown"` if not configured.
@@ -477,8 +496,10 @@ Python stdlib only — no external dependencies.
 3. Route matching → 404 Not Found
 4. Body size limit → 413 Payload Too Large
 5. Content-Type check → 415 Unsupported Media Type
-6. HMAC signature verification → 403 Forbidden
-7. JSON body parsing → 400 Bad Request
+6. Shared-secret verification → 403 Forbidden
+7. Signed-timestamp freshness → 403 Forbidden
+8. Replay refusal → 409 Conflict
+9. JSON body parsing → 400 Bad Request
 
 **Network security:**
 - **Bind to localhost by default** (`127.0.0.1`). Explicitly set `host` to
@@ -490,8 +511,38 @@ Python stdlib only — no external dependencies.
   normalized. Empty list (default) allows all IPs.
 
 **Application security:**
-- **HMAC verification** per-route using HMAC-SHA256. Supports GitHub's
-  `sha256=` prefix convention.
+- **HMAC verification** per-route using HMAC-SHA256, over the payload the
+  route's `signature_scheme` constructs — the request body by default (with
+  GitHub's `sha256=` prefix convention), `v0:{ts}:{body}` for Slack,
+  `{ts}.{body}` for Stripe. The preferred mode: the secret never travels and
+  a captured request cannot be replayed against a *different* body.
+- **Replay refusal** (#713) — a digest over a body alone binds no time, so it
+  authenticates the same bytes forever. Two mechanisms: a per-route freshness
+  window (`max_age_seconds`, default 300, two-sided) over a timestamp the
+  signature *covers*, and a bounded TTL'd replay cache
+  (`replay_cache_size`) that catches the copy arriving inside that window.
+  Only a route whose sender signs a timestamp, or which names a
+  `replay_key_header` delivery id, can be protected; every other route logs a
+  startup WARNING saying its signatures never expire. Configuring
+  `timestamp_header` on a scheme that does not sign it is a config error and
+  a 500 — checking a value the replayer can rewrite is not protection.
+- **Plain shared-secret verification** (`secret_algo: "token"`) for producers
+  that do not sign bodies — GitLab's `X-Gitlab-Token` is the canonical case.
+  A constant-time equality against the route secret. **Strictly weaker than
+  HMAC**: the secret is in every request (so it is readable by any hop that
+  terminates TLS) and requests replay against any payload. Its only replay
+  protection is `replay_key_header`: there is no signed payload to bind a
+  timestamp into, and the credential is identical on every request, so a cache
+  keyed on it would refuse the second legitimate delivery. It exists so that
+  such a producer is authenticated at all — the alternative was
+  `allow_unauthenticated: true`, discarding a secret the request was carrying.
+  Pair it with TLS; every `token` route logs a startup WARNING, louder when
+  TLS is off, so the weaker mode cannot be reached for silently.
+- **A secret config is a pair, fail-closed.** `secret_header` without
+  `secret_algo` (or the reverse) is a 500, and an `secret_algo` outside the
+  known vocabulary is a config-validation error and a 500 at request time —
+  never a downgrade to unsigned. Widening the vocabulary widens what
+  `secret_algo` may *say*, never what it may omit.
 - **Body size limits** to prevent memory exhaustion (default 1 MB).
 - **Per-IP rate limiting** — token-bucket algorithm. Configurable via
   `rate_limit_per_second` (default 0 = unlimited). Each source IP gets its

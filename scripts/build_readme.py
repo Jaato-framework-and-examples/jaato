@@ -1,9 +1,25 @@
 #!/usr/bin/env python3
 """Generate PKG_README.md with an auto-generated changelog prepended to README.md.
 
-The changelog is built from git history since the last "Bump <pkg>" commit.
-PyPI renders whatever file `readme` points to in pyproject.toml, so the
-publish workflows point readme at PKG_README.md (this script's output).
+The changelog covers commits touching the package since its PREVIOUS
+version was set.  PyPI renders whatever file `readme` points to in
+pyproject.toml, so the publish workflows point readme at PKG_README.md
+(this script's output).
+
+The anchor is read from the `version` line of the package's own
+pyproject.toml, walked back through git history.  It used to be the
+second-most-recent commit whose subject began "Bump <pkg>" -- a convention
+this repository has never once followed (zero matches across 1400+
+commits), so the anchor was always None and every published changelog was
+the package's ENTIRE history.  jaato-server's PyPI long description was
+91k characters and grew by ~400 across a release carrying five merged PRs.
+
+A commit-message convention is a promise someone has to keep on the day
+they release.  A version change is not a convention: it is the definition
+of a release, it is already enforced (the publish workflow refuses a
+version that exists on PyPI), and it survives squash merges, which is what
+made the "Bump <pkg>" scheme unkeepable here -- one squashed PR has one
+subject line, and a release that bumps two packages needs two.
 
 Usage:
     python scripts/build_readme.py [--dir <pkg-dir>]
@@ -33,54 +49,180 @@ def _git(*args: str, cwd: Path | None = None) -> str:
     return result.stdout.strip()
 
 
-def _find_previous_bump_sha(pkg_name: str, repo_root: Path) -> str | None:
-    """Return the SHA of the second-most-recent 'Bump <pkg-name>' commit.
+def _version_at(sha: str, rel_pyproject: str, repo_root: Path) -> str | None:
+    """The version this package's pyproject declared at ``sha``.
 
-    The most recent bump is for the *current* version being built, so the
-    changelog should cover commits since the *previous* bump (i.e. the one
-    before it).  Returns None when fewer than two bump commits exist (first
-    release — include everything).
+    None when the file did not exist there, could not be parsed, or the
+    commit is unreachable -- which is what a shallow clone looks like from
+    the inside.  ``_git`` returns "" rather than raising on a failed
+    command, so all three arrive here the same way and are treated the
+    same: as "history ends here", never as a version.
     """
-    log = _git(
-        "log", "--oneline", "--format=%H %s", f"--grep=Bump {pkg_name}",
-        cwd=repo_root,
-    )
-    bumps: list[str] = []
-    for line in log.splitlines():
-        if not line:
+    blob = _git("show", f"{sha}:{rel_pyproject}", cwd=repo_root)
+    if not blob:
+        return None
+    try:
+        return tomllib.loads(blob)["project"]["version"]
+    except Exception:       # noqa: BLE001 - malformed/renamed file, same answer
+        return None
+
+
+def _find_release_anchors(pkg_dir: Path, repo_root: Path,
+                          declared_version: str) -> tuple[str | None, str | None]:
+    """Return ``(current_sha, previous_sha)`` for this package.
+
+    Both name the commit that *set* a version -- the OLDEST commit of a run
+    declaring it, since later commits touching pyproject.toml (a new
+    dependency, an extra) carry the same version forward without being the
+    release.
+
+    ``current_sha`` is the commit that set the version being built; the
+    caller excludes it so a release's own bump is not an entry in its own
+    changelog.  ``previous_sha`` is the changelog anchor: the commit that
+    set the version before it.
+
+    Either may be None, and both mean "include everything":
+
+      * a first release, where only one version has ever existed;
+      * a shallow clone, where the walk hits an unreadable commit before it
+        has seen two versions.  CI passes ``fetch-depth: 0`` on the publish
+        jobs precisely so this does not happen there.
+
+    ``declared_version`` is what the WORKING TREE says, and the walk starts
+    from it rather than from whatever the newest commit happens to declare.
+    That is the difference between a preview and a release: when the bump is
+    committed the two agree and nothing changes, but run against an
+    uncommitted bump the newest commit still declares the PREVIOUS version,
+    and starting from it would treat that as "current" and anchor a release
+    too early.  Observed doing exactly that: previewing 0.10.0 anchored on
+    the 0.8.0 commit and listed 0.9.0's entries again.  ``current_sha`` is
+    then None, which is honest -- no commit has set this version yet.
+    """
+    rel = (pkg_dir.resolve().relative_to(repo_root.resolve())
+           / "pyproject.toml").as_posix()
+    shas = _git("log", "--format=%H", "--", rel, cwd=repo_root).splitlines()
+
+    current_sha: str | None = None
+    previous_sha: str | None = None
+    seen: str | None = declared_version
+    groups = 0
+
+    for sha in shas:                        # newest first
+        version = _version_at(sha, rel, repo_root)
+        if version is None:                 # end of readable history
+            if previous_sha is None:
+                print(f"warning: cannot read {rel} at {sha[:12]} - history may be "
+                      f"shallow; changelog will cover everything reachable",
+                      file=sys.stderr)
+            break
+        if version != seen:
+            groups += 1
+            seen = version
+            if groups == 2:                 # two transitions is all we need
+                break
+        if groups == 0:
+            current_sha = sha
+        elif groups == 1:
+            previous_sha = sha
+
+    return current_sha, previous_sha
+
+
+RELEASE_TAG_GLOB = "{dist}-[0-9]*"
+
+
+def _published_anchor(dist: str, declared_version: str,
+                      repo_root: Path) -> tuple[str | None, str | None]:
+    """``(tag, sha)`` of the newest release of ``dist`` REACHABLE from HEAD.
+
+    A release tag records where a version was *published*; the version line
+    in pyproject records where it was *set*.  Those are the same commit only
+    when a bump is published immediately, and this repository deliberately
+    holds a version across several staging rounds so later PRs fold into the
+    release those numbers already name.  Measured on jaato-server 0.15.0:
+    0.14.0 was SET at 5257d25d and PUBLISHED 19 commits later at 9abaffa5,
+    so anchoring on the set-point re-listed 16 entries 0.14.0 had already
+    shipped.  A tag is the only record of the publish point -- it is written
+    by the workflow that uploaded the files, on the commit it uploaded them
+    from.
+
+    ``--merged HEAD`` keeps a tag on an abandoned branch from anchoring a
+    release, and ``-creatordate`` orders by when each was shipped rather
+    than by version string, so a patch released after a minor still reads as
+    the more recent one.
+
+    A tag naming the DECLARED version is skipped: that is this version's own
+    publish, which happens when the script is re-run against an
+    already-released tree, and anchoring there would report a released
+    version as carrying only what landed after itself.
+
+    Returns ``(None, None)`` when nothing matches -- no tags yet, a shallow
+    clone, or a checkout that fetched none -- and the caller then walks
+    pyproject history exactly as before.
+    """
+    names = _git("tag", "--list", RELEASE_TAG_GLOB.format(dist=dist),
+                 "--merged", "HEAD", "--sort=-creatordate",
+                 cwd=repo_root).splitlines()
+    prefix = f"{dist}-"
+    for name in names:
+        name = name.strip()
+        if not name.startswith(prefix):
             continue
-        sha, subject = line.split(" ", 1)
-        if subject.startswith(f"Bump {pkg_name}"):
-            bumps.append(sha)
-            if len(bumps) == 2:
-                return bumps[1]
-    return None
+        if name[len(prefix):] == declared_version:
+            continue
+        sha = _git("rev-list", "-n", "1", name, cwd=repo_root)
+        if sha:
+            return name, sha
+    return None, None
 
 
-def _collect_commits(bump_sha: str | None, pkg_dir: Path, repo_root: Path) -> list[str]:
-    """Return one-line commit subjects since bump_sha that touch pkg_dir."""
-    # Compute the relative path of pkg_dir from repo_root for git log
+def _collect_commits(previous_sha: str | None, current_sha: str | None,
+                     pkg_dir: Path, repo_root: Path) -> list[str]:
+    """Commit subjects touching pkg_dir since ``previous_sha`` (exclusive).
+
+    Two kinds of entry are dropped, and the rule for both is "carries no
+    news", never "matches a convention":
+
+    * a subject beginning "Bump " -- the pre-existing filter, kept because
+      it catches an intermediate release commit anywhere in the range;
+    * ``current_sha`` -- this release's own version bump -- but ONLY when
+      the sole file it touched inside this package was pyproject.toml.
+
+    That qualifier is load-bearing in both directions.  Dropping
+    ``current_sha`` unconditionally loses a real entry on a FIRST release,
+    where the commit that "set" the current version is the initial import
+    and carries the whole package; and this repository has more than once
+    folded a version bump into a feature commit (efdec11c set jaato-server
+    0.7.0 *and* shipped the convenience facade), which must still be
+    reported.  ``--name-only`` is scoped by the pathspec, so a bump that
+    also edited CLAUDE.md still reads as pyproject-only from this
+    package's point of view -- which is the right answer for a changelog
+    about this package.
+    """
     rel_dir = pkg_dir.resolve().relative_to(repo_root.resolve())
+    range_spec = f"{previous_sha}..HEAD" if previous_sha else "HEAD"
 
-    if bump_sha:
-        range_spec = f"{bump_sha}..HEAD"
-    else:
-        range_spec = "HEAD"
-
-    log = _git(
-        "log", "--no-merges", "--oneline", "--format=%s", range_spec,
+    # NUL-delimited records so a subject containing a newline cannot be
+    # mistaken for a filename.
+    raw = _git(
+        "log", "--no-merges", "--format=%x00%H %s", "--name-only", range_spec,
         "--", str(rel_dir),
         cwd=repo_root,
     )
+
     subjects = []
-    for line in log.splitlines():
-        line = line.strip()
-        if not line:
+    for record in raw.split("\0"):
+        lines = [ln for ln in record.strip().splitlines() if ln.strip()]
+        if not lines:
             continue
-        # Filter out bump commits themselves
-        if line.startswith("Bump "):
+        sha, _, subject = lines[0].partition(" ")
+        files = lines[1:]
+        if subject.startswith("Bump "):
             continue
-        subjects.append(line)
+        if (current_sha and sha == current_sha
+                and files and all(f.endswith("pyproject.toml") for f in files)):
+            continue
+        subjects.append(subject)
     return subjects
 
 
@@ -114,14 +256,23 @@ def main() -> None:
         data = tomllib.load(f)
 
     project = data["project"]
-    pkg_name = project["name"]
     version = project["version"]
 
     # Find repo root
     repo_root = Path(_git("rev-parse", "--show-toplevel", cwd=pkg_dir))
 
-    bump_sha = _find_previous_bump_sha(pkg_name, repo_root)
-    commits = _collect_commits(bump_sha, pkg_dir, repo_root)
+    current_sha, previous_sha = _find_release_anchors(pkg_dir, repo_root, version)
+
+    # A release tag, where one exists, outranks the pyproject walk: it names
+    # the commit the files were uploaded from, which is what "since the last
+    # release" means.  `current_sha` still comes from the walk -- it answers
+    # a different question (which commit set THIS version, so the bump is
+    # not an entry in its own changelog) that a tag cannot answer.
+    tag_name, tag_sha = _published_anchor(project["name"], version, repo_root)
+    if tag_sha:
+        previous_sha = tag_sha
+
+    commits = _collect_commits(previous_sha, current_sha, pkg_dir, repo_root)
     changelog = _build_changelog(version, commits)
 
     # Read original README
@@ -134,7 +285,14 @@ def main() -> None:
     # Write combined file
     out_path = pkg_dir / "PKG_README.md"
     out_path.write_text(f"{changelog}\n---\n\n{original_readme}")
-    print(f"Generated {out_path} ({len(commits)} changelog entries)")
+    if tag_name:
+        anchor = f"{tag_name} ({previous_sha[:12]})"
+    elif previous_sha:
+        anchor = f"{previous_sha[:12]} (no release tag; version-set point)"
+    else:
+        anchor = "(none - full history)"
+    print(f"Generated {out_path} ({len(commits)} changelog entries "
+          f"since {anchor})")
 
 
 if __name__ == "__main__":

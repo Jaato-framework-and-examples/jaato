@@ -560,12 +560,28 @@ class PreviewedRequest:
         headers: All headers that would be sent.
         body: Serialized request body.
         curl: Equivalent curl command.
+        auth_unresolved: Why the configured credential could NOT be
+            resolved, when it could not.  A preview must not raise — the
+            point is to show what would be sent — but it used to swallow
+            the failure and return a request with no auth header at all,
+            which reads as "this endpoint needs none": the one answer a
+            caller would act on and the one that is wrong.  ``None`` when
+            auth resolved, or when the request carries none by design.
+
+    Note:
+        ``headers`` is REDACTED (see ``AuthManager.redact_headers``) —
+        this object is returned to the model by ``preview_request``, so it
+        must never carry a live credential.  Redaction is by PROVENANCE:
+        the header names the auth manager injected into on this request,
+        which is the only complete answer for an ``apiKey`` scheme whose
+        header name the operator chose.
     """
     method: str
     url: str
     headers: Dict[str, str]
     body: Optional[str] = None
     curl: Optional[str] = None
+    auth_unresolved: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for tool response."""
@@ -578,4 +594,12 @@ class PreviewedRequest:
             result["body"] = self.body
         if self.curl:
             result["curl"] = self.curl
+        if self.auth_unresolved:
+            result["auth_unresolved"] = self.auth_unresolved
+            result["warning"] = (
+                "The configured credential did not resolve, so this request "
+                "would be sent UNAUTHENTICATED.  Check the env var named by "
+                "the service's auth config (`services show <name>`), or "
+                "re-run configure_service_auth."
+            )
         return result

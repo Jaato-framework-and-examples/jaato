@@ -10,6 +10,8 @@ import os
 import re
 import tempfile
 import threading
+import uuid
+from base64 import b64encode as _b64encode
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import dataclass, replace as _dc_replace
@@ -36,9 +38,11 @@ from .tool_result_truncation import (
     truncate_results_to_fit as _truncate_results_to_fit_impl,
 )
 from .tool_result_builder import (
+    apply_text_view_enrichment as _apply_text_view_enrichment_impl,
     extract_multimodal_attachments as _extract_multimodal_attachments_impl,
     normalize_result_dict as _normalize_result_dict_impl,
     split_executor_result as _split_executor_result_impl,
+    tool_result_text_view as _tool_result_text_view_impl,
 )
 from .instruction_budget_builder import (
     TokenCountRequest as _TokenCountRequest,
@@ -61,7 +65,19 @@ from .session_telemetry import (
 
 logger = logging.getLogger(__name__)
 
+# Reserved ``call_id`` for media the MODEL generated (as opposed to media a
+# tool produced).  Model output belongs to no tool call, but reuses the
+# tool-output delivery channel so that clients need no second subscription;
+# this id is how they tell the two apart.
+#
+# Imported rather than defined here: the daemon writes this value once and
+# every CLIENT compares against it, so the client-side package is where it
+# belongs.  Defining it on both sides makes it a shared constant with no
+# owner, which is how the two drift.
+from jaato_sdk.events import MODEL_MEDIA_CALL_ID       # noqa: F401  (re-export)
+
 from .ai_tool_runner import ToolExecutor
+from .runtime_limits import DEFAULT_MAX_PARALLEL_TOOLS, RuntimeLimits
 from .session_context import set_current_session
 from .tool_id_map import StreamScrubber
 from .retry_utils import with_retry, RequestPacer, RetryCallback, RetryConfig, is_context_limit_error
@@ -72,7 +88,12 @@ from .plugins.gc.utils import (
     dedup_identical_tool_results,
     ensure_tool_call_integrity,
     estimate_history_tokens,
+    evict_consumed_media,
+    history_media_bytes,
+    message_media_tokens,
 )
+from .history_invariant import repair_history
+from jaato_sdk.media_identity import ATTACHMENT_ID_KEY, mint_attachment_id
 from .instruction_budget import (
     InstructionBudget,
     InstructionSource,
@@ -85,11 +106,20 @@ from .instruction_budget import (
     PayloadExceedsContextError,
 )
 from .instruction_token_cache import InstructionTokenCache
+from .session_consumption import (
+    ConsumptionLedger,
+    COST_SOURCE_PRICING_TABLE,
+    COST_SOURCE_PROVIDER,
+    DETAIL_FULL,
+    DETAIL_SUMMARY,
+    VALID_DETAIL_LEVELS,
+)
 from .plugins.session import SessionPlugin, SessionConfig, SessionState, SessionInfo
 from .plugins.streaming import StreamManager, StreamingCapable, StreamChunk, StreamUpdate
 from .plugins.model_provider.base import UsageUpdateCallback, GCThresholdCallback
 from jaato_sdk.plugins.model_provider.types import (
     Attachment,
+    MediaDelta,
     CancelledException,
     CancelToken,
     DISCOVERABILITY_EAGER,
@@ -107,6 +137,7 @@ from jaato_sdk.plugins.model_provider.types import (
     TurnOutcome,
     TurnResult,
     replay_excerpt,
+    session_completed_call_error,
     tool_result_is_error,
     tool_result_status,
     unexecuted_call_error,
@@ -309,6 +340,128 @@ def _should_drop_introspection(has_deferred_to_discover, tool_names) -> bool:
     return not any(n not in _INTROSPECTION_TOOL_NAMES for n in tool_names)
 
 
+# Per-turn budget bookkeeping, kept on ``turn_data`` for the life of ONE turn
+# and popped by ``_budget_observe_turn`` before the dict is appended to
+# ``_turn_accounting`` (so nothing here is persisted or emitted).  They let
+# the mid-turn observations (#955) and the turn-end observation split
+# ``tool_calls`` and ``seconds`` between them without counting anything
+# twice, whichever chat loop produced the turn.
+_BUDGET_TOOL_CALLS_OBSERVED = "_budget_tool_calls_observed"
+_BUDGET_SECONDS_OBSERVED = "_budget_seconds_observed"
+
+#: Finish reasons for a turn that REACHED THE END, and therefore should have
+#: been billed.  Only these raise the unmetered-turn warning (#688 item 3):
+#: a turn that errored, was cancelled or was cut off mid-stream also carries
+#: no tokens, and blaming the provider's usage reporting for it sends an
+#: operator after a reporting defect that is really a failed turn.  Both chat
+#: loops close through the same ``finally``, so every one of those paths
+#: reaches ``_record_turn_ran``.
+#:
+#: ``unknown`` is IN the set on purpose: per :class:`FinishReason` it means the
+#: turn ended and the upstream's word for why was not one we recognise -- a
+#: clean end with an unmapped label.  ``incomplete`` is its opposite and is
+#: out.
+_METERABLE_FINISH_REASONS = frozenset({
+    FinishReason.STOP.value,
+    FinishReason.MAX_TOKENS.value,
+    FinishReason.TOOL_USE.value,
+    FinishReason.SAFETY.value,
+    FinishReason.UNKNOWN.value,
+})
+
+
+def _resolve_parallel_width(
+    explicit: Optional[int],
+    limits: Optional["RuntimeLimits"],
+) -> Optional[int]:
+    """The tool-pool ceiling a session should install (#862, #735).
+
+    Two callers can supply it and they must not be allowed to disagree.
+    ``max_parallel_tools=`` is the standalone kwarg envelope v6 carries
+    and every pre-#735 caller passes; ``runtime_limits.max_parallel_tools``
+    is the same number read off the whole block envelope v7 carries.  The
+    explicit kwarg wins so a v6 daemon talking to a v7 runner keeps
+    working, and so an in-process caller can narrow one session without
+    synthesising a whole ``RuntimeLimits``.
+
+    Args:
+        explicit: The standalone ``max_parallel_tools`` kwarg, or ``None``.
+        limits: The resolved block, or ``None``.
+
+    Returns:
+        The width to install, or ``None`` when nobody declared one (the
+        session then applies :data:`DEFAULT_MAX_PARALLEL_TOOLS`).
+    """
+    if explicit is not None:
+        return explicit
+    return getattr(limits, "max_parallel_tools", None)
+
+
+
+def _resolve_cost_and_source(
+    session: Any, usage: Any,
+) -> Tuple[Optional[float], Optional[str]]:
+    """Per-call cost (USD) and where it came from.
+
+    Precedence:
+
+    1. ``usage.cost_usd`` — provider-reported; fiscal truth, wins.
+    2. The operator pricing table (``.jaato/pricing.json`` via
+       ``shared.pricing``), computed from the model name + token counts.
+    3. ``(None, None)`` — no source knew (a telemetry backend may still
+       estimate).
+
+    A ``0.0`` cost WITH a source is a reported zero; ``None`` is an
+    absence.  Collapsing the two would make a free model indistinguishable
+    from an unpriced one.
+
+    The pricing table is loaded lazily on first non-reported cost and
+    cached on the session, so cost-free sessions never touch the JSON. Any
+    failure to load or compute degrades to ``(None, None)`` — telemetry
+    must never break a turn.
+
+    A MODULE-LEVEL function taking ``session`` rather than a third method,
+    because :meth:`JaatoSession._resolve_span_cost` is called with a
+    duck-typed ``self`` by ``test_session_cost_telemetry`` (a
+    ``SimpleNamespace`` carrying just the five attributes touched here).
+    Delegating to a sibling METHOD quietly made the whole class a
+    requirement of that call and broke those guards; a free function keeps
+    the one implementation without widening what a caller must be.
+
+    Args:
+        session: Anything carrying ``_model_name``, ``workspace_path``,
+            ``_span_pricing``, ``_span_pricing_loaded`` and ``_trace``.
+        usage: The response ``TokenUsage``.
+
+    Returns:
+        ``(cost_usd, source)`` — source is
+        :data:`~shared.session_consumption.COST_SOURCE_PROVIDER` or
+        :data:`~shared.session_consumption.COST_SOURCE_PRICING_TABLE`.
+    """
+    if usage.cost_usd is not None:
+        return usage.cost_usd, COST_SOURCE_PROVIDER
+    if not session._model_name:
+        return None, None
+    try:
+        if not session._span_pricing_loaded:
+            from shared.pricing import load_pricing
+            session._span_pricing = load_pricing(session.workspace_path)
+            session._span_pricing_loaded = True
+        if session._span_pricing is None or not session._span_pricing.has(
+                session._model_name):
+            return None, None
+        return session._span_pricing.cost_for_usage(
+            session._model_name,
+            prompt_tokens=int(usage.prompt_tokens or 0),
+            output_tokens=int(usage.output_tokens or 0),
+            cache_read_tokens=usage.cache_read_tokens,
+            cache_creation_tokens=usage.cache_creation_tokens,
+        ), COST_SOURCE_PRICING_TABLE
+    except Exception as e:  # pragma: no cover - defensive
+        session._trace(f"LLM_TELEMETRY: pricing-table cost lookup failed: {e}")
+        return None, None
+
+
 class JaatoSession:
     """Per-agent conversation session.
 
@@ -401,6 +554,34 @@ class JaatoSession:
         # is replaced with a typed ``payload: <schema>``. None = legacy untyped.
         self._completion_payload_schema: Optional[Any] = None
 
+        # Tier to return to when the tier currently at the wheel finishes
+        # its completion.  ``None`` = nothing pending, which is every
+        # session using no such tier.
+        #
+        # Exactly one writer each way, which is what bounds the state
+        # (#1025):
+        #   ARMED   by ``switch_tier``, on every entry into a tier
+        #           declaring ``exit_on: completion`` from a different
+        #           tier.
+        #   SPENT   by ``_take_pending_tier_return``, the sole clearing
+        #           site.  Its two callers -- the mid-turn
+        #           ``_exit_completion_tier_if_settled`` and the turn-end
+        #           ``_finalize_completion_tier_exit`` -- take the target
+        #           BEFORE performing the switch, so whichever reaches it
+        #           first spends the arming and the other becomes a no-op.
+        #           A double pop is therefore unrepresentable, and the
+        #           turn-end site guarantees the arming is never left
+        #           standing into a later turn.
+        #
+        # Deferred rather than nested: the exit is state a lifecycle tool
+        # stamps and the next settled completion consumes -- the same
+        # shape as the Path-1 tool_choice retry above.  Running the tier's
+        # completion INSIDE the ``enter_tier`` executor would mean a
+        # provider call from a tool executor, which can run in a worker
+        # thread under JAATO_PARALLEL_TOOLS with no lock over history, and
+        # nothing in this session has ever done that.
+        self._pending_tier_return: Optional[str] = None
+
         # Path 1 quirk state (server 0.6.195+).  When
         # ``LifecycleTools._execute_signal_completion`` returns a
         # ``validation_failed`` error, ``_execute_tools_and_continue``
@@ -441,13 +622,28 @@ class JaatoSession:
         # subagent: end of ``_run_subagent_async``) to decide whether
         # to inject a nudge prompt back into the session asking the
         # agent to call ``signal_completion`` before terminating.
-        # ``_completion_nudges_fired`` bounds the retry budget, and unlike
-        # ``_signal_completion_called`` it is per SESSION: a nudge
-        # re-prompts, so a per-turn budget is refunded by the very turn it
-        # paid for and bounds nothing (#767).  See
-        # ``_begin_turn_completion_state``.
+        # ``_completion_nudges_fired`` bounds the retry budget.  It is
+        # per TURN, but a naive per-turn reset bounds nothing: a nudge
+        # RE-PROMPTS the session, so the turn the nudge itself creates ran
+        # the reset and handed back the token the nudge had just spent
+        # (#767).  ``_completion_nudge_turn_pending`` is the distinction
+        # that makes both true at once — it is latched by
+        # :meth:`try_completion_nudge` and consumed by
+        # :meth:`_begin_turn_completion_state`, so a NUDGE-originated turn
+        # keeps the counter (the loop terminates) while a turn the caller
+        # started clears it (a conversation is not rationed, #934).
         self._signal_completion_called: bool = False
         self._completion_nudges_fired: int = 0
+        self._completion_nudge_turn_pending: bool = False
+        # LIFETIME nudge count, and the budget the caller last enforced.
+        # Both are REPORTING state for the ``consumption`` environment
+        # aspect and are read by nothing that decides anything -- which is
+        # the point: ``_completion_nudges_fired`` is per TURN by design
+        # (#934) and must stay the only number the guard consults, so a
+        # session-lifetime figure needs its own counter rather than a
+        # second meaning layered onto that one.
+        self._completion_nudges_total: int = 0
+        self._completion_nudge_budget: Optional[int] = None
         # Set in configure() when introspection's tools are dropped because there
         # is nothing deferred to discover — read by introspection's
         # get_system_instructions to suppress the now-mismatched discovery
@@ -476,10 +672,28 @@ class JaatoSession:
         # ``_budget_terminal_action`` (which also latches finalize/escalate,
         # neither of which stops anything).
         self._budget_exhausted_reason: Optional[str] = None
+        # Dimensions whose 100% crossing has been TRACED (#955).  A ceiling
+        # is announced once, whether or not any rung fires on it — a ladder
+        # that never logs is indistinguishable from one that is not wired.
+        self._budget_ceilings_traced: Set[str] = set()
         # True when the LAST send_message was refused by the budget gate
         # (no turn ran).  Read runner-side to suppress the post-turn
         # TurnCompletedEvent — see ``was_last_send_refused``.
         self._last_send_refused: bool = False
+        # LIFECYCLE, not usage (#881).  ``_turn_accounting`` is a USAGE
+        # ledger: a turn lands in it only when the provider reported tokens,
+        # and every consumer of ``len(_turn_accounting)`` -- the ``turns``
+        # figure in ``get_context_usage``, the unattributed-turn reconciliation
+        # in ``get_consumption``, the persisted ``turn_count`` -- reads it as
+        # one.  These two answer the DIFFERENT question "did a turn run", and
+        # they are what the post-turn event fan-out gates on.  Keeping them
+        # apart is what lets a provider that reports no usage still terminate
+        # the session's event stream; conflating them is #881.
+        self._turns_ran: int = 0
+        self._last_turn_ran: Optional[Dict[str, Any]] = None
+        # #688 item 3: latched by ``_warn_unmetered_turn_once`` so a provider
+        # that reports no usage says so once rather than every turn.
+        self._unmetered_warning_emitted: bool = False
         self._active_tier: Optional[str] = None
 
         # Spawn-time parameters passed to this session by the caller
@@ -572,6 +786,11 @@ class JaatoSession:
         self._executor: Optional[ToolExecutor] = None
         self._tools: Optional[List[ToolSchema]] = None
         self._system_instruction: Optional[str] = None
+        # Width of this session's tool thread pool (#862), from the
+        # profile's ``runtime_limits.max_parallel_tools``.  ``None`` =
+        # nothing declared one, so :data:`DEFAULT_MAX_PARALLEL_TOOLS`
+        # applies; see :meth:`_parallel_worker_cap`.
+        self._max_parallel_tools: Optional[int] = None
         # Per-session AppArmor reference-fragment authorizer.  Set by
         # JaatoServer.set_reference_authorizer() after WS provisions an
         # AppArmor profile.  ``None`` means no kernel layer to mutate
@@ -623,6 +842,14 @@ class JaatoSession:
         # Per-turn token accounting
         self._turn_accounting: List[Dict[str, int]] = []
 
+        # Per-BINDING spend accounting -- (provider, model, tier).  The turn
+        # list above carries no model stamp, so it cannot say which tier of a
+        # ``model_tiers`` session spent what; this can.  Written once per
+        # response by ``_observe_binding_usage`` from the same hook that
+        # accumulates the turn's ``spend_*`` keys, read by
+        # ``get_consumption``.  See ``shared/session_consumption.py``.
+        self._consumption: ConsumptionLedger = ConsumptionLedger()
+
         # Instruction budget tracking (token usage by source layer)
         self._instruction_budget: Optional[InstructionBudget] = None
 
@@ -661,12 +888,16 @@ class JaatoSession:
         #
         #   cache re-wire fails      -> the session runs UNCACHED from here
         #   reliability retarget     -> patterns judged against the wrong model
+        #   context-window refresh   -> GC and every "how full am I" figure
+        #                               measured against the previous model's
+        #                               window
         #
-        # Three best-effort blocks is not the smell; three UNOBSERVABLE ones
-        # is.  Both counters ride the LLM span alongside ``jaato.tier``, so a
-        # consumer can see a degraded session instead of inferring it.
+        # Best-effort blocks are not the smell; UNOBSERVABLE ones are.  Every
+        # counter rides the LLM span alongside ``jaato.tier``, so a consumer
+        # can see a degraded session instead of inferring it.
         self._tier_cache_rewire_failures: int = 0
         self._tier_reliability_retarget_failures: int = 0
+        self._tier_context_limit_refresh_failures: int = 0
 
         # Thinking mode
         self._thinking_plugin: Optional['ThinkingPlugin'] = None
@@ -679,6 +910,18 @@ class JaatoSession:
         # Agent type context (for permission checks)
         self._agent_type: str = "main"
         self._agent_name: Optional[str] = None
+        # This session's own ``plugin_configs.permission`` block, and the
+        # key it is judged under once installed on the shared permission
+        # plugin (#957).  ``configure()`` stashes the block;
+        # ``_apply_scoped_permission_policy`` installs it when the session
+        # is a subagent, and ``_permission_scoped`` records that it did so
+        # the executor's permission context names the scope.  See
+        # ``_permission_context`` for why the scope is minted here rather
+        # than taken from ``_agent_id`` (which is "main" until a UI hook
+        # renames it, after the first tool may already have run).
+        self._permission_config: Optional[Dict[str, Any]] = None
+        self._permission_scope: str = uuid.uuid4().hex[:12]
+        self._permission_scoped: bool = False
         self._telemetry_spans_started: bool = False
 
         # UI hooks for agent lifecycle events
@@ -1116,21 +1359,26 @@ class JaatoSession:
     ) -> None:
         """Set the agent context for permission checks and trace identification.
 
+        This is also where a session BECOMES a subagent, and so where its
+        own ``plugin_configs.permission`` block — stashed by
+        :meth:`configure` — is installed as the policy that judges it
+        (#957).  Both spawn paths in the subagent plugin call this right
+        after ``create_session`` and before the first turn, so no tool
+        call is ever judged by the parent's policy in between.
+
         Args:
             agent_type: Type of agent ("main" or "subagent").
             agent_name: Optional name for the agent (e.g., profile name).
         """
         self._agent_type = agent_type
         self._agent_name = agent_name
+        self._apply_scoped_permission_policy()
 
         # Update executor permission context if already configured
         if self._executor and self._runtime.permission_plugin:
-            context = {"agent_type": agent_type, "session_id": self._daemon_session_id}
-            if agent_name:
-                context["agent_name"] = agent_name
             self._executor.set_permission_plugin(
                 self._runtime.permission_plugin,
-                context=context
+                context=self._permission_context()
             )
 
         # Propagate agent context to provider for trace identification
@@ -1144,6 +1392,117 @@ class JaatoSession:
         # Telemetry session/agent spans are started lazily on the first
         # turn (see _ensure_telemetry_spans) because the parent session
         # reference may not be set yet when set_agent_context is called.
+
+    def _apply_plugin_configs(
+        self, plugin_configs: Optional[Dict[str, Dict[str, Any]]]
+    ) -> None:
+        """Apply this session's ``plugin_configs`` to the plugins the
+        registry knows (#950) — all but ``permission``, whose block is
+        stashed for :meth:`_apply_scoped_permission_policy` (#957).
+        The rationale for both is in the comment block at the call
+        site in :meth:`configure`.
+        """
+        if not plugin_configs or not self._runtime.registry:
+            return
+        registry = self._runtime.registry
+        known_plugins = set(registry.list_available())
+        for plugin_name, config in plugin_configs.items():
+            if plugin_name not in known_plugins:
+                continue  # a provider section, or a name nothing supplies
+            if plugin_name == "permission":
+                self._permission_config = dict(config)
+                continue
+            try:
+                # Inject agent_name into plugin config for trace logging
+                if self._agent_name and "agent_name" not in config:
+                    config = {**config, "agent_name": self._agent_name}
+                # expose_tool with new config will re-initialize
+                registry.expose_tool(plugin_name, config)
+            except Exception as e:
+                logger.warning(
+                    "Failed to configure plugin '%s': %s", plugin_name, e)
+
+    def _permission_context(self) -> Dict[str, Any]:
+        """The per-session context every permission check carries.
+
+        ``ToolExecutor`` hands it to ``PermissionPlugin.check_permission``
+        on every call, and it is the ONLY per-session thing the shared
+        plugin sees: the identity it traces (#951) and, when this session
+        installed a policy of its own, the ``permission_scope`` that
+        policy is filed under (#957).  The scope is a key minted at
+        construction rather than ``_agent_id``, because ``_agent_id`` is
+        ``"main"`` until ``set_ui_hooks`` renames it — for a subagent
+        that can be after its first tool call — and the daemon session
+        id is shared by a parent and its in-process subagents.  It is
+        put in the context only once a scoped policy exists, so a
+        session judged by the runtime policy carries exactly the
+        context it did before.
+        """
+        context: Dict[str, Any] = {
+            "agent_type": self._agent_type,
+            "session_id": self._daemon_session_id,
+        }
+        if self._agent_name:
+            context["agent_name"] = self._agent_name
+        if self._permission_scoped:
+            context["permission_scope"] = self._permission_scope
+        return context
+
+    def permission_context(self) -> Dict[str, Any]:
+        """A copy of the context this session's tool calls are judged
+        under.  Read by the permission plugin's ``askPermission`` tool,
+        which the executor dispatches WITHOUT a gate and therefore
+        without the context, so that a subagent's pre-check is answered
+        by the same policy its real call will be (#957)."""
+        if self._executor is not None:
+            return dict(self._executor._permission_context)
+        return self._permission_context()
+
+    def _apply_scoped_permission_policy(self) -> None:
+        """Install this session's own ``plugin_configs.permission`` as
+        the policy that judges it — for a subagent only (#957).
+
+        Why not for the root session too: the runtime-wide policy IS the
+        root session's, seeded from the same block at bootstrap on every
+        path (``server/core.py``, the runner's Step 8,
+        ``jaato_embedded``'s ``expose_all``), and it is the object the
+        operator's ``permissions allow|deny|default`` commands mutate.
+        Giving the root a scoped copy would detach it from those
+        commands for no gain.  A subagent's block, on the other hand,
+        had NOWHERE to land: the old route (``registry.expose_tool`` →
+        re-``initialize()``) re-initialized an unread copy on the
+        daemon and runner and clobbered the parent's enforcer in-process.
+
+        A subagent without a block installs nothing and is judged by the
+        runtime policy, as before — inheriting the parent's posture is
+        the right default for a profile that declared none.  A block with
+        neither ``policy`` nor ``evaluators`` (``agent_name`` alone, or
+        an empty dict) defines no policy and installs nothing either.
+
+        Idempotent: re-installing under the same scope replaces the
+        entry, so a session reconfigured mid-life is judged by its
+        latest block.
+        """
+        plugin = self._runtime.permission_plugin if self._runtime else None
+        block = self._permission_config
+        if plugin is None or self._agent_type != "subagent" or not block:
+            return
+        if not any(k in block for k in ("policy", "evaluators")):
+            return
+        install = getattr(plugin, "set_scoped_policy", None)
+        if install is None:
+            # A stand-in enforcer that predates the seam — nothing to
+            # install on, and re-initializing it would be the old defect.
+            self._trace(
+                "permission: this session's plugin_configs.permission "
+                "has no scoped-policy seam to land on "
+                f"({type(plugin).__name__}); the runtime policy judges it")
+            return
+        install(self._permission_scope, block)
+        self._permission_scoped = True
+        self._trace(
+            f"permission: session-scoped policy installed "
+            f"scope={self._permission_scope} agent={self._agent_name}")
 
     def set_daemon_session_id(self, session_id: str) -> None:
         """Set the daemon session manager ID for this session.
@@ -1170,13 +1529,16 @@ class JaatoSession:
         self._daemon_session_id = session_id
 
     def set_client_user_id(self, user_id: Optional[str]) -> None:
-        """Set the end-user identity for telemetry user tracking.
+        """Set the end-user identity for telemetry and ledger attribution.
 
-        The daemon wires this from the authenticated client user
-        (``get_client_user(client_id)`` — WS/SSO deployments; IPC has no
-        user). It is emitted as the OpenInference ``user.id`` span
-        attribute so observability backends (Langfuse's Users view)
-        attribute traces, token usage, and cost to the user.
+        The runner bootstrap wires this from
+        ``SessionInitEnvelope.created_by`` — the user the daemon
+        authenticated for the creating client (``get_client_user`` —
+        WS/SSO deployments; IPC has no user).  It is emitted as the
+        OpenInference ``user.id`` span attribute so observability
+        backends (Langfuse's Users view) attribute traces, token usage,
+        and cost to the user, and stamped as ``user_id`` on the token
+        ledger's ``response`` records (#859).
 
         Takes precedence over the ``JAATO_TELEMETRY_USER_ID`` per-session
         env fallback used by keyless/local deployments.
@@ -1417,10 +1779,22 @@ class JaatoSession:
         don't need to do it.  Returns ``(False, current)`` otherwise
         (no counter change).
 
+        **A True answer also latches ``_completion_nudge_turn_pending``**,
+        which is what keeps the budget per TURN without making it
+        refundable (#934).  The caller's next act is to re-prompt the
+        session, and that re-prompt is a turn: without the latch,
+        :meth:`_begin_turn_completion_state` would zero the counter the
+        nudge had just spent and no nudge loop could terminate (#767).
+        The latch is consumed by that turn's start, so the turn AFTER a
+        conversation's nudge sequence begins with a full budget again.
+        This is the one place it is set — every nudge site must spend the
+        budget through this method rather than touching the counter, or
+        its re-prompt reads as caller-originated and the loop unbounds.
+
         Args:
             max_nudges: Bound on ``_completion_nudges_fired``.
-                Caller's nudge-budget knob (the existing daemon-side
-                site uses ``MAX_COMPLETION_NUDGES = 2``).  Must be
+                Caller's nudge-budget knob, resolved from the profile by
+                ``shared.completion_nudge`` (default 2).  Must be
                 non-negative; values <= 0 always yield
                 ``(False, current)``.
 
@@ -1435,11 +1809,28 @@ class JaatoSession:
         boundary.  No additional locking added (would be a behavior
         change).
         """
+        # The budget is the CALLER's knob (resolved from the profile by
+        # ``shared.completion_nudge``) and reaches the session nowhere else
+        # -- ``configure`` is not passed it and the session-init envelope
+        # does not carry it.  Latching it here is what lets the
+        # ``consumption`` aspect report the real ceiling for a profile that
+        # raised it, rather than the framework default.  Recorded on every
+        # call, refusals included, because a refusal knows the number too.
+        self._completion_nudge_budget = max_nudges
         if (
             not getattr(self, "_signal_completion_called", False)
+            # A session an ``abort`` rung stopped refuses every later turn
+            # (``_refuse_if_budget_exhausted``); re-prompting it spends a
+            # nudge on a turn that cannot run and prints a refusal per
+            # attempt (#955).  The ceiling is the verdict, not a missing
+            # signal_completion.
+            and not getattr(self, "_budget_exhausted_reason", None)
             and getattr(self, "_completion_nudges_fired", 0) < max_nudges
         ):
             self._completion_nudges_fired += 1
+            self._completion_nudges_total = getattr(
+                self, "_completion_nudges_total", 0) + 1
+            self._completion_nudge_turn_pending = True
             return True, self._completion_nudges_fired
         return False, getattr(self, "_completion_nudges_fired", 0)
 
@@ -1630,6 +2021,48 @@ class JaatoSession:
             self._on_prompt_injected(msg.text)
         return msg.text
 
+    def _make_thinking_emitter(
+        self,
+        on_output: Optional[Callable[[str, str, str], None]],
+        trace_tag: str,
+    ) -> Callable[[str], None]:
+        """Build the ``on_thinking`` callback for ONE provider call.
+
+        Reasoning reaches the session the way text does — as a stream of
+        deltas on the OpenAI-shaped wires (OpenRouter, the ``_openai_compat``
+        family, GitHub Models, the Responses API), or as one whole block on
+        the wires that accumulate it (Anthropic, ``claude_cli``, Bedrock).
+        The output contract is the same one text uses: the FIRST chunk of a
+        block is a ``"write"`` (start a new block) and every later chunk an
+        ``"append"``.  Before #755 every reasoning chunk was emitted as a
+        ``"write"``, so a client honouring the contract started a new block
+        per delta and rendered a 20-character line per token — the
+        "narrow wrap" the issue reports.
+
+        The emitter is per provider call, like ``streaming_callback``: each
+        call of the tool loop starts a fresh block, so interleaved reasoning
+        between two tool rounds renders as two blocks rather than one.
+
+        Args:
+            on_output: The session's output callback, or ``None`` (the
+                emitter is then a no-op).
+            trace_tag: Prefix for the ``_trace`` line, naming the call site.
+
+        Returns:
+            A callable taking the reasoning chunk.
+        """
+        started = [False]
+
+        def thinking_callback(thinking: str) -> None:
+            if not on_output:
+                return
+            mode = "append" if started[0] else "write"
+            self._trace(f"{trace_tag} mode={mode} len={len(thinking)}")
+            on_output("thinking", thinking, mode)
+            started[0] = True
+
+        return thinking_callback
+
     def _forward_to_parent(self, event_type: str, content: str) -> None:
         """Forward an event to the parent session.
 
@@ -1710,7 +2143,10 @@ class JaatoSession:
             if update.new_chunks:
                 parts.append(f"New results ({len(update.new_chunks)} items):")
                 for chunk in update.new_chunks:
-                    parts.append(f"  - {chunk.content}")
+                    # CLIENT-audience chunks are for viewers only and must
+                    # not enter the conversation.
+                    if chunk.audience.reaches_model() and chunk.content:
+                        parts.append(f"  - {chunk.content}")
             if update.is_complete:
                 parts.append(f"Stream completed. Total results: {update.total_chunks}")
                 if update.final_result:
@@ -2244,6 +2680,8 @@ class JaatoSession:
         agent_params: Optional[Dict[str, Any]] = None,
         completion_processors: Optional[List[Any]] = None,
         tool_scopes: Optional[Dict[str, List[str]]] = None,
+        max_parallel_tools: Optional[int] = None,
+        runtime_limits: Optional['RuntimeLimits'] = None,
         tools: Optional[List[str]] = None,  # DEPRECATED alias for ``plugins``
     ) -> None:
         """Configure the session with plugins and instructions.
@@ -2255,7 +2693,15 @@ class JaatoSession:
                    per-tool allow-lists live in ``tool_scopes``.)
             system_instructions: Optional additional system instructions.
             plugin_configs: Optional per-plugin configuration overrides.
-                           Plugins will be re-initialized with these configs.
+                           Every named plugin the registry knows is
+                           re-initialized with its config — INCLUDING plugins
+                           absent from ``plugins`` (#950): configuring a plugin
+                           and exposing its tools are separate decisions, and
+                           ``permission`` is the case that matters (it exposes
+                           no tools at all, so it is never in ``plugins``).
+                           Keys naming a provider rather than a plugin
+                           (``openrouter``, ``anthropic``, …) are skipped here
+                           — ``create_provider`` reads those.
             skip_provider: If True, skip provider creation (for auth-pending mode).
                           User commands will be available but model calls won't work.
             preloaded_plugins: Optional set of plugin names that should bypass
@@ -2282,6 +2728,25 @@ class JaatoSession:
                 path for this session.  Used by fork-replay to point a
                 temp session at a worktree snapshot without affecting other
                 sessions sharing the same runtime.
+            max_parallel_tools: Ceiling on how many tool calls this session
+                may execute concurrently (profile
+                ``runtime_limits.max_parallel_tools``, #862).  ``None``
+                applies :data:`shared.runtime_limits.DEFAULT_MAX_PARALLEL_TOOLS`.
+                Orthogonal to ``JAATO_PARALLEL_TOOLS``, which decides
+                WHETHER to go parallel at all; this decides how wide.
+            runtime_limits: The profile's whole resolved
+                :class:`~shared.runtime_limits.RuntimeLimits` block
+                (#735).  This is THE application point for the
+                application-enforced caps: ``tool_timeout_seconds`` and
+                ``max_output_bytes`` are forwarded from here to the
+                subprocess plugins (cli, interactive_shell), and
+                ``max_parallel_tools`` is read from here when the
+                standalone kwarg above is absent.  ``None`` leaves
+                whatever the plugins already carry untouched — see
+                :meth:`_apply_runtime_limits` for why absence is not
+                the same as "no limits".  The kernel-enforced trio in
+                the same block is NOT consumed here: it is written to
+                the cgroup before the runner process is forked.
             tools: DEPRECATED alias for ``plugins`` (it always took plugin
                 names, never tool names). Pass ``plugins=`` instead; ``tools=``
                 still works with a one-time deprecation warning. ``plugins``
@@ -2343,17 +2808,14 @@ class JaatoSession:
                 dict(budget_control.limits), len(budget_control.degrade),
             )
 
+        # Tool-pool width (#862), from whichever of the two vehicles
+        # carries it (#735).
+        self._apply_parallel_tool_cap(
+            _resolve_parallel_width(max_parallel_tools, runtime_limits)
+        )
+
         if tier_config is not None:
-            self._tier_config = tier_config
-            self._active_tier = tier_config.initial_tier
-            initial_model = tier_config.tiers[tier_config.initial_tier].model
-            if self._model_name and self._model_name != initial_model:
-                logger.info(
-                    "Tier mode active: overriding session model %s with "
-                    "initial tier %s's model %s",
-                    self._model_name, tier_config.initial_tier, initial_model,
-                )
-            self._model_name = initial_model
+            self._apply_initial_tier_binding(tier_config)
 
         # Store preloaded plugins for use in deferred instruction collection
         self._preloaded_plugins = preloaded_plugins or set()
@@ -2362,18 +2824,61 @@ class JaatoSession:
         # Store tool plugin names
         self._tool_plugins = plugins
 
-        # Re-initialize plugins with session-specific configs if provided
-        if plugin_configs and self._runtime.registry:
-            for plugin_name, config in plugin_configs.items():
-                if plugins is None or plugin_name in plugins:
-                    try:
-                        # Inject agent_name into plugin config for trace logging
-                        if self._agent_name and "agent_name" not in config:
-                            config = {**config, "agent_name": self._agent_name}
-                        # expose_tool with new config will re-initialize
-                        self._runtime.registry.expose_tool(plugin_name, config)
-                    except Exception as e:
-                        print(f"Warning: Failed to configure plugin '{plugin_name}': {e}")
+        # Re-initialize plugins with session-specific configs if provided.
+        #
+        # A config is applied for every plugin the REGISTRY knows, whether or
+        # not the session lists it in ``plugins`` (#950).  The old gate —
+        # ``if plugins is None or plugin_name in plugins`` — silently dropped
+        # the rest, which contradicted the framework's own intent in three
+        # other places (``SessionInitEnvelope.plugin_configs`` "carries configs
+        # for **all** plugins", the runner's Phase 4 §C merge, and
+        # ``PluginRegistry._ALWAYS_INITIALIZE_PLUGINS``) and made a profile's
+        # ``plugin_configs.permission`` inert for any session that did not also
+        # name ``permission`` in ``plugins``.  Measured: 55 permission ASKs on
+        # a tool the profile had whitelisted, with no diagnostic anywhere.
+        #
+        # A top-level session never saw this — its configs reach the plugins
+        # through ``expose_all(plugin_configs)`` at bootstrap.  A subagent
+        # reuses the parent's already-bootstrapped registry, so THIS loop was
+        # the only place its own profile's configs could land.
+        #
+        # Two properties the loop depends on:
+        #
+        # * **Names the registry does not know are skipped**, not attempted.
+        #   ``plugin_configs`` also carries the PROVIDER sections
+        #   (``openrouter``, ``anthropic``, …), which are read by
+        #   ``create_provider``, not by any plugin; ``expose_tool`` would raise
+        #   ``ValueError`` on each one and the old gate happened to filter them
+        #   out by way of them not being in ``plugins``.
+        # * **This does not widen the model's tool surface.**  Bootstrap's
+        #   ``expose_all`` already exposed every discovered plugin; what the
+        #   model sees is filtered per session from ``self._tool_plugins``
+        #   (``plugins``), which this loop does not touch.
+        #
+        # Consequence worth knowing: the registry — and therefore each plugin
+        # INSTANCE — is shared with the parent and its other subagents, so a
+        # config applied here is applied for all of them.  That was already
+        # true of every plugin a subagent DID list; this widens it to the ones
+        # it only configures.
+        #
+        # ``permission`` is the one plugin this loop must NOT re-initialize
+        # (#957).  The enforcer is a single object judging every session on
+        # the runtime, and ``expose_tool`` with a changed config is
+        # ``shutdown()`` + ``initialize()`` on whichever instance the
+        # registry holds.  On the daemon (``server/core.py``) and the runner
+        # (``server/runner/session.py`` Step 8) that is an unread copy — the
+        # enforcer is constructed separately — so a subagent's block landed
+        # nowhere and it was judged by the ROOT profile's policy: a profile
+        # that whitelisted exactly the tools it needed was denied
+        # ``method=default`` when spawned, and only the PARENT's whitelist
+        # changed the verdict.  In-process (``jaato_embedded``) the registry's
+        # instance IS the enforcer, so the same block replaced the parent's
+        # policy with the child's and swapped the parent's in-process ASK
+        # channel for a console one.  The block is stashed here and, once
+        # the session is a subagent, installed as a policy of its own on the
+        # shared plugin — ``_apply_scoped_permission_policy``.  The root
+        # session's block was already applied at bootstrap on every path.
+        self._apply_plugin_configs(plugin_configs)
 
         # Stash provider-creation args for lazy use by ``_ensure_provider``.
         # Pre-2026-05-13 the eager ``self._provider = self._runtime.create_provider(...)``
@@ -2418,6 +2923,11 @@ class JaatoSession:
         # Set registry for auto-background support
         if self._runtime.registry:
             self._executor.set_registry(self._runtime.registry)
+
+        # Arm the subprocess caps.  MUST come after ``set_registry``:
+        # the executor forwards them by walking ``registry.list_exposed()``
+        # (#735).
+        self._apply_runtime_limits(runtime_limits)
 
         # Initialize stream manager for streaming tool support
         self._stream_manager = StreamManager()
@@ -2581,14 +3091,16 @@ class JaatoSession:
                             "deferred tools to discover, no eager tools to "
                             "re-inspect)")
 
-        # Set permission plugin with agent context
+        # Set permission plugin with agent context.  A session that is
+        # already a subagent when (re)configured — a revive, a mid-life
+        # reconfigure — installs its own policy here; a fresh spawn is
+        # still ``"main"`` at this point and installs it from
+        # ``set_agent_context`` (#957).
         if self._runtime.permission_plugin:
-            context = {"agent_type": self._agent_type, "session_id": self._daemon_session_id}
-            if self._agent_name:
-                context["agent_name"] = self._agent_name
+            self._apply_scoped_permission_policy()
             self._executor.set_permission_plugin(
                 self._runtime.permission_plugin,
-                context=context
+                context=self._permission_context()
             )
 
         # Set reliability plugin for tool failure tracking
@@ -2859,9 +3371,24 @@ class JaatoSession:
             # V2 cross-provider tiers: record which provider this instance IS and
             # seed the per-provider cache so switch_tier can compare against it
             # and reuse it on a switch back.
-            self._active_provider_name = cfg['provider_name']
-            if cfg['provider_name'] is not None:
-                self._provider_cache[cfg['provider_name']] = self._provider
+            #
+            # ``cfg['provider_name']`` is the session's OVERRIDE, and ``None``
+            # there does not mean "no provider" — it means "whichever one the
+            # runtime is configured for", which is exactly what
+            # ``create_provider`` just resolved (``provider_name or
+            # self._provider_name``).  Recording the ``None`` left this
+            # instance unnamed and out of the cache, so a tier naming that
+            # same provider compared unequal and built a second instance of
+            # it.  Ask the runtime for the name it resolved instead; when
+            # neither side names one there is nothing to key on and the field
+            # stays ``None``, as before.
+            resolved_provider_name = (
+                cfg['provider_name']
+                or getattr(self._runtime, 'provider_name', None)
+            )
+            self._active_provider_name = resolved_provider_name
+            if resolved_provider_name is not None:
+                self._provider_cache[resolved_provider_name] = self._provider
             # Propagate agent context to provider for trace identification.
             if hasattr(self._provider, 'set_agent_context'):
                 self._provider.set_agent_context(
@@ -2872,16 +3399,15 @@ class JaatoSession:
             # Resolve the real context window now that the provider exists.
             # The budget was created at configure() time with context_limit=0
             # because the provider is lazy-created and didn't exist yet.  This
-            # is the single point where the model's actual limit (e.g. vLLM's
-            # configured context_length) becomes the budget-GC denominator —
-            # it runs on first model use, before any conversation grows or any
-            # after-turn GC check, so the GC threshold is computed against the
-            # true window from the very first turn.  See
+            # is the FIRST of the two points where the model's actual limit
+            # (e.g. vLLM's configured context_length) becomes the budget-GC
+            # denominator — it runs on first model use, before any
+            # conversation grows or any after-turn GC check, so the GC
+            # threshold is computed against the true window from the very
+            # first turn.  The second is ``_connect_tier_entry``, which is the
+            # other way the binding under this session changes.  See
             # _populate_instruction_budget for the failure mode this closes.
-            if self._instruction_budget is not None:
-                self._instruction_budget.context_limit = (
-                    self._provider.get_context_limit()
-                )
+            self._refresh_context_limit_from_provider()
             # Wire cache plugin now that the provider exists.  Pre-defer
             # this fired at the end of configure() unconditionally.
             self._wire_cache_plugin()
@@ -2892,6 +3418,12 @@ class JaatoSession:
             # before any model work (the earliest point the provider
             # exists).
             self._validate_modality_tier_capabilities()
+            # A session that STARTS in a speaking tier must ask for audio
+            # too.  The initial tier never passes through
+            # ``_connect_tier_entry`` (that is the SWITCH path), so without
+            # this an outbound role only took effect after the first
+            # ``enter_tier`` — the one case most likely to be tested first.
+            self._request_active_tier_output_modalities()
             # Consume the stashed args — repeated calls become no-ops
             # (the fast-path above returns the cached provider).
             self._provider_lazy_pending = None
@@ -3087,12 +3619,24 @@ class JaatoSession:
         response parts to only text and function_call (excludes
         function_response parts which belong to user/tool messages).
 
+        ``Part.thought`` is kept only when the provider declares
+        ``replay_reasoning`` — the wires whose thinking models require the
+        previous turn's reasoning back on the next request of a tool-call
+        loop (docs/design/minimax-kimi-mimo-providers.md §3).  Gating on
+        the provider rather than on the part means a provider that emits a
+        thought part incidentally (google_genai) keeps the history it
+        always had, and no existing provider's replay changes.
+
         Args:
             response: The ProviderResponse from the provider.
         """
+        # ``is True`` and not truthiness: a test double answers every
+        # attribute with a mock, and a mock must read as "does not replay".
+        keep_thought = getattr(self._provider, "replay_reasoning", False) is True
         history_parts = [
             p for p in response.parts
             if p.text is not None or p.function_call is not None
+            or (keep_thought and p.thought is not None)
         ]
         if history_parts:
             self._history.append(Message(
@@ -3439,7 +3983,11 @@ class JaatoSession:
         cache = self._runtime.instruction_token_cache
 
         def _background_count() -> None:
-            max_workers = min(len(cache_misses), 8)
+            # Same session-wide ceiling as tool execution: these workers
+            # are concurrent PROVIDER calls, so a profile that narrowed
+            # its pool because the upstream is rate-limited meant this
+            # fan-out too.
+            max_workers = self._parallel_worker_cap(len(cache_misses))
             with ThreadPoolExecutor(max_workers=max_workers) as pool:
                 def _count_one(req: _TokenCountRequest) -> None:
                     try:
@@ -3662,6 +4210,18 @@ class JaatoSession:
                         has_tool_result = True
                         if tr.name:
                             tool_names.append(tr.name)
+                # Binary payload (audio, images, PDFs) was counted as
+                # nothing at all until #850, which is what made a 600 KB
+                # utterance invisible to every GC threshold: the tokenizer
+                # has no opinion about bytes, so the denominator simply
+                # omitted them.  Summed outside the loop, not as another
+                # ``elif`` inside it, because this function is frozen near
+                # the top of the complexity baseline and one more branch
+                # would grow the ratchet.  The estimate is deliberately
+                # coarse (see MEDIA_BYTES_PER_TOKEN) — its job is to put
+                # the payload in the budget, not to reproduce a vendor's
+                # audio-token billing.
+                msg_tokens += message_media_tokens(msg)
                 self._msg_token_cache[mid] = msg_tokens
 
             conversation_tokens += msg_tokens
@@ -4274,6 +4834,13 @@ NOTES
                 provider_name=self._provider_name_override,
                 session_id=self._daemon_session_id,
             )
+            # Keep the per-provider cache pointing at the LIVE instance.
+            # ``_provider_for_tier`` hands a tier whatever is cached under
+            # its provider name, so a stale entry here would have a later
+            # ``enter_tier`` switch back to the instance this command just
+            # replaced — carrying the model it was replaced FOR.
+            if self._active_provider_name is not None:
+                self._provider_cache[self._active_provider_name] = self._provider
 
             # Propagate agent context to new provider for trace identification
             if hasattr(self._provider, 'set_agent_context'):
@@ -4361,6 +4928,21 @@ NOTES
         JSON-safe).  ``data`` is base64-decoded to the ``bytes`` that
         ``Part.inline_data`` expects.  The text part precedes the inline-data
         parts; an empty ``message`` (image-only turn) yields parts with no text.
+
+        ``display_name`` is carried onto the part: the OpenAI-shaped
+        converters read it back off ``inline_data``
+        (``_attachments.attachment_entries_from_parts``) for the PDF ``file``
+        block's ``filename``, so dropping it here renamed every attached
+        document to ``document.pdf`` on the wire.
+
+        ``attachment_id`` is carried too, and **back-filled** when the wire
+        attachment does not name one (#850).  This is the framework's ingest
+        boundary — every user attachment becomes a ``Part`` here, whatever
+        client sent it — so it is the one place that can promise the id
+        exists before anything downstream is in a position to purge the
+        bytes.  The SDK client mints the same value from the same payload,
+        so back-filling is a no-op for SDK traffic and the safety net for a
+        WS client or a direct ``session.complete(...)`` call.
         """
         import base64
         parts: List[Part] = []
@@ -4373,6 +4955,9 @@ NOTES
             parts.append(Part(inline_data={
                 "mime_type": att.get("mime_type"),
                 "data": data,
+                "display_name": att.get("display_name"),
+                ATTACHMENT_ID_KEY: (att.get(ATTACHMENT_ID_KEY)
+                                    or mint_attachment_id(data)),
             }))
         return parts
 
@@ -4723,6 +5308,64 @@ NOTES
         )
         return freed_tokens
 
+    def _evict_consumed_media(self) -> int:
+        """Purge binary parts left over from turns that already completed.
+
+        The inbound half of a lifecycle that only ever had an outbound half
+        (#850).  Model-emitted media is ``CLIENT``-audience so it never
+        enters history at all, and ``ensure_spoken_part`` leaves the
+        transcript where the audio would have been; a user *utterance*, by
+        contrast, stayed in history verbatim and rode every subsequent
+        request.  Five questions on one helpdesk call measured ~2.8 MB of
+        accumulated audio and a final request carrying all of it.
+
+        **Runs at the START of a turn, not the end.**  Everything in history
+        at that moment belongs to a turn that has completed, which is what
+        makes "consumed" true without having to reason about it; and a turn
+        that failed before the model ever saw its audio keeps the bytes, so
+        the caller can simply send again.  Doing it in the previous turn's
+        ``finally`` would evict on exactly the path where the audio was
+        never used.
+
+        Distinct from :meth:`_gate_history_for_active_modalities`, which
+        filters a per-request COPY and leaves the stored bytes alone so a
+        later tier switch can still hear them.  This one rewrites stored
+        history and is not reversible — the accepted trade the issue names,
+        since re-hearing a recording yields the understanding the
+        conversation already records in words.
+
+        Returns the bytes reclaimed (0 when nothing matched or the feature
+        is off).  Mirrors :meth:`_dedup_history_for_gc` in its bookkeeping:
+        the rewrite preserves ``message_id``, so the per-message token cache
+        must be invalidated for the touched messages or the budget re-sync
+        reads back the pre-eviction size.
+        """
+        config = self._gc_config or GCConfig()
+        if not getattr(config, "evict_consumed_media", True):
+            return 0
+
+        history = self.get_history()
+        new_history, bytes_reclaimed, evicted_ids = evict_consumed_media(
+            history,
+            mime_prefixes=getattr(
+                config, "media_evict_mime_prefixes", ("audio/",),
+            ),
+        )
+        if not evicted_ids:
+            return 0
+
+        for mid in evicted_ids:
+            self._msg_token_cache.pop(mid, None)
+        self._history.replace(new_history)
+        self._update_conversation_budget()
+        self._emit_instruction_budget_update()
+        self._trace(
+            f"MEDIA_EVICT: purged binary payload from {len(evicted_ids)} "
+            f"message(s), {bytes_reclaimed} bytes reclaimed; each carries a "
+            f"marker naming the attachment id"
+        )
+        return bytes_reclaimed
+
     def _maybe_collect_after_turn(self) -> Optional[GCResult]:
         """Perform GC after turn if threshold was crossed during streaming."""
         if not self._gc_plugin or not self._gc_config:
@@ -4825,6 +5468,8 @@ NOTES
                 getattr(self, "_tier_cache_rewire_failures", 0))
             attrs["jaato.tier.reliability_retarget_failures"] = int(
                 getattr(self, "_tier_reliability_retarget_failures", 0))
+            attrs["jaato.tier.context_limit_refresh_failures"] = int(
+                getattr(self, "_tier_context_limit_refresh_failures", 0))
         cache = getattr(self, "_cache_plugin", None)
         if cache and hasattr(cache, "get_telemetry_attributes"):
             try:
@@ -5258,14 +5903,50 @@ NOTES
         """
         abnormal = self._finish_abnormally(response, turn_data, on_output)
         if abnormal is None:
+            self._log_finish_for_pending_tier(response, "normal", context)
             return response, None
         continued = self._recover_truncated_turn(
             response, use_streaming, on_output, wrapped_usage_callback,
             turn_data, context=context,
         )
         if continued is None:
+            self._log_finish_for_pending_tier(response, "abnormal", context)
             return response, abnormal
+        self._log_finish_for_pending_tier(response, "continued", context)
         return continued, None
+
+    def _log_finish_for_pending_tier(
+        self, response, outcome: str, context: str = "",
+    ) -> None:
+        """Say at INFO what :meth:`_finish_or_continue` just decided.
+
+        Only while an ``exit_on: completion`` return is ARMED.  #1025 could
+        not establish which path a lingering speech tier took, because the
+        finish reason was logged nowhere at INFO on either side of this
+        method -- and a tier switch that silently does not happen is
+        invisible without it.  Gating on the arming is what keeps it from
+        being a per-response line in every session: a session using no such
+        tier pays one ``getattr`` and logs nothing.
+
+        Args:
+            response: the response just classified.
+            outcome: ``normal`` (kept processing), ``abnormal`` (the turn
+                ends with a ``TurnResult``, bypassing the mid-turn exit
+                check) or ``continued`` (a truncation was recovered and
+                *response* is the continuation).
+            context: the caller's trace label, so the line names the slot.
+        """
+        if getattr(self, "_pending_tier_return", None) is None:
+            return
+        finish = getattr(
+            getattr(response, "finish_reason", None), "value", None)
+        has_calls = response is not None and response.has_function_calls()
+        logger.info(
+            "Completion-tier armed (return to %s): finish_reason=%s "
+            "outcome=%s has_function_calls=%s (%s)",
+            self._pending_tier_return, finish, outcome, has_calls,
+            context or "-",
+        )
 
     def _truncation_nudge(
         self,
@@ -5676,9 +6357,16 @@ NOTES
         """
         for attempt in range(1, max_attempts + 1):
             has_fc = response.has_function_calls()
-            is_empty = not response.parts or all(
+            # Media the model produced is delivered out of band and never
+            # becomes a Part, so a turn that spoke has no parts at all.
+            # Counting it as content is what stops the nudge firing on a
+            # good spoken answer; the provider normally also gives such a
+            # turn a transcript Part, and this is the backstop for a
+            # provider that sends none.
+            spoke = response.media_chunks > 0
+            is_empty = not spoke and (not response.parts or all(
                 not p.text and not p.function_call for p in response.parts
-            )
+            ))
             needs_nudge = (
                 (not has_fc and response.finish_reason == FinishReason.TOOL_USE)
                 or (response.finish_reason == FinishReason.UNKNOWN and is_empty)
@@ -5832,6 +6520,14 @@ NOTES
         # retry signal_completion with a corrected payload.
         if getattr(self, "_signal_completion_called", False):
             final_text = ''.join(accumulated_text) if accumulated_text else ""
+            # Skipping the continuation must not skip the BOOKKEEPING it
+            # happened to carry.  ``_send_tool_results_and_continue`` was
+            # the only writer of this batch's results into history, so
+            # returning here left a dangling ``tool_calls`` block and
+            # every later request on this session -- a further
+            # ``send_message``, or a ``session.wake`` revive -- 400'd
+            # (#913).  Record them, then return.
+            self._record_terminal_tool_results(tool_results)
             self._trace(
                 "SIGNAL_COMPLETION_TERMINATES_TURN: skipping continuation "
                 "(spur + model round-trip) — session is over"
@@ -5902,6 +6598,16 @@ NOTES
             turn_data, context=context,
         )
 
+        # A delegated tier hands back EARLY here: the continuation has
+        # landed and asks for nothing more, the earliest point the
+        # framework can know its completion settled, and the only point at
+        # which there is still a turn to resume the caller into.  It is
+        # not the guarantee -- the turn-end backstop in this loop's
+        # ``finally`` is (#1025), because this line sits past
+        # ``_finish_or_continue``'s abnormal return above and past the
+        # ``signal_completion`` short-circuit earlier in this method.
+        self._exit_completion_tier_if_settled(response)
+
         # 7. Optionally check mid-turn prompts
         if check_mid_turn and not response.has_function_calls():
             mid_turn_response = self._check_and_handle_mid_turn_prompt(
@@ -5936,8 +6642,9 @@ NOTES
           synthesizer, the subagent nudge loop, and the embedded nudge gate.
         * ``_session_quiescent_emitted`` -- the once-per-turn quiescence latch.
 
-        ``_completion_nudges_fired`` IS NOT ONE OF THEM, and clearing it here
-        cost the framework its only bound on the nudge loop (#767).  A nudge
+        ``_completion_nudges_fired`` is the third, and it is cleared here
+        CONDITIONALLY -- which is the whole of #934.  An unconditional reset
+        cost the framework its only bound on the nudge loop (#767): a nudge
         RE-PROMPTS THE SESSION, so the nudge's own turn ran this reset and
         handed the budget back the token it had just spent.  Both guards read
         the counter the same way and both were therefore unbounded: the
@@ -5946,20 +6653,39 @@ NOTES
         conformance session that never signals turned 735 times in 40
         seconds), and the subagent guard's ``while ... < MAX_COMPLETION_NUDGES``
         in ``subagent/plugin.py`` -- written on the assumption that the
-        counter only goes up -- could not terminate at all.  ``max_turns``,
-        ``budget_control`` and the caller's own wall-clock were what actually
-        stopped those sessions, at whatever they had spent by then.
+        counter only goes up -- could not terminate at all.
 
-        So the budget is per SESSION, which is what ``MAX_COMPLETION_NUDGES``
-        already claimed to be.  A session that spends it terminates
-        (``NudgeExhausted``), so "the next task on this session gets a fresh
-        budget" describes a session that no longer exists -- and a
-        completion-gated session is one-shot by construction.  The one real
-        cost is an agent that answers each nudge with more work and needs a
-        third: it is now cut off at two.  That is the declared ceiling doing
-        its job, and raising it is a knob, not a bug.
+        Never resetting fixed that, and rested on one clause: "a
+        completion-gated session is one-shot by construction", so the budget
+        being session-lifetime cost nothing.  **#913 / #915 made that false.**
+        Recording ``signal_completion``'s tool result is precisely what lets a
+        completed session be driven again, and #845 / #914 lets the next turn
+        arrive with an attachment -- so a completion-gated session is now a
+        CONVERSATION, and a bound written to stop a runaway retry loop inside
+        one turn had become a ceiling on how many turns that conversation may
+        have.  Measured on a voice agent whose model announces
+        ``signal_completion`` rather than invoking it (a documented weakness of
+        that model class, so the nudge is load-bearing on EVERY turn, not an
+        exception path): the first ``max_completion_nudges`` turns closed and
+        every turn after died ``NudgeExhausted``, for the life of the session.
+        Raising the knob only moved the wall -- 2 dies at turn 3, 40 at turn 41.
 
-        None of them is persisted, so this has no restore implications.
+        The distinction #767 actually needs is not "never reset" but "do not
+        let a nudge refund itself", so the reset asks WHO STARTED THIS TURN.
+        :meth:`try_completion_nudge` latches
+        ``_completion_nudge_turn_pending`` when it hands out a nudge, and the
+        turn that nudge creates consumes the latch and KEEPS the counter --
+        the loop still terminates, exactly as #767 requires.  Any other turn
+        is caller-originated (a user message, a ``session.wake``, a parent's
+        ``send_to_subagent``) and starts with a fresh budget, so
+        ``max_completion_nudges`` means what its name says: a per-turn retry
+        allowance.  The ceiling still terminates a session that spends it
+        (``NudgeExhausted``), at the turn that actually failed rather than at
+        every turn after some earlier one did.
+
+        None of them is persisted, so this has no restore implications.  A
+        revived session therefore begins with a full nudge budget, which is
+        the same answer this reset gives its first caller-originated turn.
 
         Invisible for a one-shot session, where turn 0 is the only turn --
         which is why it survived.  On a SUSPEND/RESUME session the agent calls
@@ -5980,6 +6706,39 @@ NOTES
         self._signal_completion_called = False
         self._session_quiescent_emitted = False
         self._truncation_recovery_count = 0
+        # WHO started this turn decides whether the nudge budget is refilled.
+        # The latch is consumed either way, so a nudge that never became a
+        # turn cannot ration the turn after it.
+        if getattr(self, "_completion_nudge_turn_pending", False):
+            self._completion_nudge_turn_pending = False
+        else:
+            self._completion_nudges_fired = 0
+
+    def _resolve_use_streaming(self) -> bool:
+        """Decide whether THIS turn streams.
+
+        The session's ``_use_streaming`` preference is only half of it: a
+        provider that cannot stream must be called batched however the
+        session is configured.  Both are consulted here so the answer is
+        the same one wherever a turn is dispatched.
+
+        It lives in a helper because it did not used to be:
+        :meth:`_run_chat_loop` computed it inline and
+        :meth:`_run_chat_loop_with_parts` never asked at all -- it called
+        the batched provider method unconditionally.  That made "the
+        message carries an attachment" silently mean "do not stream",
+        which is a contradiction on a tier that answers with audio, since
+        OpenAI-shaped wires emit media only while streaming (#837).
+
+        Returns:
+            True when the turn should be dispatched with ``on_chunk``.
+        """
+        return bool(
+            self._use_streaming and
+            self._provider and
+            hasattr(self._provider, 'supports_streaming') and
+            self._provider.supports_streaming()
+        )
 
     def _run_chat_loop(
         self,
@@ -6066,12 +6825,7 @@ NOTES
         wrapped_usage_callback = usage_callback_with_turn_tracking
 
         # Determine if we should use streaming
-        use_streaming = (
-            self._use_streaming and
-            self._provider and
-            hasattr(self._provider, 'supports_streaming') and
-            self._provider.supports_streaming()
-        )
+        use_streaming = self._resolve_use_streaming()
 
         try:
             # Check for cancellation before starting (including parent)
@@ -6086,6 +6840,12 @@ NOTES
 
             # Set activity phase: we're about to wait for LLM response
             self._set_activity_phase(ActivityPhase.WAITING_FOR_LLM)
+
+            # Consumed media from EARLIER turns is purged before this one is
+            # appended (#850) — a text turn following a voice turn must stop
+            # carrying the audio too, or the growth simply resumes whenever
+            # the caller types instead of speaking.
+            self._evict_consumed_media()
 
             # Append user message to session history before provider call.
             # The message stays in history across retries (correct: the user DID send it).
@@ -6129,8 +6889,15 @@ NOTES
                     accumulated_streaming_text: List[str] = []
 
                     # Streaming callback that routes to on_output and forwards to parent
-                    def streaming_callback(chunk: str) -> None:
+                    def streaming_callback(chunk) -> None:
                         nonlocal first_chunk_sent
+                        # Model-generated media is not text: it goes to
+                        # clients and never into the transcript, the
+                        # reliability plugin's text scanner, or the
+                        # interrupt-preservation buffer.
+                        if isinstance(chunk, MediaDelta):
+                            self._deliver_model_media(chunk)
+                            return
                         # Accumulate text for potential mid-turn interrupt preservation
                         accumulated_streaming_text.append(chunk)
 
@@ -6160,16 +6927,15 @@ NOTES
 
                     self._trace(f"STREAMING on_usage_update={'set' if wrapped_usage_callback else 'None'}")
 
-                    # Create thinking callback to emit thinking BEFORE text
-                    def thinking_callback(thinking: str) -> None:
-                        if on_output:
-                            self._trace(f"SESSION_THINKING_CALLBACK len={len(thinking)}")
-                            on_output("thinking", thinking, "write")
+                    # Thinking callback: emits reasoning BEFORE text, as a
+                    # write-then-append stream (one block per provider call).
+                    thinking_callback = self._make_thinking_emitter(
+                        on_output, "SESSION_THINKING_CALLBACK")
 
                     with self._provider_access():
                         turn_result, _retry_stats = with_retry(
                             lambda: self._provider.complete(
-                                self._history.messages,
+                                self._history_for_provider(),
                                 system_instruction=self._get_effective_system_instruction(),
                                 tools=self._get_tools_for_provider(),
                                 on_chunk=streaming_callback,
@@ -6190,7 +6956,7 @@ NOTES
                     with self._provider_access():
                         turn_result, _retry_stats = with_retry(
                             lambda: self._provider.complete(
-                                self._history.messages,
+                                self._history_for_provider(),
                                 system_instruction=self._get_effective_system_instruction(),
                                 tools=self._get_tools_for_provider(),
                             ),
@@ -6528,14 +7294,22 @@ NOTES
             raise
 
         finally:
+            # A delegation that never settled cleanly hands back HERE
+            # (#1025).  The mid-turn check above is reached only on the
+            # clean-settle continuation slot; this runs on every way out of
+            # the loop, including the abnormal-finish return, the
+            # ``signal_completion`` short-circuit, cancellation and an
+            # unhandled provider error.
+            self._finalize_completion_tier_exit(
+                turn_data.get('finish_reason'), reason="turn end")
+
             # Record turn end time
             turn_end = datetime.now()
             turn_data['end_time'] = turn_end.isoformat()
             turn_data['duration_seconds'] = (turn_end - turn_start).total_seconds()
             self._budget_observe_turn(turn_data)
 
-            if turn_data['total'] > 0:
-                self._turn_accounting.append(turn_data)
+            self._record_turn_ran(turn_data)
 
             # Update instruction budget with conversation tokens
             self._update_conversation_budget()
@@ -6748,6 +7522,9 @@ NOTES
 
         Parallel execution is enabled by default but can be disabled via the
         JAATO_PARALLEL_TOOLS environment variable (set to 'false' or '0').
+        How WIDE the pool is, when it runs, is a separate question the
+        profile answers with ``runtime_limits.max_parallel_tools`` (#862)
+        — see :meth:`_parallel_worker_cap`.
         """
         # Set activity phase: we're executing tools
         self._set_activity_phase(ActivityPhase.EXECUTING_TOOL)
@@ -6806,7 +7583,130 @@ NOTES
             tool_result = self._build_tool_result(fc, result.executor_result)
             tool_results.append(tool_result)
 
+            # Budget: count the call NOW, not at turn end (#955).  An abort
+            # rung cancels the token, and the check at the top of this
+            # loop stops the next call.
+            self._budget_observe_tool_calls(turn_data, 1)
+
         return tool_results
+
+    def _apply_runtime_limits(
+        self, limits: Optional['RuntimeLimits'],
+    ) -> None:
+        """Arm this session's subprocess caps, and say so (#735).
+
+        The ONE place a :class:`~shared.runtime_limits.RuntimeLimits`
+        becomes effective for the tools a model drives.  Every route a
+        session can be built by converges here — the runner's
+        ``session.bootstrap`` (pool-served and cold-spawned alike, via
+        ``SessionInitEnvelope.runtime_limits``), the isolated
+        sub-runner, and an in-process ``runtime.create_session`` — so
+        the pool path and the cold-spawn path cannot end up enforcing
+        different things, which is precisely what they did while the
+        caps travelled as process-startup env.
+
+        ``ToolExecutor.set_runtime_limits`` forwards the block to every
+        exposed plugin implementing the receiver (``cli``,
+        ``interactive_shell``); those plugins are what actually apply
+        ``tool_timeout_seconds`` as a wall clock and
+        ``max_output_bytes`` as an output cap.  Nothing is enforced
+        here — this method only delivers, and then states what was
+        delivered, because a cap that silently does not apply is worse
+        than no cap: the operator believes they are protected.
+
+        ``attach_callback`` is ``None`` deliberately.  Kernel-enforced
+        limits are applied to the runner PROCESS at fork time
+        (``Popen(preexec_fn=...)`` in ``RunnerSpawner.spawn``) and its
+        children inherit the cgroup, so a per-plugin ``preexec_fn``
+        would be redundant; nothing else in the runner tier writes that
+        slot, so passing ``None`` clobbers nothing.
+
+        ``limits=None`` is a NO-OP rather than a clear.  The plugin
+        registry — and therefore the ``cli`` instance — is shared by
+        every session on one runtime, so a limit-less in-process
+        subagent calling ``set_runtime_limits(None, None)`` would strip
+        the cap off its parent's tools.  "Nobody declared limits" must
+        not be able to disarm somebody who did.
+
+        Args:
+            limits: The resolved block, or ``None`` when the profile
+                declared none.
+        """
+        if limits is None:
+            return
+        self._executor.set_runtime_limits(None, limits)
+        logger.info(
+            "runtime_limits armed: tool_timeout=%ss max_output_bytes=%s "
+            "max_parallel_tools=%s; receivers=%s",
+            limits.tool_timeout_seconds,
+            limits.max_output_bytes,
+            limits.max_parallel_tools,
+            sorted(self._runtime_limit_receivers()) or "(none)",
+        )
+
+    def _runtime_limit_receivers(self) -> List[str]:
+        """Names of exposed plugins that actually took the caps.
+
+        The same predicate ``ToolExecutor.set_runtime_limits`` forwards
+        on, evaluated again so the log line states a FACT rather than an
+        intention.  An empty list next to a declared
+        ``tool_timeout_seconds`` is the visible form of "this profile
+        enables no subprocess plugin, so the cap bounds nothing" — the
+        condition #735 says must never be silent.
+
+        Returns:
+            Plugin names implementing ``set_runtime_limits``.
+        """
+        registry = self._runtime.registry
+        if registry is None:
+            return []
+        return [
+            name for name in registry.list_exposed()
+            if hasattr(registry.get_plugin(name), "set_runtime_limits")
+        ]
+
+    def _apply_parallel_tool_cap(self, width: Optional[int]) -> None:
+        """Install the profile's tool-pool ceiling (#862).
+
+        Stored raw: ``None`` stays ``None`` so :meth:`_parallel_worker_cap`
+        can tell "nobody declared one" from "somebody declared the
+        default", which is what lets ``jaato-scaffold explain runtime``
+        say where the effective value came from.
+
+        Args:
+            width: ``runtime_limits.max_parallel_tools``, or ``None``.
+        """
+        if width is None:
+            return
+        self._max_parallel_tools = int(width)
+        logger.info(
+            "Tool concurrency capped at %d worker(s) by "
+            "runtime_limits.max_parallel_tools",
+            self._max_parallel_tools,
+        )
+
+    def _parallel_worker_cap(self, pending: int) -> int:
+        """Thread-pool width for *pending* concurrent units of work.
+
+        One place answers this for every pool the session opens, so the
+        profile's ceiling cannot apply to one of them and not the other.
+
+        The value is ``min(pending, ceiling)`` where *ceiling* is the
+        profile's ``runtime_limits.max_parallel_tools`` when one was
+        declared and :data:`~shared.runtime_limits.DEFAULT_MAX_PARALLEL_TOOLS`
+        otherwise — the literal 8 this replaced (#862).  Floored at 1
+        because ``ThreadPoolExecutor(max_workers=0)`` raises, and a caller
+        that reached here with nothing pending wants a pool it can close,
+        not an exception.
+
+        Args:
+            pending: How many items are about to be submitted.
+
+        Returns:
+            A worker count of at least 1.
+        """
+        ceiling = self._max_parallel_tools or DEFAULT_MAX_PARALLEL_TOOLS
+        return max(1, min(pending, ceiling))
 
     def _execute_function_calls_parallel(
         self,
@@ -6816,8 +7716,9 @@ NOTES
     ) -> List[ToolResult]:
         """Execute function calls in parallel using a thread pool.
 
-        All function calls are started concurrently. Results are collected
-        and returned in the original order.
+        All function calls are started concurrently, up to the width
+        :meth:`_parallel_worker_cap` allows; the rest queue behind them.
+        Results are collected and returned in the original order.
         """
         # Signal UI to flush before starting parallel tools
         if self._ui_hooks and on_output:
@@ -6838,7 +7739,7 @@ NOTES
 
         # Execute all tools in parallel
         results: Dict[str, _ToolExecutionResult] = {}
-        max_workers = min(len(function_calls), 8)  # Cap at 8 concurrent tools
+        max_workers = self._parallel_worker_cap(len(function_calls))
 
         # Capture interactive plugin channels from the spawning thread.
         # Thread-local channels (set by configure_for_subagent) are only
@@ -6940,6 +7841,12 @@ NOTES
                 tool_result = self._build_tool_result(fc, result.executor_result)
                 tool_results.append(tool_result)
 
+        # Budget: the batch is the unit here — every call in it was already
+        # in flight, so the overshoot past a ceiling is bounded by one
+        # batch (#955).  An abort rung cancels the token and the caller
+        # ends the turn before the next model round-trip.
+        self._budget_observe_tool_calls(turn_data, len(tool_results))
+
         return tool_results
 
     def _is_streaming_tool(self, tool_name: str) -> bool:
@@ -6948,6 +7855,55 @@ NOTES
             return False
         return self._runtime.registry.is_streaming_tool(tool_name)
 
+    def _gate_streaming_tool(
+        self,
+        base_name: str,
+        fc: FunctionCall,
+    ) -> Tuple[bool, Optional[Dict[str, Any]], Dict[str, Any]]:
+        """Run the permission gate for a ``-stream`` tool invocation.
+
+        The streaming route executes a tool without going through
+        ``ToolExecutor.execute``, so it must run the gate itself or the
+        tool runs unchecked (#797).  It does so through
+        :meth:`ToolExecutor.check_permission_only` — the SAME gate the
+        executor uses, reused rather than reimplemented, because two
+        copies of a security check is how the bypass this closes recurs.
+
+        The name judged is the **base** name, never ``fc.name``: a
+        ``-stream`` variant is the same tool with a different output
+        shape, so it must inherit every rule already written for the
+        tool.  Judging the suffixed name would leave a standing denial
+        defeatable by seven characters the model can type.
+
+        Args:
+            base_name: The tool name with the ``-stream`` suffix removed.
+            fc: The originating function call; supplies the proposed
+                arguments and the call id the decision is correlated by.
+
+        Returns:
+            ``(allowed, denial, args)``.  When ``allowed`` is ``False``,
+            ``denial`` is the executor's own denial dict and the caller
+            must return it unchanged.  ``args`` is what to execute with —
+            ``fc.args``, unless an interactive approval edited them.
+
+        Note:
+            With no executor wired there is no permission plugin to ask
+            and nothing to enforce, so the call is allowed — the same
+            answer ``ToolExecutor`` gives when no plugin is set.
+        """
+        if self._executor is None:
+            return (True, None, fc.args)
+        gate = self._executor.check_permission_only(
+            base_name, fc.args, fc.id,
+        )
+        if not gate.allowed:
+            self._trace(
+                f"_gate_streaming_tool: DENIED tool={base_name} "
+                f"wire_name={fc.name} call_id={fc.id}"
+            )
+            return (False, gate.denial, fc.args)
+        return (True, None, gate.args)
+
     def _execute_streaming_tool(
         self,
         fc: FunctionCall,
@@ -6955,13 +7911,21 @@ NOTES
     ) -> Tuple[bool, Dict[str, Any]]:
         """Execute a streaming tool via the StreamManager.
 
+        This is a SECOND execution entry point: it reaches
+        ``plugin.execute_streaming`` directly and never passes through
+        ``ToolExecutor.execute``.  It therefore runs the permission gate
+        itself, on the BASE tool name — see below (#797).
+
         Args:
             fc: The function call (with -stream suffix).
             on_output: Optional callback for UI updates.
 
         Returns:
-            Tuple of (success, result_dict) where result_dict contains
-            stream_id, initial_chunks, and status.
+            Tuple of (success, result_dict).  On success ``result_dict``
+            contains stream_id, initial_chunks and status; on a permission
+            refusal it is the executor's own denial shape
+            (``error`` + ``_permission``), so a denied ``-stream`` call is
+            indistinguishable to the model from a denied plain one.
         """
         if not self._stream_manager or not self._runtime.registry:
             return (False, {"error": "Streaming not available"})
@@ -6973,18 +7937,97 @@ NOTES
         if not streaming_plugin:
             return (False, {"error": f"Tool {base_name} does not support streaming"})
 
+        # The -stream variant is the SAME tool with a different output
+        # shape, and the registry auto-generates one for every tool on a
+        # StreamingCapable plugin.  Routing here skips
+        # ToolExecutor.execute, which is where the only permission check
+        # used to live -- so an explicitly blacklisted tool executed with
+        # zero prompts when the model appended seven characters to its
+        # name (#797).  Check the BASE name so the variant inherits every
+        # policy, whitelist and blacklist rule already written for the
+        # tool, with no policy migration.
+        allowed, denial, tool_args = self._gate_streaming_tool(base_name, fc)
+        if not allowed:
+            return (False, denial)
+
         # Get plugin name for handle
         plugin_name = "unknown"
         plugin = self._runtime.registry.get_plugin_for_tool(base_name)
         if plugin:
             plugin_name = getattr(plugin, 'name', type(plugin).__name__)
 
-        # Create chunk callback for UI - wrapped in hidden tags so only model sees content
+        # ``stream_id`` is only known once ``start_stream`` returns, but
+        # chunks can fire before then, so it is read from a mutable cell
+        # rather than closed over.  A chunk that beats the assignment
+        # carries "" and is still correlated by ``call_id`` -- which is
+        # the key clients actually join on.
+        _stream_cell = {"id": ""}
+        _call_id = fc.id or ""
+
         def on_chunk(chunk: StreamChunk) -> None:
-            if on_output:
+            """Route one streaming-tool chunk by its audience.
+
+            Audience is data on the chunk, not a fixed policy of this
+            callback.  Historically this wrapped every chunk in
+            ``<hidden>`` -- "for the model, hidden from the user" -- which
+            media inverts: a TTS tool's audio is for the user and may
+            never reach the model at all.
+
+            - MODEL (the default, so existing producers are unchanged):
+              into the conversation via ``on_output``, wrapped in
+              ``<hidden>`` exactly as before.
+            - CLIENT: to subscribed clients only, via ``on_tool_output``;
+              never passed to ``on_output``, so it never enters history.
+            - BOTH: both of the above.
+
+            Binary payloads go out base64-encoded and are never handed to
+            ``on_output`` -- that path is text and would corrupt them.
+            """
+            if chunk.audience.reaches_model() and on_output:
                 # Wrap in <hidden> so the hidden_content_filter strips it from user view
-                # but the model still receives the streaming results
-                on_output("streaming", f"<hidden>[{base_name}] {chunk.content}</hidden>", "append")
+                # but the model still receives the streaming results.  Media
+                # is skipped here: this is a text channel.
+                if chunk.content:
+                    on_output(
+                        "streaming",
+                        f"<hidden>[{base_name}] {chunk.content}</hidden>",
+                        "append",
+                    )
+
+            if chunk.audience.reaches_client() and self._ui_hooks and _call_id:
+                # sequence/chunk_type/metadata used to be discarded here;
+                # pass the sequence through rather than re-counting.
+                if chunk.is_media():
+                    self._ui_hooks.on_tool_output(
+                        agent_id=self._agent_id,
+                        call_id=_call_id,
+                        chunk=chunk.content,
+                        stream_id=_stream_cell["id"],
+                        sequence=chunk.sequence,
+                        mime_type=chunk.mime_type,
+                        data_b64=chunk.data_b64(),
+                        # A tool's media stream has NO per-chunk terminal
+                        # signal.  This read `chunk.chunk_type == "final"`,
+                        # a category error: chunk_type is a CONTENT-kind
+                        # hint (match / progress / result / stdout /
+                        # stderr / display / file / input / summary /
+                        # error), never a lifecycle marker, so the
+                        # comparison could not be true and a client
+                        # waiting on `final` for a tool's audio waited
+                        # forever.  Saying False plainly is honest;
+                        # inventing a terminal-chunk protocol is a design
+                        # change.  Model speech is unaffected -- it
+                        # carries `delta.final`.
+                        final=False,
+                    )
+                elif chunk.content:
+                    self._ui_hooks.on_tool_output(
+                        agent_id=self._agent_id,
+                        call_id=_call_id,
+                        chunk=chunk.content,
+                        stream_id=_stream_cell["id"],
+                        sequence=chunk.sequence,
+                    )
 
         try:
             # Start the streaming execution
@@ -6992,24 +8035,35 @@ NOTES
                 plugin=streaming_plugin,
                 plugin_name=plugin_name,
                 tool_name=base_name,
-                arguments=fc.args,
+                # The gate's args, not fc.args: an interactive approval
+                # may have edited them (#797).
+                arguments=tool_args,
                 call_id=fc.id or "",
                 on_ui_chunk=on_chunk,
             )
+            _stream_cell["id"] = handle.stream_id
 
-            # Format initial chunks for model
+            # Format initial chunks for model.  CLIENT-audience chunks
+            # are excluded -- this list is returned in the tool result and
+            # so becomes conversation history.
             initial_content = []
             for chunk in handle.initial_chunks:
-                initial_content.append(chunk.content)
+                if chunk.audience.reaches_model():
+                    initial_content.append(chunk.content)
 
             return (True, {
                 "stream_id": handle.stream_id,
                 "tool_name": base_name,
                 "status": handle.status.value,
                 "initial_results": initial_content,
-                "initial_count": len(handle.initial_chunks),
+                # Counts what the model can SEE, not what arrived.
+                # These were the same set until CLIENT-audience chunks
+                # could be filtered out of the content, after which the
+                # model was told "Received N initial results" over a
+                # shorter list -- the count-vs-content divergence class.
+                "initial_count": len(initial_content),
                 "message": (
-                    f"Streaming started. Received {len(handle.initial_chunks)} initial results. "
+                    f"Streaming started. Received {len(initial_content)} initial results. "
                     f"More results will be automatically provided as they become available. "
                     f"Call dismiss_stream(stream_id='{handle.stream_id}') when you have enough results."
                 ),
@@ -7649,13 +8703,34 @@ NOTES
         This is called when the model rejects a request due to context limit exceeded.
         The GC plugin decides whether it's feasible to collect anything at this point.
 
-        During context limit recovery from send_tool_results, the provider has already
-        rolled back the tool result messages, leaving the trailing MODEL message (with
-        function_calls) without matching tool results. This MODEL message must be
-        preserved through GC because the caller will retry sending the tool results.
-        Without this preservation, ensure_tool_call_integrity() would remove the
-        "unpaired" MODEL message, and the retry would fail because the tool results
-        would reference tool_call_ids absent from the history.
+        During context limit recovery from send_tool_results, the provider has
+        already rolled back the tool result messages, leaving the trailing MODEL
+        message (with function_calls) without matching tool results. That message
+        is withheld from GC below, and the reason INVERTED in #674 — the pop is
+        still load-bearing, so do not remove it on the strength of the old one.
+
+        Its calls are **pending a retry, not unanswered**, and the repair pass
+        cannot tell those two states apart: a call with no result looks the same
+        whether the turn abandoned it or ``send_tool_results`` is about to send
+        its real result a moment later. Only this method knows which.
+
+        ==========================  =======================================
+        repair policy               what leaving the message in would cost
+        ==========================  =======================================
+        before #674 (delete)        the MODEL message was removed as
+                                    "unpaired", so the retry's results
+                                    referenced tool_call_ids absent from
+                                    the history.
+        since #674 (answer)         ``repair_history`` SYNTHESISES a
+                                    cancelled result for each pending call,
+                                    and the retry then appends the real one
+                                    — the same ``call_id`` answered twice.
+                                    A duplicated ``tool_result`` is its own
+                                    provider rejection.
+        ==========================  =======================================
+
+        The old policy lost a message; the new one would duplicate a result.
+        Withholding the message is what prevents both.
 
         Args:
             on_output: Optional callback for UI notifications.
@@ -7677,11 +8752,15 @@ NOTES
         context_usage = self.get_context_usage()
         history = self.get_history()
 
-        # Save trailing MODEL message with pending tool calls before GC.
+        # Withhold the trailing MODEL message with pending tool calls from GC.
         # When send_tool_results fails with context limit, the provider rolls back
-        # the tool result messages but the MODEL message (with function_calls) remains
-        # at the end of history without matching responses. ensure_tool_call_integrity()
-        # would remove this as "unpaired", but we need it for the retry.
+        # the tool result messages but the MODEL message (with function_calls)
+        # remains at the end of history without matching responses.  Those calls
+        # are pending a RETRY, not unanswered, and ensure_tool_call_integrity()
+        # cannot tell the difference: since #674 it would synthesise a cancelled
+        # result for each, and the retry would then append the real one — the same
+        # call_id answered twice.  (Before #674 it removed the message instead.)
+        # Either way the message must not be visible to the repair pass.
         trailing_model_msg = None
         if (history and history[-1].role == Role.MODEL
                 and history[-1].function_calls):
@@ -7811,13 +8890,83 @@ NOTES
             return "file"
         return None
 
+    def _active_tier_inbound_modalities(self) -> Optional[FrozenSet[str]]:
+        """Inbound roles the ACTIVE tier declares, or ``None`` for "unset".
+
+        Thin session-side read of
+        :meth:`ModelTierConfig.gating_inbound_modalities`, which owns the
+        rule (including why a purely implicit ``vision`` role does not arm
+        the gate).  ``None`` here means the tier system has nothing to say
+        about this session's content — no tier config, no active tier, or
+        an active tier that declared no role — and the gate then keys on
+        model capability alone, exactly as it did before #1001.
+        """
+        config = self._tier_config
+        active = getattr(self, "_active_tier", None)
+        if config is None or not active:
+            return None
+        return config.gating_inbound_modalities(active)
+
+    def _modality_refusal(
+        self, kind: str, provider: 'ModelProviderPlugin'
+    ) -> Optional[str]:
+        """Why ``kind`` may not be sent right now — ``None`` when it may.
+
+        Two independent bounds, and the gate applies BOTH; the answer names
+        which one refused, because the model-facing note is only actionable
+        if it states the true reason.
+
+        * ``"model"`` — the active model's catalog does not list ``kind``
+          as an input modality.  The historical rule (#847), unchanged.
+        * ``"tier"`` — the model accepts it, but the ACTIVE TIER declared
+          its roles and ``kind`` is not among the inbound ones (#1001).
+          The reported case: a ``voz`` tier declaring ``{audio: outbound}``
+          on ``openai/gpt-audio``, whose catalog lists audio INPUT, so the
+          caller's recorded utterance was replayed into a tier that only
+          ever needed the text to speak.
+
+        The two compose as an INTERSECTION — most-restrictive-wins, the
+        shape ``runtime_limits.max_parallel_tools`` uses.  A tier declaring
+        ``audio: inbound`` against a text-only model still withholds: a
+        declaration narrows what a tier receives, it can never widen it
+        past what the wire will carry.
+        """
+        if not provider.supports_modality(kind):
+            return "model"
+        declared = self._active_tier_inbound_modalities()
+        if declared is not None and kind not in declared:
+            return "tier"
+        return None
+
+    @staticmethod
+    def _tally_withheld(
+        withheld: Dict[str, int],
+        tier_refused: Set[str],
+        kind: str,
+        reason: str,
+    ) -> None:
+        """Record one withheld item against its kind and its reason.
+
+        ``withheld`` counts by kind (what the note reports); ``tier_refused``
+        remembers which kinds were refused by the TIER rather than by the
+        model, which is what selects the note.  A kind lands wholly in one
+        bucket or the other — the refusal depends only on (kind, model,
+        active tier), all constant across one gating pass.
+        """
+        withheld[kind] = withheld.get(kind, 0) + 1
+        if reason == "tier":
+            tier_refused.add(kind)
+
     def _gate_tool_results_for_active_modalities(
         self, tool_results: List[ToolResult]
     ) -> List[ToolResult]:
         """Synthetic-self-correct content gate (multimodal-by-composition).
 
         The active model can only *see* the input modalities its provider
-        declares (``provider.modalities()``).  When a tool returns
+        declares (``provider.modalities()``), and the active tier receives
+        only the inbound roles it declared (#1001, and no constraint at all
+        when it declared none) — :meth:`_modality_refusal` applies both.
+        When a tool returns
         attachment content of a modality the active model can't view
         (canonically a ``readFile`` image while in a text-only tier),
         sending the bytes would silently fail.  Instead this strips those
@@ -7856,20 +9005,35 @@ NOTES
             return result
         kept: List[Any] = []
         withheld: Dict[str, int] = {}
+        tier_refused: Set[str] = set()
+        rerouted: List[Any] = []
         for att in result.attachments:
             modality = self._mime_to_modality(getattr(att, "mime_type", None))
             # None = unclassifiable; keep (don't over-strip).  Otherwise
-            # keep iff the active model declares it.
-            if modality is None or provider.supports_modality(modality):
+            # keep iff BOTH the active model and the active tier admit it
+            # (:meth:`_modality_refusal`).
+            reason = (None if modality is None
+                      else self._modality_refusal(modality, provider))
+            if reason is None:
                 kept.append(att)
             else:
-                withheld[modality] = withheld.get(modality, 0) + 1
+                self._tally_withheld(withheld, tier_refused, modality, reason)
+                rerouted.append(att)
         if not withheld:
             return result
-        note = self._build_withheld_attachment_note(withheld)
+        # The gate is a ROUTER, not a filter.  Content the model cannot
+        # consume is exactly the content a viewer might want, so the
+        # withheld attachments are emitted to subscribed clients before
+        # being stripped from the model's copy.  Delivery is best-effort:
+        # a failure here must not fail the tool result.
+        self._emit_withheld_attachments_to_clients(result, rerouted)
+        note = self._withheld_notes(withheld, tier_refused)
         self._trace(
             f"MODALITY_GATE: withheld {dict(withheld)} from tool "
-            f"{result.name!r} (active model {self._model_name!r} lacks them)"
+            f"{result.name!r} (active model {self._model_name!r} lacks "
+            f"{sorted(set(withheld) - tier_refused)}; active tier "
+            f"{getattr(self, '_active_tier', None)!r} does not declare "
+            f"{sorted(tier_refused)} inbound)"
         )
         # Keep ``result`` structured; the withheld-attachment note is
         # model-facing only (append to model_suffix, appended at serialization).
@@ -7878,6 +9042,338 @@ NOTES
         )
         return _dc_replace(result, attachments=(kept or None), model_suffix=combined)
 
+    # ==================== History modality gate (per-request) ====================
+
+    def _history_for_provider(self) -> List['Message']:
+        """The history list as **this** request should carry it.
+
+        Every ``provider.complete()`` call site reads its message list from
+        here rather than straight from :attr:`SessionHistory.messages`,
+        because what the session *remembers* and what the *active model* may
+        be handed are not the same list once a session is multimodal.
+
+        Two transforms apply, in this order, and **neither touches stored
+        history** — both return a per-request copy:
+
+        1. :meth:`_gate_history_for_active_modalities` withholds binary
+           content the active model cannot consume, leaving a note in its
+           place.  Switching back to a tier that can consume it restores the
+           content, because the bytes never left the store (#847).
+        2. :func:`shared.history_invariant.repair_history` enforces the
+           call/result pairing invariant: every ``FunctionCall`` leaves here
+           with a matching ``ToolResult``, no result precedes the call it
+           answers, no content block is empty, and no call carries a missing
+           id.  This is the boundary backstop for **all** the subsystems that
+           edit history independently — the four GC strategies, cancellation
+           mid-batch, ``rewind``, subagent history sharing, and an
+           OpenAI-compatible endpoint that streamed a tool call with no id —
+           so none of them has to know about the others (#674).
+
+        Gating runs first: withholding an attachment can empty a part, and
+        the invariant pass is what notices that the message it left behind
+        has no content.  Repairing the *copy* rather than the store is the
+        same contract the gate holds to and matters for the same reason
+        inverted — a turn cancelled mid-batch must keep its unanswered calls
+        on disk, because the session may still execute them and the real
+        results would collide with synthetic ones written into the store.
+
+        Returns:
+            A list safe to hand to any provider; the stored ``Message``
+            objects themselves when nothing needed gating or repair.
+        """
+        gated = self._gate_history_for_active_modalities(
+            self._history.messages)
+        return repair_history(gated, trace_fn=self._trace)
+
+    def _gate_history_for_active_modalities(
+        self, messages: List['Message']
+    ) -> List['Message']:
+        """Withhold, **for this request only**, content the model can't consume.
+
+        The inbound counterpart of
+        :meth:`_gate_tool_results_for_active_modalities`, and the gate the
+        multimodal design always specified: *the session's send path, right
+        before history->provider conversion*, where the active provider and
+        the outgoing ``Part``s are both in scope.  Until #847 only the
+        tool-result half existed, so a user utterance the session had *heard*
+        was replayed verbatim on every later request — including the ones made
+        after ``enter_tier`` moved to a text-only model, whose upstream
+        answered ``404 No endpoints found that support input audio``.
+
+        **Two bounds, intersected (#1001).**  What the active model's
+        catalog accepts, AND what the active tier declared inbound — see
+        :meth:`_modality_refusal`.  Keying on the model alone replayed a
+        caller's utterance into a tier declared ``{audio: outbound}``,
+        whose model accepts audio input and whose job was only to speak the
+        text; the upstream refused the request.  A session with no tiers,
+        or whose active tier declares no role, is bounded by the model
+        alone exactly as before.
+
+        **Per-request, never destructive.**  This returns a filtered *copy*;
+        ``self._history`` keeps the bytes.  That distinction is the whole
+        requirement — stripping audio from stored history would fix the text
+        tier by permanently deafening the session, so a later
+        ``enter_tier("voice")`` would find nothing to hear.  ``message_id``,
+        ``model`` and ``provider`` survive the copy (``dataclasses.replace``),
+        because GC's history-budget sync keys on them.
+
+        Object identity is the cheap-path signal: when nothing is withheld
+        every ``Message`` in the returned list is the *stored* object, not a
+        copy, so a text-only session pays one ``any()`` scan per message and
+        allocates nothing beyond the list ``SessionHistory.messages`` already
+        hands out.
+
+        Args:
+            messages: The stored history, newest last.
+
+        Returns:
+            ``messages`` itself when nothing is withheld, else a new list with
+            the affected messages replaced by gated copies.
+        """
+        provider = self._provider
+        if provider is None:
+            return messages
+        gated = [self._gate_one_history_message(m, provider) for m in messages]
+        return gated if any(
+            g is not m for g, m in zip(gated, messages)
+        ) else messages
+
+    def _gate_one_history_message(
+        self, msg: 'Message', provider: 'ModelProviderPlugin'
+    ) -> 'Message':
+        """Apply the inbound modality gate to one stored message.
+
+        Returns ``msg`` **unchanged** (same object) when it carries no binary
+        content or when the active model declares every modality it carries —
+        the caller uses that identity to decide whether it can hand the
+        original list to the provider.
+
+        Otherwise returns a copy in which the unconsumable
+        ``Part.inline_data`` parts are dropped, the unconsumable
+        ``ToolResult.attachments`` are stripped, and a single
+        :meth:`_build_withheld_attachment_note` is appended as a trailing text
+        part.  The note is what makes this different from a filter: a model
+        handed a user turn whose audio silently vanished answers as though the
+        caller said nothing, which is indistinguishable from the caller
+        actually having said nothing.
+
+        The note goes on the *message*, not into ``ToolResult.model_suffix``
+        as :meth:`_gate_one_tool_result` does, because a history message can
+        carry both kinds of withheld content at once and one note describing
+        both reads better than two describing halves.
+        """
+        parts = msg.parts or []
+        if not any(self._part_carries_binary(p) for p in parts):
+            return msg
+        withheld: Dict[str, int] = {}
+        tier_refused: Set[str] = set()
+        new_parts = [
+            self._gate_one_part(p, provider, withheld, tier_refused)
+            for p in parts
+        ]
+        if not withheld:
+            return msg
+        self._trace(
+            f"HISTORY_MODALITY_GATE: withheld {dict(withheld)} from a "
+            f"{msg.role} message for this request (active model "
+            f"{self._model_name!r} lacks "
+            f"{sorted(set(withheld) - tier_refused)}; active tier "
+            f"{getattr(self, '_active_tier', None)!r} does not declare "
+            f"{sorted(tier_refused)} inbound); history is unchanged"
+        )
+        note = self._withheld_notes(
+            withheld,
+            tier_refused,
+            retry_action="continue (the content stays in this session's "
+                         "history and is sent again from that tier)",
+        )
+        kept = [p for p in new_parts if p is not None]
+        return _dc_replace(msg, parts=kept + [Part.from_text(note)])
+
+    @staticmethod
+    def _part_carries_binary(part: 'Part') -> bool:
+        """Whether ``part`` carries bytes the modality gate could withhold.
+
+        The cheap pre-check that keeps a text-only session out of the gate
+        entirely: ``inline_data`` is the user-message form, a
+        ``function_response`` with ``attachments`` the tool-result form.
+        """
+        if part.inline_data:
+            return True
+        response = part.function_response
+        return bool(response is not None
+                    and getattr(response, "attachments", None))
+
+    def _gate_one_part(
+        self,
+        part: 'Part',
+        provider: 'ModelProviderPlugin',
+        withheld: Dict[str, int],
+        tier_refused: Set[str],
+    ) -> Optional['Part']:
+        """Gate one part, tallying what it lost into ``withheld``.
+
+        Returns the part unchanged when it carries nothing this request
+        refuses, a copy with the refused attachments stripped when it is a
+        tool result, and ``None`` when the part *is* the refused content (an
+        ``inline_data`` part has nothing left once its bytes are withheld).
+
+        What "refuses" means is :meth:`_modality_refusal`: the active
+        model's catalog capability AND the active tier's declared inbound
+        roles, intersected.  ``tier_refused`` collects the kinds the TIER
+        refused while the model would have accepted them, because those two
+        outcomes need different notes — telling a model on
+        ``openai/gpt-audio`` that "this wire does not accept audio" is false
+        and costs a turn in argument.
+
+        An attachment whose mime does not classify
+        (:meth:`_mime_to_modality` returns ``None``) is kept: the gate never
+        over-strips content it cannot name.
+        """
+        if part.inline_data:
+            kind = self._mime_to_modality(part.inline_data.get("mime_type"))
+            reason = (None if kind is None
+                      else self._modality_refusal(kind, provider))
+            if reason is None:
+                return part
+            self._tally_withheld(withheld, tier_refused, kind, reason)
+            return None
+        response = part.function_response
+        if response is None or not getattr(response, "attachments", None):
+            return part
+        kept = []
+        for att in response.attachments:
+            kind = self._mime_to_modality(getattr(att, "mime_type", None))
+            reason = (None if kind is None
+                      else self._modality_refusal(kind, provider))
+            if reason is None:
+                kept.append(att)
+            else:
+                self._tally_withheld(withheld, tier_refused, kind, reason)
+        if len(kept) == len(response.attachments):
+            return part
+        return Part.from_function_response(
+            _dc_replace(response, attachments=(kept or None))
+        )
+
+    def _model_media_stream_id(self, delta: 'MediaDelta') -> str:
+        """A distinct stream id per utterance, not per agent.
+
+        A constant id per agent collided every utterance in a session
+        into one stream: a client keying chunks by ``stream_id`` then
+        saw sequences restart at 0 mid-stream, so a retried turn's audio
+        was spliced onto the first attempt's and no gap check could tell
+        them apart.
+
+        The provider restarts ``sequence`` at 0 for each turn, so that
+        reset IS the utterance boundary — no extra plumbing needed.
+        """
+        if delta.sequence == 0:
+            self._model_media_utterance = (
+                getattr(self, "_model_media_utterance", 0) + 1)
+        return f"model:{self._agent_id}:{getattr(self, '_model_media_utterance', 1)}"
+
+    def _deliver_model_media(self, delta: 'MediaDelta') -> None:
+        """Deliver one chunk of MODEL-generated media to subscribed clients.
+
+        Model-emitted audio reuses the tool-output media channel rather
+        than introducing a rival event, so all three existing subscription
+        surfaces (SDK client, ``subscribeToEvents``, ``EventBus``) carry it
+        with no new API.  Because that channel is keyed by ``call_id`` and
+        this content belongs to no tool call, the reserved id
+        :data:`MODEL_MEDIA_CALL_ID` is used; clients distinguish
+        model-generated media from tool-produced media by that id.
+
+        Model media is CLIENT-audience by construction: the model produced
+        it, so replaying it back into the model's own history would be
+        both redundant and, for audio, meaningless.  It therefore never
+        touches ``on_output`` or the accumulated text buffer.
+
+        ``delta.transcript`` rides in the event's ``chunk`` field.  On the
+        ``final`` chunk that is the whole utterance's words (#869) --
+        the provider stamps them there under the ``ensure_spoken_part``
+        rule, so what a client reads off the wire is what history
+        records, and never a duplicate of text already sent as
+        ``AGENT_OUTPUT``.  This method does not decide that; it forwards
+        whatever the provider put on the delta.
+
+        Never raises -- a delivery failure must not abort generation.
+        """
+        hooks = getattr(self, "_ui_hooks", None)
+        if hooks is None or not delta.data:
+            return
+        try:
+            hooks.on_tool_output(
+                agent_id=self._agent_id,
+                call_id=MODEL_MEDIA_CALL_ID,
+                chunk=delta.transcript or "",
+                stream_id=self._model_media_stream_id(delta),
+                sequence=delta.sequence,
+                mime_type=delta.mime_type,
+                data_b64=_b64encode(delta.data).decode("ascii"),
+                final=delta.final,
+            )
+        except Exception:  # noqa: BLE001
+            self._trace(
+                f"MODEL_MEDIA: client delivery failed for a "
+                f"{delta.mime_type!r} chunk"
+            )
+
+    def _emit_withheld_attachments_to_clients(
+        self, result: ToolResult, attachments: List[Any]
+    ) -> None:
+        """Deliver model-unconsumable attachments to subscribed clients.
+
+        The counterpart to :meth:`_gate_one_tool_result` stripping them:
+        rather than destroying the bytes, publish them as CLIENT-audience
+        media on the tool-output channel, correlated by the result's
+        ``call_id``.  Each attachment is one single-chunk stream
+        (``sequence=0``), and ``final`` is set on the last one so a client
+        knows when to stop waiting.
+
+        Never raises: a client-delivery problem must not turn a successful
+        tool call into a failed one.  A failure is traced, not surfaced.
+
+        Args:
+            result: The tool result being gated; supplies ``call_id``.
+            attachments: The attachments withheld from the model.
+        """
+        # ``getattr``: the gate also runs on sessions constructed without
+        # the UI-hooks attribute at all (bare/unit-test construction), and
+        # a missing sink is "nobody to deliver to", not an error.
+        hooks = getattr(self, "_ui_hooks", None)
+        if not attachments or hooks is None:
+            return
+        call_id = getattr(result, "call_id", "") or ""
+        if not call_id:
+            return
+        stream_id = f"gated:{call_id}"
+        last = len(attachments) - 1
+        for index, att in enumerate(attachments):
+            data = getattr(att, "data", None)
+            mime_type = getattr(att, "mime_type", None)
+            if not data or not mime_type:
+                continue
+            try:
+                payload = (
+                    data if isinstance(data, str)
+                    else _b64encode(data).decode("ascii")
+                )
+                hooks.on_tool_output(
+                    agent_id=self._agent_id,
+                    call_id=call_id,
+                    chunk=getattr(att, "display_name", "") or "",
+                    stream_id=stream_id,
+                    sequence=index,
+                    mime_type=mime_type,
+                    data_b64=payload,
+                    final=(index == last),
+                )
+            except Exception:  # noqa: BLE001
+                self._trace(
+                    f"MODALITY_GATE: client delivery failed for a "
+                    f"{mime_type!r} attachment on tool {result.name!r}"
+                )
     def _resolve_withheld_target(
         self, withheld: Dict[str, int]
     ) -> Tuple[Optional[str], List[str], List[str]]:
@@ -7932,8 +9428,107 @@ NOTES
         )
         return target, covered, stuck
 
-    def _build_withheld_attachment_note(self, withheld: Dict[str, int]) -> str:
-        """Build the actionable note appended to a gated tool result.
+    def _withheld_notes(
+        self,
+        withheld: Dict[str, int],
+        tier_refused: Set[str],
+        *,
+        retry_action: str = "re-run this tool",
+    ) -> str:
+        """The note(s) standing in for everything one gating pass withheld.
+
+        Two refusals, two notes, because they are different facts and one
+        sentence covering both would have to be false about one of them:
+        :meth:`_build_withheld_attachment_note` says the MODEL cannot read
+        this, :meth:`_build_tier_role_withheld_note` says the model can and
+        the TIER did not ask for it.  Both are emitted when a single pass
+        managed both, which needs a message carrying two kinds at once (an
+        image the model can't see beside audio the tier didn't declare) —
+        rare, and two accurate sentences beat one averaged one.
+
+        The common case allocates one note, as before.
+        """
+        model_refused = {
+            k: n for k, n in withheld.items() if k not in tier_refused
+        }
+        notes: List[str] = []
+        if model_refused:
+            notes.append(self._build_withheld_attachment_note(
+                model_refused, retry_action=retry_action))
+        if tier_refused:
+            notes.append(self._build_tier_role_withheld_note(
+                {k: withheld[k] for k in tier_refused},
+                retry_action=retry_action))
+        return "  ".join(notes)
+
+    def _build_tier_role_withheld_note(
+        self,
+        withheld: Dict[str, int],
+        *,
+        retry_action: str = "re-run this tool",
+    ) -> str:
+        """The note for content the ACTIVE TIER declined (#1001).
+
+        Distinct from :meth:`_build_withheld_attachment_note` in the one
+        way that matters to the model reading it: the active model *can*
+        consume this content, so every sentence that blames the model is
+        false here.  A ``voz`` tier told "the active model can't view audio
+        content" about ``openai/gpt-audio`` has a true fact to contradict,
+        and spends a turn contradicting it; what it needs to know is that
+        the TIER declared no inbound audio role, which is a profile
+        statement, not a capability.
+
+        Two outcomes, mirroring the sibling note's first and third:
+
+        1. **Another tier declares the role inbound** — name it, and name
+           only the kinds it covers.  The ``stuck`` case the sibling
+           handles cannot arise here: a kind is only in this note because
+           the ACTIVE tier does not declare it inbound, so the active tier
+           is never the sole declarer of it.
+        2. **No tier declares it inbound** — say that, and point at the
+           profile key, without claiming the content is unreadable.
+        """
+        kinds = ", ".join(sorted(withheld))
+        model = self._model_name or "the current model"
+        active = getattr(self, "_active_tier", None)
+        target, covered, _stuck = self._resolve_withheld_target(withheld)
+
+        if target is not None:
+            covers = ", ".join(sorted(covered))
+            rest = sorted(set(withheld) - set(covered))
+            tail = (f"  No tier accepts {', '.join(rest)} content as input."
+                    if rest else "")
+            return (
+                f"[Attachment withheld: the {active!r} tier does not accept "
+                f"{kinds} as input — it declares no inbound role for it.  "
+                f"({model} itself can read {kinds}; this is the tier's "
+                f"declared role, not a model limit.)  Call "
+                f"enter_tier(\"{target}\") to take in the {covers} content, "
+                f"then {retry_action}.{tail}]"
+            )
+
+        return (
+            f"[Attachment withheld: the {active!r} tier does not accept "
+            f"{kinds} as input — it declares no inbound role for it, and no "
+            f"other tier in this session declares {kinds} inbound either.  "
+            f"({model} itself can read {kinds}; this is a profile "
+            f"statement, not a model limit.)  If a tier should receive this "
+            f"content, give it `modalities: {{{sorted(withheld)[0]}: "
+            f"inbound}}` in the profile's model_tiers.]"
+        )
+
+    def _build_withheld_attachment_note(
+        self,
+        withheld: Dict[str, int],
+        *,
+        retry_action: str = "re-run this tool",
+    ) -> str:
+        """The note for content the active MODEL cannot consume.
+
+        Reached through :meth:`_withheld_notes`, which routes each withheld
+        kind by its refusal reason; content the active TIER declined goes
+        to :meth:`_build_tier_role_withheld_note` instead, because every
+        sentence below blames the model and would be false about it.
 
         Three outcomes, in order:
 
@@ -7956,6 +9551,18 @@ NOTES
         PDF the moment a tier declares those roles.  A tier literally named
         ``vision`` that declares no ``modalities`` still implies ``image``,
         so profiles written before the key behave unchanged.
+
+        Args:
+            withheld: modality kind -> count of attachments withheld.
+            retry_action: What the agent should do *after* switching tiers,
+                phrased as the tail of "...then <retry_action>."  The default
+                suits the tool-result gate, where the content is regenerated
+                by re-running the tool.  The history gate
+                (:meth:`_gate_one_history_message`) overrides it, because
+                nothing needs re-running there -- the bytes are still in
+                history and the next request made from the other tier carries
+                them again, so telling the agent to re-run a tool it may never
+                have called would be an instruction it cannot follow.
         """
         kinds = ", ".join(sorted(withheld))
         model = self._model_name or "the current model"
@@ -7986,7 +9593,7 @@ NOTES
             return (
                 f"[Attachment withheld: the active model ({model}) can't "
                 f"view {kinds} content.  Call enter_tier(\"{target}\") first "
-                f"to view the {covers} content, then re-run this tool.{tail}]"
+                f"to view the {covers} content, then {retry_action}.{tail}]"
             )
 
         if stuck:
@@ -8160,12 +9767,9 @@ NOTES
         Appends tool results to session history as a TOOL message, then
         calls ``provider.complete()`` with the full history.
         """
-        # Proactive size guard: cap results before they enter history
-        tool_results = self._cap_tool_results(tool_results)
-        # Append tool results to session history
-        tool_results = self._gate_tool_results_for_active_modalities(tool_results)
-        tool_result_parts = [Part(function_response=r) for r in tool_results]
-        self._history.append(Message(role=Role.TOOL, parts=tool_result_parts))
+        # Cap, gate and append -- the one writer of executed results
+        # into history, shared with the terminal path (#913).
+        tool_results = self._append_tool_results_to_history(tool_results)
 
         # Probe B (force_narration_between_tools, 2026-06-09).  Empirical
         # finding from kb cascade context-stage falsification on
@@ -8217,7 +9821,10 @@ NOTES
                 # Track first chunk to use "write" for new block, "append" for continuation
                 first_chunk_after_tools = [False]  # Use list to allow mutation in closure
 
-                def streaming_callback(chunk: str) -> None:
+                def streaming_callback(chunk) -> None:
+                    if isinstance(chunk, MediaDelta):
+                        self._deliver_model_media(chunk)
+                        return
                     # Check for pending mid-turn prompts during tool result streaming
                     # This mirrors the interrupt detection in the initial streaming callback
                     if self._message_queue.has_parent_messages():
@@ -8232,11 +9839,10 @@ NOTES
                         on_output("model", chunk, mode)
                         first_chunk_after_tools[0] = True
 
-                # Create thinking callback to emit thinking BEFORE text
-                def thinking_callback(thinking: str) -> None:
-                    if on_output:
-                        self._trace(f"SESSION_TOOL_RESULT_THINKING_CALLBACK len={len(thinking)}")
-                        on_output("thinking", thinking, "write")
+                # Thinking callback: emits reasoning BEFORE text, as a
+                # write-then-append stream (one block per provider call).
+                thinking_callback = self._make_thinking_emitter(
+                    on_output, "SESSION_TOOL_RESULT_THINKING_CALLBACK")
 
                 # Path 1 quirk consumption: if signal_completion just
                 # returned validation_failed, request named-function
@@ -8260,7 +9866,7 @@ NOTES
                 with self._provider_access():
                     turn_result, _retry_stats = with_retry(
                         lambda: self._provider.complete(
-                            self._history.messages,
+                            self._history_for_provider(),
                             system_instruction=self._get_effective_system_instruction(),
                             tools=self._get_tools_for_provider(),
                             on_chunk=streaming_callback,
@@ -8282,7 +9888,7 @@ NOTES
                 with self._provider_access():
                     turn_result, _retry_stats = with_retry(
                         lambda: self._provider.complete(
-                            self._history.messages,
+                            self._history_for_provider(),
                             system_instruction=self._get_effective_system_instruction(),
                             tools=self._get_tools_for_provider(),
                             **_extra_complete_kwargs,
@@ -8397,24 +10003,26 @@ NOTES
             if use_streaming:
                 first_chunk_sent = [False]
 
-                def streaming_callback(chunk: str) -> None:
+                def streaming_callback(chunk) -> None:
+                    if isinstance(chunk, MediaDelta):
+                        self._deliver_model_media(chunk)
+                        return
                     if on_output:
                         mode = "append" if first_chunk_sent[0] else "write"
                         self._trace(f"MID_TURN_RESPONSE mode={mode} len={len(chunk)}")
                         on_output("model", chunk, mode)
                         first_chunk_sent[0] = True
 
-                # Create thinking callback to emit thinking BEFORE text
-                def thinking_callback(thinking: str) -> None:
-                    if on_output:
-                        self._trace(f"MID_TURN_THINKING_CALLBACK len={len(thinking)}")
-                        on_output("thinking", thinking, "write")
+                # Thinking callback: emits reasoning BEFORE text, as a
+                # write-then-append stream (one block per provider call).
+                thinking_callback = self._make_thinking_emitter(
+                    on_output, "MID_TURN_THINKING_CALLBACK")
 
                 self._trace("MID_TURN_PROMPT: Calling with_retry for streaming...")
                 with self._provider_access():
                     turn_result, _retry_stats = with_retry(
                         lambda: self._provider.complete(
-                            self._history.messages,
+                            self._history_for_provider(),
                             system_instruction=self._get_effective_system_instruction(),
                             tools=self._get_tools_for_provider(),
                             on_chunk=streaming_callback,
@@ -8433,7 +10041,7 @@ NOTES
                 with self._provider_access():
                     turn_result, _retry_stats = with_retry(
                         lambda: self._provider.complete(
-                            self._history.messages,
+                            self._history_for_provider(),
                             system_instruction=self._get_effective_system_instruction(),
                             tools=self._get_tools_for_provider(),
                         ),
@@ -8643,6 +10251,110 @@ NOTES
         )
         return len(fcs)
 
+    def _append_tool_results_to_history(
+        self, tool_results: List[ToolResult]
+    ) -> List[ToolResult]:
+        """Cap, modality-gate and append tool results as one ``TOOL`` message.
+
+        THE INVARIANT (stated in full on
+        :meth:`_reconcile_unanswered_calls`): every ``tool_use`` block in
+        history must have a matching ``tool_result``.  This is the single
+        place that discharges it for results that were actually produced,
+        so every path that executes a tool group writes history the same
+        way -- whether or not it goes on to ask the model for a
+        continuation.
+
+        The two steps before the append are not incidental:
+
+        * :meth:`_cap_tool_results` bounds an oversized payload *before*
+          it enters history, rather than leaving GC to evict it after.
+        * :meth:`_gate_tool_results_for_active_modalities` strips
+          attachments the active model cannot consume, replacing them
+          with the withheld note (#847).
+
+        Args:
+            tool_results: Results for one executed tool group.
+
+        Returns:
+            The results as they were written -- capped and gated -- so a
+            caller that also sends them to the provider sends exactly
+            what history holds.
+        """
+        tool_results = self._cap_tool_results(tool_results)
+        tool_results = self._gate_tool_results_for_active_modalities(tool_results)
+        self._history.append(Message(
+            role=Role.TOOL,
+            parts=[Part(function_response=r) for r in tool_results],
+        ))
+        return tool_results
+
+    def _record_terminal_tool_results(
+        self, tool_results: List[ToolResult]
+    ) -> None:
+        """Write the results of the batch that ended the session (#913).
+
+        ``signal_completion`` terminates the turn: the continuation --
+        :meth:`_send_tool_results_and_continue` -- is skipped, and with
+        it the model round-trip that would have been wasted.  But that
+        continuation was also the ONLY thing that wrote the batch's
+        results into history, so skipping it left the conversation
+        ending on an assistant message whose ``tool_calls`` nothing
+        answers.  Every OpenAI/Azure-shaped upstream rejects that on the
+        *next* request::
+
+            An assistant message with 'tool_calls' must be followed by
+            tool messages responding to those tool_call_ids
+
+        which made a completed session impossible to drive again --
+        neither by a further :meth:`send_message` nor by the
+        ``session.wake`` revive path the framework ships for exactly
+        that purpose, and with no error at wake time to say so.  The
+        optimisation and the bookkeeping were coupled; only the
+        optimisation was ever intended.
+
+        The results are therefore recorded here instead.  The round-trip
+        stays skipped -- the session IS over as far as this turn goes --
+        and the *history* is well-formed whether or not another turn
+        ever happens, which is what makes "complete every turn to
+        enforce a contract, then keep talking" a usable pattern rather
+        than a choice between typed payloads and a second turn.
+
+        Calls the batch never dispatched are answered too.
+        ``signal_completion`` is terminal for the whole batch, so a model
+        that emitted it in parallel with another call leaves that other
+        ``tool_use`` unanswered as well; each gets
+        :func:`session_completed_call_error` in the same ``TOOL``
+        message.  Only a *trailing* ``MODEL`` message can hold such
+        calls, mirroring :meth:`_reconcile_unanswered_calls`.
+
+        Args:
+            tool_results: The executed batch's results, in the shape
+                :meth:`_execute_function_call_group` produced.
+        """
+        answered = {r.call_id for r in tool_results}
+        orphans: List[FunctionCall] = []
+        messages = self._history.messages
+        if messages and messages[-1].role == Role.MODEL:
+            orphans = [
+                p.function_call for p in messages[-1].parts
+                if p.function_call and p.function_call.id not in answered
+            ]
+        self._append_tool_results_to_history(list(tool_results) + [
+            ToolResult(
+                call_id=fc.id,
+                name=fc.name,
+                result=session_completed_call_error(fc),
+                is_error=True,
+            )
+            for fc in orphans
+        ])
+        self._trace(
+            f"SIGNAL_COMPLETION_RECORDS_RESULTS: {len(tool_results)} "
+            f"result(s) written to history; "
+            f"{len(orphans)} undispatched call(s) answered "
+            f"{[fc.name for fc in orphans]}"
+        )
+
     def _inject_synthetic_cancelled_results(self, fcs: List[FunctionCall]) -> None:
         """Append synthetic cancelled tool results to history for unexecuted tool calls.
 
@@ -8683,9 +10395,16 @@ NOTES
         """Run tool result enrichment on tool results.
 
         Two enrichment modes:
-        1. For file-writing tools (writeNewFile, updateFile): Pass the full JSON
-           result so enrichers can extract file paths and run diagnostics.
-        2. For other tools with large text fields: Enrich individual text fields.
+        1. For file-writing tools (writeNewFile, updateFile) and tools
+           declaring ``TRAIT_GREPPABLE_CONTENT``: pass the full JSON result
+           so enrichers can extract file paths, run diagnostics, or shrink
+           a structured payload.
+        2. For every other dict result: render the dict's scalar fields as
+           a text view and run the chain once over it, writing back what
+           enrichment changed (``tool_result_text_view`` /
+           ``apply_text_view_enrichment``).  No field-name allowlist and no
+           length floor — a tool naming its text ``message`` used to be
+           silently exempt from enrichment forever (#922).
 
         Also checks enrichment metadata for preselected reference pinning
         signals and delegates to ``_check_and_pin_reference`` when detected.
@@ -8753,35 +10472,60 @@ NOTES
                 except json.JSONDecodeError:
                     # If enrichment broke JSON, keep original and append as text
                     enriched_dict['_lsp_diagnostics'] = enrichment.result
+            self._trace(
+                f"ENRICH [{tool_name}]: full-JSON path ({len(result_json)} chars), "
+                f"plugins={sorted(enrichment.metadata) if enrichment.metadata else []}"
+            )
             self._check_and_pin_reference(enrichment.metadata, result_json)
             self._emit_enrichment_telemetry(enrichment.metadata, 'tool_result')
             if enrichment.metadata:
                 combined_metadata.update(enrichment.metadata)
             return enriched_dict, combined_metadata
 
-        # For other tools: enrich large text fields
-        text_fields = ('result', 'content', 'stdout', 'output', 'text', 'data')
-        min_length = 100
+        # Every other dict result: enrich a TEXT VIEW of the whole dict.
+        #
+        # This path used to enrich only fields named one of six well-known
+        # names, and only from 100 characters up (#922).  Both filters were
+        # invisible: `store_memory` names its text `message` and the message
+        # measured 83 characters, so `memory` and `references` — the two
+        # plugins that implement tool-result enrichment — never ran on the
+        # pairing they exist for, with no error, no warning and no trace
+        # line to say why.  The session no longer guesses which key holds
+        # "the text": it renders the dict's scalar fields as text, runs the
+        # chain ONCE over the whole view, and writes back precisely what
+        # enrichment changed.
+        header, body, anchor = _tool_result_text_view_impl(enriched_dict)
+        text_view = header + body
+        if not text_view.strip():
+            self._trace(
+                f"ENRICH_SKIP [{tool_name}]: dict result carries no textual "
+                f"content (keys={sorted(enriched_dict)})"
+            )
+            return enriched_dict, combined_metadata
 
-        for field in text_fields:
-            if field in enriched_dict:
-                value = enriched_dict[field]
-                if isinstance(value, str) and len(value) >= min_length:
-                    # Pass session's callback to route notifications to correct agent panel
-                    enrichment = self._runtime.registry.enrich_tool_result(
-                        tool_name,
-                        value,
-                        output_callback=self._current_output_callback,
-                        terminal_width=self._terminal_width,
-                        tool_args=tool_args
-                    )
-                    if enrichment.result != value:
-                        enriched_dict[field] = enrichment.result
-                    # Check for pinning signal (only need first match)
-                    self._check_and_pin_reference(enrichment.metadata, value)
-                    self._emit_enrichment_telemetry(enrichment.metadata, 'tool_result')
-                    if enrichment.metadata:
-                        combined_metadata.update(enrichment.metadata)
+        # Pass session's callback to route notifications to correct agent panel
+        enrichment = self._runtime.registry.enrich_tool_result(
+            tool_name,
+            text_view,
+            output_callback=self._current_output_callback,
+            terminal_width=self._terminal_width,
+            tool_args=tool_args
+        )
+        changed = _apply_text_view_enrichment_impl(
+            enriched_dict, header, body, anchor, enrichment.result
+        )
+        self._trace(
+            f"ENRICH [{tool_name}]: text view {len(text_view)} chars, "
+            f"anchor={anchor or '-'}, changed={changed}, "
+            f"plugins={sorted(enrichment.metadata) if enrichment.metadata else []}"
+        )
+        # Pin the anchor field's own (pre-enrichment) text, not the view:
+        # what a preselected-reference read pins into the system instruction
+        # is the file's content, and the header lines are matching context.
+        self._check_and_pin_reference(enrichment.metadata, body or text_view)
+        self._emit_enrichment_telemetry(enrichment.metadata, 'tool_result')
+        if enrichment.metadata:
+            combined_metadata.update(enrichment.metadata)
 
         return enriched_dict, combined_metadata
 
@@ -9069,6 +10813,112 @@ NOTES
             turn_tokens['thinking'] = turn_tokens.get('thinking', 0) + response.usage.thinking_tokens
             self._update_thinking_budget(response.usage.thinking_tokens)
 
+        # Attribute the same response to the (provider, model, tier) that
+        # served it.  Here rather than in the turn's ``finally`` because a
+        # turn is not a unit that belongs to one model: ``enter_tier`` can
+        # fire mid-turn, and a budget-control rung can rebind the active
+        # tier's model in place.  This hook runs exactly once per response
+        # on every path, which is the same property that makes it the right
+        # home for the ``spend_*`` keys above.
+        # Resolved rather than called outright: this hook is deliberately
+        # callable with a duck-typed ``self`` (``test_budget_runtime``
+        # drives it on a SimpleNamespace to prove the spend keys are
+        # written on every path), and the consumption report must not turn
+        # that into a hard requirement on the whole session class.
+        observe = getattr(self, '_observe_binding_usage', None)
+        if observe is not None:
+            observe(response)
+
+    def _observe_binding_usage(self, response: ProviderResponse) -> None:
+        """Fold one response into the per-binding consumption ledger.
+
+        The binding is read from the session's LIVE state — ``_model_name``,
+        ``_active_provider_name`` and ``_active_tier`` are all updated by
+        ``_connect_tier_entry`` / ``switch_tier`` before the next request
+        goes out, so at this moment they name what actually served this
+        response.
+
+        Never raises.  Consumption accounting is an observation ABOUT a
+        turn, not part of its contract, and the same rule the budget
+        observer follows applies: a reporting surface must not be able to
+        fail a turn that otherwise succeeded.
+
+        Args:
+            response: The provider response just received.
+        """
+        # A session built without ``__init__`` -- the shape several guard
+        # tests use to exercise ``_accumulate_turn_tokens`` in isolation --
+        # has no ledger, and therefore nothing to observe into.  Asked
+        # first because the alternative is reaching for ``_model_name``
+        # further down and relying on the handler to absorb the
+        # AttributeError, which is how this method stopped being total:
+        # ``_trace`` reads ``_agent_type`` and raised from inside the very
+        # ``except`` that was supposed to contain the failure.
+        ledger = getattr(self, '_consumption', None)
+        if ledger is None:
+            return
+        try:
+            usage = getattr(response, 'usage', None)
+            if usage is None or int(getattr(usage, 'total_tokens', 0) or 0) <= 0:
+                # A cancelled stream can settle with nothing reported.
+                # Recording a row of zeros would invent a binding the
+                # session may never have billed anything to.
+                return
+            cost, cost_source = self._reportable_cost(usage)
+            finish_reason = getattr(response, 'finish_reason', None)
+            ledger.observe(
+                provider=self._active_provider_name or 'unknown',
+                model=self._model_name or 'unknown',
+                tier=self._active_tier,
+                uncached_input_tokens=int(usage.prompt_tokens or 0),
+                output_tokens=int(usage.output_tokens or 0),
+                total_tokens=int(usage.total_tokens or 0),
+                cache_read_tokens=usage.cache_read_tokens,
+                cache_creation_tokens=usage.cache_creation_tokens,
+                thinking_tokens=usage.thinking_tokens,
+                cost_usd=cost,
+                cost_source=cost_source,
+                finish_reason=(
+                    finish_reason.value if finish_reason is not None else None),
+                # The turn being accumulated is the one AFTER every turn
+                # already recorded, so its index is the current length.
+                turn_index=len(self._turn_accounting),
+                timestamp=datetime.now().isoformat(),
+            )
+        except Exception as exc:  # noqa: BLE001
+            # The report is never worth a turn, so even the complaint is
+            # guarded: ``_trace`` touches session state of its own, and a
+            # handler that can raise is not a handler.
+            try:
+                self._trace(f"CONSUMPTION: binding observation failed: {exc}")
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _reportable_cost(self, usage) -> Tuple[Optional[float], Optional[str]]:
+        """The response's cost, or ``(None, None)`` if it is not a number.
+
+        Every other value the ledger is handed is converted in
+        :meth:`_observe_binding_usage`'s argument list, so a bad one raises
+        BEFORE the ledger is touched.  Cost is the exception: it is passed
+        through as the provider gave it, and the addition that would reject
+        it happens AFTER the row's token fields are written -- leaving a
+        half-written binding rather than no binding.
+
+        So a value that is not a number is not a cost.  It is dropped and
+        named, rather than allowed to corrupt the row it arrived with.
+        ``bool`` is excluded explicitly because Python makes it an ``int``,
+        and ``True`` dollars is not a measurement.
+        """
+        cost, cost_source = self._resolve_cost_with_source(usage)
+        if cost is None:
+            return None, None
+        if isinstance(cost, bool) or not isinstance(cost, (int, float)):
+            self._trace(
+                f"CONSUMPTION: ignoring non-numeric cost "
+                f"{type(cost).__name__} from {self._model_name}")
+            return None, None
+        return cost, cost_source
+
     def _emit_turn_progress(self, turn_data: Dict[str, Any], pending_tool_calls: int) -> None:
         """Emit turn progress event with current token state.
 
@@ -9162,11 +11012,14 @@ NOTES
 
         NOT the mechanism that actually protects this today, despite what the
         wording above implies.  ``rpc._forward_post_turn_hooks`` gates on a NEW
-        turn having landed in ``turn_accounting`` -- strictly stronger, since
-        it covers every no-op path rather than just a budget refusal -- so a
-        refused turn already emits nothing.  This accessor has no consumer and
-        is kept only because a caller may want to ASK whether the last send
-        was refused; do not add a second suppression path on top of it.
+        turn having RUN (:meth:`get_turns_ran`) -- strictly stronger, since it
+        covers every no-op path rather than just a budget refusal -- so a
+        refused turn already emits nothing.  The gate used to read
+        ``len(turn_accounting)`` instead, which suppressed a refused turn for
+        the right reason and an UNMETERED one for the wrong one (#881).  This
+        accessor has no consumer and is kept only because a caller may want to
+        ASK whether the last send was refused; do not add a second suppression
+        path on top of it.
         """
         return self._last_send_refused
 
@@ -9249,18 +11102,187 @@ NOTES
             logger.warning("budget: response observation failed: %s", exc)
 
     def _budget_observe_turn(self, turn_data: Dict[str, Any]) -> None:
-        """Feed one completed turn's wall-clock / tool-call / turn count."""
+        """Feed one completed turn: its turn count, plus whatever the
+        mid-turn observations did not already see.
+
+        Until #955 this was the ONLY writer of ``tool_calls``, ``seconds``
+        and ``turns``, and it runs in the turn's ``finally`` — so a loop
+        INSIDE one turn could not cross any of them however long it ran.  A
+        subagent made 196 tool calls under ``tool_calls: 100`` with an
+        ``abort`` rung at 100% and nothing fired, because the turn had not
+        ended; it outlived its driver and was stopped with ``kill -TERM``.
+        ``tool_calls`` and ``seconds`` are now observed AS THE TURN RUNS by
+        :meth:`_budget_observe_tool_calls`; this is the closing entry.  It
+        settles the remainder — tool calls a path recorded without
+        observing (none today; the AST guard in
+        ``test_budget_mid_turn_955.py`` keeps it that way) and the seconds
+        between the last tool call and the end of the turn — so a budget is
+        exact at turn end whichever path produced the turn, and never
+        double-counted.
+
+        The bookkeeping keys are popped here: ``turn_data`` is appended to
+        ``_turn_accounting`` right after this call, and that list is
+        persisted and emitted.
+        """
         if self._budget_tracker is None:
             return
         try:
+            recorded = len(turn_data.get("function_calls") or ())
+            observed = int(turn_data.pop(_BUDGET_TOOL_CALLS_OBSERVED, 0) or 0)
+            seconds = self._budget_unobserved_seconds(
+                turn_data, turn_data.get("duration_seconds"))
+            turn_data.pop(_BUDGET_SECONDS_OBSERVED, None)
             fired = self._budget_tracker.observe(
                 turns=1,
-                seconds=turn_data.get("duration_seconds") or 0.0,
-                tool_calls=len(turn_data.get("function_calls") or ()),
+                seconds=seconds,
+                tool_calls=max(0, recorded - observed),
             )
+            self._budget_note_ceilings()
             self._apply_budget_rungs(fired)
         except Exception as exc:  # noqa: BLE001
             logger.warning("budget: turn observation failed: %s", exc)
+
+    def _budget_observe_tool_calls(
+        self, turn_data: Dict[str, Any], count: int,
+    ) -> None:
+        """Feed tool calls to the tracker as they COMPLETE, mid-turn (#955).
+
+        Called by every path that records a call in
+        ``turn_data['function_calls']`` — the sequential loop after each
+        call, the parallel loop after each batch, the parts loop after each
+        call.  Observing here is what lets an ``abort`` rung stop a tool
+        loop on the call that crosses the ceiling rather than at the end of
+        a turn that, for a runaway loop, never comes: the abort cancels the
+        session's token, which the sequential loop checks before the next
+        call and the main chat loop before the next model round-trip, so the
+        overshoot is one call or one parallel batch.  The parts loop
+        (attachment turns) has no check of its own: it finishes the batch in
+        flight and the provider cancels the next response on its first
+        chunk.
+
+        ``seconds`` rides along: the wall clock since the last observation
+        is fed at the same time, so a ``seconds`` ceiling binds mid-turn too
+        rather than at turn end, where a stuck loop would never report it.
+
+        Never raises — budgeting is a guardrail, not part of the turn's
+        contract.
+        """
+        if self._budget_tracker is None or count <= 0:
+            return
+        try:
+            turn_data[_BUDGET_TOOL_CALLS_OBSERVED] = (
+                int(turn_data.get(_BUDGET_TOOL_CALLS_OBSERVED, 0) or 0)
+                + count
+            )
+            fired = self._budget_tracker.observe(
+                tool_calls=count,
+                seconds=self._budget_unobserved_seconds(turn_data),
+            )
+            self._budget_note_ceilings()
+            self._apply_budget_rungs(fired)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("budget: tool-call observation failed: %s", exc)
+
+    @staticmethod
+    def _budget_unobserved_seconds(
+        turn_data: Dict[str, Any], elapsed: Optional[float] = None,
+    ) -> Optional[float]:
+        """Wall-clock seconds of this turn not yet fed to the tracker.
+
+        Advances the ``_budget_seconds_observed`` mark on ``turn_data`` so
+        successive calls hand out disjoint slices of the turn's elapsed
+        time: a mid-turn observation feeds the seconds since the previous
+        one, and the turn-end observation feeds only the tail.
+
+        Args:
+            turn_data: The turn's accounting dict (``start_time`` is read
+                when *elapsed* is not supplied).
+            elapsed: Total seconds elapsed so far, when the caller already
+                knows it (turn end passes ``duration_seconds``).
+
+        Returns:
+            The unobserved delta, or ``None`` when the turn's start is not
+            readable — "no news" to the tracker, never a guess.
+        """
+        if elapsed is None:
+            start = turn_data.get("start_time")
+            if not start:
+                return None
+            try:
+                elapsed = (
+                    datetime.now() - datetime.fromisoformat(start)
+                ).total_seconds()
+            except (TypeError, ValueError):
+                return None
+        already = float(turn_data.get(_BUDGET_SECONDS_OBSERVED, 0.0) or 0.0)
+        delta = max(0.0, float(elapsed) - already)
+        turn_data[_BUDGET_SECONDS_OBSERVED] = already + delta
+        return delta
+
+    def _budget_note_ceilings(self) -> None:
+        """Trace each dimension the FIRST time it reaches its ceiling.
+
+        Independent of the ladder (#955, question 3): a profile whose rungs
+        stop short of 100%, or whose terminal action is ``finalize``, still
+        crosses its limits, and until now did so in silence — the reporter
+        grepped the session trace for the ladder and found nothing, unable
+        to tell "evaluated and did not fire" from "not wired".  Once per
+        dimension, because the tracker keeps accumulating past 100% and a
+        line per tool call would be noise.
+        """
+        tracker = self._budget_tracker
+        if tracker is None:
+            return
+        traced = getattr(self, "_budget_ceilings_traced", None)
+        if traced is None:
+            traced = self._budget_ceilings_traced = set()
+        for dim, fraction in tracker.exceeded_dimensions().items():
+            if dim in traced:
+                continue
+            traced.add(dim)
+            usage = tracker.usage.as_dict().get(dim)
+            limit = tracker.config.limits.get(dim)
+            self._budget_trace(
+                f"CEILING dim={dim} used={usage:g} limit={limit:g} "
+                f"at={fraction * 100:.0f}% pressure='{tracker.describe_pressure()}'"
+            )
+            logger.warning(
+                "budget: %s ceiling reached (%g/%g); ladder=%s",
+                dim, usage, limit,
+                [r.at_percent for r in tracker.config.degrade] or "none",
+            )
+
+    def _budget_trace_rung(
+        self, rung: 'DegradeRung', origin: str, detail: str,
+    ) -> None:
+        """One trace line per fired rung: threshold, mechanism, what it carries."""
+        action = rung.action or "none"
+        overlay = "yes" if rung.model_tiers else "no"
+        self._budget_trace(
+            f"RUNG at={rung.at_percent:.0f}% origin={origin} action={action} "
+            f"overlay={overlay} pressure='{detail}'"
+        )
+
+    def _budget_trace(self, msg: str) -> None:
+        """Record a budget decision on BOTH trace channels (#955).
+
+        ``_trace`` lands in the per-agent provider trace; the permission
+        DECISION lines (#953) an operator correlates budget events against
+        live in the application trace (``JAATO_TRACE_LOG`` / the profile's
+        ``trace.session_log``), so the same line is written there too,
+        prefixed with the session's agent identity.  Best-effort: a trace
+        failure never reaches the turn.
+        """
+        line = f"BUDGET {msg}"
+        try:
+            self._trace(line)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            from shared.trace import trace
+            trace("BUDGET", f"{self._get_trace_prefix()} {msg}")
+        except Exception:  # noqa: BLE001
+            pass
 
     def _apply_budget_rungs(
         self, fired, origin: str = "self-enforced",
@@ -9331,6 +11353,10 @@ NOTES
                     "model already degraded away from",
                     origin, rung.at_percent, self._budget_applied_rung_pct,
                 )
+                self._budget_trace(
+                    f"RUNG_SKIPPED at={rung.at_percent:.0f}% origin={origin} "
+                    f"applied={self._budget_applied_rung_pct:.0f}%"
+                )
                 continue
             self._budget_applied_rung_pct = rung.at_percent
             # A cascade rung fired on the POOL's fraction; reporting this
@@ -9341,6 +11367,10 @@ NOTES
                 if self._budget_tracker is not None else "cascade pressure"
             )
             tag = f"budget[{origin}]"
+            # Every fired rung leaves a line, whatever it goes on to do
+            # (#955): the ladder must be visibly EVALUATED, not only
+            # visible when it rebinds or aborts.
+            self._budget_trace_rung(rung, origin, detail)
             if rung.model_tiers:
                 if self._tier_config is None:
                     # Rejected by the profile validator, but a session can be
@@ -9382,6 +11412,10 @@ NOTES
                     # is not a ceiling.
                     self._budget_exhausted_reason = (
                         f"budget_exhausted ({origin}: {detail})")
+                    self._budget_trace(
+                        f"EXHAUSTED reason='{self._budget_exhausted_reason}' "
+                        "— in-flight turn cancelled, later turns refused"
+                    )
                     self.request_stop(self._budget_exhausted_reason)
 
     def apply_cascade_degrade(
@@ -9498,11 +11532,20 @@ NOTES
         if not self._runtime.ledger:
             return
 
-        self._runtime.ledger._record('response', {
+        record = {
             'prompt_tokens': response.usage.prompt_tokens,
             'output_tokens': response.usage.output_tokens,
             'total_tokens': response.usage.total_tokens,
-        })
+        }
+        # #859: attribute spend to the session's authenticated user -- the
+        # same id the telemetry ``user.id`` attribute carries -- so the
+        # ledger is attributable without an observability backend.  Key
+        # omitted (not None) when there is no user, so keyless / IPC
+        # ledgers are byte-identical to before.
+        user_id = self._resolve_telemetry_user_id()
+        if user_id:
+            record['user_id'] = user_id
+        self._runtime.ledger._record('response', record)
 
     def _record_token_telemetry(self, span, response: ProviderResponse) -> None:
         """Record OpenInference token count and response attributes on a telemetry span.
@@ -9618,34 +11661,47 @@ NOTES
         Returns:
             Cost in USD, or ``None`` when no source can supply it.
         """
-        if usage.cost_usd is not None:
-            return usage.cost_usd
-        if not self._model_name:
-            return None
-        try:
-            if not self._span_pricing_loaded:
-                from shared.pricing import load_pricing
-                self._span_pricing = load_pricing(self.workspace_path)
-                self._span_pricing_loaded = True
-            if self._span_pricing is None or not self._span_pricing.has(self._model_name):
-                return None
-            return self._span_pricing.cost_for_usage(
-                self._model_name,
-                prompt_tokens=int(usage.prompt_tokens or 0),
-                output_tokens=int(usage.output_tokens or 0),
-                cache_read_tokens=usage.cache_read_tokens,
-                cache_creation_tokens=usage.cache_creation_tokens,
-            )
-        except Exception as e:  # pragma: no cover - defensive
-            self._trace(f"LLM_TELEMETRY: pricing-table cost lookup failed: {e}")
-            return None
+        return _resolve_cost_and_source(self, usage)[0]
+
+    def _resolve_cost_with_source(
+        self, usage,
+    ) -> Tuple[Optional[float], Optional[str]]:
+        """:meth:`_resolve_span_cost`, plus WHICH source supplied the number.
+
+        The provenance exists because a consumer — including the model
+        itself, through the ``consumption`` environment aspect — acts
+        differently on a billed figure than on one computed from an
+        operator's pricing table.  Nothing in the tree distinguished them
+        before: ``cost_usd`` arrived as a bare float whose meaning depended
+        on which provider produced it.
+
+        Both this and :meth:`_resolve_span_cost` are one-line wrappers over
+        :func:`_resolve_cost_and_source`, so the cost and its provenance
+        cannot disagree — two walks of the same ladder is a bug waiting for
+        a provider that reports cost only sometimes.
+
+        Returns:
+            ``(cost_usd, source)``; see :func:`_resolve_cost_and_source`.
+        """
+        return _resolve_cost_and_source(self, usage)
 
     def _record_input_messages_telemetry(self, span) -> None:
         """Record OpenInference input messages on a telemetry span.
 
-        Converts the current session history (messages being sent to the
-        provider) into OpenInference ``llm.input_messages.*`` indexed
-        attributes on the LLM span, prepended with the system instruction.
+        Converts the messages being sent to the provider into OpenInference
+        ``llm.input_messages.*`` indexed attributes on the LLM span,
+        prepended with the system instruction.
+
+        The list comes from :meth:`_history_for_provider`, not from
+        ``_history.messages``, because since #847 those are not the same
+        list: the modality gate withholds, per request, content the active
+        model cannot consume.  A span reporting the stored history would
+        show a text tier receiving the audio it was specifically not sent —
+        the one reading that makes the 404 this gate exists to prevent look
+        impossible.  Every call site sits inside the ``llm_span`` wrapping
+        the ``complete()`` call and after the turn's history append, so the
+        gate here resolves against the same active model the request will
+        use.
 
         The system prompt is NOT part of ``_history.messages`` — it reaches the
         provider as the API's separate top-level ``system`` parameter — so
@@ -9662,7 +11718,7 @@ NOTES
             span: The LLM span context to set attributes on.
         """
         input_msgs = build_input_messages(
-            self._system_instruction, self._history.messages
+            self._system_instruction, self._history_for_provider()
         )
         if input_msgs:
             span.set_input_messages(input_msgs)
@@ -9867,9 +11923,403 @@ NOTES
                 "skipped, session will still wind down correctly", exc,
             )
 
+    def _record_turn_ran(self, turn_data: Dict[str, Any]) -> None:
+        """Close one turn: record that it RAN, and its usage if there was any.
+
+        The two halves are deliberately separate (#881).
+
+        ``_turn_accounting`` is a **usage ledger**.  A turn whose provider
+        reported no tokens is appended nowhere, because ``len()`` of that list
+        is read as a token-bearing turn count by
+        :meth:`get_context_usage` (``turns``), by :meth:`get_consumption`
+        (the unattributed-turn reconciliation), and by the persisted
+        ``turn_count``.  Appending an all-zero turn would change what every
+        one of those numbers means.
+
+        ``_turns_ran`` / ``_last_turn_ran`` are the **lifecycle** fact, and
+        they are what the post-turn event fan-out gates on.  Until #881 that
+        fan-out gated on the ledger growing, so a provider that reported no
+        usage produced no ``TurnCompletedEvent`` and no
+        ``SessionTerminatedEvent`` at all -- the session did its work, the
+        agent signalled completion, and the driver's ``complete()`` /
+        ``ask()`` / ``stream()`` waited until their own timeout with nothing
+        logged on either side.  Measured with the ``echo`` provider: dropping
+        ``plugin_configs.echo.usage`` was the whole difference between a
+        cascade that returns and one that hangs.
+
+        A REFUSED send still records nothing here, and does not need to be
+        excluded: :meth:`send_message` returns before the chat loop is
+        entered, so no ``turn_data`` is ever built and this method is never
+        reached.  That -- not the old ``total > 0`` gate -- is what has always
+        suppressed a refused turn's event.
+
+        The unmetered WARNING (#688 item 3) is raised only for a turn that
+        finished normally -- see :data:`_METERABLE_FINISH_REASONS`.  A turn
+        that errored, was cancelled or was cut off mid-stream also carries no
+        tokens, and blaming the provider's usage reporting for it would be
+        wrong in the one direction that costs an operator time: chasing a
+        reporting defect that is really a failed turn.  Those paths run
+        through this ``finally`` too, so the distinction has to be made here.
+
+        Args:
+            turn_data: The turn-accounting dict for the turn just finished.
+                Stored by reference as ``_last_turn_ran``; the caller must not
+                mutate it afterwards.
+        """
+        self._turns_ran += 1
+        self._last_turn_ran = turn_data
+        if turn_data['total'] > 0:
+            self._turn_accounting.append(turn_data)
+        elif turn_data.get('finish_reason') in _METERABLE_FINISH_REASONS:
+            self._warn_unmetered_turn_once()
+
+    def _warn_unmetered_turn_once(self) -> None:
+        """Announce, once per session, that a turn carried no token usage.
+
+        #688 item 3: there was no signal at all.  A provider or gateway that
+        drops usage zeroes the token accounting silently, and the two
+        consumers of that accounting fail in opposite directions without
+        saying so -- the consumption report reads empty, and
+        ``budget_control`` enforces its ``tokens`` / ``usd`` ceilings from
+        exactly this data, so a run that appears capped is uncapped.
+
+        WHAT THIS CAN AND CANNOT SAY.  It reports what is measurable today:
+        this turn's responses carried no tokens.  It does NOT claim the
+        upstream sent no usage frame, because nothing in the tree can yet
+        tell a reported zero from an unreported one -- ``TokenUsage`` starts
+        at all-zeros and is only overwritten when a frame arrives, so the two
+        share a value.  Giving them separate representations is #688 item 1,
+        and this wording is deliberately chosen not to pre-empt it: a warning
+        that asserted "the provider reported nothing" would be a claim the
+        data does not support, which is the same class of error as the
+        silence it replaces.
+
+        Once per session, because the condition is a property of the
+        provider rather than of the turn, and a per-turn line on a long run
+        would bury it.  Best-effort and total: this is an observation ABOUT a
+        turn, never part of its contract, so a session double that lacks the
+        binding attributes gets a vaguer line rather than an exception.
+        """
+        if getattr(self, '_unmetered_warning_emitted', False):
+            return
+        self._unmetered_warning_emitted = True
+        provider = getattr(self, '_active_provider_name', None) or '?'
+        model = getattr(self, '_model_name', None) or '?'
+        try:
+            self._trace(
+                f"UNMETERED_TURN provider={provider} model={model} "
+                f"turns_ran={self._turns_ran}")
+        except Exception:  # noqa: BLE001 — a trace must not fail a turn
+            pass
+        logger.warning(
+            "provider %r (model %r) reported no token usage for a completed "
+            "turn. Token accounting for this session will under-report, and "
+            "any budget_control ceiling on 'tokens' or 'usd' is being fed "
+            "zero and will not fire. Reported once per session.",
+            provider, model,
+        )
+
+    def get_turns_ran(self) -> int:
+        """How many turns have RUN in this session, usage or no usage.
+
+        The lifecycle counter behind the post-turn event fan-out (#881).
+        ``len(get_turn_accounting())`` answers a different question -- how
+        many turns had usage to record -- and the two diverge exactly when a
+        provider reports nothing.  A caller deciding whether a turn happened
+        wants this one; a caller summing tokens wants the ledger.
+
+        Not persisted: it exists to compare a before/after snapshot taken
+        around a single ``send_message`` call, so a revived session starting
+        again at ``0`` is correct rather than merely harmless.
+        """
+        return self._turns_ran
+
+    def get_last_turn_ran(self) -> Optional[Dict[str, Any]]:
+        """The turn-accounting dict of the last turn that RAN, or ``None``.
+
+        The payload source for the post-turn fan-out.  It is the same dict
+        ``get_turn_accounting()[-1]`` returns whenever the provider reported
+        usage, and the ONLY source for a turn where it did not -- in that
+        case the dict carries real timing, a real ``finish_reason`` and the
+        real ``function_calls``, with zeroes only where the provider was
+        silent.
+
+        ``None`` until the first turn runs.
+        """
+        return self._last_turn_ran
+
     def get_turn_accounting(self) -> List[Dict[str, Any]]:
-        """Get token usage and timing per turn."""
+        """Token usage and timing for every turn that REPORTED USAGE.
+
+        A usage ledger, not a turn log: a turn whose provider reported no
+        tokens is absent, and ``len()`` of this list is read as a
+        metered-turn count by :meth:`get_context_usage` (``turns``), by
+        :meth:`get_consumption` and by the persisted ``turn_count``.  For
+        "did a turn run" and "what happened on it" use :meth:`get_turns_ran`
+        and :meth:`get_last_turn_ran`; conflating the two is #881.
+        """
         return list(self._turn_accounting)
+
+    def get_consumption(self, detail: str = DETAIL_SUMMARY) -> Dict[str, Any]:
+        """What this session has consumed, segregated by model binding.
+
+        The counterpart of :meth:`get_context_usage`, and deliberately not
+        an extension of it.  That method answers *how full is the context
+        window* — an occupancy reading taken from ``InstructionBudget``,
+        which is a property of the history and belongs to no particular
+        model.  This one answers *what has been spent, and on what*: a sum
+        over the responses each ``(provider, model, tier)`` binding served.
+        A session that switches tier has one history and several bills.
+
+        Own session only.  A subagent runs its own :class:`JaatoSession`
+        and reports its own spend; nothing here rolls a child's numbers
+        into its parent's, because the aggregate has an owner already
+        (:class:`~shared.budget_control.CascadeBudgetPool`) and a second,
+        quieter one competing with it is how two totals start disagreeing.
+
+        Args:
+            detail: :data:`~shared.session_consumption.DETAIL_SUMMARY`
+                (default) reports totals and the active binding;
+                :data:`~shared.session_consumption.DETAIL_FULL` adds the
+                per-binding list and the declared tier ladder.  The
+                default is the cheap one because this result enters the
+                history of the very session it measures — asking what you
+                have spent is itself spending.  An unknown value degrades
+                to summary rather than raising: a reporting surface must
+                not be able to fail a turn.
+
+        Returns:
+            A JSON-safe dict.  ``bindings`` is a LIST even in single-model
+            mode (one row, ``tier: null``), so a consumer never branches on
+            whether the session happened to be tiered.
+        """
+        if detail not in VALID_DETAIL_LEVELS:
+            detail = DETAIL_SUMMARY
+
+        totals = self._consumption.totals()
+        bindings = self._consumption.bindings()
+        usage = self.get_context_usage()
+
+        result: Dict[str, Any] = {
+            "active": self._consumption_active_view(usage),
+            "totals": totals.as_dict(),
+            "binding_count": len(bindings),
+            "elapsed_seconds": round(float(sum(
+                float(t.get("duration_seconds") or 0.0)
+                for t in self._turn_accounting)), 2),
+            "tool_calls": sum(
+                len(t.get("function_calls") or ())
+                for t in self._turn_accounting),
+        }
+
+        unattributed = len(self._turn_accounting) - totals.turns
+        if unattributed > 0:
+            # The ledger is in-memory and is NOT part of the session
+            # snapshot, so a session revived from disk (``session.wake``, a
+            # reattach) comes back with its turn list restored and its
+            # spend unmeasured.  Reporting the remainder as though the
+            # session had been cheap is the one answer that would mislead a
+            # reader into a wrong decision, so the gap is named instead.
+            result["turns_not_attributed"] = unattributed
+            result["measurement_note"] = (
+                f"{unattributed} earlier turn(s) are not in this breakdown: "
+                f"per-binding spend is not persisted, so a revived session "
+                f"accounts only for what it has spent since waking."
+            )
+
+        budget = self._consumption_budget_view()
+        if budget is not None:
+            result["budget"] = budget
+
+        completion = self._consumption_completion_view()
+        if completion is not None:
+            result["completion"] = completion
+
+        if detail == DETAIL_FULL:
+            result["bindings"] = [b.as_dict() for b in bindings]
+            ladder = self._consumption_tier_ladder()
+            if ladder is not None:
+                result["tiers_declared"] = ladder
+        elif len(bindings) > 1:
+            # Say that the breakdown exists rather than leaving the reader
+            # to guess from ``binding_count``.  The whole reason this
+            # aspect takes a ``detail`` argument is that a multi-tier
+            # session HAS something more to say.
+            result["hint"] = (
+                f"{len(bindings)} model bindings were used; call with "
+                f"detail='full' for the per-binding breakdown."
+            )
+        return result
+
+    def _consumption_active_view(self, usage: Dict[str, Any]) -> Dict[str, Any]:
+        """The binding serving requests right now, plus window occupancy.
+
+        Occupancy lives HERE and not in a binding row on purpose: the
+        context window is filled by the shared history, so attributing
+        ``percent_used`` to the model that happens to be active would read
+        as that model's consumption when it is nothing of the sort.
+
+        Args:
+            usage: The result of :meth:`get_context_usage`, passed in so
+                the caller's single read is reused.
+        """
+        view: Dict[str, Any] = {
+            "provider": self._active_provider_name or "unknown",
+            "model": self._model_name or "unknown",
+            "tier": self._active_tier,
+            "context_limit": usage.get("context_limit", 0),
+            "context_tokens_used": usage.get("total_tokens", 0),
+            "context_percent_used": round(usage.get("percent_used", 0.0), 2),
+            "turns": usage.get("turns", 0),
+        }
+        media_bytes = usage.get("media_bytes")
+        if media_bytes:
+            # The second GC denominator (#850), in BYTES.  Reported only
+            # when non-zero: for a text session it is noise, and for a
+            # voice session it is the number that matters.
+            view["media_bytes"] = media_bytes
+        if self._tier_config is not None:
+            view["tier_switches"] = getattr(self, "_tier_switch_count", 0)
+        return view
+
+    def _consumption_tier_ladder(self) -> Optional[List[Dict[str, Any]]]:
+        """The tiers this session DECLARES, spent or not.
+
+        A tier with no row in ``bindings`` has never been entered, and
+        that absence is a finding — an agent that was given a vision tier
+        and never used it looks identical, in a spend report alone, to one
+        that was never given a vision tier at all.
+
+        ``None`` in single-model mode, where there is no ladder to report.
+        """
+        if self._tier_config is None:
+            return None
+        used = {b.tier for b in self._consumption.bindings()}
+        return [
+            {
+                "tier": name,
+                "model": entry.model,
+                "provider": entry.provider or self._active_provider_name,
+                "active": name == self._active_tier,
+                "entered": name in used,
+            }
+            for name, entry in self._tier_config.tiers.items()
+        ]
+
+    def _consumption_budget_view(self) -> Optional[Dict[str, Any]]:
+        """Where this session stands against its declared ceilings.
+
+        ``None`` when the profile declared no ``budget_control`` — an
+        absent key is how "unbounded" is said, distinct from a block of
+        ceilings that happen to be far away.  (``jaato-scaffold validate``
+        warns about the unbudgeted case at authoring time, #947; this is
+        the same fact at run time.)
+
+        Of the five dimensions only the declared ones appear, and only an
+        ``abort`` rung actually stops a run — ``finalize`` and ``escalate``
+        are advice a looping model can decline (#955), so ``next_rung``
+        names the action rather than implying a stop.
+        """
+        tracker = self._budget_tracker
+        if tracker is None:
+            return None
+        try:
+            limits = tracker.config.limits
+            used = tracker.usage.as_dict()
+            view: Dict[str, Any] = {
+                # Only the DECLARED dimensions.  The tracker accumulates
+                # all five whether or not a ceiling exists for them, and
+                # an undeclared one reading ``0.0`` beside a ceiling it
+                # does not have is noise at best and a phantom headroom
+                # reading at worst.  Absolute consumption regardless of
+                # ceilings is what ``totals`` is for.
+                "used": {
+                    dim: round(value, 6)
+                    for dim, value in used.items() if dim in limits
+                },
+                # ``limits`` is a plain mapping of declared dimensions;
+                # an absent dimension is unbounded and stays absent here.
+                "limits": dict(limits),
+                "fraction_used": round(tracker.usage_fraction(), 4),
+            }
+            next_rung = self._consumption_next_rung(tracker)
+            if next_rung is not None:
+                view["next_rung"] = next_rung
+            reason = getattr(self, "_budget_exhausted_reason", None)
+            if reason:
+                view["exhausted_reason"] = reason
+            return view
+        except Exception as exc:  # noqa: BLE001
+            self._trace(f"CONSUMPTION: budget view failed: {exc}")
+            return None
+
+    def _consumption_next_rung(self, tracker) -> Optional[Dict[str, Any]]:
+        """The lowest degrade rung that has not fired yet.
+
+        What the agent can act on: a rung at 95% it has not reached is a
+        deadline, where the rungs behind it are history.  Returns ``None``
+        when the ladder is empty or fully spent.
+        """
+        fraction_percent = tracker.usage_fraction() * 100.0
+        pending = [
+            rung for idx, rung in enumerate(tracker.config.degrade)
+            if idx not in getattr(tracker, "_fired", set())
+            and rung.at_percent > fraction_percent
+        ]
+        if not pending:
+            return None
+        rung = min(pending, key=lambda r: r.at_percent)
+        view: Dict[str, Any] = {"at_percent": rung.at_percent}
+        if rung.action:
+            view["action"] = rung.action
+        if rung.model_tiers:
+            view["rebinds_tiers"] = sorted(rung.model_tiers)
+        return view
+
+    def _consumption_completion_view(self) -> Optional[Dict[str, Any]]:
+        """The completion gate's state, when this session has one.
+
+        ``None`` when ``signal_completion`` is not on the surface — a
+        session with no gate has no nudge budget to report, and an
+        always-present block of zeros would suggest otherwise.
+
+        ``max_nudges_per_turn`` is reported with its SOURCE because the
+        session is not told its own budget: the knob is resolved from the
+        profile by the caller that nudges (``server/core.py``, the subagent
+        loop) and passed to :meth:`try_completion_nudge`, so until the
+        first nudge is considered the session knows only the framework
+        default.  ``source: "framework_default"`` beside a profile that
+        raised ``max_completion_nudges`` therefore means "not observed
+        yet", not "your knob was ignored".  Carrying the value on the
+        session-init envelope would remove the caveat; that is a wire
+        version bump and is deliberately not done here.
+        """
+        lifecycle = getattr(self, "_lifecycle_tools", None)
+        if lifecycle is None:
+            return None
+        try:
+            if lifecycle._should_hide_signal_completion():
+                return None
+        except Exception:  # noqa: BLE001
+            return None
+
+        from .completion_nudge import DEFAULT_MAX_COMPLETION_NUDGES
+        observed = getattr(self, "_completion_nudge_budget", None)
+        max_nudges = (
+            observed if observed is not None else DEFAULT_MAX_COMPLETION_NUDGES)
+        fired = getattr(self, "_completion_nudges_fired", 0)
+        return {
+            "payload_schema_declared": (
+                self._completion_payload_schema is not None),
+            "signal_completion_called": getattr(
+                self, "_signal_completion_called", False),
+            "nudges_fired_this_turn": fired,
+            "nudges_remaining_this_turn": max(0, max_nudges - fired),
+            "max_nudges_per_turn": max_nudges,
+            "max_nudges_source": (
+                "observed" if observed is not None else "framework_default"),
+            "nudges_fired_total": getattr(self, "_completion_nudges_total", 0),
+        }
 
     def restore_turn_accounting(
         self, turns: List[Dict[str, Any]],
@@ -10059,6 +12509,13 @@ NOTES
         Uses InstructionBudget as the single source of truth for token accounting.
         This includes system instructions, plugin schemas, enrichment, and conversation
         tokens - providing accurate context usage from startup through all turns.
+
+        Reports one figure that is NOT a token count: ``media_bytes``, the
+        binary payload the history carries.  It is the denominator
+        ``media_pressure_reason`` compares against
+        ``GCConfig.media_bytes_threshold``, and it is in bytes on purpose --
+        a voice session can sit far below its token threshold while carrying
+        megabytes of audio, which is the state GC could not see (#850).
         """
         # Use InstructionBudget as the single source of truth
         if self._instruction_budget:
@@ -10085,6 +12542,13 @@ NOTES
             'turns': len(turn_accounting),
             'percent_used': percent_used,
             'tokens_remaining': tokens_remaining,
+            # The second denominator, reported in BYTES (#850).  Every other
+            # figure here is a token count against a token budget, and that
+            # is exactly why media went unseen: the payload that dominates a
+            # voice request is not a token quantity.  ``media_pressure_reason``
+            # reads this key; a strategy that never looks at it behaves
+            # precisely as it did before.
+            'media_bytes': history_media_bytes(self.get_history()),
         }
 
     def _log_gc_denominator(self, label: str, provider_total: int = 0) -> None:
@@ -10158,6 +12622,14 @@ NOTES
             logger.info(f"[session:{self._agent_id}] reset_session: starting fresh (no history)")
             self._history.clear()
         self._turn_accounting = []
+        # The consumption ledger follows the turn list, and not only for
+        # tidiness: ``_observe_binding_usage`` derives its turn index from
+        # ``len(self._turn_accounting)``, so a reset restarts that counter
+        # at 0 and every re-used index would be read as the SAME turn --
+        # silently under-counting ``turns`` for the rest of the session.
+        # The spend it described belongs to a conversation that no longer
+        # exists, which is the same judgement clearing the turn list makes.
+        self._consumption = ConsumptionLedger()
         if not history:
             self._msg_token_cache.clear()
             # On true fresh reset, clear pinned references and remove their
@@ -10366,16 +12838,171 @@ NOTES
 
         return self._run_chat_loop_with_parts(parts, on_output)
 
+    def _emit_batched_response_text(
+        self,
+        response: ProviderResponse,
+        on_output: Optional[OutputCallback],
+        use_streaming: bool,
+    ) -> str:
+        """Return a response's text, emitting it only if the turn was batched.
+
+        A streaming turn has already delivered that text to ``on_output``
+        chunk by chunk, so emitting the assembled response as well would
+        render the answer twice.  A batched turn has emitted nothing yet,
+        and this is where its text reaches the caller.
+
+        The distinction is new to the multimodal parts loop, which until
+        #837 could not stream at all and so emitted unconditionally.
+
+        Args:
+            response: The provider response to read text from.
+            on_output: Turn output callback, or ``None``.
+            use_streaming: Whether this turn was dispatched with ``on_chunk``.
+
+        Returns:
+            The response's text, or ``''`` when it carried none.
+        """
+        text = response.get_text() or ''
+        if text and on_output and not use_streaming:
+            on_output("model", text, "write")
+        return text
+
+    def _complete_parts_turn(
+        self,
+        on_output: Optional[OutputCallback],
+        use_streaming: bool,
+        on_usage_update: Optional[UsageUpdateCallback],
+        context: str,
+    ) -> 'TurnResult':
+        """Dispatch one provider call for the multimodal parts loop.
+
+        Both of that loop's provider calls -- the one answering the user's
+        multi-part message and the one answering tool results -- go through
+        here, so the streaming decision is made once and cannot drift
+        between them.
+
+        On the streaming branch, model text reaches ``on_output`` chunk by
+        chunk (``"write"`` for the first, ``"append"`` after) and thinking
+        is emitted ahead of it, matching the text loop.  A
+        :class:`MediaDelta` is *not* text: it is model-generated media,
+        CLIENT-audience by construction, and is handed to
+        :meth:`_deliver_model_media` rather than the transcript.  Reaching
+        this branch at all is the point of #837 -- an OpenAI-shaped wire
+        emits audio only while streaming, so a batched call on a speaking
+        tier is refused upstream.
+
+        On the batched branch this is the call the loop always made.
+
+        Args:
+            on_output: Turn output callback, or ``None``.
+            use_streaming: Result of :meth:`_resolve_use_streaming`.
+            on_usage_update: Streaming usage-chunk sink (ignored when batched).
+            context: Retry-loop label, used in logs and traces.
+
+        Returns:
+            The provider's turn result, still wrapped -- callers unwrap it
+            with :meth:`_unwrap_turn_result`.
+        """
+        if not use_streaming:
+            with self._provider_access():
+                turn_result, _retry_stats = with_retry(
+                    lambda: self._provider.complete(
+                        self._history_for_provider(),
+                        system_instruction=self._get_effective_system_instruction(),
+                        tools=self._get_tools_for_provider(),
+                    ),
+                    context=context,
+                    on_retry=self._on_retry,
+                    cancel_token=self._cancel_token,
+                    provider=self._provider,
+                )
+            return turn_result
+
+        # Mutable box rather than ``nonlocal``: the callback is redefined
+        # per provider call, and each call starts a fresh output block.
+        first_chunk_sent = [False]
+
+        def streaming_callback(chunk) -> None:
+            if isinstance(chunk, MediaDelta):
+                self._deliver_model_media(chunk)
+                return
+            if self._runtime.reliability_plugin:
+                self._runtime.reliability_plugin.on_model_text(chunk)
+            if on_output:
+                mode = "append" if first_chunk_sent[0] else "write"
+                self._trace(
+                    f"SESSION_PARTS_OUTPUT mode={mode} len={len(chunk)} "
+                    f"preview={repr(chunk[:50])}"
+                )
+                on_output("model", chunk, mode)
+                first_chunk_sent[0] = True
+            self._forward_to_parent("MODEL_OUTPUT", chunk)
+
+        # Reasoning is a write-then-append stream, like text (one block per
+        # provider call).
+        thinking_callback = self._make_thinking_emitter(
+            on_output, "SESSION_PARTS_THINKING")
+
+        with self._provider_access():
+            turn_result, _retry_stats = with_retry(
+                lambda: self._provider.complete(
+                    self._history_for_provider(),
+                    system_instruction=self._get_effective_system_instruction(),
+                    tools=self._get_tools_for_provider(),
+                    on_chunk=streaming_callback,
+                    cancel_token=self._cancel_token,
+                    on_usage_update=on_usage_update,
+                    on_thinking=thinking_callback,
+                ),
+                context=f"{context}_streaming",
+                on_retry=self._on_retry,
+                cancel_token=self._cancel_token,
+                provider=self._provider,
+            )
+        return turn_result
+
     def _run_chat_loop_with_parts(
         self,
         parts: List[Part],
         on_output: OutputCallback
     ) -> str:
-        """Internal function calling loop for multi-part messages."""
+        """Internal function calling loop for multi-part messages.
+
+        The multimodal sibling of :meth:`_run_chat_loop`: reached whenever
+        the user message carries attachments (images, PDFs, audio), which
+        :meth:`send_message` turns into a ``Part`` list.
+
+        **Streaming is decided, not assumed.**  This loop used to call the
+        batched ``provider.complete()`` unconditionally, so an attachment
+        in the message meant the turn did not stream -- fine for the vision
+        turns the path was built for, fatal for audio: an OpenAI-shaped
+        wire emits model audio only while streaming, so "hear a question,
+        answer aloud" on a ``modalities: {audio: bidirectional}`` tier was
+        refused upstream with *Audio output requires stream: true* (#837).
+        Both provider calls below now branch on
+        :meth:`_resolve_use_streaming`, exactly as the text loop does, and
+        the telemetry label reports what actually happened.
+
+        When streaming, text reaches the caller through the chunk callback
+        as it arrives, so the whole-response emissions that follow each
+        provider call are suppressed -- they would render the answer twice.
+        Model-generated media is not text: it goes to clients via
+        :meth:`_deliver_model_media` and never into history or ``on_output``.
+        """
         self._begin_turn_completion_state()
 
         if self._executor:
             self._executor.set_output_callback(on_output)
+
+        # Fresh cancellation token for this turn.  Previously this loop
+        # reused whatever ``_run_chat_loop`` last left behind -- already
+        # cancelled, in the common case -- and handed it to every
+        # ``executor.execute`` call.  Now it also reaches the provider on
+        # the streaming path, where a stale cancelled token would abort
+        # generation before the first chunk.
+        self._cancel_token = CancelToken()
+
+        use_streaming = self._resolve_use_streaming()
 
         turn_start = datetime.now()
         turn_data = {
@@ -10399,9 +13026,21 @@ NOTES
         }
         response: Optional[ProviderResponse] = None
 
+        # Streaming usage chunks carry the turn's token levels; capture
+        # them onto ``turn_data`` so accounting survives a turn that is
+        # cut short mid-stream.  Level readings only -- the ``spend_``
+        # keys stay owned by ``_accumulate_turn_tokens``.
+        def wrapped_usage_callback(usage: TokenUsage) -> None:
+            self._track_streaming_usage(turn_data, usage)
+
         try:
             # Proactive rate limiting: wait if needed before request
             self._pacer.pace()
+
+            # Consumed media from EARLIER turns is purged before this one is
+            # appended (#850).  This is the path a voice turn takes, so it is
+            # the one where the accumulation was measured.
+            self._evict_consumed_media()
 
             # Append user message to session history
             self._history.append(Message(role=Role.USER, parts=list(parts)))
@@ -10409,21 +13048,16 @@ NOTES
             with self._telemetry.llm_span(
                 model=self._model_name or "unknown",
                 provider=self._provider.name if self._provider else "unknown",
-                streaming=False,
+                streaming=use_streaming,
                 attributes=self._build_llm_span_attributes(),
             ) as llm_telemetry:
                 self._record_input_messages_telemetry(llm_telemetry)
-                with self._provider_access():
-                    turn_result, _retry_stats = with_retry(
-                        lambda: self._provider.complete(
-                            self._history.messages,
-                            system_instruction=self._get_effective_system_instruction(),
-                            tools=self._get_tools_for_provider(),
-                        ),
-                        context="complete_with_parts",
-                        on_retry=self._on_retry,
-                        provider=self._provider
-                    )
+                turn_result = self._complete_parts_turn(
+                    on_output=on_output,
+                    use_streaming=use_streaming,
+                    on_usage_update=wrapped_usage_callback,
+                    context="complete_with_parts",
+                )
                 response = self._unwrap_turn_result(turn_result)
 
                 # Record model response in session history
@@ -10447,7 +13081,8 @@ NOTES
                 # -- a fix applied only to the main loop holds exactly
                 # until an attachment is in the message.
                 continued = self._recover_truncated_turn(
-                    response, False, on_output, None, turn_data,
+                    response, use_streaming, on_output,
+                    wrapped_usage_callback, turn_data,
                     context="parts loop initial response",
                 )
                 if continued is None:
@@ -10456,9 +13091,9 @@ NOTES
 
             function_calls = list(response.get_function_calls())
             while function_calls:
-                response_text = response.get_text()
-                if response_text and on_output:
-                    on_output("model", response_text, "write")
+                self._emit_batched_response_text(
+                    response, on_output, use_streaming,
+                )
 
                 tool_results: List[ToolResult] = []
 
@@ -10569,34 +13204,29 @@ NOTES
                     tool_result = self._build_tool_result(fc, executor_result)
                     tool_results.append(tool_result)
 
+                    # Budget: count the call now, not at turn end (#955).
+                    self._budget_observe_tool_calls(turn_data, 1)
+
                 # Send tool results back (with retry for rate limits)
                 self._pacer.pace()  # Proactive rate limiting
 
-                # Proactive size guard: cap results before they enter history
-                tool_results = self._cap_tool_results(tool_results)
-                # Append tool results to session history
-                tool_results = self._gate_tool_results_for_active_modalities(tool_results)
-                tool_result_parts = [Part(function_response=r) for r in tool_results]
-                self._history.append(Message(role=Role.TOOL, parts=tool_result_parts))
+                # Cap, gate and append (see
+                # ``_append_tool_results_to_history``).
+                tool_results = self._append_tool_results_to_history(tool_results)
 
                 with self._telemetry.llm_span(
                     model=self._model_name or "unknown",
                     provider=self._provider.name if self._provider else "unknown",
-                    streaming=False,
+                    streaming=use_streaming,
                     attributes=self._build_llm_span_attributes(),
                 ) as llm_telemetry:
                     self._record_input_messages_telemetry(llm_telemetry)
-                    with self._provider_access():
-                        turn_result, _retry_stats = with_retry(
-                            lambda: self._provider.complete(
-                                self._history.messages,
-                                system_instruction=self._get_effective_system_instruction(),
-                                tools=self._get_tools_for_provider(),
-                            ),
-                            context="complete_tool_results_parts",
-                            on_retry=self._on_retry,
-                            provider=self._provider
-                        )
+                    turn_result = self._complete_parts_turn(
+                        on_output=on_output,
+                        use_streaming=use_streaming,
+                        on_usage_update=wrapped_usage_callback,
+                        context="complete_tool_results_parts",
+                    )
                     response = self._unwrap_turn_result(turn_result)
 
                     # Record model response in session history
@@ -10608,11 +13238,9 @@ NOTES
                     self._record_token_telemetry(llm_telemetry, response)
                 function_calls = list(response.get_function_calls())
 
-            final_text = response.get_text()
-            if final_text and on_output:
-                on_output("model", final_text, "write")
-
-            return final_text or ''
+            return self._emit_batched_response_text(
+                response, on_output, use_streaming,
+            )
 
         except Exception as exc:
             # Route provider errors through output callback before re-raising
@@ -10662,13 +13290,22 @@ NOTES
                         "write",
                     )
 
+            # A delegation entered from an attachment-carrying turn hands
+            # back HERE (#1025).  This loop is the voice path -- a user
+            # message with audio in it -- and it evaluated the
+            # completion-tier exit NOWHERE, so a speech tier entered from a
+            # spoken question could never pop.  Terminal-only, and
+            # deliberately: this loop has no mid-turn drain, so a resumable
+            # report would sit in the queue for the next turn.
+            self._finalize_completion_tier_exit(
+                turn_data.get('finish_reason'), reason="parts turn end")
+
             turn_end = datetime.now()
             turn_data['end_time'] = turn_end.isoformat()
             turn_data['duration_seconds'] = (turn_end - turn_start).total_seconds()
             self._budget_observe_turn(turn_data)
 
-            if turn_data['total'] > 0:
-                self._turn_accounting.append(turn_data)
+            self._record_turn_ran(turn_data)
 
     # ==================== Context Garbage Collection ====================
 
@@ -10689,9 +13326,48 @@ NOTES
         self._gc_config = None
 
     def manual_gc(self) -> GCResult:
-        """Manually trigger garbage collection."""
+        """Manually trigger garbage collection.  **Turn-boundary only.**
+
+        Refuses while a turn is in progress, for the same reason
+        :meth:`_try_gc_for_context_recovery` withholds its trailing MODEL
+        message: the repair pass cannot distinguish a call **pending a
+        retry** from one **genuinely unanswered**.  One reason, two guards.
+
+        Mid-turn, history can end with an assistant message whose calls are
+        about to be answered for real.  ``ensure_tool_call_integrity`` would
+        synthesise a cancelled result for each, and the real results would
+        then arrive as duplicates — the same ``call_id`` answered twice,
+        which is its own provider rejection.  (Before #674 the same window
+        removed the message instead; the hazard is not new, its shape is.)
+
+        Idle, the opposite is true and is why this refuses rather than
+        withholding: a trailing batch with no results is then genuinely
+        abandoned, and answering it **in the stored record** is the right
+        outcome — the one a later per-request repair cannot achieve, since
+        it never writes to disk.
+
+        **Raises rather than returning a no-op result** because this verb is
+        operator-driven and its only non-test caller is the public
+        :meth:`JaatoClient.manual_gc`: a ``GCResult`` reporting nothing
+        collected is indistinguishable from a pass that found nothing to
+        collect, which is exactly the partially-firing-but-observable
+        failure mode ``gc_support`` exists to complain about.  Raising also
+        matches this method's own precedent for "cannot do the job".
+
+        Raises:
+            RuntimeError: If no GC plugin is configured, or if a turn is in
+                progress.
+        """
         if not self._gc_plugin:
             raise RuntimeError("No GC plugin configured.")
+        if self.is_running:
+            raise RuntimeError(
+                "manual_gc() is a turn-boundary operation and a turn is in "
+                "progress. Mid-turn, a pending tool-call batch is "
+                "indistinguishable from an abandoned one, so collection "
+                "would synthesise results for calls that are about to be "
+                "answered for real. Retry once the turn completes."
+            )
         if not self._gc_config:
             self._gc_config = GCConfig()
 
@@ -11203,6 +13879,273 @@ NOTES
             return False
         return entry.provider is None or entry.provider == self._active_provider_name
 
+    def _request_active_tier_output_modalities(self) -> None:
+        """Stamp the ACTIVE tier's outbound roles onto a freshly built provider.
+
+        The switch path (:meth:`_connect_tier_entry`) covers every later
+        tier change; this covers the first one, which is not a change at
+        all — the session simply starts there.
+        """
+        if self._tier_config is None or not self._active_tier:
+            return
+        entry = self._tier_config.tiers.get(self._active_tier)
+        if entry is not None:
+            self._request_tier_output_modalities(entry)
+
+    def _request_tier_output_modalities(self, entry) -> None:
+        """Ask the provider to emit what the entered tier declares.
+
+        This is what turns ``modalities: {audio: outbound}`` from a
+        declaration the startup check merely *validates* into a request
+        that reaches the wire.  Without it an outbound role is inert: the
+        tier says the model may speak, but nothing ever asks it to.
+
+        Called on EVERY tier entry, including entries that declare no
+        outbound role, because the empty set is the instruction that stops
+        requesting audio — leaving a speaking tier must not leave the
+        request stamped.
+
+        Best-effort by design.  A provider that cannot emit media inherits
+        a no-op :meth:`request_output_modalities`, so the common case costs
+        one call; and a provider that raises must not fail the tier switch,
+        which has already succeeded by this point.  A model that genuinely
+        cannot do the job is refused far earlier, by the startup
+        capability check.
+        """
+        provider = self._provider
+        if provider is None:
+            return
+        request = getattr(provider, "request_output_modalities", None)
+        if request is None:
+            return
+        kinds = getattr(entry, "outbound_modalities", frozenset()) or frozenset()
+        try:
+            request(kinds)
+        except Exception:  # noqa: BLE001 - never fail a completed switch
+            self._trace(
+                f"TIER_OUTPUT_MODALITIES: provider refused {sorted(kinds)!r}"
+            )
+
+    def _take_pending_tier_return(self) -> Optional[str]:
+        """Read-and-clear the armed completion-tier return.
+
+        The SOLE clearing site for ``_pending_tier_return``, which is what
+        makes a double pop unrepresentable rather than merely unlikely:
+        whichever evaluation point reaches here first takes the target and
+        every later one on the same turn sees ``None``.  ``switch_tier`` is
+        the only writer in the other direction (#1025).
+
+        ``getattr`` rather than attribute access: 28 test files build a
+        bare ``JaatoSession`` via ``__new__`` to exercise one method
+        without a runtime, and this runs on paths several of them drive.
+        The session already accommodates that idiom for ``_ui_hooks`` in
+        three places; a session with no tier state has nothing pending,
+        which is what ``None`` means here.
+        """
+        target = getattr(self, "_pending_tier_return", None)
+        if target is not None:
+            self._pending_tier_return = None
+        return target
+
+    def _exit_completion_tier_if_settled(self, response) -> None:
+        """Leave an ``exit_on: completion`` tier MID-TURN, once it settles.
+
+        "Settled" means the tier's response asks for nothing more: no
+        function calls.  Deliberately not "one provider call" -- a
+        delegated tier that legitimately calls a tool would be evicted
+        mid-task.
+
+        This is the RESUMABLE half of the exit and it is an optimisation,
+        not the guarantee: the turn goes on afterwards, so the caller is
+        handed both the binding and -- via :meth:`_report_delegated_tier`
+        -- something to act on.  A response still carrying calls leaves
+        the arming in place and the loop re-evaluates on the next
+        continuation.
+
+        The guarantee lives in :meth:`_finalize_completion_tier_exit`,
+        which runs at turn end on every path.  Before #1025 this method was
+        the ONLY evaluation point, sitting past ``_finish_or_continue``'s
+        abnormal return and past the ``signal_completion`` short-circuit,
+        so an abnormally-finished delegation -- routine for a speech tier,
+        whose spoken answers reach the output cap -- left the tier armed
+        and resident for every later turn.
+        """
+        target = getattr(self, "_pending_tier_return", None)
+        if target is None or response is None:
+            return
+        if response.has_function_calls():
+            logger.info(
+                "Completion-tier exit HELD: %s has not settled (its "
+                "response carries function calls); still armed to return "
+                "to %s", getattr(self, "_active_tier", None), target,
+            )
+            return                      # still working; it has not settled
+        self._pop_completion_tier(
+            self._take_pending_tier_return(), response,
+            resumable=True, trigger="settled",
+        )
+
+    def _finalize_completion_tier_exit(
+        self, finish_reason: Optional[str] = None, reason: str = "turn end",
+    ) -> None:
+        """Leave an ``exit_on: completion`` tier that never settled cleanly.
+
+        The TERMINAL half of the exit, and the one that makes the contract
+        ("entered, one completion, control handed back") true rather than
+        probable.  It runs from the ``finally`` of both chat loops, so it
+        sees every way a turn can end -- a clean settle that already
+        popped, an abnormal finish (#749 hands back before the mid-turn
+        check), ``signal_completion`` terminating the turn, a cancellation,
+        an unhandled provider error, and the whole attachment-carrying
+        parts loop, which evaluated the exit nowhere at all.
+
+        "Terminal" here means *the framework has stopped making provider
+        calls on the delegate's behalf*, which is a stronger claim than
+        "the last response had no function calls": at this point the loop
+        has already stopped dispatching, so nothing is outstanding and a
+        pop cannot strand work.  It is NOT "one turn" in the #767 sense --
+        the tier is not evicted because a turn boundary arrived, it is
+        evicted because the turn it was delegated for is over.
+
+        Not resumable: there is no turn left to steer, so the outcome is
+        NOT queued as a mid-turn report.  Doing so would leave "You are
+        back in control; continue." in the queue for whatever the next
+        caller-originated turn turns out to be.
+
+        Never raises -- it runs in a ``finally`` and must not replace the
+        turn's own exception.
+        """
+        try:
+            if getattr(self, "_pending_tier_return", None) is None:
+                return
+            logger.info(
+                "Completion-tier exit at %s: %s never settled cleanly "
+                "(finish_reason=%s); returning to %s",
+                reason, getattr(self, "_active_tier", None),
+                finish_reason, self._pending_tier_return,
+            )
+            self._pop_completion_tier(
+                self._take_pending_tier_return(), None,
+                resumable=False, trigger=reason,
+            )
+        except Exception as exc:  # noqa: BLE001 - a finally must not raise
+            logger.warning("Completion-tier exit at %s raised: %s", reason, exc)
+
+    def _pop_completion_tier(
+        self, target: Optional[str], response, *,
+        resumable: bool, trigger: str,
+    ) -> None:
+        """Switch back to *target*, reporting the outcome when resumable.
+
+        The one place the return is actually performed; both evaluation
+        points above funnel through it having already TAKEN the target, so
+        the arming is spent before any of this can fail.
+
+        Best-effort in the same way as the entry: a failed return must not
+        fail a turn that has already produced its answer.  The pending
+        target is spent either way, so a tier cannot be armed to return
+        twice.
+
+        Args:
+            target: the tier to return to, as taken from the arming.
+                ``None`` is a no-op (nothing was armed).
+            response: the delegate's terminal response, used only to
+                compose the resumable report.  ``None`` on the terminal
+                path, which sends none.
+            resumable: whether the turn continues after this.  ``True``
+                queues :meth:`_report_delegated_tier` so the caller is
+                resumed through the ordinary mid-turn path; ``False`` is
+                the turn-end pop, which has no turn to resume.
+            trigger: what caused the evaluation, for the trace and the log
+                line -- ``settled`` for the mid-turn path, otherwise the
+                turn-end reason.
+        """
+        if target is None:
+            return
+        delegated_from = getattr(self, "_active_tier", None)
+        if target == delegated_from:
+            self._trace(
+                f"TIER_EXIT_ON_COMPLETION: already at {target} ({trigger})")
+            return
+        produced = ""
+        spoke = 0
+        if response is not None:
+            produced = "".join(
+                p.text for p in response.parts if p.text).strip()
+            spoke = getattr(response, "media_chunks", 0) or 0
+        try:
+            self.switch_tier(target)
+        except Exception as exc:  # noqa: BLE001 - never fail a finished turn
+            self._trace(
+                f"TIER_EXIT_ON_COMPLETION: return to {target} failed: {exc}")
+            logger.warning(
+                "Completion-tier exit %s -> %s (%s) FAILED: %s",
+                delegated_from, target, trigger, exc,
+            )
+            return
+        # A hand-back is not a delegation.  ``switch_tier`` arms on ANY
+        # entry into a completion tier from a different one, so returning
+        # to a caller that itself declares ``exit_on: completion`` would
+        # re-arm -- pointing at the tier just left, which is a ping-pong,
+        # and on the terminal path would leave an arming standing into the
+        # next turn.  The model did not ask for this switch, so it does not
+        # count as an entry.
+        rearmed = self._take_pending_tier_return()
+        if rearmed is not None:
+            self._trace(
+                f"TIER_EXIT_ON_COMPLETION: not re-arming {target} "
+                f"(a hand-back is not a delegation)")
+        self._trace(
+            f"TIER_EXIT_ON_COMPLETION: returned to {target} ({trigger})")
+        logger.info(
+            "Completion-tier exit: %s -> %s (%s)",
+            delegated_from, target, trigger,
+        )
+        if resumable:
+            self._report_delegated_tier(delegated_from, produced, spoke)
+
+    def _report_delegated_tier(
+        self, tier: str, produced: str, media_chunks: int,
+    ) -> None:
+        """Hand the delegated tier's outcome back as a mid-turn message.
+
+        Returning the BINDING is not returning CONTROL.  The delegated
+        tier's completion settling is what ENDS the turn, so switching
+        back alone hands the wheel to a tier that no longer has a turn to
+        steer -- and measurement showed exactly that: the model's manual
+        `enter_tier` back disappeared, and the completion nudge was still
+        the only thing that woke the caller to finish.
+
+        Queuing the outcome as a mid-turn message resumes the caller
+        through the path the framework already has for "something arrived
+        while you were working", which the loop drains immediately after
+        this returns.  It is not a nudge: a nudge tells an agent it forgot
+        to finish, this tells it what its delegate produced.
+
+        That also closes the other half.  Model media never enters history
+        -- it is CLIENT-audience by construction -- so the caller could
+        otherwise only learn what was said if the provider happened to
+        send a transcript.  Here the report is written whether or not it
+        did, and says so when it did not, which turns a silent hole into a
+        stated one.
+        """
+        from .message_queue import SourceType
+        if produced:
+            body = f'The {tier} tier produced: "{produced}"'
+        else:
+            body = (
+                f"The {tier} tier produced no text"
+                + (f", though it emitted {media_chunks} media chunk(s)"
+                   if media_chunks else "")
+                + "."
+            )
+        if media_chunks:
+            body += f"  ({media_chunks} media chunk(s) were delivered to the client.)"
+        body += "  You are back in control; continue."
+        self._message_queue.put(
+            f"<hidden>{body}</hidden>", "tier-delegation", SourceType.SYSTEM)
+        self._trace(f"TIER_DELEGATION_REPORT: queued outcome from {tier}")
+
     def _connect_tier_entry(self, entry) -> None:
         """Point the session's provider at ``entry``'s (provider, model).
 
@@ -11245,6 +14188,11 @@ NOTES
         # switch lands half-applied — the provider re-pointed at the new
         # model while the session still believes it is on the old one.
         #
+        # Asking the provider to emit the tier's outbound modalities is
+        # exactly such bookkeeping, which is why it sits below the connect
+        # rather than inside it.
+        self._request_tier_output_modalities(entry)
+        #
         # Counted here rather than in ``switch_tier`` so BOTH routes into a
         # binding change are seen: the model-driven one and the
         # budget-control rebind, which never changes the tier NAME.  A
@@ -11269,6 +14217,51 @@ NOTES
                 "tier reliability retarget for %s failed; records will name "
                 "the previous model: %s", entry.model, exc,
             )
+        try:
+            self._refresh_context_limit_from_provider()
+        except Exception as exc:  # noqa: BLE001
+            self._tier_context_limit_refresh_failures = getattr(
+                self, '_tier_context_limit_refresh_failures', 0) + 1
+            logger.warning(
+                "tier context-window refresh for %s failed; GC and the "
+                "context readout keep measuring against the previous "
+                "model's window: %s", entry.model, exc,
+            )
+
+    def _refresh_context_limit_from_provider(self) -> None:
+        """Re-read the active model's window into the budget denominator.
+
+        ``InstructionBudget.context_limit`` is the denominator for every
+        figure that says how full this session is: the after-turn GC
+        threshold, the pre-send refusal guard, ``get_context_usage`` (so
+        ``get_environment(aspect="context")`` and every client's context
+        readout), and the GC pressure checks.  It was stamped ONCE, when
+        the provider was lazily created, and a tier switch re-points the
+        session at a different model with a different window.
+
+        So a session that booted on a 200k-window tier and entered an 8k
+        one kept measuring against 200k: GC could not fire before the
+        request overflowed, the refusal guard let it through, and the
+        upstream rejected it — at which point
+        ``_try_gc_for_context_recovery`` trims history in the STORE, which
+        is destructive and shared, so the tier that had the room loses the
+        conversation too.  In the other direction the session GCs a history
+        that comfortably fits.
+
+        ``get_context_limit()`` already answers for whatever provider is
+        active, so this is the one value that had to follow it and did not.
+        Both callers — first materialisation and every later tier connect —
+        go through here, so the two cannot disagree about where the number
+        comes from.
+
+        A budget that does not exist yet (``configure()`` has not run) is a
+        no-op, exactly as the inline stamp was.
+        """
+        if self._instruction_budget is None or self._provider is None:
+            return
+        self._instruction_budget.context_limit = (
+            self._provider.get_context_limit()
+        )
 
     def _retarget_reliability_model(self, model: str) -> None:
         """Tell the reliability plugin which model is now running.
@@ -11301,6 +14294,60 @@ NOTES
         if plugin is None:
             return
         plugin.set_model_context(model)
+
+    def _apply_initial_tier_binding(self, tier_config) -> None:
+        """Bind the session to the initial tier's ``(provider, model)`` pair.
+
+        Called from :meth:`configure` when a session runs in tier mode, and
+        it is the counterpart of :meth:`_connect_tier_entry` for the one
+        tier entry that is not a *switch*: the session simply starts there.
+
+        **A tier binds a pair, and only half of it used to take.** The model
+        was overridden here from the day tier mode shipped; the provider was
+        left at the profile's top-level ``provider:`` — ``None`` when the
+        profile declares none, because every tier declares its own. Two
+        things followed:
+
+        * turn 0 ran the initial tier's MODEL on somebody else's PROVIDER
+          (the runtime default, or a top-level value that disagrees);
+        * ``_active_provider_name`` — what :meth:`_connect_tier_entry`
+          compares ``entry.provider`` against to decide whether to SWAP —
+          was that same wrong value, so entering a tier naming the provider
+          the session was already running compared unequal and built a
+          SECOND instance of it.
+
+        The second is the one that is not merely wasteful. A duplicate
+        instance of a stateless provider costs a handshake; ``claude_cli``
+        is not stateless — it sends ``messages[-1]`` and nothing else,
+        leaving the transcript to the CLI's own ``--resume`` session — so a
+        second instance is a second CLI conversation, and that tier then
+        genuinely keeps a history of its own.
+
+        A tier that declares no ``provider`` leaves the choice untouched:
+        that is what "use the session's main provider" means, and it is the
+        single-provider shape that predates cross-provider tiers.
+        """
+        self._tier_config = tier_config
+        self._active_tier = tier_config.initial_tier
+        entry = tier_config.tiers[tier_config.initial_tier]
+        if self._model_name and self._model_name != entry.model:
+            logger.info(
+                "Tier mode active: overriding session model %s with "
+                "initial tier %s's model %s",
+                self._model_name, tier_config.initial_tier, entry.model,
+            )
+        self._model_name = entry.model
+        if not entry.provider:
+            return
+        if (self._provider_name_override
+                and self._provider_name_override != entry.provider):
+            logger.info(
+                "Tier mode active: overriding session provider %s with "
+                "initial tier %s's provider %s",
+                self._provider_name_override, tier_config.initial_tier,
+                entry.provider,
+            )
+        self._provider_name_override = entry.provider
 
     def switch_tier(self, requested_tier: str) -> Dict[str, Any]:
         """Switch the session's active model tier.
@@ -11361,6 +14408,20 @@ NOTES
         previous_tier = self._active_tier
         self._active_tier = actual_tier
         self._model_name = entry.model
+
+        # A tier that exits on completion is a DELEGATION: entered, one
+        # completion, left again, with the model doing nothing to return.
+        # That matters because the model in a specialist tier is routinely
+        # the one LEAST able to hand back -- a speaking tier measured over
+        # four runs never returned on its own; it said its sentence and
+        # stopped, and only the completion nudge ever unblocked it.
+        from .model_tiers import EXIT_ON_COMPLETION
+        if entry.exit_on == EXIT_ON_COMPLETION and previous_tier != actual_tier:
+            self._pending_tier_return = previous_tier
+            self._trace(
+                f"TIER_EXIT_ARMED: {actual_tier} exits on completion, "
+                f"returning to {previous_tier}"
+            )
 
         logger.info(
             "Tier switch: %s → %s (model %s)",
@@ -11518,7 +14579,20 @@ NOTES
             return None
 
     def close_session(self) -> None:
-        """Close the current session."""
+        """Close the current session.
+
+        Releases the session-scoped permission policy, if one was
+        installed (#957); the shared plugin also drops every scoped
+        policy on ``reset_for_next_session`` / ``shutdown``, so a
+        subagent that ends without reaching here is bounded by the
+        slot boundary rather than leaking for the daemon's life.
+        """
+        if self._permission_scoped and self._runtime is not None:
+            plugin = self._runtime.permission_plugin
+            release = getattr(plugin, "release_scoped_policy", None)
+            if release is not None:
+                release(self._permission_scope)
+            self._permission_scoped = False
         self._persistence.close()
 
 

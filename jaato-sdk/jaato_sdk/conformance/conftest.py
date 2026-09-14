@@ -50,14 +50,38 @@ SIGNAL_COMPLETION_CALL = {
 }
 
 
+#: The ceiling ``conformance-refused`` declares.  Small, because what the
+#: invariant measures is that the loop STOPS, and each refusal is a real
+#: round-trip through the daemon.
+MAX_REFUSALS = 2
+
+#: A gate that can never be satisfied.
+#:
+#: Paired with ``retry_tool_call``, this is the whole of jaato #768's incident
+#: expressed as a profile: the agent claims completion, the gate refuses, the
+#: agent claims completion again.  Nothing in echo or in the processor ends
+#: that; only ``max_refusals`` does, which is what the invariant asserts.
+ALWAYS_REFUSES = (
+    "def validate(payload, context):\n"
+    "    return ['the acceptance checks still fail']\n"
+)
+
+
 @pytest.fixture(scope="module")
 def daemon():
-    """A daemon serving THREE profiles, one per ending a session can have.
+    """A daemon serving FIVE profiles, one per ending a session can have.
 
     The first two are needed and neither substitutes for the other -- the
     defects that hide behind a prose ending are exactly the ones the terminus
     exposes, and a suite carrying only the second could not tell a general
     breakage from a terminus-specific one.
+
+    ``conformance-refused`` is the fourth, and the only one whose session ends
+    because a BUDGET ran out rather than because the work finished: a gate
+    that always refuses, driven by an echo that always re-claims. Without
+    ``max_refusals`` that pair does not terminate at all, which is the state
+    jaato #768 measured in production (seven refusals in 156 seconds) and
+    #770 asked to be guarded at the loop rather than at the invocation.
 
     ``conformance-nudged`` is the third ending, and it is a COMBINATION rather
     than a variant: a completion schema (so ``signal_completion`` is in the
@@ -67,6 +91,19 @@ def daemon():
     nudge loop, and a caller settling on the first of several turns.  Neither
     profile above reaches it: the prose one is not gated, and the terminus one
     signals on turn 1.
+
+    ``conformance-unmetered`` is the fifth, and it is the one profile here
+    that differs from another by a MISSING key rather than a present one: it
+    is ``conformance-terminus`` with ``usage`` dropped, so echo reports no
+    tokens at all.  Every other profile passes ``TURN_USAGE``, and that is
+    precisely why this suite stayed green for the life of jaato #881 -- the
+    post-turn event fan-out gated on the USAGE ledger growing, so a turn that
+    ran and reported nothing emitted neither ``TurnCompletedEvent`` nor
+    ``SessionTerminatedEvent`` and every driver waiting on one hung.  A suite
+    whose every profile is metered is structurally unable to see it, however
+    many scenarios it runs.  Nothing about the state is echo-specific: a
+    stream that never delivers a usage frame, a gateway that strips the
+    field and a zero-cost cached turn all reach it.
     """
     root = Path(tempfile.mkdtemp(prefix="jaato-conformance-ws-"))
     echo_workspace(root, usage=TURN_USAGE, response="conformance ok",
@@ -78,6 +115,22 @@ def daemon():
     echo_workspace(root, usage=TURN_USAGE, response="conformance ok",
                    completion_schema=COMPLETION_SCHEMA,
                    name="conformance-nudged")
+    echo_workspace(root, usage=TURN_USAGE,
+                   tool_call=SIGNAL_COMPLETION_CALL,
+                   completion_schema=COMPLETION_SCHEMA,
+                   retry_tool_call=True,
+                   processor=ALWAYS_REFUSES,
+                   processor_entry={"on_error": "fail_completion",
+                                    "max_refusals": MAX_REFUSALS,
+                                    "on_exhausted": "allow"},
+                   name="conformance-refused")
+    # The fifth ending: a turn that RAN and reported nothing.  ``usage`` is
+    # omitted, not set to zeros -- that is the shape a provider which never
+    # sends a usage frame actually produces (jaato #881).
+    echo_workspace(root,
+                   tool_call=SIGNAL_COMPLETION_CALL,
+                   completion_schema=COMPLETION_SCHEMA,
+                   name="conformance-unmetered")
     d = ConformanceDaemon(root)
     try:
         yield d.start()

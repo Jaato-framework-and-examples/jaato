@@ -10,7 +10,18 @@ Frame = 4-byte big-endian unsigned length prefix + that many bytes of UTF-8 JSON
 Frame types
 -----------
 runner → kernel:
-  - ``execute``     {type, cell_id, code}        dispatch a cell
+  - ``execute``     {type, cell_id, code,
+                     allow?}                     dispatch a cell.  ``allow`` is
+                                                  {read[], write[], deny[]} —
+                                                  the session's live
+                                                  ``sandbox add`` / ``sandbox
+                                                  deny`` paths, re-sent per cell
+                                                  because a kernel outlives many
+                                                  cells and those lists are
+                                                  operator-mutable (#710).  An
+                                                  absent block leaves the
+                                                  kernel's policy as it is; it
+                                                  does NOT clear it.
   - ``variables``   {type}                       request the namespace summary
   - ``reset``       {type}                        clear the namespace
   - ``shutdown``    {type}                        graceful kernel exit
@@ -19,7 +30,16 @@ runner → kernel:
                                                   (the cross-process tools bridge,
                                                   wired in PR 2)
 kernel → runner:
-  - ``ready``       {type, cwd}                   handshake after chdir + init
+  - ``ready``       {type, cwd, boundary,
+                     boundary_description}        handshake after chdir +
+                                                  containment + init.
+                                                  ``boundary`` is the kind
+                                                  (apparmor | audit | opt-out |
+                                                  none) the kernel established
+                                                  and ``boundary_description``
+                                                  the human form; ``none`` means
+                                                  the kernel refuses every cell
+                                                  (#710)
   - ``stream``      {type, cell_id, name, text}   streamed stdout/stderr
   - ``result``      {type, cell_id, status, value, execution_count}
   - ``error``       {type, cell_id, ename, evalue, traceback}

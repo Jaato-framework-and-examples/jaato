@@ -14,7 +14,7 @@ reaching into the daemon-side session.  Tests updated accordingly.
 import pytest
 
 from datetime import datetime, timezone
-from typing import Any, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from .session_manager import Session, SessionManager
 
@@ -43,6 +43,7 @@ class _FakeRunnerRPC:
         source_id: Optional[str] = None,
         source_type: Optional[str] = None,
         require_idle: bool = False,
+        attachments: Optional[List[Dict[str, Any]]] = None,
         timeout: Optional[float] = None,
     ) -> str:
         """Stand-in for the runner's ATOMIC queue-or-report.
@@ -242,7 +243,8 @@ class TestDeliverPromptToSession:
         )
         driven: List[Tuple[str, str]] = []
         manager.send_message_to_session = (  # type: ignore[method-assign]
-            lambda sid, text: (driven.append((sid, text)), True)[1]
+            lambda sid, text, attachments=None:
+            (driven.append((sid, text)), True)[1]
         )
 
         status = manager.deliver_prompt_to_session("sess_idle", "wake up")
@@ -279,7 +281,7 @@ class TestDeliverPromptToSession:
             "sess_dead", model_running=False, terminal_reason="error",
         )
         manager.send_message_to_session = (  # type: ignore[method-assign]
-            lambda sid, text: pytest.fail(
+            lambda sid, text, attachments=None: pytest.fail(
                 "a terminated session must not be driven"
             )
         )
@@ -344,7 +346,7 @@ class TestDeliverPromptToSession:
         ):
             manager, _ = _make_manager_with_session(f"sess_{label}", **kwargs)
             manager.send_message_to_session = (  # type: ignore[method-assign]
-                lambda sid, text: True
+                lambda sid, text, attachments=None: True
             )
             status = manager.deliver_prompt_to_session(f"sess_{label}", "x")
             ok = manager.inject_prompt_to_session(f"sess_{label}", "x")

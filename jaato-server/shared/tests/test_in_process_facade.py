@@ -295,6 +295,28 @@ class TestTransportAgnosticEntry:
 
         asyncio.run(_run())
 
+    def test_agent_params_reach_session_configure(self):
+        """Spawn-time ``agent_params`` must reach ``JaatoSession.configure``
+        (as ``session_kwargs["agent_params"]``), not only the persona's
+        ``{{param}}`` substitution: a ``{{!py:...}}`` prefetch reads them as
+        ``RenderContext.agent_params``, and the embedded path used to drop
+        them there — a persona whose prefetch keyed on a param aborted
+        session-prep in-process while the same profile ran under the daemon."""
+
+        async def _run():
+            holder = {}
+            async with InProcessClient.session(
+                profile={"model": "m", "provider": "openrouter", "plugins": [],
+                         "plugin_configs": {"openrouter": {"api_key": "sk-or-plain"}}},
+                agent_params={"subphase": "1.2"},
+                embedded_factory=_factory_for(holder),
+            ) as s:
+                await s.ask("hi")
+            kwargs = holder["client"].configure_tools_session_kwargs
+            assert kwargs["agent_params"] == {"subphase": "1.2"}
+
+        asyncio.run(_run())
+
 
 class TestEnvFileBothModes:
     """``env_file`` is a both-modes kwarg (only ``socket_path`` is IPC-only):

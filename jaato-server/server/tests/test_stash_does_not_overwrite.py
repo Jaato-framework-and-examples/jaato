@@ -13,6 +13,13 @@ trace anywhere.
 
 Reachable whenever two messages land in the same wind-down tail, which is
 wide: measured ~30s on a live cascade.
+
+#877 GAVE THE STASH A SECOND HALF.  Each entry is now ``(text,
+attachments)``: a stash of text alone dropped the payload that WAS the
+message for a voice turn, silently.  The consumer guards below drive the
+real ``merge_pending_continuations`` rather than restating the join --
+restating it is what let the drain and this file drift apart until the
+drain's rule could be wrong with every test here still green.
 """
 
 from __future__ import annotations
@@ -20,7 +27,7 @@ from __future__ import annotations
 import threading
 from typing import Any, List
 
-from server.core import JaatoServer
+from server.core import JaatoServer, merge_pending_continuations
 
 
 def _server() -> JaatoServer:
@@ -43,9 +50,11 @@ def test_three_sends_in_one_window_all_survive():
     for text in ("first", "second", "third"):
         with srv._pending_continuation_lock:
             if srv._model_running:
-                srv._pending_continuations.append(text)
+                srv._pending_continuations.append((text, []))
 
-    assert srv._pending_continuations == ["first", "second", "third"], (
+    assert srv._pending_continuations == [
+        ("first", []), ("second", []), ("third", []),
+    ], (
         "a single-slot stash drops every message but the last, silently -- "
         "each one having been reported 'accepted' to its sender"
     )
@@ -55,17 +64,21 @@ def test_the_consumer_takes_all_of_them_joined():
     """Taking one and leaving the rest would re-introduce the loss.
 
     Mirrors ``_drain_child_messages``, which joins a collected batch with a
-    blank line and fires ONE continuation for it.
+    blank line and fires ONE continuation for it.  Drives the drain's own
+    ``merge_pending_continuations`` rather than restating the join.
     """
     srv = _server()
-    srv._pending_continuations = ["first", "second", "third"]
+    srv._pending_continuations = [
+        ("first", []), ("second", []), ("third", []),
+    ]
 
     with srv._pending_continuation_lock:
         stashed = srv._pending_continuations
         srv._pending_continuations = []
-    pending = "\n\n".join(stashed) if stashed else None
+    pending, attachments = merge_pending_continuations(stashed)
 
     assert pending == "first\n\nsecond\n\nthird"
+    assert attachments == []
     assert srv._pending_continuations == [], "the stash must be emptied"
 
 
@@ -75,9 +88,10 @@ def test_an_empty_stash_starts_no_turn():
     with srv._pending_continuation_lock:
         stashed = srv._pending_continuations
         srv._pending_continuations = []
-    pending = "\n\n".join(stashed) if stashed else None
+    merged = merge_pending_continuations(stashed)
 
-    assert pending is None, (
-        "an empty stash must be falsy, not an empty string that reads as "
-        "'there is a continuation' to the caller's truthiness check"
+    assert not any(merged), (
+        "an empty stash must be falsy in BOTH halves -- a turn started "
+        "from it would carry neither text nor bytes, and the drain's "
+        "truthiness check is what stops it"
     )

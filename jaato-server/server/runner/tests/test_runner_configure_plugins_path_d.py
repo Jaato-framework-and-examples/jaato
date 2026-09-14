@@ -73,12 +73,15 @@ from typing import Any, List, Optional
 import pytest
 
 from server.runner.session import (
+    _adopt_then_discover,
     BootstrapError,
     RunnerSessionHost,
     _configure_runtime_plugins,
     bootstrap_session,
 )
 from shared.session_envelope import SessionInitEnvelope
+
+from .conftest import StubSession
 
 
 # ----------------------------------------------------------------------
@@ -124,10 +127,9 @@ class _StubRuntime:
         self._registry = registry
 
     def create_session(self, **kwargs: Any) -> Any:
-        class _StubSession:
-            pass
-
-        return _StubSession()
+        # Shared conftest stub: bootstrap_session stamps the returned
+        # session, so it must answer those calls (#736).
+        return StubSession(**kwargs)
 
 
 def _envelope(
@@ -371,15 +373,23 @@ def test_bootstrap_session_source_contains_configure_runtime_plugins() -> None:
 
 
 def test_configure_runtime_plugins_source_uses_runner_tier_filter() -> None:
-    """Pin via AST: ``_configure_runtime_plugins`` invokes
-    ``registry.discover`` with ``tier_filter="runner"``.
+    """Pin via AST: the runner-side bootstrap invokes ``registry.discover``
+    with ``tier_filter="runner"``.
 
     Daemon-side discovers everything (no tier filter); runner-side
     correctness requires the explicit filter so daemon-tier plugins
     don't leak.  This pin defends against an accidental drop of the
-    kwarg during a refactor."""
-    src = inspect.getsource(_configure_runtime_plugins)
-    src = textwrap.dedent(src)
+    kwarg during a refactor.
+
+    The call itself moved into :func:`_adopt_then_discover` in #890 — the
+    adoption of slot-scoped plugins has to happen between constructing the
+    registry and discovering into it, and the two belong together — so both
+    functions are scanned.  The guarantee is unchanged: somewhere on the
+    bootstrap path, discovery is tier-filtered."""
+    src = "\n".join(
+        textwrap.dedent(inspect.getsource(fn))
+        for fn in (_configure_runtime_plugins, _adopt_then_discover)
+    )
     tree = ast.parse(src)
     discover_calls = [
         n for n in ast.walk(tree)
@@ -391,7 +401,7 @@ def test_configure_runtime_plugins_source_uses_runner_tier_filter() -> None:
     ]
     assert discover_calls, (
         "Path D regression: registry.discover(...) call missing "
-        "from _configure_runtime_plugins."
+        "from the runner-side bootstrap path."
     )
     matched = False
     for call in discover_calls:

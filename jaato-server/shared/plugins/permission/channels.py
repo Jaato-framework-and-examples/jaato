@@ -277,9 +277,31 @@ class ChannelResponse:
     edited_arguments: Optional[Dict[str, Any]] = None
     was_edited: bool = False
 
+    # Who decided (issue #859).  Two fields because they have different
+    # provenance and an audit trail must not blur it:
+    #
+    # ``user_id`` — the identity the DAEMON authenticated for the client
+    #   that answered.  Only :class:`RunnerRPCChannel` fills it, from
+    #   ``PromptResponse.user_id``, which the daemon stamps from the
+    #   transport's ``get_client_user()`` when it routes the
+    #   ``PermissionResponseRequest``.  A channel that has no
+    #   authenticated caller (console, queue, file) leaves it ``None``.
+    # ``approver`` — an identity ASSERTED by the responding system: the
+    #   ``approver`` key of a :class:`WebhookChannel` /
+    #   :class:`FileChannel` response, so an external approval workflow
+    #   (a Slack bot, a ticketing system) can name the human it consulted.
+    #   The daemon cannot verify it and records it as claimed.
+    user_id: Optional[str] = None
+    approver: Optional[str] = None
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'ChannelResponse':
-        """Create from dictionary."""
+        """Create from dictionary.
+
+        ``approver`` / ``user_id`` are read when present and coerced to
+        ``str`` (or ``None`` when empty) so an external system's JSON
+        response can name its approver with no further contract.
+        """
         decision_str = data.get("decision", "deny")
         try:
             decision = ChannelDecision(decision_str)
@@ -295,6 +317,8 @@ class ChannelResponse:
             expires_at=data.get("expires_at"),
             edited_arguments=data.get("edited_arguments"),
             was_edited=data.get("was_edited", False),
+            user_id=_optional_identity(data.get("user_id")),
+            approver=_optional_identity(data.get("approver")),
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -310,7 +334,34 @@ class ChannelResponse:
         }
         if self.edited_arguments is not None:
             result["edited_arguments"] = self.edited_arguments
+        if self.user_id is not None:
+            result["user_id"] = self.user_id
+        if self.approver is not None:
+            result["approver"] = self.approver
         return result
+
+    def attribution(self) -> Dict[str, str]:
+        """The identity fields that are set, as ``{"user_id"|"approver": ...}``.
+
+        The permission plugin merges this into the metadata dict it
+        returns from ``check_permission`` so the decision's identity
+        reaches the resolved hook, the ledger and the tool result
+        without each consumer re-deriving which fields exist.
+        """
+        out: Dict[str, str] = {}
+        if self.user_id:
+            out["user_id"] = self.user_id
+        if self.approver:
+            out["approver"] = self.approver
+        return out
+
+
+def _optional_identity(value: Any) -> Optional[str]:
+    """Coerce a response's identity value to a non-empty ``str`` or ``None``."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 class Channel(ABC):
@@ -714,6 +765,12 @@ class WebhookChannel(Channel):
 
     This channel is designed for integration with external approval systems,
     such as Slack bots, approval workflows, or custom dashboards.
+
+    The response JSON is decoded by :meth:`ChannelResponse.from_dict`, so
+    besides ``decision`` / ``reason`` it may carry an ``approver`` naming
+    the human the external system consulted (issue #859).  That name is
+    forwarded as ``PermissionResolvedEvent.approver`` and into the ledger's
+    ``permission-check`` record; the daemon records it as claimed.
     """
 
     def __init__(self):
@@ -820,6 +877,10 @@ class FileChannel(Channel):
 
     Request files: {base_path}/requests/{request_id}.json
     Response files: {base_path}/responses/{request_id}.json
+
+    A response file may carry an ``approver`` key (issue #859) naming who
+    wrote it; it is decoded by :meth:`ChannelResponse.from_dict` and
+    forwarded as ``PermissionResolvedEvent.approver``.
     """
 
     def __init__(self):

@@ -396,3 +396,48 @@ async def test_e2e_unknown_method_raises_runner_rpc_error() -> None:
             )
     finally:
         await _teardown(pair)
+
+
+# ----------------------------------------------------------------------
+# #859 — the responder's authenticated identity rides the response
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_handler_resolve_stamps_daemon_authenticated_user() -> None:
+    """``resolve_response(user_id=...)`` reaches the runner as
+    ``PromptResponse.user_id`` — the transport's identity, never the
+    client's claim."""
+    handler = PromptOperatorHandler(lambda e: None)
+
+    async def _resolve() -> None:
+        await asyncio.sleep(0.02)
+        handler.resolve_response("r-859", "y", user_id="sso|alice")
+
+    asyncio.create_task(_resolve())
+    result = await handler.handle(
+        PromptPayload(
+            request_id="r-859", session_id="s", tool_name="cli", tool_args={},
+        ).to_dict()
+    )
+    response = PromptResponse.from_dict(result)
+    assert response.response == "y"
+    assert response.user_id == "sso|alice"
+
+
+@pytest.mark.asyncio
+async def test_handler_resolve_without_user_leaves_none() -> None:
+    """Local IPC has no authenticated user; the wire carries None."""
+    handler = PromptOperatorHandler(lambda e: None)
+
+    async def _resolve() -> None:
+        await asyncio.sleep(0.02)
+        handler.resolve_response("r-859b", "n")
+
+    asyncio.create_task(_resolve())
+    result = await handler.handle(
+        PromptPayload(
+            request_id="r-859b", session_id="s", tool_name="cli", tool_args={},
+        ).to_dict()
+    )
+    assert PromptResponse.from_dict(result).user_id is None

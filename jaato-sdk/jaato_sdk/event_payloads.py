@@ -244,6 +244,15 @@ class ToolOutputPayload(TypedDict):
     agent_id: str
     call_id: str
     chunk: str
+    # Binary media (see docs/design/binary-media-chunks.md).  All
+    # NotRequired: a text chunk omits them entirely, keeping the common
+    # frame identical to before media existed.  ``data_b64`` is base64
+    # because the frame is UTF-8 JSON.
+    stream_id: NotRequired[str]
+    sequence: NotRequired[Optional[int]]
+    mime_type: NotRequired[Optional[str]]
+    data_b64: NotRequired[Optional[str]]
+    final: NotRequired[bool]
     # Which session this event is about (protocol 1.2+).  Mirrors the
     # base ``Event.session_id``, stamped centrally as the daemon routes;
     # NotRequired because a hand-built payload need not supply it.
@@ -290,12 +299,13 @@ class TurnCompletedPayload(TypedDict):
     formatted_text: NotRequired[Optional[str]]
     finish_reason: str
     # Why this turn produced no typed completion when one was expected.
-    # ``None`` on every normal turn; ``"not_signalled_after_nudges"`` when
-    # the framework asked for ``signal_completion`` up to
-    # ``MAX_COMPLETION_NUDGES`` times and gave up.  It is the ONLY event a
-    # consumer receives in that state -- no AgentCompleted and no
-    # SessionTerminated fire -- so a driver that ignores it must invent a
-    # reason for the missing payload.
+    # ``None`` on every normal turn -- and, in this tree, on EVERY turn:
+    # no daemon delivers ``"not_signalled_after_nudges"`` here, because
+    # the sole writer runs after this event has been built and cleared
+    # (#771).  A driver watching for a spent nudge budget must read
+    # SessionTerminatedEvent / ErrorEvent with
+    # ``error_type == "NudgeExhausted"``, which is typed, terminal and
+    # unconditional.  See TurnCompletedEvent.completion_gap in events.py.
     completion_gap: NotRequired[Optional[str]]
     # Which session this event is about (protocol 1.2+).  Mirrors the
     # base ``Event.session_id``, stamped centrally as the daemon routes;
@@ -384,6 +394,12 @@ class PermissionResolvedPayload(TypedDict):
     granted: bool
     method: str
     comment: str
+    # Who decided (#859).  ``user_id`` is the daemon-authenticated user of
+    # the client that answered; ``approver`` is the name an external
+    # approval system attached to its response.  Both absent / None for
+    # policy decisions and unauthenticated sessions.
+    user_id: NotRequired[Optional[str]]
+    approver: NotRequired[Optional[str]]
     # Which session this event is about (protocol 1.2+).  Mirrors the
     # base ``Event.session_id``, stamped centrally as the daemon routes;
     # NotRequired because a hand-built payload need not supply it.

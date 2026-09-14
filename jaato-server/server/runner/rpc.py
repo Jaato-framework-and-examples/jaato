@@ -31,6 +31,13 @@ Key responsibilities:
    ``CancelledException``.  Either way the runner emits a terminating
    response with ``ok=False, error.type="CancelledException"``.
 
+   The ordering that makes this reliable is #988's fix and is stated
+   in :meth:`RunnerRPC.serve`: a call is registered in
+   ``_active_calls`` on the **reader thread**, before the next frame
+   is read, never inside the worker that runs it.  Registering inside
+   the worker made "is the cancel honoured?" a thread-scheduling race
+   that a loaded host lost outright — see :class:`_ActiveCall`.
+
 5. **Surface failures via the typed envelope (§4.8).**  Any executor
    exception is caught here and serialized into the response's
    ``error`` payload so the daemon side decoder doesn't have to be
@@ -53,11 +60,13 @@ import socket
 import threading
 import traceback
 import concurrent.futures as _concurrent_futures
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Protocol
 
 from shared.framing import (
+    MAX_MESSAGE_SIZE,
     FrameTooLargeError,
     read_frame_sync,
     write_frame_sync,
@@ -68,6 +77,8 @@ from jaato_sdk.plugins.model_provider.types import (
     DISCOVERABILITY_EAGER,
     DISCOVERABILITY_DEFERRED,
 )
+
+from .json_codec import dumps as _json_dumps, frame_size, loads as _json_loads
 
 from .envelope import (
     KIND_CANCEL,
@@ -85,6 +96,14 @@ from .envelope import (
 
 
 logger = logging.getLogger(__name__)
+
+
+#: Characters of a dropped failure's own message carried into the
+#: substitute response (#999).  Enough to name what went wrong, four
+#: orders of magnitude under ``MAX_MESSAGE_SIZE`` so the substitute
+#: cannot itself be refused — which is the premise the pre-#999 skip
+#: asserted about the wrong frame and never checked.
+OVERSIZE_MESSAGE_CHARS = 2000
 
 
 # We deliberately re-use :class:`jaato_sdk.plugins.model_provider.types.CancelToken`
@@ -156,9 +175,46 @@ class ExecuteFn(Protocol):
 
 @dataclass
 class _ActiveCall:
-    """Runner-side bookkeeping for an in-flight tool call.
+    """Runner-side bookkeeping for an in-flight call.
 
-    ``cancel_token`` is tripped when a ``CancelFrame`` arrives.
+    ``cancel_token`` is tripped when a ``CancelFrame`` arrives.  The
+    same object is published to the worker thread as
+    ``_thread_local.cancel_token``, which is what
+    ``get_current_cancel_token()`` — and through it ``run_command`` —
+    polls.  So tripping it here is what a tool observes, whether the
+    worker has started yet or not.
+
+    **Lifecycle, and why every step of it is on the stated thread
+    (#988).**  The entry lives in ``RunnerRPC._active_calls`` keyed by
+    the wire request id:
+
+    ==================  ===============  ==============================
+    transition          thread           site
+    ==================  ===============  ==============================
+    created + inserted  reader (serve)   :meth:`RunnerRPC._register_call`
+    tripped             reader (serve)   :meth:`RunnerRPC._handle_cancel`
+    published to TLS    worker           :meth:`RunnerRPC._handle_request`
+    removed             worker           ``_handle_request``'s ``finally``
+    ==================  ===============  ==============================
+
+    Insertion is on the READER thread, in wire order, before the next
+    frame is decoded.  That is the whole cancel guarantee: the daemon
+    only ever cancels an id whose request frame it has already
+    written, so by the time ``_handle_cancel`` is reached for id *N*
+    the entry for *N* is either present (in flight — trip it) or gone
+    (already completed).  "Not registered yet" is not reachable.
+
+    It used to be.  Insertion was the first statement of
+    ``_handle_request``, i.e. on the pool WORKER, while ``serve`` went
+    straight back to reading — so a cancel frame already sitting in
+    the socket buffer routinely beat the worker to the dict.
+    ``_handle_cancel`` then found nothing, returned, and logged at
+    DEBUG; the token was never tripped and the tool ran to completion
+    reporting ``ok=True``.  Measured at 12/12 lost cancels on a
+    4-core host carrying 16 busy loops, against 0/10 idle.  The loss
+    is PERMANENT, not deferred: the frame is consumed and discarded,
+    so no later cancel-check can recover it (a 105 s command lost the
+    cancel just as completely as a 10 s one).
     """
 
     cancel_token: CancelToken
@@ -197,6 +253,32 @@ WORK_LANE_METHODS = frozenset({
 #: Runs on the main thread, in neither pool.  Kept as an explicit name so the
 #: "every method is classified" guard can account for it.
 MAIN_THREAD_METHODS = frozenset({"session.bootstrap"})
+
+#: How many recently-registered request ids the reader thread remembers,
+#: for the reconciliation payload on ``session.health_check`` (#856).
+#:
+#: A WINDOW rather than a high-water mark, because the probe that asks the
+#: question is itself a request: it is registered on the reader thread
+#: BEFORE its handler runs, so by the time the handler answers, the highest
+#: id this runner has ever seen is the PROBE's -- which is greater than any
+#: id the daemon could be asking about.  A high-water comparison would
+#: therefore answer "yes, received" for every id, including the ones that
+#: never arrived: the one answer that makes the reconciliation worthless.
+#:
+#: 256 is sized against the question actually asked.  The daemon probes
+#: about an id it dispatched seconds ago, so the window only has to outlive
+#: the ack deadline -- a session would have to issue 256 further RPCs on one
+#: channel inside that window to roll the answer out of memory.
+#:
+#: **The size is a tuning parameter; the FULLNESS is a correctness bound.**
+#: The daemon tells its caller whether a lost call may already have executed,
+#: and "the id is not in this window" only proves it was never registered
+#: while the window has evicted nothing.  So the capacity is reported
+#: alongside the ids (``seen_window_capacity``) and a FULL window whose floor
+#: sits above the id is answered "indeterminate -- it may have run", never
+#: "never received".  Raising this number reduces how often that happens; it
+#: is not what makes the answer safe.
+SEEN_REQUEST_ID_MEMORY = 256
 
 
 class RunnerRPC:
@@ -251,6 +333,10 @@ class RunnerRPC:
         self._sock = sock
         self._execute_fn = execute_fn
         self._workspace_root = workspace_root
+        # Kept so :meth:`recycle_worker_pools` can rebuild each lane with
+        # the width it was constructed with (#1023).
+        self._max_workers = max_workers
+        self._control_workers = control_workers
         self._pool = ThreadPoolExecutor(
             max_workers=max_workers,
             thread_name_prefix="runner-rpc-work",
@@ -265,6 +351,32 @@ class RunnerRPC:
         self._write_lock = threading.Lock()
         self._active_calls: Dict[int, _ActiveCall] = {}
         self._active_lock = threading.Lock()
+        # Highest incoming request id the reader thread has registered.
+        # Written under ``_active_lock`` beside ``_active_calls`` so the
+        # two cannot disagree.  Its only job is to let
+        # ``_handle_cancel`` tell a BENIGN miss (the call finished
+        # before the cancel arrived) from an ANOMALOUS one (a cancel
+        # for an id this runner was never asked to run) -- the two were
+        # indistinguishable, and both silent, before #988.
+        self._highest_request_id = 0
+        # #856 reconciliation: the ids the reader thread has registered,
+        # most recent last.  Bounded -- see SEEN_REQUEST_ID_MEMORY for why
+        # this is a window and not a high-water mark.  Written under
+        # ``_active_lock`` beside ``_active_calls`` and
+        # ``_highest_request_id`` so all three describe one instant.
+        self._seen_request_ids: "deque[int]" = deque(
+            maxlen=SEEN_REQUEST_ID_MEMORY,
+        )
+        # #988 observability counters.  A cancel that is written to the
+        # wire and not honoured must be countable, not merely absent
+        # from a DEBUG log nobody enables.  Read via
+        # :meth:`cancel_stats`.
+        self._cancel_counts: Dict[str, int] = {
+            "received": 0,      # cancel frames decoded
+            "tripped": 0,       # matched an in-flight call and tripped it
+            "late": 0,          # arrived after the call completed (benign)
+            "unknown": 0,       # id this runner never registered (anomaly)
+        }
         self._closed = False
 
         # Phase 3 §3.2: runner → daemon outgoing-call bookkeeping.
@@ -291,9 +403,110 @@ class RunnerRPC:
         self._session_host = None  # type: Optional[Any]
         self._session_lock = threading.Lock()
 
+    # ---------------------- worker-pool recycling (#1023) ----------------
+
+    def _lane_threads(self, pool: ThreadPoolExecutor) -> "List[Any]":
+        """Best-effort snapshot of the Thread objects a lane owns.
+
+        Reads ``ThreadPoolExecutor._threads`` — private, and stable across
+        the CPython versions this tree supports.  Used only to SAY how many
+        threads a recycle retired; nothing branches on it, so a future
+        interpreter that renames the attribute degrades the log line and
+        nothing else.
+        """
+        try:
+            return list(getattr(pool, "_threads", ()) or ())
+        except Exception:  # noqa: BLE001 — diagnostics must not raise
+            return []
+
+    def recycle_worker_pools(self, reason: str) -> Dict[str, Any]:
+        """Replace both worker lanes so future work runs on NEW threads.
+
+        **The #1023 remedy.**  ``aa_change_profile`` is per-task, and
+        ``ThreadPoolExecutor`` spawns its workers lazily on the first
+        submit — so a worker created before the runner transitioned into
+        its session's AppArmor profile keeps the cred it was created with,
+        for the life of the slot, while ``/proc/<pid>/attr/current``
+        (the main thread) reports the process confined.  Executors reuse
+        workers and a slot serves several sessions of one cascade, so that
+        population is durable *and* carries across session boundaries with
+        the profile of whichever session created it.
+
+        There is no way to make another thread call ``aa_change_profile``
+        on its own behalf — the kernel enforces ``current != task ->
+        -EACCES`` on ``attr/current`` writes — so an existing thread cannot
+        be repaired.  It can only be retired, which is what this does: the
+        executor OBJECTS are replaced, so every later submit spawns a fresh
+        worker under the confined cred, and the old executors are asked to
+        drain.
+
+        **What can legitimately be outstanding, and why nothing is
+        dropped.**  This runs on the reader thread, inside the synchronous
+        ``session.bootstrap`` handler, which is the only submitter — so no
+        NEW work can be submitted while it runs.  What may still be running
+        is a pre-bootstrap RPC the reader dispatched earlier: on a slot
+        serving its second or later session, ``session.end`` is the routine
+        one (control lane), and the dispatch watchdog's
+        ``session.health_check`` probe can overlap the instant a bootstrap
+        frame is read.  So the old executors are shut down with
+        ``wait=False`` and **without** ``cancel_futures``:
+
+        - not cancelling means a submitted call still runs and still
+          answers its caller — cancelling would leave the daemon waiting
+          for a response that is never written;
+        - not waiting means this cannot deadlock.  A pre-bootstrap task
+          blocked on an ``outgoing_call`` needs the READER thread to
+          resolve its future, and the reader thread is the one executing
+          this.
+
+        A worker still draining is therefore alive and still carrying the
+        old cred for a few milliseconds.  That is the race
+        :func:`server.runner.bootstrap.verify_thread_confinement` absorbs
+        with its grace window rather than reporting as durable divergence.
+
+        Args:
+            reason: Free text for the log line — typically the profile the
+                process just entered.
+
+        Returns:
+            A dict with ``work_threads_retired`` / ``ctl_threads_retired``
+            counts for the caller's log.  Best-effort figures; see
+            :meth:`_lane_threads`.
+        """
+        old_work, old_ctl = self._pool, self._control_pool
+        retired_work = self._lane_threads(old_work)
+        retired_ctl = self._lane_threads(old_ctl)
+
+        # Build the replacements BEFORE retiring the old ones so a failure
+        # here leaves the runner with working lanes rather than none.
+        # Construction spawns no thread: the first submit does, which is
+        # the whole reason this defect exists and the reason this is safe
+        # to do on the confined thread.
+        self._pool = ThreadPoolExecutor(
+            max_workers=self._max_workers,
+            thread_name_prefix="runner-rpc-work",
+        )
+        self._control_pool = ThreadPoolExecutor(
+            max_workers=self._control_workers,
+            thread_name_prefix="runner-rpc-ctl",
+        )
+        old_work.shutdown(wait=False)
+        old_ctl.shutdown(wait=False)
+
+        logger.info(
+            "runner RPC: worker pools recycled (%s) — retired %d work + %d "
+            "control worker threads; every later RPC runs on a thread "
+            "spawned after the AppArmor transition (#1023)",
+            reason, len(retired_work), len(retired_ctl),
+        )
+        return {
+            "work_threads_retired": len(retired_work),
+            "ctl_threads_retired": len(retired_ctl),
+        }
+
     # --------------------------- write paths ---------------------------
 
-    def _write(self, payload: Dict[str, Any]) -> None:
+    def _write(self, payload: Dict[str, Any]) -> bool:
         """Serialize *payload* to the wire under the write lock.
 
         The lock prevents partial-frame interleave when stream frames
@@ -301,12 +514,42 @@ class RunnerRPC:
         swallowed — a write failure usually means the daemon went
         away (§6.7), which the reader loop will surface cleanly via
         EOF on its next read.
+
+        Serialization goes through :mod:`server.runner.json_codec`, so
+        ``bytes`` anywhere in *payload* crosses as base64 and decodes
+        back to ``bytes`` daemon-side.  The pre-#920 ``default=str``
+        turned it into a Python repr instead: 4.2x the size, and not
+        decodable at the other end.
+
+        A frame over ``MAX_MESSAGE_SIZE`` is **not written**.  The peer
+        cannot skip an oversized frame (the length prefix is read, the
+        body is not, so the stream is desynchronised) and therefore
+        closes the whole transport — one bad frame used to take down
+        every in-flight call and end the session.  Dropping it here
+        costs that one frame; :meth:`_emit_response` turns the drop
+        into a typed error for the call it belonged to.
+
+        Returns:
+            ``True`` when the frame reached the socket, ``False`` when
+            it was dropped (oversized) or the peer is gone.
         """
-        encoded = json.dumps(payload, default=str)
+        encoded = _json_dumps(payload)
+        size = frame_size(encoded)
+        if size > MAX_MESSAGE_SIZE:
+            logger.error(
+                "runner RPC: refusing to write oversized frame "
+                "(kind=%s id=%s, %d bytes, cap %d) — dropping it rather "
+                "than desynchronising the channel",
+                payload.get("kind"), payload.get("id"),
+                size, MAX_MESSAGE_SIZE,
+            )
+            return False
         try:
             with self._write_lock:
-                if not self._closed:
-                    write_frame_sync(self._sock, encoded)
+                if self._closed:
+                    return False
+                write_frame_sync(self._sock, encoded)
+                return True
         except (OSError, BrokenPipeError) as exc:
             # Peer gone; mark closed so subsequent attempts no-op.
             logger.info(
@@ -314,6 +557,7 @@ class RunnerRPC:
                 "shutting down writer", exc,
             )
             self._closed = True
+            return False
 
     def _emit_stream(
         self,
@@ -322,7 +566,22 @@ class RunnerRPC:
         text: str,
         mode: Optional[str],
     ) -> None:
-        """Emit a streaming-output chunk for the given in-flight call."""
+        """Emit a streaming-output chunk for the given in-flight call.
+
+        AN OVERSIZED CHUNK IS DROPPED WITH NO SUBSTITUTE, and that is a
+        decision rather than an omission (#999 asked for it to be stated).
+        A chunk is display output, not an answer: the call still ends in a
+        response, so dropping one costs the viewer some text and costs the
+        CALLER nothing — where dropping a response costs the caller the
+        whole call, which is why :meth:`_emit_response` substitutes.
+
+        Substituting here would also be the wrong shape twice over: a
+        stream frame has no field in which to say "something was dropped"
+        that is not itself display text, and a per-chunk error would arrive
+        interleaved with real output as though the model had said it.  The
+        drop is already logged at ERROR by :meth:`_write` with the call id,
+        which is where an operator looks for it.
+        """
         frame = StreamFrame(
             id=request_id,
             source=source,
@@ -408,7 +667,85 @@ class RunnerRPC:
             error=error,
             telemetry=telemetry,
         )
-        self._write(env.to_dict())
+        if self._write(env.to_dict()):
+            return
+        # #920: the frame was refused (oversized) rather than sent, so
+        # the daemon's in-flight future would hang until its timeout —
+        # or forever, since ``session.send_message`` has none.  Answer
+        # the same id with a typed error instead: the caller learns its
+        # result did not fit, and the channel survives to serve the
+        # next call.  A result carrying megabytes of tool output is the
+        # realistic case; the substitute is small by construction.
+        #
+        # #999: that used to skip ``ok=False`` on the reasoning that "an
+        # error frame that did not fit will not fit a second time".  The
+        # premise names the wrong frame.  What did not fit is the
+        # ORIGINAL, whose ``result`` dict carries the same megabytes of
+        # tool output beside ``ErrorPayload.traceback`` — the
+        # domain-failure branch of ``_handle_request`` passes exactly
+        # that.  The substitute is a different, bounded frame, so it
+        # fits.  Measured on the pre-fix tree over a real socketpair:
+        # ``ok=True`` answered the caller in 221 bytes and ``ok=False``
+        # wrote NOTHING, leaving ``_closed`` False — the channel open,
+        # the runner idle, the daemon waiting.  #856's ack watchdog
+        # bounds that at 120 s with a ``RunnerResultLost`` verdict; it
+        # does not recover the reason the runner already had in hand.
+        if self._closed:
+            # A closed channel has nowhere to put either.  This is the
+            # only half of the old guard that was ever true.
+            return
+        if not self._write(
+                self._oversize_substitute(request_id, ok, error).to_dict()):
+            # Belt and braces on "small by construction": if even that
+            # did not fit, the only text it borrowed is the one thing
+            # that can be dropped.  A caller told nothing is the state
+            # #999 is about, so it is worth one more bounded attempt.
+            self._write(self._oversize_substitute(
+                request_id, ok, None).to_dict())
+
+    def _oversize_substitute(
+        self,
+        request_id: int,
+        ok: bool,
+        error: Optional[ErrorPayload],
+    ) -> ResponseEnvelope:
+        """The small frame that answers a call whose real response did not fit.
+
+        Always a FAILURE, whichever way the original went: a success whose
+        result was dropped is not a success the caller can use, and saying
+        so is the whole point.
+
+        CARRIES THE ORIGINAL FAILURE'S ``type`` AND A BOUNDED PREFIX OF ITS
+        ``message`` when there was one.  The runner knows what went wrong
+        and the pre-#999 caller was told only that something did not fit —
+        which for a domain failure is the less useful half of the truth.
+        The traceback is deliberately NOT carried: it is usually what made
+        the frame oversized, and it is the part a bounded substitute cannot
+        promise to deliver.
+
+        Bounded by :data:`OVERSIZE_MESSAGE_CHARS` against a frame cap four
+        orders of magnitude larger, so "small by construction" is enforced
+        here rather than argued at the call site.
+        """
+        detail = (
+            f"runner RPC: response exceeded the {MAX_MESSAGE_SIZE}-byte "
+            "frame cap and was dropped"
+        )
+        if error is not None:
+            message = error.message or ""
+            if len(message) > OVERSIZE_MESSAGE_CHARS:
+                message = message[:OVERSIZE_MESSAGE_CHARS] + " […truncated]"
+            detail += (
+                f". The call had already FAILED with {error.type}: {message}"
+            )
+        elif not ok:
+            detail += ". The call had already FAILED, with no error payload"
+        return ResponseEnvelope(
+            id=request_id,
+            ok=False,
+            result=None,
+            error=ErrorPayload(type="FrameTooLargeError", message=detail),
+        )
 
     # --------------------------- request paths -------------------------
 
@@ -426,21 +763,66 @@ class RunnerRPC:
 
         return _cb
 
-    def _handle_request(self, env: RequestEnvelope) -> None:
-        """Worker-thread entrypoint for one in-flight request.
+    def _register_call(self, request_id: int) -> CancelToken:
+        """Create and publish the cancel token for *request_id*.
 
-        Sets thread-local cancel token + on_output, calls the executor,
-        emits the terminating response.  Any exception from the
-        executor is caught and serialized into the error payload — the
-        wire never sees a half-open call.
+        **Call this from the reader thread, before reading the next
+        frame** — that ordering is the #988 cancel guarantee, and it is
+        the reason this is a separate method from
+        :meth:`_handle_request` rather than its first two statements.
+        See :class:`_ActiveCall` for the full lifecycle.
+
+        Idempotent per id in the only sense that matters: re-registering
+        an id replaces its entry, so a direct caller (a test, or the
+        synchronous ``session.bootstrap`` path) that reaches
+        ``_handle_request`` without going through ``serve`` still gets a
+        token.
+
+        Returns:
+            The :class:`CancelToken` now reachable from
+            ``_active_calls[request_id]`` — hand it to
+            :meth:`_handle_request` so the worker publishes the SAME
+            object to its thread-local, rather than a second one that
+            a cancel would never reach.
         """
-        import threading as _thr   # [RPC_DIAG] register-stall trace — DIAG BRANCH
-        logger.info(
-            "[RPC_DIAG] _handle_request ENTER method=%s id=%s tid=%s",
-            env.method, env.id, _thr.get_ident())
         token = CancelToken()
         with self._active_lock:
-            self._active_calls[env.id] = _ActiveCall(cancel_token=token)
+            self._active_calls[request_id] = _ActiveCall(cancel_token=token)
+            self._seen_request_ids.append(request_id)
+            if request_id > self._highest_request_id:
+                self._highest_request_id = request_id
+        return token
+
+    def _handle_request(
+        self,
+        env: RequestEnvelope,
+        token: Optional[CancelToken] = None,
+    ) -> None:
+        """Worker-thread entrypoint for one in-flight request.
+
+        Publishes the cancel token + on_output to the worker's
+        thread-locals, calls the executor, emits the terminating
+        response, and deregisters the call.  Any exception from the
+        executor is caught and serialized into the error payload — the
+        wire never sees a half-open call.
+
+        Args:
+            env: the decoded request frame.
+            token: the token :meth:`_register_call` already published
+                for ``env.id`` on the reader thread.  ``None`` means
+                "nobody registered this call yet" and registers it here
+                — correct only for a caller that is ITSELF the reader
+                thread (or a test with no concurrent cancel), because a
+                cancel frame decoded between the submit and this line
+                would find no entry.  ``serve`` always passes the token
+                it registered; see :class:`_ActiveCall`.
+        """
+        logger.info(   # [RPC_DIAG] register-stall trace — DIAG BRANCH
+            "[RPC_DIAG] _handle_request ENTER method=%s id=%s tid=%s "
+            "preregistered=%s",
+            env.method, env.id, threading.get_ident(), token is not None)
+        if token is None:
+            token = self._register_call(env.id)
 
         _thread_local.cancel_token = token
         _thread_local.on_output = self._make_on_output(env.id)
@@ -1203,7 +1585,15 @@ class RunnerRPC:
                 }
 
         try:
-            host: RunnerSessionHost = bootstrap_session(envelope)
+            host: RunnerSessionHost = bootstrap_session(
+                envelope,
+                # #1023: hand the bootstrap a way to retire worker threads
+                # that predate its AppArmor transition.  Called from step
+                # 1c, on this (the reader) thread, immediately after the
+                # process is confined and before the per-thread
+                # verification that follows it.
+                recycle_pools=self.recycle_worker_pools,
+            )
         except BootstrapError as exc:
             return False, {
                 "error": f"session.bootstrap: {exc.message}",
@@ -1274,7 +1664,49 @@ class RunnerRPC:
               session is None / not yet ready / can't enumerate.
               Useful as a sanity check that the runner-side plugin
               set actually loaded.
+            - ``active_call_ids`` (List[int]): request ids running
+              RIGHT NOW -- the keys of ``_active_calls``, sorted.
+            - ``known_request_ids`` (List[int]): the last
+              :data:`SEEN_REQUEST_ID_MEMORY` ids the reader thread
+              registered, sorted.  A superset of the active ones.
+            - ``seen_window_capacity`` (int): that window's ``maxlen``.
+              Reported rather than assumed daemon-side, because it is
+              what tells the reader whether the window has EVICTED
+              anything: a window that is not full has dropped nothing,
+              so an id missing from it was genuinely never registered,
+              and the daemon may safely tell its caller the work did
+              not happen.  A full one has rolled, and its silence about
+              an old id is not a denial.  Hardcoding the number on the
+              far side of a wire is how that distinction goes stale
+              without anyone noticing.
+            - ``highest_request_id`` (int): the highest id ever
+              registered.  Diagnostic only -- see
+              :data:`SEEN_REQUEST_ID_MEMORY` for why the daemon must
+              not reconcile against it.
+
+        The last three are the **reconciliation** payload (#856), and
+        they are reported whether or not a session host exists,
+        because they describe the TRANSPORT rather than the session.
+        The daemon believes a call is in flight iff it holds an entry
+        in ``RunnerRPCClient._in_flight``; this runner believes it iff
+        the id is in ``active_call_ids``.  Those two beliefs diverged
+        -- four ids registered daemon-side against an empty work queue
+        here -- and nothing could see it, because no RPC asked.  Now
+        one does, over the CONTROL lane, so the answer arrives while
+        the work lane is busy with the very turn in question.
+
+        The predicate is the same one :meth:`_handle_cancel` already
+        uses to count a cancel as ``unknown`` (#988): an id this
+        runner has never been asked to run.  One fact, two readers.
         """
+        with self._active_lock:
+            transport = {
+                "active_call_ids": sorted(self._active_calls),
+                "known_request_ids": sorted(self._seen_request_ids),
+                "highest_request_id": self._highest_request_id,
+                "seen_window_capacity": self._seen_request_ids.maxlen,
+            }
+
         with self._session_lock:
             host = self._session_host
 
@@ -1284,6 +1716,7 @@ class RunnerRPC:
                 "ready": False,
                 "session_id": "",
                 "tool_count": -1,
+                **transport,
             }
 
         tool_count = -1
@@ -1303,6 +1736,7 @@ class RunnerRPC:
             "ready": host.is_ready,
             "session_id": host.session_id,
             "tool_count": tool_count,
+            **transport,
         }
 
     def _handle_session_end(self) -> "tuple[bool, Any]":
@@ -1322,17 +1756,34 @@ class RunnerRPC:
         NOT be returned to the pool because its plugin state is
         partially-reset (undefined).
 
+        After the sweep the outgoing registry is RELEASED (#890).  The
+        sweep alone was never enough: the daemon reused the slot but the
+        next ``session.bootstrap`` built a fresh registry and re-ran
+        ``discover()``, so every plugin instance the sweep had just
+        prepared was dropped — and a plugin owning an OS process kept it
+        running with nobody to stop it.  ``slot_plugins.park_from``
+        parks the instances declaring ``TRAIT_SLOT_SCOPED`` for the next
+        session on this slot to adopt, and shuts the rest down.
+
         Returns:
-            ``(True, {"plugins_reset": int, "errors": List[str]})`` —
-            ``ok`` stays True even when individual plugin resets
-            fail; daemon branches on ``errors``.  ``(False, error)``
-            only on the structural "no session host" case (which is
-            a programmer error: daemon shouldn't call session.end
-            when no session was bootstrapped).
+            ``(True, {"plugins_reset": int, "errors": List[str],
+            "plugins_carried": List[str]})`` — ``ok`` stays True even
+            when individual plugin resets fail; daemon branches on
+            ``errors``.  ``plugins_carried`` names the instances parked
+            for the next session (empty for a standalone session, or
+            when ``errors`` made the slot unpoolable).  ``(False,
+            error)`` only on the structural "no session host" case
+            (which is a programmer error: daemon shouldn't call
+            session.end when no session was bootstrapped).
         """
+        from . import slot_plugins
+
         ready, err, session = self._require_ready_session()
         if not ready:
             return err
+
+        with self._session_lock:
+            host = self._session_host
 
         runtime = getattr(session, "_runtime", None)
         registry = getattr(runtime, "registry", None) if runtime else None
@@ -1384,6 +1835,33 @@ class RunnerRPC:
             except Exception as exc:  # noqa: BLE001 — per-plugin boundary
                 errors.append(f"{name}: {type(exc).__name__}: {exc}")
 
+        # #890: release the outgoing registry.  Until now nothing did —
+        # the daemon returned the SLOT to the pool but the next
+        # ``session.bootstrap`` built a fresh registry and re-ran
+        # ``discover()``, so every plugin instance was silently dropped.
+        # Dropping is not freeing: a plugin holding an OS process kept it
+        # running with no owner, which is how a cascade accumulated one
+        # jdtls per stage.  ``park_from`` moves the slot-scoped instances
+        # into the process-level store the next bootstrap adopts from, and
+        # shuts every other initialized plugin down.
+        #
+        # ``allow_carry`` is gated on the reset sweep: a slot whose reset
+        # raised is not returned to the pool (the daemon branches on
+        # ``errors``), so parking state for a next session that will never
+        # arrive would only defer the teardown.  Same reasoning as the
+        # daemon's own "errors ⇒ do not pool" rule.
+        try:
+            envelope = getattr(host, "envelope", None)
+            parked, park_errors = slot_plugins.park_from(
+                registry, envelope, allow_carry=not errors,
+            )
+            for name in park_errors:
+                errors.append(f"{name}: shutdown() raised during session.end")
+        except Exception as exc:  # noqa: BLE001 — boundary
+            logger.exception("session.end: releasing the registry raised")
+            errors.append(f"registry_release: {type(exc).__name__}: {exc}")
+            parked = []
+
         # PR #174 hotfix (server 0.6.151+): clear the runner-side
         # session host so the next ``session.bootstrap`` on this slot
         # (cascade reuse path) is NOT rejected by the
@@ -1409,6 +1887,7 @@ class RunnerRPC:
         return True, {
             "plugins_reset": plugins_reset,
             "errors": errors,
+            "plugins_carried": parked,
         }
 
     def _require_ready_session(
@@ -1573,19 +2052,7 @@ class RunnerRPC:
                 "stage": "read",
             }
 
-        history_dicts: list = []
-        for msg in messages:
-            try:
-                history_dicts.append(_serialize_message_for_wire(msg))
-            except Exception:  # noqa: BLE001 — boundary
-                # Single-message serialization failure must not
-                # drop the whole history — substitute a
-                # placeholder so the count stays accurate and
-                # the daemon can log the issue.
-                history_dicts.append(
-                    {"role": "system", "content": "<unserialisable>"},
-                )
-        return True, {"history": history_dicts}
+        return True, {"history": _serialize_history_for_wire(messages)}
 
     def _handle_session_get_context_limit(self) -> "tuple[bool, Any]":
         """Read-only context-window size in tokens (Phase 3 §7b.1
@@ -3260,14 +3727,19 @@ class RunnerRPC:
         # synchronously here; output streams via on_output;
         # usage + gc-threshold events stream via notification frames.
         # Turn-count snapshot: the post-turn forwarding below must fire iff a
-        # NEW turn actually landed in turn_accounting.  This is the mechanical
-        # guarantee behind the refused-turn suppression (a refused turn
-        # appends nothing, so the event would re-emit the PREVIOUS turn's
-        # numbers) AND what makes it safe to forward on the cancelled path.
-        try:
-            _turns_before = len(session.get_turn_accounting() or ())
-        except Exception:  # noqa: BLE001
-            _turns_before = None
+        # NEW turn actually RAN.  This is the mechanical guarantee behind the
+        # refused-turn suppression (a refused turn never enters the chat loop,
+        # so the count does not move and the event would re-emit the PREVIOUS
+        # turn's numbers) AND what makes it safe to forward on the cancelled
+        # path.
+        #
+        # It reads the LIFECYCLE counter, not the length of the usage ledger
+        # (#881).  The ledger only grows when the provider reported tokens, so
+        # gating on it meant a turn that ran and reported nothing emitted
+        # neither TurnCompletedEvent nor SessionTerminatedEvent -- and a
+        # driver blocked on either waited out its own timeout with nothing
+        # logged on either side.
+        _turns_before = RunnerRPC._turns_ran_snapshot(session)
 
         try:
             try:
@@ -3475,6 +3947,61 @@ class RunnerRPC:
     # to refresh.
     _NOTIF_DESCRIPTION_UPDATED = "description_updated"
 
+    @staticmethod
+    def _turns_ran_snapshot(session) -> Optional[int]:
+        """How many turns this session has RUN, or ``None`` if it cannot say.
+
+        The LIFECYCLE count (#881).  ``JaatoSession.get_turns_ran`` moves for
+        every turn that entered the chat loop; ``len(get_turn_accounting())``
+        moves only for a turn whose provider reported tokens, and the gap
+        between them is the whole of #881.
+
+        Falls back to the ledger length for a session object that has no
+        ``get_turns_ran`` — a duck-typed double, or a session class from
+        outside this tree.  That fallback is exactly the pre-#881 behaviour
+        rather than an invention, so such a caller is no worse off than
+        before; a real :class:`~shared.jaato_session.JaatoSession` never takes
+        it.
+
+        ``None`` when neither can be read, which the caller treats as "do not
+        gate" — forwarding a turn twice is recoverable, forwarding it never
+        is what hung the driver.
+        """
+        getter = getattr(session, "get_turns_ran", None)
+        if callable(getter):
+            try:
+                return int(getter())
+            except Exception:  # noqa: BLE001
+                return None
+        try:
+            return len(session.get_turn_accounting() or ())
+        except Exception:  # noqa: BLE001
+            return None
+
+    @staticmethod
+    def _last_turn_ran(session, turn_accounting) -> Optional[Dict[str, Any]]:
+        """The accounting dict of the last turn that RAN, or ``None``.
+
+        ``JaatoSession.get_last_turn_ran`` is the same object
+        ``turn_accounting[-1]`` is whenever the provider reported usage, and
+        the ONLY source for a turn where it did not — that dict still carries
+        real timing, a real ``finish_reason`` and the real ``function_calls``,
+        with zeroes only where the provider was silent.  Sourcing the payload
+        from the ledger instead is why an unmetered turn had nothing to report
+        and therefore reported nothing at all (#881).
+
+        Falls back to the ledger's last entry, then to ``None``.
+        """
+        getter = getattr(session, "get_last_turn_ran", None)
+        if callable(getter):
+            try:
+                last = getter()
+            except Exception:  # noqa: BLE001
+                last = None
+            if last is not None:
+                return last
+        return turn_accounting[-1] if turn_accounting else None
+
     def _forward_post_turn_hooks(self, session, turns_before) -> None:
         """Fire the post-turn ``AgentUIHooks`` fan-out for a turn that RAN.
 
@@ -3490,13 +4017,25 @@ class RunnerRPC:
         own budget ends by cancellation, so the leak hit exactly the
         children whose spend mattered most.
 
-        Gated on a NEW turn having landed in ``turn_accounting``
-        (``turns_before`` snapshot).  That is the mechanical guarantee: the
-        payload is sourced from ``turn_accounting[-1]``, so firing when
-        nothing was appended re-emits the PREVIOUS turn's tokens and
-        duration — which is what a REFUSED turn would do, and why refused
-        turns must stay suppressed.  The count check subsumes the
-        refused-flag check and covers every other no-op path too.
+        Gated on a NEW turn having RUN (``turns_before`` snapshot against
+        :meth:`_turns_ran_snapshot`).  That is the mechanical guarantee: the
+        payload is one turn's accounting dict, so firing when no turn ran
+        re-emits the PREVIOUS turn's tokens and duration — which is what a
+        REFUSED turn would do, and why refused turns must stay suppressed.
+        The count check subsumes the refused-flag check and covers every
+        other no-op path too.
+
+        **The counter is a lifecycle fact, not a usage one (#881).**  It used
+        to be ``len(turn_accounting)``, which the session only grows when the
+        provider reported tokens — so a turn that ran and reported nothing
+        fired NEITHER half of the terminus, and a driver waiting on
+        ``TurnCompletedEvent`` (``ask()`` / ``stream()``) or on
+        ``SessionTerminatedEvent`` (``complete()``) blocked until its own
+        timeout while the daemon sat content and logged nothing.  Any
+        provider can be in that state — a stream that never delivers a usage
+        frame, a gateway that drops the field, a zero-cost cached turn — and
+        ``echo`` is simply where it is guaranteed, which is the first thing
+        every new harness reaches for.
 
         Best-effort throughout: forwarding failure must not corrupt the
         send_message response.
@@ -3508,17 +4047,28 @@ class RunnerRPC:
             turn_accounting = session.get_turn_accounting() or []
         except Exception:  # noqa: BLE001
             return
+        # Named on the CLASS, not through ``self``: this method is driven
+        # with a stand-in ``self`` by the runner tests (it reaches nothing
+        # on the instance), so a bound lookup would make the helpers
+        # unreachable there.
+        turns_now = RunnerRPC._turns_ran_snapshot(session)
         # No new turn => nothing completed => do not re-emit the last one.
-        if turns_before is not None and len(turn_accounting) <= turns_before:
+        if (turns_before is not None and turns_now is not None
+                and turns_now <= turns_before):
             return
-        if not turn_accounting:
+        last_turn = RunnerRPC._last_turn_ran(session, turn_accounting)
+        if last_turn is None:
             return
         try:
             agent_id = getattr(session, "_agent_id", None) or "main"
-            last_turn = turn_accounting[-1]
+            turn_number = max(
+                0,
+                (turns_now if turns_now is not None
+                 else len(turn_accounting)) - 1,
+            )
             ui_hooks.on_agent_turn_completed(
                 agent_id=agent_id,
-                turn_number=max(0, len(turn_accounting) - 1),
+                turn_number=turn_number,
                 prompt_tokens=last_turn.get("prompt", 0),
                 output_tokens=last_turn.get("output", 0),
                 total_tokens=last_turn.get("total", 0),
@@ -4023,6 +4573,9 @@ class RunnerRPC:
         This handler is just the session-level lifecycle bookend
         that mirrors the bootstrap-then-shutdown cycle.
 
+        It also releases the session's plugin resources — see
+        :meth:`_release_session_plugins` (#890).
+
         Returns:
             ``(True, {"shutdown_session_id": str})`` on success.
             ``"shutdown_session_id"`` is the id of the session that
@@ -4046,6 +4599,7 @@ class RunnerRPC:
 
         session_id = host.session_id
         session = host.session
+        close_error: Optional[Exception] = None
         if session is not None:
             close = getattr(session, "close_session", None)
             if callable(close):
@@ -4058,15 +4612,62 @@ class RunnerRPC:
                         "surfacing error to daemon",
                         session_id, exc, exc_info=True,
                     )
-                    return False, {
-                        "error": (
-                            f"session.shutdown: close_session raised "
-                            f"{type(exc).__name__}: {exc}"
-                        ),
-                        "stage": "close",
-                    }
+                    close_error = exc
+
+        # #890: release plugin resources AFTER the on_session_end hooks
+        # (same order as ``session.end``, so a hook still sees live
+        # plugins) and on BOTH outcomes — a close_session that raised is
+        # exactly when an abandoned language server is most likely, so
+        # returning the error without reaping would trade one failure for
+        # a leak.
+        self._release_session_plugins(host, session)
+
+        if close_error is not None:
+            return False, {
+                "error": (
+                    f"session.shutdown: close_session raised "
+                    f"{type(close_error).__name__}: {close_error}"
+                ),
+                "stage": "close",
+            }
 
         return True, {"shutdown_session_id": session_id}
+
+    def _release_session_plugins(self, host: Any, session: Any) -> None:
+        """Reap every plugin resource this runner still owns (#890).
+
+        The COLD counterpart of the release :meth:`_handle_session_end`
+        performs.  The daemon reaches ``session.shutdown`` only when the
+        slot is NOT going back to the pool, so nothing here will adopt a
+        parked plugin and nothing will reuse this registry: both are shut
+        down rather than kept warm.
+
+        Doing it here, before the daemon's close ladder starts, is what
+        makes the teardown graceful — ``shutdown()`` gives a language
+        server a terminate-then-wait, whereas the process-exit backstop a
+        plugin registers for itself can only SIGKILL, and a SIGTERM that
+        outruns ``atexit`` reaps nothing at all.
+
+        Best-effort throughout: a teardown failure must not turn a
+        shutdown into an error the daemon has to handle.
+        """
+        try:
+            from . import slot_plugins
+            slot_plugins.release_all(reason="session.shutdown (cold path)")
+            runtime = getattr(session, "_runtime", None) if session else None
+            registry = getattr(runtime, "registry", None) if runtime else None
+            if registry is not None:
+                # ``allow_carry=False``: parking for a next session that
+                # will never arrive is a slower leak, not a fix.
+                slot_plugins.park_from(
+                    registry, getattr(host, "envelope", None),
+                    allow_carry=False,
+                )
+        except Exception:  # noqa: BLE001 — best-effort teardown
+            logger.exception(
+                "session.shutdown: releasing plugin resources raised; "
+                "the session is closed regardless",
+            )
 
     def _handle_session_request_stop(
         self, args: Dict[str, Any],
@@ -4680,14 +5281,67 @@ class RunnerRPC:
         with self._session_lock:
             return self._session_host
 
-    def _handle_cancel(self, frame: CancelFrame) -> None:
+    def cancel_stats(self) -> Dict[str, int]:
+        """Snapshot of the cancel-frame counters (#988).
+
+        Keys: ``received`` (frames decoded), ``tripped`` (matched an
+        in-flight call), ``late`` (the call had already finished —
+        benign), ``unknown`` (an id this runner never registered — an
+        anomaly, and the shape a lost cancel used to take).
+
+        ``received == tripped + late + unknown`` holds by construction,
+        so a nonzero ``unknown`` is the one number that says "a cancel
+        reached this runner and nothing was cancelled".
+        """
         with self._active_lock:
+            return dict(self._cancel_counts)
+
+    def _handle_cancel(self, frame: CancelFrame) -> None:
+        """Trip the cancel token for *frame.id*, or say why it could not.
+
+        Runs on the reader thread, in wire order, which is what makes
+        the miss branches below genuinely exceptional — see
+        :class:`_ActiveCall`.  Before #988 this method had one miss
+        branch logged at DEBUG, so a cancel the daemon had written to
+        the wire and the runner had decoded could vanish leaving no
+        trace at any level an operator runs at.
+
+        The two misses are NOT the same event and no longer read the
+        same:
+
+        * ``id <= _highest_request_id`` — the call finished before the
+          cancel arrived.  Benign and routine (any cancel racing a
+          completion does this); DEBUG.
+        * ``id > _highest_request_id`` — a cancel for a call this
+          runner was never asked to run.  The daemon believes a call is
+          in flight that is not, which is #856's signature; WARNING.
+        """
+        with self._active_lock:
+            self._cancel_counts["received"] += 1
             active = self._active_calls.get(frame.id)
+            if active is not None:
+                self._cancel_counts["tripped"] += 1
+            elif frame.id <= self._highest_request_id:
+                self._cancel_counts["late"] += 1
+            else:
+                self._cancel_counts["unknown"] += 1
+            highest = self._highest_request_id
+
         if active is None:
-            logger.debug(
-                "runner RPC: cancel for unknown call id=%d — already finished?",
-                frame.id,
-            )
+            if frame.id <= highest:
+                logger.debug(
+                    "runner RPC: cancel for call id=%d arrived after the "
+                    "call completed — nothing to trip",
+                    frame.id,
+                )
+            else:
+                logger.warning(
+                    "runner RPC: cancel for call id=%d was NOT honoured — "
+                    "this runner has never been asked to run that id "
+                    "(highest registered=%d).  The daemon believes a call "
+                    "is in flight that is not; the cancel is discarded.",
+                    frame.id, highest,
+                )
             return
         active.cancel_token.cancel()
         logger.info("runner RPC: cancel tripped for call id=%d", frame.id)
@@ -4716,7 +5370,7 @@ class RunnerRPC:
                     return
 
                 try:
-                    payload = json.loads(raw)
+                    payload = _json_loads(raw)
                 except json.JSONDecodeError as exc:
                     logger.error(
                         "runner RPC: malformed JSON frame: %s — closing", exc,
@@ -4734,6 +5388,15 @@ class RunnerRPC:
                         continue
                     logger.info(   # [RPC_DIAG] register-stall trace — DIAG BRANCH
                         "[RPC_DIAG] serve recv method=%s id=%s", env.method, env.id)
+                    # #988: register the call HERE, on the reader
+                    # thread, before the next frame is decoded — never
+                    # inside the worker that runs it.  Every branch
+                    # below hands the resulting token to
+                    # ``_handle_request`` so the worker publishes the
+                    # same object to its thread-local.  See
+                    # :class:`_ActiveCall` for what the worker-side
+                    # registration cost us.
+                    call_token = self._register_call(env.id)
                     if env.method == "session.bootstrap":
                         # Pool PR 5a-fix: ``session.bootstrap`` runs
                         # synchronously on the main thread (NOT via
@@ -4747,10 +5410,26 @@ class RunnerRPC:
                         # spawned workers (for tool.execute etc.)
                         # would inherit the MAIN thread's
                         # ``unconfined`` cred via pthread_create.
-                        # Running synchronously on main thread means
-                        # main confines BEFORE any worker spawns;
-                        # later worker threads inherit the confined
-                        # cred cleanly.  See the v67 cascade smoke
+                        # Running synchronously on the reader thread is
+                        # NECESSARY and, on its own, NOT SUFFICIENT.
+                        # This comment used to end "main confines BEFORE
+                        # any worker spawns; later worker threads inherit
+                        # the confined cred cleanly", which assumed no
+                        # worker existed yet.  Nothing guaranteed that:
+                        # both lanes spawn workers lazily on first
+                        # submit, and a slot fields RPCs before its first
+                        # bootstrap (``session.end`` from the previous
+                        # session of a cascade; a dispatch-watchdog
+                        # probe).  Such a worker keeps its ``unconfined``
+                        # cred for the life of the slot while
+                        # ``/proc/<pid>/attr/current`` — the MAIN
+                        # thread's label — reports ``(enforce)``.  That
+                        # is #1023, confirmed live on 2 of 5 runners of
+                        # an enforcing host.  ``bootstrap_session`` now
+                        # RECYCLES both lanes at the transition and then
+                        # verifies every thread's own label, so the
+                        # premise is enforced and checked rather than
+                        # assumed.  See the v67 cascade smoke
                         # debug for the empirical evidence (worker
                         # thread aa_change_profile silent-no-ops at
                         # the verification step because /proc/self/
@@ -4759,17 +5438,19 @@ class RunnerRPC:
                         # synchronous-on-main-thread pattern that
                         # cold-spawn uses in ``__main__.py`` step 2
                         # — pool slot now mirrors it.
-                        self._handle_request(env)
+                        self._handle_request(env, call_token)
                     elif env.method in WORK_LANE_METHODS:
                         # Unbounded: runs model or user code.
-                        self._pool.submit(self._handle_request, env)
+                        self._pool.submit(self._handle_request, env, call_token)
                     else:
                         # Control plane -- bounded work, its own lane, so it
                         # cannot queue behind a turn or a tool.  Unclassified
                         # methods land here by falling through; the guard in
                         # ``test_every_rpc_method_has_a_lane`` makes that a
                         # test failure rather than a silent latency cliff.
-                        self._control_pool.submit(self._handle_request, env)
+                        self._control_pool.submit(
+                            self._handle_request, env, call_token,
+                        )
                 elif kind == KIND_CANCEL:
                     try:
                         frame = CancelFrame.from_dict(payload)
@@ -4892,7 +5573,17 @@ class RunnerRPC:
             self._outgoing_calls[request_id] = fut
 
         env = RequestEnvelope(id=request_id, method=method, args=args or {})
-        self._write(env.to_dict())
+        if not self._write(env.to_dict()):
+            # #920: the request never left (oversized, or the peer is
+            # gone).  Waiting on a future nothing can complete would
+            # block this worker thread for the whole timeout — and
+            # forever where the caller passed none — so fail now.
+            with self._outgoing_lock:
+                self._outgoing_calls.pop(request_id, None)
+            raise RuntimeError(
+                f"runner RPC: {method!r} request was not sent "
+                f"(frame refused or channel closed)"
+            )
 
         try:
             return fut.result(timeout=timeout)
@@ -5053,16 +5744,39 @@ class _AgentUIHooksNotificationShim:
         agent_id: str,
         call_id: str,
         chunk: str,
+        stream_id: str = "",
+        sequence: Optional[int] = None,
+        mime_type: Optional[str] = None,
+        data_b64: Optional[str] = None,
+        final: bool = False,
     ) -> None:
+        """Forward a tool-output chunk from the runner to the daemon.
+
+        Media keys are added to the RPC payload only when bytes are
+        actually present, so a text chunk's frame is byte-identical to
+        before media existed -- this is the hottest notification on the
+        runner boundary and text is the overwhelmingly common case.
+
+        ``data_b64`` is already base64 (the caller encodes at the
+        ``StreamChunk`` boundary), so no bytes cross this JSON frame raw.
+        """
         try:
+            payload = {
+                "agent_id": str(agent_id or ""),
+                "call_id": str(call_id or ""),
+                "chunk": str(chunk or ""),
+            }
+            if mime_type and data_b64:
+                payload["mime_type"] = str(mime_type)
+                payload["data_b64"] = str(data_b64)
+                payload["stream_id"] = str(stream_id or "")
+                payload["final"] = bool(final)
+                if sequence is not None:
+                    payload["sequence"] = int(sequence)
             self._rpc.emit_notification(
                 request_id=self._request_id,
                 event_type=self._rpc._NOTIF_TOOL_OUTPUT,
-                payload={
-                    "agent_id": str(agent_id or ""),
-                    "call_id": str(call_id or ""),
-                    "chunk": str(chunk or ""),
-                },
+                payload=payload,
             )
         except Exception:  # noqa: BLE001
             logger.exception("tool_output notify raised")
@@ -5387,10 +6101,21 @@ class _AgentUIHooksNotificationShim:
         stores the snapshot under ``server._agents[agent_id].history``
         for the persist/restore + session-inspector paths.
 
-        ``history`` is an opaque snapshot — passed through to the
-        daemon verbatim.  Pydantic JSON serialization happens at
-        ``emit_notification`` time; the daemon-side demuxer just
-        forwards the deserialized payload.
+        ``history`` is a list of :class:`Message` objects, and it is
+        serialized HERE — with the canonical session serializer, the
+        same wire shape ``session.get_history`` uses — rather than
+        being handed to the frame encoder as opaque objects (#920).
+
+        That was the shape of the reported crash.  A ``Message`` is not
+        JSON-serializable, so the encoder's catch-all rendered each one
+        as its **Python repr**, including the repr of any audio bytes it
+        carried: a 3.83 MB utterance became a 16.7 MB frame, over the
+        10 MB cap, and the daemon closed the transport mid-turn.  The
+        canonical serializer base64s ``inline_data`` instead (1.33x),
+        and — the half that was failing silently — the daemon gets
+        ``Message`` objects back rather than a list of repr strings it
+        stores as ``AgentState.history`` and replays to reconnecting
+        clients.
         """
         try:
             self._rpc.emit_notification(
@@ -5398,7 +6123,7 @@ class _AgentUIHooksNotificationShim:
                 event_type=self._rpc._NOTIF_AGENT_HISTORY_UPDATED,
                 payload={
                     "agent_id": str(agent_id or ""),
-                    "history": history,
+                    "history": _serialize_history_for_wire(history or ()),
                 },
             )
         except Exception:  # noqa: BLE001
@@ -5420,7 +6145,9 @@ def _serialize_message_for_wire(msg: Any) -> Any:
     """JSON-friendly serialization of a conversation Message
     (Phase 3 §3.3c precursor).
 
-    Used by the runner-side ``session.get_history`` handler.  Tries
+    Used by :func:`_serialize_history_for_wire`, and through it by
+    both history-carrying wire paths — the ``session.get_history``
+    handler and the ``agent_history_updated`` notification.  Tries
     in order:
 
     1. ``msg.to_dict()`` if defined — custom message types (test
@@ -5461,6 +6188,32 @@ def _serialize_message_for_wire(msg: Any) -> Any:
     if dataclasses.is_dataclass(msg) and not isinstance(msg, type):
         return _coerce_for_json(dataclasses.asdict(msg))
     return msg
+
+
+def _serialize_history_for_wire(messages: Any) -> List[Any]:
+    """Serialize a whole conversation history for the RPC wire.
+
+    Wraps :func:`_serialize_message_for_wire` per message so a single
+    unserialisable one cannot drop the rest: the failure is replaced by
+    a placeholder, keeping the message count — which several daemon-side
+    consumers read — accurate.
+
+    Used by BOTH history-carrying wire paths: the ``session.get_history``
+    handler and the ``agent_history_updated`` notification.  The
+    notification used to pass raw ``Message`` objects to the frame
+    encoder, whose catch-all stringified them (#920) — sharing this
+    helper is what keeps the two paths from drifting apart again.
+    """
+    out: List[Any] = []
+    for msg in messages or ():
+        try:
+            out.append(_serialize_message_for_wire(msg))
+        except Exception:  # noqa: BLE001 — boundary
+            # Single-message serialization failure must not drop the
+            # whole history — substitute a placeholder so the count
+            # stays accurate and the daemon can log the issue.
+            out.append({"role": "system", "content": "<unserialisable>"})
+    return out
 
 
 def _coerce_for_json(value: Any) -> Any:

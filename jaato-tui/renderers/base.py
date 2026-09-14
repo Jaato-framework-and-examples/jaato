@@ -110,8 +110,19 @@ class Renderer(ABC):
         agent_id: str,
         call_id: str,
         chunk: str,
+        stream_id: str = "",
+        sequence: Optional[int] = None,
+        mime_type: Optional[str] = None,
+        data_b64: Optional[str] = None,
+        final: bool = False,
     ) -> None:
-        """Handle live tool output chunk."""
+        """Handle live tool output chunk (text and/or binary media).
+
+        Media arguments are keyword-with-default and are passed only when
+        bytes are present, so a renderer that only handles text can ignore
+        them entirely.  A renderer MUST NOT feed ``data_b64`` through a
+        text formatter or terminal emulator -- both corrupt bytes.
+        """
         pass
 
     # ==================== Permissions ====================

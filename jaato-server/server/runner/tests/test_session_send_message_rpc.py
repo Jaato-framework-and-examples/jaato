@@ -454,13 +454,36 @@ class _SpyRPC:
 class _SessionWithAccessors(_FakeSession):
     """Extends the bare _FakeSession with the accessors the
     post-turn forwarding block reads.  ``_ui_hooks`` is overwritten
-    by the IPC handler's install step; we don't touch it here."""
+    by the IPC handler's install step; we don't touch it here.
+
+    **A turn that completes APPENDS to turn accounting.**  Set
+    ``pending_turn`` to the record this session's ``send_message``
+    should append, the way a real ``JaatoSession`` does.  Do not
+    pre-seed ``_turn_accounting`` with the turn under test instead:
+    ``_forward_post_turn_hooks`` snapshots ``len(turn_accounting)``
+    before the send and returns early when nothing was appended --
+    deliberately, since its payload comes from ``turn_accounting[-1]``
+    and firing on a no-op re-emits the PREVIOUS turn's tokens, which is
+    exactly what a REFUSED turn would do.  A fake that pre-seeds models
+    a turn that never ran, so production is correct to stay silent and
+    the assertion pins "fire unconditionally" rather than the ordering
+    it claims to pin (#736).
+    """
 
     def __init__(self) -> None:
         super().__init__()
         self._ui_hooks: Optional[Any] = None
         self._agent_id: str = "main"
         self._turn_accounting: List[Dict[str, Any]] = []
+        # Appended by send_message when the turn completes; None means
+        # this fake's turn records nothing (the pre-existing default).
+        self.pending_turn: Optional[Dict[str, Any]] = None
+
+    def send_message(self, message: str, **kwargs: Any) -> str:
+        result = super().send_message(message, **kwargs)
+        if self.pending_turn is not None:
+            self._turn_accounting.append(self.pending_turn)
+        return result
         self._context_usage: Dict[str, Any] = {
             "total_tokens": 0,
             "prompt_tokens": 0,
@@ -497,19 +520,20 @@ def test_send_message_fires_post_turn_notifications_in_order() -> None:
     session = _SessionWithAccessors()
     session.response = "hello"
     session._agent_id = "main"
-    session._turn_accounting = [
-        {
-            "prompt": 1500,
-            "output": 200,
-            "total": 1700,
-            "duration_seconds": 3.5,
-            "function_calls": [
-                {"name": "list_tools", "duration_seconds": 0.02},
-            ],
-            "cache_read": 1000,
-            "cache_creation": 500,
-        },
-    ]
+    # The turn this send APPENDS -- see _SessionWithAccessors.  Pinning
+    # the ordering requires a turn that actually landed, because
+    # _forward_post_turn_hooks is (correctly) gated on one having.
+    session.pending_turn = {
+        "prompt": 1500,
+        "output": 200,
+        "total": 1700,
+        "duration_seconds": 3.5,
+        "function_calls": [
+            {"name": "list_tools", "duration_seconds": 0.02},
+        ],
+        "cache_read": 1000,
+        "cache_creation": 500,
+    }
     session._context_usage = {
         "total_tokens": 1700,
         "prompt_tokens": 1500,

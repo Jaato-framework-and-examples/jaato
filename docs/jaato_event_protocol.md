@@ -378,7 +378,9 @@ The permission flow is a **request-response cycle** involving three server event
 │    │  PermissionResolvedEvent                           │            │
 │    │  ├─ request_id: "perm-001"                        │            │
 │    │  ├─ granted: true                                 │            │
-│    │  └─ method: "user_approved"                       │            │
+│    │  ├─ method: "user_approved"                       │            │
+│    │  ├─ user_id: "sso|alice"   (who answered, #859)   │            │
+│    │  └─ approver: null         (external system's)    │            │
 │    │ ─────────────────────────────────────────────────► │            │
 │    │                                          Clears permission      │
 │    │                                          panel, resumes normal  │
@@ -393,6 +395,14 @@ The permission flow is a **request-response cycle** involving three server event
 | `PermissionRequested` | Output panel | Renders permission content with diff highlighting |
 | `PermissionInputMode` | Input field | Switches to permission mode, shows response options |
 | `PermissionResolved` | Input field, Tool tree | Returns to normal input; shows grant/deny in tool tree |
+
+**Who decided (#859).** `method` says how; `user_id` says which
+daemon-authenticated client answered (stamped by the transport that received
+the `PermissionResponseRequest`, so it is verified), and `approver` carries
+the name an external approval system attached to its webhook / file
+response (asserted, recorded as claimed).  Both are `null` for policy
+decisions and on unauthenticated transports, so a consumer can tell "nobody
+was asked" from "somebody answered".
 
 ---
 

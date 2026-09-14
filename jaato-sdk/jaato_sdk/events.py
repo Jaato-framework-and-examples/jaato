@@ -61,7 +61,49 @@ from pydantic import BaseModel, ConfigDict, Field
 # the target will ACT on the message rather than only that it was accepted
 # into a queue.  Older clients that send no ``request_id`` get the previous
 # fire-and-forget behaviour unchanged.
-PROTOCOL_VERSION = "1.3"
+# 1.4 (2026-09-05): additive optional ``stream_id`` / ``sequence`` /
+# ``mime_type`` / ``data_b64`` / ``final`` on ToolOutputEvent, carrying
+# BINARY media -- a tool's attachments and the model's own speech -- on
+# the existing tool-output channel rather than a rival event.  Older
+# clients ignore the fields and see the text stream exactly as before,
+# so the compat rule holds.  A client that needs to RECEIVE media must
+# declare ``min_protocol_version="1.4"``: against a 1.3 daemon the
+# fields are simply never sent, which is indistinguishable from a model
+# that chose not to speak.
+# 1.5 (2026-09-09): additive optional ``attachments`` on
+# InjectPromptRequest, so the two RESUME verbs (``session.wake`` and
+# ``inject_prompt``) carry the same binary content ``send_message``
+# already accepts.  Before it, a session whose input is audio (or an
+# image, or a PDF) could be STARTED with that content and never driven
+# again with it -- the resume path was closed to exactly the sessions
+# #830 made possible.  Older daemons ignore the field, which for BYTES
+# is not a benign no-op: a client that sends attachments must declare
+# ``min_protocol_version="1.5"`` (the SDK refuses the call rather than
+# letting the payload be silently dropped).
+# 1.6 (2026-09-12): additive optional ``answer_attachments`` on
+# ClarificationBatchResponseEvent, so a clarification ANSWER can carry
+# media -- a voice note answering "what is your name", a screenshot
+# answering "how should we design this".  Plus an advisory
+# ``expects_attachment`` flag on a question's individual CHOICES, so a
+# client can render an attach control on the branch that wants a file.
+# Same reasoning as 1.5 and the same consequence: an older daemon
+# ignores the field, and a clarification answered with the audio
+# dropped is a BLANK answer reported as a successful one (``_parse_answer``
+# reads an empty response as ``free_text=""``), so a client that sends
+# attachments must declare ``min_protocol_version="1.6"`` -- the SDK
+# refuses the call below it.
+# 1.7 -- ``session.orphans`` and ``session.stop``: list the LOADED sessions
+# with no client attached, and stop ANY session by id rather than only the
+# caller's own (#812).  A session whose client died kept running for seven
+# minutes and $2.52, and could not be identified or stopped from outside.
+#
+# Unlike every additive FIELD above, a missing VERB does not degrade
+# harmlessly: an older daemon does not recognise ``session.stop``, so the
+# call is a silent no-op and the caller is told nothing -- while believing a
+# runaway session has been stopped.  That is the #845 verdict (refuse, don't
+# degrade) applied to a command rather than a payload, so the SDK raises
+# below ``MIN_SESSION_STOP_PROTOCOL``.
+PROTOCOL_VERSION = "1.7"
 
 
 # =============================================================================
@@ -687,12 +729,83 @@ class ToolCallEndEvent(Event):
     show_popup: Optional[bool] = None  # Whether to track/update the tool output popup (None = default True)
 
 
+#: Reserved ``ToolOutputEvent.call_id`` for media the MODEL produced, as
+#: opposed to media a tool returned under its own call id.  Defined here,
+#: on the CLIENT side of the wire, because it is the clients that must
+#: read it: the daemon writes one value, every consumer compares against
+#: it, and a literal copied into each consumer is a shared constant with
+#: no single owner.
+MODEL_MEDIA_CALL_ID = "model-output"
+
+
 class ToolOutputEvent(Event):
-    """Live output chunk from a running tool (tail -f style)."""
+    """Live output chunk from a running tool (tail -f style).
+
+    Carries text, binary media, or both.  This event is widened rather
+    than joined by a rival media event because it already correlates by
+    ``call_id``, is already mapped onto the in-process bus, and clients
+    already subscribe to it -- so widening the payload lights up all
+    three subscription surfaces (SDK client, ``subscribeToEvents`` agent
+    tool, ``EventBus``) at once, with no new API on any of them.
+
+    A whole-blob delivery -- a tool returning one finished WAV -- is just
+    a single-chunk stream: ``sequence=0, final=True``.
+
+    Attributes:
+        agent_id: Which agent produced the chunk.
+        call_id: Correlates the chunk with a specific tool call.
+        chunk: Output text (may contain newlines).  Empty for a
+            pure-media chunk -- except the ``final`` chunk of MODEL
+            speech (:meth:`is_model_speech`), which carries the
+            utterance's transcript (#869) when the model wrote no text
+            of its own that turn; a turn that both wrote and spoke
+            delivered its words as ``AGENT_OUTPUT`` and this stays
+            empty, so a client never receives the same words twice.
+        stream_id: Correlates chunks belonging to one media stream.
+            Empty for unstreamed text, preserving existing frames.
+        sequence: Ordering, passed through from
+            :attr:`StreamChunk.sequence` rather than re-counted here --
+            a second counter would be a second source of truth.
+        mime_type: Tags the ``data_b64`` payload (e.g. ``"audio/wav"``).
+        data_b64: Base64-encoded binary payload (+33% over the raw
+            bytes; the frame is UTF-8 JSON).
+        final: Last chunk of this stream, so a client can close its
+            playback buffer or finish writing the file without waiting
+            on a separate completion event.
+
+    Note:
+        When ``mime_type``/``data_b64`` are set the chunk MUST bypass the
+        text formatter pipeline -- see ``server/core.py`` ``on_tool_output``.
+        A formatter that reflows text corrupts bytes.
+    """
     type: EventType = Field(default=EventType.TOOL_OUTPUT)
     agent_id: str = ""
     call_id: str = ""  # Required to correlate with specific tool call
     chunk: str = ""  # Output text chunk (may contain newlines)
+    stream_id: str = ""  # Correlates chunks of one media stream
+    sequence: Optional[int] = None  # From StreamChunk.sequence
+    mime_type: Optional[str] = None  # Tags the data_b64 payload
+    data_b64: Optional[str] = None  # Base64 binary payload
+    final: bool = False  # Last chunk of this stream
+
+    def is_media(self) -> bool:
+        """Whether this event carries a binary payload.
+
+        The predicate routing code should use, so "has bytes" is defined
+        once rather than re-derived at each call site.
+        """
+        return bool(self.mime_type and self.data_b64)
+
+    def is_model_speech(self) -> bool:
+        """Whether these bytes are the MODEL's own output, not a tool's.
+
+        Both travel on this event; :data:`MODEL_MEDIA_CALL_ID` is what
+        separates them.  Offered here because every client needs the
+        distinction — audio the model produced is played, a tool's
+        attachment is saved or shown — and without it each one
+        rediscovers the literal ``"model-output"``.
+        """
+        return self.is_media() and self.call_id == MODEL_MEDIA_CALL_ID
 
 
 class PermissionResponseOption(BaseModel):
@@ -741,7 +854,26 @@ class PermissionInputModeEvent(Event):
 
 
 class PermissionResolvedEvent(Event):
-    """Permission has been resolved (granted or denied)."""
+    """Permission has been resolved (granted or denied).
+
+    ``method`` says HOW the decision was reached (a policy rule, an
+    evaluator, or the channel the ASK went through); ``user_id`` and
+    ``approver`` say WHO reached it (issue #859).  Both identity fields
+    are ``None`` for policy decisions and for unauthenticated sessions,
+    so an auditor can tell "nobody was asked" from "somebody answered":
+
+    - ``user_id`` is the identity the DAEMON authenticated for the client
+      that answered the prompt (``set_client_user()`` — WS/SSO
+      deployments; local IPC carries no user).  It is stamped by the
+      transport that received the ``PermissionResponseRequest``, never
+      by the client itself, so it is the verified half of the trail.
+    - ``approver`` is an identity ASSERTED by whoever answered on the
+      decision's channel: the ``approver`` key of a webhook / file
+      channel response, naming the human an external approval system
+      consulted.  The daemon cannot verify it; it is recorded as
+      claimed, so the trail can still say who the external system says
+      approved.
+    """
     type: EventType = Field(default=EventType.PERMISSION_RESOLVED)
     agent_id: str = ""  # Which agent's permission was resolved
     request_id: str = ""
@@ -749,6 +881,12 @@ class PermissionResolvedEvent(Event):
     granted: bool = False
     method: str = ""  # "user", "whitelist", "blacklist", "default"
     comment: str = ""  # Advisory comment (from yc: or ALLOW_WITH_COMMENT evaluator)
+    # Daemon-authenticated identity of the client that answered the
+    # prompt; None for policy decisions and unauthenticated (IPC) clients.
+    user_id: Optional[str] = None
+    # Identity an external approval system attached to its response
+    # (webhook / file channel ``approver`` key); None when none was given.
+    approver: Optional[str] = None
 
 
 class PermissionStatusEvent(Event):
@@ -836,7 +974,16 @@ class ClarificationBatchEvent(Event):
     tool_name: str = ""
     context: str = ""
     questions: List[Dict[str, Any]] = Field(default_factory=list)
-    # ^ List of {index, text, question_type, required, choices: [{text, default?}]}
+    # ^ List of {index, text, question_type, required,
+    #            choices: [{text, default?, expects_attachment?}]}
+    #
+    #   ``expects_attachment`` (protocol 1.6, #989) marks a CHOICE whose
+    #   branch expects the user to attach a file -- "1. you attach a
+    #   screenshot" vs "2. we discuss it".  Per choice rather than per
+    #   question because that is where the case splits.  Advisory: a
+    #   client renders an attach control on that choice, and nothing
+    #   refuses an answer that ignores it.  Absent means false, so a
+    #   client that does not know the key behaves exactly as before.
     batch_only: bool = False
     # ^ True when this event is the ONLY delivery of the questions and the
     #   only way to answer them.  False means the per-question
@@ -859,6 +1006,30 @@ class ClarificationBatchResponseEvent(Event):
     # ^ Ordered list of answers, one per question (by index)
     cancelled: bool = False
     # ^ True to cancel the clarification outright (answers ignored).
+    answer_attachments: Dict[str, List[Dict[str, Any]]] = Field(
+        default_factory=dict
+    )
+    # ^ Media attached to individual ANSWERS (protocol 1.6, #989), keyed
+    #   by 1-based question index as a decimal string ("1", "2", ...) —
+    #   JSON object keys are strings, and the daemon accepts either
+    #   spelling.  Each entry is the canonical attachment dict
+    #   ``{mime_type, data: base64-str, display_name, attachment_id}``,
+    #   the same shape ``send_message(attachments=...)`` takes.
+    #
+    #   A PARALLEL field rather than a widening of ``answers`` into a
+    #   union: ``respond_to_clarification_batch(request_id, answers)`` is
+    #   positional in the TUI, the TS SDK and the web store, and a union
+    #   would break each of them silently.
+    #
+    #   Orthogonal to the answer's TYPE.  An attachment on a choice
+    #   answer is meaningful and is carried — picking "1. you attach a
+    #   screenshot" and attaching it is the ordinal AND the image.
+    #
+    #   The daemon validates the whole map before resolving anything: an
+    #   index that names no question, an undecodable payload, or a batch
+    #   over the per-submission byte cap is answered with an
+    #   ``ErrorEvent`` and the clarification stays OPEN for a corrected
+    #   submission.  Ignored when ``cancelled``.
 
 
 class ReferenceSelectionRequestedEvent(Event):
@@ -1185,18 +1356,39 @@ class TurnCompletedEvent(Event):
     #: never had a completion schema and every turn that legitimately has
     #: more work to do.
     #:
-    #: ``"not_signalled_after_nudges"`` means the framework EXPECTED a
+    #: ``"not_signalled_after_nudges"`` would mean the framework EXPECTED a
     #: completion here and gave up asking: ``signal_completion`` was in the
     #: session's tool surface, the model ended its loop without calling it,
-    #: and the nudge budget (``MAX_COMPLETION_NUDGES``) is spent.
+    #: and the nudge budget (``max_completion_nudges``) is spent.
     #:
-    #: This is the only signal a consumer gets in that state. No
-    #: ``AgentCompletedEvent`` fires (only ``signal_completion`` produces
-    #: one) and no ``SessionTerminatedEvent`` fires (quiescence is gated on
-    #: ``signal_completion`` having been called), so a cascade driver
-    #: otherwise sees a turn end and must INVENT a reason for the missing
-    #: payload -- typically blaming the schema, which is the one thing that
-    #: was fine.
+    #: **No daemon in this tree delivers that value, and none is expected
+    #: to.  Watch the terminal instead** (#771):
+    #:
+    #: .. code-block:: python
+    #:
+    #:     SessionTerminatedEvent / ErrorEvent  with
+    #:     error_type == "NudgeExhausted"
+    #:
+    #: Why the field does not arrive on the path it describes: the value is
+    #: written in exactly one place -- ``server/core.py``
+    #: ``_start_model_thread``, in the ``status == "done"`` handler -- and
+    #: that runs AFTER ``on_agent_turn_completed`` has already built this
+    #: event, read the field and cleared it.  The session then terminates,
+    #: so no later turn event picks it up.  It is the one and only writer
+    #: in the server, which makes ``completion_gap`` reliably ``None`` for
+    #: every consumer today.
+    #:
+    #: The terminal is the better signal in any case, which is why this is
+    #: documented rather than plumbed: it is typed, unconditional, and
+    #: actually terminal.  ``jaato_eval`` already routes on it --
+    #: ``sign_off.UNSIGNED_TERMINALS == frozenset({"NudgeExhausted"})`` --
+    #: to tell an agent that worked and never signalled apart from a daemon
+    #: that died mid-turn.
+    #:
+    #: The field is kept (rather than removed) because it is part of a
+    #: released wire shape and a consumer may set or forward it; treat a
+    #: value arriving here as advisory, and never read its ABSENCE as
+    #: evidence that the completion was signalled.
     completion_gap: Optional[str] = None
     duration_seconds: float = 0.0
     function_calls: List[Dict[str, Any]] = Field(default_factory=list)
@@ -1853,16 +2045,41 @@ class InjectPromptRequest(Event):
       model at the next safe point).
     * ``"child"`` — CHILD priority (queued behind in-flight work; runs
       when the agent would otherwise stop, the "follow-up" pattern).
+    * ``"sibling"`` — SIBLING priority (idle-only, like ``"child"``,
+      and never mid-turn): another SESSION sharing this cascade's
+      ``cascade_driver_id``.  Siblings coordinate, they do not
+      control, which is what keeps them out of the high-priority
+      tier.
     * ``"system"`` / ``"event"`` / ``"parent"`` — other priority
       tiers from :class:`SourceType` for reactor / hook callers.
+
+    The daemon derives the accepted set from ``SourceType`` itself and
+    rejects anything outside it, so this list is the whole vocabulary —
+    all six members, not a selection from them.
 
     Single verb covers both pi-agent's ``steer`` and ``followUp``
     patterns via the priority dimension.
     """
     type: EventType = Field(default=EventType.INJECT_PROMPT_REQUEST)
     text: str = ""
-    source_type: str = "user"  # "user" | "child" | "system" | "event" | "parent"
+    # "user" | "child" | "sibling" | "system" | "event" | "parent"
+    source_type: str = "user"
     source_id: Optional[str] = None  # caller identifier for telemetry / logs
+    #: Binary user content in the same canonical wire shape
+    #: :class:`SendMessageRequest` accepts (``{mime_type, data: base64-str,
+    #: display_name, attachment_id}``), normalised client-side by
+    #: ``IPCClient._normalize_attachments``.  Protocol 1.5+.
+    #:
+    #: AN ATTACHMENT-BEARING INJECT IS IDLE-ONLY.  The two outcomes of an
+    #: inject are "drive a turn" and "queue behind the running one", and
+    #: only the first can carry bytes: a queued message is folded into the
+    #: running turn as TEXT (appended to a tool result's model suffix, or
+    #: replayed as a user text message), and there is nowhere in either
+    #: shape to put an ``inline_data`` part.  So the daemon offers an
+    #: attachment-bearing message with ``require_idle``: a busy target
+    #: answers ``"busy"`` with NOTHING enqueued, rather than accepting the
+    #: message and dropping its payload.  Retry when the target goes idle.
+    attachments: List[Dict[str, Any]] = Field(default_factory=list)
     #: Correlates this inject with the :class:`InjectPromptResultEvent` that
     #: answers it.  ``None`` (the default, and what every pre-1.3 client
     #: sends) keeps the historical fire-and-forget behaviour: the daemon
@@ -1884,6 +2101,11 @@ class InjectPromptResultEvent(Event):
     * ``"accepted"``    — the target was idle, so a turn was STARTED on it.
     * ``"queued"``      — the target is mid-turn; its running turn will
       drain the message.
+    * ``"busy"``        — the target is mid-turn and NOTHING was enqueued.
+      Reachable when the inject carried ``attachments``: the queued path
+      folds a message into the running turn as text and cannot carry bytes,
+      so an attachment-bearing inject is offered idle-only rather than
+      accepted with its payload dropped.  Retry-safe; retry when idle.
     * ``"terminated"``  — the target is loaded but terminal and will run no
       further turns.  Reported from the target's own terminal stamp, never
       inferred from silence.
@@ -2272,6 +2494,11 @@ class PresentationContext(BaseModel):
         supports_expandable_content: Whether the client can collapse overflow
             behind an expand/click affordance (e.g. Telegram inline buttons,
             HTML details, TUI panels).
+        renderable_media: MIME types this client can present to a person,
+            e.g. ``["image/png", "audio/*"]``.  Wildcards of the form
+            ``type/*`` are honoured by :meth:`can_render_media`.  Empty
+            (the default) means the client can present none -- the honest
+            answer for a plain terminal.
         client_type: The kind of client (see ``ClientType`` enum).
     """
 
@@ -2289,6 +2516,19 @@ class PresentationContext(BaseModel):
     supports_mermaid: bool = False
     supports_expandable_content: bool = False
 
+    # ── Playable / renderable media ─────────────────────────────
+    # MIME types (or ``type/*`` wildcards) this client can present to a
+    # person.  A TUI declares none, a web client image+audio, a voice
+    # client audio only.  Empty is the honest default: a client that has
+    # not said it can play something cannot.
+    #
+    # This is the CLIENT axis and is kept strictly apart from the MODEL
+    # axis (``model_tiers.<tier>.modalities``, consumed by the content
+    # gate).  Conflating them is the easiest mistake here: they have
+    # different owners and different lifetimes -- what a model can consume
+    # is fixed by the tier, what a viewer can play changes per connection.
+    renderable_media: List[str] = Field(default_factory=list)
+
     # ── Client hint ─────────────────────────────────────────────
     client_type: ClientType = ClientType.TERMINAL
 
@@ -2298,6 +2538,29 @@ class PresentationContext(BaseModel):
     communication_style: Optional['CommunicationStyle'] = None
 
     # ──────────────────────────────────────────────────────────
+
+    def can_render_media(self, mime_type: Optional[str]) -> bool:
+        """Whether this client declares it can present ``mime_type``.
+
+        Matches an exact type first, then a ``type/*`` wildcard.  Any
+        parameters on the supplied type are ignored for matching, so a
+        client declaring ``"audio/pcm"`` still matches a payload tagged
+        ``"audio/pcm;rate=24000;channels=1"`` -- the parameters describe
+        how to play it, not whether it can be played.
+
+        A falsy ``mime_type`` is not renderable: absence of a type is not
+        a claim about one.
+        """
+        if not mime_type:
+            return False
+        base = mime_type.split(";", 1)[0].strip().lower()
+        if not base:
+            return False
+        declared = {m.strip().lower() for m in self.renderable_media if m}
+        if base in declared:
+            return True
+        top = base.split("/", 1)[0]
+        return f"{top}/*" in declared
 
     def to_system_instruction(self) -> str:
         """Generate a compact display-context block for system instructions.
@@ -2912,3 +3175,84 @@ def create_event(event_type: EventType, **kwargs) -> Event:
         raise ValueError(f"Unknown event type: {event_type}")
 
     return event_class(**kwargs)
+
+
+# =============================================================================
+# Event-type-name filters (cascade observers)
+# =============================================================================
+#
+# ``cascade_events(event_types=[...])`` and the daemon's
+# ``register_in_process_client(event_types=...)`` filter on the Python CLASS
+# name (``type(event).__name__``), not on the wire value of ``EventType``.
+# The two vocabularies look interchangeable — ``"SessionTerminatedEvent"``
+# versus ``"session.terminated"`` — and a filter written in the wrong one
+# matches NOTHING while every other signal (registration succeeds, the daemon
+# logs a healthy entry) says the subscription is live.  jaato #821: the
+# scaffolded observer template shipped wire values and was silently deaf for
+# the entire life of every cascade it observed.
+#
+# These helpers exist so both sides can SAY SO instead of going quiet.
+
+
+def known_event_class_names() -> frozenset:
+    """Every event CLASS name a type-name filter can legitimately match.
+
+    This is the vocabulary of ``event_types``: the names
+    ``type(event).__name__`` produces.  Built from the wire registry plus
+    every ``Event`` subclass this module defines, so a class that has not
+    (yet) been given a wire entry is still recognised as a real name rather
+    than reported as a typo.
+    """
+    names = {cls.__name__ for cls in _EVENT_CLASSES.values()}
+    for obj in globals().values():
+        if isinstance(obj, type) and issubclass(obj, Event):
+            names.add(obj.__name__)
+    return frozenset(names)
+
+
+def check_event_type_names(names) -> "Dict[str, Optional[str]]":
+    """Report which of *names* can never match, and what was probably meant.
+
+    Returns a mapping ``{given_name: suggestion_or_None}`` containing ONLY
+    the entries that match no event class.  The suggestion is the class name
+    for the wire value that was passed — ``{"session.terminated":
+    "SessionTerminatedEvent"}`` — which is by far the most common way to get
+    this wrong, and ``None`` when the string corresponds to nothing at all.
+
+    An empty mapping means every name is a real event class.  It does NOT
+    mean the filter will match anything: a real class that this session never
+    emits is a legitimate (if idle) subscription, and this function
+    deliberately does not guess at that.
+    """
+    known = known_event_class_names()
+    bad: Dict[str, Optional[str]] = {}
+    for name in names or ():
+        if name in known:
+            continue
+        wire = _EVENT_CLASSES.get(name)
+        bad[name] = wire.__name__ if wire is not None else None
+    return bad
+
+
+def describe_event_type_problems(names) -> Optional[str]:
+    """One-line human-readable summary of :func:`check_event_type_names`.
+
+    ``None`` when every name is valid — so callers can ``if msg:`` rather
+    than re-deriving emptiness.  Used verbatim in the SDK's warning and in
+    the daemon's, so the two surfaces cannot describe the same defect
+    differently.
+    """
+    bad = check_event_type_names(names)
+    if not bad:
+        return None
+    parts = []
+    for given, suggestion in sorted(bad.items()):
+        if suggestion:
+            parts.append(f"{given!r} (a wire value — use {suggestion!r})")
+        else:
+            parts.append(f"{given!r} (matches no event class)")
+    return (
+        "event-type filter can never match: " + "; ".join(parts)
+        + ".  Filters compare against the event CLASS name "
+          "(type(event).__name__), not the EventType wire value."
+    )

@@ -25,6 +25,7 @@ class GCTriggerReason(Enum):
     TURN_LIMIT = "turn_limit"    # Maximum turn count exceeded
     PRE_MESSAGE = "pre_message"  # Triggered before sending a message
     CONTEXT_LIMIT = "context_limit"  # Model rejected request due to context limit exceeded
+    MEDIA_PRESSURE = "media_pressure"  # History carries more binary payload than media_bytes_threshold
 
 
 @dataclass
@@ -101,6 +102,31 @@ def _get_pressure_percent() -> Optional[float]:
     return value if value > 0 else None
 
 
+#: 8 MiB of binary payload in one history.  Chosen against the measurement
+#: in #850 — a five-question helpdesk call accumulated ~2.8 MB of audio and
+#: put ~3.8 MB of base64 on its last request — so the default sits above a
+#: normal call and below the runaway, and eviction (which runs every turn)
+#: normally keeps a session nowhere near it.  This is the backstop for the
+#: cases eviction does not cover: it disabled, or media kept on purpose
+#: (images, PDFs) piling up.
+_DEFAULT_MEDIA_BYTES_THRESHOLD = 8 * 1024 * 1024
+
+
+def _get_media_bytes_threshold() -> int:
+    """Media-payload ceiling from the environment, in bytes (0 disables).
+
+    Non-numeric input falls back to the default rather than raising: this
+    runs inside a ``default_factory``, so a typo in a workspace ``.env``
+    would otherwise make every session fail to construct a ``GCConfig``.
+    """
+    raw = os.getenv('JAATO_GC_MEDIA_BYTES', '')  # env: history media-payload ceiling in bytes that triggers GC (default 8 MiB; 0 disables)
+    try:
+        value = int(raw) if raw else _DEFAULT_MEDIA_BYTES_THRESHOLD
+    except ValueError:
+        value = _DEFAULT_MEDIA_BYTES_THRESHOLD
+    return max(0, value)
+
+
 @dataclass
 class GCConfig:
     """Configuration for context garbage collection.
@@ -144,6 +170,37 @@ class GCConfig:
 
     max_turns: Optional[int] = None
     """Trigger GC when turn count exceeds this limit (None = no limit)."""
+
+    media_bytes_threshold: int = field(
+        default_factory=_get_media_bytes_threshold
+    )
+    """Trigger GC when history carries more than this many bytes of binary
+    payload.  ``0`` disables the check.
+
+    The second denominator, and it is in BYTES on purpose.  Everything else
+    here is a percentage of a token budget, and that is exactly what made
+    media invisible to GC (#850): the payload dominating a voice request is
+    not measured in tokens, an operator bounding it thinks in megabytes,
+    and laundering bytes through a token estimate to compare against
+    ``threshold_percent`` would hide the quantity that actually matters
+    behind a guess.  Overridable via ``JAATO_GC_MEDIA_BYTES``.
+    """
+
+    evict_consumed_media: bool = True
+    """Whether binary parts are purged from history once the turn that
+    consumed them has completed.
+
+    On by default: an inbound recording has no further use after the turn
+    it was answered on — the conversation carries the meaning — and leaving
+    it in history means re-sending it on every later request forever.  What
+    replaces it names the attachment's id, so the original stays locatable
+    (see ``gc.utils.evict_consumed_media``).  Set ``False`` for a session
+    that must be able to re-send the raw bytes to a later model.
+    """
+
+    media_evict_mime_prefixes: Tuple[str, ...] = ("audio/",)
+    """Which mimes eviction applies to.  Audio only by default — an image
+    or a PDF is routinely re-examined across turns, a recording is not."""
 
     auto_trigger: bool = True
     """Whether to automatically trigger GC based on thresholds."""

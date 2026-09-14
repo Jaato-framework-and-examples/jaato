@@ -17,6 +17,16 @@ session-scoped ``ContextVar`` first, then falls back to ``os.environ``.
 This avoids the race condition where concurrent sessions clobber each
 other's values in the global ``os.environ`` dict.
 
+**It lives in the SDK** (:mod:`jaato_sdk.session_env`) and is imported
+back here, so there is exactly ONE ``ContextVar`` object: the one
+``_with_session_env()`` sets is the one a plugin reads.  An out-of-tree
+plugin — which builds against ``jaato_sdk`` and must not have to import
+this package to read a credential — gets the same function from
+``jaato_sdk.session_env`` / ``jaato_sdk.plugins.base`` (issue #918).  A
+second copy declared here would read empty on the SDK side, fall through
+to ``os.environ``, and reintroduce the cross-session leak in a form that
+looks fixed.
+
 ``JaatoServer._with_session_env()`` sets the contextvar alongside
 ``os.environ`` (the latter is still needed for third-party code that
 reads ``os.environ`` directly).  Because Python 3.12+
@@ -42,20 +52,44 @@ Usage in session wiring (already handled by JaatoSession)::
     from shared.session_context import set_current_session
 
     set_current_session(self)  # before tool execution
+
+Putting it back
+~~~~~~~~~~~~~~~
+
+``set_current_session`` has no counterpart in production, and does not
+need one: a real session holds the variable for as long as it is the
+session running.  A *caller that is not a session* — a test driving
+``configure()`` or a dispatch path against a hand-built shell — is the
+case that needs one, because what it publishes outlives it.
+:func:`isolated_current_session` is that counterpart, and it is a
+context manager rather than a ``clear()`` because returning the
+variable to **unset** is only expressible through the ``Token`` of the
+``set()`` that left it (issue #974).
 """
 
 import contextvars
 import os
 from contextvars import ContextVar, Token
-from typing import Any, Callable, Dict, Optional, Tuple, TYPE_CHECKING, TypeVar
+from contextlib import contextmanager
+from typing import (
+    Any, Callable, Dict, Iterator, Optional, Tuple, TYPE_CHECKING, TypeVar,
+)
+
+# The session-env trio is DEFINED in the SDK and imported here, not
+# redefined (issue #918).  Object identity is the whole point: the
+# ``ContextVar`` ``set_session_env`` writes must be the one an
+# out-of-tree plugin's ``get_session_env`` reads.
+from jaato_sdk.session_env import (  # noqa: F401  (re-exported)
+    clear_session_env,
+    get_session_env,
+    set_session_env,
+    _session_env,
+)
 
 if TYPE_CHECKING:
     from .jaato_session import JaatoSession
 
 _current_session: ContextVar['JaatoSession'] = ContextVar('current_session')
-_session_env: ContextVar[Optional[Dict[str, str]]] = ContextVar(
-    'session_env', default=None,
-)
 # Per-task workspace identity (server 0.6.68+).  Replaces the previous
 # ``_in_workspace()`` os.environ mutation pattern, which clobbered values
 # across concurrent overlapping sessions.  ContextVar is asyncio-task /
@@ -81,46 +115,69 @@ def set_current_session(session: 'JaatoSession') -> None:
 def get_current_session() -> 'JaatoSession':
     """Get the current session for this thread/context.
 
+    ``None`` reads as "no session", not as a session that happens to be
+    ``None``.  Nothing in the framework ever stores it; the value exists
+    so that a *restorable* "no session" state can be written, which a
+    bare ``ContextVar`` has no other way to express — once set, it
+    returns to the unset state only through the ``Token`` of the very
+    ``set()`` that left it, and production code calling
+    :func:`set_current_session` hands that token to nobody.
+    :func:`isolated_current_session` is the one writer of ``None``, and
+    the reason this branch exists (issue #974).
+
     Raises:
         LookupError: If no session has been set in this context.
     """
-    return _current_session.get()
+    session = _current_session.get(None)
+    if session is None:
+        raise LookupError('current_session')
+    return session
+
+
+@contextmanager
+def isolated_current_session() -> Iterator[None]:
+    """Restore :data:`_current_session` to its entry state on exit.
+
+    The current-session ``ContextVar`` is process-global for the life of
+    a thread, and :func:`set_current_session` is called from deep inside
+    ``JaatoSession`` — ``configure()`` and both tool-dispatch paths.  A
+    caller that drives one of those against a session it built by hand
+    (every ``JaatoSession.__new__(JaatoSession)`` shell in the test
+    suite) therefore publishes that half-built object to everything that
+    runs afterwards in the same process.
+
+    Not theoretical: one such test poisoned 113 of the permission
+    package's tests when the two ran in one pytest process, because
+    ``PermissionPlugin`` reads the current session to resolve its
+    per-session policy and a shell has no ``_state_providers``
+    (issue #974).  The failures surfaced hundreds of tests away from
+    their cause, which is what made a whole-suite failure count useless
+    as a baseline.
+
+    Wrap anything that may set the variable::
+
+        with isolated_current_session():
+            session._execute_single_tool(call, None)
+
+    On exit the variable is returned to exactly what it was — *unset*
+    included, which is what the ``Token`` buys and what a plain
+    save-and-restore cannot do.
+    """
+    token = _current_session.set(_current_session.get(None))
+    try:
+        yield
+    finally:
+        _current_session.reset(token)
 
 
 # ── Session-scoped environment ──────────────────────────────────────────
-
-def set_session_env(env: Dict[str, str]) -> None:
-    """Set the session-scoped environment dict for this context.
-
-    Called by ``JaatoServer._with_session_env()`` on entry.  Plugins
-    should never call this directly.
-    """
-    _session_env.set(env)
-
-
-def clear_session_env() -> None:
-    """Clear the session-scoped environment for this context.
-
-    Called by ``JaatoServer._with_session_env()`` on exit.
-    """
-    _session_env.set(None)
-
-
-def get_session_env(key: str, default: Optional[str] = None) -> Optional[str]:
-    """Read an environment variable, preferring the session-scoped value.
-
-    Lookup order:
-
-    1. Session-scoped env (``ContextVar``, set by ``_with_session_env()``).
-    2. ``os.environ`` (global process environment).
-
-    This avoids the race where concurrent sessions clobber each other's
-    values in the global ``os.environ`` dict.
-    """
-    env = _session_env.get()
-    if env is not None and key in env:
-        return env[key]
-    return os.environ.get(key, default)
+#
+# ``set_session_env`` / ``clear_session_env`` / ``get_session_env`` are
+# imported from :mod:`jaato_sdk.session_env` at the top of this module
+# and re-exported here, so every in-tree caller
+# (``from shared.session_context import get_session_env`` — fourteen
+# plugin packages do it) keeps working unchanged while an out-of-tree
+# plugin can reach the SAME ContextVar through the SDK alone.
 
 
 # ── Per-task workspace identity (server 0.6.68+) ────────────────────────

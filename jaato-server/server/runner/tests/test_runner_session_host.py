@@ -58,10 +58,15 @@ class _StubSession:
     def __init__(self, **kwargs: Any) -> None:
         self.create_session_kwargs = dict(kwargs)
         self._daemon_session_id: Optional[str] = None
+        self._client_user_id: Optional[str] = None
 
     def set_daemon_session_id(self, session_id: str) -> None:
         # Bootstrap stamps envelope.session_id onto the session.
         self._daemon_session_id = session_id
+
+    def set_client_user_id(self, user_id: Optional[str]) -> None:
+        # Bootstrap stamps envelope.created_by onto the session (#859).
+        self._client_user_id = user_id
 
 
 class _StubRuntime:
@@ -144,7 +149,12 @@ def test_bootstrap_passes_plugin_list_to_runtime() -> None:
     runtime = _StubRuntime()
     bootstrap_session(env, runtime_factory=lambda e: runtime)
     assert runtime.create_session_kwargs is not None
-    assert runtime.create_session_kwargs["tools"] == [
+    # ``plugins=``, not ``tools=``: bootstrap_session calls
+    # ``runtime.create_session(plugins=tool_names, ...)``.  ``tools=``
+    # is the DEPRECATED alias (#292) and this assertion was pinning the
+    # alias, so it broke when production stopped spelling it that way
+    # -- invisibly, in an unwired directory (#736).
+    assert runtime.create_session_kwargs["plugins"] == [
         "signal_completion", "cli",
     ]
 
@@ -222,8 +232,8 @@ def test_bootstrap_with_empty_plugins_passes_empty_list() -> None:
     env = _good_envelope(plugins=[], plugin_configs={})
     runtime = _StubRuntime()
     bootstrap_session(env, runtime_factory=lambda e: runtime)
-    assert runtime.create_session_kwargs["tools"] == [], (
-        "Empty profile.plugins must produce tools=[] (NOT None).  "
+    assert runtime.create_session_kwargs["plugins"] == [], (
+        "Empty profile.plugins must produce plugins=[] (NOT None).  "
         "None would cascade to the runtime's 'load all exposed "
         "plugins' fallback — the bug the vLLM smoke 2026-06-07 "
         "surfaced."
@@ -231,7 +241,7 @@ def test_bootstrap_with_empty_plugins_passes_empty_list() -> None:
     # plugin_configs and preloaded_plugins still get the empty→None
     # falsy coercion since their downstream semantics treat
     # empty-dict and empty-set as equivalent to None (no overrides,
-    # no preloaded plugins).  Distinct from tools where None has
+    # no preloaded plugins).  Distinct from plugins where None has
     # meaningfully different semantics.
     assert runtime.create_session_kwargs["plugin_configs"] is None
     assert runtime.create_session_kwargs["preloaded_plugins"] is None
@@ -316,3 +326,25 @@ def test_host_is_ready_true_after_bootstrap() -> None:
     assert host.is_ready is True
     assert host.session is not None
     assert host.runtime is runtime
+
+
+# ----------------------------------------------------------------------
+# #859 — the authenticated creator is stamped on the runner-side session
+# ----------------------------------------------------------------------
+
+
+def test_bootstrap_stamps_created_by_as_client_user_id() -> None:
+    """``set_client_user_id`` had no caller: the daemon knew the user
+    (``Session.created_by``) and the runner session never did, so the
+    telemetry ``user.id`` attribute and the ledger stayed anonymous."""
+    env = _good_envelope(created_by="sso|alice")
+    runtime = _StubRuntime()
+    host = bootstrap_session(env, runtime_factory=lambda e: runtime)
+    assert host.session._client_user_id == "sso|alice"
+
+
+def test_bootstrap_without_created_by_leaves_user_unset() -> None:
+    env = _good_envelope()
+    runtime = _StubRuntime()
+    host = bootstrap_session(env, runtime_factory=lambda e: runtime)
+    assert host.session._client_user_id is None

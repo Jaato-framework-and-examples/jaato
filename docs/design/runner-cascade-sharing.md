@@ -290,10 +290,30 @@ classification, not whole-plugin categorisation.
 
 (Revised 2026-05-20 — see Amendment at head of §4.)
 
-**Profile naming**: stays `jaato-ws-{session_id}`.  Each session has
-its own apparmor profile, composed against that session's profile's
-plugins + fragments — identical to the pre-cascade-sharing model.
-No `get_apparmor_rules` signature change.
+> **Superseded 2026-09-13 by #1033.**  The cross-session
+> `aa_change_profile` this section specifies is not something the kernel
+> can perform: `aa_change_profile` confines the CALLING TASK, and a slot's
+> other threads — the telemetry exporter, the reader, anything a plugin
+> started — keep the cred they were created with and cannot be re-confined
+> (`current != task -> -EACCES`).  #1023's per-thread verification made
+> that visible and refused every reused slot's bootstrap; #1026 can retire
+> only the two RPC executor lanes.
+>
+> Profile naming is therefore `jaato-ws-{confinement_id}`, where the id is
+> derived from the BOUNDARY — workspace, config root, and a digest of the
+> rendered profile body (`server/confinement_id.py`).  A slot's reuse key
+> carries that name, so a reused slot is by construction one whose profile
+> has not changed and **no transition happens at all**.  This is narrower
+> than the withdrawn "one profile per cascade" decision below: sessions of
+> one cascade whose boundaries differ get different profiles AND different
+> slots, and sessions of different cascades that share a boundary share a
+> profile.  See CLAUDE.md, "A Key That Said \"Reusable\" and a Name That
+> Said \"New\"".
+
+**Profile naming**: ~~stays `jaato-ws-{session_id}`~~ (see the #1033 note
+above).  Each session has its own apparmor profile, composed against that
+session's profile's plugins + fragments — identical to the
+pre-cascade-sharing model.  No `get_apparmor_rules` signature change.
 
 **Slot lifecycle vs apparmor profile lifecycle:**
 
@@ -443,6 +463,20 @@ Risk: under heavy concurrent load, runaway slot creation.  Mitigation:
 operator config `JAATO_RUNNER_POOL_MAX_OVERFLOW` (future knob, not in
 Phase 1) caps the temporary excess.  Phase 0 defers this knob; ship
 without limit + observe behavior.
+
+**Shipped as `JAATO_RUNNER_POOL_MAX_SIZE` (#898)**, and it turned out to
+be load-bearing rather than a mitigation for a hypothetical.  What
+shipped without it was not "no limit" — `target_size` bounded the total,
+and because a cascade-affined idle slot is capacity for one tenant only,
+that bound made the M < N case *starve* rather than overflow: with both
+idle slots affined to cascade B, `acquire_slot(cascade=A)` returned
+`None` and the replenishment thread read the pool as full and never
+forked.  "Spawn fresh from pool" was the right decision; the accounting
+underneath it could not carry it out.  The knob is now the ceiling on
+TOTAL idle slots while `JAATO_RUNNER_POOL_SIZE` is the floor on the
+UNRESERVED ones — reservations sit on top of the floor, so a second
+tenant's arrival grows the pool instead of evicting the first, and the
+ceiling is what keeps that bounded (129–187 MB a slot).
 
 ### 5.4 Idle teardown firing during active session
 
@@ -614,7 +648,7 @@ All Phase 0 decisions are locked.  Phase 1 can begin without further input.
 
 - Cross-cascade slot reuse (workspace-tier reuse across cascade runs)
 - Operator knob for `cascade_idle_timeout_seconds` (uses default 300s)
-- Pool overflow cap (`JAATO_RUNNER_POOL_MAX_OVERFLOW`)
+- ~~Pool overflow cap (`JAATO_RUNNER_POOL_MAX_OVERFLOW`)~~ — shipped as `JAATO_RUNNER_POOL_MAX_SIZE` (#898); see §5.3
 - Cascade keep-alive IPC ping verb (for known-long-gap cascades)
 - Web client (telegram, etc.) cascade_driver_id flows — Phase 2 IPC change
   is the touchpoint; WS clients adopt as needed

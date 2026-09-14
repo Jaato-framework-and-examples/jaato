@@ -428,7 +428,13 @@ class OutputBuffer:
     # Type alias for items that can be stored in the line buffer
     LineItem = Union[OutputLine, ToolBlock, CopyButton]
 
-    def __init__(self, max_lines: int = 1000, agent_type: str = "main", tools_expanded: bool = False):
+    def __init__(
+        self,
+        max_lines: int = 1000,
+        agent_type: str = "main",
+        tools_expanded: bool = False,
+        thinking_expanded: bool = False,
+    ):
         """Initialize the output buffer.
 
         Args:
@@ -436,6 +442,12 @@ class OutputBuffer:
             agent_type: Type of agent ("main" or "subagent") for label display.
             tools_expanded: Initial tool block expansion state. False (collapsed) for
                 interactive TUI, True (expanded) for headless mode.
+            thinking_expanded: Initial reasoning-block expansion state (#755).
+                False (collapsed) by default: reasoning is the longest thing
+                in a turn and the one least often wanted expanded, so a
+                contiguous run of ``source == "thinking"`` lines renders as
+                ONE summary line until toggled — see
+                :meth:`toggle_thinking_expanded`.
         """
         self._lines: deque[Union[OutputLine, ToolBlock, CopyButton]] = deque(maxlen=max_lines)
         # Conversational-turn accumulator + button registry.
@@ -463,6 +475,10 @@ class OutputBuffer:
         self._popup_tools: Dict[str, ActiveToolCall] = {}  # Backgrounded tools for popup (keyed by call_id)
         self._tools_expanded: bool = tools_expanded  # Toggle between collapsed/expanded tool view
         self._tools_expanded_before_prompt: Optional[bool] = None  # Saved state before permission/clarification forced expansion
+        # Reasoning blocks (#755): one global collapsed/expanded state, the
+        # same shape as ``_tools_expanded`` — every reasoning group in the
+        # buffer follows it, toggled by the ``toggle_thinking`` keybinding.
+        self._thinking_expanded: bool = thinking_expanded
         self._rendering: bool = False  # Guard against flushes during render
         self._tool_placeholder_index: Optional[int] = None  # Position in _lines where tools render
         self._agent_type: str = agent_type  # "main" or "subagent" for user label
@@ -650,6 +666,7 @@ class OutputBuffer:
                 "tool_expand": "→", "tool_collapse": "←", "tool_exit": "Esc",
                 "tool_output_up": "↑", "tool_output_down": "↓",
                 "tool_nav_enter": "Ctrl+N", "toggle_tools": "Ctrl+T",
+                "toggle_thinking": "Ctrl+R",
             }
             return defaults.get(action, action)
 
@@ -1543,6 +1560,109 @@ class OutputBuffer:
         """Check if tool view is currently expanded."""
         return self._tools_expanded
 
+    def toggle_thinking_expanded(self) -> bool:
+        """Toggle every reasoning block between collapsed and expanded (#755).
+
+        Reasoning (``source == "thinking"``) is stored as ordinary
+        ``OutputLine`` items; what the toggle changes is how a contiguous
+        *group* of them renders and how much height it is charged:
+
+        - **collapsed** (the default): the group's first line — its *head* —
+          renders as one summary line (``▸ Internal thinking (N lines, …)``
+          plus the key hint) and the remaining lines render nothing.  See
+          :meth:`_render_collapsed_thinking` / :meth:`_display_heights`.
+        - **expanded**: the bordered ``┌─ Internal thinking`` box, one
+          wrapped line per stored line — :meth:`_render_expanded_thinking`.
+
+        Returns:
+            True if now expanded, False if now collapsed.
+        """
+        old = self._thinking_expanded
+        self._thinking_expanded = not self._thinking_expanded
+        _trace(f"toggle_thinking_expanded: {old} -> {self._thinking_expanded}")
+        return self._thinking_expanded
+
+    @property
+    def thinking_expanded(self) -> bool:
+        """Whether reasoning blocks currently render expanded."""
+        return self._thinking_expanded
+
+    def has_thinking(self) -> bool:
+        """Whether the buffer holds any reasoning output.
+
+        Lets a status surface show the reasoning toggle indicator only when
+        there is something for it to act on, rather than on every session.
+        """
+        if self._current_block and self._current_block[0] == "thinking":
+            return True
+        return any(
+            isinstance(item, OutputLine) and item.source == "thinking"
+            for item in self._lines
+        )
+
+    @staticmethod
+    def _thinking_groups(items) -> Dict[int, List[OutputLine]]:
+        """Group contiguous reasoning lines, keyed by the id of each group's head.
+
+        A reasoning *group* is a maximal run of adjacent ``OutputLine`` items
+        with ``source == "thinking"``; anything else (model text, a
+        ``ToolBlock``, a ``CopyButton``) ends it.  Grouping is done at
+        render time by adjacency — never stored on the line — because a
+        ``ToolBlock`` may later be inserted at the tool placeholder in the
+        middle of what was one run, splitting it in two.  This is the same
+        rule the expanded renderer already used to decide where to draw the
+        box header and footer.
+
+        Returns:
+            ``{id(head): [head, member, member, ...]}`` — every reasoning
+            line is in exactly one list; non-head lines have no key.
+        """
+        groups: Dict[int, List[OutputLine]] = {}
+        current: Optional[List[OutputLine]] = None
+        for item in items:
+            if isinstance(item, OutputLine) and item.source == "thinking":
+                if current is None:
+                    current = [item]
+                    groups[id(item)] = current
+                else:
+                    current.append(item)
+            else:
+                current = None
+        return groups
+
+    def _display_heights(self, items) -> List[int]:
+        """Per-item display heights, honouring collapsed reasoning (#755).
+
+        The single place the collapse rule is charged against the viewport:
+        every scroll / window / selection computation that used to sum
+        :meth:`_get_item_display_lines` item by item goes through here, so
+        the height a collapsed group is *charged* cannot drift from what
+        :meth:`_render_collapsed_thinking` *draws*.
+
+        With reasoning expanded this is exactly the per-item measurement.
+        Collapsed, a group's head is charged the summary line (plus the
+        blank line and ``── Model`` header when it starts the turn — the
+        blank is drawn at inter-item level, like every turn start) and its
+        other members are charged nothing.
+
+        Args:
+            items: Any iterable of buffer items, in buffer order (``_lines``
+                itself, or ``list(_lines) + current-block lines``).
+        """
+        items = list(items)
+        if self._thinking_expanded:
+            return [self._get_item_display_lines(item) for item in items]
+        groups = self._thinking_groups(items)
+        heights: List[int] = []
+        for item in items:
+            if not (isinstance(item, OutputLine) and item.source == "thinking"):
+                heights.append(self._get_item_display_lines(item))
+            elif id(item) in groups:
+                heights.append(3 if item.is_turn_start else 1)
+            else:
+                heights.append(0)
+        return heights
+
     def _get_approval_indicator(self, method: str) -> Optional[str]:
         """Convert a permission method to a short display indicator.
 
@@ -1767,6 +1887,7 @@ class OutputBuffer:
 
         # Calculate display lines up to the selected block
         display_line = 0
+        heights = self._display_heights(self._lines)
         for i, item in enumerate(self._lines):
             if isinstance(item, ToolBlock):
                 # Find which block index this is
@@ -1798,10 +1919,10 @@ class OutputBuffer:
                                 display_line += 2  # Scroll indicators
                     break
 
-            display_line += self._get_item_display_lines(item)
+            display_line += heights[i]
 
         # Calculate total display lines
-        total_lines = sum(self._get_item_display_lines(item) for item in self._lines)
+        total_lines = sum(heights)
 
         # Calculate the scroll offset needed to show this position
         # scroll_offset is "lines from bottom", so higher = older content shown
@@ -2356,7 +2477,7 @@ class OutputBuffer:
             True if scroll position changed.
         """
         # Calculate total display lines (handles both OutputLine and ToolBlock)
-        total_display_lines = sum(self._get_item_display_lines(item) for item in self._lines)
+        total_display_lines = sum(self._display_heights(self._lines))
         max_offset = max(0, total_display_lines - 1)
 
         old_offset = self._scroll_offset
@@ -2392,7 +2513,7 @@ class OutputBuffer:
         Returns:
             True if scroll position changed.
         """
-        total_display_lines = sum(self._get_item_display_lines(item) for item in self._lines)
+        total_display_lines = sum(self._display_heights(self._lines))
         max_offset = max(0, total_display_lines - 1)
         old_offset = self._scroll_offset
         self._scroll_offset = max_offset
@@ -2424,22 +2545,14 @@ class OutputBuffer:
         )
 
         # Calculate total display lines before the tool tree
-        # Note: _lines is a deque which doesn't support slicing, so we iterate with enumerate
-        lines_before_tree = sum(
-            self._get_item_display_lines(item)
-            for i, item in enumerate(self._lines)
-            if i < self._tool_placeholder_index
-        )
+        heights = self._display_heights(self._lines)
+        lines_before_tree = sum(heights[:self._tool_placeholder_index])
 
         # Calculate tool tree height
         tree_height = self._calculate_tool_tree_height()
 
         # Calculate lines after the tool tree (remaining content in _lines + any streaming)
-        lines_after_tree = sum(
-            self._get_item_display_lines(item)
-            for i, item in enumerate(self._lines)
-            if i >= self._tool_placeholder_index
-        )
+        lines_after_tree = sum(heights[self._tool_placeholder_index:])
 
         # Total content height
         total_height = lines_before_tree + tree_height + lines_after_tree
@@ -2571,14 +2684,11 @@ class OutputBuffer:
         line_idx, _, _ = self._search_matches[match_idx]
 
         # Calculate display lines before this item
-        display_lines_before = 0
-        for i, item in enumerate(self._lines):
-            if i >= line_idx:
-                break
-            display_lines_before += self._get_item_display_lines(item)
+        heights = self._display_heights(self._lines)
+        display_lines_before = sum(heights[:line_idx])
 
         # Calculate total display lines
-        total_display_lines = sum(self._get_item_display_lines(item) for item in self._lines)
+        total_display_lines = sum(heights)
 
         # Calculate scroll offset to center the match in the visible area
         # scroll_offset is measured from bottom (0 = at bottom)
@@ -3730,9 +3840,7 @@ class OutputBuffer:
 
         # Context lines kept at top by scroll logic
         lines_before_tree = sum(
-            self._get_item_display_lines(item)
-            for i, item in enumerate(self._lines)
-            if i < self._tool_placeholder_index
+            self._display_heights(self._lines)[:self._tool_placeholder_index]
         )
         context_lines = min(1, lines_before_tree)
         overhead += context_lines
@@ -3766,9 +3874,7 @@ class OutputBuffer:
         # Calculate context lines that scroll logic will keep at top
         # (mirrors the logic in scroll_to_show_tool_tree)
         lines_before_tree = sum(
-            self._get_item_display_lines(item)
-            for i, item in enumerate(self._lines)
-            if i < self._tool_placeholder_index
+            self._display_heights(self._lines)[:self._tool_placeholder_index]
         )
         context_lines = min(1, lines_before_tree)  # Scroll keeps 1 line max for pending prompts
         overhead += context_lines
@@ -4307,6 +4413,193 @@ class OutputBuffer:
             preserve_ansi=True
         )
 
+    def _hidden_thinking_ids(self, items, groups: Dict[int, List[OutputLine]]) -> set:
+        """Ids of reasoning lines that render nothing under the collapsed state.
+
+        Empty when reasoning is expanded.  Collapsed, it is every group
+        member except the head, whose summary line stands for the group.
+        """
+        if self._thinking_expanded:
+            return set()
+        return {id(member) for members in groups.values() for member in members[1:]}
+
+    def _render_thinking_line(
+        self,
+        line: OutputLine,
+        i: int,
+        items_to_show: list,
+        output: Text,
+        wrap_width: int,
+        wrap_text,
+        groups: Dict[int, List[OutputLine]],
+        last_item,
+    ) -> None:
+        """Render one ``source == "thinking"`` line (dispatch, #755).
+
+        Collapsed: only a group head reaches here (members were skipped by
+        the render loop), and it draws the summary line.  Expanded: every
+        line draws its slice of the bordered box.
+
+        Args:
+            line: The reasoning line being rendered.
+            i: Its index in ``items_to_show`` (the expanded renderer looks at
+                its neighbours to place the box header and footer).
+            items_to_show: The visible window of items.
+            output: The Text being built.
+            wrap_width: Content width of the panel.
+            wrap_text: The render loop's width-aware wrapper.
+            groups: :meth:`_thinking_groups` over ALL items, so a collapsed
+                summary counts the whole group, not just the visible part.
+            last_item: The final item of all items — the streaming
+                indicator is shown when the group ends there while a
+                reasoning block is still being appended to.
+        """
+        if self._thinking_expanded:
+            self._render_expanded_thinking(line, i, items_to_show, output, wrap_width, wrap_text)
+            return
+        members = groups.get(id(line))
+        if members is None:
+            # Not a head: skipped by the loop; nothing to draw.
+            return
+        streaming = (
+            self._current_block is not None
+            and self._current_block[0] == "thinking"
+            and members[-1] is last_item
+        )
+        self._render_collapsed_thinking(line, members, output, wrap_width, streaming)
+
+    def _render_collapsed_thinking(
+        self,
+        head: OutputLine,
+        members: List[OutputLine],
+        output: Text,
+        wrap_width: int,
+        streaming: bool,
+    ) -> None:
+        """Draw a collapsed reasoning group as one summary line (#755).
+
+        Shape, mirroring the collapsed tool tree's ``▸ N tools`` line and
+        its ``───  Ctrl+T to expand`` hint::
+
+               ▸ Internal thinking (14 lines, 412 words)  ───  Ctrl+R to expand
+
+        ``streaming`` replaces the word count with ``streaming…`` while the
+        block is still being appended to, so a block that grows while
+        collapsed is visibly live rather than silently growing.  When the
+        head starts the model turn the ``── Model`` header is drawn first,
+        exactly as the expanded box does — the summary stands in for the
+        box, not for the turn.  The key hint is dropped when the panel is
+        too narrow for both.  Height charged: see :meth:`_display_heights`.
+        """
+        indent = "   "
+        if head.is_turn_start:
+            self._render_model_header(output, wrap_width)
+        line_count = len(members)
+        if streaming:
+            detail = f"{line_count} line{'s' if line_count != 1 else ''}, streaming…"
+        else:
+            words = sum(len(member.text.split()) for member in members)
+            detail = f"{line_count} line{'s' if line_count != 1 else ''}, {words:,} word{'s' if words != 1 else ''}"
+        label = "▸ Internal thinking "
+        count = f"({detail})"
+        toggle_key = self._format_key_hint("toggle_thinking")
+        hint = f"  ───  {toggle_key} to expand"
+        if _display_width(indent + label + count + hint) > wrap_width:
+            hint = ""
+        output.append(indent)
+        output.append(label, style=self._style("thinking_header", "dim #D7AF5F"))
+        output.append(count, style=self._style("thinking_header_separator", "dim #D7AF5F"))
+        if hint:
+            output.append(hint, style=self._style("hint", "dim"))
+
+    def _render_model_header(self, output: Text, wrap_width: int) -> None:
+        """Draw the ``── Model ───`` turn header line, followed by a newline."""
+        header_prefix = "── Model "
+        prefix_dw = _display_width(header_prefix)
+        dash_dw = _display_width("─") or 1
+        remaining = max(0, (wrap_width - prefix_dw) // dash_dw)
+        output.append(header_prefix, style=self._style("model_header", "bold cyan"))
+        output.append("─" * remaining, style=self._style("model_header_separator", "dim cyan"))
+        output.append("\n")
+
+    def _render_expanded_thinking(
+        self,
+        line: OutputLine,
+        i: int,
+        items_to_show: list,
+        output: Text,
+        wrap_width: int,
+        wrap_text,
+    ) -> None:
+        """Draw one line of the expanded ``┌─ Internal thinking`` box.
+
+        The box header is drawn before the first reasoning line of a
+        contiguous run and the footer after the last, decided by looking at
+        the neighbouring items in the visible window; every line draws its
+        own ``│`` border and wrapped content.  Lifted verbatim out of
+        ``_render_impl`` for #755, so the collapsed path could sit beside it
+        without growing that function.
+        """
+        # This is the model's internal reasoning before generating response
+        # Box characters: ┌ (top-left), │ (vertical), └ (bottom-left), ┘ (bottom-right)
+        # NOTE: Box-drawing chars have East Asian Ambiguous width, so we use
+        # _display_width() throughout to handle terminals where they render as 2 columns.
+        indent = "   "  # Left indent for the entire thinking block
+        border = "│ "
+        indent_dw = _display_width(indent)
+        border_dw = _display_width(border)
+        border_width = indent_dw + border_dw
+        dash_dw = _display_width("─") or 1
+        # Extra 1-char right margin compensates for italic font rendering in
+        # terminals that slant glyphs rightward, clipping the last character.
+        italic_margin = 1
+        # Check if this is the first thinking line in a consecutive group
+        is_first_thinking = (i == 0) or (items_to_show[i - 1].source != "thinking"
+                                          if isinstance(items_to_show[i - 1], OutputLine)
+                                          else True)
+        if line.is_turn_start:
+            # First render Model header (thinking is part of model turn)
+            self._render_model_header(output, wrap_width)
+        if is_first_thinking:
+            # Render thinking header (top border): ┌─ Internal thinking ───────┐
+            thinking_header = "┌─ Internal thinking "
+            box_display_width = wrap_width - indent_dw
+            header_dw = _display_width(thinking_header)
+            closing_dw = _display_width("┐")
+            remaining = max(0, (box_display_width - header_dw - closing_dw) // dash_dw)
+            output.append(indent)
+            output.append(thinking_header, style=self._style("thinking_header", "dim #D7AF5F"))
+            output.append("─" * remaining, style=self._style("thinking_header_separator", "dim #D7AF5F"))
+            output.append("┐", style=self._style("thinking_header", "dim #D7AF5F"))
+            output.append("\n")
+        # Render thinking content with border (aligned with box)
+        wrapped = wrap_text(line.text, border_width + italic_margin)
+        for j, wrapped_line in enumerate(wrapped):
+            if j > 0:
+                output.append("\n")
+            output.append(indent)
+            output.append(border, style=self._style("thinking_border", "dim #D7AF5F"))
+            output.append(wrapped_line, style=self._style("thinking_content", "italic #D7AF87"))
+        # Track that we're in thinking mode for footer rendering
+        self._in_thinking = True
+        # Check if this is the last thinking line in the visible items
+        # to render footer (look ahead to next item)
+        is_last_thinking = (i == len(items_to_show) - 1) or (
+            i + 1 < len(items_to_show) and getattr(items_to_show[i + 1], 'source', None) != "thinking"
+        )
+        if is_last_thinking:
+            # Render footer: └─────────────────────────────────────────┘
+            output.append("\n")
+            box_display_width = wrap_width - indent_dw
+            opening_dw = _display_width("└")
+            closing_dw = _display_width("┘")
+            remaining = max(0, (box_display_width - opening_dw - closing_dw) // dash_dw)
+            output.append(indent)
+            output.append("└", style=self._style("thinking_footer", "dim #D7AF5F"))
+            output.append("─" * remaining, style=self._style("thinking_footer_separator", "dim #D7AF5F"))
+            output.append("┘", style=self._style("thinking_footer", "dim #D7AF5F"))
+            self._in_thinking = False
+
     def _render_tool_block(self, block: ToolBlock, output: Text, wrap_width: int) -> None:
         """Render a ToolBlock inline in the output."""
         tool_count = len(block.tools)
@@ -4610,8 +4903,10 @@ class OutputBuffer:
                         spinner_reserved += 1  # model header line
                 available_for_lines = max(1, available_for_lines - spinner_reserved)
 
-            # Calculate total display lines (accounting for ToolBlocks)
-            total_display_lines = sum(self._get_item_display_lines(item) for item in all_items)
+            # Calculate total display lines (accounting for ToolBlocks and
+            # collapsed reasoning groups, #755)
+            item_heights = self._display_heights(all_items)
+            total_display_lines = sum(item_heights)
 
             # Find the end position (bottom of visible window)
             # scroll_offset=0 means show the most recent content
@@ -4630,8 +4925,7 @@ class OutputBuffer:
 
             # Collect items that fall within the visible range
             current_display_line = 0
-            for item in all_items:
-                item_height = self._get_item_display_lines(item)
+            for item, item_height in zip(all_items, item_heights):
                 line_end = current_display_line + item_height
                 # Include item if it overlaps with visible range
                 if line_end > start_display_line and current_display_line < end_display_line:
@@ -4740,8 +5034,17 @@ class OutputBuffer:
                     result.extend(wrapped)
             return result if result else ['']
 
+        # Collapsed reasoning (#755): a group's head renders the summary line,
+        # its other members render nothing at all — not even the inter-item
+        # newline — so they are skipped before any output is appended.
+        thinking_groups = self._thinking_groups(all_items)
+        hidden_thinking = self._hidden_thinking_ids(all_items, thinking_groups)
+        last_item = all_items[-1] if all_items else None
+
         # Render items (OutputLines, ToolBlocks, and ActiveToolsMarker)
         for i, item in enumerate(items_to_show):
+            if id(item) in hidden_thinking:
+                continue
             if i > 0:
                 output.append("\n")
                 # Add extra blank line before turn_start items for visual separation
@@ -4936,71 +5239,11 @@ class OutputBuffer:
                         output.append("\n")
                     output.append(wrapped_line, style=self._style("muted", "dim"))
             elif line.source == "thinking":
-                # Extended thinking output - render with header/footer and indentation
-                # This is the model's internal reasoning before generating response
-                # Box characters: ┌ (top-left), │ (vertical), └ (bottom-left), ┘ (bottom-right)
-                # NOTE: Box-drawing chars have East Asian Ambiguous width, so we use
-                # _display_width() throughout to handle terminals where they render as 2 columns.
-                indent = "   "  # Left indent for the entire thinking block
-                border = "│ "
-                indent_dw = _display_width(indent)
-                border_dw = _display_width(border)
-                border_width = indent_dw + border_dw
-                dash_dw = _display_width("─") or 1
-                # Extra 1-char right margin compensates for italic font rendering in
-                # terminals that slant glyphs rightward, clipping the last character.
-                italic_margin = 1
-                # Check if this is the first thinking line in a consecutive group
-                is_first_thinking = (i == 0) or (items_to_show[i - 1].source != "thinking"
-                                                  if isinstance(items_to_show[i - 1], OutputLine)
-                                                  else True)
-                if line.is_turn_start:
-                    # First render Model header (thinking is part of model turn)
-                    header_prefix = "── Model "
-                    prefix_dw = _display_width(header_prefix)
-                    remaining = max(0, (wrap_width - prefix_dw) // dash_dw)
-                    output.append(header_prefix, style=self._style("model_header", "bold cyan"))
-                    output.append("─" * remaining, style=self._style("model_header_separator", "dim cyan"))
-                    output.append("\n")
-                if is_first_thinking:
-                    # Render thinking header (top border): ┌─ Internal thinking ───────┐
-                    thinking_header = "┌─ Internal thinking "
-                    box_display_width = wrap_width - indent_dw
-                    header_dw = _display_width(thinking_header)
-                    closing_dw = _display_width("┐")
-                    remaining = max(0, (box_display_width - header_dw - closing_dw) // dash_dw)
-                    output.append(indent)
-                    output.append(thinking_header, style=self._style("thinking_header", "dim #D7AF5F"))
-                    output.append("─" * remaining, style=self._style("thinking_header_separator", "dim #D7AF5F"))
-                    output.append("┐", style=self._style("thinking_header", "dim #D7AF5F"))
-                    output.append("\n")
-                # Render thinking content with border (aligned with box)
-                wrapped = wrap_text(line.text, border_width + italic_margin)
-                for j, wrapped_line in enumerate(wrapped):
-                    if j > 0:
-                        output.append("\n")
-                    output.append(indent)
-                    output.append(border, style=self._style("thinking_border", "dim #D7AF5F"))
-                    output.append(wrapped_line, style=self._style("thinking_content", "italic #D7AF87"))
-                # Track that we're in thinking mode for footer rendering
-                self._in_thinking = True
-                # Check if this is the last thinking line in the visible items
-                # to render footer (look ahead to next item)
-                is_last_thinking = (i == len(items_to_show) - 1) or (
-                    i + 1 < len(items_to_show) and getattr(items_to_show[i + 1], 'source', None) != "thinking"
+                # Reasoning — collapsed summary or the bordered box (#755)
+                self._render_thinking_line(
+                    line, i, items_to_show, output, wrap_width, wrap_text,
+                    thinking_groups, last_item,
                 )
-                if is_last_thinking:
-                    # Render footer: └─────────────────────────────────────────┘
-                    output.append("\n")
-                    box_display_width = wrap_width - indent_dw
-                    opening_dw = _display_width("└")
-                    closing_dw = _display_width("┘")
-                    remaining = max(0, (box_display_width - opening_dw - closing_dw) // dash_dw)
-                    output.append(indent)
-                    output.append("└", style=self._style("thinking_footer", "dim #D7AF5F"))
-                    output.append("─" * remaining, style=self._style("thinking_footer_separator", "dim #D7AF5F"))
-                    output.append("┘", style=self._style("thinking_footer", "dim #D7AF5F"))
-                    self._in_thinking = False
             else:
                 # Other plugin output - wrap and preserve ANSI codes
                 # Use cache for expensive ANSI parsing (only for non-turn-start simple cases)
@@ -5234,8 +5477,7 @@ class OutputBuffer:
         result_lines: List[str] = []
         current_display_line = 0
 
-        for item in all_items:
-            item_height = self._get_item_display_lines(item)
+        for item, item_height in zip(all_items, self._display_heights(all_items)):
             line_end = current_display_line + item_height
 
             # Check if this item overlaps with the selection range
@@ -5297,7 +5539,7 @@ class OutputBuffer:
             Tuple of (start_line, end_line) display line indices.
         """
         all_items = list(self._lines) + self._get_current_block_lines()
-        total_display_lines = sum(self._get_item_display_lines(item) for item in all_items)
+        total_display_lines = sum(self._display_heights(all_items))
 
         # Calculate visible range based on scroll offset
         end_line = total_display_lines - self._scroll_offset

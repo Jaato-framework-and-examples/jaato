@@ -39,7 +39,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
 
 # Leaf module (no package-internal deps of its own): the strict-posture egress
 # failure is the one wire-up error the spawn path must NOT swallow, so the type
@@ -47,6 +47,12 @@ from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 from server.egress_proxy.errors import (
     EgressEnforcementError as _EgressEnforcementError,
 )
+
+# Named at import time because ``_profile_runtime_limits`` type-CHECKS the
+# profile's declared block (#735) rather than duck-typing it, and a lazy
+# import inside a per-session helper would pay the lookup on every spawn.
+from shared.runtime_limits import RuntimeLimits
+from shared.utils.errors import exc_message
 
 
 if TYPE_CHECKING:  # pragma: no cover — types only
@@ -170,6 +176,14 @@ def spawn_session_runner(
             ``disable_confine`` gate is removed — sessions with
             AppArmor opt-in are now eligible for pool routing.
 
+            #1033: a slot that has ALREADY been confined does not
+            transition again — ``aa_change_profile`` is per-task and its
+            other threads could not follow (#1023).  What makes reuse
+            safe is that the profile name is part of the reuse key, so
+            such a slot is only handed to a session wanting the profile
+            it already wears; the transition above is the first-session
+            path.
+
     Raises:
         RuntimeError: when *daemon_loop* is None or the runner-RPC
             start times out.  Caller catches and downgrades to
@@ -178,7 +192,7 @@ def spawn_session_runner(
         Exception: any spawn / RPC failure.  Caller catches and
             downgrades.
     """
-    from server.runner_spawner import SpawnedRunner, RunnerSpawner
+    from server.runner_spawner import SpawnedRunner
     from server.runner_rpc_client import RunnerRPCClient
 
     if daemon_loop is None:
@@ -216,6 +230,14 @@ def spawn_session_runner(
             # one's bootstrap derived -- profiles, agents, prompt library,
             # permission config.
             config_root=getattr(server, "config_root", None),
+            # ...and its THREADS are stuck in the AppArmor profile it was
+            # last confined to, which grants one workspace and cannot be
+            # changed for the threads that already exist (#1023).  Both
+            # are part of the reuse key; see ``runner_pool.SlotKey``.
+            # Passed raw; ``SlotKey.build`` folds "" to None so that
+            # "unconfined" and "no workspace" each have one spelling.
+            workspace_root=workspace_path,
+            profile_name=profile_name,
         )
         if slot is not None:
             spawned = SpawnedRunner(
@@ -251,40 +273,12 @@ def spawn_session_runner(
 
     # ----- Cold-spawn fallback (pre-PR-4 behavior) -----
     if spawned is None:
-        spawner = RunnerSpawner()
-
-        # Phase 5 §5.1b: forward the app-layer ``RuntimeLimits`` fields
-        # via ``RunnerSpawner.spawn``'s ``max_output_chars`` /
-        # ``tool_timeout_seconds`` kwargs.  The spawner translates them
-        # into the ``JAATO_RUNNER_MAX_OUTPUT_CHARS`` /
-        # ``JAATO_RUNNER_TOOL_TIMEOUT_SECONDS`` env vars the runner-side
-        # cli plugin reads at startup.  Source of truth is
-        # ``server._profile.runtime_limits`` — same field the WS path
-        # consults for cgroup provision (see
-        # ``server/websocket.py:620-624``).  No defaulting on the
-        # mainline path: a profile that omits ``runtime_limits`` keeps
-        # the runner's compile-time defaults (§5.1's
-        # ``apply_isolated_defaults`` is specific to
-        # ``agent_params.isolated=true``).  See
-        # docs/design/phase5_5_1b_mainline_runtime_limits_passthrough_audit.md.
-        profile = getattr(server, "_profile", None)
-        runtime_limits = getattr(profile, "runtime_limits", None) if profile else None
-        max_output_chars = (
-            runtime_limits.max_output_bytes
-            if runtime_limits is not None else None
-        )
-        tool_timeout_seconds = (
-            runtime_limits.tool_timeout_seconds
-            if runtime_limits is not None else None
-        )
-
-        spawned = spawner.spawn(
+        spawned = _cold_spawn_runner(
+            server,
             profile_name=profile_name,
             session_id=session_id,
             workspace_path=workspace_path,
             log_path=log_path,
-            max_output_chars=max_output_chars,
-            tool_timeout_seconds=tool_timeout_seconds,
             disable_confine=disable_confine,
             cgroup_attach=cgroup_attach,
         )
@@ -297,8 +291,35 @@ def spawn_session_runner(
     # socket fail; ``server._runner_rpc`` ends up None; sessions
     # crash with ``NoneType.session_send_message_threadsafe``.
     # See PR #173.
+    #
+    # #1058: ...and reuse it only if it is LIVE.  ``PoolManager`` now
+    # refuses to hand out a slot whose client has died, so reaching this
+    # branch with a corpse takes a race — ``acquire_slot`` ran off the
+    # daemon loop, and the read loop that sets the flag runs on it — but
+    # a race is exactly what the reported symptom looks like from here,
+    # and verifying at the point of USE is what makes the reuse a
+    # checked assumption rather than an inherited one.
     pool_slot = getattr(spawned, "pool_slot", None) if pool_served else None
-    existing_rpc = getattr(pool_slot, "rpc", None) if pool_slot else None
+    existing_rpc, slot_discarded = _reusable_slot_rpc(
+        pool_slot, session_id, pool_manager, daemon_loop)
+    if slot_discarded:
+        # The slot was discarded with its dead client.  Its socket was
+        # adopted by that client's asyncio transport, so a second
+        # ``RunnerRPCClient`` on the same socket is the PR #173 failure
+        # this whole reuse path exists to avoid — the session gets a
+        # freshly spawned runner instead of an unknown-state transport.
+        spawned = _cold_spawn_runner(
+            server,
+            profile_name=profile_name,
+            session_id=session_id,
+            workspace_path=workspace_path,
+            log_path=log_path,
+            disable_confine=disable_confine,
+            cgroup_attach=cgroup_attach,
+        )
+        pool_slot = None
+        pool_served = False
+        server._pool_manager_ref = None
     if existing_rpc is not None:
         # Returned slot — reuse the rpc client.  Per-session state
         # was cleared by the slot-return path's
@@ -338,6 +359,253 @@ def spawn_session_runner(
         not disable_confine,
         pool_served,
     )
+
+
+def _cold_spawn_runner(
+    server: Any,
+    *,
+    profile_name: str,
+    session_id: str,
+    workspace_path: Optional[str],
+    log_path: Optional[str],
+    disable_confine: bool,
+    cgroup_attach: Optional[Any],
+) -> Any:
+    """Spawn a fresh session-mode runner subprocess.
+
+    The pre-pool behaviour, and the fallback for every path the pool
+    cannot serve: pool disabled, pool empty, a ``cgroup_attach`` the
+    pool cannot honour, or — since #1058 — a pool slot whose RPC client
+    turned out to be dead at the point of use.
+
+    A free function with two call sites rather than a block inside
+    :func:`spawn_session_runner`: the second call site is what lets the
+    dead-slot path produce a working session instead of a refusal, and
+    a copied forty-line block is a copy that rots.
+
+    Args:
+        server: The session's ``JaatoServer`` — read only for its
+            resolved profile's ``runtime_limits``.
+        profile_name: AppArmor profile to confine to (``""`` =
+            unconfined).
+        session_id: Session this runner will serve.
+        workspace_path: The runner's cwd.
+        log_path: Where the runner writes its own log, or ``None`` to
+            inherit the daemon's stderr.
+        disable_confine: Skip the AppArmor transition entirely.
+        cgroup_attach: Optional ``preexec`` callback migrating the
+            forked runner into a per-session cgroup.
+
+    Returns:
+        The ``SpawnedRunner`` handle.  It carries NO ``pool_slot``, which
+        is what makes the teardown path (``JaatoServer.shutdown``) take
+        the cold close rather than trying to return a slot to the pool.
+    """
+    from server.runner_spawner import RunnerSpawner
+
+    spawner = RunnerSpawner()
+
+    # Phase 5 §5.1b, re-scoped by #735: these two kwargs become the
+    # ``JAATO_RUNNER_MAX_OUTPUT_CHARS`` /
+    # ``JAATO_RUNNER_TOOL_TIMEOUT_SECONDS`` env vars, and those
+    # configure ``server/runner/tool_executor.ToolExecutor`` — the
+    # PHASE-2, cli-only ``execute_fn`` surface.  They are NOT this
+    # session's enforcement path and never were: ``RunnerRPC``
+    # routes to ``host.session._executor`` whenever a session host
+    # exists, which is on every path that dispatches
+    # ``session.bootstrap`` (all of them).  The measured consequence
+    # was a ``tool_timeout_seconds: 2`` profile running a
+    # ``sleep 60`` for 60.02 s on cold-spawn as well as on the pool.
+    #
+    # They are kept, not deleted, because the Phase-2 executor is a
+    # LIVE fallback for a runner with no session host (cli-only
+    # runners, harnesses, tests) and deleting them would silently
+    # drop that surface back to its compile-time defaults — the same
+    # class of regression, in the same direction.  Both values come
+    # from the one source of truth, ``server._profile.runtime_limits``,
+    # so the two surfaces cannot disagree about a number; they simply
+    # bound different executors.  The session's own caps ride
+    # ``SessionInitEnvelope.runtime_limits`` (v7), built by
+    # ``build_session_envelope`` and applied in
+    # ``JaatoSession.configure``.
+    runtime_limits = _profile_runtime_limits(getattr(server, "_profile", None))
+    max_output_chars = (
+        runtime_limits.max_output_bytes
+        if runtime_limits is not None else None
+    )
+    tool_timeout_seconds = (
+        runtime_limits.tool_timeout_seconds
+        if runtime_limits is not None else None
+    )
+
+    return spawner.spawn(
+        profile_name=profile_name,
+        session_id=session_id,
+        workspace_path=workspace_path,
+        log_path=log_path,
+        max_output_chars=max_output_chars,
+        tool_timeout_seconds=tool_timeout_seconds,
+        disable_confine=disable_confine,
+        cgroup_attach=cgroup_attach,
+    )
+
+
+def _revive_slot_rpc(rpc: Any, daemon_loop: Any) -> bool:
+    """Reopen a pooled client whose read task was cancelled (#1058).
+
+    Driven from the spawn path rather than from the pool because
+    restarting a reader needs the event loop, and ``PoolManager`` has
+    none — it runs on the replenish thread and on whichever thread is
+    acquiring.  ``spawn_session_runner`` already holds ``daemon_loop``
+    and already schedules :meth:`RunnerRPCClient.start` on it the same
+    way.
+
+    Best-effort and bounded: a revive that raises, times out, or is
+    refused by the client's own evidence check answers ``False``, and
+    the caller discards the slot and cold-spawns.  A slot is worth one
+    short attempt, never a stalled session.
+
+    Args:
+        rpc: The slot's ``RunnerRPCClient``.
+        daemon_loop: The loop the client's transport is bound to.
+
+    Returns:
+        ``True`` when the channel is usable again.
+    """
+    revive = getattr(rpc, "revive_read_loop", None)
+    if not callable(revive) or daemon_loop is None:
+        return False
+    try:
+        fut = asyncio.run_coroutine_threadsafe(revive(), daemon_loop)
+        return bool(fut.result(timeout=5.0))
+    except Exception as exc:  # noqa: BLE001 — a failed revive is a discard
+        logger.warning(
+            "spawn_session_runner: reviving the slot's rpc read loop "
+            "raised %s — discarding the slot instead", exc,
+        )
+        return False
+
+
+def _reusable_slot_rpc(
+    pool_slot: Any,
+    session_id: str,
+    pool_manager: Any,
+    daemon_loop: Any = None,
+) -> Tuple[Optional[Any], bool]:
+    """The slot's RPC client, but only when it is still alive (#1058).
+
+    Layer 2 of the dead-slot fix.  ``PoolManager.acquire_slot`` is layer
+    1 and is the one that makes the reported failure unreachable; this is
+    the check at the point of USE, where the assumption is actually
+    consumed.  It is not decorative: ``spawn_session_runner`` runs OFF
+    the daemon loop (it blocks on ``run_coroutine_threadsafe``), so the
+    read loop that sets ``is_closed`` can run between the acquire and
+    here.
+
+    A closed client gets ONE repair, and only on positive evidence.  If
+    its ``close_reason`` says its read task was CANCELLED, then the
+    runner was never signalled and the transport was never closed — what
+    died is the reader, and a task cannot be un-cancelled, so a fresh
+    read task is started on the surviving transport
+    (``RunnerRPCClient.revive_read_loop``).  Clearing the flag alone
+    would hand back a channel nobody is reading, which fails later and
+    more confusingly than failing here.
+
+    Every other cause DISCARDS the slot: the peer is gone (``eof``), the
+    runner was reaped (``explicit-close``), or the stream is
+    desynchronised mid-frame (``oversized-frame`` / ``malformed-frame``).
+    Re-ADOPTING the socket is not among the options in any of those
+    cases: it is already owned by the dead client's asyncio transport,
+    and a second ``connect_accepted_socket`` on it is the exact PR #173
+    failure the shared-client design exists to avoid.  The caller
+    cold-spawns instead.
+
+    Args:
+        pool_slot: The acquired slot, or ``None`` for a cold-spawned
+            session (in which case there is nothing to reuse).
+        session_id: The arriving session — for the log line.
+        pool_manager: The daemon's :class:`~server.runner_pool.PoolManager`,
+            used to queue a discarded slot for teardown so its runner
+            process is reaped rather than leaked.  ``None`` is tolerated:
+            an unwired pool cannot reap, and refusing the reuse still
+            beats handing back a closed client.
+        daemon_loop: The loop the slot's transport is bound to, needed to
+            start a new read task.  ``None`` disables the revive, which
+            degrades to the discard path rather than to a wrong answer.
+
+    Returns:
+        ``(rpc, discarded)``.  ``rpc`` is the usable client or ``None``;
+        ``discarded`` says the SLOT is gone and the caller must
+        cold-spawn.  Two values because ``None`` alone conflates the
+        routine case — the first session on a slot, which has no client
+        yet and must create one on the slot's socket — with the failure
+        case, where the socket belongs to a dead client and must not be
+        touched.  Cold-spawning for the first case would bypass the pool
+        entirely, silently, on every fresh slot.
+    """
+    rpc = getattr(pool_slot, "rpc", None) if pool_slot is not None else None
+    if rpc is None:
+        return None, False
+
+    from server.runner_pool import slot_rpc_death
+
+    if not getattr(rpc, "is_closed", False):
+        return rpc, False
+
+    # Closed, but possibly only because its READER was cancelled — the
+    # transport and the runner survive that, and a task cannot be
+    # un-cancelled, so clearing a flag would hand back a channel nobody
+    # is reading.  A fresh read task on the surviving transport is the
+    # repair; ``can_revive`` is the evidence that it is the right one.
+    if getattr(rpc, "can_revive", False) and _revive_slot_rpc(
+            rpc, daemon_loop):
+        logger.info(
+            "spawn_session_runner: session %s revived the read loop of "
+            "pool slot pid=%s before reusing its rpc client",
+            session_id, getattr(pool_slot, "pid", "?"),
+        )
+        return rpc, False
+
+    reason = slot_rpc_death(pool_slot) or "closed"
+
+    logger.error(
+        "spawn_session_runner: session %s was handed pool slot pid=%s "
+        "whose rpc client is closed (reason=%s) — discarding the slot "
+        "and cold-spawning instead (#1058)",
+        session_id, getattr(pool_slot, "pid", "?"), reason,
+    )
+    discard = getattr(pool_manager, "discard_acquired_slot", None)
+    if callable(discard):
+        discard(pool_slot, reason=f"dead-rpc:{reason}")
+    return None, True
+
+
+def _profile_runtime_limits(profile: Any) -> Optional[RuntimeLimits]:
+    """A profile's ``runtime_limits``, but only if it really is one.
+
+    ``build_session_envelope`` accepts whatever object the daemon stashed
+    on ``server._profile``, which in practice is a ``SubagentProfile``
+    and in tests is sometimes a ``MagicMock``.  ``_runtime_limits_to_dict``
+    calls ``dataclasses.asdict``, which raises ``TypeError`` on anything
+    else -- and an exception here aborts the whole envelope build, so a
+    stand-in profile would take the session down rather than the one
+    field it cannot describe.
+
+    Type-checking rather than catching is deliberate: the attribute is
+    DECLARED ``Optional[RuntimeLimits]``, so anything else is "nobody
+    declared limits", which is exactly what the framework defaults mean.
+
+    A free function because ``build_session_envelope`` sits on its
+    cyclomatic-complexity baseline and may not grow.
+
+    Args:
+        profile: The resolved profile, a stand-in, or ``None``.
+
+    Returns:
+        The declared limits, or ``None``.
+    """
+    limits = getattr(profile, "runtime_limits", None)
+    return limits if isinstance(limits, RuntimeLimits) else None
 
 
 def _apply_cache_field(
@@ -456,8 +724,12 @@ def build_session_envelope(
       → ``session_env["MODEL_NAME"]``.
       Empty if neither declares; runner-side ``_validate_envelope``
       raises ``BootstrapError(stage="validate")`` audibly.
-    - ``provider_name``: profile.provider → ``session_env["JAATO_PROVIDER"]``.
-      Same empty-stays-empty rule.
+    - ``provider_name``: profile.provider → ``model_tiers[initial].provider``
+      → ``session_env["JAATO_PROVIDER"]``.
+      Same empty-stays-empty rule.  The tier step is what lets a profile whose
+      tiers fully declare model AND provider drop both top-level keys, which
+      is what the profile loader's own both-declared warning tells authors is
+      fine (jaato #822).
 
     Args:
         server: The :class:`JaatoServer` instance — has ``_profile``
@@ -494,16 +766,28 @@ def build_session_envelope(
     env_overrides: dict = {}
     model_tiers_dict: Optional[Dict[str, Any]] = None
     budget_control_dict: Optional[Dict[str, Any]] = None
+    max_parallel_tools: Optional[int] = None
+    runtime_limits_dict: Optional[Dict[str, Any]] = None
 
     if profile is not None:
-        provider_name = getattr(profile, "provider", None) or ""
         # Same source the bootstrap gate uses (core._profile_binds_a_model):
         # flat ``model``, else ``model_tiers[initial].model``.  Reading
         # ``profile.model`` alone made the gate and the envelope disagree --
         # a tiers-only profile passed the gate, then the runner rejected the
         # envelope with "envelope.model_name is empty" and the caller saw a
         # dropped connection rather than a config error.
-        from shared.model_tiers import bound_model_for_profile
+        #
+        # ``provider`` follows the SAME rule, and did not until #822: it read
+        # the flat key alone, so a profile whose tiers declared model AND
+        # provider per tier -- and which therefore dropped both top-level
+        # keys, exactly as the profile loader's own warning advises -- was
+        # refused with "envelope.provider_name is empty".  Client-side that is
+        # a 60-second create_session timeout, which reads as a hung daemon
+        # rather than a config error.  The initial tier is what the session
+        # uses on turn 1, so deriving from it is what makes that advice true.
+        from shared.model_tiers import (bound_model_for_profile,
+                                        bound_provider_for_profile)
+        provider_name = bound_provider_for_profile(profile) or ""
         model_name = bound_model_for_profile(profile) or ""
         # A profile is present, so its answer is explicit -- even the
         # empty one.  Materialise here rather than at the first append:
@@ -528,6 +812,21 @@ def build_session_envelope(
         # The profile holds a parsed ``BudgetControlConfig``; the wire
         # carries its re-serialised dict (runner re-parses + revalidates).
         _budget = getattr(profile, "budget_control", None)
+        # Envelope v6 (#862) / v7 (#735): the resolved ``runtime_limits``.
+        # The width rides its own field for daemon/runner skew; the whole
+        # block rides ``runtime_limits`` so the runner-side session can
+        # ARM the subprocess plugins with ``tool_timeout_seconds`` /
+        # ``max_output_bytes``.  Built HERE, outside the cold-spawn
+        # branch in ``spawn_session_runner``, because that branch is the
+        # one a pool slot -- forked before this session existed -- never
+        # reaches, and pool-served is the default path.  The env pair the
+        # cold-spawn branch still writes configures the Phase-2 cli-only
+        # executor, which no bootstrapped session dispatches through; see
+        # ``SessionInitEnvelope`` v7's note.
+        from shared.plugins.subagent.config import _runtime_limits_to_dict
+        _limits = _profile_runtime_limits(profile)
+        max_parallel_tools = getattr(_limits, "max_parallel_tools", None)
+        runtime_limits_dict = _runtime_limits_to_dict(_limits)
         # Cascade clamp (design note §3.1/§8b).  When this session belongs to
         # a cascade with a declared cap, its EFFECTIVE ceiling is
         # min(profile, cascade_remaining) per dimension — a child may only
@@ -574,7 +873,9 @@ def build_session_envelope(
         # Symmetric to the ``envelope.session_env`` resolution channel
         # (PR #91 → #92).  Same trust posture: resolved plaintext on
         # the daemon↔runner socketpair, never logged or forwarded.
-        from shared.plugins.subagent.config import expand_plugin_configs
+        from shared.plugins.subagent.config import (
+            expand_plugin_configs, inject_scrub_secret_env,
+        )
         raw_plugin_configs = {
             k: dict(v)
             for k, v in (getattr(profile, "plugin_configs", {}) or {}).items()
@@ -612,6 +913,11 @@ def build_session_envelope(
             )
             provider_cfg["quirks"] = dict(profile_quirks)
             plugin_configs_dict[effective_provider_for_quirks] = provider_cfg
+        # Profile-level ``scrub_secret_env`` (#863) -> the cli /
+        # interactive_shell / mcp sections, beneath their explicit knobs.
+        # Same channel as cache + quirks above, for the same reason: the
+        # plugin_configs dict is what already reaches the runner.
+        inject_scrub_secret_env(profile, plugin_configs_dict)
         profile_tool_scopes = getattr(profile, "tool_scopes", {}) or {}
         for name in names:
             spec = {"name": name, "preload": name in preloaded}
@@ -729,18 +1035,17 @@ def build_session_envelope(
         profile_completion_schema = getattr(
             profile, "completion_payload_schema", None,
         )
-        raw_processors = getattr(profile, "completion_processors", []) or []
-        for entry in raw_processors:
-            if hasattr(entry, "script"):
-                profile_completion_processors.append({
-                    "script": getattr(entry, "script", None),
-                    "output": getattr(entry, "output", None),
-                    "on_error": getattr(entry, "on_error", "fail_completion"),
-                    "description": getattr(entry, "description", None),
-                    "phase": getattr(entry, "phase", "finalization"),
-                })
-            elif isinstance(entry, dict):
-                profile_completion_processors.append(dict(entry))
+        # Serialised from the dataclass, never field-by-field: this list
+        # named five of CompletionProcessor's eight fields, so `name`,
+        # `max_refusals` and `on_exhausted` were dropped crossing into the
+        # runner and a declared refusal ceiling had no effect on the session
+        # that ran (jaato #770).
+        from shared.plugins.subagent.config import (
+            completion_processors_to_wire,
+        )
+        profile_completion_processors = completion_processors_to_wire(
+            getattr(profile, "completion_processors", []) or []
+        )
 
     # PR #91 Y fix: ship the FULLY-RESOLVED per-session env to the
     # runner.  ``server._session_env`` is populated by the daemon's
@@ -783,6 +1088,8 @@ def build_session_envelope(
         completion_processors=profile_completion_processors,
         model_tiers=model_tiers_dict,
         budget_control=budget_control_dict,
+        max_parallel_tools=max_parallel_tools,
+        runtime_limits=runtime_limits_dict,
         # Phase 2 cascade-sharing (envelope v4): forward the cascade
         # tenant ID stashed on the server by
         # ``SessionManager._construct_and_initialize_server``.  Runner
@@ -807,6 +1114,11 @@ def build_session_envelope(
         system_instruction_override=getattr(
             server, "_system_instruction_override", None,
         ),
+        # #859: the authenticated creator, stashed on the per-session
+        # server by ``_construct_and_initialize_server`` from
+        # ``BootstrapEnvelope.created_by``, so the runner-side session
+        # can stamp telemetry spans and ledger records with a user.
+        created_by=getattr(server, "_client_user_id", None),
         # 2026-06-21: client-provided ("host") tools registered via the WS/IPC
         # protocol BEFORE session.new (e.g. a telegram client's send_to_telegram),
         # ferried so the RUNNER-tier model SEES them in list_tools.  Pre-fix they
@@ -873,6 +1185,12 @@ def dispatch_bootstrap_envelope(
         # ``_emit_bootstrap_terminated`` helper for the exception-safe
         # emit + the rationale memory
         # ``project_backlog_bootstrap_time_visibility_gap``.
+        _note_bootstrap_outcome(
+            server,
+            "spawn_session_runner did not populate server.runner_rpc — "
+            "no session.bootstrap was dispatched, so the runner hosts no "
+            "session",
+        )
         _emit_bootstrap_terminated(
             server=server,
             session_id=session_id,
@@ -894,6 +1212,7 @@ def dispatch_bootstrap_envelope(
             profile_name=profile_name,
         )
         result = rpc.bootstrap_session_threadsafe(envelope, timeout=timeout)
+        _note_bootstrap_outcome(server, None)
         logger.info(
             "runner session.bootstrap acknowledged for %s: %s",
             session_id, result,
@@ -905,10 +1224,20 @@ def dispatch_bootstrap_envelope(
         # shape as MODEL_THREAD_TERMINAL_ERROR in core.py) so the class name
         # is always visible, plus ``exc_info=True`` for the traceback when
         # the logger config preserves it.
-        logger.warning(
-            "runner session.bootstrap failed for %s: error_type=%s error=%s — "
-            "daemon-side JaatoSession remains authoritative",
+        # #1033: ERROR, not WARNING, and no longer claiming a fallback.
+        # "daemon-side JaatoSession remains authoritative" described a §7c
+        # rollout window that has closed — ``initialize()`` itself now reads
+        # the runner's session (``session_get_context_usage_threadsafe``),
+        # and every ``session.*`` verb on a hostless runner answers
+        # ``no_host``.  This line is the ONE place the real cause is
+        # recorded, so it is logged at the severity of what it decides.
+        logger.error(
+            "runner session.bootstrap FAILED for %s: error_type=%s error=%s — "
+            "this runner hosts no session; the session will be refused",
             session_id, type(exc).__name__, exc, exc_info=True,
+        )
+        _note_bootstrap_outcome(
+            server, f"{type(exc).__name__}: {exc_message(exc)}",
         )
         # Server 0.6.169+ (bootstrap-time visibility): emit
         # SessionTerminatedEvent so cascade observers + reactor rules
@@ -948,6 +1277,29 @@ def dispatch_bootstrap_envelope(
                 "post-bootstrap tool-id re-emit failed for %s",
                 session_id, exc_info=True,
             )
+
+
+def _note_bootstrap_outcome(server: Any, error: Optional[str]) -> None:
+    """Record the bootstrap outcome on *server* (#1033).
+
+    Best-effort by construction: this function is called from the
+    dispatch's own failure paths, and a diagnostic that raises there would
+    replace a reportable failure with an unreportable one.  Test doubles
+    for ``JaatoServer`` that predate the method simply do not record —
+    which reads downstream as "nothing known to be wrong", the same answer
+    a session with no runner gives.
+
+    Args:
+        server: the session's ``JaatoServer``.
+        error: one-line summary of the failure, or ``None`` on success.
+    """
+    note = getattr(server, "note_runner_bootstrap_outcome", None)
+    if not callable(note):
+        return
+    try:
+        note(error)
+    except Exception:  # noqa: BLE001 — a recorder must not fail the path
+        logger.debug("note_runner_bootstrap_outcome raised", exc_info=True)
 
 
 def _emit_bootstrap_terminated(

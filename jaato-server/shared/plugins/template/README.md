@@ -47,7 +47,7 @@ The plugin subscribes to prompt enrichment to automatically detect and extract t
 │  Template plugin's enrich_prompt() is called                    │
 │                                                                 │
 │  1. Detects code blocks with {{ }} or {% %} syntax             │
-│  2. Extracts to .jaato/templates/mod-code-001-basic.java.tmpl  │
+│  2. Extracts to .jaato/template_extracts/mod-code-001-...tmpl  │
 │  3. Annotates prompt with extraction info                       │
 └─────────────────────────────────────────────────────────────────┘
                               │
@@ -57,7 +57,7 @@ The plugin subscribes to prompt enrichment to automatically detect and extract t
 │                                                                 │
 │  ---                                                            │
 │  **Extracted Templates:**                                       │
-│  [Template extracted: .jaato/templates/mod-code-001-basic...]   │
+│  [Template extracted: .jaato/template_extracts/mod-code-001...] │
 │    Variables: circuitBreakerName, fallbackMethodName, ...       │
 │    Use: renderTemplateToFile(template_path="...", variables={...})    │
 │  ---                                                            │
@@ -196,7 +196,7 @@ listAvailableTemplates()
 # Returns:
 # {
 #   "templates": [
-#     {"path": ".jaato/templates/mod-code-001-basic.java.tmpl",
+#     {"path": ".jaato/template_extracts/mod-code-001-basic.java.tmpl",
 #      "variables": ["circuitBreakerName", "fallbackMethodName", ...]}
 #   ],
 #   "count": 1
@@ -372,6 +372,75 @@ Templates without an `Output:` directive — or callers using inline
 either fails fast with `validation_layer=path_check` (same severity
 class as variable-shape validation).
 
+## Output-Path Routing
+
+A template's `Output:` directive declares a path relative to the package,
+not to the project root — which is right, because where a `.java` file
+belongs is a fact about the *stack*, not about the template.  Routing is
+where that fact is declared: a first-match-wins list of `(glob, prefix)`
+rules applied to every `renderTemplateToFile` call's resolved
+`output_path`, whether the agent supplied it or the directive derived it.
+
+```yaml
+file_conventions:
+  output_path_routing:
+    - {glob: "pom.xml",       prefix: ""}                     # leave alone
+    - {glob: "**/*Test.java", prefix: "src/test/java"}
+    - {glob: "**/*.java",     prefix: "src/main/java"}
+    - {glob: "**/*.yml",      prefix: "src/main/resources"}
+```
+
+Semantics: rules are tried in declared order and the first match wins;
+an empty `prefix` means *match and leave as-is* (an explicit whitelist
+ahead of the catch-alls below it); prepending is idempotent, so a path
+already under the matched rule's prefix is returned unchanged.  Globs are
+`pathlib.PurePath.match` — `*`, `?`, `[seq]`, `**` — with `**/` also
+matching at zero depth (`**/*.yml` routes a top-level `application.yml`,
+gitignore-style).  Brace expansion is NOT supported; write one rule per
+extension.  With no rules declared anywhere, nothing is routed.
+
+### Two sources, and which one wins
+
+| Source | Where | Notes |
+|--------|-------|-------|
+| `plugin_configs.template.file_conventions` | the session profile | Declared knob (#900): validated by `jaato-scaffold validate`, and `.jaato/profiles/**` is AppArmor write-denied to the runner |
+| `template_routing.yaml` | `<config_root>/`, else `<workspace>/.jaato/` | Convention-over-configuration; same schema, same top-level key |
+
+**Precedence: knob > file.**  When `file_conventions` is PRESENT in the
+profile it IS the configuration and no file is read — not the config_root
+tier, not the workspace tier.  Present-and-empty (`{}`, or an empty
+`output_path_routing`) is itself a declaration: *this profile routes
+nothing*.  Absent keeps the file search exactly as it was.
+
+Merging the two would give one session two writers of one table, and the
+file half is reachable from the workspace while the profile half is not —
+so the profile suppresses the file rather than layering over it.  This is
+the same rule, for the same reason, as
+`plugin_configs.lsp.languageServers`.
+
+Prefer the knob when the rules are stack knowledge a cascade already
+carries: it travels on the vehicle the profile already is, a typo in it
+fails `jaato-scaffold validate` before a run starts rather than sitting
+inert, and it does not depend on which of the two file tiers won.  A
+malformed knob is read as *no routing* and never falls back to the file —
+falling back would make the profile's own declaration silently inert.
+
+```yaml
+# profile
+plugins: [template]
+plugin_configs:
+  template:
+    file_conventions:
+      output_path_routing:
+        - {glob: "**/*Test.java", prefix: "src/test/java"}
+        - {glob: "**/*.java",     prefix: "src/main/java"}
+```
+
+Routing decides where generated files land, which is why it is worth
+declaring precisely: files that land outside the declared source root are
+where a validator gate does not look, so the gate examines zero files and
+reports a clean verdict over nothing.
+
 ## Enrichment Priority
 
 The template plugin participates in three enrichment surfaces:
@@ -410,23 +479,63 @@ Example: `mod-code-001-basic-with-fallback.java.tmpl`
 ```python
 registry.expose_tool("template", {
     "base_path": "/path/to/project",  # Optional: override base path
-    "agent_name": "main"              # For trace logging
+    "agent_name": "main",             # For trace logging
+    # Output-path routing — see "Output-Path Routing" above.  Presence of
+    # this key suppresses template_routing.yaml entirely.
+    "file_conventions": {
+        "output_path_routing": [
+            {"glob": "**/*.java", "prefix": "src/main/java"},
+        ],
+    },
 })
 ```
 
+Declared knobs (`get_config_schema`):
+
+| Knob | Type | Meaning |
+|------|------|---------|
+| `file_conventions` | dict | Output-path routing table; present = the profile IS the configuration and no `template_routing.yaml` is read |
+
+`base_path` / `agent_name` / `session_id` / `config_root` are
+framework-supplied (the registry populates them), not profile knobs.
+
 ## Storage
 
-Extracted templates are stored in `.jaato/templates/`:
+Two directories, and the plugin only ever writes to one of them.
+
+`.jaato/templates/` (or `<config_root>/templates/` when a config_root is
+set) is the **catalog** — templates an operator or an orchestrator
+provisioned, plus their `index.json`. The plugin reads it and never
+writes it: under AppArmor a confined session carries `audit deny
+<workspace>/.jaato/templates/** wlk,` alongside the other user-authored
+config (#893), because a template is authored content that becomes code,
+and an agent that could rewrite one before rendering it would have removed
+whatever rule the template encoded — with the generated file still looking
+entirely normal.
+
+`.jaato/template_extracts/` is where the plugin's own runtime writes go —
+templates extracted from tool output, and the persisted index:
 
 ```
 .jaato/
-└── templates/
+├── templates/                # catalog: provisioned, read-only to the agent
+│   └── index.json
+└── template_extracts/        # runtime: extracted on-demand, writable
+    ├── index.json
     ├── mod-code-001-basic-with-fallback.java.tmpl
     ├── mod-code-001-config.yaml.tmpl
     └── mod-code-002-retry-pattern.java.tmpl
 ```
 
-This directory can be gitignored as templates are extracted on-demand.
+It is a *sibling* of the catalog rather than a subdirectory because
+AppArmor does not let a more-specific allow override a less-specific deny,
+so a carve-out under the deny would not have worked. It always resolves
+against the workspace, never config_root, which is granted read-only under
+confinement.
+
+`template_extracts/` can be gitignored as templates are extracted
+on-demand. On load, the catalog's index wins over the extracts index on a
+name collision.
 
 ## Security
 

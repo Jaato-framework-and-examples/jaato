@@ -73,7 +73,80 @@ from .path_utils import require_absolute_path
 # Runner-side bootstrap stashes the value onto ``JaatoSession`` so
 # subagent spawns can inherit the parent cascade via the existing
 # ``runtime.create_session()`` path.
-SESSION_ENVELOPE_VERSION = 5
+#
+# v6 (2026-09-08): added ``max_parallel_tools``.  The profile's
+# ``runtime_limits`` block is resolved daemon-side, but the two
+# application-enforced fields the RUNNER needs reach it by env var
+# (``JAATO_RUNNER_MAX_OUTPUT_CHARS`` / ``..._TOOL_TIMEOUT_SECONDS``) on
+# the COLD-spawn path only — a pool slot is forked before any session
+# exists and inherits no such env.  Pool-served sessions are the default,
+# so a knob delivered that way would be a no-op exactly where it matters.
+# This one rides the envelope instead, which every bootstrap path reads.
+#
+# v7 (2026-09-11, #735): added ``runtime_limits`` — the WHOLE resolved
+# block, not just the one field v6 carried.  v6's comment above says the
+# two subprocess caps "reach it by env var ... on the COLD-spawn path
+# only".  Measured on a real daemon, they reach NO path: the env pair
+# configures ``server/runner/tool_executor.ToolExecutor`` (the Phase-2
+# cli-only ``execute_fn``), and ``RunnerRPC._dispatch_method`` bypasses
+# that surface whenever a session host exists — i.e. always, since
+# ``session.bootstrap`` is dispatched on every path.  A session's tools
+# run through ``shared.ai_tool_runner.ToolExecutor``, whose
+# ``set_runtime_limits`` had no non-test caller, so
+# ``CliPlugin._runtime_limits`` was ``None`` everywhere and a profile
+# declaring ``tool_timeout_seconds: 2`` ran a ``sleep 60`` for 60.02 s
+# on BOTH the pool and cold-spawn paths.  The block now rides the
+# envelope and is applied in ``JaatoSession.configure()`` — one
+# application point, so the runner tier and in-process sessions cannot
+# disagree.  ``max_parallel_tools`` keeps its own v6 field for
+# daemon/runner skew: a v6 runner still reads it, a v7 runner prefers
+# the block and falls back to the standalone field.
+SESSION_ENVELOPE_VERSION = 7
+
+
+def _optional_str(value: Any) -> Optional[str]:
+    """``str(value)`` for a present, non-empty wire value; else ``None``."""
+    return str(value) if value else None
+
+
+def _optional_positive_int(value: Any) -> Optional[int]:
+    """``int(value)`` for a positive wire number; else ``None``.
+
+    Deliberately lenient at the boundary: a malformed or non-positive
+    concurrency ceiling means "nobody declared one", which the session
+    answers with the framework default.  Refusing the whole envelope over
+    it would turn a typo in one profile key into a session that cannot
+    bootstrap at all — and the value is validated where it is authored,
+    by :class:`shared.runtime_limits.RuntimeLimits`.
+    """
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _optional_limits_dict(value: Any) -> Optional[Dict[str, Any]]:
+    """A wire ``runtime_limits`` mapping, or ``None`` when unusable (v7).
+
+    Lenient in the v6 style, and for the same reason: the block is
+    *validated where it is authored*, by
+    :class:`shared.runtime_limits.RuntimeLimits`, which rejects a bad
+    value at profile-parse time.  Anything malformed that still reached
+    the wire means "nobody declared limits" — refusing the whole envelope
+    over it would turn one typo into a session that cannot bootstrap at
+    all, which is strictly worse than the framework defaults.
+
+    Args:
+        value: The raw ``runtime_limits`` value off the wire.
+
+    Returns:
+        A plain dict copy, or ``None`` for a missing / empty / non-mapping
+        value.
+    """
+    if not isinstance(value, dict) or not value:
+        return None
+    return dict(value)
 
 
 @dataclass
@@ -308,6 +381,34 @@ class SessionInitEnvelope:
     # daemon.plugin_execute (sentinel plugin name).  Empty default = backward
     # compat; same-build daemon+runner so no schema_version bump needed.
     client_tools: List[Dict[str, Any]] = field(default_factory=list)
+    # #859: the authenticated user the session was created for.  Known
+    # daemon-side since the WS/SSO work (``Session.created_by``) but it
+    # never crossed to the runner, so the runner-side ``JaatoSession``
+    # -- the one that opens telemetry spans and writes ledger records --
+    # had no user to stamp (``set_client_user_id`` had no caller).  The
+    # runner bootstrap now stamps it.  ``None`` on unauthenticated (IPC)
+    # sessions and on envelopes from older daemons; same-build
+    # daemon+runner so no schema_version bump.
+    created_by: Optional[str] = None
+    # v6 (#862): profile ``runtime_limits.max_parallel_tools`` — the
+    # ceiling on how many tool calls the runner-side JaatoSession runs
+    # concurrently.  ``None`` (older daemons included) means nothing
+    # declared one and the session applies the framework default, so an
+    # envelope built before this field behaves exactly as it did.
+    max_parallel_tools: Optional[int] = None
+    # v7 (#735): the profile's whole resolved ``runtime_limits`` block,
+    # re-serialised by ``_runtime_limits_to_dict``.  The runner rebuilds
+    # a :class:`~shared.runtime_limits.RuntimeLimits` from it and hands
+    # it to ``JaatoSession.configure(runtime_limits=...)``, which is the
+    # ONE place that arms the subprocess plugins (cli,
+    # interactive_shell) with ``tool_timeout_seconds`` /
+    # ``max_output_bytes``.  ``None`` — from an older daemon, or from a
+    # profile declaring no ``runtime_limits`` — leaves the framework
+    # defaults in charge, so an envelope built before this field behaves
+    # exactly as it did.  The kernel-enforced trio in the same block is
+    # NOT consumed here: it is written to the cgroup daemon-side before
+    # the runner is even forked, and the runner's children inherit it.
+    runtime_limits: Optional[Dict[str, Any]] = None
     schema_version: int = SESSION_ENVELOPE_VERSION
 
     def __post_init__(self) -> None:
@@ -382,6 +483,9 @@ class SessionInitEnvelope:
             ),
             "system_instruction_override": self.system_instruction_override,
             "client_tools": [dict(t) for t in self.client_tools],
+            "created_by": self.created_by,
+            "max_parallel_tools": self.max_parallel_tools,
+            "runtime_limits": self.runtime_limits,
         }
 
     @classmethod
@@ -453,6 +557,11 @@ class SessionInitEnvelope:
                 dict(t) for t in (d.get("client_tools") or [])
                 if isinstance(t, dict)
             ],
+            created_by=_optional_str(d.get("created_by")),
+            max_parallel_tools=_optional_positive_int(
+                d.get("max_parallel_tools")
+            ),
+            runtime_limits=_optional_limits_dict(d.get("runtime_limits")),
         )
 
 

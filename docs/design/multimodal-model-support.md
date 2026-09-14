@@ -5,6 +5,18 @@ provider vision tables, #299 `vision` tier + content gate, #300 config-time
 vision-tier validation). Scope: **v1 = input vision via the tier system**;
 output/generation and audio/PDF breadth are explicit later scopes (§9).
 
+**Superseded for current state (2026-09, #866).** The first table below is
+the snapshot v1 was designed *against*, kept because it records why the
+design took the shape it did; it no longer describes the tree. The table
+after it is the current state, and the design that carried modality past
+v1 — PDF and audio input, audio output, media in history and under GC — is
+[Binary Media Chunks](binary-media-chunks.md). The provider capability
+declarations (`PROVIDER_CAPABILITIES` in each provider package) are the
+source of truth for which wire carries what;
+`test_provider_capability_conformance` proves each declaration on a real
+conversion, and `test_docs_do_not_contradict_the_tree` holds the current
+table to those declarations.
+
 ## Goal
 
 Let a jaato agent actually *use* a multimodal model — to start, **see images**
@@ -15,7 +27,7 @@ multimodal agent from role-specialized providers via the existing
 `vision` tier mapped to a vision-capable provider = a vision-capable agent, with
 the executor's provider untouched.
 
-## Where jaato is today (grounded)
+## Where jaato was when v1 was designed (historical snapshot)
 
 | Piece | State |
 |-------|-------|
@@ -30,6 +42,18 @@ the executor's provider untouched.
 The plumbing types and the role/tier mechanism **exist**; the gaps are
 capability-awareness, honest gating, and wiring modality content to the
 role provider.
+
+## Where jaato is now
+
+| Piece | State |
+|-------|-------|
+| Image-input conversion in adapters | ✅ every provider that declares `user_message_images` — all but `chrome_ai`, `claude_cli` and `github_models`. The OpenAI-compatible fleet shares one converter path (`model_provider/_attachments.py`), which is how the "0 of the local fleet" row above closed in one change rather than ten |
+| Input source | 🟡 `readFile` MIME-detects files, and a client attaches media on `SendMessageRequest.attachments` — an attachment with no text is a valid turn (#838). Still no paste/URL/drag-drop |
+| Modality breadth | 🟡 PDF input where the wire declares `pdf_input` (`anthropic`, `bedrock`, `google_genai`, `openai`, `openrouter`); audio input where it declares `audio_input` (`bedrock`, `google_genai`, `openai`, `openrouter`; #830). `openai` is the native first-party wire (#508); the Azure provider shares its request shape but gates both extensions on api-version and on the deployment, so it declares neither. `bedrock` (#508) is the first wire whose document block is not an OpenAI `file` block at all, and the first to carry **video** — Converse names a video format vocabulary and `bedrock/converters.py` emits it, reachable for a model whose `modalities` say `video`. There is still no `video_input` capability column, so that half stays unguarded and undeclared rather than asserted |
+| Output (model→media) | ✅ model-emitted audio streams as `MediaDelta` and reaches clients as `CLIENT`-audience chunks (#824); declared by `output_media` on `azure_openai`, `doubleword`, `kimi`, `mimo`, `minimax`, `nebius`, `nim`, `openai`, `openrouter`, `ovhcloud` and `zhipuai_openai` — the native `openai` provider decodes it on both of its wires, the Responses events being the same split (bytes, then words) under different names |
+| Capability awareness | ✅ `modalities()` / `resolve_modalities` for input and `output_modalities()` for output, per provider; `supports_modality()` is the framework's one answer to "can this model consume that?" |
+| Media in history | ✅ replay is gated per request by the *active* model (#847); consumed audio is evicted after its turn and GC sizes media in tokens and in bytes (#850) |
+| Multi-model-by-role | ✅ unchanged, and tier modality keys are now direction-qualified (`{audio: outbound}`; binary-media-chunks §5.5) |
 
 ## Approach — modality roles in the tier system ("Pattern 1")
 
@@ -185,8 +209,8 @@ confirmed (modalities unresolved / no `image`), session creation **fails loud**:
 
 The correctness of the whole feature hinges here. When a turn carries
 `Part.inline_data` of an image and the **active** tier's provider lacks `image`
-in `modalities()`, the framework returns a **clear, actionable error** instead
-of sending bytes a model can't see:
+in `modalities()`, the framework withholds those bytes and puts a **clear,
+actionable note** in their place instead of sending content a model can't see:
 
 > This message contains an image, but the active `executor` model
 > (`<model>`) can't view images. Call `enter_tier("vision")` first, then retry.
@@ -196,6 +220,28 @@ from a silent failure into a loud, self-correcting signal — same philosophy as
 the recovery-event work. Gate location: the session's send path, right before
 history→provider conversion (where the active provider + the outgoing `Part`s
 are both in scope).
+
+**Both halves are implemented, and they landed apart.** The tool-result half
+(`_gate_tool_results_for_active_modalities`) shipped with this design; the
+send-path half described above did not, and stayed missing until #847 — where
+it surfaced not as an unviewable image but as a **404**, because an `audio/*`
+part the session had legitimately accepted was replayed to a text model whose
+upstream refuses input audio outright. `_gate_history_for_active_modalities`
+fills it, at exactly the location named above.
+
+Two properties are load-bearing there and are not obvious from the paragraph
+above:
+
+* **Per-request, not destructive.** The gate filters a *copy*; stored history
+  keeps the bytes. Content withheld from a text tier must still be there when
+  the agent switches back, or the first text turn permanently costs the
+  session a modality.
+* **A note, not an error.** A hard error was the v1 sketch and is wrong for
+  history replay: it would refuse every subsequent turn rather than the one
+  offending part. The turn continues, minus the content, plus a note saying
+  what went missing — which is also what lets the agent act on it.
+
+See [Binary Media Chunks §10](binary-media-chunks.md).
 
 ## Agent guidance
 
@@ -224,11 +270,27 @@ backstop when the agent forgets.
 - **Output / generation** (model emits an image/audio) — `ProviderResponse`
   carries no model-generated media; adapters don't parse it; clients don't
   render it. Separate scope (Scope B). The detect tier here is its foundation.
+  *Closed since for audio:* #824 streams model-emitted audio as `MediaDelta`
+  on the tool-output channel; see [Binary Media Chunks](binary-media-chunks.md).
 - **Modality breadth** — PDF/audio/video converters in whichever providers fill
   those roles. (`modalities()` already generalizes; the *converters* don't.)
+  *Partly closed since:* PDF landed with `pdf_input` and audio with
+  `audio_input` (#829, #830) — both as per-wire opt-ins in
+  `model_provider/_attachments.py`, both guarded in each direction by
+  `test_provider_capability_conformance`. #508's `bedrock` adds a wire that
+  carries a video block too, which is what makes the missing column visible
+  rather than theoretical. Video remains open, and remains
+  deliberately unchecked by `jaato-scaffold validate`: with no capability
+  column there is nothing to check, and a warning would be inventing a
+  verdict. The prediction in this section held — the gate, the validator and
+  the tier machinery needed no new methods for either; the converters were
+  the whole of the work.
 - **Ingestion UX** — paste/URL/drag-drop is client-side, downstream of this.
 - **Backfilling image conversion to all 13 providers** — unnecessary under
   composition; only the providers chosen to *fill* a modality role need it.
+  *Happened anyway, cheaply:* the OpenAI-compatible fleet converts through
+  one shared module (`_attachments.py`, #829), so the backfill was one
+  change, not one per provider.
 - **Cross-provider tiers** (text executor on provider A + vision tier on
   provider B) — blocked by the V1 same-provider invariant
   (`_validate_same_provider_v1`); it's the existing V2 tier-roadmap item, not

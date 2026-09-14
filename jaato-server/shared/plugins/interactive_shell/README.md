@@ -70,8 +70,43 @@ When the `popen_spawn` backend is active (typical on MSYS2 with MINGW Python), t
 | `max_lifetime` | float | `600` | Session lifetime ceiling in seconds |
 | `max_idle` | float | `300` | Max idle seconds before reaping |
 | `idle_timeout` | float | `0.5` | Seconds of silence for output settling |
-| `workspace_root` | str | `None` | Working directory for spawned processes |
+| `workspace_root` | str | `None` | Working directory for spawned processes, and the containment boundary (see below). `None` = no sandboxing |
+| `require_confinement` | bool | `false` | Refuse every `shell_spawn` when no AppArmor child profile is active |
+| `scrub_secret_env` | str/list | `default` | Secret env-var globs stripped from every spawn ([Secret Env Scrubbing](../../../../CLAUDE.md)) |
 | `agent_name` | str | `None` | Agent context for trace logging |
+
+## Path Containment (#722, #503)
+
+This plugin spawns a real PTY, so it is strictly more capable than `cli` —
+and until #722 it enforced nothing, while `cli` refused every path outside
+the workspace. `shell_spawn("cat /etc/hostname")` therefore read a file
+`cli` had just declined. Three layers answer that, and they are
+deliberately not equal:
+
+| Layer | Covers | On a string it cannot parse |
+|-------|--------|-----------------------------|
+| `shell_spawn`'s `command` | the workspace check `cli` applies, same analyzer (`shared/plugins/command_containment.py`) | **refuses** — the spawn command IS a shell command |
+| `shell_input`'s `text` | the same check, best effort | **allows** — typed text may be Python, SQL or a password; refusing every non-shell string would refuse most legitimate input |
+| AppArmor child profile | everything, kernel-enforced | n/a |
+
+Only the third is a boundary in the strict sense: a live PTY's working
+directory drifts under `cd`, and a program inside it can name paths
+through channels no string check sees. The string layers refuse the
+direct attempt and claim nothing more — concretely, the analyzer does not
+descend into the quoted argument of `sh -c`, so `sh -c 'cat /etc/shadow'`
+is not caught (a gap shared with `cli`, whose analyzer this is).
+
+When the runner installed no AppArmor child-profile transition the plugin
+**says so once per session at WARNING** rather than running unconfined in
+silence, which was the pre-#722 behaviour. `require_confinement: true`
+takes the stronger posture and refuses to spawn at all — the same shape as
+the `notebook` plugin's in-process-exec gate. The default is `false`
+because a PTY child is a separate process, the same risk class as a `cli`
+subprocess, which does not fail closed either.
+
+The spawn `cwd` is the workspace root, is not model-controllable, and is
+verified against `workspace_root` inside `ShellSession` before the process
+starts (the `cwd` half of #503).
 
 ## Session Lifecycle
 

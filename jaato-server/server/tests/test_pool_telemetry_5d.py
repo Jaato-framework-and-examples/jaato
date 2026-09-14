@@ -54,6 +54,23 @@ def test_telemetry_starts_at_zero() -> None:
         "cascade_slot_reuse_hits_total": 0,
         "cascade_slot_reuse_misses_total": 0,
         "cascade_slots_idle_torndown_total": 0,
+        # Capacity counters.  The over-cap pair used to be sprung into
+        # existence by the first ``_incr``, so a daemon that had never
+        # hit the ceiling reported neither key rather than reporting
+        # zero -- an absent counter and a counter at zero are different
+        # claims to whoever reads the snapshot.
+        "pool_slots_over_cap_total": 0,
+        "pool_slots_over_cap_torndown_total": 0,
+        # Multi-tenant capacity counters (#898).
+        "pool_stale_reservation_evicted_total": 0,
+        "pool_replenish_ceiling_blocked_total": 0,
+        # Liveness counters (#1058).  Both declared rather than sprung
+        # into existence for the same reason the over-cap pair is: on a
+        # healthy daemon they must read 0, not be absent.  Nonzero on
+        # either is a fault report -- a runner that died unasked, or a
+        # session torn down twice.
+        "pool_dead_slot_evicted_total": 0,
+        "pool_duplicate_return_refused_total": 0,
     }
 
 

@@ -32,7 +32,9 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, FrozenSet, List, Optional, Tuple, TYPE_CHECKING
+from base64 import b64decode as _b64decode
+from binascii import Error as BinasciiError
 
 from ._lazy import get_openai_client_class, get_openai_module
 
@@ -42,6 +44,7 @@ if TYPE_CHECKING:
 from ..base import (
     ModalityCapabilityMixin,
     FunctionCallDetectedCallback,
+    MediaDelta,
     ProviderConfig,
     StreamingCallback,
     ThinkingCallback,
@@ -60,6 +63,7 @@ from jaato_sdk.plugins.model_provider.types import (
     TurnResult,
     normalize_inclusive_usage,
     parse_tool_call_arguments,
+    reported_cache_count,
     require_terminated_stream,
     resolve_tool_use_finish,
 )
@@ -70,18 +74,34 @@ from .converters import (
     response_from_openai,
     tool_schemas_to_openai,
 )
+from .._media_deltas import (  # noqa: F401 - re-exported for callers
+    MEDIA_API_PARAMS,
+    drop_unrequested_audio_options,
+    NO_MEDIA_YET,
+    STREAM_AUDIO_MIME,
+    OpenAIMediaOutputMixin,
+    extract_audio_delta as _extract_audio_delta,
+    ensure_spoken_part,
+    model_wrote_text,
+    media_chunk_count,
+    stream_terminated,
+)
 from .._prose_tools import (
     augment_system_with_tools,
     messages_to_prose_chat,
     read_prose_tool_calls_quirk,
     rewrite_prose_tool_calls,
 )
-from shared.tool_id_map import tool_choice_to_wire
+from shared.history_invariant import (
+    new_tool_call_nonce,
+    synthetic_tool_call_id,
+)
+from shared.tool_id_map import tool_choice_to_wire, wire_name_trace_fields
 
 logger = logging.getLogger(__name__)
 
 
-class OpenAICompatProvider(ModalityCapabilityMixin):
+class OpenAICompatProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
     """Base class for OpenAI-compatible chat-completions providers.
 
     See the module docstring for the hook contract.  Lifecycle:
@@ -105,14 +125,68 @@ class OpenAICompatProvider(ModalityCapabilityMixin):
     # ``plugin_configs.<provider>.api_params``.  Allowlisted (not blind
     # passthrough) so a typo'd / unsupported key surfaces as a profile warning
     # rather than an opaque OpenAI 400.  Subclasses may override.
+    # ``modalities`` here is OpenAI's OUTPUT selector (``["text","audio"]``)
+    # and is NOT the jaato tier key of the same name, which declares INPUT
+    # roles.  They coexist in one profile -- ``api_params.modalities`` vs
+    # ``model_tiers.<tier>.modalities`` -- so the layer a key sits under is
+    # what disambiguates them.  ``audio`` is its companion
+    # (``{"voice": ..., "format": ...}``); OpenAI requires both together,
+    # and both were previously dropped here with a warning, which made
+    # audio output unrequestable through any OpenAI-compatible provider.
     _FORWARDED_API_PARAMS = frozenset({
         "temperature", "top_p", "max_tokens", "tool_choice",
         "parallel_tool_calls", "frequency_penalty", "presence_penalty",
         "seed", "stop",
-    })
+    }) | MEDIA_API_PARAMS
 
     # Models known to expose reasoning/thinking via ``reasoning_content``.
     REASONING_CAPABLE_MODELS: List[str] = []
+
+    # --- wire policy: what this endpoint carries BEYOND images.
+    #
+    # Images ride every OpenAI-shaped wire in this tree, so they need no
+    # flag.  PDFs (``file`` blocks) and audio input (``input_audio``
+    # blocks) do not: they are extensions that a given endpoint either
+    # implements or 400s on.  The default is the base chat format — no
+    # PDFs, no audio — which is what every existing sharer declares
+    # (``pdf_input=False`` / ``audio_input=False``), so leaving these
+    # alone keeps a provider byte-identical on the wire.
+    #
+    # A subclass raising one MUST also raise the matching
+    # ``PROVIDER_CAPABILITIES`` field: the conformance guard runs the
+    # converter and fails when a declaration and a converter disagree,
+    # which is the check that would have caught #829.
+    WIRE_PDF_AS_FILE: bool = False
+    WIRE_AUDIO_AS_INPUT_AUDIO: bool = False
+    # Whether an assistant turn's reasoning goes BACK to the model on the
+    # next request (docs/design/minimax-kimi-mimo-providers.md §3).  Off
+    # by default: for the DeepSeek-R1-era models this base was written
+    # for, the reasoning of a finished turn is noise, and every existing
+    # inheritor keeps that behaviour.  A provider fronting a wire whose
+    # thinking models REQUIRE the replay (MiMo answers 400 without it,
+    # Kimi K3 wants the assistant message back as-is, MiniMax measures a
+    # large quality drop) sets it True, and then three things follow: the
+    # streaming loop and the batch path put the reasoning in a leading
+    # ``Part.thought`` (not only in ``ProviderResponse.thinking``, which
+    # the UI reads), the session keeps that part in history, and
+    # ``history_to_openai`` replays it through ``_reasoning_replay_fields``.
+    # Declared to the capability contract as ``reasoning_replay``.
+    replay_reasoning: bool = False
+
+    # Thinking-control keys this provider READS out of ``api_params``
+    # (``enable_thinking`` / ``thinking_level`` / ``thinking_budget`` and
+    # any vendor-specific sibling).  They are not Chat Completions body
+    # fields, so they are not forwarded; a provider names the ones it
+    # consumes here so they are handed to ``_apply_thinking_knobs`` rather
+    # than reported as unsupported.  Empty on the base: the nim-family
+    # providers take thinking from ``config.extra`` directly.
+    _THINKING_KNOBS: FrozenSet[str] = frozenset()
+
+    # Wire name of the output cap.  ``max_tokens`` is what the profile
+    # convention says and what most upstreams accept; the vendors that
+    # deprecated it in favour of ``max_completion_tokens`` (MiniMax, Kimi,
+    # MiMo) rename it here, so a profile stays portable across providers.
+    _MAX_TOKENS_WIRE_NAME: str = "max_tokens"
 
     def __init__(self) -> None:
         """Initialize the provider (not yet connected)."""
@@ -131,6 +205,8 @@ class OpenAICompatProvider(ModalityCapabilityMixin):
         # plugin_configs.<provider>.api_params (filtered to
         # _FORWARDED_API_PARAMS) + opaque extra_body, forwarded on each call.
         self._api_params: Dict[str, Any] = {}
+        # Operator assertion that this model can EMIT these modalities.
+        self._output_modalities_knob: Optional[List[str]] = None
         self._extra_body: Optional[Dict[str, Any]] = None
 
         # Quirk: prose_tool_calls (opt-in via profile.quirks).  When set,
@@ -272,13 +348,29 @@ class OpenAICompatProvider(ModalityCapabilityMixin):
                 k: v for k, v in api_params.items()
                 if k in self._FORWARDED_API_PARAMS
             }
-            dropped = set(api_params) - self._FORWARDED_API_PARAMS
+            dropped = set(api_params) - self._FORWARDED_API_PARAMS - self._THINKING_KNOBS
             if dropped:
                 logger.warning(
                     "%s api_params: ignoring unsupported key(s) %s; forwarded "
                     "fields are %s",
                     self.name, sorted(dropped), sorted(self._FORWARDED_API_PARAMS),
                 )
+            self._apply_thinking_knobs(api_params)
+        # The OUTPUT counterpart of the input ``modalities`` knob.  No
+        # catalog in this tree reports output modalities, so an operator
+        # naming an audio-capable model is the only available source of
+        # truth -- without it the startup check refuses any outbound tier
+        # role, since the floor is text-only.
+        out_knob = config.extra.get("output_modalities")
+        if out_knob is not None:
+            if (not isinstance(out_knob, (list, tuple))
+                    or not all(isinstance(m, str) for m in out_knob)):
+                raise TypeError(
+                    f"{self.name} 'output_modalities' config must be a list "
+                    f"of strings, got {type(out_knob).__name__}"
+                )
+            self._output_modalities_knob = list(out_knob)
+
         extra_body = config.extra.get("extra_body")
         if extra_body is not None:
             if not isinstance(extra_body, dict):
@@ -349,6 +441,141 @@ class OpenAICompatProvider(ModalityCapabilityMixin):
         """Hook: list available models (provider-specific).  Default: none."""
         return []
 
+    # ==================== Reasoning replay hooks ====================
+
+    def _reasoning_replay_fields(self, text: str) -> Dict[str, Any]:
+        """Wire fields that replay one assistant turn's reasoning ``text``.
+
+        Every vendor documents ``reasoning_content``; a wire that wants a
+        second field alongside it (MiniMax echoes ``reasoning_details``)
+        overrides this.  Only consulted when :attr:`replay_reasoning` is
+        set.
+        """
+        return {"reasoning_content": text}
+
+    def _reasoning_from_delta(self, delta: Any) -> Optional[str]:
+        """The reasoning text carried by one streaming ``delta``, if any.
+
+        The base reads ``delta.reasoning_content`` (DeepSeek's spelling,
+        adopted by Kimi, MiMo and most OpenAI-shaped wires).  A wire that
+        streams reasoning under another shape overrides this — MiniMax
+        with ``reasoning_split`` delivers ``delta.reasoning_details[]``.
+        """
+        reasoning = getattr(delta, "reasoning_content", None)
+        return reasoning if reasoning and isinstance(reasoning, str) else None
+
+    def _history_reasoning_fields(self):
+        """The ``reasoning_fields`` callable ``history_to_openai`` replays
+        with — this provider's shape when it opts in, else ``None``."""
+        return self._reasoning_replay_fields if self.replay_reasoning else None
+
+    def _attach_reasoning_part(self, parts: List[Part], thinking: Optional[str]) -> None:
+        """Prepend ``Part(thought=thinking)`` when this wire replays reasoning.
+
+        Thought first, text and tool calls after — the vendors emit
+        reasoning before content and expect it replayed in that order.
+        Both the streaming loop and the batch path call this so a turn
+        looks the same in history whichever path produced it.  No-op when
+        :attr:`replay_reasoning` is off or the turn carried no reasoning.
+        """
+        if self.replay_reasoning and thinking:
+            parts.insert(0, Part.from_thought(thinking))
+
+    # ==================== Vendor-dialect hooks ====================
+    #
+    # Each has an inert default, so the eight pre-existing inheritors are
+    # untouched; a provider fronting a wire with its own thinking
+    # vocabulary, a narrower tool_choice set or a renamed output cap
+    # overrides one method rather than forking ``complete()``.  See
+    # docs/design/minimax-kimi-mimo-providers.md §7.
+
+    def _apply_thinking_knobs(self, api_params: Dict[str, Any]) -> None:
+        """Consume the ``_THINKING_KNOBS`` present in ``api_params``.
+
+        Called once at init with the profile's whole ``api_params`` dict.
+        The base reads nothing; a provider maps ``enable_thinking`` /
+        ``thinking_level`` / ... onto its own state here and rejects, with
+        a clear error, a knob its wire has no equivalent for.
+        """
+
+    def _thinking_request_fields(self) -> Dict[str, Any]:
+        """Request-body fields that carry this provider's thinking control.
+
+        Merged beneath the profile's ``extra_body`` on every call (the
+        profile wins on a collision).  Empty on the base.
+        """
+        return {}
+
+    def _tool_choice_vocabulary(self, model: Optional[str]) -> Optional[FrozenSet[str]]:
+        """The ``tool_choice`` values this wire accepts for ``model``.
+
+        ``None`` (the base) means the full OpenAI set.  A vendor that
+        documents fewer returns them as a set over ``{"auto", "none",
+        "required", "named"}`` — ``"named"`` standing for a dict that
+        names one tool.
+        """
+        return None
+
+    def _narrow_tool_choice(self, choice: Any) -> Any:
+        """Fold ``choice`` into this wire's vocabulary.
+
+        A value the vendor does not accept becomes ``"auto"`` with a
+        WARNING naming the model and the value: the parameter is never
+        silently dropped, and a 400 on every turn is never let through.
+        """
+        vocabulary = self._tool_choice_vocabulary(self._model_name)
+        if vocabulary is None:
+            return choice
+        kind = choice if isinstance(choice, str) else "named"
+        if kind in vocabulary:
+            return choice
+        logger.warning(
+            "%s: tool_choice %r is not accepted by %s (accepts %s); sending "
+            "'auto' instead", self.name, choice, self._model_name,
+            sorted(vocabulary),
+        )
+        return "auto"
+
+    def _wire_tools(self, tools: List[ToolSchema]) -> Optional[List[Dict[str, Any]]]:
+        """Tool definitions as this wire wants them (default: OpenAI's)."""
+        return tool_schemas_to_openai(tools)
+
+    def _map_finish_reason(self, reason: Optional[str]) -> FinishReason:
+        """Map a wire finish reason; a vendor with extra labels overrides."""
+        return map_finish_reason(reason)
+
+    @staticmethod
+    def _extract_reasoning_tokens(usage: Any) -> Optional[int]:
+        """OpenAI-shaped reasoning-token count
+        (``usage.completion_tokens_details.reasoning_tokens``), or None."""
+        details = getattr(usage, "completion_tokens_details", None)
+        count = getattr(details, "reasoning_tokens", None) if details is not None else None
+        return count if isinstance(count, int) and count else None
+
+    def _finish_batch_response(self, provider_response: ProviderResponse, response: Any) -> None:
+        """Post-process a batch (non-streaming) response in place.
+
+        Attaches the thought part when this wire replays reasoning, maps a
+        vendor finish label the shared converter does not know, and fills
+        in the cache-hit and reasoning-token counts the converter does not
+        carry (the streaming path sets both per chunk).
+        """
+        self._attach_reasoning_part(provider_response.parts, provider_response.thinking)
+        choices = getattr(response, "choices", None) or []
+        if choices:
+            provider_response.finish_reason = self._map_finish_reason(
+                getattr(choices[0], "finish_reason", None))
+        usage = getattr(response, "usage", None)
+        if provider_response.usage is None:
+            return
+        provider_response.usage.reasoning_tokens = self._extract_reasoning_tokens(usage)
+        cached = self._extract_cache_tokens(usage)
+        if cached is not None:
+            provider_response.usage.cache_read_tokens = cached
+            # ...and then take it back OUT of prompt_tokens, which on
+            # this wire counted it.  See ``TokenUsage``.
+            normalize_inclusive_usage(provider_response.usage)
+
     # ==================== Stateless Completion ====================
 
     def _apply_api_params(
@@ -367,15 +594,24 @@ class OpenAICompatProvider(ModalityCapabilityMixin):
         ("required"/"auto") pass through.
         """
         for key, value in self._api_params.items():
-            kwargs[key] = value
-        if self._extra_body:
-            kwargs["extra_body"] = self._extra_body
+            kwargs[self._MAX_TOKENS_WIRE_NAME if key == "max_tokens" else key] = value
+        # After the profile's own params, so an explicit ``api_params.audio``
+        # wins: the TIER says what to emit, the PROFILE says how.
+        self.apply_requested_output_modalities(kwargs)
+        # ...and the PROFILE's "how" is dropped when nothing is asking for
+        # media, so leaving a speaking tier does not leave `audio` stamped
+        # on a text tier's request.  See the rule's own docstring.
+        drop_unrequested_audio_options(kwargs)
+        extra_body = {**self._thinking_request_fields(), **(self._extra_body or {})}
+        if extra_body:
+            kwargs["extra_body"] = extra_body
         if tool_choice is not None:
             kwargs["tool_choice"] = tool_choice
         if "tool_choice" in kwargs and "tools" not in kwargs:
             kwargs.pop("tool_choice")
         if "tool_choice" in kwargs:
-            kwargs["tool_choice"] = tool_choice_to_wire(kwargs["tool_choice"])
+            kwargs["tool_choice"] = tool_choice_to_wire(
+                self._narrow_tool_choice(kwargs["tool_choice"]))
 
     def complete(
         self,
@@ -423,12 +659,17 @@ class OpenAICompatProvider(ModalityCapabilityMixin):
             if system_instruction:
                 openai_messages.append({"role": "system",
                                         "content": system_instruction})
-            openai_messages.extend(history_to_openai(list(messages)))
+            openai_messages.extend(history_to_openai(
+                list(messages),
+                pdf_as_file=self.WIRE_PDF_AS_FILE,
+                audio_as_input_audio=self.WIRE_AUDIO_AS_INPUT_AUDIO,
+                reasoning_fields=self._history_reasoning_fields(),
+            ))
 
         # Build kwargs
         kwargs: Dict[str, Any] = {}
         if tools and not prose_mode:
-            openai_tools = tool_schemas_to_openai(tools)
+            openai_tools = self._wire_tools(tools)
             if openai_tools:
                 kwargs["tools"] = openai_tools
         if response_schema:
@@ -455,14 +696,7 @@ class OpenAICompatProvider(ModalityCapabilityMixin):
                     **kwargs,
                 )
                 provider_response = response_from_openai(response)
-                # Non-streaming cache-hit count (the streaming path sets this
-                # per-chunk); response_from_openai doesn't carry it.
-                cached = self._extract_cache_tokens(getattr(response, "usage", None))
-                if cached is not None and provider_response.usage is not None:
-                    provider_response.usage.cache_read_tokens = cached
-                    # ...and then take it back OUT of prompt_tokens, which
-                    # on this wire counted it.  See ``TokenUsage``.
-                    normalize_inclusive_usage(provider_response.usage)
+                self._finish_batch_response(provider_response, response)
 
             # Prose-mode counterpart of the native tool-call flush: parse
             # fenced tool_call blocks out of the text into FunctionCall
@@ -490,10 +724,16 @@ class OpenAICompatProvider(ModalityCapabilityMixin):
     @staticmethod
     def _extract_cache_tokens(usage: Any) -> Optional[int]:
         """OpenAI-compatible cache-hit count (``usage.prompt_tokens_details
-        .cached_tokens``), or None when absent / zero (no cache hit).
+        .cached_tokens``), or None when the upstream reported none.
 
         Lets cache hit-rate and $ savings be measured uniformly across the
         fleet — previously a per-provider copy (and missing entirely on nim).
+
+        A reported ZERO is kept as ``0``, not folded into ``None``: this
+        wire declaring "I cache, and this call hit nothing" is a
+        measurement, and it is the only thing that tells a consumer apart
+        from a model with no prompt cache at all.  See
+        :func:`reported_cache_count`, which owns that rule for every seam.
 
         This count is a SUBSET of the same usage object's
         ``prompt_tokens``.  Callers must therefore pair it with
@@ -502,11 +742,7 @@ class OpenAICompatProvider(ModalityCapabilityMixin):
         """
         details = getattr(usage, "prompt_tokens_details", None)
         cached = getattr(details, "cached_tokens", None) if details is not None else None
-        # ``isinstance`` and not merely truthiness: the count is now
-        # ARITHMETIC (it comes out of ``prompt_tokens``), so a field an
-        # upstream sent as a string — or a test double left as a mock —
-        # must read as "not reported" rather than reach the subtraction.
-        return cached if isinstance(cached, int) and cached else None
+        return reported_cache_count(cached)
 
     def _stream_response(
         self,
@@ -543,6 +779,30 @@ class OpenAICompatProvider(ModalityCapabilityMixin):
 
         # Track tool call accumulation (streaming sends tool calls in pieces)
         tool_call_accumulators: Dict[int, Dict[str, Any]] = {}
+        # Discriminator for ids this response has to mint because the
+        # upstream sent none (#674).  One per response: the delta ``index``
+        # is unique only WITHIN a response, so index alone would put two
+        # different calls from two turns under one id in the same history.
+        tool_id_nonce = new_tool_call_nonce()
+
+        # Monotonic index over model-generated media chunks, so a consumer
+        # can spot a gap left by backpressure.  Separate from the text
+        # chunk counter: they are different streams.
+        media_sequence = NO_MEDIA_YET
+        # One-slot buffer: a chunk is held until the next thing
+        # arrives, so the end-of-audio marker can flag the one before
+        # it as `final`.  Costs 144ms on the last chunk of an utterance.
+        media_pending: List[Any] = []
+        # What the model SAID.  A plain list because bytes and
+        # transcript arrive in SEPARATE deltas -- 7 data-only and 11
+        # transcript-only in one measured turn, zero carrying both -- so
+        # the words cannot be read off the emitted chunks.
+        media_transcript: List[str] = []
+        # Read at the end-of-audio marker, mid-stream, so it must be a
+        # live question rather than a snapshot: the transcript rides the
+        # final media chunk only when the model wrote no text of its
+        # own (#869), the rule ``ensure_spoken_part`` applies to history.
+        wrote_text = lambda: model_wrote_text(parts, accumulated_text)  # noqa: E731
 
         def flush_text_block():
             """Flush accumulated text as a single Part."""
@@ -568,7 +828,19 @@ class OpenAICompatProvider(ModalityCapabilityMixin):
                     tool_id = tc.get("id")
                     original_name = get_original_tool_name(func_name)
                     if not tool_id:
-                        self._trace(f"ERROR: Missing tool call ID for {func_name}")
+                        # A third-party OpenAI-compatible endpoint that
+                        # streams a call with no id used to put an
+                        # unmatchable call into history and 400 the NEXT
+                        # turn.  Mint one instead: the id is only ever a
+                        # correlation handle between this call and the
+                        # result we send back, and both sides are ours
+                        # once the upstream declines to supply it (#674).
+                        tool_id = synthetic_tool_call_id(idx, tool_id_nonce)
+                        self._trace(
+                            f"SYNTHETIC_TOOL_CALL_ID idx={idx} "
+                            f"id={tool_id!r} name={original_name!r} — "
+                            f"upstream streamed no id"
+                        )
                     if unreadable_args is not None:
                         self._trace(
                             f"UNREADABLE_TOOL_ARGS name={original_name} "
@@ -579,6 +851,13 @@ class OpenAICompatProvider(ModalityCapabilityMixin):
                         name=original_name,
                         args=args,
                         unreadable_args=unreadable_args,
+                    )
+                    # The name may have arrived on a later delta than the
+                    # one that opened the call, so the START record can be
+                    # nameless; this one never is (#873).
+                    self._trace(
+                        f"TOOL_CALL_END idx={idx} id={tool_id!r} "
+                        + wire_name_trace_fields(func_name)
                     )
                     parts.append(Part.from_function_call(fc))
                     function_calls.append(fc)
@@ -610,6 +889,7 @@ class OpenAICompatProvider(ModalityCapabilityMixin):
                             output_tokens=chunk.usage.completion_tokens or 0,
                             total_tokens=chunk.usage.total_tokens or 0,
                             cache_read_tokens=self._extract_cache_tokens(chunk.usage),
+                            reasoning_tokens=self._extract_reasoning_tokens(chunk.usage),
                         ))
                         self._trace(f"{trace_prefix}_USAGE prompt={usage.prompt_tokens} output={usage.output_tokens}")
                         if on_usage_update and usage.total_tokens > 0:
@@ -621,13 +901,13 @@ class OpenAICompatProvider(ModalityCapabilityMixin):
                     if not delta:
                         if choice.finish_reason:
                             terminal_seen = True
-                            finish_reason = map_finish_reason(choice.finish_reason)
+                            finish_reason = self._map_finish_reason(choice.finish_reason)
                         continue
 
                     # Extract reasoning/thinking (e.g. DeepSeek-R1)
                     if self._enable_thinking:
-                        reasoning = getattr(delta, "reasoning_content", None)
-                        if reasoning and isinstance(reasoning, str):
+                        reasoning = self._reasoning_from_delta(delta)
+                        if reasoning:
                             self._trace(f"{trace_prefix}_THINKING len={len(reasoning)}")
                             accumulated_thinking.append(reasoning)
                             if on_thinking:
@@ -639,12 +919,34 @@ class OpenAICompatProvider(ModalityCapabilityMixin):
                         accumulated_text.append(delta.content)
                         on_chunk(delta.content)
 
+                    # Model-generated audio.  The OpenAI streaming shape is
+                    # ``delta.audio.data`` (base64) with an optional running
+                    # ``transcript``.  It is NOT in the published OpenAPI
+                    # schema for the streaming delta -- and so not in the
+                    # generated SDK types either -- so it arrives as an
+                    # untyped extra and is read defensively rather than by
+                    # attribute access.  While streaming, OpenAI emits only
+                    # pcm16 (24 kHz mono s16le, headerless), which is why
+                    # the mime type spells the parameters out: the payload
+                    # carries no header to recover them from.
+                    media_sequence = self.emit_media_delta(
+                        delta, on_chunk, media_sequence, media_transcript,
+                        media_pending, wrote_text,
+                    )
+
                     # Accumulate tool calls (they come in pieces)
                     if delta.tool_calls:
                         for tc_delta in delta.tool_calls:
                             idx = tc_delta.index
                             if idx not in tool_call_accumulators:
-                                self._trace(f"TOOL_CALL_START idx={idx} id={tc_delta.id!r} name={getattr(tc_delta.function, 'name', '')!r}")
+                                # ``name`` is the hashed wire id; the resolved
+                                # ``tool_name`` beside it is what a reader of
+                                # the journal can actually use (#873).
+                                self._trace(
+                                    f"TOOL_CALL_START idx={idx} id={tc_delta.id!r} "
+                                    + wire_name_trace_fields(
+                                        getattr(tc_delta.function, 'name', ''))
+                                )
                                 tool_call_accumulators[idx] = {
                                     "id": tc_delta.id,
                                     "type": "function",
@@ -662,7 +964,7 @@ class OpenAICompatProvider(ModalityCapabilityMixin):
                     # Extract finish reason
                     if choice.finish_reason:
                         terminal_seen = True
-                        finish_reason = map_finish_reason(choice.finish_reason)
+                        finish_reason = self._map_finish_reason(choice.finish_reason)
 
                 # Extract usage from chunk (some providers include it per-chunk)
                 if chunk.usage:
@@ -671,10 +973,17 @@ class OpenAICompatProvider(ModalityCapabilityMixin):
                         output_tokens=chunk.usage.completion_tokens or 0,
                         total_tokens=chunk.usage.total_tokens or 0,
                         cache_read_tokens=self._extract_cache_tokens(chunk.usage),
+                            reasoning_tokens=self._extract_reasoning_tokens(chunk.usage),
                     ))
                     if on_usage_update and usage.total_tokens > 0:
                         on_usage_update(usage)
 
+            # The upstream's end-of-audio marker normally released the
+            # last chunk already; this covers a provider that sends
+            # none, where the stream ending is the only evidence the
+            # utterance is over -- and is conclusive.
+            self.flush_media_stream(
+                on_chunk, media_pending, media_transcript, wrote_text)
             self._trace(f"{trace_prefix}_END chunks={chunk_count} finish_reason={finish_reason}")
 
         except Exception as e:
@@ -721,22 +1030,30 @@ class OpenAICompatProvider(ModalityCapabilityMixin):
         )
 
         thinking = "".join(accumulated_thinking) if accumulated_thinking else None
+        self._attach_reasoning_part(parts, thinking)
 
         # A stream that stopped arriving is not a turn that finished
         # (#687).  Raises rather than returning the fragment.
+        # A turn that only spoke has no Part of its own — without this
+        # the session sees an empty response and nudges a good answer.
+        ensure_spoken_part(parts, "".join(media_transcript))
+
         return require_terminated_stream(
             ProviderResponse(
                 parts=parts,
+                media_chunks=media_chunk_count(media_sequence),
                 usage=usage,
                 finish_reason=finish_reason,
                 raw=None,
                 thinking=thinking,
             ),
-            terminal_seen=terminal_seen,
+            terminal_seen=stream_terminated(
+                terminal_seen, media_sequence,
+                usage_reported=usage.total_tokens > 0),
             was_cancelled=was_cancelled,
             provider=self.name,
             model=self._model_name,
-            chunks=chunk_count,
+            chunks=chunk_count + media_chunk_count(media_sequence),
         )
 
     # ==================== Error Handling ====================

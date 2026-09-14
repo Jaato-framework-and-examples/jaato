@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jaato-server"
-version = "0.7.0"
+version = "0.15.0"
 description = "Jaato Server - LLM tool orchestration runtime and daemon"
 readme = "PKG_README.md"
 requires-python = ">=3.10"
@@ -62,6 +62,16 @@ github-models = [
 nim = [
     "openai>=1.0",  # NIM and ZhipuAI model providers: OpenAI-compatible SDK
 ]
+openai = [
+    "openai>=1.66",  # Native OpenAI provider: the SDK's `responses` namespace, which the Responses wire calls
+]
+azure-openai = [
+    "openai>=1.66",  # Azure OpenAI provider: the SDK's AzureOpenAI client (deployment routing + api-version)
+    "azure-identity>=1.15.0",  # Microsoft Entra ID auth (auth: aad); not needed for resource-key auth
+]
+bedrock = [
+    "boto3>=1.35",  # Amazon Bedrock provider: the Converse API client, and botocore's SigV4 signer + credential-resolution chain (jaato holds no AWS credential of its own)
+]
 openrouter = [
     "openai>=1.0",  # OpenRouter model provider: OpenAI-compatible SDK
 ]
@@ -110,7 +120,7 @@ telemetry = [
     "opentelemetry-exporter-otlp-proto-http>=1.20.0",  # OTLP HTTP exporter
 ]
 all = [
-    "jaato-server[dev,google,github-models,nim,openrouter,ovhcloud,web,interactive,ast,notebook,diagrams,templates,kaggle,kerberos,telemetry]",
+    "jaato-server[dev,google,github-models,nim,openai,azure-openai,bedrock,openrouter,ovhcloud,web,interactive,ast,notebook,diagrams,templates,kaggle,kerberos,telemetry]",
 ]
 
 [project.scripts]
@@ -171,6 +181,14 @@ cache_google_genai = "shared.plugins.cache_google_genai:create_plugin"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["shared*", "server*", "jaato_embedded*"]
+
+# Integrations ship WITH the framework they wire into another tool, so an
+# applied copy cannot describe a different version than the one running.
+# `jaato-scaffold integration <name>` applies one; `jaato-doctor` compares
+# the stamp it leaves against this distribution's version.
+[tool.setuptools.package-data]
+"shared.scaffold" = ["integrations/*/integration.json", "integrations/*/payload/*.md",
+                     "integrations/*/payload/*.sh", "integrations/*/payload/references/*.md"]
 
 [tool.pytest.ini_options]
 # Register custom marks so pytest doesn't warn on use.  ``apparmor``

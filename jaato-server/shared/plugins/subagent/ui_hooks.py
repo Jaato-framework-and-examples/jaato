@@ -408,17 +408,37 @@ class AgentUIHooks(Protocol):
         self,
         agent_id: str,
         call_id: str,
-        chunk: str
+        chunk: str,
+        stream_id: str = "",
+        sequence: Optional[int] = None,
+        mime_type: Optional[str] = None,
+        data_b64: Optional[str] = None,
+        final: bool = False,
     ) -> None:
         """Called when a tool emits output during execution.
 
         Enables live "tail -f" style output preview in the tool tree.
         Plugins should call this repeatedly during execution to stream output.
 
+        The media arguments are all keyword-with-default, and callers pass
+        them ONLY when bytes are actually present, so the text path is
+        byte-identical to before they existed and an implementer that
+        predates them keeps working.
+
         Args:
             agent_id: Which agent's tool is producing output.
             call_id: Unique identifier for the tool call (required for correlation).
-            chunk: Output text chunk (may contain newlines).
+            chunk: Output text chunk (may contain newlines).  Empty for a
+                pure-media chunk.
+            stream_id: Correlates chunks belonging to one media stream.
+            sequence: Ordering, passed through from ``StreamChunk.sequence``.
+            mime_type: Tags the ``data_b64`` payload (e.g. ``"audio/wav"``).
+            data_b64: Base64-encoded binary payload.
+            final: Last chunk of this stream.
+
+        Note:
+            An implementation receiving ``mime_type``/``data_b64`` must not
+            run the payload through a text formatter -- it corrupts bytes.
         """
         ...
 

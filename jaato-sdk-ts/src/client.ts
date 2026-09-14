@@ -100,6 +100,30 @@ interface HandlerEntry {
 export const MIN_PROTOCOL_VERSION = "1.0";
 
 /**
+ * Wire-protocol minor from which the two RESUME verbs (`injectPrompt` and
+ * `session.wake`) carry `attachments`.
+ *
+ * Deliberately NOT the client's connect-time floor: a TS client that never
+ * sends binary content works against any 1.x daemon, and raising
+ * {@link MIN_PROTOCOL_VERSION} would refuse those connections for a field
+ * they do not use.  It is checked per call instead, by the two methods that
+ * would otherwise let a payload vanish.
+ */
+export const MIN_ATTACHMENT_RESUME_PROTOCOL = "1.5";
+
+/**
+ * Wire-protocol minor from which a clarification ANSWER carries
+ * `answer_attachments` (#989).
+ *
+ * Per-call for the same reason as {@link MIN_ATTACHMENT_RESUME_PROTOCOL},
+ * and refused for the same one: an older daemon ignores the field and
+ * answers the clarification with the media gone, which for a voice-only
+ * answer is a BLANK answer reported as a successful one — the server reads
+ * an empty response as `free_text: ""` and the agent proceeds on nothing.
+ */
+export const MIN_CLARIFICATION_ATTACHMENT_PROTOCOL = "1.6";
+
+/**
  * Parse ``"MAJOR.MINOR"`` into ``[major, minor]``.  Extra components
  * are tolerated and dropped (e.g. ``"1.0.5"`` → ``[1, 0]``).  Returns
  * ``null`` on malformed input rather than throwing — the compat check
@@ -524,18 +548,65 @@ export class JaatoClient {
    *   the tool returns ``{cancelled: true}`` to the model and the turn
    *   continues.  ``answers`` is ignored.  This is the way out of a
    *   question the user cannot or will not answer.
+   * @param answerAttachments Media attached to individual answers
+   *   (protocol 1.6+, #989), keyed by 1-based question index as a string:
+   *   `{"1": [{mime_type, data, display_name}]}`.  `data` must already be
+   *   base64 — this SDK does no file reading, exactly as `sendMessage`
+   *   and `wakeSession` do none.  A voice note answering a `free_text`
+   *   question is the motivating case, and the matching entry in
+   *   `answers` is then legitimately `""`: the utterance IS the answer,
+   *   and the daemon does not read it as a skip.  Equally valid on a
+   *   CHOICE answer — the ordinal says which branch, the attachment says
+   *   what content.  Refused (not degraded) below protocol 1.6.
    */
   async respondToClarificationBatch(
     requestId: string,
     answers: string[],
     cancelled = false,
+    answerAttachments?: Record<string, Array<Record<string, unknown>>>,
   ): Promise<void> {
+    const hasMedia =
+      !cancelled &&
+      answerAttachments !== undefined &&
+      Object.keys(answerAttachments).length > 0;
+    if (hasMedia) {
+      this._requireClarificationAttachmentProtocol();
+    }
     await this._sendEvent({
       type: EventTypeValue.CLARIFICATION_BATCH_RESPONSE,
       request_id: requestId,
       answers,
       cancelled,
+      answer_attachments: hasMedia ? answerAttachments : {},
     } as ClarificationBatchResponseEvent);
+  }
+
+  /**
+   * Refuse answer attachments against a daemon too old to carry them.
+   *
+   * Sibling of {@link _requireAttachmentResumeProtocol}, and the same
+   * argument: the degraded call does not mean what the caller asked for.
+   * Here it answers the agent's question with the recording thrown away —
+   * and the agent acts on it, because a clarification answer reaches the
+   * model as a tool result it reads as fact.
+   */
+  private _requireClarificationAttachmentProtocol(): void {
+    if (
+      this._serverProtocolVersion !== null &&
+      isProtocolCompatible(
+        this._serverProtocolVersion,
+        MIN_CLARIFICATION_ATTACHMENT_PROTOCOL,
+      )
+    ) {
+      return;
+    }
+    throw new Error(
+      `respondToClarificationBatch: this daemon speaks protocol ` +
+        `${this._serverProtocolVersion ?? "unknown"} and would DROP the ` +
+        `answer attachments (needs >= ` +
+        `${MIN_CLARIFICATION_ATTACHMENT_PROTOCOL}).  Answer the ` +
+        `clarification in text, or upgrade the daemon.`,
+    );
   }
 
   async respondToReferenceSelection(requestId: string, response: string): Promise<void> {
@@ -776,11 +847,25 @@ export class JaatoClient {
     } as CommandRequest);
   }
 
-  async executeCommand(command: string, args?: string[]): Promise<void> {
+  /**
+   * Execute a daemon command verb.
+   *
+   * `payload` is the structured body for verbs that take one
+   * (`CommandRequest.payload`) — used where a dict is the natural shape and
+   * squeezing it into positional `args` would be lossy, e.g.
+   * `cascade.budget.set`, or `session.wake` carrying attachments.  Omitted
+   * it is `null`, exactly as before.
+   */
+  async executeCommand(
+    command: string,
+    args?: string[],
+    payload?: Record<string, unknown>,
+  ): Promise<void> {
     await this._sendEvent({
       type: EventTypeValue.COMMAND,
       command,
       args: args ?? [],
+      payload: payload ?? null,
     } as CommandRequest);
   }
 
@@ -857,13 +942,106 @@ export class JaatoClient {
 
   // ──── SDK feature parity — session-primitive verbs ───────────────
 
-  async injectPrompt(text: string, sourceType = "user", sourceId?: string): Promise<void> {
+  /**
+   * Inject a prompt into the session's message queue.
+   *
+   * `attachments` (protocol 1.5+) carries binary user content in the same
+   * canonical wire shape `sendMessage` accepts —
+   * `{mime_type, data: base64-string, display_name}`.  Note that an
+   * attachment-bearing inject is IDLE-ONLY: the queued path folds a message
+   * into the running turn as text and has nowhere to put binary content, so
+   * the daemon offers it with `require_idle` and a busy target answers
+   * `"busy"` with nothing enqueued.  Retry when the target goes idle rather
+   * than assuming delivery.
+   */
+  async injectPrompt(
+    text: string,
+    sourceType = "user",
+    sourceId?: string,
+    attachments?: Array<Record<string, unknown>>,
+  ): Promise<void> {
+    if (attachments && attachments.length > 0) {
+      this._requireAttachmentResumeProtocol("injectPrompt");
+    }
     await this._sendEvent({
       type: EventTypeValue.INJECT_PROMPT_REQUEST,
       text,
       source_type: sourceType,
       source_id: sourceId ?? null,
+      attachments: attachments ?? [],
     } as InjectPromptRequest);
+  }
+
+  /**
+   * Wake a session by id — revive it if cold and start a USER turn on it.
+   *
+   * The typed form of `executeCommand("session.wake", [], payload)`.  Like
+   * the command it wraps this is fire-and-forget: a refusal arrives on the
+   * event stream as an `ErrorEvent` with `error_type: "WakeError"`.
+   *
+   * `attachments` (protocol 1.5+) carries binary content in the same shape
+   * `sendMessage` accepts, already base64-encoded — this SDK does no file
+   * reading.  `text` may be empty when the attachments ARE the message (a
+   * spoken utterance), which is why the two are checked together.  The
+   * daemon wraps the payload in its untrusted-content boundary and names
+   * each attachment inside it, so media arriving this way is data the model
+   * interprets, never instructions it follows.
+   */
+  async wakeSession(
+    sessionId: string,
+    text = "",
+    options?: {
+      attachments?: Array<Record<string, unknown>>;
+      source?: string;
+      eventId?: string;
+    },
+  ): Promise<void> {
+    const attachments = options?.attachments ?? [];
+    if (!text && attachments.length === 0) {
+      throw new Error(
+        "wakeSession requires text or attachments — a wake with no content " +
+          "drives a turn the model has nothing to answer",
+      );
+    }
+    const payload: Record<string, unknown> = {
+      session_id: sessionId,
+      text,
+      source: options?.source ?? "user",
+    };
+    if (options?.eventId !== undefined) payload.event_id = options.eventId;
+    if (attachments.length > 0) {
+      this._requireAttachmentResumeProtocol("wakeSession");
+      payload.attachments = attachments;
+    }
+    await this.executeCommand("session.wake", [], payload);
+  }
+
+  /**
+   * Refuse an attachment-bearing resume against a daemon too old to carry it.
+   *
+   * An additive optional field is normally safe to send blind: an older peer
+   * ignores it and the call degrades to what it always did.  That reasoning
+   * holds for a `request_id` and NOT for an attachment — the degraded call is
+   * a turn driven with the text and WITHOUT the audio that was the whole
+   * message, which for a blank-text utterance is an empty turn reported as a
+   * success.  So this is checked, not hoped.
+   */
+  private _requireAttachmentResumeProtocol(verb: string): void {
+    if (
+      this._serverProtocolVersion !== null &&
+      isProtocolCompatible(
+        this._serverProtocolVersion,
+        MIN_ATTACHMENT_RESUME_PROTOCOL,
+      )
+    ) {
+      return;
+    }
+    throw new Error(
+      `${verb}: this daemon speaks protocol ` +
+        `${this._serverProtocolVersion ?? "unknown"} and would DROP the ` +
+        `attachments (needs >= ${MIN_ATTACHMENT_RESUME_PROTOCOL}).  Send the ` +
+        `content through sendMessage() on a live session, or upgrade the daemon.`,
+    );
   }
 
   async replayMessages(

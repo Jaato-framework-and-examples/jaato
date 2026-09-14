@@ -615,3 +615,42 @@ def test_bootstrap_envelope_independent_from_session_init_envelope() -> None:
     # JaatoSession-level, the bootstrap is SessionManager-level).
     assert not hasattr(init, "client_id")
     assert not hasattr(bootstrap, "schema_version")
+
+
+# ----------------------------------------------------------------------
+# #859 — the authenticated creator crosses to the runner
+# ----------------------------------------------------------------------
+
+
+def test_envelope_carries_created_by() -> None:
+    """``created_by`` round-trips so the runner-side JaatoSession can stamp
+    telemetry ``user.id`` and the ledger's ``user_id`` -- until #859 the
+    daemon knew the user and the runner never did."""
+    e = SessionInitEnvelope(
+        session_id="sess-859",
+        workspace_path="/tmp/ws",
+        profile_name="p",
+        provider_name="anthropic",
+        model_name="m",
+        created_by="sso|alice",
+    )
+    d = e.to_dict()
+    assert d["created_by"] == "sso|alice"
+    back = SessionInitEnvelope.from_dict(d)
+    assert back == e
+    assert back.created_by == "sso|alice"
+
+
+def test_envelope_created_by_defaults_none_and_tolerates_absence() -> None:
+    """Unauthenticated (IPC) sessions and older daemons send no user."""
+    e = SessionInitEnvelope(
+        session_id="s", workspace_path=None, profile_name=None,
+        provider_name="anthropic", model_name="m",
+    )
+    d = e.to_dict()
+    assert d["created_by"] is None
+    assert SessionInitEnvelope.from_dict(d).created_by is None
+    d.pop("created_by")
+    assert SessionInitEnvelope.from_dict(d).created_by is None
+    d["created_by"] = ""
+    assert SessionInitEnvelope.from_dict(d).created_by is None

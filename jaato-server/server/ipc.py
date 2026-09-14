@@ -101,6 +101,7 @@ from jaato_sdk.events import (
     PostAuthSetupResponse,
     ToolsRegisterClientRequest,
     ToolExecuteResultEvent,
+    ToolOutputEvent,
 )
 
 
@@ -111,6 +112,128 @@ def _get_server_version() -> str:
     """Read the jaato-server package version from installed metadata."""
     from importlib.metadata import version as pkg_version
     return pkg_version("jaato-server")
+
+
+# ---------------------------------------------------------------------------
+# Per-client event-queue backpressure
+# ---------------------------------------------------------------------------
+#
+# Sizing: PCM16 24 kHz mono is ~48 KB/s, so 100 ms audio chunks arrive at
+# ~10/sec.  A 2048-event bound is therefore minutes of audio backlog for a
+# client that has stopped reading -- far past the point where dropping is
+# the right answer -- while staying small enough that the worst case is
+# bounded memory rather than an OOM.  Override for clients that legitimately
+# burst (a cascade driver replaying a long transcript).
+def _resolve_event_queue_max() -> int:
+    """Resolve the per-client event-queue bound from the environment.
+
+    A non-numeric or non-positive value falls back to the default rather
+    than disabling the bound, because "unbounded" is the bug this exists
+    to fix and a typo should not silently reintroduce it.
+    """
+    raw = os.environ.get("JAATO_IPC_EVENT_QUEUE_MAX", "").strip()
+    if raw:
+        try:
+            parsed = int(raw)
+            if parsed > 0:
+                return parsed
+        except ValueError:
+            pass
+        logger.warning(
+            f"Ignoring invalid JAATO_IPC_EVENT_QUEUE_MAX={raw!r}; "
+            f"using default {_DEFAULT_EVENT_QUEUE_MAX}"
+        )
+    return _DEFAULT_EVENT_QUEUE_MAX
+
+
+_DEFAULT_EVENT_QUEUE_MAX = 2048
+_EVENT_QUEUE_MAX = _resolve_event_queue_max()
+
+
+def _is_lossy_event(event: Any) -> bool:
+    """Whether ``event`` may be dropped under backpressure.
+
+    Lossy means "a gap degrades the experience but does not desynchronise
+    the client".  Only live tool-output chunks qualify: they are the
+    firehose, and a client that misses one still has a consistent view of
+    the session.
+
+    Deliberately NOT lossy: agent output text.  It looks like a similar
+    token firehose, but a client accumulates it into the visible
+    transcript, so a dropped chunk silently corrupts what the user reads
+    rather than merely thinning it.
+
+    ``isinstance`` rather than a class-name match, so a subclass is
+    classified with its base instead of silently becoming undroppable.
+    """
+    return isinstance(event, ToolOutputEvent)
+
+
+def _event_is_media(event: Any) -> bool:
+    """Whether ``event`` carries a binary payload."""
+    return bool(
+        getattr(event, "mime_type", None) and getattr(event, "data_b64", None)
+    )
+
+
+def _evict_one_lossy(queue: "asyncio.Queue") -> bool:
+    """Evict the oldest lossy event from ``queue``; return whether one went.
+
+    Media is preferred over text: a media chunk is orders of magnitude
+    more bytes, so evicting one buys far more headroom per unit of lost
+    output.  Within a class the OLDEST is evicted -- for a media stream
+    recency is what matters, and a stale chunk is worthless.
+
+    Checks the HEAD before draining.  Media is the preferred victim and
+    an audio flood is mostly media, so the head usually IS the chunk the
+    full search would pick -- and taking it costs one ``get_nowait``.
+
+    That shortcut is not a micro-optimisation.  Draining and refilling
+    costs ~2n queue operations, and the docstring this replaces called
+    that acceptable because it "runs only on overflow".  Overflow is not
+    the exception under the load this bound exists for: a stalled client
+    receiving 24 kHz PCM overflows on EVERY chunk, so eviction is the
+    steady state.  Measured at the 2048 default, queue full of media:
+    1549 us/eviction draining vs 18 us head-first, and it scales with
+    the bound -- so an operator raising it for a cascade driver, as the
+    env var invites, makes each eviction proportionally worse.
+
+    Falls back to the full drain when the head is not the preferred
+    victim, so the POLICY is unchanged: oldest media first, then oldest
+    text, essential events never dropped.  Order of retained events is
+    preserved either way.  Returns ``False`` when the queue holds nothing
+    droppable, leaving it untouched.
+    """
+    try:
+        head = queue.get_nowait()
+    except asyncio.QueueEmpty:
+        return False
+    if _is_lossy_event(head) and _event_is_media(head):
+        return True                 # exactly what the full search would pick
+
+    drained = [head]
+    while True:
+        try:
+            drained.append(queue.get_nowait())
+        except asyncio.QueueEmpty:
+            break
+
+    victim = None
+    for index, item in enumerate(drained):
+        if not _is_lossy_event(item):
+            continue
+        if _event_is_media(item):
+            victim = index
+            break
+        if victim is None:
+            victim = index  # oldest text chunk, kept as the fallback
+
+    if victim is not None:
+        drained.pop(victim)
+
+    for item in drained:
+        queue.put_nowait(item)
+    return victim is not None
 
 
 # Message framing constants are imported from shared.framing — see
@@ -270,8 +393,17 @@ class JaatoIPCServer:
         # Event loop reference for thread-safe operations
         self._event_loop: Optional[asyncio.AbstractEventLoop] = None
 
-        # Event queue for broadcasting
+        # Event queue for broadcasting.  BOUNDED -- see
+        # ``_EVENT_QUEUE_MAX`` and ``queue_event`` for the drop policy.
+        # An unbounded queue meant a slow consumer grew it without limit:
+        # cosmetic lag for text, but unbounded memory and monotonically
+        # increasing audio drift once chunks carry media.
         self._event_queues: Dict[str, asyncio.Queue[Event]] = {}
+
+        # Per-client count of media chunks evicted under backpressure,
+        # so a client can be told its stream was lossy rather than
+        # silently receiving a gap.
+        self._dropped_chunks: Dict[str, int] = {}
 
         # Shutdown flag
         self._shutdown_event = asyncio.Event()
@@ -482,6 +614,7 @@ class JaatoIPCServer:
             )
             self._clients[client_id] = client
             self._event_queues[client_id] = asyncio.Queue()
+            self._dropped_chunks[client_id] = 0
 
         peer = writer.get_extra_info('peername') or 'unknown'
         logger.info(f"IPC client connected: {client_id} from {peer}")
@@ -534,6 +667,7 @@ class JaatoIPCServer:
                     del self._clients[client_id]
                 if client_id in self._event_queues:
                     del self._event_queues[client_id]
+                self._dropped_chunks.pop(client_id, None)
             # Detach from session via the transport-agnostic helper
             # (CommandRouter.handle_client_disconnect → SessionManager.detach_client).
             # Without this, session.attached_clients retains the dead
@@ -903,7 +1037,31 @@ class JaatoIPCServer:
             self.queue_event(client_id, event)
 
     def queue_event(self, client_id: str, event: Event) -> None:
-        """Queue an event for delivery to a client.
+        """Queue an event for delivery to a client, applying backpressure.
+
+        The queue is bounded by ``_EVENT_QUEUE_MAX``.  The bound is
+        enforced here rather than by ``asyncio.Queue(maxsize=...)`` so
+        that an essential event can deliberately exceed it; the queue
+        itself stays unbounded and ``put_nowait`` therefore never raises.
+
+        The policy is deliberately NOT uniform, because events are not
+        equally replaceable:
+
+        - **Lossy** events (tool-output chunks) degrade gracefully.  A
+          dropped audio chunk is a click; a *late* one is drift that never
+          recovers, so recency beats completeness and the OLDEST lossy
+          event is evicted to make room.  Media is evicted before text,
+          because a media chunk is ~1000x the bytes of a text chunk, so
+          evicting one buys far more headroom per unit of lost output.
+        - **Essential** events (lifecycle, permission prompts, results)
+          drive the client's state machine.  Losing one desynchronises the
+          client permanently -- strictly worse than a bounded memory
+          spike -- so an essential event is queued past the bound with a
+          warning naming the client.
+
+        Eviction drains and refills through the public queue API rather
+        than touching ``queue._queue``, preserving the relative order of
+        everything retained.  It is O(n), but runs only on overflow.
 
         This is thread-safe and can be called from session handlers
         running in thread pool executors.
@@ -916,11 +1074,29 @@ class JaatoIPCServer:
         queue = self._event_queues[client_id]
 
         def _do_put():
-            try:
-                queue.put_nowait(event)
-                logger.debug(f"  queued successfully")
-            except asyncio.QueueFull:
-                logger.warning(f"Event queue full for {client_id}")
+            if queue.qsize() >= _EVENT_QUEUE_MAX:
+                if _evict_one_lossy(queue):
+                    self._dropped_chunks[client_id] = (
+                        self._dropped_chunks.get(client_id, 0) + 1
+                    )
+                elif _is_lossy_event(event):
+                    # Nothing evictable and the newcomer is itself lossy:
+                    # drop it rather than grow without bound.
+                    dropped = self._dropped_chunks.get(client_id, 0) + 1
+                    self._dropped_chunks[client_id] = dropped
+                    logger.warning(
+                        f"Event queue full for {client_id}; dropped a "
+                        f"{type(event).__name__} ({dropped} dropped so far)"
+                    )
+                    return
+                else:
+                    logger.warning(
+                        f"Event queue full for {client_id}; queueing "
+                        f"essential {type(event).__name__} past the "
+                        f"{_EVENT_QUEUE_MAX} bound"
+                    )
+            queue.put_nowait(event)
+            logger.debug("  queued successfully")
 
         # Use call_soon_threadsafe for thread-safe queue operations
         if self._event_loop:
@@ -928,6 +1104,24 @@ class JaatoIPCServer:
         else:
             # Fallback for when called before start() - direct put
             _do_put()
+
+    def dropped_chunk_count(self, client_id: str) -> int:
+        """How many chunks were dropped for ``client_id`` under backpressure.
+
+        An accessor AWAITING A CONSUMER.  Nothing in the tree calls it,
+        so the gap it counts is currently silent: a client whose media
+        stream was thinned receives fewer chunks and is told nothing,
+        and only notices as a jump in ``sequence``.  This said it "lets
+        a client be told", which described an intention the code does
+        not carry out -- the counter exists and is maintained, but no
+        path reports it.
+
+        Wiring it means choosing a surface (a field on a lifecycle
+        event, or a reply to an explicit query) and is a protocol
+        decision, not an oversight to patch here.  Returns 0 for an
+        unknown client.
+        """
+        return self._dropped_chunks.get(client_id, 0)
 
     def set_client_session(self, client_id: str, session_id: str) -> None:
         """Set the session ID for a client.

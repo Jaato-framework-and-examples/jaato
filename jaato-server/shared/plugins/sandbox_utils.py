@@ -374,6 +374,45 @@ def is_under_temp_path(path: str) -> bool:
     return False
 
 
+# Procfs entries that leak a process's secrets or its address space to
+# anyone who can open them (#712).  Keyed by the final path component,
+# which is what identifies the file under any of the three procfs
+# spellings (``/proc/<pid>/``, ``/proc/self/``, ``/proc/thread-self/``)
+# and under the ``task/<tid>/`` per-thread twin of each.
+#
+#   environ  — THE one.  The confined runner legitimately holds provider
+#              API keys and OAuth tokens in its own ``os.environ``;
+#              ``shared/secret_scrub.py`` strips those from the
+#              environment given to a model-driven subprocess and
+#              deliberately leaves the runner's own intact.  Reading
+#              ``/proc/self/environ`` from an in-process path-taking
+#              tool reads the unscrubbed store.
+#   mem      — direct read/write of a process's address space.
+#   pagemap  — virtual-to-physical mapping; a side-channel primitive.
+#   auxv     — the auxiliary vector, including the ASLR seed pointer.
+#   maps,
+#   smaps    — address-space layout.  Denied here but NOT in the
+#              AppArmor template: this gate covers only model-driven
+#              path-taking tools, so it can afford to be stricter than
+#              a kernel profile that also constrains framework code and
+#              whatever the distro's ``abstractions/base`` grants.
+#
+# ``stat``, ``status``, ``comm`` and ``cmdline`` are absent on purpose.
+# The first three are benign process metadata the framework itself
+# reads.  ``cmdline`` IS denied in the AppArmor template (the
+# ``--ws-token TOKEN`` exposure), but it is left readable here because
+# this layer gates paths handed to file tools, where the leak it
+# enables is narrower than the ``ps``-shaped workflows it would break.
+_SENSITIVE_PROC_ENTRIES = frozenset({
+    "environ",
+    "mem",
+    "pagemap",
+    "auxv",
+    "maps",
+    "smaps",
+})
+
+
 def is_proc_attr_path(path: str) -> bool:
     """Return ``True`` for a procfs *security attribute* path.
 
@@ -415,6 +454,42 @@ def is_proc_attr_path(path: str) -> bool:
     return len(parts) >= 6 and parts[3] == "task" and parts[5] == "attr"
 
 
+def is_sensitive_proc_path(path: str) -> bool:
+    """Return ``True`` for a procfs path that leaks secrets or memory.
+
+    The application-layer half of #712.  AppArmor's per-session profile
+    carries the same denials (template v30) and is the kernel-enforced
+    control, but it is unavailable on non-Linux hosts and in the
+    degraded directory-sandbox-only posture (#504) — in which case this
+    is the *only* control, so it must not depend on confinement being
+    present.
+
+    Recognises the security-attribute paths
+    (:func:`is_proc_attr_path`, the confinement-escape vector) and the
+    credential/memory entries in :data:`_SENSITIVE_PROC_ENTRIES`, under
+    every procfs spelling: ``/proc/<pid>/environ``,
+    ``/proc/self/environ``, ``/proc/thread-self/environ`` and the
+    ``task/<tid>/`` per-thread twin of each.
+
+    Callers must check both the literal and the ``realpath``-resolved
+    form: a symlink into ``/proc`` reaches the same file, and
+    ``/proc/self`` resolves to ``/proc/<pid>`` on the way.
+
+    Args:
+        path: An absolute path (literal or resolved).
+
+    Returns:
+        ``True`` when the path names a denied procfs entry.
+    """
+    if is_proc_attr_path(path):
+        return True
+    if not path.startswith("/proc/"):
+        return False
+    # parts: ['', 'proc', '<pid>|self|thread-self', ...]
+    parts = path.split("/")
+    return len(parts) >= 4 and parts[-1] in _SENSITIVE_PROC_ENTRIES
+
+
 def check_path_with_jaato_containment(
     path: str,
     workspace_root: str,
@@ -425,6 +500,11 @@ def check_path_with_jaato_containment(
     """Check if a path is allowed, with special .jaato containment handling.
 
     This is the main entry point for path validation that respects:
+    0. The procfs hard denylist (:func:`is_sensitive_proc_path`) — checked
+       before anything else and applying even when ``workspace_root`` is
+       unset, because ``/proc/self/environ`` is the runner's unscrubbed
+       credential store and ``/proc/self/attr/current`` is a confinement
+       escape.  Neither is subject to ``sandbox add``.
     1. Denied paths (checked first, takes precedence over all other rules)
     2. Standard POSIX pseudo-devices (``/dev/null``, ``/dev/stdout``,
        ``/dev/fd/<n>``, ...) -- always allowed; see
@@ -458,7 +538,9 @@ def check_path_with_jaato_containment(
     real_abs_path = os.path.realpath(abs_path)
 
     # Hard denylist — applies even when workspace_root is unset.
-    if is_proc_attr_path(abs_path) or is_proc_attr_path(real_abs_path):
+    # Covers the confinement-escape attribute paths AND the procfs entries
+    # that leak credentials or memory (#712); see is_sensitive_proc_path.
+    if is_sensitive_proc_path(abs_path) or is_sensitive_proc_path(real_abs_path):
         return False
 
     if not workspace_root:

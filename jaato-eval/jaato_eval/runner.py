@@ -40,7 +40,7 @@ import asyncio
 import json
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 from .arm import ArmResult, ArmSpec
 from .fixture import FixtureError, Workspace, discard, materialise
@@ -223,6 +223,87 @@ class _TurnAccumulator:
 #: arm's result with it.
 DEFAULT_ARM_TIMEOUT_SECONDS = 900.0
 
+#: The knob that raises it.  Named in the BLOCKED message, because an
+#: author who reads "the harness ceiling of 900s" and does not know this
+#: flag exists has nowhere to go (#724).
+ARM_TIMEOUT_FLAG = "--arm-timeout"
+
+
+def effective_arm_timeout(arm_timeout_seconds: Optional[float]) -> float:
+    """The wall-clock ceiling one arm actually runs under, in seconds.
+
+    ``0`` means disabled.  ``None`` -- nobody passed ``--arm-timeout`` --
+    resolves to :data:`DEFAULT_ARM_TIMEOUT_SECONDS`.
+
+    One function so the ceiling that BOUNDS an arm and the ceiling a
+    warning is computed against cannot disagree: a pre-flight warning
+    derived from a second copy of this arithmetic is exactly the kind of
+    surface that starts telling an author something untrue.
+    """
+    if arm_timeout_seconds is None:
+        return DEFAULT_ARM_TIMEOUT_SECONDS
+    return float(arm_timeout_seconds)
+
+
+def describe_arm_timeout(arm_timeout_seconds: Optional[float]) -> str:
+    """Where the effective ceiling came from, for a message that names it.
+
+    The distinction is load-bearing: telling an operator who passed
+    ``--arm-timeout 600`` that 600 is the "harness default" is a new false
+    statement in the message written to stop a false impression.
+    """
+    if arm_timeout_seconds is None:
+        return f"harness default; raise with `{ARM_TIMEOUT_FLAG}`"
+    return f"set by `{ARM_TIMEOUT_FLAG}`"
+
+
+def arm_ceiling_advice(tasks: Sequence[Any],
+                       arm_timeout_seconds: Optional[float]) -> List[str]:
+    """Warn where a manifest's ``budget.seconds`` exceeds the arm ceiling.
+
+    The two are DIFFERENT GATES and the difference is by design (#724):
+    ``budget.seconds`` is the task POOL's wall clock, shared by every arm
+    and reconciled when a session ENDS, while the arm ceiling bounds one
+    arm's run so that a session which never ends cannot consume a whole
+    sweep.  Feeding one into the other would break the reproducibility
+    the split exists to protect.
+
+    What is worth saying is the combination that always downgrades
+    silently: a pool allowance larger than the per-arm ceiling can never
+    be reached by any single arm, so an author who wrote ``seconds: 1800``
+    and sees an arm cut at 900 has been given half of what they asked for
+    with nothing naming the gate that did it.
+
+    Args:
+        tasks: The discovered manifests.  Typed loosely to keep this
+            module free of a manifest import cycle.
+        arm_timeout_seconds: The CLI value, or ``None`` for the default.
+
+    Returns:
+        One line per offending task, or ``[]`` when nothing downgrades --
+        including when the ceiling is disabled with ``0``, where no arm
+        is cut and there is nothing to warn about.
+    """
+    limit = effective_arm_timeout(arm_timeout_seconds)
+    if limit <= 0:
+        return []
+    source = describe_arm_timeout(arm_timeout_seconds)
+    lines: List[str] = []
+    for task in tasks:
+        budget = getattr(task, "budget", None)
+        declared = (getattr(budget, "limits", {}) or {}).get("seconds")
+        if not isinstance(declared, (int, float)) or declared <= limit:
+            continue
+        lines.append(
+            f"{getattr(task, 'task_id', '?')}: budget.seconds={declared:.0f} "
+            f"exceeds the per-arm ceiling of {limit:.0f}s ({source}). These "
+            f"are different gates — budget.seconds is the task POOL's clock, "
+            f"shared by the task's arms and reconciled when a session ends; "
+            f"the arm ceiling bounds ONE arm. No single arm can run longer "
+            f"than {limit:.0f}s, so the extra pool allowance is unreachable."
+        )
+    return lines
+
 
 async def run_arm(spec: ArmSpec, *, workspace_root: Path,
                   socket_path: Optional[str] = None,
@@ -282,8 +363,7 @@ async def run_arm(spec: ArmSpec, *, workspace_root: Path,
     started = time.monotonic()
     session_ref: Dict[str, Any] = {}
     try:
-        limit = (DEFAULT_ARM_TIMEOUT_SECONDS if arm_timeout_seconds is None
-                 else float(arm_timeout_seconds))
+        limit = effective_arm_timeout(arm_timeout_seconds)
         # Held by us, not by the coroutine: `asyncio.wait_for` cancels the
         # task on timeout and we would never receive its return value.
         accumulator = _TurnAccumulator()
@@ -294,10 +374,17 @@ async def run_arm(spec: ArmSpec, *, workspace_root: Path,
         payload, accumulator, history = (
             await asyncio.wait_for(run, timeout=limit) if limit > 0 else await run)
     except asyncio.TimeoutError:
+        # NAME THE KNOB (#724).  The old message stated the number and
+        # nothing else, so an author who had set `budget.seconds: 1800`
+        # and saw 900 had no way to discover that this ceiling exists,
+        # let alone that it is a different gate with its own flag.
         result.blocked_reason = (
-            f"arm exceeded the harness ceiling of {limit:.0f}s and was cut "
+            f"arm exceeded the per-arm ceiling of {limit:.0f}s "
+            f"({describe_arm_timeout(arm_timeout_seconds)}) and was cut "
             "short — BLOCKED, not FAIL: a run that did not finish says "
-            "nothing about the configuration under test")
+            "nothing about the configuration under test. This is NOT the "
+            "task's `budget.seconds`, which is the pool's clock across all "
+            "its arms")
         result.duration_seconds = time.monotonic() - started
         _record_partial_usage(
             result, accumulator,

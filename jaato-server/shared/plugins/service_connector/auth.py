@@ -23,7 +23,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from shared.session_context import get_session_env
 from shared.secret_repr import secret_safe_repr
@@ -665,20 +665,45 @@ class AuthManager:
             "env_vars_missing": missing,
         }
 
-    def redact_headers(self, headers: Dict[str, str]) -> Dict[str, str]:
-        """Redact sensitive values from headers for logging.
+    def redact_headers(
+        self,
+        headers: Dict[str, str],
+        injected: Optional[Iterable[str]] = None,
+    ) -> Dict[str, str]:
+        """Redact credential values from headers for logging and previews.
+
+        Two sources, and only one of them can be complete:
+
+        - **By provenance** (*injected*) — the header names
+          :meth:`get_auth_headers` actually put a credential into on THIS
+          request.  This is the authoritative set, because an ``apiKey``
+          scheme carries an operator-chosen header name that no static list
+          can anticipate: GitLab's ``PRIVATE-TOKEN``, a vendor's
+          ``X-Acme-Key``, anything a spec declares.  Caller passes it.
+        - **By name** — a small conventional set, for headers the CALLER
+          supplied by hand (``call_service(headers={"Authorization": ...})``),
+          which have no provenance to read.
+
+        The provenance half is the load-bearing one.  ``preview_request``
+        returns this dict to the MODEL, so a header the name list did not
+        happen to include put the credential itself into the transcript —
+        latent until ``configure_service_auth``'s auth actually reached the
+        preview, which it did not before the config-precedence fix.
 
         Args:
-            headers: Headers dict.
+            headers: The request headers.
+            injected: Header names a credential was resolved into, if known.
 
         Returns:
-            Headers dict with sensitive values redacted.
+            A new dict with credential values elided.
         """
-        sensitive_keys = {"authorization", "x-api-key", "api-key", "apikey"}
+        sensitive_keys = {"authorization", "x-api-key", "api-key", "apikey",
+                          "x-auth-token", "cookie", "proxy-authorization"}
+        by_provenance = {k.lower() for k in (injected or ())}
         redacted = {}
 
         for key, value in headers.items():
-            if key.lower() in sensitive_keys:
+            if key.lower() in sensitive_keys or key.lower() in by_provenance:
                 # Show first/last few characters
                 if len(value) > 12:
                     redacted[key] = f"{value[:4]}...{value[-4:]}"

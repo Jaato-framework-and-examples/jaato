@@ -1,0 +1,203 @@
+name: "Publish jaato-server (PyPI or TestPyPI)"
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Index to publish to. Stage on TestPyPI, let someone install and test it, then re-run this workflow on the SAME commit with pypi -- what ships is then what was tested."
+        type: choice
+        options:
+          - testpypi
+          - pypi
+        default: testpypi
+      suffix:
+        description: "Pre-release suffix for a TestPyPI staging build (TestPyPI only). Blank means rc1 -- every staging build is a pre-release, so the newest one always shows as current on the project page. An index accepts a version once, ever, so a second staging attempt of one release needs rc2, rc3, ..."
+        type: string
+        default: ""
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    # Measured: the suite is 9m30s and `.[all]` adds a few minutes of install
+    # (gssapi compiles from sdist; this job has no pip cache). 30 leaves room
+    # on a slow runner without letting a hung gate hold a release for
+    # GitHub's default six hours.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      # This job runs `shared/tests/`, which is what ci-tests' `shared/tests`
+      # leg runs — and that leg installs `.[all]`. Anything narrower here is a
+      # SECOND environment for the same suite, kept in sync by hand, and it
+      # drifted twice in one evening: `.[dev]` failed collection on a
+      # module-level `import openai`, and `.[dev,openrouter]` then failed 13
+      # tests on `import pexpect` — a LAZY import inside production code
+      # (interactive_shell/session.py), which no scan of the test files can
+      # predict. So the gate installs what the suite is written against
+      # instead of a hand-picked subset.
+      #
+      # `.[all]` pulls gssapi (needs libkrb5 headers) and the diagrams plugin
+      # (graphviz), hence the apt step; and `apt-get update` exits 100 if any
+      # configured source is broken, so the unused google-chrome source is
+      # dropped first, exactly as ci-tests does.
+      - name: Drop the unused third-party apt sources
+        run: sudo rm -f /etc/apt/sources.list.d/google-chrome.list
+                        /etc/apt/sources.list.d/google-chrome.sources
+
+      - name: System build deps (gssapi / diagrams)
+        run: sudo apt-get update && sudo apt-get install -y libkrb5-dev graphviz
+
+      - name: Install dependencies
+        run: pip install -e jaato-sdk/ && pip install -e "jaato-server/.[all]"
+
+      - name: Run tests
+        run: pytest jaato-server/shared/tests/ jaato-server/server/test_client.py jaato-server/server/test_workspace_command.py
+
+  build-and-publish:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # push the release tag below
+      id-token: write
+    environment:
+      name: ${{ inputs.target == 'pypi' && 'pypi-server' || 'testpypi-server' }}
+    steps:
+      # fetch-depth: 0 — scripts/build_readme.py derives the changelog that
+      # becomes the package's PyPI long description from `git log` since the
+      # previous "Bump <pkg>" commit.  checkout's default depth of 1 leaves it
+      # a single commit to look at, so the published changelog was whatever
+      # that one commit happened to be.
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install build
+        run: pip install build
+
+      # `suffix` is free text from the dispatch form, so it reaches the shell
+      # through `env:` rather than a `${{ }}` interpolation inside `run:`,
+      # which would splice whatever was typed into the script itself.  Its
+      # shape is checked here too, because the step that applies it builds a
+      # `sed` expression around the value.
+      - name: Resolve the target index
+        id: index
+        env:
+          TARGET: ${{ inputs.target }}
+          SUFFIX: ${{ inputs.suffix }}
+        run: |
+          case "$SUFFIX" in
+            "") ;;
+            *[!a-z0-9.]*)
+              echo "::error::suffix must be lowercase alphanumerics and dots (e.g. rc1, dev2); got '$SUFFIX'"
+              exit 1 ;;
+          esac
+          if [ "$TARGET" = "pypi" ]; then
+            if [ -n "$SUFFIX" ]; then
+              echo "::error::suffix is for staging on TestPyPI only -- PyPI publishes the version the repository declares, so that what ships is what was tested"
+              exit 1
+            fi
+            echo "host=pypi.org" >> "$GITHUB_OUTPUT"
+            echo "upload=https://upload.pypi.org/legacy/" >> "$GITHUB_OUTPUT"
+          else
+            # Every TestPyPI build is a pre-release, and there is no way to ask
+            # for a plain one.  PyPI pins "THIS RELEASE" to the newest STABLE
+            # version whenever one exists, so a plain 0.21.0 staged on Monday
+            # outranks the 0.21.0rc1 staged on Friday and the project page
+            # presents the older build as the current one.  With nothing but
+            # pre-releases on the index the newest upload is always the one
+            # shown.  Defaulting rather than refusing is what keeps the
+            # promotion run -- target: pypi, suffix left blank -- untouched.
+            [ -n "$SUFFIX" ] || SUFFIX=rc1
+            echo "host=test.pypi.org" >> "$GITHUB_OUTPUT"
+            echo "upload=https://test.pypi.org/legacy/" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Publishing suffix: '${SUFFIX:-<none>}'"
+          echo "suffix=$SUFFIX" >> "$GITHUB_OUTPUT"
+
+      - name: Check version not already on the target index
+        env:
+          SUFFIX: ${{ steps.index.outputs.suffix }}
+        run: |
+          base=$(python -c "
+          import tomllib, pathlib
+          data = tomllib.loads(pathlib.Path('jaato-server/pyproject.toml').read_text())
+          print(data['project']['version'])
+          ")
+          version="${base}${SUFFIX}"
+          echo "Package version: $version (declared: $base)"
+          status=$(curl -s -o /dev/null -w '%{http_code}' \
+            "https://${{ steps.index.outputs.host }}/pypi/jaato-server/${version}/json")
+          if [ "$status" = "200" ]; then
+            echo "::error::Version ${version} of jaato-server already exists on ${{ steps.index.outputs.host }}. An index accepts a version once, ever -- re-run with a suffix (rc1, rc2, ...) to stage again, or bump the release."
+            exit 1
+          fi
+          echo "Version ${version} is available for publishing"
+
+      - name: Generate combined README
+        run: python scripts/build_readme.py --dir jaato-server
+
+      # AFTER the README step, deliberately.  build_readme.py anchors the
+      # changelog on the version pyproject declares, walking git history for
+      # the commits that set it; a suffixed version matches no commit, so the
+      # walk anchors on the bump commit itself -- measured: an EMPTY changelog.
+      - name: Apply the staging suffix
+        if: steps.index.outputs.suffix != ''
+        env:
+          SUFFIX: ${{ steps.index.outputs.suffix }}
+        run: |
+          sed -i "0,/^version = \"/{s/^\(version = \"[^\"]*\)\"/\1${SUFFIX}\"/}" jaato-server/pyproject.toml
+          grep -m1 '^version = ' jaato-server/pyproject.toml
+
+      - name: Build package
+        run: python -m build jaato-server/
+
+      - name: Publish to the target index
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: jaato-server/dist/
+          repository-url: ${{ steps.index.outputs.upload }}
+
+      # A release tag is the ONLY record of the commit a version shipped
+      # from.  scripts/build_readme.py anchors the next changelog on it,
+      # because the commit that SET a version is not the commit it shipped
+      # from whenever a release is held across staging rounds so later PRs
+      # fold into it -- measured 19 commits apart for jaato-server 0.14.0,
+      # whose entries were then re-listed in 0.15.0's changelog.
+      #
+      # Never on TestPyPI.  Staging is not a release, and a tag there would
+      # anchor the next changelog on a build nobody shipped, dropping every
+      # entry that landed before the real release.
+      #
+      # `continue-on-error` because by this point the upload has HAPPENED:
+      # failing the job would report a release that shipped as a release
+      # that did not.  The annotation below carries the manual remedy, and
+      # a missed tag degrades the next changelog rather than the release.
+      - name: Tag the published commit
+        if: inputs.target == 'pypi'
+        continue-on-error: true
+        run: |
+          read -r name version <<<"$(python -c "
+          import tomllib, pathlib
+          d = tomllib.loads(pathlib.Path('jaato-server/pyproject.toml').read_text())['project']
+          print(d['name'], d['version'])
+          ")"
+          tag="${name}-${version}"
+          if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+            echo "::notice::${tag} already exists -- leaving it where it is"
+            exit 0
+          fi
+          git tag "$tag"                       # lightweight: no identity needed
+          if git push origin "refs/tags/${tag}"; then
+            echo "::notice::tagged $(git rev-parse --short HEAD) as ${tag}"
+          else
+            echo "::error::${name} ${version} was PUBLISHED but not tagged. The release is fine; the next changelog will re-list this one's entries until someone runs: git tag ${tag} ${GITHUB_SHA} && git push origin ${tag}"
+            exit 1
+          fi

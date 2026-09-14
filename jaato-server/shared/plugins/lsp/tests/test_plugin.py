@@ -3000,12 +3000,19 @@ class TestApparmorExtraRulesKnob:
         src = plugin_path.read_text(encoding="utf-8")
         # Find the helper method
         helper_start = src.index("def _compose_lsp_apparmor_extra_rules(")
-        helper_end = src.find("\n    @classmethod", helper_start + 1)
-        if helper_end == -1:
-            helper_end = src.find("\n    @staticmethod", helper_start + 1)
-        if helper_end == -1:
-            helper_end = helper_start + 4000
+        # The body ends at whichever decorator comes FIRST — taking
+        # @classmethod unconditionally swallowed every @staticmethod
+        # defined between this helper and the next classmethod, so the
+        # slice was another method's body and the pins below read it.
+        ends = [src.find(marker, helper_start + 1)
+                for marker in ("\n    @classmethod", "\n    @staticmethod")]
+        ends = [e for e in ends if e != -1]
+        helper_end = min(ends) if ends else helper_start + 4000
         body = src[helper_start:helper_end]
+        assert "def _language_servers_from_profile" not in body, (
+            "the slice ran past the helper — the pins below would be "
+            "measuring a different method's body"
+        )
         assert "plugin_config.get('apparmor_extra_rules')" in body or \
                'plugin_config.get("apparmor_extra_rules")' in body, (
             "_compose_lsp_apparmor_extra_rules MUST read from "

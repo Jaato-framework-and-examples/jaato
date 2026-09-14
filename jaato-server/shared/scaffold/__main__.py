@@ -33,8 +33,9 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Any, Callable, Optional, Tuple
 
 from . import explain as _explain
 from . import validate as _validate
@@ -42,74 +43,288 @@ from . import validate as _validate
 
 # --------------------------------------------------------------- explain
 #
-# Scopes are TABLES, not an if/elif chain.  The chain is how `explain` came to
-# advertise "4 client archetypes" with no scope behind it (jaato #716): adding
-# a scope meant finding the right rung of a 20-branch ladder AND its entry in
-# two help strings, so the cheap path was to add nothing.
+# Scopes are ONE TABLE, not an if/elif chain and not four tables.  The chain is
+# how `explain` came to advertise "4 client archetypes" with no scope behind it
+# (jaato #716): adding a scope meant finding the right rung of a 20-branch
+# ladder AND its entry in two help strings, so the cheap path was to add
+# nothing.  Splitting the ladder into four tables plus a stray ``elif scope ==
+# "profile"`` fixed the ladder and left the help hand-typed, which is how
+# `integrations` came to be dispatched and advertised nowhere (#994): #906
+# registered it in one table and nobody edited the string.
+#
+# So the table below is the ONLY place a topic is declared.  The help line, the
+# unknown-scope error, the argparse `--help` and the dispatch all read it, and
+# `shared/tests/test_explain_scopes_are_derived_994.py` fails if a sixth
+# dispatch shape appears without being wired in.
 
-#: Scopes rendered with no argument.
-_SIMPLE_SCOPES = {
-    "plugins": _explain.plugins,
-    "providers": _explain.providers,
-    "gc": _explain.gc,
-    "transports": _explain.transports,
-    "clients": _explain.clients,
-    "runtime": _explain.runtime,
-    "tiers": _explain.tiers,
-    "paths": _explain.paths,
-    "prefetch": _explain.prefetch,
-    "commands": _explain.commands,
-    "archetypes": _explain.archetypes,
+
+@dataclass(frozen=True)
+class ExplainScope:
+    """One `explain` topic: what renders it, how it is called, what it takes.
+
+    Attributes:
+        render: the renderer for the argument-less form of the scope.
+        kind: which calling convention it takes — a key of :data:`_SCOPE_KINDS`,
+            which is what turns this declaration into a dispatch.  A kind no
+            handler implements is a build failure, not a runtime surprise.
+        arg: the argument hint rendered beside the scope in the help line and
+            in the ``usage:`` message a ``named`` scope prints when called
+            without one (``"<name>"``, ``"[<filter>]"``, ...).  Empty for a
+            scope that takes no argument.  Presentation lives HERE rather than
+            in a parallel string, so ``profile [<name>]`` cannot survive the
+            scope being renamed.
+        render_named: the second renderer of an ``optional_named`` scope — what
+            runs when a name IS supplied.  ``None`` for every other kind.
+        blurb: the trailing ``# ...`` note the overview banner prints beside
+            this topic, for the topics whose name does not say what they are.
+            Empty for the ones that do.  It lives HERE for the same reason
+            ``arg`` does: the banner used to be hand-typed prose and had
+            drifted to advertise 21 of 23 topics (#1006), so every string the
+            banner prints is now a field of the entry it describes.
+    """
+
+    render: Callable[..., Any]
+    kind: str = "simple"
+    arg: str = ""
+    render_named: Optional[Callable[..., Any]] = None
+    blurb: str = ""
+
+
+#: Every `explain` topic, in the order the help line lists them.
+#:
+#: Kinds:
+#:   ``simple``          rendered with no argument.
+#:   ``filter``          takes an OPTIONAL filter as the name argument.
+#:   ``named``           REQUIRES a name.  A renderer signals "no such name" by
+#:                       returning a data dict carrying an ``error`` key; the
+#:                       CLI turns that into a stderr message and exit 2, so a
+#:                       caller that typo'd a name never mistakes the miss for
+#:                       documentation.
+#:   ``workspace``       rendered AGAINST A WORKSPACE — it reports on files on
+#:                       disk, so the ``--workspace`` value is the argument.
+#:   ``optional_named``  both: bare, it is the SCHEMA; with a name, what that
+#:                       named unit inherits and costs, resolved against the
+#:                       workspace.
+_SCOPES = {
+    "plugins": ExplainScope(_explain.plugins),
+    "plugin": ExplainScope(_explain.plugin, "named", "<name>"),
+    "commands": ExplainScope(_explain.commands),
+    "providers": ExplainScope(_explain.providers),
+    "provider": ExplainScope(_explain.provider, "named", "<name>"),
+    "gc": ExplainScope(_explain.gc),
+    "env": ExplainScope(_explain.env, "filter", "[<filter>]",
+                        blurb="vars the daemon + plugins READ"),
+    "events": ExplainScope(_explain.events, "filter", "[<filter>]",
+                           blurb="the client/server protocol"),
+    # The hint says "or" rather than "|": the help line separates topics with
+    # "|", so a hint carrying one is unreadable there and unparseable by
+    # anything reading the line back.
+    "event": ExplainScope(_explain.event, "named", "<NAME or wire.value>",
+                          blurb="one event's fields + docstring"),
+    "transports": ExplainScope(_explain.transports),
+    "clients": ExplainScope(_explain.clients),
+    "runtime": ExplainScope(_explain.runtime),
+    "tiers": ExplainScope(_explain.tiers),
+    "integrations": ExplainScope(_explain.integrations,
+                                 blurb="tools jaato can wire into"),
+    "sets": ExplainScope(_explain.sets, "workspace"),
+    "agents": ExplainScope(_explain.agents, "workspace",
+                           blurb="the PERSONA layer (.jaato/agents/)"),
+    "services": ExplainScope(_explain.services, "workspace",
+                             blurb="named HTTP APIs (.jaato/services/)"),
+    # ``profile`` alone is the SCHEMA; ``profile <name>`` is what that named
+    # profile INHERITS and what it costs per turn.  A profile file states what
+    # it adds and never what it inherits, so the instruction tax is invisible
+    # at authoring time and shows up later as a budget refusal.
+    "profile": ExplainScope(_explain.profile, "optional_named", "[<name>]",
+                            render_named=_explain.profile_cost,
+                            blurb="a session's CAPABILITIES"),
+    "paths": ExplainScope(_explain.paths),
+    "prefetch": ExplainScope(_explain.prefetch),
+    "completion": ExplainScope(_explain.completion,
+                               blurb="the OUTPUT-side hook"),
+    "archetypes": ExplainScope(_explain.archetypes,
+                               blurb="what `new` WRITES"),
+    "archetype": ExplainScope(_explain.archetype, "named", "<name>"),
 }
 
-#: Scopes REQUIRING a name, with the usage line printed when it is missing.
-#: A renderer here signals "no such name" by returning a data dict carrying an
-#: ``error`` key; the CLI turns that into a stderr message and exit 2, so a
-#: caller that typo'd a name never mistakes the miss for documentation.
-_NAMED_SCOPES = {
-    "plugin": (_explain.plugin, "explain plugin <name>"),
-    "provider": (_explain.provider, "explain provider <name>"),
-    "event": (_explain.event, "explain event <NAME|wire.value>"),
-    "archetype": (_explain.archetype, "explain archetype <name>"),
+
+class _ScopeUsageError(Exception):
+    """A scope was named correctly and invoked wrongly (missing / unknown name).
+
+    Carries the message to print on stderr and the exit code, so every kind
+    handler reports the same way and ``_cmd_explain`` keeps ONE error exit.
+    """
+
+    def __init__(self, message: str, code: int = 2):
+        super().__init__(message)
+        self.message = message
+        self.code = code
+
+
+def _scope_usage(scope: str, spec: ExplainScope) -> str:
+    """The ``usage:`` line for *scope* — derived, never a second copy."""
+    return f"explain {scope} {spec.arg}".rstrip()
+
+
+def _call_simple(spec, scope, name, ws):
+    return spec.render()
+
+
+def _call_filter(spec, scope, name, ws):
+    return spec.render(name)
+
+
+def _call_workspace(spec, scope, name, ws):
+    return spec.render(ws)
+
+
+def _call_named(spec, scope, name, ws):
+    if not name:
+        raise _ScopeUsageError(f"usage: {_scope_usage(scope, spec)}")
+    data, text = spec.render(name)
+    if isinstance(data, dict) and "error" in data:
+        raise _ScopeUsageError(text)
+    return data, text
+
+
+def _call_optional_named(spec, scope, name, ws):
+    return spec.render_named(name, ws) if name else spec.render()
+
+
+#: How each :attr:`ExplainScope.kind` is invoked.  Dispatch is a lookup here,
+#: so a scope declaring a kind with no handler fails loudly at the one place
+#: that would otherwise grow a sixth ``elif``.
+_SCOPE_KINDS = {
+    "simple": _call_simple,
+    "filter": _call_filter,
+    "named": _call_named,
+    "workspace": _call_workspace,
+    "optional_named": _call_optional_named,
 }
 
-#: Scopes taking an OPTIONAL filter as the name argument.
-_FILTER_SCOPES = {"env": _explain.env, "events": _explain.events}
 
-_SCOPES_HELP = ("plugins | plugin | commands | providers | provider | gc | env | events | "
-                "event | transports | clients | runtime | tiers | sets | "
-                "profile [<name>] | paths | prefetch | archetypes | archetype")
+def _scopes_help() -> str:
+    """The ``one of:`` line — every registered topic with its argument hint.
+
+    Derived from :data:`_SCOPES`, so a topic added there appears in the
+    unknown-scope error and in ``explain --help`` without anyone editing prose.
+    """
+    return " | ".join(
+        f"{scope} {spec.arg}".rstrip() for scope, spec in _SCOPES.items())
+
+
+def _workspace_readers() -> list:
+    """The topics whose renderer is handed the ``--workspace`` value.
+
+    One predicate, two consumers: ``--workspace``'s own help text and the
+    overview banner, which appends ``[--workspace DIR]`` to exactly these
+    topics.  Written once because the hand-typed banner put that hint on
+    ``sets`` alone while ``agents`` and ``services`` read the workspace just
+    as much (#1006).
+    """
+    return [n for n, s in _SCOPES.items()
+            if s.kind in ("workspace", "optional_named")]
+
+
+def _workspace_arg_help() -> str:
+    """``--workspace``'s help — the topics that actually read it.
+
+    Derived for the same reason the scope list is: this said "(for `sets`)"
+    while three more workspace-reading topics had been added beside it.
+    """
+    readers = _workspace_readers()
+    return "workspace dir (for " + ", ".join(f"`{n}`" for n in readers) + ")"
+
+
+def scope_catalog() -> list:
+    """Every `explain` topic as data — what the overview banner renders from.
+
+    The banner is the THIRD surface that used to spell the topic list by hand
+    (#1006), after the ``one of:`` error and argparse's ``--help`` (#994).  It
+    advertised 21 topics while :data:`_SCOPES` carried 23, with ``env``,
+    ``event`` and ``events`` dispatching and named nowhere.  Exporting the
+    table as data — rather than letting :mod:`explain` import the CLI's
+    private dict — keeps the banner derived without making every field of
+    ``ExplainScope`` part of that module's contract.
+
+    Returns:
+        One dict per topic, in table order: ``scope``, ``arg`` (the argument
+        hint), ``kind``, ``reads_workspace`` (whether ``--workspace`` reaches
+        its renderer) and ``blurb``.
+    """
+    readers = set(_workspace_readers())
+    return [{"scope": name,
+             "arg": spec.arg,
+             "kind": spec.kind,
+             "reads_workspace": name in readers,
+             "blurb": spec.blurb}
+            for name, spec in _SCOPES.items()]
+
+
+_SCOPES_HELP = _scopes_help()
+
+# Derived views of the one table, kept because callers and tests reach for
+# them by name.  Each is a projection, never a second declaration: a topic
+# added to _SCOPES appears here, and nothing can appear here without being
+# dispatched.
+_SIMPLE_SCOPES = {n: s.render for n, s in _SCOPES.items() if s.kind == "simple"}
+_FILTER_SCOPES = {n: s.render for n, s in _SCOPES.items() if s.kind == "filter"}
+_WORKSPACE_SCOPES = {n: s.render for n, s in _SCOPES.items()
+                     if s.kind == "workspace"}
+_NAMED_SCOPES = {n: (s.render, _scope_usage(n, s)) for n, s in _SCOPES.items()
+                 if s.kind == "named"}
+
+
+_DEPS_WORDS = ("dependencies", "deps")
+
+
+def _take_deps_word(scope, name, extra):
+    """Pull the optional `dependencies` word out of the query, wherever it sits.
+
+    Dependencies are a FACET of every scope rather than a scope of their own —
+    a provider imports packages, a plugin shells out, the framework is two
+    distributions that drift — so the word is appended to whatever you were
+    already asking:
+
+        explain dependencies
+        explain provider openrouter dependencies
+        explain plugin cli deps
+
+    Accepted in any position after the verb, because a reader who types it
+    first is asking the same question as one who types it last.
+    """
+    words = [w for w in (scope, name, extra) if w]
+    kept = [w for w in words if w not in _DEPS_WORDS]
+    asked = len(kept) != len(words)
+    kept += [None, None]
+    return kept[0], kept[1], asked
 
 
 def _cmd_explain(args) -> int:
-    scope = args.scope
-    name = args.name
+    """Render one `explain` topic.
+
+    Every topic is looked up in :data:`_SCOPES` and invoked through the handler
+    its ``kind`` names, so the set of topics this dispatches is by construction
+    the set the help line advertises (#994).
+    """
+    scope, name, deps = _take_deps_word(
+        args.scope, args.name, getattr(args, "extra", None))
     ws = args.workspace or "."
+    if deps:
+        from . import dependencies as _deps
+        data, text = _deps.render(scope, name)
+        print(json.dumps(data, indent=2) if args.json else text)
+        return 0
     if scope is None:
         data, text = _explain.overview()
-    elif scope in _SIMPLE_SCOPES:
-        data, text = _SIMPLE_SCOPES[scope]()
-    elif scope in _FILTER_SCOPES:
-        data, text = _FILTER_SCOPES[scope](name)
-    elif scope in _NAMED_SCOPES:
-        render, usage = _NAMED_SCOPES[scope]
-        if not name:
-            print(f"usage: {usage}", file=sys.stderr)
-            return 2
-        data, text = render(name)
-        if isinstance(data, dict) and "error" in data:
-            print(text, file=sys.stderr)
-            return 2
-    elif scope == "sets":
-        data, text = _explain.sets(ws)
-    elif scope == "profile":
-        # ``profile`` alone is the SCHEMA; ``profile <name>`` is what that
-        # named profile INHERITS and what it costs per turn.  A profile file
-        # states what it adds and never what it inherits, so the instruction
-        # tax is invisible at authoring time and shows up later as a budget
-        # refusal.
-        data, text = (_explain.profile_cost(name, ws) if name
-                      else _explain.profile())
+    elif scope in _SCOPES:
+        spec = _SCOPES[scope]
+        try:
+            data, text = _SCOPE_KINDS[spec.kind](spec, scope, name, ws)
+        except _ScopeUsageError as exc:
+            print(exc.message, file=sys.stderr)
+            return exc.code
     else:
         print(f"unknown explain scope {scope!r} — one of: {_SCOPES_HELP}",
               file=sys.stderr)
@@ -196,13 +411,18 @@ def _new_epilog() -> str:
     #716).  Sourced from the same registry ``explain archetypes`` renders.
     """
     from . import archetypes as _archetypes
-    docs = [_archetypes.ARCHETYPES[_archetypes.PROFILE_SET]] + [
-        _archetypes.ARCHETYPES[n] for n in _archetypes.CLIENT_ARCHETYPES]
+    # Every documented archetype, never a hand-kept subset: the epilog used
+    # to enumerate profile-set + the client templates, so an archetype that
+    # was neither (the processor generator) would have been absent from
+    # `new --help` while `new` accepted it — the same shape of drift that
+    # made the banner advertise four archetypes out of six (jaato #716).
+    docs = [_archetypes.ARCHETYPES[n] for n in sorted(_archetypes.ARCHETYPES)]
     width = max(len(d.name) for d in docs)
     lines = ["what each archetype writes into --workspace:"]
     for d in docs:
         paths = ", ".join(e.render_path(archetype=d.name, set="<set>",
-                                        agent="<agent>") for e in d.writes)
+                                        agent="<agent>", name="<name>")
+                          for e in d.writes)
         lines.append(f"  {d.name.ljust(width)}  {paths}")
     lines += [
         "",
@@ -222,6 +442,37 @@ def _cmd_new(args) -> int:
 
 
 # ----------------------------------------------------- external verbs (plugins)
+
+def _cmd_integration(args) -> int:
+    from . import integrations as _install
+    names = _install.available()
+    if not names:
+        print("this build ships no integrations", file=sys.stderr)
+        return 1
+    if not args.name:
+        # The bare verb LISTS rather than guessing which one you meant — with
+        # more than one shipped, picking for you would be a coin toss.
+        data, text = _install.listing()
+        print(json.dumps(data, indent=2) if args.json else text)
+        return 0
+    name = args.name
+    # --user and --workspace are mutually exclusive, so "not --workspace" IS
+    # user scope; --user is accepted so the default can be stated out loud.
+    dest = _install.target_dir(name, user=not args.workspace,
+                               workspace=args.workspace)
+    changed, lines = _install.install(name, dest, force=args.force, dry_run=args.dry_run)
+    if args.json:
+        state, detail = _install.compare(name, dest)
+        print(json.dumps({"asset": name, "dest": str(dest), "changed": changed,
+                          "state": state, "detail": detail,
+                          "version": _install.framework_version()}, indent=2))
+        return 0
+    for line in lines:
+        print(line)
+    # A refusal is not a crash: the operator asked a reasonable thing and the
+    # answer is "there is already one there".  Non-zero so a script notices.
+    return 0 if (changed or args.dry_run) else 1
+
 
 def _discover_external_verbs() -> list:
     """Load verbs contributed by external packages via entry points.
@@ -272,7 +523,11 @@ def main(argv=None) -> int:
     pe.add_argument("name", nargs="?",
                     help="name for plugin/provider/event/archetype scope, or a "
                          "filter for env/events")
-    pe.add_argument("--workspace", help="workspace dir (for `sets`)")
+    pe.add_argument("extra", nargs="?",
+                    help="the optional word `dependencies` (or `deps`) — a facet "
+                         "of any scope: what it needs, what is installed, and "
+                         "whether this environment agrees with itself")
+    pe.add_argument("--workspace", help=_workspace_arg_help())
     pe.add_argument("--json", action="store_true")
     pe.set_defaults(func=_cmd_explain)
 
@@ -296,8 +551,30 @@ def main(argv=None) -> int:
     pn.add_argument("--workspace", required=True, help="target workspace dir")
     pn.add_argument("--provider", help="provider name")
     pn.add_argument("--model", help="model name")
+    pn.add_argument("--profile", metavar="NAME",
+                    help="bind the generated client to an EXISTING profile "
+                         "instead of an inline {model, provider} spec. A "
+                         "profile carries plugins, persona, GC, ceilings and "
+                         "the completion schema, which a spec cannot; "
+                         "mutually exclusive with --provider/--model, and "
+                         "refused if NAME does not resolve in --workspace.")
     pn.add_argument("--set", help="profile-set name (provider_model)")
     pn.add_argument("--agents", help="comma-separated agent names for a set")
+    pn.add_argument("--name", help="processor name for `new processor` — the "
+                                   "module stem under "
+                                   ".jaato/scripts/processors/ and the "
+                                   "`name:` of its profile entry")
+    pn.add_argument("--no-gate", action="store_true", dest="no_gate",
+                    help="for `new sweep`: do NOT emit the completion gate "
+                         "(acceptance.sh + the processor + the profile wiring "
+                         "it needs). The gate is emitted by default because a "
+                         "sweep's arms are graded — 'did this arm meet the "
+                         "criteria' is the measurement, not a nicety. Pass "
+                         "this for a sweep that grades nothing.")
+    pn.add_argument("--gate-name", metavar="NAME", dest="gate_name",
+                    help="stem shared by the gate's four files (default "
+                         "'acceptance'): the processor module, the completion "
+                         "schema, the profile, and the profile entry's `name:`.")
     pn.add_argument("--force", action="store_true", help="overwrite existing")
     pn.add_argument("--secrets", metavar="MODE",
                     help="how profiles reference the provider credential: "
@@ -334,6 +611,31 @@ def main(argv=None) -> int:
                          "an appended-to one exactly as the real run would.")
     pn.add_argument("--json", action="store_true")
     pn.set_defaults(func=_cmd_new)
+
+    pi = sub.add_parser(
+        "integration", help="wire jaato into a tool you work in (bare: list them)",
+        description="An integration is jaato's side of a contract with another "
+                    "tool — today `claude-code`, which installs the jaato-sdk "
+                    "skill where Claude Code looks for skills.  Each copy is "
+                    "stamped with the build it came from, so `jaato-doctor` can "
+                    "say when one has gone stale.  With no name, lists what this "
+                    "build ships and where each one stands.")
+    pi.add_argument("name", nargs="?", default=None,
+                    help="integration name (omit to list)")
+    scope = pi.add_mutually_exclusive_group()
+    scope.add_argument("--user", action="store_true",
+                       help="apply under $HOME — every repo on this machine "
+                            "(the default; accepted explicitly so a script can "
+                            "say what it means)")
+    scope.add_argument("--workspace", default=None,
+                       help="apply under DIR instead of $HOME — this project only")
+    pi.add_argument("--force", action="store_true",
+                    help="overwrite an existing copy")
+    pi.add_argument("--dry-run", action="store_true",
+                    help="print what would be written, write nothing")
+    pi.add_argument("--json", action="store_true")
+    pi.set_defaults(func=_cmd_integration)
+
 
     # External verbs (e.g. the premium `compile` verb) — discovered via the
     # `jaato.scaffold_verbs` entry-point group.  Built-in names win on collision.

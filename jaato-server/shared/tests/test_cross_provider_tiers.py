@@ -32,6 +32,7 @@ def _session(tier_dict):
         _active_tier="executor",
         _provider=SimpleNamespace(
             name="zhipuai", connect=lambda m, skip_model_test=True: None),
+        _request_tier_output_modalities=lambda entry: None,
         _active_provider_name="zhipuai",
         _provider_cache={},
         # Realistic post-main-provider state: _provider_lazy_pending is already

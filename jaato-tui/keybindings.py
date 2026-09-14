@@ -146,6 +146,7 @@ DEFAULT_KEYBINDINGS = {
     # Features
     "toggle_plan": "c-p",
     "toggle_tools": "c-t",
+    "toggle_thinking": "c-r",  # Collapse/expand model reasoning blocks (#755)
     "toggle_budget": "c-b",
     "cycle_agents": "c-a",
     "yank": "c-y",
@@ -346,6 +347,7 @@ class KeybindingConfig:
     # Features
     toggle_plan: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["toggle_plan"])
     toggle_tools: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["toggle_tools"])
+    toggle_thinking: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["toggle_thinking"])
     toggle_budget: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["toggle_budget"])
     cycle_agents: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["cycle_agents"])
     yank: KeyBinding = field(default_factory=lambda: DEFAULT_KEYBINDINGS["yank"])
@@ -570,6 +572,7 @@ class KeybindingConfig:
             "pager_next": self.pager_next,
             "toggle_plan": self.toggle_plan,
             "toggle_tools": self.toggle_tools,
+            "toggle_thinking": self.toggle_thinking,
             "toggle_budget": self.toggle_budget,
             "cycle_agents": self.cycle_agents,
             "yank": self.yank,
@@ -761,6 +764,7 @@ def generate_example_config() -> str:
 
         "toggle_plan": "c-p",
         "toggle_tools": "c-t",
+        "toggle_thinking": "c-r",
         "toggle_budget": "c-b",
         "cycle_agents": "c-a",
         "yank": "c-y",

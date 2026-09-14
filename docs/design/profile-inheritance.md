@@ -63,6 +63,7 @@ Fields fall into two categories based on their type:
 | `gc` | If multiple parents define it, values must agree (field-by-field) or child must override the entire `gc` block. |
 | `completion_payload_schema` | Same as `model`. An empty dict `{}` **is a value** and overrides; `null`/absent reads as unset and inherits. |
 | `spawn_payload_schema` | Same as `completion_payload_schema`, at the spawn boundary. |
+| `scrub_secret_env` | Same as `model`: the child's value replaces the parents' outright (`none` in a child turns the scrub off for that child alone); parents must agree when the child is silent. Absent everywhere = the framework default set, not "off" (#863). |
 | `description` | Child must define its own. Not inherited. |
 
 ### The Golden Rule

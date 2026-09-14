@@ -342,3 +342,116 @@ class TestSessionLifecycle:
         assert isinstance(ev, CommandRequest)
         assert ev.command == "session.delete"
         assert ev.args == ["sess_xyz"]
+
+
+def _answers(status):
+    """Stand in for the daemon's InjectPromptResultEvent wait.
+
+    Without it a 1.3+ inject blocks for its full timeout on a captured
+    request nobody answers — ten seconds of nothing, per test.
+    """
+    async def _await(request_id):
+        return status
+    return _await
+
+
+class TestResumeVerbsCarryAttachments:
+    """#845 — ``session.wake`` and ``inject_prompt`` accept the ``attachments``
+    ``send_message`` already accepted.
+
+    A completion-gated voice session is designed to END, and the documented
+    way back in is ``session.wake``.  With both resume verbs text-only, a
+    session whose input is a spoken utterance could be started with audio and
+    never driven again with it.  The limitation was invisible from the API
+    surface — ``attachments`` is on the call a reader starts from, and was
+    absent on the two they reach for next.
+    """
+
+    @pytest.mark.asyncio
+    async def test_inject_normalizes_attachments_like_send_message(
+            self, client_capture, tmp_path):
+        client, captured = client_capture
+        client._server_protocol_version = "1.5"
+        client._await_inject_result = _answers("accepted")  # type: ignore[assignment]
+        pic = tmp_path / "shot.png"
+        pic.write_bytes(b"\x89PNG")
+
+        await client.inject_prompt("look", attachments=[str(pic)])
+
+        att = captured[0].attachments[0]
+        assert att["mime_type"] == "image/png"
+        assert att["display_name"] == "shot.png"
+        # The same expansion send_message performs: a client-side PATH never
+        # crosses the wire, because the daemon (esp. cross-host WS) cannot
+        # read it.
+        assert att["data"] == "iVBORw=="
+
+    @pytest.mark.asyncio
+    async def test_inject_without_attachments_sends_an_empty_list(
+            self, client_capture):
+        client, captured = client_capture
+        client._server_protocol_version = "1.5"
+        client._await_inject_result = _answers("accepted")  # type: ignore[assignment]
+        await client.inject_prompt("steer")
+        assert captured[0].attachments == []
+
+    @pytest.mark.asyncio
+    async def test_a_daemon_that_would_drop_the_bytes_is_refused(
+            self, client_capture):
+        """An additive optional field is normally safe to send blind — an
+        older peer ignores it and the call degrades to what it always did.
+        That reasoning holds for a ``request_id`` and NOT for an attachment:
+        the degraded call is a turn driven WITHOUT the audio that was the
+        whole message.  So it raises instead."""
+        client, captured = client_capture
+        client._server_protocol_version = "1.4"
+        with pytest.raises(ValueError, match="DROP the attachments"):
+            await client.inject_prompt("hi", attachments=[{"data": "QUJD"}])
+        assert captured == []
+
+    @pytest.mark.asyncio
+    async def test_wake_session_puts_the_utterance_in_the_payload(
+            self, client_capture):
+        client, captured = client_capture
+        client._server_protocol_version = "1.5"
+
+        await client.wake_session(
+            "sess_1", attachments=[{"mime_type": "audio/wav", "data": "QUJD"}],
+            source="phone", event_id="e1")
+
+        req = captured[0]
+        assert req.command == "session.wake"
+        assert req.payload["session_id"] == "sess_1"
+        # Blank text is the NORMAL shape here: for a spoken message the
+        # attachment IS the message (#838).
+        assert req.payload["text"] == ""
+        assert req.payload["source"] == "phone"
+        assert req.payload["event_id"] == "e1"
+        assert req.payload["attachments"][0]["mime_type"] == "audio/wav"
+
+    @pytest.mark.asyncio
+    async def test_wake_session_text_only_carries_no_attachments_key(
+            self, client_capture):
+        client, captured = client_capture
+        client._server_protocol_version = "1.5"
+        await client.wake_session("sess_1", "have another look")
+        assert captured[0].payload["text"] == "have another look"
+        assert "attachments" not in captured[0].payload
+
+    @pytest.mark.asyncio
+    async def test_wake_session_with_no_content_is_refused_client_side(
+            self, client_capture):
+        client, captured = client_capture
+        client._server_protocol_version = "1.5"
+        with pytest.raises(ValueError, match="text or attachments"):
+            await client.wake_session("sess_1")
+        assert captured == []
+
+    @pytest.mark.asyncio
+    async def test_wake_session_also_refuses_a_daemon_that_would_drop_bytes(
+            self, client_capture):
+        client, captured = client_capture
+        client._server_protocol_version = "1.3"
+        with pytest.raises(ValueError, match="DROP the attachments"):
+            await client.wake_session("sess_1", attachments=[{"data": "QUJD"}])
+        assert captured == []

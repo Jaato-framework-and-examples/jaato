@@ -697,6 +697,78 @@ class TestModelTiersPassdown:
         assert env.model_tiers is None
 
 
+class TestTiersOnlyProfileBootstraps:
+    """A tiered profile that drops the top-level keys must still bootstrap.
+
+    ``model_name`` has resolved through the initial tier since #574.
+    ``provider_name`` did not: it read ``profile.provider`` alone, so a
+    profile whose ``model_tiers`` fully declared model AND provider per
+    tier — and which therefore omitted both top-level keys — reached the
+    runner with an empty provider and was refused with
+    ``envelope.provider_name is empty``.  Client-side that surfaced only as
+    a 60-second ``create_session`` timeout, which reads as a hung daemon
+    rather than a config error.
+
+    The contradiction is what made it worth fixing here rather than
+    documenting: the profile loader's own warning tells authors that
+    dropping those keys is fine because "the session bootstraps from the
+    initial tier", so following the framework's advice produced a profile
+    that validated cleanly and could not start (jaato #822).
+    """
+
+    #: The reporter's profile, minus the top-level keys.
+    TIERS = {
+        "executor": {"model": "openai/gpt-audio-mini",
+                     "provider": "openrouter"},
+        "initial": "executor",
+        "fallback": "executor",
+    }
+
+    def _envelope(self, **profile_kw):
+        profile = _stub_profile(model_tiers=self.TIERS, **profile_kw)
+        return _build_session_envelope(
+            server=_stub_server(profile=profile),
+            session_id="s",
+            workspace_path="/tmp/ws",
+            profile_name="speaker",
+        )
+
+    def test_provider_comes_from_the_initial_tier(self) -> None:
+        env = self._envelope()
+        assert env.provider_name == "openrouter"
+        assert env.model_name == "openai/gpt-audio-mini"
+
+    def test_a_top_level_provider_still_wins(self) -> None:
+        """Precedence is unchanged — the flat key is the explicit answer, and
+        a tier that leaves ``provider`` unset means "the session's main
+        provider", which is exactly what the flat key names."""
+        env = self._envelope(provider="anthropic")
+        assert env.provider_name == "anthropic"
+
+    def test_a_tier_declaring_no_provider_binds_none(self) -> None:
+        """A tier may legitimately omit ``provider``; with no flat key either,
+        nothing is bound and the caller's own env fallback applies rather
+        than a guess."""
+        profile = _stub_profile(model_tiers={
+            "executor": "some-model", "initial": "executor",
+        })
+        env = _build_session_envelope(
+            server=_stub_server(profile=profile),
+            session_id="s",
+            workspace_path="/tmp/ws",
+            profile_name="speaker",
+        )
+        assert env.provider_name == ""
+        assert env.model_name == "some-model"
+
+    def test_the_envelope_the_runner_validates_is_complete(self) -> None:
+        """The assertion that matches the reported symptom: the runner
+        refuses an envelope whose ``provider_name`` is empty, and this
+        profile no longer produces one."""
+        env = self._envelope()
+        assert env.provider_name and env.model_name
+
+
 def test_envelope_round_trip_via_dict() -> None:
     """The constructed envelope is wire-serializable (the dict
     survives a round-trip through SessionInitEnvelope.from_dict)."""

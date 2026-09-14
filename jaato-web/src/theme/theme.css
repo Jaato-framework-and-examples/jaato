@@ -1,0 +1,107 @@
+@import "tailwindcss";
+/* Name the source root explicitly.  Tailwind v4's automatic detection
+   consults the repository's .gitignore rules from the working directory
+   upwards and, in this monorepo layout, produced no utilities at all (the
+   built CSS carried only preflight + our rules).  "../" is src/. */
+@source "../";
+
+/* Defaults = TUI "dark" theme; applyTheme() overrides these at runtime. */
+:root {
+  --c-primary: #5fd7ff;
+  --c-secondary: #87d787;
+  --c-accent: #d7af87;
+  --c-success: #5fd75f;
+  --c-warning: #ffff5f;
+  --c-error: #ff5f5f;
+  --c-muted: #808080;
+  --c-bg: #1a1a1a;
+  --c-surface: #333333;
+  --c-text: #ffffff;
+  --c-text-muted: #aaaaaa;
+  --font-mono: ui-monospace, "JetBrains Mono", "Fira Code", Menlo, Consolas, monospace;
+  --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+@theme inline {
+  --color-primary: var(--c-primary);
+  --color-secondary: var(--c-secondary);
+  --color-accent: var(--c-accent);
+  --color-success: var(--c-success);
+  --color-warning: var(--c-warning);
+  --color-error: var(--c-error);
+  --color-muted: var(--c-muted);
+  --color-bg: var(--c-bg);
+  --color-surface: var(--c-surface);
+  --color-text: var(--c-text);
+  --color-text-muted: var(--c-text-muted);
+  --font-mono: var(--font-mono);
+  --font-sans: var(--font-sans);
+}
+
+html, body, #root { height: 100%; margin: 0; }
+body {
+  background: var(--c-bg);
+  color: var(--c-text);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+/* Surfaces derived from the eleven base colours. */
+.surface-1 { background: color-mix(in srgb, var(--c-surface) 55%, var(--c-bg)); }
+.surface-2 { background: var(--c-surface); }
+.hairline { border-color: color-mix(in srgb, var(--c-muted) 35%, transparent); }
+
+/* Pygments token roles (see protocol/pygments.ts). */
+.tok-keyword     { color: var(--c-primary); font-weight: 600; }
+.tok-function    { color: var(--c-secondary); }
+.tok-class       { color: var(--c-accent); }
+.tok-builtin     { color: var(--c-accent); }
+.tok-name        { color: var(--c-text); }
+.tok-string      { color: var(--c-success); }
+.tok-number      { color: var(--c-warning); }
+.tok-operator    { color: var(--c-text-muted); }
+.tok-punctuation { color: var(--c-text-muted); }
+.tok-comment     { color: var(--c-muted); font-style: italic; }
+.tok-decorator   { color: var(--c-accent); }
+.tok-tag         { color: var(--c-primary); }
+.tok-attribute   { color: var(--c-secondary); }
+.tok-error       { color: var(--c-error); text-decoration: underline wavy; }
+.tok-inserted    { color: var(--c-success); }
+.tok-deleted     { color: var(--c-error); }
+.tok-heading     { color: var(--c-primary); font-weight: 700; }
+.tok-prompt      { color: var(--c-muted); }
+.tok-text        { color: var(--c-text); }
+
+/* Diff lines in permission prompts / tool output. */
+.diff-add { color: var(--c-success); background: color-mix(in srgb, var(--c-success) 10%, transparent); }
+.diff-del { color: var(--c-error); background: color-mix(in srgb, var(--c-error) 10%, transparent); }
+.diff-hunk { color: var(--c-primary); }
+.diff-meta { color: var(--c-muted); }
+
+/* Prose from the model. */
+.prose-j p { margin: 0.35rem 0; }
+.prose-j h1, .prose-j h2, .prose-j h3, .prose-j h4 { margin: 0.8rem 0 0.3rem; line-height: 1.25; color: var(--c-primary); }
+.prose-j h1 { font-size: 1.35rem; } .prose-j h2 { font-size: 1.2rem; } .prose-j h3 { font-size: 1.05rem; } .prose-j h4 { font-size: 1rem; }
+.prose-j ul, .prose-j ol { margin: 0.3rem 0 0.3rem 1.4rem; }
+.prose-j ul { list-style: disc; } .prose-j ol { list-style: decimal; }
+.prose-j li { margin: 0.1rem 0; }
+.prose-j blockquote { border-left: 3px solid var(--c-muted); padding-left: 0.75rem; color: var(--c-text-muted); margin: 0.4rem 0; }
+.prose-j hr { border: 0; border-top: 1px solid color-mix(in srgb, var(--c-muted) 45%, transparent); margin: 0.75rem 0; }
+.prose-j code.inline { font-family: var(--font-mono); font-size: 0.92em; background: color-mix(in srgb, var(--c-surface) 80%, var(--c-bg)); padding: 0.05rem 0.3rem; border-radius: 4px; }
+.prose-j a { color: var(--c-primary); text-decoration: underline; }
+
+.code-block { font-family: var(--font-mono); font-size: 12.5px; line-height: 1.45; }
+.code-block .ln { user-select: none; color: var(--c-muted); text-align: right; padding-right: 0.9rem; min-width: 2.5rem; display: inline-block; }
+
+table.j-table { border-collapse: collapse; margin: 0.4rem 0; font-size: 13px; }
+table.j-table th, table.j-table td { border: 1px solid color-mix(in srgb, var(--c-muted) 40%, transparent); padding: 0.2rem 0.6rem; text-align: left; vertical-align: top; }
+table.j-table th { color: var(--c-primary); font-weight: 600; background: color-mix(in srgb, var(--c-surface) 60%, var(--c-bg)); }
+
+/* Thin scrollbars everywhere. */
+* { scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--c-muted) 50%, transparent) transparent; }
+
+@keyframes pulse-dot { 0%, 100% { opacity: 0.25; } 50% { opacity: 1; } }
+.pulse { animation: pulse-dot 1.2s ease-in-out infinite; }
+
+kbd { font-family: var(--font-mono); font-size: 0.75rem; border: 1px solid color-mix(in srgb, var(--c-muted) 50%, transparent); border-bottom-width: 2px; border-radius: 4px; padding: 0 0.3rem; color: var(--c-text-muted); }

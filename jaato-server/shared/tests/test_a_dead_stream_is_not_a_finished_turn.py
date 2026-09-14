@@ -105,12 +105,17 @@ SESSION_PY = pathlib.Path(__file__).resolve().parents[1] / "jaato_session.py"
 #: (Azure inference, Copilot chat, Copilot Responses); ``claude_cli``
 #: carries two, one per CLI transport.
 #:
-#: ``_openai_compat/base.py`` stands in for eight providers: ``nim``,
+#: ``_openai_compat/base.py`` stands in for thirteen providers: ``nim``,
 #: ``nebius``, ``ovhcloud``, ``lmstudio``, ``tensorrt_llm``,
-#: ``doubleword``, ``triton`` and ``zhipuai_openai`` all inherit that
-#: one streaming loop.
+#: ``doubleword``, ``triton``, ``zhipuai_openai``, ``mimo``, ``kimi``,
+#: ``minimax``, ``azure_openai`` and the chat wire of ``openai`` all
+#: inherit that one streaming loop.
+#: ``openai/responses.py`` is counted separately because the Responses
+#: API is a second wire with its own event vocabulary and its own
+#: accumulator -- the same provider, a different stream to prove ended.
 TERMINATING_PROVIDERS = {
     "_openai_compat/base.py": 1,
+    "openai/responses.py": 1,
     "anthropic/provider.py": 1,
     "antigravity/provider.py": 1,
     "claude_cli/provider.py": 2,
@@ -145,6 +150,11 @@ TERMINATING_PROVIDERS = {
 #:   ``ERROR`` on its own.
 TERMINAL_EVENT_SITES = {
     "_openai_compat/base.py": 2,
+    # One site: the Responses API answers with a single terminal event
+    # (``response.completed`` / ``.incomplete`` / ``.failed``), all three
+    # carrying the same ``response`` object, so one membership test reads
+    # the end of the turn.
+    "openai/responses.py": 1,
     "anthropic/provider.py": 3,
     "antigravity/provider.py": 2,
     "claude_cli/provider.py": 3,
@@ -201,10 +211,10 @@ REVERSIONS = [
         find="""                    # Extract finish reason
                     if choice.finish_reason:
                         terminal_seen = True
-                        finish_reason = map_finish_reason(choice.finish_reason)""",
+                        finish_reason = self._map_finish_reason(choice.finish_reason)""",
         replace="""                    # Extract finish reason
                     if choice.finish_reason:
-                        finish_reason = map_finish_reason(choice.finish_reason)""",
+                        finish_reason = self._map_finish_reason(choice.finish_reason)""",
         test=(
             "test_every_streaming_provider_records_the_terminal_event"
             "[_openai_compat/base.py]"

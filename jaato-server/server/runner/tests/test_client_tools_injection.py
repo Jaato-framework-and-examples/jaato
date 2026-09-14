@@ -18,6 +18,7 @@ from server.runner.session import (
     _make_client_tool_forwarder,
     _CLIENT_TOOL_PLUGIN,
 )
+from server.runner.envelope import ExecutorOutcome
 from server.runner_rpc_handlers.daemon_plugin_execute import DaemonPluginExecuteHandler
 
 
@@ -145,7 +146,15 @@ def test_daemon_handler_routes_sentinel_to_proxy_executor():
         "plugin_name": _CLIENT_TOOL_PLUGIN,
         "tool_name": "send_to_telegram",
         "args": {"text": "hi"}}))
-    assert out == {"result": "sent"}
+    # ``DaemonPluginExecuteHandler.handle`` returns an
+    # ``ExecutorOutcome``, not the raw payload.  That is deliberate and
+    # documented at ``server/runner/envelope.py`` -- returning the bare
+    # ``(ok, payload)`` 2-tuple let JSON flatten it to a list,
+    # ``split_executor_result``'s ``isinstance(x, tuple)`` check fell
+    # through, and A FAILING FORWARDED TOOL REPORTED SUCCESS.  The
+    # assertion below pinned the pre-fix shape; production is right
+    # (#736).
+    assert out == ExecutorOutcome(ok=True, payload={"result": "sent"})
     assert captured["args"] == {"text": "hi"}
 
 

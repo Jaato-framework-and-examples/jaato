@@ -79,12 +79,23 @@ class _FakePluginWithoutReset:
 class _FakeRegistry:
     def __init__(self, plugins: dict) -> None:
         self._plugins = plugins
+        self._configs: dict = {}
+        self._enrichment_only: set = set()
+        self.shutdown_all_calls: List[set] = []
 
     def list_available(self) -> List[str]:
         return list(self._plugins.keys())
 
     def get_plugin(self, name: str):
         return self._plugins.get(name)
+
+    def get_plugin_source(self, name: str):
+        return None
+
+    def shutdown_all(self, skip=None) -> List[str]:
+        """#890: the handler releases the outgoing registry after the sweep."""
+        self.shutdown_all_calls.append(set(skip or ()))
+        return []
 
 
 def _install_session(rpc: RunnerRPC, plugins: dict) -> None:
@@ -116,7 +127,7 @@ def test_session_end_happy_path() -> None:
 
     ok, result = rpc._handle_session_end()
     assert ok is True
-    assert result == {"plugins_reset": 3, "errors": []}
+    assert result == {"plugins_reset": 3, "errors": [], "plugins_carried": []}
     assert p1.reset_calls == 1
     assert p2.reset_calls == 1
     assert p3.reset_calls == 1
@@ -191,7 +202,7 @@ def test_session_end_empty_registry_returns_zero() -> None:
     _install_session(rpc, {})
     ok, result = rpc._handle_session_end()
     assert ok is True
-    assert result == {"plugins_reset": 0, "errors": []}
+    assert result == {"plugins_reset": 0, "errors": [], "plugins_carried": []}
 
 
 def test_session_end_clears_session_host() -> None:

@@ -26,10 +26,28 @@ def test_cached_tokens_from_reads_prompt_tokens_details():
     assert cached_tokens_from(NS(prompt_tokens_details=NS(cached_tokens=312000))) == 312000
 
 
-def test_cached_tokens_from_none_when_absent_or_zero():
+def test_cached_tokens_from_none_when_the_field_is_absent():
     assert cached_tokens_from(NS(prompt_tokens_details=None)) is None
-    assert cached_tokens_from(NS()) is None                       # no cache hit -> no field
-    assert cached_tokens_from(NS(prompt_tokens_details=NS(cached_tokens=0))) is None
+    assert cached_tokens_from(NS()) is None                       # no field at all
+
+
+def test_a_reported_zero_is_a_measurement_not_an_absence():
+    """``cached_tokens: 0`` says "I cache, and this call hit nothing".
+
+    Folding it into ``None`` made that indistinguishable from a backend
+    that reports no cache dimension at all -- the distinction
+    ``TokenUsage`` and ``jaato_sdk.helpers.compute_cache_hit_percent``
+    both promise, and which the consumption aspect needs to publish a
+    session-wide cache rate over a multi-tier session at all.
+    """
+    assert cached_tokens_from(NS(prompt_tokens_details=NS(cached_tokens=0))) == 0
+
+
+def test_a_malformed_count_is_still_not_reported():
+    """Zero is a measurement; a bool, a string and a negative are not."""
+    assert cached_tokens_from(NS(prompt_tokens_details=NS(cached_tokens=True))) is None
+    assert cached_tokens_from(NS(prompt_tokens_details=NS(cached_tokens="12"))) is None
+    assert cached_tokens_from(NS(prompt_tokens_details=NS(cached_tokens=-1))) is None
 
 
 def test_extract_usage_maps_cached_into_cache_read_tokens():

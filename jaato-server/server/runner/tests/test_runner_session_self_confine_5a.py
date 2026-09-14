@@ -23,12 +23,16 @@ from unittest.mock import patch
 
 import pytest
 
+from server.runner.bootstrap import ThreadProfileScan
+from shared.apparmor_label import parse_label
 from server.runner.session import (
     BootstrapError,
     _maybe_self_confine,
     bootstrap_session,
 )
 from shared.session_envelope import SessionInitEnvelope
+
+from .conftest import StubSession
 
 
 def _envelope(profile_name: str = "") -> SessionInitEnvelope:
@@ -61,7 +65,10 @@ class _StubRuntime:
                 # touch real kernel state.
                 pass
 
-        class _S:
+        # Subclasses the shared conftest stub: bootstrap_session stamps
+        # the session (set_daemon_session_id / set_client_user_id)
+        # before the self-confine step under test (#736).
+        class _S(StubSession):
             _session_env: Dict[str, str] = {}
             _executor = _Executor()
 
@@ -87,8 +94,19 @@ def test_maybe_self_confine_already_confined_skips() -> None:
     transition (which would also fail — per-session profiles omit
     ``change_profile -> self``)."""
     with patch(
-        "server.runner.bootstrap.read_current_profile",
-        return_value="jaato-ws-sess-5a (enforce)",
+        # #1014: the readback seam is now the PARSED label, so the
+        # idempotency check can tell "already in this profile" (which it
+        # asks) from "the kernel is enforcing it" (which it must not
+        # conflate with the first).
+        "server.runner.bootstrap.current_confinement",
+        return_value=parse_label("jaato-ws-sess-5a (enforce)"),
+    ), patch(
+        # #1023: step 1c now walks every thread's own attr/current after
+        # the process is confined.  This test SIMULATES confinement, so
+        # the real walk would read the host's actual /proc — where no
+        # thread is in ``jaato-ws-sess-5a`` — and correctly refuse.  Stub
+        # it for the same reason the two calls above are stubbed.
+        "server.runner.bootstrap.verify_thread_confinement",
     ), patch(
         "server.runner.bootstrap.confine_to_profile",
     ) as confine_mock:
@@ -97,12 +115,16 @@ def test_maybe_self_confine_already_confined_skips() -> None:
 
 
 def test_maybe_self_confine_already_confined_no_mode_suffix_skips() -> None:
-    """``read_current_profile`` may return the profile name WITHOUT
-    the enforcement-mode suffix on some kernels.  Match exact-equal
-    too (not just prefix)."""
+    """``attr/current`` may report the profile name WITHOUT the
+    enforcement-mode suffix on some kernels.  The idempotency check must
+    still recognise it (a re-transition would fail — per-session profiles
+    omit ``change_profile -> self``)."""
     with patch(
-        "server.runner.bootstrap.read_current_profile",
-        return_value="jaato-ws-sess-5a",
+        "server.runner.bootstrap.current_confinement",
+        return_value=parse_label("jaato-ws-sess-5a"),
+    ), patch(
+        # See the note in the preceding test (#1023).
+        "server.runner.bootstrap.verify_thread_confinement",
     ), patch(
         "server.runner.bootstrap.confine_to_profile",
     ) as confine_mock:
@@ -121,6 +143,9 @@ def test_maybe_self_confine_pool_slot_transitions() -> None:
     with patch(
         "server.runner.bootstrap.read_current_profile",
         return_value="unconfined",
+    ), patch(
+        # See the note in ``..._already_confined_skips`` (#1023).
+        "server.runner.bootstrap.verify_thread_confinement",
     ), patch(
         "server.runner.bootstrap.confine_to_profile",
     ) as confine_mock:
@@ -182,12 +207,34 @@ def test_maybe_self_confine_mismatch_raises_bootstrap_error() -> None:
 def test_bootstrap_session_runs_self_confine_for_pool_slot() -> None:
     """End-to-end: bootstrap_session with envelope.profile_name set +
     runner unconfined → confine_to_profile is called BEFORE runtime
-    construction."""
+    construction.
+
+    Extended for #1023: the worker-pool recycle and the per-thread
+    verification both sit between the transition and runtime
+    construction.  Recycling must precede verification (it removes the
+    population the framework CAN remove, so what verification then finds
+    is a thread neither lane reached), and both must precede any plugin
+    or runtime code — that code is what the confinement exists to bound.
+    """
     runtime = _StubRuntime()
     call_order: List[str] = []
 
     def _record_confine(profile: str) -> None:
         call_order.append(f"confine:{profile}")
+
+    def _record_recycle(reason: str) -> Dict[str, Any]:
+        call_order.append("recycle")
+        return {}
+
+    def _record_verify(profile: str, **kwargs: Any) -> Any:
+        call_order.append("verify")
+        # A real scan object, not a bare sentinel: the caller reads the
+        # result to decide what to log, and a stub that cannot be read
+        # would pass this test while hiding a broken caller.
+        return ThreadProfileScan(
+            expected=profile, matched=(1,), divergent=(), unreadable=(),
+            gone=(), route="task_dir",
+        )
 
     def _record_runtime_factory(envelope: SessionInitEnvelope) -> _StubRuntime:
         call_order.append("runtime_construct")
@@ -197,16 +244,23 @@ def test_bootstrap_session_runs_self_confine_for_pool_slot() -> None:
         "server.runner.bootstrap.read_current_profile",
         return_value="unconfined",
     ), patch(
+        "server.runner.bootstrap.verify_thread_confinement",
+        side_effect=_record_verify,
+    ), patch(
         "server.runner.bootstrap.confine_to_profile",
         side_effect=_record_confine,
     ):
         bootstrap_session(
             _envelope(profile_name="jaato-ws-e2e"),
             runtime_factory=_record_runtime_factory,
+            recycle_pools=_record_recycle,
         )
 
-    assert call_order == ["confine:jaato-ws-e2e", "runtime_construct"], (
-        f"Self-confine must happen BEFORE runtime construction.  "
+    assert call_order == [
+        "confine:jaato-ws-e2e", "recycle", "verify", "runtime_construct",
+    ], (
+        f"Self-confine, worker-pool recycle and per-thread verification "
+        f"must all happen BEFORE runtime construction, in that order.  "
         f"Observed order: {call_order}"
     )
 

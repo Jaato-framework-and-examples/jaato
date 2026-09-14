@@ -100,8 +100,16 @@ class ClarificationRelayHandler:
         """
         self._emit_event = emit_event
         self._prompt_timeout = prompt_timeout
-        # request_id -> Future[{"cancelled": bool, "answers": List[str]}]
+        # request_id -> Future[{"cancelled": bool, "answers": List[str],
+        #                       "answer_attachments": {...}}]
         self._pending: Dict[str, "asyncio.Future[Dict[str, Any]]"] = {}
+        # request_id -> how many questions that batch asked.  Kept because
+        # an ANSWER may now carry attachments keyed by question index
+        # (#989), and the daemon has to be able to refuse an index that
+        # names no question -- the alternative is forwarding it to a
+        # runner that will silently drop it.  Same lifetime as the
+        # future: registered in ``handle``, dropped in its ``finally``.
+        self._question_counts: Dict[str, int] = {}
         self._closed = False
 
     async def handle(self, args: Dict[str, Any]) -> Dict[str, Any]:
@@ -125,16 +133,19 @@ class ClarificationRelayHandler:
                 f"request_clarification: duplicate request_id={request_id!r}"
             )
 
+        questions = list(args.get("questions") or [])
+
         loop = asyncio.get_running_loop()
         fut: "asyncio.Future[Dict[str, Any]]" = loop.create_future()
         self._pending[request_id] = fut
+        self._question_counts[request_id] = len(questions)
 
         event = ClarificationBatchEvent(
             agent_id=str(args.get("agent_id", "") or ""),
             request_id=request_id,
             tool_name=str(args.get("tool_name", "request_clarification")),
             context=str(args.get("context", "") or ""),
-            questions=list(args.get("questions") or []),
+            questions=questions,
             # This relay is the ONLY delivery: no AgentOutputEvent carrying
             # the question text, no per-question ClarificationInputModeEvent,
             # no ClarificationResolvedEvent follows it.  The flag says so, so
@@ -148,6 +159,7 @@ class ClarificationRelayHandler:
             self._emit_event(event)
         except Exception:
             self._pending.pop(request_id, None)
+            self._question_counts.pop(request_id, None)
             raise
 
         try:
@@ -158,6 +170,20 @@ class ClarificationRelayHandler:
             return result
         finally:
             self._pending.pop(request_id, None)
+            self._question_counts.pop(request_id, None)
+
+    def pending_question_count(self, request_id: str) -> Optional[int]:
+        """How many questions the pending batch *request_id* asked.
+
+        ``None`` when nothing by that id is waiting here — which is how
+        ``JaatoServer.respond_to_clarification_batch`` tells a relayed
+        clarification apart from a daemon-local one before it validates
+        an answer's attachments (#989).  The count is the batch's own,
+        recorded when the questions were emitted, so an attachment keyed
+        to a question that does not exist is refused rather than
+        forwarded to a runner that would drop it.
+        """
+        return self._question_counts.get(request_id)
 
     def resolve_response(
         self,
@@ -165,6 +191,7 @@ class ClarificationRelayHandler:
         answers: List[str],
         *,
         cancelled: bool = False,
+        answer_attachments: Optional[Dict[int, List[Dict[str, Any]]]] = None,
     ) -> bool:
         """Resolve the pending future for *request_id*.
 
@@ -173,11 +200,33 @@ class ClarificationRelayHandler:
         a future was pending and got resolved; ``False`` otherwise (no
         future waiting — e.g. a daemon-local session whose answers go
         through the legacy input queue instead).
+
+        Args:
+            request_id: The batch being answered.
+            answers: Ordered answer strings, one per question.
+            cancelled: Abandon the clarification; ``answers`` ignored.
+            answer_attachments: Media attached to individual answers
+                (#989), keyed by 1-based question index, each entry a
+                canonical ``{mime_type, data, display_name,
+                attachment_id}`` wire dict.  Already validated by the
+                caller — this method forwards, it does not judge.  The
+                key is rendered as a decimal STRING on the wire because
+                the result crosses the runner RPC as JSON, whose object
+                keys are strings; the runner-side channel parses it back.
         """
         fut = self._pending.get(request_id)
         if fut is None or fut.done():
             return False
-        fut.set_result({"cancelled": bool(cancelled), "answers": list(answers)})
+        result: Dict[str, Any] = {
+            "cancelled": bool(cancelled),
+            "answers": list(answers),
+        }
+        if answer_attachments:
+            result["answer_attachments"] = {
+                str(index): list(entries)
+                for index, entries in answer_attachments.items()
+            }
+        fut.set_result(result)
         return True
 
     def shutdown(self) -> None:
@@ -190,6 +239,7 @@ class ClarificationRelayHandler:
         if self._closed:
             return
         self._closed = True
+        self._question_counts.clear()
         for request_id, fut in list(self._pending.items()):
             if not fut.done():
                 fut.set_exception(

@@ -17,10 +17,13 @@ import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from shared.safe_pool import SafeThreadPoolExecutor
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple, TYPE_CHECKING
+from typing import (
+    Any, Callable, Dict, List, NamedTuple, Optional, Set, Tuple, TYPE_CHECKING
+)
 
 logger = logging.getLogger(__name__)
 
+from shared.trace import trace as _trace_write
 from shared.token_accounting import TokenLedger
 from jaato_sdk.plugins.base import OutputCallback
 from jaato_sdk.plugins.model_provider.types import (
@@ -53,6 +56,92 @@ BACKGROUND_READER_TOOL = 'getBackgroundTask'
 # imposes no wall-clock timeout unless RuntimeLimits sets one, and a
 # genuinely hung command must not wedge the session forever.
 DEFAULT_NO_READER_TIMEOUT_SECONDS = 300.0
+
+
+def _trace_runner(msg: str) -> None:
+    """Write one ``[TOOL_RUNNER]`` trace line.
+
+    This is the stage issue #951 could not see into.  ``[PERMISSION]``
+    said a check happened, ``[FILE_EDIT]`` said nothing, and between
+    them sat the executor lookup, the auto-background branch and the
+    deny short-circuit — three ways for a tool call to end without
+    running, none of which left a mark.  The lines below name the
+    outcome of each.
+    """
+    _trace_write("TOOL_RUNNER", msg)
+
+
+def _trace_permission_outcome(
+    name: str,
+    call_id: Optional[str],
+    allowed: bool,
+    perm_info: Dict[str, Any],
+) -> None:
+    """Trace what the gate answered, and what the runner will do about it.
+
+    Distinct from the permission plugin's own DECISION line: this one
+    is the *consumer's* view, so a decision made by a plugin that
+    somehow traces nothing (a stub, a wrapper, jaato-premium) is still
+    recorded at the point it takes effect.
+    """
+    verdict = "ALLOW" if allowed else "DENY"
+    _trace_runner(
+        f"permission: tool={name} call_id={call_id} verdict={verdict} "
+        f"method={perm_info.get('method', 'unknown')} "
+        f"reason={perm_info.get('reason', '')!r}"
+    )
+
+
+def _describe_executor(fn: Optional[Callable]) -> str:
+    """Name the resolved executor, or say plainly that there is none."""
+    if fn is None:
+        return "MISSING"
+    module = getattr(fn, "__module__", "?")
+    return f"{module}.{getattr(fn, '__name__', '?')}"
+
+
+def _trace_executor_resolution(
+    name: str,
+    call_id: Optional[str],
+    fn: Optional[Callable],
+) -> None:
+    """Trace whether an executor was found for an ALREADY-APPROVED call.
+
+    The pair "permission verdict=ALLOW" + "executor=MISSING" is the
+    shape that reads, from outside, as a call vanishing after the gate.
+    """
+    _trace_runner(
+        f"resolve: tool={name} call_id={call_id} "
+        f"executor={_describe_executor(fn)}"
+    )
+
+
+def _summarize_result(result: Any) -> str:
+    """Describe a tool result without putting its payload in the log.
+
+    Keys and the error string only: a trace file is not the place for
+    file contents, and the operator question this answers ("did it run,
+    and did it fail?") needs neither.
+    """
+    if isinstance(result, dict):
+        keys = ",".join(sorted(str(k) for k in result))
+        error = result.get("error")
+        suffix = f" error={error!r}" if error is not None else ""
+        return f"dict(keys={keys}){suffix}"
+    return type(result).__name__
+
+
+def _trace_tool_outcome(
+    name: str,
+    call_id: Optional[str],
+    ok: bool,
+    result: Any,
+) -> None:
+    """Trace the result the model is about to be handed."""
+    _trace_runner(
+        f"result: tool={name} call_id={call_id} ok={ok} "
+        f"{_summarize_result(result)}"
+    )
 
 
 def get_current_tool_output_callback() -> Optional[ToolOutputCallback]:
@@ -156,6 +245,81 @@ if TYPE_CHECKING:
     from shared.plugins.background.protocol import BackgroundCapable, TaskHandle
     from shared.plugins.reliability import ReliabilityPlugin
     from shared.runtime_limits import RuntimeLimits
+
+
+def _permission_attribution(perm_info: Dict[str, Any]) -> Dict[str, str]:
+    """The identity keys a permission decision carries, for the ledger (#859).
+
+    ``user_id`` is the daemon-authenticated responder, ``approver`` the
+    name an external approval system attached; the permission plugin sets
+    them only for channel decisions, so a policy decision yields ``{}``
+    and the ledger record gains no key rather than a ``None``.
+    """
+    return {
+        key: perm_info[key]
+        for key in ('user_id', 'approver')
+        if perm_info.get(key)
+    }
+
+
+def _permission_caller_fields(
+    context: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """The asking session's identity keys, for the ledger (#951).
+
+    Read from the executor's per-session permission context, not from
+    the permission plugin: one plugin instance serves a parent and
+    every subagent sharing its registry, so only the caller knows who
+    the caller is.  Absent keys are omitted rather than recorded as
+    ``None``, matching :func:`_permission_attribution`.
+    """
+    ctx = context or {}
+    return {
+        key: ctx[key]
+        for key in ('agent_type', 'agent_name', 'session_id')
+        if ctx.get(key)
+    }
+
+
+class PermissionGateOutcome(NamedTuple):
+    """The verdict of one permission-gate run, with no execution attached.
+
+    Produced by :meth:`ToolExecutor.check_permission_only` and consumed by
+    two kinds of caller:
+
+    * :meth:`ToolExecutor._execute_impl` — the executor's own gate, which
+      then runs the tool body;
+    * any caller that reaches a tool by a route which does NOT pass
+      through ``execute()``.  Today that is
+      ``JaatoSession._execute_streaming_tool``, which dispatches the
+      auto-generated ``<tool>-stream`` variants straight to
+      ``StreamManager`` and so bypassed the gate entirely (#797).
+
+    The four fields exist so a non-executing caller can reproduce the
+    executor's behaviour exactly rather than re-deriving it:
+
+    Attributes:
+        allowed: Whether execution may proceed.  ``False`` means the tool
+            MUST NOT run, and ``denial`` carries the model-facing result.
+        meta: The ``_permission`` metadata block the executor injects into
+            a tool result — ``decision`` / ``reason`` / ``method``, plus
+            ``was_edited`` / ``comment`` when the responder supplied them.
+            ``None`` when no permission plugin is configured, and for
+            ``askPermission`` itself (which is always allowed).
+        args: The arguments to execute with.  Normally the caller's own,
+            but an interactive approval may EDIT them, in which case these
+            are the edited ones.  Callers must use this value rather than
+            the dict they passed in.
+        denial: The result dict to hand back to the model when ``allowed``
+            is ``False``: ``{'error': ..., '_permission': meta}`` for a
+            policy refusal, or an error-only dict when the check itself
+            raised (which denies by default).  ``None`` when allowed.
+    """
+
+    allowed: bool
+    meta: Optional[Dict[str, Any]]
+    args: Dict[str, Any]
+    denial: Optional[Dict[str, Any]]
 
 
 class ToolExecutor:
@@ -380,6 +544,171 @@ class ToolExecutor:
         self._permission_plugin = plugin
         self._permission_context = context or {}
 
+    def check_permission_only(
+        self,
+        name: str,
+        args: Dict[str, Any],
+        call_id: Optional[str] = None,
+        debug: bool = False,
+    ) -> PermissionGateOutcome:
+        """Run the permission gate WITHOUT executing the tool.
+
+        This is the ONE implementation of the gate.  :meth:`_execute_impl`
+        calls it and then runs the tool body; callers that execute a tool
+        by another route call it and run their own body — today
+        ``JaatoSession._execute_streaming_tool``, which dispatches the
+        registry's auto-generated ``<tool>-stream`` variants straight to
+        ``StreamManager`` and never touches :meth:`execute` (#797).
+
+        Factoring rather than duplicating is the point: two copies of a
+        security gate is exactly how a bypass of this class recurs.
+
+        Same plugin, same ledger ``permission-check`` record, same trace
+        lines and the same denial shape as the executor's own gate.  A
+        check that RAISES denies by default, because failing open here
+        would run a tool nobody approved.
+
+        Args:
+            name: The tool name to judge.  A caller holding a name
+                variant (``<tool>-stream``) must pass the BASE name, so
+                the variant inherits every policy, whitelist and
+                blacklist rule already written for the tool.
+            args: The proposed arguments.  Read by policy rules and
+                recorded to the ledger; an approval may return edited
+                arguments, which arrive on the outcome's ``args``.
+            call_id: The model's call id, for correlating the decision
+                with ``ToolCallStartEvent`` / ``PermissionResolvedEvent``
+                and the OTel span.
+            debug: Print the decision to stdout, as ``execute(debug=True)``
+                does.
+
+        Returns:
+            A :class:`PermissionGateOutcome`.  Callers MUST honour
+            ``allowed``, return ``denial`` unchanged to the model when it
+            is ``False``, and execute with ``args`` rather than the dict
+            they passed in.
+        """
+        # askPermission is the gate's own tool and is always allowed.
+        if self._permission_plugin is None or name == 'askPermission':
+            return PermissionGateOutcome(True, None, args, None)
+        try:
+            allowed, perm_info = self._permission_plugin.check_permission(
+                name, args, self._permission_context, call_id
+            )
+            _trace_permission_outcome(name, call_id, allowed, perm_info)
+            return self._permission_gate_verdict(
+                name, args, call_id, debug, allowed, perm_info
+            )
+        except Exception as perm_exc:
+            return self._permission_gate_failure(name, args, call_id, debug, perm_exc)
+
+    def _permission_gate_verdict(
+        self,
+        name: str,
+        args: Dict[str, Any],
+        call_id: Optional[str],
+        debug: bool,
+        allowed: bool,
+        perm_info: Dict[str, Any],
+    ) -> PermissionGateOutcome:
+        """Turn one plugin verdict into a :class:`PermissionGateOutcome`.
+
+        Builds the ``_permission`` metadata block, writes the ledger
+        ``permission-check`` record, and — on a refusal — the denial dict
+        the model is handed.  On an approval, applies any arguments the
+        responder edited during the prompt.
+
+        Split out of :meth:`check_permission_only` only to keep both
+        functions under the repository's cyclomatic-complexity ceiling;
+        it has no other caller and is not a second gate.
+        """
+        permission_meta = {
+            'decision': 'allowed' if allowed else 'denied',
+            'reason': perm_info.get('reason', ''),
+            'method': perm_info.get('method', 'unknown'),
+        }
+        if perm_info.get('was_edited'):
+            permission_meta['was_edited'] = True
+        if perm_info.get('comment') and allowed:
+            permission_meta['comment'] = perm_info['comment']
+        # Record permission check to ledger.  ``user_id`` /
+        # ``approver`` (#859) say WHO decided a channel prompt;
+        # absent for policy decisions, like the event's fields.
+        if self._ledger is not None:
+            self._ledger._record('permission-check', {
+                'tool': name,
+                'args': args,
+                'allowed': allowed,
+                'reason': perm_info.get('reason', ''),
+                'method': perm_info.get('method', 'unknown'),
+                # WHICH session asked (#951).  One shared plugin
+                # decides for a parent and every subagent under
+                # it, so a ledger row naming only the tool
+                # cannot be attributed to either.
+                **_permission_caller_fields(self._permission_context),
+                **_permission_attribution(perm_info),
+            })
+        if not allowed:
+            if debug:
+                print(f"[ai_tool_runner] permission denied for {name}: {perm_info.get('reason', '')}")
+            # For comment decisions, use the reason directly (it already
+            # contains "Tool not executed. User comment: ...") instead of
+            # wrapping with "Permission denied:" prefix which is redundant.
+            reason = perm_info.get('reason', '')
+            if perm_info.get('method') == 'user_comment':
+                error_msg = reason
+            else:
+                error_msg = f"Permission denied: {reason}"
+            denial = {'error': error_msg, '_permission': permission_meta}
+            _trace_tool_outcome(name, call_id, False, denial)
+            return PermissionGateOutcome(False, permission_meta, args, denial)
+        # Use edited arguments if the user modified them during permission
+        if perm_info.get('was_edited') and perm_info.get('modified_args'):
+            args = perm_info['modified_args']
+            if debug:
+                print(f"[ai_tool_runner] using edited args for {name}")
+        if debug:
+            print(f"[ai_tool_runner] permission granted for {name}: {perm_info.get('reason', '')}")
+        return PermissionGateOutcome(True, permission_meta, args, None)
+
+    def _permission_gate_failure(
+        self,
+        name: str,
+        args: Dict[str, Any],
+        call_id: Optional[str],
+        debug: bool,
+        perm_exc: BaseException,
+    ) -> PermissionGateOutcome:
+        """Deny by default when the permission check itself raised.
+
+        A gate that cannot reach a verdict must refuse: failing open
+        would run a tool nobody approved.  The failure is traced, logged
+        with its traceback, and recorded to the ledger as
+        ``permission-error`` (distinct from ``permission-check``, so an
+        auditor can tell a policy DENY from a broken policy).
+        """
+        _trace_runner(
+            f"permission: tool={name} call_id={call_id} verdict=DENY "
+            f"method=check_failed "
+            f"error={type(perm_exc).__name__}: {perm_exc}"
+        )
+        logger.error(f"Permission check failed for {name}", exc_info=True)
+        if debug:
+            print(f"[ai_tool_runner] permission check failed for {name}: {perm_exc}")
+        # Record permission error to ledger
+        if self._ledger is not None:
+            self._ledger._record('permission-error', {
+                'tool': name,
+                'args': args,
+                'error': str(perm_exc),
+                'traceback': traceback.format_exc(),
+            })
+        denial = {
+            'error': f'Permission check failed: {perm_exc}',
+            'traceback': traceback.format_exc(),
+        }
+        return PermissionGateOutcome(False, None, args, denial)
+
     def update_permission_context(self, **kwargs) -> None:
         """Update the permission context dict with additional fields.
 
@@ -430,12 +759,21 @@ class ToolExecutor:
     ) -> None:
         """Install per-session cgroup attach + app-layer limits + event reader.
 
-        Called by the server layer after the cgroup has been provisioned
-        (or, for sessions without kernel limits, with ``attach_callback``
-        set to a no-op).  Subprocess-launching plugins read attach +
-        limits via :meth:`get_cgroup_attach` and :meth:`get_runtime_limits`,
-        OR via the forwarded ``set_runtime_limits`` method on the plugin
-        if it implements one — same pattern as ``set_tool_output_callback``.
+        Called by :meth:`shared.jaato_session.JaatoSession._apply_runtime_limits`
+        during ``configure()``, right after ``set_registry`` — the
+        forwarding loop below walks ``registry.list_exposed()``, so a
+        caller that ran earlier would arm nothing.  That is the ONE
+        caller (#735): every route a session can be built by converges
+        on ``configure()``, so the pool-served, cold-spawned, isolated
+        sub-runner and in-process paths cannot arm different caps.
+        Until #735 this method had no non-test caller at all, which is
+        why ``CliPlugin._runtime_limits`` was ``None`` on every path and
+        a profile's ``tool_timeout_seconds`` bounded nothing.
+
+        Subprocess-launching plugins read attach + limits via
+        :meth:`get_cgroup_attach` and :meth:`get_runtime_limits`, OR via
+        the forwarded ``set_runtime_limits`` method on the plugin if it
+        implements one — same pattern as ``set_tool_output_callback``.
 
         The ``event_reader`` is consumed *here* in :meth:`execute` rather
         than forwarded to plugins: snapshotting before/after each tool
@@ -448,7 +786,10 @@ class ToolExecutor:
             attach_callback: Zero-argument callable suitable for use as
                 ``Popen(preexec_fn=...)``.  Migrates the forked child
                 into the session's cgroup before ``exec``.  ``None``
-                means no attach (host defaults).
+                means no attach (host defaults) — which is what the
+                session passes, because the runner PROCESS is already
+                migrated into the cgroup at fork time and its children
+                inherit it.
             limits: :class:`RuntimeLimits` carrying the app-layer caps
                 (``tool_timeout_seconds``, ``max_output_bytes``).  May
                 be ``None`` when no profile-level runtime_limits is set.
@@ -1211,73 +1552,25 @@ class ToolExecutor:
         # This avoids asking the user to approve a tool call that will
         # unconditionally fail with "No executor registered".
         if not self._can_resolve_executor(name):
+            _trace_runner(
+                f"resolve: tool={name} call_id={call_id} executor=MISSING "
+                f"— refused before the permission check"
+            )
             if debug:
                 print(f"[ai_tool_runner] no executor resolvable for {name}, "
                       f"skipping permission check")
             return False, {'error': f'No executor registered for {name}'}
 
+        # Run the permission gate.  Shared verbatim with every caller that
+        # executes a tool by another route (#797) — see
+        # check_permission_only — so the two can never drift apart.
+        gate = self.check_permission_only(name, args, call_id, debug)
+        if not gate.allowed:
+            return False, gate.denial
         # Track permission metadata for injection into result
-        permission_meta = None
-
-        # Check permissions if a permission plugin is set
-        # Note: askPermission tool itself is always allowed
-        if self._permission_plugin is not None and name != 'askPermission':
-            try:
-                allowed, perm_info = self._permission_plugin.check_permission(
-                    name, args, self._permission_context, call_id
-                )
-                # Build permission metadata for result injection
-                permission_meta = {
-                    'decision': 'allowed' if allowed else 'denied',
-                    'reason': perm_info.get('reason', ''),
-                    'method': perm_info.get('method', 'unknown'),
-                }
-                if perm_info.get('was_edited'):
-                    permission_meta['was_edited'] = True
-                if perm_info.get('comment') and allowed:
-                    permission_meta['comment'] = perm_info['comment']
-                # Record permission check to ledger
-                if self._ledger is not None:
-                    self._ledger._record('permission-check', {
-                        'tool': name,
-                        'args': args,
-                        'allowed': allowed,
-                        'reason': perm_info.get('reason', ''),
-                        'method': perm_info.get('method', 'unknown'),
-                    })
-                if not allowed:
-                    if debug:
-                        print(f"[ai_tool_runner] permission denied for {name}: {perm_info.get('reason', '')}")
-                    # For comment decisions, use the reason directly (it already
-                    # contains "Tool not executed. User comment: ...") instead of
-                    # wrapping with "Permission denied:" prefix which is redundant.
-                    reason = perm_info.get('reason', '')
-                    if perm_info.get('method') == 'user_comment':
-                        error_msg = reason
-                    else:
-                        error_msg = f"Permission denied: {reason}"
-                    return False, {'error': error_msg, '_permission': permission_meta}
-                # Use edited arguments if the user modified them during permission
-                if perm_info.get('was_edited') and perm_info.get('modified_args'):
-                    args = perm_info['modified_args']
-                    if debug:
-                        print(f"[ai_tool_runner] using edited args for {name}")
-                if debug:
-                    print(f"[ai_tool_runner] permission granted for {name}: {perm_info.get('reason', '')}")
-            except Exception as perm_exc:
-                logger.error(f"Permission check failed for {name}", exc_info=True)
-                if debug:
-                    print(f"[ai_tool_runner] permission check failed for {name}: {perm_exc}")
-                # Record permission error to ledger
-                if self._ledger is not None:
-                    self._ledger._record('permission-error', {
-                        'tool': name,
-                        'args': args,
-                        'error': str(perm_exc),
-                        'traceback': traceback.format_exc(),
-                    })
-                # On permission check failure, deny by default for safety
-                return False, {'error': f'Permission check failed: {perm_exc}', 'traceback': traceback.format_exc()}
+        permission_meta = gate.meta
+        # An interactive approval may have edited the arguments.
+        args = gate.args
 
         # Check for auto-background capability
         if self._auto_background_enabled and self._registry:
@@ -1289,6 +1582,11 @@ class ToolExecutor:
                         if debug:
                             print(f"[ai_tool_runner] using auto-background for {name} "
                                   f"(threshold={threshold}s)")
+                        _trace_runner(
+                            f"auto-background: tool={name} call_id={call_id} "
+                            f"plugin={bg_plugin.name} threshold={threshold}s "
+                            f"— execution leaves this path"
+                        )
                         return self._execute_with_auto_background(
                             name, args, bg_plugin, threshold, permission_meta
                         )
@@ -1325,6 +1623,7 @@ class ToolExecutor:
                     self._map[name] = fn
                     if debug:
                         print(f"[ai_tool_runner] execute: found executor for {name} via core executors")
+        _trace_executor_resolution(name, call_id, fn)
         if not fn:
             if debug:
                 print(f"[ai_tool_runner] execute: no executor registered for {name}, attempting generic execution")
@@ -1421,12 +1720,15 @@ class ToolExecutor:
                 except Exception as e:
                     logger.debug(f"Reliability plugin on_tool_result failed: {e}")
 
+            _trace_tool_outcome(name, call_id, ok, result)
             return ok, result
         except CancelledException:
             # Tool was cancelled via CancelToken — not an error, not retried.
             # Return a structured result so the session can record it in history.
             logger.debug(f"Tool {name} was cancelled")
-            return False, {'error': 'cancelled'}
+            cancelled = {'error': 'cancelled'}
+            _trace_tool_outcome(name, call_id, False, cancelled)
+            return False, cancelled
         except Exception as exc:
             logger.error(f"Tool execution failed for {name}", exc_info=True)
             if debug:
@@ -1442,6 +1744,7 @@ class ToolExecutor:
                 except Exception as e:
                     logger.debug(f"Reliability plugin on_tool_result failed: {e}")
 
+            _trace_tool_outcome(name, call_id, False, error_result)
             return False, error_result
 
 

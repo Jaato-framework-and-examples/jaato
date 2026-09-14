@@ -56,9 +56,9 @@ from typing import Any, Dict, Mapping, NamedTuple, Optional, Tuple
 # Re-implementing it here would let the two grammars drift apart.
 from .model_tiers import (
     RESERVED_KEYS,
-    VALID_TIER_NAMES,
     TierEntry,
     _normalize_tier_entry,
+    tier_name_error,
 )
 
 logger = logging.getLogger(__name__)
@@ -71,9 +71,13 @@ logger = logging.getLogger(__name__)
 #   seconds    -> summed turn / tool wall-clock
 #   tool_calls -> count of tool.call_completed
 #   turns      -> turn counter
-VALID_DIMENSIONS: frozenset = frozenset(
-    {"usd", "tokens", "seconds", "tool_calls", "turns"}
-)
+#
+# Ordered, because the order is presentational as well as canonical: it is
+# what ``BudgetUsage.as_dict`` and ``BudgetTracker.observe`` already use, and
+# what the validator lists back to an author who has never seen the knob
+# (#947).  The frozenset is DERIVED from it so the two cannot drift.
+DIMENSIONS: Tuple[str, ...] = ("usd", "tokens", "seconds", "tool_calls", "turns")
+VALID_DIMENSIONS: frozenset = frozenset(DIMENSIONS)
 
 # Terminal actions a rung may take instead of / alongside an overlay.
 #   finalize -> inject "wrap up and answer with what you have" (graceful)
@@ -223,7 +227,7 @@ def _parse_degrade_overlay(
 
     Raises:
         BudgetControlConfigError: Not an object; a reserved control key; a
-            name outside :data:`~shared.model_tiers.VALID_TIER_NAMES`; a
+            name :func:`~shared.model_tiers.tier_name_error` refuses; a
             ``description`` (a rung rebinds a tier's model, not its role);
             or an entry the shared tier-entry normalizer rejects.
     """
@@ -246,10 +250,10 @@ def _parse_degrade_overlay(
                 f"not valid in an overlay (an overlay rebinds tier→model "
                 f"only; set initial/fallback on the base model_tiers)"
             )
-        if key not in VALID_TIER_NAMES:
+        reason = tier_name_error(key)
+        if reason is not None:
             raise BudgetControlConfigError(
-                f"degrade[{index}].model_tiers: '{key}' is not a tier name "
-                f"({', '.join(sorted(VALID_TIER_NAMES))})"
+                f"degrade[{index}].model_tiers: {reason}"
             )
         # A rung rebinds a tier's MODEL; the tier's ROLE — the prose
         # describing it and the modalities it fills — is untouched by a
@@ -285,8 +289,9 @@ class DegradeRung:
             declared dimension's usage reaches this percentage of its
             limit ("first dimension wins" — see the design note §5.1).
         model_tiers: Sparse overlay onto the session's tier table, keyed
-            by tier name (a subset of
-            :data:`~shared.model_tiers.VALID_TIER_NAMES`).  Tiers absent
+            by tier name — canonical or deployment-named, whatever the base
+            table declared (validated by
+            :func:`~shared.model_tiers.tier_name_error`).  Tiers absent
             from the overlay keep their current binding.  Empty when the
             rung only carries an ``action``.
         action: Optional terminal action from :data:`VALID_ACTIONS`.
@@ -409,6 +414,28 @@ class BudgetControlConfig:
         ``model_tiers`` — the overlay would have no table to patch.
         """
         return any(rung.model_tiers for rung in self.degrade)
+
+    @property
+    def has_abort_rung(self) -> bool:
+        """True if some rung carries ``action: abort`` — i.e. it can STOP.
+
+        The distinction the profile validator needs, and the one that is
+        easiest to get wrong from reading ``limits`` alone: a ceiling in
+        ``limits`` is **observed, never enforced**.
+        :class:`BudgetTracker` accumulates against it and
+        :meth:`BudgetTracker.usage_fraction` turns it into a percentage —
+        but the ``degrade`` ladder is the ONLY consumer of that
+        percentage, so a profile declaring ``limits`` and no ladder sails
+        through 100%, 200%, 1000% in silence.
+
+        Of the three terminal actions only ``abort`` stops the run:
+        ``JaatoSession._apply_budget_rungs`` latches
+        ``_budget_exhausted_reason`` and calls ``request_stop`` for it,
+        while ``finalize`` and ``escalate`` are latched and surfaced for a
+        layer above to act on — advice a looping model can decline, and
+        did (#947: 35 consecutive failed tool calls, no text emitted).
+        """
+        return any(rung.action == ACTION_ABORT for rung in self.degrade)
 
     @classmethod
     def from_dict(

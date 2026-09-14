@@ -45,10 +45,70 @@ DECLARING A REVERSION.  A guard module exposes::
 ``find`` must be the FIXED text and ``replace`` the BROKEN text: this puts
 the code back the way it was, which is what "reversion" means and what the
 guard was written against.
+
+WHERE THE SABOTAGE HAPPENS -- AND WHY NOT HERE (#995)
+=====================================================
+
+Every case rewrites a source file.  Until #995 it rewrote **the file in
+the working tree**, and put it back in a per-case ``finally``.  A
+``finally`` is an exception handler, not a crash-safety mechanism: it
+covers a pass and it covers a raise, and it covers none of SIGKILL, a CI
+job timeout, a container restart, or an operator's interrupt landing
+between the write and the restore.  In all of those the sabotage is
+simply left on disk, indistinguishable from deliberate work in progress.
+
+That was measured, not feared.  Seven of nine agent runs in one session
+left a dirty tree, and on one occasion a ``git add -A`` swept up the
+suite's live sabotage of ``openrouter/auth.py`` and committed the
+deletion of ``__repr__ = secret_safe_repr("api_key")`` -- #721's
+protection against an API key reaching a log through a default ``repr``.
+It was caught by diffing failing test IDs against a baseline, which is
+not a mechanism anyone should have to rely on.
+
+So the working tree is no longer written **at all**.  One disposable
+copy of the checkout is made per session (:func:`worktree_sandbox`), and
+every sabotage, every guard subprocess and every restore happens inside
+it.  The difference between the two designs is the difference between a
+failure that is recoverable and one that is unreachable: there is no
+interrupt, signal or timeout that can leave the developer's tree
+modified, because no code path here ever opens a file under
+:data:`ROOT` for writing.
+
+Three things hold that property up rather than asserting it:
+
+* :func:`_sandbox_path` is the only way a case obtains a path to write,
+  and it REFUSES a path that resolves outside the sandbox or inside
+  ``ROOT`` -- symlinks included, since it resolves before it compares.
+* Each case records the real file's bytes before it starts and asserts
+  they are unchanged afterwards (:func:`_assert_working_tree_untouched`).
+  A future change that reintroduces an in-place write fails loudly on
+  the case that made it, rather than silently on somebody's next commit.
+* :func:`test_a_sabotage_never_reaches_the_working_tree` states the
+  property directly, on a real reversion.
+
+WHAT THE SANDBOX DOES NOT WEAKEN.  A guard subprocess reads the copy --
+the copy is what ``PYTHONPATH`` and ``cwd`` point at -- so if the
+isolation were broken and it read the real tree instead, it would be
+reading UNSABOTAGED source, the guard would pass, and the case would
+fail as "decorative".  A green run of this suite is therefore itself
+evidence that the sandbox is being read: there is no configuration of
+this mechanism in which a broken copy reports success.
+
+COST.  One copy of ~2.4k files, plus a ``compileall`` pass so the
+subprocesses start with warm bytecode -- a couple of seconds once per
+session, against ~5s per case.  Measured on this tree a guard case runs
+marginally FASTER in the sandbox than in the checkout.
+
+NO LONGER TRUE, and deliberately recorded: the folklore that this suite
+must not run under ``pytest -n`` or alongside anything else, and that
+``git status`` is untrustworthy near it.  Both were consequences of the
+in-place design.  Each xdist worker builds its own sandbox (session
+scope is per worker), which costs disk rather than correctness.
 """
 from __future__ import annotations
 
 import importlib
+import importlib.util
 import os
 import pkgutil
 import shutil
@@ -56,7 +116,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Tuple
+from typing import Iterator, List, Optional, Tuple
 
 import pytest
 
@@ -86,6 +146,36 @@ class Reversion:
 #: the path, so the suite resolves it rather than each declaration
 #: repeating a directory that could drift.
 _PACKAGES = ("jaato-server/shared/tests", "jaato-server/server/tests")
+
+#: Import roots the guard subprocess needs, in the order it should try
+#: them.  Prepended to any inherited ``PYTHONPATH`` so the sandbox's copy
+#: of a package is the one that resolves.  ``jaato-tui`` is here because
+#: the checkout's editable installs cover it too; a guard importing it
+#: must get the sandbox's copy like everything else.
+_IMPORT_ROOTS = ("jaato-server", "jaato-sdk", "jaato-tui")
+
+#: Names never copied into the sandbox.  VCS metadata, virtual
+#: environments, caches and agent scratch -- none of which any guard
+#: reads, and which together dwarf the source: measured on one working
+#: checkout at 189 MB of tracked files against 8.3 GB under ``.claude``
+#: alone, where sibling agents keep their worktrees.
+#:
+#: ``__pycache__`` is excluded on purpose rather than for size: a copied
+#: ``.pyc`` records the ORIGINAL file's path in ``co_filename``, so
+#: ``inspect.getsource`` on a module loaded from one would read the real
+#: checkout -- a pointer back into the tree this sandbox exists to leave
+#: alone.  The copy is compiled fresh instead (:func:`_precompile`),
+#: which costs about a second and leaves no such pointer.
+#:
+#: An over-eager exclusion cannot pass silently: a target that is not in
+#: the copy is named by
+#: :func:`test_every_reversion_target_exists_in_the_sandbox`, and every
+#: case using it reports ``BLOCKED``, which fails.
+_NOT_COPIED = (
+    ".git", ".venv", "venv", ".claude", "__pycache__", ".pytest_cache",
+    ".mypy_cache", ".ruff_cache", ".tox", ".hypothesis", ".nox",
+    "node_modules", "htmlcov", ".coverage",
+)
 
 
 def _module_path(module_name: str) -> str:
@@ -123,21 +213,174 @@ def _guard_modules() -> List[Tuple[str, object]]:
     return sorted(found)
 
 
-def _clear_pycache(root: Path) -> None:
-    """Bytecode caching invalidates on (size, mtime), not content.
+def _invalidate_bytecode(path: Path) -> None:
+    """Drop the cached bytecode for the ONE file a case rewrites.
 
-    A reversion that preserves file size -- a reorder, a same-length
-    rename -- restored within the same second reuses the SABOTAGED
-    bytecode while the source on disk reads correct.  That cost a whole
-    round of hand-sabotage once; it must not cost this suite anything.
+    Bytecode caching invalidates on (size, mtime), not content.  A
+    reversion that preserves file size -- a reorder, a same-length
+    rename -- written and restored within the same second reuses the
+    SABOTAGED bytecode while the source on disk reads correct.  That
+    cost a whole round of hand-sabotage once; it must not cost this
+    suite anything.  So every write of a target is followed by this
+    call: the sabotage in :func:`_apply`, and the restore in the case's
+    ``finally``.
+
+    Only the file a case WRITES can be stale, so only its cache entry
+    is dropped.  Until #913 this cleared every ``__pycache__`` under
+    ``jaato-server/`` instead, which made all 76 subprocesses recompile
+    the tree from source for a guarantee about one file: measured 16.8s
+    per case against 8.8s with the cache warm, so roughly ten minutes
+    of recompilation.  That is most of a leg with a 20-minute CI budget
+    which was measured at 18m36s on main -- this suite grew until it
+    nearly stopped running at all, which is its own failure mode in a
+    different costume.
+
+    :func:`importlib.util.cache_from_source` rather than a glob: it
+    answers with the exact path THIS interpreter would read, honouring
+    ``sys.pycache_prefix`` and the version tag, and the subprocess is
+    the same interpreter with the same environment.  A target that is
+    not Python -- a workflow, a doc -- has no bytecode and is a no-op.
     """
-    for p in root.rglob("__pycache__"):
-        shutil.rmtree(p, ignore_errors=True)
+    if path.suffix != ".py":
+        return
+    try:
+        cached = Path(importlib.util.cache_from_source(str(path)))
+    except (NotImplementedError, ValueError):  # pragma: no cover
+        return
+    cached.unlink(missing_ok=True)
 
 
-def _apply(rev: Reversion) -> Tuple[str, str]:
-    """Apply *rev*; return (state, detail). Caller must restore."""
-    path = ROOT / rev.target
+# ============================================================
+# The sandbox: a disposable copy of the checkout (#995)
+# ============================================================
+
+
+def _copy_worktree(dest: Path) -> None:
+    """Copy the checkout into *dest*, minus the directories above.
+
+    ``copy2`` preserves mtimes, which is not required for correctness --
+    :func:`_precompile` records whatever stats the copy ends up with --
+    but keeps the sandbox a faithful mirror, which matters for any guard
+    that reads a timestamp.
+    """
+    shutil.copytree(
+        ROOT, dest, symlinks=True, copy_function=shutil.copy2,
+        ignore=shutil.ignore_patterns(*_NOT_COPIED),
+    )
+
+
+def _precompile(sandbox: Path) -> None:
+    """Warm the sandbox's bytecode so each case's subprocess starts hot.
+
+    Best effort: a module that will not compile is a problem for its own
+    test run, and an unwarmed sandbox is slow rather than wrong.  The
+    return code is deliberately ignored for that reason.
+    """
+    roots = [str(sandbox / name) for name in _IMPORT_ROOTS
+             if (sandbox / name).is_dir()]
+    if not roots:
+        return
+    subprocess.run(
+        [sys.executable, "-m", "compileall", "-q", "-j0", *roots],
+        capture_output=True, text=True, timeout=600,
+    )
+
+
+@pytest.fixture(scope="session")
+def worktree_sandbox(tmp_path_factory) -> Iterator[Path]:
+    """One disposable copy of the checkout, shared by every case.
+
+    Built lazily, so the probe tests below cost nothing, and shared,
+    because the copy is the expensive part and each case restores what
+    it touched.  A case that dies mid-sabotage poisons only this copy,
+    and only for a run that is already over.
+
+    A failure to build is raised, never skipped: a case that cannot be
+    set up has exercised nothing, which is the ``BLOCKED`` state this
+    suite exists to stop reporting as green.
+
+    Removed at session end so only one copy of the checkout is on disk
+    at a time; a removal that fails is ignored, because a leftover
+    directory under the temp root is litter and the thing this fixture
+    exists to prevent is a modified *checkout*.
+    """
+    dest = tmp_path_factory.mktemp("guard_sandbox") / "checkout"
+    assert not dest.resolve().is_relative_to(ROOT.resolve()), (
+        f"the sandbox {dest} is inside the working tree {ROOT}; a "
+        f"sabotage written there is a sabotage of the checkout"
+    )
+    _copy_worktree(dest)
+    _precompile(dest)
+    try:
+        yield dest
+    finally:
+        shutil.rmtree(dest, ignore_errors=True)
+
+
+def _sandbox_path(sandbox: Path, target: str) -> Path:
+    """Resolve a reversion's target INSIDE the sandbox, or refuse.
+
+    The single gate on every write this module performs.  It resolves
+    before it compares, so a symlink in the copy that points back into
+    the checkout is refused rather than followed, and it names ``ROOT``
+    explicitly rather than trusting that "inside the sandbox" implies
+    "outside the tree" -- two conditions, because a future caller could
+    hand it a sandbox built in the wrong place.
+    """
+    path = sandbox / target
+    resolved = path.resolve()
+    if not resolved.is_relative_to(sandbox.resolve()):
+        raise AssertionError(
+            f"reversion target {target!r} resolves to {resolved}, outside "
+            f"the sandbox {sandbox}. Refusing to write it."
+        )
+    if resolved.is_relative_to(ROOT.resolve()):
+        raise AssertionError(
+            f"reversion target {target!r} resolves into the working tree "
+            f"({resolved}). This suite never writes to the checkout; see "
+            f"the module docstring (#995)."
+        )
+    return path
+
+
+def _assert_working_tree_untouched(
+        real: Path, before: Optional[bytes], rev: Reversion) -> None:
+    """The tripwire: the checkout's copy of the target did not change.
+
+    Cheap (one small file per case) and it converts any future in-place
+    write from a silent dirty tree into a named failure on the case that
+    performed it.
+
+    A changed file has two possible authors -- this suite, or somebody
+    editing the checkout while it runs -- so the message names which,
+    by checking whether what is on disk is exactly this reversion's
+    output.  Either is worth stopping for: the second means the guard
+    just ran against source that is no longer the source under review.
+    """
+    after = real.read_bytes() if real.is_file() else None
+    if after == before:
+        return
+    sabotaged = (before is not None and after is not None
+                 and after == before.replace(rev.find.encode(),
+                                             rev.replace.encode(), 1))
+    culprit = (
+        "THIS SUITE wrote its sabotage into the checkout -- the #995 "
+        "defect. Restore the file from git and fix the write."
+        if sabotaged else
+        "it was not written by this suite (the bytes are not this "
+        "reversion's output), so something else edited the checkout "
+        "mid-run and this guard reported on stale source."
+    )
+    pytest.fail(f"{real} CHANGED while this case ran: {culprit}")
+
+
+def _apply(rev: Reversion, sandbox: Path) -> Tuple[str, str]:
+    """Apply *rev* inside *sandbox*; return (state, detail).
+
+    The caller restores.  Nothing under :data:`ROOT` is opened for
+    writing here or anywhere else in this module.
+    """
+    path = _sandbox_path(sandbox, rev.target)
     if not path.is_file():
         return BLOCKED, f"{rev.target} does not exist"
     src = path.read_text(encoding="utf-8")
@@ -149,25 +392,38 @@ def _apply(rev: Reversion) -> Tuple[str, str]:
             f"stale -- it is NOT known whether the guard still works."
         )
     path.write_text(src.replace(rev.find, rev.replace, 1), encoding="utf-8")
+    _invalidate_bytecode(path)
     return PASS, ""
 
 
-def _run_guard(module_name: str, test_name: str) -> int:
+def _run_guard(module_name: str, test_name: str, sandbox: Path) -> int:
     """Run ONE test of a guard module in a SUBPROCESS; return its exit code.
 
     A subprocess because this process has already imported the module
     under test and the code it inspects; re-running in-process would
     read stale imports and report on the pre-reversion tree.
+
+    It runs against the SANDBOX -- ``cwd`` and the leading ``PYTHONPATH``
+    entries both point there.  The checkout's editable installs append
+    their finders to ``sys.meta_path``, which sits after the ordinary
+    path finder, so the sandbox's copy of a package is what resolves.
+    Any inherited ``PYTHONPATH`` is kept but demoted behind ours: a
+    developer's entry must not silently re-point an import at the
+    unsabotaged tree.
+
+    The sabotaged file's bytecode was already dropped by :func:`_apply`,
+    so nothing is invalidated here -- every OTHER module's cache is
+    still valid and the subprocess starts warm.
     """
-    _clear_pycache(ROOT / "jaato-server")
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join(
-        [str(ROOT / "jaato-server"), str(ROOT / "jaato-sdk"),
-         env.get("PYTHONPATH", "")]).strip(os.pathsep)
+        [str(sandbox / name) for name in _IMPORT_ROOTS]
+        + [env.get("PYTHONPATH", "")]).strip(os.pathsep)
     proc = subprocess.run(
         [sys.executable, "-m", "pytest", "-q", "-x",
          f"{_module_path(module_name)}::{test_name}"],
-        cwd=str(ROOT), env=env, capture_output=True, text=True, timeout=600,
+        cwd=str(sandbox), env=env, capture_output=True, text=True,
+        timeout=600,
     )
     return proc.returncode
 
@@ -192,30 +448,188 @@ def test_at_least_one_guard_declares_a_reversion():
     )
 
 
+# ============================================================
+# The invalidation this suite's own correctness rests on
+# ============================================================
+
+
+def _stale_cache_probe(tmp_path, invalidate) -> str:
+    """Compile a module, rewrite it behind the cache key, re-import it.
+
+    Returns what the fresh interpreter SAW.  A ``.pyc`` records the
+    source's size and mtime-in-whole-seconds, so the rewrite keeps the
+    size and the mtime is restored to the exact value the ``.pyc``
+    recorded.  The cache key therefore still matches and a reader that
+    trusts it answers with the FIRST version -- which is precisely the
+    sabotage-reads-as-restored failure the invalidation exists to
+    prevent.
+
+    The mtime is pinned rather than relying on both writes landing in
+    one clock second: that races the second boundary, and a control
+    that passes only most of the time is not a control.
+    """
+    import py_compile
+    mod = tmp_path / "sabotage_probe.py"
+    mod.write_text("VALUE = 'aaa'\n", encoding="utf-8")
+    py_compile.compile(str(mod), doraise=True)      # populate the cache
+    recorded = mod.stat()
+
+    mod.write_text("VALUE = 'bbb'\n", encoding="utf-8")   # same size...
+    os.utime(mod, (recorded.st_atime, recorded.st_mtime))  # ...same mtime
+    invalidate(mod)
+
+    proc = subprocess.run(
+        [sys.executable, "-c",
+         "import sabotage_probe; print(sabotage_probe.VALUE)"],
+        cwd=str(tmp_path), capture_output=True, text=True,
+    )
+    return proc.stdout.strip()
+
+
+def test_the_targeted_invalidation_actually_invalidates(tmp_path):
+    """The whole suite is worthless if a rewritten file reads stale.
+
+    Narrowing the wipe from the whole tree to one file (#913) is only
+    safe if the one file is genuinely dropped, so this exercises the
+    real mechanism -- compile, rewrite the source behind an unchanged
+    cache key, import in a fresh interpreter -- rather than asserting
+    that a path was unlinked.
+    """
+    assert _stale_cache_probe(tmp_path, _invalidate_bytecode) == "bbb", (
+        "a rewritten source file was re-imported as its PREVIOUS "
+        "contents: _invalidate_bytecode did not drop the cached "
+        "bytecode, so a size-preserving reversion would be tested "
+        "against the wrong source"
+    )
+
+
+def test_the_probe_would_notice_a_do_nothing_invalidation(tmp_path):
+    """The control.  Without it the test above passes on any platform
+    that never caches, and would go on passing if the invalidation were
+    deleted entirely."""
+    stale = _stale_cache_probe(tmp_path, lambda _p: None)
+    assert stale == "aaa", (
+        "the probe cannot distinguish an invalidated file from a stale "
+        "one on this platform, so the test above proves nothing"
+    )
+
+
+def test_a_non_python_target_is_a_no_op(tmp_path):
+    """Reversions target workflows and docs too; they have no bytecode."""
+    doc = tmp_path / "notes.md"
+    doc.write_text("hello\n", encoding="utf-8")
+    _invalidate_bytecode(doc)          # must not raise
+    assert doc.read_text(encoding="utf-8") == "hello\n"
+
+
+# ============================================================
+# The property that makes an interrupted run harmless (#995)
+# ============================================================
+
+
+def test_a_target_escaping_the_sandbox_is_refused(tmp_path):
+    """Traversal and symlink, the two ways a write leaves the copy."""
+    sandbox = tmp_path / "checkout"
+    (sandbox / "jaato-server").mkdir(parents=True)
+
+    with pytest.raises(AssertionError, match="outside the sandbox"):
+        _sandbox_path(sandbox, "../escaped.py")
+
+    link = sandbox / "jaato-server" / "linked.py"
+    link.symlink_to(ROOT / "jaato-server" / "conftest.py")
+    with pytest.raises(AssertionError, match="outside the sandbox"):
+        _sandbox_path(sandbox, "jaato-server/linked.py")
+
+
+def test_a_sandbox_built_inside_the_checkout_is_refused():
+    """The second condition, which containment alone would not catch.
+
+    A sandbox placed under :data:`ROOT` satisfies "inside the sandbox"
+    for every target it holds, so a single check would happily write
+    into the working tree.  The fixture refuses to build one there; this
+    is the same refusal one layer down, where the write happens.
+    """
+    with pytest.raises(AssertionError, match="working tree"):
+        _sandbox_path(ROOT / "jaato-server", "shared/tests/anything.py")
+
+
+def test_every_reversion_target_exists_in_the_sandbox(worktree_sandbox):
+    """The copy is complete for the cases that will run against it.
+
+    A missing target surfaces as ``BLOCKED``, which already fails -- but
+    it blames the reversion for being stale rather than the sandbox for
+    being short, so state it here instead.
+
+    Byte-equality against the checkout is deliberately NOT asserted: the
+    sandbox is a snapshot taken once per session, and a developer or a
+    concurrent agent editing the tree afterwards makes it legitimately
+    differ.  The snapshot is the source under review for this run.
+    """
+    assert not worktree_sandbox.resolve().is_relative_to(ROOT.resolve())
+    missing = sorted({rev.target for _n, _m, rev in _CASES
+                      if not (worktree_sandbox / rev.target).is_file()})
+    assert not missing, (
+        f"the sandbox copy is missing reversion targets: {missing}\n"
+        f"Either _NOT_COPIED excludes something a guard reads, or the "
+        f"copy failed part way. Every case naming one of these would "
+        f"report BLOCKED and blame the wrong thing."
+    )
+
+
+def test_a_sabotage_never_reaches_the_working_tree(worktree_sandbox):
+    """The #995 property, stated on a real reversion.
+
+    Applies one, checks the copy changed and the checkout did not, and
+    restores.  Should this ever fail, the failure is the whole issue:
+    an interrupted run would leave that edit in somebody's tree.
+    """
+    _name, _mod, rev = _CASES[0]
+    real = ROOT / rev.target
+    before = real.read_bytes()
+    copied = _sandbox_path(worktree_sandbox, rev.target)
+    original = copied.read_bytes()
+    try:
+        state, detail = _apply(rev, worktree_sandbox)
+        assert state != BLOCKED, detail
+        assert copied.read_bytes() != original, "the sandbox was not written"
+        assert real.read_bytes() == before, (
+            f"applying a reversion modified {real} in the WORKING TREE. "
+            f"An interrupted run would leave that edit on disk (#995)."
+        )
+    finally:
+        copied.write_bytes(original)
+        _invalidate_bytecode(copied)
+
+
 @pytest.mark.parametrize(
     "module_name,rev",
     [(n, r) for n, _m, r in _CASES],
     ids=[f"{n}::{r.test}" for n, _m, r in _CASES],
 )
-def test_the_guard_fails_when_its_defect_is_put_back(module_name, rev):
-    path = ROOT / rev.target
+def test_the_guard_fails_when_its_defect_is_put_back(
+        module_name, rev, worktree_sandbox):
+    real = ROOT / rev.target
+    real_before = real.read_bytes() if real.is_file() else None
     # BYTES, not text: several files in this tree are CRLF, and a
     # read_text/write_text round trip silently rewrites every line
-    # ending in them -- leaving the whole file "modified" in a working
-    # tree the suite is supposed to leave exactly as it found it.
+    # ending in them -- leaving the whole file "modified" in a sandbox
+    # the next case expects to find exactly as this one did.
+    path = _sandbox_path(worktree_sandbox, rev.target)
     original = path.read_bytes() if path.is_file() else None
-    state, detail = _apply(rev)
+    state, detail = _apply(rev, worktree_sandbox)
     if state == BLOCKED:
         pytest.fail(
             f"BLOCKED (this is NOT a pass): {detail}\n\n"
             f"guard: {module_name}\nshould notice: {rev.because}"
         )
     try:
-        code = _run_guard(module_name, rev.test)
+        code = _run_guard(module_name, rev.test, worktree_sandbox)
     finally:
         if original is not None:
             path.write_bytes(original)
-        _clear_pycache(ROOT / "jaato-server")
+            _invalidate_bytecode(path)
+
+    _assert_working_tree_untouched(real, real_before, rev)
 
     assert code != 0, (
         f"{module_name}::{rev.test} PASSED with its defect put back.\n\n"

@@ -34,12 +34,18 @@ from dataclasses import dataclass
 from typing import (Any, Callable, Dict, List, Optional, Protocol, Tuple,
                     TYPE_CHECKING)
 
+from shared.apparmor_label import (
+    AppArmorLabel,
+    COMPLAIN_ENV_VAR,
+    profile_name_ignoring_mode,
+)
 from shared.session_envelope import SessionInitEnvelope
 
 
 if TYPE_CHECKING:  # pragma: no cover — types only
     from shared.jaato_runtime import JaatoRuntime
     from shared.jaato_session import JaatoSession
+    from shared.plugins.registry import PluginRegistry
 
 
 logger = logging.getLogger(__name__)
@@ -119,6 +125,12 @@ def _default_runtime_factory(envelope: SessionInitEnvelope) -> "JaatoRuntime":
     cost of pulling in the heavy ``JaatoRuntime`` is paid only when
     actually needed (a runner that never receives a
     ``session.bootstrap`` RPC skips this).
+
+    The envelope's ``plugin_configs.telemetry`` block is forwarded to the
+    runtime because telemetry is runtime-scoped and is therefore built
+    here, before any session exists — the profile block reaches it on this
+    argument or not at all (#858).  Step 8's per-plugin config merge cannot
+    serve it: telemetry is not a registry plugin.
     """
     # Import inside the factory so the runner's import surface
     # doesn't force the JaatoRuntime import (and its provider plugin
@@ -137,6 +149,7 @@ def _default_runtime_factory(envelope: SessionInitEnvelope) -> "JaatoRuntime":
         provider_name=envelope.provider_name or "anthropic",
         workspace_path=workspace_path,
         config_root=envelope.config_root,
+        telemetry_config=(envelope.plugin_configs or {}).get("telemetry"),
     )
 
 
@@ -225,6 +238,49 @@ def _register_client_tools_on_runner(registry, client_tools) -> None:
         )
 
 
+def _adopt_then_discover(
+    registry: "PluginRegistry",
+    envelope: SessionInitEnvelope,
+    plugin_configs: Dict[str, Any],
+) -> List[str]:
+    """Adopt carried-over plugins, then discover the rest (#890).
+
+    The ORDER is the mechanism, which is why the two calls live together in
+    one named step.  Both of ``discover()``'s paths skip a name that is
+    already registered, so adopting first means discovery never constructs a
+    rival to a warm instance; adopting after would leave the carried plugin
+    registered nowhere and the leak intact.
+
+    A cold slot, a standalone session, a slot recycled onto another
+    workspace, or a profile that changed the plugin's config all adopt
+    nothing — in which case this is exactly the pre-#890 ``discover()`` call
+    and the full plugin set is built fresh.
+
+    Args:
+        registry: The new session's registry, freshly constructed.
+        envelope: The arriving session envelope, whose cascade / workspace
+            identity gates reuse.
+        plugin_configs: The effective per-plugin config map this bootstrap
+            will pass to ``expose_all`` — compared against the config each
+            parked instance was initialized under.
+
+    Returns:
+        Names adopted, for the caller's logging.
+    """
+    from . import slot_plugins
+
+    adopted = slot_plugins.adopt_into(registry, envelope, plugin_configs)
+    registry.discover(tier_filter="runner")
+    if adopted:
+        logger.info(
+            "runner-session bootstrap: reusing warm plugin instance(s) %s "
+            "carried over from the previous session on this slot — no "
+            "re-initialize, no re-connect",
+            ", ".join(adopted),
+        )
+    return adopted
+
+
 def _configure_runtime_plugins(
     runtime: "JaatoRuntime", envelope: SessionInitEnvelope,
 ) -> None:
@@ -245,6 +301,17 @@ def _configure_runtime_plugins(
 
     Differences from daemon-side:
 
+    0. Slot-scoped adoption runs between construction and discovery.
+       A pool slot serving several stages of one cascade parks the
+       plugin instances that declare
+       :data:`~jaato_sdk.plugins.base.TRAIT_SLOT_SCOPED` at the
+       previous ``session.end``; this function adopts them into the new
+       registry so discovery skips those names and the warm resources
+       (a connected language server, a cascade's plan map) are reused
+       rather than rebuilt beside an abandoned copy.  See
+       :mod:`server.runner.slot_plugins` and #890.  The daemon has no
+       counterpart — its registry is per-``JaatoServer``, which is
+       per-session.
     1. ``registry.discover(tier_filter="runner")`` — runner-tier
        plugins only (per §3.3.5).  Daemon-tier plugins (auth, gc_*,
        cache_*, session, background) must NOT load runner-side; they
@@ -255,10 +322,13 @@ def _configure_runtime_plugins(
     3. No ``on_progress`` callback on ``expose_all`` — runner has no
        client event sink for per-plugin init progress (the daemon's
        ``_emit_init_progress`` doesn't apply).
-    4. ``permission_plugin`` initialized with the daemon-side default
-       policy (``defaultPolicy: "ask"``).  Profile-supplied
-       ``plugin_configs["permission"]`` overrides aren't currently in
-       the envelope (filed: backlog §3.3c.X).
+    4. ``permission_plugin`` is constructed here rather than taken
+       from the registry, seeded with the same daemon-side default
+       policy (``defaultPolicy: "ask"``) and then updated from
+       ``envelope.plugin_configs["permission"]`` — which Phase 4 §C
+       put on the wire (schema v2), closing backlog §3.3c.X.  The
+       profile's permission block therefore applies whether or not
+       ``permission`` appears in ``profile.plugins``; see Step 8.
 
     Bootstrap timing (2026-05-14): wraps every step with a sibling
     :class:`BootstrapTimer` instance.  When
@@ -285,12 +355,18 @@ def _configure_runtime_plugins(
         "JAATO_BOOTSTRAP_TIMING", "",
     ).lower() in ("1", "true", "yes")
 
-    # Step 1-2: construct + discover (runner-tier only).
-    with timer.stage("discover"):
-        registry = PluginRegistry(model_name=envelope.model_name)
-        registry.discover(tier_filter="runner")
+    # Step 1: construct.  Discovery no longer happens here — it moved
+    # below Step 3, because #890's slot-scoped adoption has to run
+    # between the two: both discovery paths skip a name that is already
+    # registered, and that skip is what stops discovery constructing a
+    # rival to a carried-over warm instance.  Adoption in turn needs the
+    # plugin_configs map (it compares each parked instance's config
+    # against the arriving session's).  Hoisting Step 3 costs nothing —
+    # that block never touches the registry.
+    registry = PluginRegistry(model_name=envelope.model_name)
 
-    # Step 3: assemble plugin_configs.  Defaults mirror daemon-side
+    # Step 3 (hoisted, see Step 1): assemble plugin_configs.
+    # Defaults mirror daemon-side
     # `core.py:1621-1675` for the 6 runner-tier entries.  Auth plugin
     # entries are skipped — they're daemon-tier and the tier filter
     # already excluded them from the registry.  Envelope-supplied
@@ -340,6 +416,11 @@ def _configure_runtime_plugins(
         if isinstance(name, str) and name and isinstance(cfg, dict) and cfg:
             existing = plugin_configs.get(name, {})
             plugin_configs[name] = {**existing, **dict(cfg)}
+
+    # Step 2 (runs here, see Step 1): adopt the slot-scoped plugins the
+    # previous session on this pool slot parked, then discover the rest.
+    with timer.stage("discover"):
+        _adopt_then_discover(registry, envelope, plugin_configs)
 
     # Server 0.6.129+ structural fix: register framework-known values
     # on the registry BEFORE ``expose_all`` fires so each plugin's
@@ -558,7 +639,10 @@ def _apply_envelope_session_env(envelope: SessionInitEnvelope) -> Dict[str, str]
     return applied
 
 
-def _maybe_self_confine(envelope: SessionInitEnvelope) -> None:
+def _maybe_self_confine(
+    envelope: SessionInitEnvelope,
+    recycle_pools: Optional[Callable[[str], Any]] = None,
+) -> None:
     """Transition the runner to ``envelope.profile_name`` if needed.
 
     Pool PR 5a (initial).  Pool slots fork from the template unconfined;
@@ -577,10 +661,19 @@ def _maybe_self_confine(envelope: SessionInitEnvelope) -> None:
     §4.4 for the full lifecycle.
 
     Path by initial state:
-      - ``unconfined`` → P1  (cold-spawn or first session of cascade)
-      - P_N → P_{N+1}  (Phase 3: reused slot, session N+1 of same
-                       cascade; requires the v28 template rule)
-      - P → P  (idempotent skip — same profile, no transition)
+      - ``unconfined`` → P1  (cold-spawn, or the first session ever
+                             served by this pool slot)
+      - P → P  (idempotent skip — same profile, no transition).  **This
+               is the reuse path now** (#1033): a slot's reuse key
+               carries the profile its threads wear, so a slot is only
+               ever handed to a session that wants the profile it has.
+      - P_N → P_{N+1}  (requires the v28 template rule).  Reachable only
+                       where a daemon hands a confined runner a
+                       different profile, which the pool no longer does
+                       — because ``aa_change_profile`` is per-task and
+                       the threads created under P_N could not follow
+                       (#1023).  Kept because the transition itself is
+                       still legal and a non-pool caller may use it.
       - empty profile_name  (operator opted out; unconfined session)
 
     Cold-spawn runners self-confined in ``__main__.py`` step 2 BEFORE
@@ -594,7 +687,37 @@ def _maybe_self_confine(envelope: SessionInitEnvelope) -> None:
     No-op cases:
       - ``envelope.profile_name`` is empty (operator opted out of
         confinement; runner runs unconfined).
-      - The kernel already reports the target profile (idempotency).
+      - The kernel already reports the target profile (idempotency) —
+        note this still recycles and verifies, see below.
+
+    **Per-thread confinement (#1023).**  ``aa_change_profile`` confines
+    the CALLING TASK, not the process, and every check in this tree reads
+    ``/proc/self/attr/current`` — which resolves to ``/proc/<pid>/`` and
+    therefore reports the MAIN THREAD's label.  A worker thread created
+    before the transition keeps its own cred for the life of the slot and
+    is invisible to all of them.  So once the process is confined, two
+    more things happen on every path where a profile is expected:
+
+    1. *recycle* — ``recycle_pools`` retires the RPC worker lanes so every
+       later RPC runs on a thread spawned under the confined cred;
+    2. *verify* — every thread's own ``attr/current`` is read and compared
+       against the target profile.
+
+    Both run on the IDEMPOTENT path too, and deliberately.  That path is
+    reached by a slot serving its second session of a cascade under the
+    same profile, where a worker created before the slot's FIRST bootstrap
+    is still ``unconfined`` — precisely the durable population #1023
+    reports.  Skipping the check there would leave the commonest case
+    unexamined.
+
+    Args:
+        envelope: The bootstrap payload; ``profile_name`` is read.
+        recycle_pools: Optional ``(reason) -> Any`` supplied by
+            :class:`server.runner.rpc.RunnerRPC`, which owns the worker
+            lanes.  ``None`` on the paths that have no RPC lanes (the
+            cold-spawn ``__main__`` sequence confines before any executor
+            exists; tests) — verification still runs, because a process
+            with no lanes can still carry another thread.
 
     Raises:
         BootstrapError: confinement attempt failed (kernel refused
@@ -622,7 +745,7 @@ def _maybe_self_confine(envelope: SessionInitEnvelope) -> None:
         from .bootstrap import (
             ConfinementMismatchError,
             confine_to_profile,
-            read_current_profile,
+            current_confinement,
         )
     except ImportError as exc:  # noqa: BLE001 — boundary surface
         # AppArmor module not importable (test path or Windows host
@@ -638,7 +761,8 @@ def _maybe_self_confine(envelope: SessionInitEnvelope) -> None:
         return
 
     try:
-        actual = read_current_profile()
+        label = current_confinement()
+        actual = label.raw
     except OSError as exc:
         # ``/proc/self/attr/current`` not readable — non-Linux or
         # apparmor-less host.  Daemon shouldn't have set
@@ -651,16 +775,27 @@ def _maybe_self_confine(envelope: SessionInitEnvelope) -> None:
             f"running a profile-bearing envelope",
         ) from exc
 
-    # ``read_current_profile`` returns e.g. ``jaato-ws-<sid> (enforce)``
-    # post-transition, or ``unconfined`` pre-transition.  Match by
-    # prefix so the enforcement-mode suffix doesn't trip the check.
-    expected_prefix = f"{target_profile} "
-    if actual.startswith(expected_prefix) or actual == target_profile:
+    # ``current_confinement`` parses e.g. ``jaato-ws-<sid> (enforce)``
+    # post-transition, or ``unconfined`` pre-transition.  Match on the
+    # NAME only, ignoring the enforcement mode: this is an IDEMPOTENCY
+    # question -- "have we already transitioned, so skip the no-op
+    # re-transition" -- and re-entering the same profile would not change
+    # its mode, so mode-tolerance here is correct and deliberate (#1014).
+    #
+    # What it must NOT do is let "already confined" stand in for "there is
+    # a boundary".  The mode check below is that separation.
+    if profile_name_ignoring_mode(actual) == target_profile:
         logger.info(
-            "runner-session bootstrap: already confined to %s "
+            "runner-session bootstrap: already in AppArmor profile %s "
             "(kernel reports: %s); skipping redundant self-confine",
             target_profile, actual,
         )
+        _announce_unenforced_profile(label, target_profile)
+        # NOT a skip of the #1023 work: this is the path a reused pool
+        # slot takes when the next session of its cascade carries the
+        # same profile, and a worker created before the slot's FIRST
+        # bootstrap is unconfined on it.
+        _retire_and_verify_threads(target_profile, recycle_pools)
         return
 
     # Need to transition.  ``confine_to_profile`` does the
@@ -675,7 +810,7 @@ def _maybe_self_confine(envelope: SessionInitEnvelope) -> None:
         # has an old template loaded (pre-v28, no
         # ``change_profile -> jaato-ws-*,`` rule).  Restart the
         # daemon to pick up the new template.
-        current = actual.split(" ", 1)[0]  # strip mode suffix
+        current = profile_name_ignoring_mode(actual)
         likely_cause: str
         if current.startswith("jaato-ws-"):
             likely_cause = (
@@ -706,6 +841,147 @@ def _maybe_self_confine(envelope: SessionInitEnvelope) -> None:
             f"AppArmor self-confine failed for profile={target_profile}: "
             f"{exc}",
         ) from exc
+
+    _retire_and_verify_threads(target_profile, recycle_pools)
+
+
+def _announce_unenforced_profile(
+    label: AppArmorLabel,
+    target_profile: str,
+) -> None:
+    """WARN when a profile is attached and the kernel is not enforcing it.
+
+    The idempotent bootstrap path (a pool slot serving its second session
+    of a cascade under the same profile) never calls
+    :func:`~server.runner.bootstrap.confine_to_profile`, so it never
+    reached that function's mode announcement.  Left silent, the commonest
+    path in a cascade would be the one that says nothing — which is how
+    #1014's posture stayed invisible: the record claims a boundary, the log
+    claims confinement, and no line anywhere names the mode.
+
+    No-op in the enforcing case, so an ordinary cascade gains no noise.
+    """
+    if label.enforced:
+        return
+    remedy = (
+        f"Unset {COMPLAIN_ENV_VAR} to enforce."
+        if label.complaining
+        else "No enforcement mode was reported, which is not evidence of "
+             "a boundary and is not treated as one."
+    )
+    logger.warning(
+        "runner-session bootstrap: AppArmor profile %s is attached WITHOUT "
+        "a kernel boundary: %s.  This session's tools are NOT confined.  %s",
+        target_profile, label.describe(), remedy,
+    )
+
+
+def _retire_and_verify_threads(
+    target_profile: str,
+    recycle_pools: Optional[Callable[[str], Any]],
+) -> None:
+    """Retire pre-transition worker threads, then verify every thread (#1023).
+
+    Order is load-bearing: recycling FIRST removes the population the
+    framework created and can remove, so anything the verification still
+    finds is a thread reached by neither lane — the unknown that must not
+    be certified silently.
+
+    **Divergence fails the bootstrap.**  Argued rather than assumed, since
+    failing closed on a false positive would take down every session on a
+    host whose ``/proc`` were misread:
+
+    - the check acts only on POSITIVE evidence — a label read successfully
+      that names a different profile.  A ``/proc`` that cannot be read
+      (``hidepid``, an unusual container, a profile template predating the
+      task-dir grant) yields ``unreadable`` and is logged, never raised;
+    - the alternative — log an ERROR and proceed — reproduces exactly the
+      incident state: a session whose record asserts
+      ``sandbox_mode: apparmor`` while in-process tools run outside the
+      kernel boundary.  A log line is not a boundary, and #1013's proposed
+      ``require`` mode would certify such a runner;
+    - an operator who cannot tolerate the failure already has an honest
+      opt-out: an empty ``profile_name`` runs the session unconfined and
+      the record then claims nothing.  "Confined, but tolerating threads
+      that are not" is not a posture anyone needs — it is the defect.
+
+    A failed bootstrap is also the right remedy in kind: the slot is
+    poisoned for the life of the process, and discarding it is what the
+    operator did by hand (SIGTERM on the two divergent slots).
+    """
+    if recycle_pools is not None:
+        try:
+            recycle_pools(f"confined to {target_profile}")
+        except Exception as exc:  # noqa: BLE001 — boundary surface
+            # Recycling is a remedy, not the verdict.  If it fails, the
+            # verification below is still run and still fails the
+            # bootstrap on any divergence it finds.
+            logger.error(
+                "runner-session bootstrap: worker-pool recycle failed "
+                "(%s); per-thread verification still applies", exc,
+            )
+
+    try:
+        from .bootstrap import (
+            ThreadConfinementDivergence,
+            verify_thread_confinement,
+        )
+    except ImportError as exc:  # noqa: BLE001 — boundary surface
+        logger.warning(
+            "runner-session bootstrap: per-thread confinement check "
+            "unavailable (%s)", exc,
+        )
+        return
+
+    try:
+        scan = verify_thread_confinement(target_profile)
+    except ThreadConfinementDivergence as exc:
+        raise BootstrapError(
+            "confine",
+            f"{exc}  The runner refuses this session rather than report "
+            f"sandbox_mode=apparmor for a process carrying threads "
+            f"outside the profile.",
+        ) from exc
+
+    if scan.unreadable:
+        logger.warning(
+            "runner-session bootstrap: per-thread confinement "
+            "UNVERIFIED for %d of %d threads (%s) — %s.  Absence of "
+            "evidence is not divergence, so the session continues; a "
+            "confined runner needs `/proc/*/task/ r,` (AppArmor "
+            "template v32+) for the complete walk.",
+            len(scan.unreadable), scan.scanned,
+            "; ".join(f"tid={tid}: {why}" for tid, why in scan.unreadable),
+            scan.summary(),
+        )
+    else:
+        logger.info(
+            "runner-session bootstrap: per-thread confinement verified "
+            "(%s)", scan.summary(),
+        )
+
+
+def _stamp_daemon_identity(envelope: SessionInitEnvelope, session: Any) -> None:
+    """Stamp the daemon's session id and the authenticated creator onto
+    the runner-side session (bootstrap steps 3b / 3c).
+
+    ``session_id`` is this session's daemon id — every runner-tier
+    consumer of the per-session id (memory ``source_session``, telemetry
+    ``jaato.session_id``, ``{{session_id}}``) reads it from here rather
+    than from shared registry state.
+
+    ``created_by`` (#859) is the user the daemon authenticated for the
+    creating client.  Until this stamp nothing called
+    ``set_client_user_id`` on the runner-side session, so the telemetry
+    ``user.id`` attribute and the ledger's ``user_id`` stayed empty on
+    every runner-tier session.  Absent on IPC sessions and on envelopes
+    from older daemons — then nothing is stamped, as before.
+    """
+    if envelope.session_id:
+        session.set_daemon_session_id(envelope.session_id)
+    created_by = getattr(envelope, "created_by", None)
+    if created_by:
+        session.set_client_user_id(created_by)
 
 
 def _maybe_install_child_callback(
@@ -831,6 +1107,7 @@ def bootstrap_session(
     envelope: SessionInitEnvelope,
     *,
     runtime_factory: Any = _USE_DEFAULT,
+    recycle_pools: Optional[Callable[[str], Any]] = None,
 ) -> RunnerSessionHost:
     """Construct a runner-side session from a daemon-supplied envelope.
 
@@ -848,6 +1125,11 @@ def bootstrap_session(
             stub.  Pass ``None`` explicitly for the test-only
             "skip runtime construction entirely" path (the host
             is returned with ``runtime=None`` + ``session=None``).
+        recycle_pools: Optional ``(reason) -> Any`` the RPC dispatcher
+            supplies so step 1c can retire worker threads that predate
+            its AppArmor transition (#1023).  ``None`` leaves the
+            per-thread VERIFICATION in place and skips only the
+            retirement — see :func:`_retire_and_verify_threads`.
 
     Returns:
         A :class:`RunnerSessionHost` wrapping the bootstrap
@@ -924,7 +1206,7 @@ def bootstrap_session(
     # When ``envelope.profile_name`` is empty (operator-side
     # ``disable_confine`` opt-out or no AppArmor opt-in), the step
     # is also a no-op — runner runs unconfined.
-    _maybe_self_confine(envelope)
+    _maybe_self_confine(envelope, recycle_pools)
 
     # ---- 2. Optionally construct the runtime ----
     if runtime_factory is None:
@@ -1036,8 +1318,7 @@ def bootstrap_session(
     # its OWN JaatoSession, so stamping the id here (envelope.session_id
     # is this session's daemon id) gives every consumer a per-execution,
     # per-sibling-correct value via ``get_current_session()``.
-    if envelope.session_id:
-        session.set_daemon_session_id(envelope.session_id)
+    _stamp_daemon_identity(envelope, session)
 
     # ---- 4. Phase 5 §5.10c — install AppArmor child-profile
     # transition callback on subprocess-spawning plugins.
@@ -1090,6 +1371,48 @@ def _validate_envelope(envelope: SessionInitEnvelope) -> None:
     # (inline-spec sessions don't carry a profile name).
 
 
+def _runtime_limits_from_envelope(
+    envelope: SessionInitEnvelope,
+) -> Optional[Any]:
+    """Rebuild ``RuntimeLimits`` from the v7 wire block, or ``None``.
+
+    The envelope carries the block as a plain dict (the same shape
+    ``profile_to_snapshot`` persists) so the daemon and the runner do
+    not have to agree on a dataclass across the socketpair.  The runner
+    re-parses it here, which is also where it is re-validated:
+    ``RuntimeLimits.__post_init__`` raises on a bad value.
+
+    A parse failure degrades to ``None`` — "nobody declared limits" —
+    rather than aborting the bootstrap.  The block was already
+    validated at profile-load time daemon-side, so anything that fails
+    here came from a NEWER daemon whose vocabulary this runner does not
+    share; refusing to bootstrap over it would turn a forward-compat
+    skew into a session that cannot start at all.  The failure is
+    logged at WARNING because an unarmed cap must never be silent
+    (#735).
+
+    Args:
+        envelope: The bootstrap envelope.
+
+    Returns:
+        The parsed limits, or ``None`` when the envelope carried none.
+    """
+    raw = getattr(envelope, "runtime_limits", None)
+    if not raw:
+        return None
+    from shared.runtime_limits import RuntimeLimits
+    try:
+        return RuntimeLimits.from_dict(raw)
+    except (ValueError, TypeError) as exc:
+        logging.getLogger(__name__).warning(
+            "session.bootstrap: envelope runtime_limits %r is not "
+            "parseable by this runner (%s); the session will run with "
+            "framework defaults and NO tool wall-clock or output cap",
+            raw, exc,
+        )
+        return None
+
+
 def _processors_from_envelope(
     envelope: SessionInitEnvelope,
 ) -> List[Any]:
@@ -1107,22 +1430,16 @@ def _processors_from_envelope(
     ``completion_validators`` envelope fields, both of which used
     the same wire-dict-reconstruction pattern.
     """
-    from shared.plugins.subagent.config import CompletionProcessor
-    out: List[Any] = []
-    for entry in envelope.completion_processors or []:
-        if not isinstance(entry, dict):
-            continue
-        script = entry.get("script")
-        if not isinstance(script, str) or not script.strip():
-            continue
-        out.append(CompletionProcessor(
-            script=script.strip(),
-            output=entry.get("output"),
-            on_error=entry.get("on_error", "fail_completion"),
-            description=entry.get("description"),
-            phase=entry.get("phase", "finalization"),
-        ))
-    return out
+    from shared.plugins.subagent.config import (
+        completion_processors_from_wire,
+    )
+
+    # The SAME parser a profile file's completion_processors: block goes
+    # through, so the wire and the profile cannot disagree about what an
+    # entry means.  The hand-rolled reconstruction this replaces named five
+    # fields and defaulted the rest, so `max_refusals` was discarded on
+    # arrival even once the daemon started sending it (jaato #770).
+    return completion_processors_from_wire(envelope.completion_processors)
 
 
 def _extract_plugin_specs(
@@ -1276,6 +1593,21 @@ def _build_session(
         ),
         tier_config=tier_config,
         budget_control=budget_control,
+        # Envelope v6 (#862): the profile's tool-pool ceiling.  ``None``
+        # from an older daemon, or from a profile that declares no
+        # ``runtime_limits``, leaves the framework default in charge.
+        max_parallel_tools=envelope.max_parallel_tools,
+        # Envelope v7 (#735): the whole resolved ``runtime_limits``.
+        # ``JaatoSession.configure`` is the ONE place that arms the
+        # subprocess plugins with ``tool_timeout_seconds`` /
+        # ``max_output_bytes``; before this the caps reached the runner
+        # only as process-startup env, which configures the Phase-2
+        # cli-only executor a bootstrapped session never dispatches
+        # through -- so the caps were inert on the pool path AND on
+        # cold-spawn.  Built here rather than in the envelope so a
+        # malformed block from a future daemon degrades to "nobody
+        # declared limits" instead of refusing the bootstrap.
+        runtime_limits=_runtime_limits_from_envelope(envelope),
         # Per-plugin tool allow-lists (profile ``tools:[...]`` modifier),
         # threaded from the envelope so scoped-out tools are absent from
         # this runner session's wire body + grammar surface.

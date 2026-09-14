@@ -27,6 +27,23 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _model_facing_text(chunks) -> str:
+    """Join the chunk text that actually reached the model.
+
+    CLIENT-audience chunks are excluded: the final result is model-facing
+    and becomes conversation history, so content the model never saw must
+    not appear in it -- replaying it later would be a lie about what the
+    model was told.
+
+    Extracted from the completion path rather than inlined there to keep
+    that function under the cyclomatic-complexity ceiling.
+    """
+    return "\n".join(
+        c.content for c in chunks
+        if c.content and c.audience.reaches_model()
+    )
+
+
 class StreamManager:
     """Manages active streaming tool executions.
 
@@ -173,9 +190,8 @@ class StreamManager:
                         stream = self._streams[stream_id]
                         if stream.status != StreamStatus.DISMISSED:
                             stream.status = StreamStatus.COMPLETED
-                            # Build final result from all chunks
-                            stream.final_result = "\n".join(
-                                c.content for c in stream.chunks if c.content
+                            stream.final_result = _model_facing_text(
+                                stream.chunks
                             )
 
             except Exception as e:

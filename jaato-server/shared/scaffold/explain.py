@@ -27,15 +27,73 @@ def _yn(flag: bool) -> str:
 
 # ---------------------------------------------------------------- overview
 
+def _topic_lines() -> List[str]:
+    """One ``jaato-scaffold explain <topic>`` line per dispatched topic.
+
+    Derived from the CLI's scope table, so the banner advertises exactly what
+    ``explain`` answers (#1006).  ``[--workspace DIR]`` is appended to the
+    topics whose renderer is handed that value, and the trailing ``# ...`` is
+    the entry's own ``blurb`` — both read off the table rather than typed here,
+    because the hand-typed banner carried the workspace hint on one of the four
+    topics that take it.
+    """
+    from .__main__ import scope_catalog          # deferred: the CLI imports US
+    rows = [("  jaato-scaffold explain "
+             + f"{t['scope']} {t['arg']}".rstrip()
+             + (" [--workspace DIR]" if t["reads_workspace"] else ""),
+             t["blurb"]) for t in scope_catalog()]
+    width = max(len(cmd) for cmd, _ in rows)
+    return [f"{cmd:<{width}}  # {blurb}" if blurb else cmd for cmd, blurb in rows]
+
+
+def _facet_lines() -> List[str]:
+    """The `dependencies` block — a FACET, and the banner now says which.
+
+    ``dependencies`` is not a topic: ``_take_deps_word`` strips it from any
+    position BEFORE the scope is looked up, so it appears in no scope table and
+    a derivation from one would drop it (#1006).  It is also not, as the banner
+    used to claim, "a facet of every scope" — only a NAMED provider or plugin
+    has one of its own; every other scope falls through to the framework
+    picture with a note saying so.  Both halves are read from the routing:
+    :data:`dependencies.UNIT_FACETS` for the units, ``_DEPS_WORDS`` for the
+    spellings.
+    """
+    from .__main__ import _DEPS_WORDS            # deferred: the CLI imports US
+    from . import dependencies as _deps
+    word, alias = _DEPS_WORDS[0], _DEPS_WORDS[-1]
+    units = list(_deps.UNIT_FACETS)
+    cmds = [(f"  jaato-scaffold explain {word}", "distributions, skew, extras")]
+    cmds += [(f"  jaato-scaffold explain {u} <name> {alias}",
+              "what its code imports" if i == 0 else "")
+             for i, u in enumerate(units)]
+    width = max(len(c) for c, _ in cmds)
+    return [
+        f"`{word}` (or `{alias}`) is a FACET, not a topic: it is accepted in",
+        "any position after `explain` and consumed before the topic is looked",
+        "up, so it never appears in the list above.  It is also not a facet of",
+        f"every topic — only a NAMED {' or '.join(units)} has one of its own;",
+        f"anything else, a bare `explain {word}` included, answers with the",
+        "framework picture and says so.  Derived by parsing what is installed,",
+        "never from a table that could be wrong:",
+    ] + [f"{c:<{width}}   # {note}" if note else c for c, note in cmds] + [
+        "a named unit is read as its own source PLUS the shared machinery it",
+        "imports, and a MISSING package is printed with the extra declaring it.",
+    ]
+
+
 def overview() -> Rendered:
     P = introspect.providers()
     PL = introspect.plugins()
     GC = introspect.gc_strategies()
+    from .__main__ import scope_catalog          # deferred: the CLI imports US
     data = {
         "providers": sorted(P),
         "plugins": len(PL),
         "gc_strategies": sorted(GC),
         "archetypes": list(_archetypes.accepted()),
+        # The topics, machine-readably: `explain --json` advertised a count of
+        # everything EXCEPT what you can ask it next (#1006).
+        "topics": scope_catalog(),
     }
     # Counted, never spelled: a literal here is how the banner came to advertise
     # "4 client archetypes" while `new` accepted six (jaato #716).
@@ -45,22 +103,15 @@ def overview() -> Rendered:
         f"  {len(P)} providers   {len(PL)} plugins   "
         f"{len(GC)} gc strategies   {n_arch} archetypes\n\n"
         "drill down:\n"
-        "  jaato-scaffold explain plugins\n"
-        "  jaato-scaffold explain plugin <name>\n"
-        "  jaato-scaffold explain commands\n"
-        "  jaato-scaffold explain providers\n"
-        "  jaato-scaffold explain provider <name>\n"
-        "  jaato-scaffold explain gc\n"
-        "  jaato-scaffold explain transports\n"
-        "  jaato-scaffold explain clients\n"
-        "  jaato-scaffold explain runtime\n"
-        "  jaato-scaffold explain tiers\n"
-        "  jaato-scaffold explain sets [--workspace DIR]\n"
-        "  jaato-scaffold explain profile\n"
-        "  jaato-scaffold explain paths\n"
-        "  jaato-scaffold explain prefetch\n"
-        "  jaato-scaffold explain archetypes        # what `new` WRITES\n"
-        "  jaato-scaffold explain archetype <name>\n"
+        + "\n".join(_topic_lines()) + "\n"
+        "\n"
+        + "\n".join(_facet_lines()) + "\n"
+        "\n"
+        "integrations ship WITH this build, so an installed copy cannot describe a\n"
+        "different framework than the one running:\n"
+        "  jaato-scaffold integration               # list them + their state\n"
+        "  jaato-scaffold integration claude-code   # -> ~/.claude/skills/ (all repos)\n"
+        "  jaato-doctor                             # says when one has gone stale\n"
     )
     return data, text
 
@@ -91,7 +142,7 @@ def transports() -> Rendered:
         },
         "websocket": {
             "sdk": "jaato-sdk (Python) — jaato_sdk.WSClient / jaato.session(mode='ws'); "
-                   "also jaato-sdk-ts (TypeScript) / browser web-client",
+                   "also jaato-sdk-ts (TypeScript) / browser client jaato-web",
             "scope": "remote / browser daemon",
             "daemon_flags": ["--web-socket [HOST:]PORT", "--ws-token TOKEN",
                              "--ws-token-file PATH", "--ws-unsafe-no-auth"],
@@ -110,7 +161,7 @@ def transports() -> Rendered:
         "  in_process            IPC (Unix socket)        WebSocket\n"
         "  - embedded, no daemon - local daemon           - remote daemon / browser\n"
         "  - InProcessClient     - IPCClient              - WSClient (Python)\n"
-        "                                                   + TS SDK / web-client\n"
+        "                                                   + TS SDK / jaato-web\n"
         "  - n/a (no wire)       - unauthenticated        - bearer-token authenticated\n"
         "                          (socket-mode 660)\n\n"
         "  Python ships a client for ALL THREE; the SAME Session.ask/.complete/\n"
@@ -138,6 +189,91 @@ def transports() -> Rendered:
 
 
 # --------------------------------------------------------------- clients
+
+def _turn_method_block() -> List[str]:
+    """The ask/complete/stream decision, rendered at the FRONT DOOR.
+
+    The rule was reachable only through ``explain archetype observer``, where
+    a reader who is not scaffolding that archetype never meets it — while the
+    topic named after the thing (``clients``) listed the three methods and
+    said nothing about choosing (jaato #909).
+
+    Both halves come from :mod:`archetypes`: the table from
+    :data:`~archetypes.TURN_METHODS`, the prose verbatim from
+    :data:`~archetypes.TURN_METHOD_RULE` — the SAME object the archetype page
+    renders, so the two cannot drift into disagreeing wordings.
+    """
+    rows = [
+        f"    {m.name:10} {m.settles_on:20} {m.returns:25} "
+        f"{'YES' if m.ends_session else 'no'}"
+        for m in _archetypes.TURN_METHODS
+    ]
+    lines = [
+        "",
+        "  WHICH TURN METHOD — the question is whether the session is",
+        "  COMPLETION-GATED (does its profile declare completion_payload_schema?):",
+        "",
+        f"    {'method':10} {'settles on':20} {'returns':25} session ends?",
+        "    " + "-" * 66,
+    ]
+    lines += rows
+    lines.append("")
+    lines += _wrap_bullet(_archetypes.TURN_METHOD_RULE, indent=4, glyph=" ")
+    lines += [
+        "",
+        "    Getting it wrong does not fail loudly.  complete() returns None when",
+        "    the profile declared no schema or the model never completed — there",
+        "    is no payload to capture — and otherwise waits for a termination a",
+        "    conversational session may never reach.  Conversely a completed",
+        "    session is a session that ENDED: keep driving it and you replay a",
+        "    history whose tool_calls never got responses.",
+        "    Gated or not is decided in the profile, not here: see",
+        "    `explain completion` (the gate) and `explain plugin lifecycle`",
+        "    (signal_completion itself).",
+    ]
+    return lines
+
+
+def _timeouts_block() -> List[str]:
+    """Every clock between ``jaato.session(...)`` and a turn's terminus.
+
+    ``explain clients`` documented none of them, so hitting the 60s
+    ``session.new`` budget sent an author to ``convenience.py`` and ``ipc.py``
+    to discover that the knob exists at all (jaato #904).  Numbers are READ
+    from the live SDK signatures by ``introspect.client_timeouts`` — none is
+    written down here, so none can go stale.
+
+    Renders nothing when the SDK is not importable, rather than asserting
+    defaults it could not check.
+    """
+    TO = introspect.client_timeouts()
+    if not TO:
+        return []
+    lines = [
+        "",
+        "  TIMEOUTS — every clock between connect and a turn's terminus.",
+        "  They are not one knob, and they do not all live in the same place:",
+        "",
+        f"    {'default':9} {'where':45} settable via",
+        "    " + "-" * 72,
+    ]
+    for t in TO:
+        shown = "none" if t.default is None else f"{t.default:g}s"
+        lines.append(f"    {shown:9} {t.where:45} {t.settable_via}")
+        lines.append(f"    {'':9} {t.bounds}")
+        lines.append(f"    {'':9} on expiry: {t.on_expiry}")
+    lines += [
+        "",
+        "    The facade and the bare client carry DIFFERENT connect defaults,",
+        "    deliberately: a cold daemon autostart takes ~30-60s, which the",
+        "    facade's default accounts for and the bare constructor's does not.",
+        "    A hand-rolled client that autostarts must pass its own.",
+        "    A `session.new` that times out is the one failure that may have",
+        "    LEFT A SESSION RUNNING — it has no idempotency key, so retrying",
+        "    makes a second one.  Raise it (bare client) or list_sessions().",
+    ]
+    return lines
+
 
 def clients() -> Rendered:
     """The Python SDK client classes — one per transport (+ recovery) — and when
@@ -226,7 +362,25 @@ def clients() -> Rendered:
         "  jaato-scaffold new client --transport ws ...              # WSClient\n"
         "  jaato-scaffold new client --transport ws --recoverable .  # WSRecoveryClient\n"
     )
-    return data, text
+    # The topic is named after the CLASSES; what a reader needs from it is how
+    # to DRIVE a session (#904, #909).  Both blocks render from a single
+    # definition elsewhere — the rule from ``archetypes``, the numbers from
+    # the live SDK signatures — so neither is a second copy.
+    turn = _turn_method_block()
+    timeouts = _timeouts_block()
+    data["turn_methods"] = [
+        {"name": m.name, "settles_on": m.settles_on, "returns": m.returns,
+         "ends_session": m.ends_session, "use_for": m.use_for}
+        for m in _archetypes.TURN_METHODS
+    ]
+    data["turn_method_rule"] = _archetypes.TURN_METHOD_RULE
+    data["timeouts"] = [
+        {"name": t.name, "where": t.where, "default": t.default,
+         "bounds": t.bounds, "settable_via": t.settable_via,
+         "on_expiry": t.on_expiry}
+        for t in introspect.client_timeouts()
+    ]
+    return data, text + "\n".join(turn + timeouts) + "\n"
 
 
 # ------------------------------------------------------------ archetypes
@@ -240,8 +394,14 @@ def archetypes() -> Rendered:
     from :mod:`archetypes`, whose registry is guarded to cover every archetype
     ``new`` accepts.
     """
+    # The WHOLE registry, ordered with the default first — never
+    # profile-set-plus-the-client-templates, which silently omits any
+    # archetype that is neither (the processor generator is the first).
+    # A hand-kept subset standing in for the registry is how `explain` came
+    # to advertise four archetypes out of six (jaato #716).
     docs = [_archetypes.ARCHETYPES[_archetypes.PROFILE_SET]] + [
-        _archetypes.ARCHETYPES[n] for n in _archetypes.CLIENT_ARCHETYPES]
+        _archetypes.ARCHETYPES[n] for n in sorted(_archetypes.ARCHETYPES)
+        if n != _archetypes.PROFILE_SET]
     data = {
         d.name: {
             "kind": d.kind,
@@ -249,14 +409,15 @@ def archetypes() -> Rendered:
             "aliases": list(d.aliases),
             "requires": list(d.requires),
             "writes": [e.render_path(archetype=d.name, set="<set>",
-                                     agent="<agent>") for e in d.writes],
+                                     agent="<agent>", name="<name>")
+                       for e in d.writes],
         }
         for d in docs
     }
     import textwrap
     lines = ["`jaato-scaffold new <archetype>` — what each one WRITES into your",
-             "workspace.  Every archetype re-checks its own output: a profile-set",
-             "is run back through the validator, a client is compile-checked.",
+             "workspace.  Every archetype re-checks its own output — see each",
+             "one's `check` under `explain archetype <name>`.",
              ""]
     for d in docs:
         tags = []
@@ -268,7 +429,8 @@ def archetypes() -> Rendered:
         lines += textwrap.wrap(d.summary, width=76,
                                initial_indent="      ", subsequent_indent="      ")
         paths = ", ".join(e.render_path(archetype=d.name, set="<set>",
-                                        agent="<agent>") for e in d.writes)
+                                        agent="<agent>", name="<name>")
+                          for e in d.writes)
         lines += textwrap.wrap("writes: " + paths, width=76,
                                initial_indent="      ", subsequent_indent="              ")
         lines.append(f"      needs:  {' '.join(d.requires)}")
@@ -297,7 +459,8 @@ def archetype(name: str) -> Rendered:
         return ({"error": f"unknown archetype {name!r}", "known": list(_archetypes.accepted())},
                 f"unknown archetype {name!r} — one of: {known}")
 
-    subs = dict(archetype=doc.name, **{"set": "<set>", "agent": "<agent>"})
+    subs = dict(archetype=doc.name,
+                **{"set": "<set>", "agent": "<agent>", "name": "<name>"})
     data = {
         "name": doc.name,
         "kind": doc.kind,
@@ -392,13 +555,135 @@ def _wrap_bullet(text: str, indent: int, glyph: str = "-") -> List[str]:
 
 # --------------------------------------------------------------- runtime
 
+# ``runtime_limits`` fields, by the layer that ENFORCES them.  The split is
+# the class docstring's own; naming it here rather than re-deriving keeps
+# one description of each field and one place to add the next one.
+_RUNTIME_LIMIT_FIELDS = (
+    ("memory_max_mb", "kernel", "cgroup v2 memory.max — OOM-kills the slice"),
+    ("pids_max", "kernel", "cgroup v2 pids.max — bounds fork/thread count"),
+    ("cpu_weight", "kernel", "cgroup v2 cpu.weight — fair-share, 1..10000"),
+    ("tool_timeout_seconds", "cli/shell",
+     "subprocess.run(timeout=) per tool call"),
+    ("max_output_bytes", "cli/shell", "truncates captured stdout/stderr"),
+    ("max_parallel_tools", "session",
+     "width of the tool thread pool (and of the token-count fan-out)"),
+    ("max_session_seconds", "daemon",
+     "total wall-clock a session may stay LOADED; 0 = unbounded"),
+    ("max_orphan_seconds", "daemon",
+     "wall-clock with NO client attached before the daemon stops it; "
+     "0 = unbounded"),
+)
+
+
+def _runtime_limits_report() -> Dict[str, Any]:
+    """Machine-readable ``runtime_limits`` summary for ``explain runtime``.
+
+    Reads :mod:`shared.runtime_limits` — the dataclass's own fields, the
+    framework's concurrency default, and the isolated-subagent defaults —
+    so an added field or a changed default shows up here without an edit.
+
+    Returns:
+        ``{"fields": [{name, layer, effective, note}, ...],
+           "isolated_subagent_defaults": {...}}``.  ``effective`` is what
+        applies when NO profile declares the field.
+    """
+    from shared import runtime_limits as rl
+
+    unset = "host default (no limit)"
+    effective = {
+        "max_parallel_tools": (
+            f"{rl.DEFAULT_MAX_PARALLEL_TOOLS} (framework default)"
+        ),
+        "max_session_seconds": "unbounded",
+        "max_orphan_seconds": (
+            f"{rl.DEFAULT_MAX_ORPHAN_SECONDS:g}s (framework default)"
+        ),
+    }
+    iso = rl.ISOLATED_SUBAGENT_DEFAULT_RUNTIME_LIMITS
+    return {
+        "fields": [
+            {
+                "name": name,
+                "layer": layer,
+                "effective": effective.get(name, unset),
+                "note": note,
+            }
+            for name, layer, note in _RUNTIME_LIMIT_FIELDS
+        ],
+        "isolated_subagent_defaults": {
+            name: getattr(iso, name)
+            for name, _layer, _note in _RUNTIME_LIMIT_FIELDS
+        },
+        "inheritance": {
+            "ceilings": "child REPLACES the block (parents must agree)",
+            "max_parallel_tools": "MIN across every layer that declares it",
+            "max_session_seconds": "MIN across every layer that declares it",
+            "max_orphan_seconds": "MIN across every layer that declares it",
+        },
+    }
+
+
+def _runtime_limits_lines(report: Dict[str, Any]) -> List[str]:
+    """Render :func:`_runtime_limits_report` as the ``explain runtime`` block."""
+    lines = [
+        "RUNTIME LIMITS  (profile `runtime_limits:` — what a session may CONSUME)",
+        "  field                 enforced by  effective when unset",
+    ]
+    for row in report["fields"]:
+        lines.append(
+            f"  {row['name']:<21} {row['layer']:<12} {row['effective']}"
+        )
+        lines.append(f"  {'':<21} {'':<12} {row['note']}")
+    iso = report["isolated_subagent_defaults"]
+    declared = ", ".join(
+        f"{k}={v}" for k, v in iso.items() if v is not None
+    )
+    lines.append(
+        f"  agent_params.isolated=true fills any field the profile omits: {declared}"
+    )
+    lines.append(
+        "  inheritance: the ceilings are child-REPLACES (parents must agree);"
+    )
+    lines.append(
+        "               max_parallel_tools and the two wall-clock bounds are"
+    )
+    lines.append(
+        "               MIN across every layer that sets one, so a child may"
+    )
+    lines.append(
+        "               only ever narrow what it was spawned under."
+    )
+    lines.append(
+        "  the 'daemon' layer is enforced by the SessionManager watchdog, not"
+    )
+    lines.append(
+        "  inside the session -- so it still applies when the client that created"
+    )
+    lines.append(
+        "  the session has died (#812).  max_orphan_seconds is the ONE field here"
+    )
+    lines.append(
+        "  with a framework default: the session it exists for is the one whose"
+    )
+    lines.append(
+        "  profile declared nothing.  Declare 0 to opt out."
+    )
+    return lines
+
+
 def runtime() -> Rendered:
     """How a session runs + how to DEBUG it — entities, the workspace flow, the
     log map, and the one-command session diagnostic.
 
+    Also reports the ``runtime_limits`` block — what a session may CONSUME —
+    introspected from :mod:`shared.runtime_limits` (fields, enforcement layer,
+    framework defaults) so it tracks the installed framework rather than a
+    prose copy that drifts.
+
     Curated (the runtime architecture is not in the plugin registry).  Pairs with
     ``jaato-doctor --session <id>``, which applies this map to a live session.
     """
+    limits = _runtime_limits_report()
     data = {
         "entities": {
             "daemon": "long-lived singleton on the IPC socket; daemon-tier plugins, "
@@ -427,6 +712,7 @@ def runtime() -> Rendered:
             "daemon log": "daemon-tier (e.g. /tmp/jaato.log)",
         },
         "debug": "jaato-doctor --session <id|latest> --workspace DIR",
+        "runtime_limits": limits,
     }
     text = (
         "jaato runtime — entities, workspace flow, logs, how to debug\n"
@@ -457,7 +743,8 @@ def runtime() -> Rendered:
         "DEBUG A SESSION (one command — reads the logs above):\n"
         "  jaato-doctor --session <id|latest> --workspace DIR\n"
         "  -> reports whether the runner-tier path plugins resolved the workspace\n"
-        "     (PASS=<ws>) or got workspace=none (FAIL + the fix), plus the log map.\n"
+        "     (PASS=<ws>) or got workspace=none (FAIL + the fix), plus the log map.\n\n"
+        + "\n".join(_runtime_limits_lines(limits)) + "\n"
     )
     return data, text
 
@@ -467,16 +754,34 @@ def runtime() -> Rendered:
 def tiers() -> Rendered:
     """Model tiers — multi-model sessions: cognitive roles + modality (vision)
     roles, switched mid-session via ``enter_tier``.  V2 (#354): tiers may span
-    PROVIDERS.  Introspects ``shared.model_tiers`` (VALID_TIER_NAMES /
-    RESERVED_KEYS) so it tracks the installed framework.
+    PROVIDERS.  #831: a deployment may NAME its own tiers.  Introspects
+    ``shared.model_tiers`` (CANONICAL_TIER_NAMES / TIER_NAME_PATTERN /
+    MAX_DECLARED_TIERS / RESERVED_KEYS) so it tracks the installed framework.
     """
     from shared import model_tiers as mt
-    valid = sorted(mt.VALID_TIER_NAMES)
+    valid = sorted(mt.CANONICAL_TIER_NAMES)
     reserved = sorted(mt.RESERVED_KEYS)
     modalities = sorted(mt.VALID_TIER_MODALITIES)
     directions = sorted(mt.VALID_MODALITY_DIRECTIONS)
     data = {
+        "canonical_tier_names": valid,
+        # Kept under the old key too: this dict is a machine-readable
+        # surface other tools read, and dropping a key is a breaking change
+        # where adding one is not.
         "tier_names": valid,
+        "free_tier_names": (
+            "a profile may declare tiers under names of its OWN — 'coder', "
+            "'reviewer', 'researcher' — matching "
+            + mt.TIER_NAME_PATTERN + " (lowercase, digits, underscores, "
+            "starting with a letter, 2-32 chars).  a free name MUST carry a "
+            "'description': the four canonical names come with framework "
+            "prose, a name the framework has never heard of does not, and "
+            "'routes this session to <model>' is not a reason for the model "
+            "to enter a tier.  free names sort after the canonical ones in "
+            "the enter_tier schema, so adding one never reorders the "
+            "prompt-cache prefix ahead of them."
+        ),
+        "max_tiers": mt.MAX_DECLARED_TIERS,
         "reserved_keys": reserved,
         "modalities": modalities,
         "modality_directions": directions,
@@ -517,13 +822,67 @@ def tiers() -> Rendered:
                           "modality fails loud at connect); the opposite of "
                           "plugin_configs.<provider>.modalities, which "
                           "ASSERTS capability to correct catalog detection.",
-        "outbound_is_inert": "an OUTBOUND role parses and is stored, but "
-                             "nothing can deliver model-generated media yet "
-                             "(no adapter parses response media; the "
-                             "streaming callback is text-only).  validate "
-                             "warns rather than errors so profiles can be "
-                             "written ahead of that work.  see "
+        "outbound_is_inert": "the EMISSION half of an OUTBOUND role is "
+                             "INERT unless the named provider declares "
+                             "`output_media` — the adapters that decode "
+                             "model-generated media off the stream "
+                             "(openrouter + the _openai_compat five "
+                             "today).  validate warns only when it does "
+                             "not, so a working speaking tier is not told "
+                             "it does nothing.  the role itself is NOT "
+                             "inert: writing any role ARMS the inbound "
+                             "gate for that tier (see "
+                             "inbound_gate_is_armed_by_any_role), so "
+                             "{audio: outbound} is live whatever the "
+                             "provider can emit.  see "
                              "docs/design/binary-media-chunks.md.",
+        "inbound_gate_is_armed_by_any_role":
+            "a tier that declares ANY role — in EITHER direction — is "
+            "handed, out of the whole vocabulary (" + ", ".join(modalities) +
+            "), ONLY the kinds it declared "
+            + mt.DIRECTION_INBOUND + ".  so declaring {audio: "
+            + mt.DIRECTION_OUTBOUND + "} is HOW YOU STOP inbound audio "
+            "reaching a tier that only speaks: a tier declared to speak is "
+            "read as a decision about what it RECEIVES too.  the trigger is "
+            "'did the author write a role', NOT 'is the inbound set "
+            "non-empty' — an outbound-only tier arms the gate with an EMPTY "
+            "inbound set, which is the whole point.  it NARROWS, never "
+            "widens: the tier's set is INTERSECTED with what the model's "
+            "catalog accepts, so declaring a role a model cannot take still "
+            "withholds (most-restrictive-wins, as runtime_limits."
+            "max_parallel_tools).  #1001.",
+        "inbound_gate_fallback":
+            "no tier config, no active tier, a tier not in the config, or an "
+            "active tier that declared NO role of its own -> the model's "
+            "catalog capability ALONE decides, exactly as before #1001.  a "
+            "tier named 'vision' carrying only its IMPLICIT {image: "
+            + mt.DIRECTION_INBOUND + "} does NOT arm the gate either: that "
+            "implication exists so profiles written before the modalities "
+            "key are unchanged, and arming off it would make the shim CHANGE "
+            "their behaviour.  write any role on that tier and it arms — and "
+            "then still admits image, which is part of its set, just not the "
+            "trigger.",
+        "why_the_tier_and_not_the_format":
+            "the framework cannot know which CONTAINERS a model accepts.  "
+            "openai/gpt-audio lists audio input in the catalog and takes "
+            "only wav/mp3, so supports_modality('audio') is true and "
+            "useless — a jaato-side format allowlist could only ever be "
+            "stale in one of two directions (withholding what a model "
+            "accepts, or passing what it rejects), the argument api_params "
+            "already makes about per-model tables.  what the tier declared "
+            "IS knowable, and is written by you — which is why this is "
+            "gated by role and not by format.",
+        "inbound_is_inert_when_unmarshalled": "an INBOUND role is INERT in "
+                             "the same way when the provider does not "
+                             "declare the capability that carries it "
+                             "(image -> user_message_images, file -> "
+                             "pdf_input, audio -> audio_input): the model "
+                             "may well accept the content, but the "
+                             "converter withholds it with a note.  that "
+                             "asymmetry — a catalog saying `audio` and a "
+                             "converter with no branch for it — was #830.  "
+                             "a kind with no capability column (video) is "
+                             "left unchecked rather than declared inert.",
         "cross_provider": "V2 (#354): tiers may declare DIFFERENT providers; "
                           "switch_tier swaps to a cached per-tier provider "
                           "instance (history is provider-neutral; switch-back is "
@@ -533,7 +892,15 @@ def tiers() -> Rendered:
     text = (
         "jaato model tiers — multi-model sessions (cognitive + modality roles)\n"
         "  ----------------------------------------------------------------\n"
-        f"TIER NAMES   {', '.join(valid)}\n"
+        f"CANONICAL     {', '.join(valid)}\n"
+        f"              (the names the FRAMEWORK has prose for; 'vision' also\n"
+        f"               implies modalities {{image: inbound}})\n"
+        f"YOUR OWN      any name matching {mt.TIER_NAME_PATTERN} -- 'coder',\n"
+        f"              'reviewer', 'researcher'.  a free name REQUIRES a\n"
+        f"              'description' (the framework has none for it) and has\n"
+        f"              no JAATO_TIER_* env spelling.  at most {mt.MAX_DECLARED_TIERS}\n"
+        f"              tiers per session -- each one is a bullet + an enum entry\n"
+        f"              in the prompt-cache prefix, paid on EVERY request.\n"
         f"CONTROL KEYS {', '.join(reserved)}  (reserved: initial tier + fallback)\n\n"
         "SHAPE  (in a profile)\n"
         "  model_tiers:\n"
@@ -542,6 +909,15 @@ def tiers() -> Rendered:
         "               modalities: {<kind>: <direction>}}\n"
         "    initial:  <tier>           # the tier a session starts in\n"
         "    fallback: <tier>           # when enter_tier names an undeclared tier\n\n"
+        "EXIT  (what ends a tier's turn at the wheel)\n"
+        "  exit_on: switch      (default) stays until something switches it\n"
+        "  exit_on: completion  entered, does ONE completion, left again --\n"
+        "                       the framework returns to the calling tier and\n"
+        "                       reports what the delegate produced, so the\n"
+        "                       model in the specialist tier does NOTHING to\n"
+        "                       hand back.  use it when that model is the one\n"
+        "                       least able to: a speaking tier measured over\n"
+        "                       four runs never returned on its own.\n\n"
         "SWITCHING\n"
         "  the MODEL calls enter_tier('<tier>') mid-session; the active tier picks\n"
         "  the model (and, V2, the provider).  conversation history is preserved.\n\n"
@@ -549,7 +925,9 @@ def tiers() -> Rendered:
         "  the enter_tier tool advertises ONLY the tiers this profile declares,\n"
         "  each with a bullet.  the bullet is the tier's 'description' when set,\n"
         "  else the framework's own wording for that name — so a ladder whose\n"
-        "  'executor' means something specific to your deployment can say so.\n"
+        "  'executor' means something specific to your deployment can say so,\n"
+        "  and a ladder that would rather call it 'coder' can do THAT instead\n"
+        "  (a deployment-named tier must carry the description).\n"
         "  it is read once, when the tool schema is built: the tool block sits in\n"
         "  the prompt-cache prefix, so a budget degrade rung may NOT set one.\n\n"
         "MODALITY ROLES  (which tier can SEE what)\n"
@@ -566,11 +944,47 @@ def tiers() -> Rendered:
         "  NOTE this DECLARES a role and is VERIFIED — the opposite direction from\n"
         "  plugin_configs.<provider>.modalities, which ASSERTS what a model\n"
         "  supports to correct catalog detection.\n"
-        "  OUTBOUND roles parse but are INERT — nothing delivers model-generated\n"
-        "  media yet, so `validate` warns.  declare them anyway if you want the\n"
-        "  profile ready; see docs/design/binary-media-chunks.md.\n"
+        "  OUTBOUND roles are DELIVERED by any provider declaring `output_media`\n"
+        "  (openrouter + the _openai_compat five today); `validate` warns only\n"
+        "  when the named provider does not.  that warning is about EMISSION\n"
+        "  only — the role is never inert, because declaring it also bounds what\n"
+        "  the tier RECEIVES (below).  see docs/design/binary-media-chunks.md.\n"
+        "  INBOUND roles are MARSHALLED by any provider declaring the matching\n"
+        "  capability (image -> user_message_images, file -> pdf_input, audio ->\n"
+        "  audio_input); `validate` warns when the named provider does not, since\n"
+        "  the model may accept content its own converter then withholds (#830).\n"
         "  user-message images ride the attachment ferry — SDK\n"
         "  send_message(attachments=...).\n\n"
+        "WHAT A TIER IS HANDED  (declaring a role bounds it -- #1001)\n"
+        "  a tier that declares ANY role, in EITHER direction, receives only the\n"
+        "  kinds it declared INBOUND.  the counter-intuitive consequence is the\n"
+        "  useful one:\n"
+        "      voz: {model: openai/gpt-audio, modalities: {audio: outbound}}\n"
+        "  is HOW YOU STOP the caller's recorded audio reaching a tier that only\n"
+        "  SPEAKS.  your decision that a tier speaks is honoured as a decision\n"
+        "  about what it is given.\n"
+        "  ARMED BY  'did the author write a role', NOT 'is the inbound set\n"
+        "            non-empty' -- an outbound-only tier arms it with an EMPTY\n"
+        "            inbound set, which is the case above.\n"
+        "  NOT ARMED no tier config; no active tier; a tier absent from the\n"
+        "            config; a tier that declared no role of its own; or a tier\n"
+        "            named 'vision' carrying ONLY its implied [image] (that\n"
+        "            implication exists so pre-modalities profiles are\n"
+        "            unchanged, so arming off it would defeat its purpose).\n"
+        "            in every one of those the MODEL's catalog decides alone,\n"
+        "            exactly as before.\n"
+        "  NARROWS   the tier's set is INTERSECTED with the model's catalog, so\n"
+        "            declaring a role the model cannot take still withholds.  a\n"
+        "            declaration never grants (most-restrictive-wins, as\n"
+        "            runtime_limits.max_parallel_tools).\n"
+        "  WHY HERE  the framework cannot know which CONTAINERS a model accepts:\n"
+        "            openai/gpt-audio lists audio input and takes only wav/mp3,\n"
+        "            so supports_modality('audio') is true and useless.  what\n"
+        "            YOU declared is knowable -- which is why this is gated by\n"
+        "            role, and not by a format allowlist that could only be\n"
+        "            stale in one of two directions.\n"
+        "  withheld content leaves a note naming the TIER (not the model, which\n"
+        "  may read the kind perfectly well) and a tier that declares the role.\n\n"
         "CROSS-PROVIDER  (V2)\n"
         "  tiers may declare DIFFERENT providers — switch_tier swaps to a cached\n"
         "  per-tier provider instance (history is provider-neutral; switch-back is\n"
@@ -581,6 +995,31 @@ def tiers() -> Rendered:
 
 
 # ----------------------------------------------------------------- plugins
+
+def _tier_missing_note(PL: Dict[str, Any]) -> str:
+    """The footer explaining ``[no PLUGIN_TIER]``, or ``""`` when clean.
+
+    Printed only when at least one listed plugin lacks the annotation,
+    so a healthy workspace's table is unchanged.  The text names the fix
+    rather than the rule, because the author reading it has just been
+    told their plugin will not load and needs the next action, not the
+    history of §3.3.5.
+
+    Split out of :func:`plugins` deliberately: that function is near the
+    complexity ceiling and radon counts the generator below as a
+    decision point (see ``test_cyclomatic_complexity_audit``).
+    """
+    if not any(getattr(pi, "tier_missing", False) for pi in PL.values()):
+        return ""
+    return (
+        "\n  `[no PLUGIN_TIER - will not load in the runner]` marks a "
+        "plugin discovered\n  here but EXCLUDED by the runner's tier "
+        "filter: sessions naming it come up\n  without its tools. Add "
+        "`PLUGIN_TIER = \"runner\"` to the plugin package's\n  "
+        "__init__.py (\"daemon\" for daemon-side only, "
+        "\"daemon_callable\" for both)."
+    )
+
 
 def plugins() -> Rendered:
     PL = introspect.plugins()
@@ -596,13 +1035,24 @@ def plugins() -> Rendered:
             # Provenance (issue #684) — which distribution supplied this
             # plugin, and whether that is the framework itself.
             "source": pi.source, "builtin": pi.builtin,
+            # Tier reachability (issue #917) — this walk discovers with
+            # NO tier filter, so an unannotated plugin appears here and
+            # is nonetheless dropped by the runner.  A consumer reading
+            # ``--json`` needs the same fact the table renders.
+            "tier_missing": pi.tier_missing,
         }
         tools = "dynamic" if pi.dynamic else f"{len(pi.tools)} ({core} core/{disc} disc)"
         # Built-ins render bare; anything else is named, so a plugin
         # supplied by an installed distribution stands out in the table.
         src = "" if pi.builtin else f"   <- {pi.source}"
+        # An unannotated plugin is listed but WILL NOT LOAD in the
+        # runner, so the row has to say so — silently listing it is the
+        # defect (#917): this is the surface an author consults to
+        # confirm the plugin is wired, and it was answering "yes" for a
+        # plugin the session would come up without.
+        warn = "  [no PLUGIN_TIER - will not load in the runner]" if pi.tier_missing else ""
         rows.append(
-            f"  {name:22} {pi.kind:10} {str(pi.tier or '-'):8} {tools}{src}"
+            f"  {name:22} {pi.kind:10} {str(pi.tier or '-'):8} {tools}{src}{warn}"
         )
     text = (f"{'plugin':24}{'kind':12}{'tier':10}tools\n"
             + "  " + "-" * 56 + "\n" + "\n".join(rows)
@@ -611,8 +1061,32 @@ def plugins() -> Rendered:
               "with `<plugin>(preload)` in a profile)"
             + "\n  `<- dist (module)` marks a plugin supplied by an "
               "installed distribution\n  rather than the built-in "
-              "package — see JAATO_PLUGIN_ENTRY_POINT_ALLOWLIST")
+              "package — see JAATO_PLUGIN_ENTRY_POINT_ALLOWLIST"
+            + _tier_missing_note(PL)
+            + _session_tools_note())
     return data, text
+
+
+def _session_tools_note() -> str:
+    """Name the session-level tools this registry walk cannot contain.
+
+    ``plugins()`` walks ``PluginRegistry``, and ``lifecycle`` is wired onto
+    the session instead — so the surface an author consults to find
+    ``signal_completion``'s owner could only ever omit it (jaato #905).  The
+    omission is what sent two repos to ``grep``, so the list now ends by
+    saying what is NOT in it and where to look.  Names are probed live, not
+    written down.
+    """
+    ST = introspect.session_tools()
+    if not ST:
+        return ""
+    names = ", ".join(sorted({s.name for s in ST}))
+    return ("\n\n  NOT IN THIS LIST — session tools, wired by "
+            "JaatoSession.configure() for every\n  session regardless of "
+            "`plugins:`, so they are not registry plugins and cannot\n"
+            "  be named in a profile:\n"
+            f"    lifecycle   {names}\n"
+            "                (each gated — see `explain plugin lifecycle`)")
 
 
 def _signature(parameters: "Optional[Dict[str, Any]]") -> str:
@@ -635,6 +1109,89 @@ def _signature(parameters: "Optional[Dict[str, Any]]") -> str:
     required = set(parameters.get("required") or ())
     return "(" + ", ".join(
         p if p in required else f"{p}=..." for p in props) + ")"
+
+
+def _spec_summary(spec: "Dict[str, Any]") -> str:
+    """One column of type facts for a parameter: its type and its closed set.
+
+    ``enum`` is rendered because it is the difference between a parameter a
+    caller can guess and one they cannot: ``{"type": "string"}`` invites any
+    string, ``one of: header, query`` is the whole contract.  Union types
+    (``["string", "null"]``) render joined rather than as a Python repr.
+    """
+    if not isinstance(spec, dict):
+        return ""
+    t = spec.get("type")
+    if isinstance(t, list):
+        t = "|".join(str(x) for x in t)
+    parts = [str(t)] if t else []
+    enum = spec.get("enum")
+    if isinstance(enum, (list, tuple)) and enum:
+        parts.append("one of: " + ", ".join(str(e) for e in enum))
+    return "  ".join(parts)
+
+
+def _nested_params(parameters: "Optional[Dict[str, Any]]") -> List[str]:
+    """Expand the parameters a flat signature cannot describe.
+
+    :func:`_signature` renders ``configure_service_auth(service, auth)`` — true,
+    and useless, because ``auth`` is an object whose shape IS the tool.  Its
+    five accepted forms (``apiKey`` in a header or a query, ``bearer``,
+    ``basic``, ``oauth2_client``) and the ``*_env`` field each one wants were
+    declared in the schema and rendered nowhere, so the only way to call the
+    tool correctly was to read the plugin source — for a page whose entire job
+    is to make that unnecessary.  (``--json`` carried the schema all along;
+    what was missing was a HUMAN rendering of it.)
+
+    Expanded here: any parameter carrying an ``enum``, and any ``object``
+    parameter's own properties.  Deliberately ONE level deep — deeper nesting
+    is a schema dump, which is what ``--json`` is for.
+
+    Args:
+        parameters: A tool's JSON-Schema ``parameters`` block, or ``None``.
+
+    Returns:
+        Indented lines, or ``[]`` when nothing needs expanding (the common
+        case: a tool whose arguments are all plain scalars).
+    """
+    props = (parameters or {}).get("properties")
+    if not isinstance(props, dict):
+        return []
+    required = set((parameters or {}).get("required") or ())
+    out: List[str] = []
+    for pname, spec in props.items():
+        if not isinstance(spec, dict):
+            continue
+        if isinstance(spec.get("properties"), dict):
+            out.extend(_object_param_block(pname, spec, pname in required))
+        elif spec.get("enum"):
+            out.append(f"           {pname:20} {_spec_summary(spec)}")
+    return out
+
+
+def _object_param_block(pname: str, spec: "Dict[str, Any]",
+                        is_required: bool) -> List[str]:
+    """One ``object`` parameter's own properties, as an indented block.
+
+    Split from :func:`_nested_params` to keep both under the complexity
+    ceiling: radon counts the ``or``-defaults and the width arithmetic here as
+    decision points, and the caller is a loop over every parameter.
+
+    ``*`` marks a property required WITHIN the object — a different question
+    from whether the object itself is required, which the header states.
+    """
+    req = "required" if is_required else "optional"
+    sub_req = set(spec.get("required") or ())
+    out = [f"           {pname} (object, {req}):"]
+    for k, ks in spec["properties"].items():
+        mark = "*" if k in sub_req else " "
+        desc = (ks.get("description") or "") if isinstance(ks, dict) else ""
+        tail = f"   {desc}" if desc else ""
+        pad = max(0, 18 - len(k))
+        out.append(f"             {k}{mark:<2}{'':<{pad}}{_spec_summary(ks)}{tail}")
+    if sub_req:
+        out.append("             (* = required within this object)")
+    return out
 
 
 def _commands_json(commands: List[Any]) -> List[Dict[str, Any]]:
@@ -672,10 +1229,178 @@ def _command_block(commands: List[Any]) -> List[str]:
     return out
 
 
+def _config_block(settings, depth: int = 0) -> List[str]:
+    """Render one ``plugin_configs.<plugin>.*`` knob per line, nesting included.
+
+    The declared ``enum`` is rendered because it is CHECKED: ``validate``
+    reports a value outside it as ``invalid_knob_value`` (#925), and this
+    listing is where an author reads the permitted set.  It sits beside the
+    type rather than after the description because it IS type information,
+    and a knob's description can run to several lines.  ``type`` may be a
+    union (``string|array``), which is why the column is wider than the
+    single JSON-Schema token it used to hold.
+
+    Sub-knobs are rendered at every declared depth, NOT one level
+    the way a tool parameter is (:func:`_nested_params`).  The two look
+    similar and the reader's need is opposite: a nested tool parameter is
+    one call's argument, so one level plus ``--json`` is enough, while
+    ``permission.policy`` IS the plugin's whole configuration surface —
+    stopping at ``policy  object  Permission policy rules`` left the only
+    honest route to ``defaultPolicy`` / ``whitelist.tools`` running through
+    ``shared/plugins/permission/policy.py``, which is the one thing this
+    page exists to make unnecessary.
+
+    A ``free_form`` knob is marked rather than silently bottomed out: it is
+    the difference between "this page did not tell you the keys" and "there
+    is no closed set of keys to tell you", and it is exactly where
+    ``validate`` stops reporting unknown names.
+    """
+    pad = "    " + "  " * depth
+    out: List[str] = []
+    for s in settings:
+        dflt = f"  (default {s.default!r})" if s.default is not None else ""
+        desc = f"  {s.description}" if s.description else ""
+        enum = ("  one of: " + ", ".join(repr(c) for c in s.enum)
+                if s.enum else "")
+        width = max(4, 22 - 2 * depth)
+        out.append(f"{pad}{s.name:{width}} {s.type:12}{enum}{desc}{dflt}")
+        if s.free_form:
+            out.append(f"{pad}  (open key set — any key is accepted here, so "
+                       f"`validate` reports none of them as unknown)")
+        if s.children:
+            out.extend(_config_block(s.children, depth + 1))
+    return out
+
+
+def _config_json(settings) -> List[Dict[str, Any]]:
+    """``--json`` view of the knob tree — the same recursion as the text one.
+
+    Kept beside :func:`_config_block` so a field added to
+    :class:`~shared.scaffold.introspect.ConfigSetting` is rendered by both or
+    by neither; a machine consumer that could not see ``children`` would be
+    in exactly the position the human page was.
+    """
+    return [{"name": s.name, "type": s.type, "default": s.default,
+             "description": s.description, "enum": s.enum,
+             "free_form": s.free_form,
+             "children": _config_json(s.children) if s.children else None}
+            for s in settings]
+
+
+def _client_gate_note() -> List[str]:
+    """The gate on ``signal_completion`` that is NOT a profile key.
+
+    A root session's CLIENT decides it, so the same profile completes under
+    a headless driver and cannot complete under the TUI — the one gate an
+    author cannot see by reading their own files, and the reason a persona
+    that instructs the model to signal can look correct and broken at once.
+    Probed (:func:`~shared.scaffold.introspect.client_gate`), never spelled,
+    and omitted entirely when the probe finds nothing rather than printing a
+    heading over an empty fact.
+    """
+    gate = introspect.client_gate()
+    keeps, hides = gate.get("keeps") or [], gate.get("hides") or []
+    if not keeps or not hides:
+        return []
+    return [
+        "  THE OTHER GATE IS NOT A PROFILE KEY — it is the CLIENT.  A ROOT",
+        f"  session keeps signal_completion for client_type {', '.join(keeps)}",
+        f"  and HIDES it for {', '.join(hides)}, which expect the session to",
+        "  stay open for more turns.  So one profile completes under a",
+        "  headless driver and cannot complete under the TUI, and a persona",
+        "  that tells the model to signal is right in one and wrong in the",
+        "  other.  A SUBAGENT is unaffected: it keeps the tool whenever a",
+        "  schema is declared, whatever its parent's client is.",
+        "",
+    ]
+
+
+#: The name the profile loader and ``explain profile`` both use for the
+#: session-level tool provider that is NOT a registry plugin.  Kept as a
+#: constant because three surfaces have to agree on the spelling a reader
+#: will type.
+LIFECYCLE_TOPIC = "lifecycle"
+
+
+def lifecycle() -> Rendered:
+    """``explain plugin lifecycle`` — the owner of ``signal_completion``.
+
+    The route this closes (jaato #905): the profile loader's own error names
+    ``lifecycle`` as part of the minimal framework set, and ``explain plugin
+    lifecycle`` answered ``unknown plugin``.  Both were right about their own
+    half — it IS wired for every session, and it is NOT in the registry — so
+    the honest answer is to resolve the topic and say which.
+
+    The tool list and its gates are PROBED from the live
+    ``LifecycleTools`` (``introspect.session_tools``), never listed here, so
+    a tool added there shows up without an edit.
+    """
+    ST = introspect.session_tools()
+    data = {
+        "name": LIFECYCLE_TOPIC,
+        "kind": "session tools (NOT a registry plugin)",
+        "module": "shared/lifecycle_tools.py",
+        "wired_by": "JaatoSession.configure() — regardless of profile.plugins",
+        "selectable": False,
+        "tools": [{"name": s.name, "gate": s.gate,
+                   "description": s.description} for s in ST],
+        "client_gate": introspect.client_gate(),
+        "see_also": ["explain completion", "explain profile"],
+    }
+    lines = [
+        f"plugin: {LIFECYCLE_TOPIC}   (session tools — NOT a registry plugin)",
+        "  The owner of signal_completion.  Lives in "
+        "shared/lifecycle_tools.py and is",
+        "  wired onto the session by JaatoSession.configure(), so it is "
+        "reachable for",
+        "  EVERY session regardless of the profile's `plugins:` list — and "
+        "for the same",
+        "  reason it is absent from `explain plugins`' registry walk and "
+        "cannot be named",
+        "  in `plugins:`.  Listing it there does nothing; it is already "
+        "there.",
+    ]
+    if not ST:
+        lines.append("  tools: could not be probed in this environment")
+        return data, "\n".join(lines)
+    lines.append("")
+    lines.append("  tools — each is on the wire only when its gate holds:")
+    for s in ST:
+        lines.append(f"    [{s.gate}]")
+        lines.append(f"      {s.name}")
+        if s.description:
+            lines.extend(_wrap_bullet(s.description, indent=8, glyph=" "))
+    lines += [
+        "",
+        "  NO completion_payload_schema → NO signal_completion.  The tool is "
+        "opt-in via",
+        "  that profile key, and a schema DECLARED but unresolvable leaves "
+        "the same",
+        "  empty surface as one never declared — the agent then cannot "
+        "complete at all.",
+        "  `jaato-scaffold validate` reports the second case "
+        "(completion_asset_missing).",
+        "  A root session on an INTERACTIVE client also hides it — see "
+        "below.",
+        "",
+    ] + _client_gate_note() + [
+        "  see also:  `explain completion`  the gate that runs when it is "
+        "called",
+        "             `explain clients`     which turn method captures its "
+        "payload",
+    ]
+    return data, "\n".join(lines)
+
+
 def plugin(name: str) -> Rendered:
     PL = introspect.plugins()
     pi = PL.get(name)
     if pi is None:
+        # ``lifecycle`` is not in the registry and never will be — it is
+        # session-level (#905).  Pointing at `explain plugins`, which by
+        # construction cannot list it, was the dead end.
+        if name == LIFECYCLE_TOPIC:
+            return lifecycle()
         return ({"error": f"unknown plugin {name!r}"},
                 f"unknown plugin {name!r} — see `explain plugins`")
     lines = [f"plugin: {name}"]
@@ -690,6 +1415,7 @@ def plugin(name: str) -> Rendered:
             lines.append(f"    [{badge}] {t.name}{_signature(t.parameters)}")
             if t.description:
                 lines.append(f"           {t.description}")
+            lines.extend(_nested_params(t.parameters))
         if any(t.discoverability != DISCOVERABILITY_EAGER for t in pi.tools):
             lines.append(
                 f"  note: [core] tools are in the model's INITIAL schema; [disc] "
@@ -700,10 +1426,7 @@ def plugin(name: str) -> Rendered:
     lines.extend(_command_block(pi.commands))
     if pi.config_settings:
         lines.append(f"  config (plugin_configs.{name}.*):")
-        for s in pi.config_settings:
-            dflt = f"  (default {s.default!r})" if s.default is not None else ""
-            d = f"  {s.description}" if s.description else ""
-            lines.append(f"    {s.name:22} {s.type:8}{d}{dflt}")
+        lines.extend(_config_block(pi.config_settings))
     data = {"description": pi.description,
             "kind": pi.kind, "tier": pi.tier, "dynamic": pi.dynamic,
             "commands": _commands_json(pi.commands),
@@ -716,8 +1439,7 @@ def plugin(name: str) -> Rendered:
             "tools": [{"name": t.name, "discoverability": t.discoverability,
                        "description": t.description,
                        "parameters": t.parameters} for t in pi.tools],
-            "config": [{"name": s.name, "type": s.type, "default": s.default,
-                        "description": s.description} for s in pi.config_settings]}
+            "config": _config_json(pi.config_settings)}
     return data, "\n".join(lines)
 
 
@@ -817,6 +1539,47 @@ def _resolution_order(info, EV) -> list:
     return lines
 
 
+#: The caveat every provider page owes an ``api_params`` author.
+#:
+#: ``validate`` checks an ``api_params`` key against the PROVIDER's declared
+#: allow-list, which is the only thing it can check: the layer is a property of
+#: the wire, and which values a given MODEL on that wire accepts is not
+#: declared anywhere in the tree and moves whenever a vendor ships.  So
+#: ``temperature: 0.0`` validates clean against every OpenAI-shaped provider
+#: and is a ``400`` on the reasoning models that accept only their default.
+#:
+#: The framework will not grow a per-model incompatibility table to close
+#: that: a stale row would reject a parameter the vendor accepts, or pass one
+#: it rejects, and either is worse than the honest statement that this check
+#: stops at the provider boundary.  What IS always true is the escape hatch —
+#: an omitted parameter is never the cause of a 400.
+_API_PARAMS_CAVEAT = (
+    "  api_params — scope of the check:\n"
+    "    `validate` checks these against THIS PROVIDER's allow-list, not against\n"
+    "    the model you named: a key can be a valid provider knob and still be a\n"
+    "    400 on one model (reasoning models commonly accept only the DEFAULT\n"
+    "    temperature / top_p, and reject an explicit 0.0).  Which values a model\n"
+    "    takes is the vendor's documentation, not a fact this framework holds.\n"
+    "    OMITTING a parameter is always safe — it is never the cause of a 400."
+)
+
+
+def _provider_notes(info) -> List[str]:
+    """The provider's own declared caveats, if it has any.
+
+    Rendered FIRST — above capabilities and knobs — because these are the
+    facts that make the rest of the page readable: on Azure, every knob below
+    is described correctly and still misleads anyone who read ``model:`` as a
+    catalog model id.
+    """
+    if not getattr(info, "notes", ()):
+        return []
+    out = ["  read this first:"]
+    for note in info.notes:
+        out.extend(_wrap_bullet(note, indent=4, glyph="!"))
+    return out
+
+
 def provider(name: str) -> Rendered:
     info = introspect.resolve_provider(name)
     if info is None:
@@ -829,25 +1592,42 @@ def provider(name: str) -> Rendered:
             "quirks": sorted(info.quirks), "knobs": knobs,
             "auth": [{"kind": a.kind, "name": a.name, "note": a.note}
                      for a in info.auth],
+            "notes": list(getattr(info, "notes", ())),
             "resolution_order": res}
 
     lines = [f"provider: {info.dir_name}"]
+    lines.extend(_provider_notes(info))
     lines.append("  capabilities: "
                  + ", ".join(k for k, v in caps.items() if v) or "  (none)")
     lines.append("  quirks: " + (", ".join(sorted(info.quirks)) or "(none)"))
     lines.append("  resolution order:")
     lines.extend(res)
     lines.append("  knobs (plugin_configs.%s.*):" % info.dir_name)
-    if info.knobs:
-        for layer in info.knobs.layers:
-            tag = " (opaque pass-through)" if layer.opaque else ""
-            desc = f"  — {layer.description}" if layer.description else ""
-            lines.append(f"    [{layer.layer}]{tag}{desc}")
-            for k in layer.knobs:
-                dflt = f"  (default {k.default!r})" if k.default is not None else ""
-                d = f"  {k.description}" if k.description else ""
-                lines.append(f"      {k.name:22} {k.type:6}{d}{dflt}")
+    lines.extend(_knob_layers(info.knobs))
     return data, "\n".join(lines)
+
+
+def _knob_layers(knobs) -> List[str]:
+    """Every ``plugin_configs.<provider>.*`` knob, grouped by layer.
+
+    Split out of :func:`provider`, which is frozen in the complexity baseline —
+    so the ``api_params`` caveat below had to land in a helper rather than grow
+    it (see ``test_cyclomatic_complexity_audit``).
+    """
+    if not knobs:
+        return []
+    out: List[str] = []
+    for layer in knobs.layers:
+        tag = " (opaque pass-through)" if layer.opaque else ""
+        desc = f"  — {layer.description}" if layer.description else ""
+        out.append(f"    [{layer.layer}]{tag}{desc}")
+        for k in layer.knobs:
+            dflt = f"  (default {k.default!r})" if k.default is not None else ""
+            d = f"  {k.description}" if k.description else ""
+            out.append(f"      {k.name:22} {k.type:6}{d}{dflt}")
+    if any(l.layer == "api_params" for l in knobs.layers):
+        out.append(_API_PARAMS_CAVEAT)
+    return out
 
 
 # ---------------------------------------------------------------------- gc
@@ -918,7 +1698,48 @@ PROFILE_ENV_FACTS = (
     "outranks the workspace .env, per key",
     "takes ${VAR} expansion + secret URIs (pass://, vault://, ...)",
     "is applied verbatim — a relative path is resolved by its READER",
+    "refuses a SWITCH (1/true/off) in a path var — #775, at profile load",
 )
+
+
+def _placeholder_table(indent: str = "    ") -> List[str]:
+    """The substitution vocabulary, grouped by WHEN each token resolves.
+
+    Rendered from :func:`introspect.placeholders` — i.e. from the two live
+    registries — wherever placeholders are documented, which is currently
+    ``explain env`` and ``explain profile``.  Grouped by resolver rather than
+    listed flat because the resolution TIME is the whole distinction: an
+    author reaching for ``${agent}`` is asking a daemon-side expander for a
+    value that does not exist until a subagent thread writes a line, and a
+    flat list invites exactly that.
+
+    Args:
+        indent: Left padding for the rendered rows.
+
+    Returns:
+        Rendered lines, ready to extend a topic's output.
+    """
+    groups: Dict[str, list] = {}
+    for ph in introspect.placeholders():
+        groups.setdefault(ph.resolved_by, []).append(ph)
+
+    lines: List[str] = []
+    for resolver, phs in groups.items():
+        lines.append(f"{indent}resolved by {resolver}:")
+        width = max(len(ph.name) for ph in phs)
+        for ph in phs:
+            lines.append(f"{indent}  {ph.name:{width}}  {ph.meaning}")
+        lines.append(f"{indent}  → honoured in: {phs[0].applies_to}")
+        lines.append("")
+    lines.append(f"{indent}The two vocabularies are told apart by the `$`, and "
+                 f"do NOT overlap:")
+    lines.append(f"{indent}`${{agent}}` is an env var nobody sets; `{{agent}}` "
+                 f"is the per-agent token.")
+    lines.append(f"{indent}A `{{token}}` the framework does not know is "
+                 f"REFUSED in `trace:` at profile")
+    lines.append(f"{indent}load and reported by `validate` — unresolved, it "
+                 f"becomes a literal directory.")
+    return lines
 
 
 def _profile_env_note() -> List[str]:
@@ -983,12 +1804,17 @@ def _profile_env_note() -> List[str]:
         "  better route than `env:`: the typed one is validated, and `env:` is",
         "  not.  The two trace vars are the worked example in both directions —",
         "  `env: {JAATO_PROVIDER_TRACE: 1}` is a valid str and wrote every",
-        "  session's trace to a file named `1` (#775); the block refuses it:",
+        "  session's trace to a file named `1` (#775).  BOTH routes refuse that",
+        "  now, and the typed block additionally checks the path's vocabulary:",
         "",
         "        trace:",
         f"          provider_log: {ENV_EXAMPLE_VALUE}"
         "   # same resolution, checked",
+        "",
+        "  SUBSTITUTION — what a value may contain, and when it is resolved:",
+        "",
     ]
+    lines += _placeholder_table()
     return lines
 
 
@@ -1186,7 +2012,13 @@ def events(filter_: str = None) -> Rendered:
             + (f"; {shown} match '{filter_}'" if filter_ else ""))
     lines = [head,
              "  (S→C server→client, C→S client→server, S↔C bidirectional; "
-             "wire value is the on-the-wire `type`. `explain event <NAME>` for detail)"]
+             "wire value is the on-the-wire `type`. `explain event <NAME>` for detail)",
+             "  NOTE a cascade/observer subscription filters on the CLASS name "
+             "(SessionTerminatedEvent),",
+             "       not on the member or the wire value — "
+             "`cascade_events(event_types=[...])` and the daemon both",
+             "       compare type(event).__name__, so a wire value there "
+             "matches nothing at all (#821)."]
     for dom in sorted(groups):
         lines.append(f"\n  [{dom}]")
         w = max((len(e.name) for e in groups[dom]), default=0)
@@ -1234,6 +2066,12 @@ def event(name: str) -> Rendered:
              f"  domain    : {e.domain or '(ungrouped)'}"]
     if e.event_class:
         lines.append(f"  class     : {e.event_class}")
+        # The one place the distinction bites.  A reader who has just been
+        # shown a member name and a wire value reasonably reaches for either
+        # when writing a filter; only this third string works, and the wrong
+        # one fails silently for the life of the subscription (#821).
+        lines.append(f"  subscribe : event_types=[\"{e.event_class}\"]   "
+                     "(cascade_events / observer filters match the CLASS name)")
     else:
         lines.append("  class     : (none — a wire marker / command, no payload class)")
     if e.note:
@@ -1249,6 +2087,215 @@ def event(name: str) -> Rendered:
         lines.append("  fields    : (none declared beyond the base Event)")
     return data, "\n".join(lines)
 
+
+
+# ------------------------------------------------------------------ agents
+
+def agents(workspace: str = ".") -> Rendered:
+    """Where an agent's PERSONA lives, and why it is not a profile field.
+
+    The gap this closes: nothing under ``explain`` named ``.jaato/agents/`` at
+    all, while ``explain profile`` listed ``system_instructions`` — marked
+    DEPRECATED, and still the only instruction-shaped key on the page.  An
+    author who never found the agents directory reached for the deprecated key,
+    which works, so nothing corrected them.
+
+    The search order is read from :func:`agent_search_dirs`, the function the
+    runtime itself walks, rather than restated here — a documented order that
+    disagrees with the loaded one is worse than none.
+    """
+    from shared.plugins.subagent.config import (
+        AGENT_FILE_FORMS, agent_search_dirs)
+
+    ws = Path(workspace).expanduser().resolve()
+    dirs = agent_search_dirs(str(ws))
+    found: List[Dict[str, Any]] = []
+    for d in dirs:
+        if not d.is_dir():
+            continue
+        for f in sorted(d.glob("*.md")):
+            found.append({"name": f.stem, "path": str(f)})
+
+    data = {
+        "search_order": [str(d) for d in dirs],
+        "file_forms": list(AGENT_FILE_FORMS),
+        "frontmatter": ["description", "default_profile", "params"],
+        "discovered": found,
+        "profile_field": "default_agent",
+        "deprecated": "system_instructions",
+    }
+
+    lines = [
+        "agents — the PERSONA layer (.jaato/agents/<name>.md)",
+        "",
+        "  A profile says what a session CAN DO (plugins, model, limits).",
+        "  An agent says WHO IT IS (instructions, voice, task framing).  They are",
+        "  orthogonal and compose: the same persona runs on a cheap profile and an",
+        "  expensive one; the same profile serves several personas.",
+        "",
+        "  WHERE — searched in this order, first hit wins:",
+    ]
+    for d in dirs:
+        mark = "  (exists)" if d.is_dir() else ""
+        lines.append(f"    {d}{mark}")
+    lines += [
+        "    In each, the name may take any of these forms:",
+    ]
+    lines += [f"      {form}" for form in AGENT_FILE_FORMS]
+    lines += [
+        "    `config_root` REPLACES the workspace tier — it IS that tier, moved.",
+        "",
+        "  FORMAT — optional YAML frontmatter, then markdown:",
+        "    ---",
+        "    description: what this agent is for   # shown when listing agents",
+        "    default_profile: researcher           # profile to pair it with",
+        "    params:",
+        "      topic: {default: 'anything'}        # default for {{topic}}",
+        "    ---",
+        "    You are a research agent working on {{topic}}.",
+        "    Budget: {{max_sources:5}} sources.    # inline default, no frontmatter",
+        "",
+        "    {{param}} substitution: a value from `agent_params`, else the inline",
+        "    default, else the frontmatter default.  An unresolved placeholder is",
+        "    left LITERAL on purpose (a visible debugging signal) and reported in",
+        "    `missing_params` — it is not silently blanked.",
+        "    {{!py:scripts/<f>.py}} runs a prefetch script at session-prep —",
+        "    see `jaato-scaffold explain prefetch`.",
+        "",
+        "  HOW A SESSION GETS ONE — three routes, in precedence order:",
+        "    1. explicit          client.create_session(agent='researcher',",
+        "                                               agent_params={'topic': 'x'})",
+        "                         spawn_subagent(profile='...', agent='researcher')",
+        "    2. the profile's own default_agent: researcher   (#944)",
+        "                         — a profile supplies plugins, an agent supplies",
+        "                         instructions; this binds the two so spawning by",
+        "                         profile name alone yields a subagent that has",
+        "                         both.  An explicit agent= still wins.",
+        "    3. neither           the session runs with no persona layer at all.",
+        "",
+        "  WHY NOT IN THE PROFILE YAML:",
+        "    `system_instructions:` is DEPRECATED and describes the wrong thing —",
+        "    a persona is not 'the session's system instructions'.  The rendered",
+        "    prompt LAYERS: .jaato/instructions/ base + THIS persona + plugin",
+        "    instructions + framework constants + the untrusted-content boundary.",
+        "    `suppress_base_instructions` can drop every layer EXCEPT the persona",
+        "    and its plugins — which is what makes the persona the durable half.",
+        "    Markdown also travels: it is reviewable, diffable, and reusable across",
+        "    profiles in a way a YAML block scalar is not.",
+        "",
+        "  NEVER PASS A CREDENTIAL AS AN agent_param.  Params are substituted INTO",
+        "  the persona, so they already reach the model in its system prompt — and",
+        "  the rendered persona is PERSISTED with the session (#787).  Secrets go in",
+        "  the profile's `env:` as a pass:// / vault:// URI, resolved daemon-side.",
+        "",
+        "  See also: `explain prefetch` (scripted session-start context),",
+        "  `explain profile` (the capability half), `explain paths` (config_root).",
+    ]
+    if found:
+        lines += ["", f"  IN THIS WORKSPACE ({ws}) — {len(found)} agent(s):"]
+        lines += [f"    {a['name']:24} {a['path']}" for a in found]
+    else:
+        lines += ["", f"  IN THIS WORKSPACE ({ws}): no agent files found.",
+                  "    `jaato-scaffold explain agents --workspace <dir>` to look elsewhere."]
+    return data, "\n".join(lines)
+
+
+# ---------------------------------------------------------------- services
+
+def services(workspace: str = ".") -> Rendered:
+    """The ``service_connector`` managed-service flow, and where it stores things.
+
+    The gap this closes: ``.jaato/services/`` appeared in no ``explain`` topic,
+    so a session that needed an HTTP API reached for a raw URL — passing the
+    base URL, the auth header and the pagination by hand on every call, and
+    re-deriving all three next session.  The managed path (discover once, name
+    it, call it by alias) was already there and simply invisible.
+    """
+    from shared.plugins.service_connector.schema_store import (
+        DEFAULT_SERVICES_DIR, DISCOVERED_DIR, SERVICE_CONFIG_FILE)
+
+    ws = Path(workspace).expanduser().resolve()
+    tiers = [("workspace", ws / DEFAULT_SERVICES_DIR),
+             ("user", Path.home() / DEFAULT_SERVICES_DIR)]
+    known: List[Dict[str, Any]] = []
+    for label, root in tiers:
+        if not root.is_dir():
+            continue
+        disc = root / DISCOVERED_DIR
+        if disc.is_dir():
+            for f in sorted(disc.glob("*.y*ml")):
+                known.append({"tier": label, "service": f.stem,
+                              "kind": "discovered", "path": str(f)})
+        for d in sorted(x for x in root.iterdir() if x.is_dir()):
+            if d.name == DISCOVERED_DIR:
+                continue
+            known.append({"tier": label, "service": d.name,
+                          "kind": "defined", "path": str(d)})
+
+    data = {"tiers": [{"tier": t, "path": str(p), "exists": p.is_dir()}
+                      for t, p in tiers],
+            "writable_tier": "workspace",
+            "discovered_dir": DISCOVERED_DIR,
+            "service_config_file": SERVICE_CONFIG_FILE,
+            "known": known}
+
+    lines = [
+        "services — named HTTP APIs the model calls by alias "
+        "(.jaato/services/, service_connector plugin)",
+        "",
+        "  THE FLOW — three calls, then the API has a name:",
+        "    1. discover_service(source='https://host/openapi.json', alias='gitlab')",
+        "         parses the OpenAPI/Swagger spec, caches it, learns every",
+        "         endpoint's parameters and response schema.",
+        "    2. configure_service_auth(service='gitlab', auth={...})",
+        "         binds a scheme + the ENV VARS its credentials come from, once.",
+        "         (`explain plugin service_connector` prints the auth shapes.)",
+        "    3. call_service(service='gitlab', method='GET', path='/projects')",
+        "         base URL, auth and request validation all come from the alias.",
+        "    list_endpoints / get_endpoint_schema browse it in between;",
+        "    preview_request dry-runs a call and prints the equivalent curl.",
+        "",
+        "  WHERE IT IS STORED — two tiers, workspace shadows home:",
+    ]
+    for label, root in tiers:
+        mark = "  (exists)" if root.is_dir() else ""
+        note = "  writable" if label == "workspace" else "  read-only here"
+        lines.append(f"    [{label:9}] {root}{note}{mark}")
+    lines += [
+        "    Per tier:",
+        f"      {DISCOVERED_DIR + '/<service>.yaml':30} auto-cached OpenAPI specs",
+        f"      {'<service>/' + SERVICE_CONFIG_FILE:30} hand-written service config",
+        f"      {'<service>/<endpoint>.yaml':30} hand-written endpoint schemas",
+        "    The user tier is populated out of band (copy a service you want in",
+        "    every workspace); writes always land in the workspace tier.",
+        "",
+        "  MANAGED ALIAS vs RAW URL — call_service takes either.  Prefer the alias",
+        "  when any of these hold:",
+        "    - the API needs auth        the scheme is configured ONCE, and the",
+        "                                credential stays an env-var NAME on disk",
+        "    - it is paginated or wide   the cached schema is what makes",
+        "                                list_endpoints / get_endpoint_schema able",
+        "                                to answer without another round trip",
+        "    - requests get validated    a body is checked against the spec before",
+        "                                it is sent, so a typo is a local error",
+        "    - more than one call        the alias survives the session; a raw URL",
+        "                                is re-derived by hand every time",
+        "  A raw `url=` is right for a one-shot unauthenticated fetch, and for an",
+        "  API that publishes no spec (save_schema / import_bruno_collection give",
+        "  those one by hand).",
+        "",
+        "  Under confinement the user tier is granted READ only",
+        "  (~/.jaato/services/**), so a service the workspace must WRITE belongs",
+        "  in the workspace tier.  See `explain paths`.",
+    ]
+    if known:
+        lines += ["", f"  KNOWN HERE — {len(known)}:"]
+        lines += [f"    [{k['tier']:9}] {k['service']:24} {k['kind']}"
+                  for k in known]
+    else:
+        lines += ["", "  KNOWN HERE: none — nothing has been discovered yet.",
+                  f"    (looked in {tiers[0][1]} and {tiers[1][1]})"]
+    return data, "\n".join(lines)
 
 
 # -------------------------------------------------------------------- sets
@@ -1295,6 +2342,45 @@ def sets(workspace: str) -> Rendered:
 
 # ----------------------------------------------------------------- profile
 
+def _trace_block_note() -> List[str]:
+    """The ``trace:`` block's own section for ``explain profile``.
+
+    Its own function for the reason :func:`_profile_env_note` is: the field
+    row above prints one description line, and the three things an author
+    actually has to know about a trace path — where a relative one lands, what
+    may be substituted into it, and which of the two vocabularies resolves
+    when — do not fit there.  They were previously written down nowhere, which
+    is how ``${HOME}/t.log`` came to be created as a directory named
+    ``${HOME}``.
+
+    Returns:
+        Rendered lines, blank-line separated from the schema listing.
+    """
+    return [
+        "",
+        "  trace: — the two diagnostic log paths, and the ONE knob whose value",
+        "  is a path the framework writes to.  Both keys take the same rules:",
+        "    absolute   one file, shared by every session using this profile",
+        "    relative   resolved against each session's own workspace by the",
+        "               READER (jaato_sdk/trace.py) — one file per session",
+        "    refused    a switch (1 / true / off), a directory, an unknown",
+        "               {token} — each fails at profile LOAD, by name",
+        "",
+        "        trace:",
+        "          provider_log: .jaato/logs/provider{agent_suffix}.jsonl",
+        "          session_log:  .jaato/logs/session.jsonl",
+        "",
+        "  A PROVIDER trace splits per agent whether or not you ask: with no",
+        "  placeholder the agent id is appended before the extension",
+        "  (provider.jsonl -> provider_subagent_1.jsonl).  Naming a placeholder",
+        "  puts it where you want it instead, and is the only way to split a",
+        "  SESSION trace, which never splits on its own.",
+        "",
+        "  SUBSTITUTION — what a value may contain, and when it is resolved:",
+        "",
+    ] + _placeholder_table()
+
+
 def profile() -> Rendered:
     """The ``SubagentProfile`` schema — every knob a profile author can set.
 
@@ -1319,6 +2405,7 @@ def profile() -> Rendered:
             lines.append(f"      allowed → {f.allowed}")
         if f.description:
             lines.append(f"      {f.description}")
+    lines += _trace_block_note()
     lines.append(
         "\n  AppArmor — add client-side extra rules via the profile:\n"
         "    apparmor: true              opt the session into kernel-enforced confinement\n"
@@ -1329,33 +2416,75 @@ def profile() -> Rendered:
     lines.append(
         "\n  inheritance (`inherits: [_base_<stage>]`) — how a child profile merges with its\n"
         "  parent(s), resolved at discover_profiles() (config.py:_merge_profiles):\n"
-        "    plugins, preloaded_plugins   UNION / additive — child ADDS to the parents'; it\n"
-        "                                 CANNOT scope DOWN here (the list only grows).\n"
+        "    plugins                      UNION / additive — child ADDS to the parents'; it\n"
+        "                                 CANNOT scope DOWN here (the list only grows). `[]`\n"
+        "                                 in the child ADDS NOTHING — it does NOT clear the\n"
+        "                                 parents'. There is NO spelling that clears them.\n"
+        "                                 To reduce the surface, re-list the plugin carrying\n"
+        "                                 an allow-list — `plugins: [memory(tools:[a,b])]` —\n"
+        "                                 or use the permission whitelist, or do not inherit.\n"
+        "    preloaded_plugins,           DERIVED, never written: both come out of the\n"
+        "    tool_scopes                  `plugins` entries' own modifiers, so a top-level\n"
+        "                                 `preloaded_plugins:` / `tool_scopes:` in a profile\n"
+        "                                 FILE is read by NOBODY (`validate` reports it as\n"
+        "                                 `derived_profile_key`).  Write them as\n"
+        "                                 `plugins: [todo(preload), memory(tools:[a,b])]`.\n"
+        "                                 They merge the way their source does —\n"
+        "                                 preloaded_plugins by UNION, tool_scopes per-KEY\n"
+        "                                 with the VALUE at a key REPLACED.  NB a child that\n"
+        "                                 re-lists a plugin with NO `tools:` modifier keeps\n"
+        "                                 the PARENT's allow-list; to widen it back the child\n"
+        "                                 must enumerate the wider set explicitly.\n"
         "    completion_processors        CONCATENATED parent → child; all of them fire. `[]`\n"
         "                                 in the child ADDS NOTHING — it does NOT clear the\n"
         "                                 parents'. Scope DOWN by naming inherited entries in\n"
         "                                 `suppress_inherited_processors` (matches an entry's\n"
         "                                 `name`, else its `script`); an entry matching nothing\n"
         "                                 is a load ERROR, and it is not inherited further.\n"
-        "    tool_scopes, env,            per-KEY dict-merge — child wins on keys it sets;\n"
-        "    plugin_configs, quirks       the parent's other keys survive.\n"
+        "    env, quirks                  per-KEY dict-merge — child wins on keys it sets;\n"
+        "                                 the parent's other keys survive.  The VALUE at a\n"
+        "                                 key is REPLACED, never merged into.\n"
+        "    plugin_configs               the same, one level deeper: merged per PLUGIN and\n"
+        "                                 then per KEY within it, so a sibling key survives\n"
+        "                                 — but the value at a key is still REPLACED.  A\n"
+        "                                 NESTED dict is NOT merged recursively:\n"
+        "                                   parent  openrouter.api_params {temperature: 0.0}\n"
+        "                                   child   openrouter.api_params {thinking: high}\n"
+        "                                   result  openrouter.api_params {thinking: high}\n"
+        "                                 `temperature` is GONE, nothing fails, and the two\n"
+        "                                 stages that override api_params are exactly the\n"
+        "                                 ones that lose the determinism the base hoisted.\n"
+        "                                 Repeat the shared keys in each child that sets any.\n"
         "    model, provider, gc, cache,  child REPLACES — the child's value wins outright\n"
         "    model_tiers, runtime_limits, (this is how a child scopes DOWN, unlike plugins).\n"
+        "    scrub_secret_env, default_agent,\n"
         "    apparmor_fragments,          For the two payload schemas an empty dict `{}` IS a\n"
         "    completion_payload_schema,   value and overrides; `null`/absent reads as unset and\n"
         "    spawn_payload_schema         inherits.\n"
         "    max_turns,                   MOST RESTRICTIVE wins — a child may only TIGHTEN a\n"
-        "    budget_control.limits        ceiling, never raise the one it was spawned under.\n"
-        "                                 (budget_control.degrade is child-REPLACES.)\n"
+        "    budget_control.limits,       ceiling, never raise the one it was spawned under.\n"
+        "    runtime_limits.              (budget_control.degrade is child-REPLACES, and so are\n"
+        "      max_parallel_tools         runtime_limits' other, kernel-enforced ceilings.)\n"
         "    suppress_base_instructions,  UNION / OR — STICKY: a piece any layer drops stays\n"
         "    apparmor                     dropped, and a confined parent can't be un-confined.\n"
-        "\n  empty vs listed `plugins` (a REQUIRED key — authors must pick):\n"
+        "\n  empty vs listed `plugins` (a REQUIRED key — authors must pick).  WITH NO PARENT\n"
+        "  (no `inherits:`) — this is the ONLY context in which [] means 'none':\n"
         "    plugins: []   → tools=[] → NONE of the registry tool plugins; only the framework\n"
         "                   set (permission, reliability, lifecycle/signal_completion) is wired.\n"
         "                   (Pre-2026-06-07 a falsy bug made [] silently load ALL ~30 tools.)\n"
-        "    plugins: [x]  → exactly those, UNIONed with any inherited.\n"
-        "    To scope DOWN per stage, use tool_scopes (per-plugin allow-list) or the permission\n"
-        "    plugin's whitelist — NOT the plugins list, which only ADDS to the inherited set.")
+        "    plugins: [x]  → exactly those.\n"
+        "\n  IN A CHILD (`inherits:` set) — [] does NOT mean 'none'.  The list is a UNION, so:\n"
+        "    plugins: []   → the parents' plugins, UNCHANGED.  Writing [] to lock a stage down\n"
+        "                   hands it the parent's ENTIRE tool surface, silently, with a profile\n"
+        "                   that validates cleanly.  Measured: parent [memory, todo] + child []\n"
+        "                   → [memory, todo].\n"
+        "    plugins: [x]  → the parents' plugins PLUS x.\n"
+        "    To scope DOWN per stage, re-list the plugin CARRYING an allow-list —\n"
+        "    `plugins: [memory(tools:[a,b])]`, which is the only spelling of tool_scopes — or\n"
+        "    use the permission plugin's whitelist, or do not inherit.  A bare name in the\n"
+        "    plugins list only ADDS to the inherited set.\n"
+        "    NB `[]` is not one vocabulary across this schema: for apparmor_fragments above it\n"
+        "    DOES mean none.  Read each key's own row; do not generalise from a neighbour.")
     lines.append(
         "\n  declining ONE inherited completion_processor (the only removal opt-out there is):\n"
         "    inherits: [_base_worker]\n"
@@ -1540,6 +2669,21 @@ def paths() -> Rendered:
     mistake: jaato keeps ``~/.jaato`` deliberately daemon-global (creds + the
     auto-installed reactors live there), and isolates PER SESSION at the
     workspace / ``config_root`` layer — not at ``$HOME``.
+
+    Also states the ownership rule the contents list only implies (#896):
+    ``config_root`` is FRAMEWORK-OWNED, and a driver's own runtime state
+    (checkpoints, resume journals, run scratch) belongs at a sibling
+    ``<workspace>/.<yourapp>/`` instead.  Read as a list of contents rather
+    than a statement of ownership, ``.jaato/`` looks like "the jaato-related
+    directory for this workspace", so an SDK author with jaato-shaped state
+    files it alongside and nothing fails — until the deny surface moves.  It
+    does move: ``server/apparmor.py`` v11 introduced a broad ``.jaato/** w``
+    deny, v13 replaced it with narrow per-subpath denies after the broad one
+    blocked the daemon's own writes, and v29 added ``.jaato/templates/`` —
+    at which point the template plugin's own writer had to relocate to the
+    sibling ``.jaato/template_extracts/`` to survive it.  That is the
+    framework fixing, for itself, exactly the break a tenant parked under an
+    arbitrary ``.jaato/<name>/`` would take on a release it did not author.
     """
     data = {
         "daemon_global": {
@@ -1556,6 +2700,23 @@ def paths() -> Rendered:
                       ".jaato/sessions/"],
             "workspace_root_env": "JAATO_WORKSPACE_ROOT",
             "scope": "the isolation boundary — one per session",
+        },
+        "config_root_ownership": {
+            "owner": "framework",
+            "rule": "config_root (<workspace>/.jaato) is FRAMEWORK-OWNED: "
+                    "everything under it is either config jaato reads or "
+                    "runtime state jaato writes",
+            "tenant_state_goes": "<workspace>/.<yourapp>/  (a SIBLING of "
+                                 ".jaato, still inside the workspace so it "
+                                 "stays on the isolation boundary)",
+            "why": "the confinement deny surface under .jaato is real, "
+                   "actively maintained and moves between releases "
+                   "(server/apparmor.py v11 -> v13 -> v29); a tenant "
+                   "subpath is not denied today, and no allow rule names "
+                   "it either",
+            "precedent": ".jaato/templates/ became write-denied in template "
+                         "v29 (#893) and the template plugin's own writer "
+                         "had to move to the sibling .jaato/template_extracts/",
         },
     }
     lines = [
@@ -1581,13 +2742,354 @@ def paths() -> Rendered:
         "       per-session workspace, NOT $HOME.",
         "",
         "  config_root   = <workspace>/.jaato by default — the resolution root for",
-        "    profiles / instructions / agents.  Override per-profile (config_root:)",
-        "    or per-client (working_dir / env_file).",
+        "    profiles / instructions / agents.  It is a CLIENT knob, not a profile",
+        "    key: pass `config_root=` to IPCClient / WSClient / InProcessClient",
+        "    (all three default it to <workspace>/.jaato).  The default is applied",
+        "    client-side, and that matters because the value has two consumers:",
+        "      - the config SEARCH PATH falls back to <workspace>/.jaato daemon-side",
+        "        whether or not the value is set, so profiles and agents resolve",
+        "        either way;",
+        "      - a plugin that WRITES under the root reads the VALUE — file_edit",
+        "        puts backups in <config_root>/sessions/<id>/backups/ and REFUSES",
+        "        to initialize without one, so a session that reached the daemon",
+        "        with config_root unset came up with no writeNewFile at all.",
+        "    A plugin the profile asked for that fails to initialize is now named",
+        "    at WARNING (registry.get_failed_plugins() is the programmatic read).",
+        "    -> FRAMEWORK-OWNED.  Everything under it is either config jaato READS",
+        "       (profiles, agents, instructions, schemas, scripts, templates) or",
+        "       runtime state jaato WRITES (logs/, sessions/, cache/, memory/,",
+        "       todos/, ...).  Do NOT park your own application's state here.",
+        "",
+        "  YOUR OWN state (checkpoints, resume journals, run scratch) goes in a",
+        "  SIBLING directory — <workspace>/.<yourapp>/ — not under .jaato/:",
+        "    <workspace>/.jaato/       framework config + framework runtime state",
+        "    <workspace>/.<yourapp>/   YOUR driver's runtime state",
+        "    -> Still inside the workspace, so a fresh workspace still isolates a",
+        "       run and the two ownerships stay legible side by side.",
+        "    -> WHY not .jaato/<yourapp>/: the confinement deny surface under",
+        "       .jaato is real, actively maintained, and MOVES between releases",
+        "       (server/apparmor.py: v11 added a broad .jaato/** write deny, v13",
+        "       replaced it with narrow per-subpath denies, v29 added",
+        "       .jaato/templates/).  A tenant-invented subpath is not denied",
+        "       today — and no allow rule names it either, so a later release",
+        "       that denies your name EACCESes every confined writer (reactor,",
+        "       prefetch, completion processor, tool) with nothing in your",
+        "       mental model to debug it.  Precedent: when v29 denied",
+        "       .jaato/templates/, the template plugin's OWN writer had to",
+        "       relocate to the sibling .jaato/template_extracts/ to survive it.",
+        "    -> The workspace outside .jaato/ is rwkl under confinement and under",
+        "       no deny, so .<yourapp>/ is writable from confined contexts too.",
         "",
         "  TL;DR  ~/.jaato = daemon-global (creds + reactors, shared).  Per-session",
         "  isolation = a fresh workspace + config_root, NEVER a $HOME override.",
+        "  .jaato/ is the FRAMEWORK's; your state goes in <workspace>/.<yourapp>/.",
     ]
     return data, "\n".join(lines)
+
+
+def completion() -> Rendered:
+    """The completion-processor capability — the OUTPUT-side script hook.
+
+    The symmetric sibling of :func:`prefetch`, and the closest analogue to
+    read first: prefetch seeds the prompt BEFORE turn 1, a completion
+    processor gates ``signal_completion`` AFTER the work.
+    ``docs/design/payload-schema-conventions.md`` already frames the two
+    boundaries as a pair (``spawn_payload_schema`` in,
+    ``completion_payload_schema`` out); scaffold documented only the input
+    half, so an author wanting a self-correcting agent had to rediscover
+    the shape, and the failure modes are not the ones you would guess
+    (jaato #768, #769).
+
+    Every field name, vocabulary and channel below is READ from the
+    framework (``introspect.processor_schema``), never spelled here.
+    """
+    S = introspect.processor_schema()
+    vocab = S["vocabularies"]
+    data = {
+        "lives_in": ".jaato/profiles/<set>/<agent>.yaml  (completion_processors:)",
+        "script_at": "<config_root>/scripts/processors/<name>.py  OR  "
+                     "~/.jaato/scripts/processors/<name>.py",
+        "entries": [{"name": f.name, "type": f.type, "default": f.default}
+                    for f in S["fields"]],
+        "vocabularies": vocab,
+        "validate_channels": S["channels"],
+        "render_entry": "def render(payload, context) -> str | bytes",
+        "validate_entry": "def validate(payload, context) -> ProcessorResult",
+        "retry_budget_is_max_turns": (
+            "a blocked signal_completion is retried inside the session's "
+            "own max_turns; there is no second attempts knob.  What "
+            "max_refusals bounds is how many times THIS GATE may block, "
+            "which is a different thing and did not exist before #768."
+        ),
+        "does_not_terminate_on_its_own": (
+            "without max_refusals the processor refuses, the agent "
+            "re-claims completion, forever — seven refusals in 156 "
+            "seconds, same two errors, no work in between, budget gone "
+            "and no verdict (#768 rule 2)."
+        ),
+        "generator": "jaato-scaffold new processor --name <n> --workspace DIR",
+    }
+    fields = "\n".join(
+        f"    {f.name:16} {f.type:22}"
+        + ("(required)" if f.default == "<required>"
+           else f"default {f.default!r}")
+        for f in S["fields"]
+    )
+    lines = [
+        "completion processors — the OUTPUT-side script hook "
+        "(shared/completion_processors.py):",
+        "",
+        "  WHAT: profile-declared Python that runs when the agent calls",
+        "  signal_completion, AFTER its payload passes "
+        "completion_payload_schema.",
+        "  A `validate` that returns errors BLOCKS the completion and hands the",
+        "  agent a `validation_failed` result carrying every string, so it fixes",
+        "  and calls signal_completion again.  It is the framework's",
+        "  fix-until-it-passes loop.  The INPUT-side sibling is `explain",
+        "  prefetch` — read it first; this is the same shape at the other",
+        "  boundary.",
+        "",
+        "  WHO OWNS signal_completion: the session-level lifecycle tools",
+        "  (shared/lifecycle_tools.py), wired by JaatoSession.configure() for",
+        "  every session — NOT a registry plugin, so it is not in `plugins:`",
+        "  and not in `explain plugins`.  `explain plugin lifecycle` has the",
+        "  tools and their gates.  What turns gating ON is one profile key:",
+        "  completion_payload_schema.  Without it signal_completion is not on",
+        "  the wire at all and the session just ends when the model stops —",
+        "  so a profile carrying completion_processors and no schema has a",
+        "  gate that can never run (`validate` reports that pair).",
+        "",
+    ] + _client_gate_note() + [
+        "  TWO SHAPES OF A CORRECT FINISH, and a watcher must not read the",
+        "  second as a loop:",
+        "    one-shot     signal_completion(<the whole payload>)",
+        "    field-by-    prepare_completion(field_path, value)  × ~one per",
+        "      field      schema field, optionally query_completion to see what",
+        "                 is still pending, then signal_completion() with NO",
+        "                 args — the framework synthesizes from what accumulated",
+        "  Both are the protocol working.  The second exists for models that",
+        "  collapse to args={} when asked to compose a whole structured payload",
+        "  in one emission, and a correction pass after a processor refuses is",
+        "  normal.  So ~N prepare_completion calls for an N-field schema, plus a",
+        "  few, is expected; what a LOOP looks like is the same two errors with",
+        "  no work in between (see max_refusals below).  prepare_completion and",
+        "  query_completion exist only when a completion_payload_schema is",
+        "  declared — there is nothing to accumulate against otherwise.",
+        "",
+        "  AUTHOR IT in two places:",
+        "    .jaato/profiles/<set>/<agent>.yaml   the wiring (fields below)",
+        "    <config_root>/scripts/processors/<f>.py   the module (or",
+        "                                     ~/.jaato/scripts/processors/<f>.py,",
+        "                                     daemon-global; same loader as",
+        "                                     prefetch scripts and reactors)",
+        "",
+        "  WIRING (a `completion_processors:` list entry):",
+        fields,
+        "    " + "  ".join(f"{k} → {'|'.join(v)}" for k, v in vocab.items()),
+        "",
+        "  MODULE contract — one or both top-level callables:",
+        "    def render(payload, context) -> str | bytes",
+        "        content; written to the entry's `output:` template when it",
+        "        declares one, else logged for audit only.",
+        "    def validate(payload, context) -> ProcessorResult",
+        "        from jaato_sdk.cascade_authoring import ProcessorResult",
+        "        A dict of four channels (a bare list[str] is still accepted",
+        "        and read as all-errors):",
+        "",
+        "      channel      blocks completion?        spends a refusal?",
+        "      errors       yes, per on_error         yes — one per CALL, not",
+        "                                             per message",
+        "      faults       once per session          never",
+        "      warnings     never                     never",
+        "      incomplete   never (gates is_complete  never",
+        "                   on a phase:completeness",
+        "                   processor)",
+        "",
+        "    context = RenderContext: agent_params, workspace_path,",
+        "      config_root, env, session_id, registry, runtime, logger, and",
+        "      tool_calls — the paired ledger of every function_call and its",
+        "      response, for cross-checking a payload's claims against what",
+        "      the session ACTUALLY did.",
+        "",
+        "  TWO WAYS TO CHECK A CLAIM, AND THE SECOND IS STRONGER.",
+        "    The ledger (`context.tool_calls`) proves the agent CALLED a tool.",
+        "    The filesystem proves the tool LEFT SOMETHING BEHIND — and that is",
+        "    the claim a downstream stage actually depends on.  A `validate` may",
+        "    read the workspace, so an agent that reports `output_file:` can be",
+        "    held to it:",
+        "",
+        "      def validate(payload, context):",
+        "          out = Path(context.workspace_path) / payload['output_file']",
+        "          if not out.is_file():",
+        "              return {'errors': [f\"{payload['output_file']} does not \"",
+        "                                 f'exist — write it, then signal again']}",
+        "          if out.stat().st_size == 0:",
+        "              return {'errors': [f\"{payload['output_file']} is empty\"]}",
+        "          return {}",
+        "",
+        "    That turns the payload into a VERIFIABLE contract between driver and",
+        "    agent rather than a report taken on trust, and it costs one stat().",
+        "    Two rules make it behave:",
+        "      - a path from the payload is MODEL-supplied.  Resolve it under",
+        "        workspace_path and reject one that escapes (`..`, an absolute",
+        "        path) — a processor runs with the session's own file access.",
+        "      - report the miss as `errors` (retryable — the agent can still",
+        "        write the file within max_turns), NOT as `faults`, which is for",
+        "        an environment the agent cannot fix.",
+        "",
+        "  THE RETRY BUDGET IS max_turns.  A blocked completion is retried",
+        "  inside the session's own max_turns; there is no second attempts",
+        "  knob, and adding one to a driver is the wrong fix (that PR was",
+        "  closed on finding this mechanism).",
+        "",
+        "  THE TERMINUS A DRIVER WAITS ON IS NOT AGENT_COMPLETED.  An accepted",
+        "  signal_completion emits AgentCompletedEvent with the payload, but",
+        "  Session.complete() settles on the SESSION: first-of",
+        "  {SessionTerminatedEvent, TurnCompletedEvent + the settling status}.",
+        "  Both of those are emitted from ONE post-turn site, and that site is",
+        "  gated on a turn having RUN.  It used to be gated on a turn having",
+        "  been RECORDED in the usage ledger, which happens only when the",
+        "  provider reported tokens — so a turn whose provider reported NO",
+        "  usage did its work, delivered its payload, and emitted no terminal",
+        "  event at all, leaving the driver to wait out its own timeout with",
+        "  nothing logged on either side (#881).  The gate now reads a",
+        "  lifecycle counter, so a turn terminates because it ENDED rather",
+        "  than because it was billed.",
+        "",
+        "  `echo` IS STILL WORTH A usage BLOCK, for a different reason now.",
+        "  The test double reports the spend it is TOLD to and none otherwise,",
+        "  so a harness built on it terminates fine and accounts for nothing:",
+        "  an empty consumption report, and a budget_control ceiling on",
+        "  `tokens` or `usd` fed zero that will never fire.  Declare one:",
+        "",
+        "    plugin_configs:",
+        "      echo:",
+        "        usage: {prompt_tokens: 1000, output_tokens: 200}",
+        "",
+        "  `jaato-scaffold validate` flags the omission (echo_reports_no_usage),",
+        "  and the session logs a WARNING naming the provider the first time a",
+        "  turn carries no tokens.  The framework's own conformance profiles",
+        "  all pass a usage block — except one, deliberately, which is what",
+        "  keeps the unmetered path exercised.",
+        "",
+        "  THE LOOP DOES NOT TERMINATE ON ITS OWN.  Without `max_refusals`",
+        "  the processor refuses, the agent re-claims completion, and round",
+        "  it goes: an observed run spent SEVEN refusals in 156 seconds on",
+        "  the same two errors, with no work in between, and ended with its",
+        "  budget gone and no verdict.  Nothing upstream catches this —",
+        "  the completion-nudge budget bounds the opposite direction (an",
+        "  agent that stops WITHOUT signalling; `max_completion_nudges:`,",
+        "  default 2).  Declare a ceiling:",
+        "",
+        "    completion_processors:",
+        "      - script: scripts/processors/acceptance.py",
+        "        name: acceptance",
+        "        max_refusals: 3",
+        "        on_exhausted: allow      # allow | fail",
+        "",
+        "  on_exhausted: allow  lets the unfinished completion stand (errors",
+        "    downgraded to warnings) — right when something grades the run",
+        "    afterwards, because a FAIL verdict carries information and a",
+        "    BLOCKED arm carries none.",
+        "  on_exhausted: fail   keeps blocking — right when an unfinished",
+        "    completion is worse than none (it writes to a shared store, say).",
+        "  Both are real choices.  The counter lives on the framework's",
+        "  per-session LoadedProcessor, so a module-level global in your",
+        "  script is no longer the place for it.",
+        "",
+        "  THE OTHER DIRECTION IS `max_completion_nudges` (#919).  Where",
+        "  `max_refusals` bounds how many times a processor may BLOCK a",
+        "  completion, this bounds how many times the framework re-prompts",
+        "  an agent that ended its loop without calling signal_completion",
+        "  at all, before giving up with NudgeExhausted:",
+        "",
+        "    max_completion_nudges: 4      # profile top level; default 2",
+        "",
+        "  Two is right for a strong tool-caller and is unchanged.  Raise",
+        "  it for a model that reliably does the work and unreliably",
+        "  reports it done — an audio tier that hands off, writes, narrates",
+        "  the write, and burns one of its two nudges on a redundant",
+        "  enter_tier has exactly one real attempt left.  Per TURN — every",
+        "  turn of a conversation gets the same allowance, rather than",
+        "  inheriting what an earlier turn spent (#934).  Positive integer",
+        "  (0 is refused — the give-up test is `fired >= max`, so a budget",
+        "  of 0 would report NudgeExhausted on sessions that completed",
+        "  cleanly).  Inherits like max_turns: child overrides, else the",
+        "  minimum across parents.",
+        "",
+        "  SEPARATE A WRONG ANSWER FROM AN ENVIRONMENT FAULT.  A missing",
+        "  acceptance script, an absent agent_param, a checks timeout: no fix",
+        "  the agent makes can clear those, so a retryable message about one",
+        "  burns the whole budget without ever producing a verdict.  Return",
+        "  them in `faults[]` — budget-exempt, and blocking only the single",
+        "  round-trip the agent needs to record the fault in its payload.",
+        "",
+        "  NEVER RETURN [] ON A BROKEN GATE.  If your checking script exits",
+        "  non-zero with no output, the gate did not RUN — returning [] there",
+        "  waves the completion through on a check that never happened.  An",
+        "  error path returning the same value as success is the defect class",
+        "  this hook attracts most.  The framework holds the same line: a",
+        "  raise, a malformed return, a missing module and a failed write all",
+        "  BLOCK, spend no refusal, and are never waved through by",
+        "  exhaustion.",
+        "",
+        "  WRITE THE STRINGS AS INSTRUCTIONS FOR THE RETRY, not as a report:",
+        "  they are read by a model about to try again.  Name the failure and",
+        "  what to do about it; the framework appends the attempts remaining.",
+        "",
+        "  GENERATE ONE with those parts already right:",
+        "    jaato-scaffold new processor --name <n> --workspace DIR",
+        "  and see `explain archetype processor` for what it writes.",
+    ]
+    return data, "\n".join(lines)
+
+
+#: What each ``RenderContext`` attribute is FOR.  The SET of attributes is
+#: never written here — it is read off the dataclass by
+#: :func:`_render_context_attrs` (#911), because the hand-copied set was
+#: incomplete on the day it was written and stayed that way through two later
+#: edits.  This table carries only the prose a derivation cannot know (which
+#: handle is for what; that ``tool_calls`` is empty on the input side), and an
+#: attribute missing from it is rendered by NAME — visible, unannotated, and
+#: never silently absent.
+_RENDER_CONTEXT_NOTES = {
+    "session": "the owning JaatoSession: session.workspace_path, "
+               "session.history, ...",
+    "runtime": "the session's JaatoRuntime — ledger, registered providers",
+    "registry": "registry.get_plugin('<name>') to reach a plugin",
+    "agent_params": "the agent's params dict",
+    "env": "os.environ snapshot",
+    "session_id": "None when the session is not daemon-attached",
+    "tool_calls": "completion-time only; [] for input-side prefetch",
+}
+
+
+def _render_context_attrs() -> List[Tuple[str, str]]:
+    """``RenderContext``'s attributes, in declaration order, with their notes.
+
+    Derived from ``dataclasses.fields`` so a field added to the dataclass is
+    documented by ``explain prefetch`` the day it is added rather than the day
+    someone remembers (#911).  Returns ``(name, note)`` pairs; the note is
+    ``""`` for a field :data:`_RENDER_CONTEXT_NOTES` does not describe.
+    """
+    import dataclasses
+
+    from shared.dynamic_instructions import RenderContext
+
+    return [(f.name, _RENDER_CONTEXT_NOTES.get(f.name, ""))
+            for f in dataclasses.fields(RenderContext)]
+
+
+def _context_attr_lines(attrs: List[Tuple[str, str]]) -> List[str]:
+    """Render ``(name, note)`` pairs as one indented line per attribute.
+
+    One line each rather than a reflowed paragraph: the set is derived, so it
+    grows, and a wrapped run of comma-separated names is where an omission
+    hides.  An annotated attribute reads ``name — note``; an unannotated one is
+    its bare name.
+    """
+    return [f"        {name} — {note}" if note else f"        {name}"
+            for name, note in attrs]
 
 
 def prefetch() -> Rendered:
@@ -1599,14 +3101,15 @@ def prefetch() -> Rendered:
     never mentions — so an author/agent self-configuring via explain can
     actually discover it.
     """
+    attrs = _render_context_attrs()
     data = {
         "directive_mandatory": "{{!py:scripts/<name>.py [args]}}",
         "directive_optional": "{{!py?:scripts/<name>.py [args]}}",
         "lives_in": ".jaato/agents/<name>.md  (the persona)",
         "script_at": "<config_root>/scripts/<name>.py  OR  ~/.jaato/scripts/<name>.py",
         "entry": "def render(context, args) -> str",
-        "context_attrs": ["agent_params", "registry", "runtime", "workspace_path",
-                          "config_root", "env", "session_id", "logger", "tool_calls"],
+        "context_attrs": [name for name, _ in attrs],
+        "context_attr_notes": {name: note for name, note in attrs if note},
         "example": "shared/plugins/subagent/README.md (prefetch_kyc_aml.py)",
         "agent_params_are_not_secret": (
             "agent_params are substituted into the persona, so anything put "
@@ -1650,11 +3153,8 @@ def prefetch() -> Rendered:
         "  SCRIPT contract:",
         "    def render(context, args) -> str",
         "      args    = whitespace-split tokens after the script name.",
-        "      context = RenderContext: agent_params (the agent's params dict),",
-        "        registry (registry.get_plugin('<name>') to reach a plugin),",
-        "        runtime, workspace_path, config_root, env (os.environ snapshot),",
-        "        session_id, logger, tool_calls (completion-time only; [] for",
-        "        input-side prefetch).",
+        "      context = RenderContext, every attribute of it:",
+        *_context_attr_lines(attrs),
         "",
         "",
         "  NEVER PASS A CREDENTIAL AS AN agent_param.  They are substituted",
@@ -1675,3 +3175,16 @@ def prefetch() -> Rendered:
         "  (a full persona placeholder + render() pulling plugin data into the prompt).",
     ]
     return data, "\n".join(lines)
+
+
+# ---------------------------------------------------------- integrations
+
+def integrations():
+    """Tools this build can wire itself into, and where each one stands.
+
+    Delegates to the same renderer the `integration` verb uses: see-then-apply
+    is the framework's own shape (`explain archetypes` / `new <archetype>`),
+    and one source means the listing and the verb cannot drift apart.
+    """
+    from . import integrations as _int
+    return _int.listing()

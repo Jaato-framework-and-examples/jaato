@@ -215,7 +215,7 @@ agent types) are premium content — see below.
 #### Other public content
 
 - `docs/` (architecture, design docs, etc.)
-- `web-client/` (React web client)
+- `jaato-web/` (React browser client)
 - `out-of-tree-plugins/` (plugin development example)
 - `gc-benchmark/`, `examples/`, `scripts/`
 - `CLAUDE.md`, `README.md`

@@ -69,6 +69,8 @@ from server.runner.session import (
 )
 from shared.session_envelope import SessionInitEnvelope
 
+from .conftest import StubSession
+
 
 # ----------------------------------------------------------------------
 # Envelope schema pins
@@ -215,12 +217,11 @@ class _StubRuntime:
         self.is_connected = True
 
     def create_session(self, **kwargs: Any) -> Any:
-        # Return a stub object — runner_session.bootstrap_session
-        # treats the return as opaque.
-        class _StubSession:
-            pass
-
-        return _StubSession()
+        # The shared StubSession from conftest, not a local `pass`
+        # class: bootstrap_session STAMPS the session it gets back
+        # (set_daemon_session_id / set_client_user_id), so an opaque
+        # object is not opaque enough.  See conftest.StubSession (#736).
+        return StubSession(**kwargs)
 
 
 def _envelope(

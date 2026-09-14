@@ -68,14 +68,46 @@ def test_cli_workspace_venv_accepted_typo_flagged():
                _unknown_knobs(_validate({"cli": {"workspace_venvv": "v"}})))
 
 
-def test_nested_and_freeform_substructures_not_descended():
-    # permission.evaluators is a free-form tool->path map; permission.policy is
-    # a deep tree.  Only top-level knob names are checked — inner keys pass.
+def test_freeform_substructure_is_not_descended():
+    # permission.evaluators declares additionalProperties: it maps tool names
+    # to script paths, so every key there is authored and none is a typo.
+    # Descending it would report the author's own tool names as unknown.
     diags = _validate({"permission": {
         "evaluators": {"cli_based_tool": "x.py", "made_up_tool": "y.py"},
-        "policy": {"defaultPolicy": "deny", "whatever_inner": {"a": 1}},
     }})
     assert _unknown_knobs(diags) == []
+
+
+def test_declared_substructure_is_descended():
+    # permission.policy declares a closed `properties` set, so a key outside
+    # it is read by nobody and is reported.  This used to pass
+    # silently, which is how a policy block could look right and do nothing.
+    diags = _validate({"permission": {
+        "policy": {"defaultPolicy": "deny", "whatever_inner": {"a": 1}},
+    }})
+    unknown = _unknown_knobs(diags)
+    assert any("policy.whatever_inner" in w for w in unknown), unknown
+    assert not any("defaultPolicy" in w for w in unknown), unknown
+
+
+def test_nested_enum_violation_is_an_error():
+    # The knob that cost a session: `defaultPolicy` declares
+    # allow/deny/ask, and every misspelling of it validated clean.
+    diags = _validate({"permission": {"policy": {"defaultPolicy": "denied"}}})
+    bad = [d for d in diags if d.code == "invalid_knob_value"]
+    assert len(bad) == 1, [d.as_dict() for d in diags]
+    assert bad[0].severity == "error"
+    assert bad[0].where == "plugin_configs.permission.policy.defaultPolicy"
+
+
+def test_deeply_nested_names_are_reached():
+    # Four levels down: policy.sanitization.path_scope.allowed_roots.
+    ok = _validate({"permission": {"policy": {"sanitization": {
+        "path_scope": {"allowed_roots": ["."]}}}}})
+    assert _unknown_knobs(ok) == []
+    bad = _validate({"permission": {"policy": {"sanitization": {
+        "path_scope": {"allowed_rootz": ["."]}}}}})
+    assert any("path_scope.allowed_rootz" in w for w in _unknown_knobs(bad))
 
 
 def test_unknown_plugin_name_is_skipped_not_crashed():

@@ -418,9 +418,25 @@ def test_the_loop_is_reported_as_a_waiter_when_it_is_one():
 
     It is the thread the reader arrives caring about, so mislabelling it is
     the most expensive mistake the dump can make.
+
+    ``all_threads_after`` is 1.0 rather than 0.4 because it is a stall AGE,
+    and the convoy this drives puts the loop on the lock at age 0.4 exactly:
+    the loop stalls when ``_run_a_convoy`` makes its first SYNCHRONOUS
+    ``time.sleep(0.2)`` and reaches ``with lock:`` two of them later.  Asking
+    for the dump at that same age left no margin at all, and the sampler
+    ticks every 0.1s -- so on a loaded runner the dump caught the loop still
+    inside ``time.sleep`` (its captured stack ended at the sleep, not the
+    lock) and the waiter section correctly did not contain it.  That is a
+    defect in the SETUP, not in the labelling this asserts.
+
+    Observed on CI three times, including on main at aa89379, where 49
+    leaked ``cascade-client-gc-sweep`` threads from earlier tests in the same
+    process were enough to tip it.  The holder holds for 1.6s, so the loop is
+    on the lock from age 0.4 through ~1.6 and sampling at 1.0 sits well
+    inside that window; the assertions below are unchanged.
     """
     dog = LoopWatchdog(interval=0.1, threshold=0.3, resample_every=0.3,
-                       all_threads_after=0.4)
+                       all_threads_after=1.0)
     dumps = _run_a_convoy(dog, threading.Lock(), n_waiters=2)
     assert dumps, "no all-thread dump was produced"
     dump = dumps[0]

@@ -72,7 +72,26 @@ registry.expose_all({
 })
 ```
 
-The `extra_paths` configuration adds directories to the PATH environment variable when resolving and executing commands.
+The `extra_paths` configuration **appends** directories to the PATH environment
+variable when resolving and executing commands. Appended, never prepended: a
+configured directory can supply a command name the base PATH lacks, but can
+never shadow a system binary. The ordering is a security property, not
+formatting.
+
+`extra_paths` is **operator-only**. Extending PATH decides which binary a
+command name resolves to, and the permission decision is made over the command
+*text* (`PermissionPolicy._build_signature` reads `command` and `args` and
+nothing else) — so a per-call value would make an approval for `deploy --prod`
+an approval for whatever `deploy` resolves to under a PATH the model chose in
+the same call. Every execution site therefore refuses an `extra_paths` key that
+arrives in the tool-call arguments, rather than merging it (issue #697):
+
+```json
+{
+  "error": "cli_based_tool: 'extra_paths' is operator-configured and cannot be set per call. ...",
+  "hint": "Invoke the executable by absolute path, or ask the operator to add the directory to plugin_configs.cli.extra_paths."
+}
+```
 
 ### With JaatoClient
 
@@ -117,7 +136,7 @@ If an executable is not found:
 ```json
 {
   "error": "cli_based_tool: executable 'foo' not found in PATH",
-  "hint": "Configure extra_paths or provide full path to the executable."
+  "hint": "Provide the full path to the executable, or ask the operator to add its directory to plugin_configs.cli.extra_paths (PATH extension is operator-configured, not settable per call)."
 }
 ```
 

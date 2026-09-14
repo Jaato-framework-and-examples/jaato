@@ -38,6 +38,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, Optional, Tuple
 
+from shared.cli_path_policy import CLI_EXE_NOT_FOUND_HINT, precheck_cli_args
 from shared.subprocess_runner import requires_shell, run_command, RunResult
 
 # We bridge the runner-side cancel/output thread-local onto the
@@ -78,8 +79,12 @@ def execute_cli_based_tool(
     - On hard failure: ``error`` (str) + optional ``hint``.
 
     Args:
-        args: ``{"command": str, "args": list?, "extra_paths": list?}``
-            mirroring the cli plugin's ToolSchema parameters.
+        args: ``{"command": str, "args": list?}`` mirroring the cli plugin's
+            ToolSchema parameters.  An ``extra_paths`` key is REFUSED rather
+            than honoured (#697) — PATH extension decides which binary a
+            command name resolves to, and the permission decision upstream is
+            keyed on the command text alone, so a caller-supplied value would
+            put executable resolution outside the value that was approved.
         workspace_root: Working directory for the spawned process.
             Set by the runner's ``__main__`` from
             ``JAATO_RUNNER_WORKSPACE`` env at startup.
@@ -92,12 +97,17 @@ def execute_cli_based_tool(
         from the spawned process is reported as ``ok=True`` with
         ``returncode != 0`` so the model sees the actual exit status.
     """
+    # Is this call runnable as given?  A caller-supplied ``extra_paths`` is
+    # refused (#697) — this surface had no operator tier at all, so the key
+    # came straight out of the model's tool-call arguments and reached
+    # ``shutil.which`` while the permission decision upstream was keyed on the
+    # command text alone — and an absent command is an error, as before.
+    refusal = precheck_cli_args(args, surface="runner cli executor")
+    if refusal is not None:
+        return False, refusal
+
     command = args.get("command")
     arg_list = args.get("args")
-    extra_paths = args.get("extra_paths")
-
-    if not command:
-        return False, {"error": "cli_based_tool: command must be provided"}
 
     # Merge separate arg_list into the command string when it doesn't
     # need shell interpretation — matches the daemon-side plugin's
@@ -108,15 +118,10 @@ def execute_cli_based_tool(
             [shlex.quote(command)] + [shlex.quote(a) for a in arg_list]
         )
 
-    # Build extra env for PATH extension (extra_paths is rarely set).
+    # No PATH extension here.  The only ``extra_paths`` this executor ever saw
+    # was the caller-supplied one refused above; the operator's list lives on
+    # the daemon-side ``CliPlugin`` and is applied there (#697).
     extra_env: Optional[Dict[str, str]] = None
-    if extra_paths:
-        import os
-        path_sep = os.pathsep
-        extra_env = {
-            "PATH": os.environ.get("PATH", "")
-            + path_sep + path_sep.join(extra_paths),
-        }
 
     # Bridge the runner-side cancel + output to the shared.ai_tool_runner
     # thread-local that ``run_command`` reads.  Set on entry, restore
@@ -165,10 +170,7 @@ def execute_cli_based_tool(
     if r.returncode == 127 and "not found in PATH" in r.stderr:
         return False, {
             "error": f"cli_based_tool: {r.stderr}",
-            "hint": (
-                "Configure extra_paths or provide full path to the "
-                "executable."
-            ),
+            "hint": CLI_EXE_NOT_FOUND_HINT,
         }
 
     result: Dict[str, Any] = {

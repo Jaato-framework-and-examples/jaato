@@ -1,18 +1,28 @@
-"""A scaffolded send-and-wait client must NOT hang on a plain turn.
+"""A scaffolded send-and-wait client must NOT hang, and must not hand-roll
+the wait it hangs on.
 
-Regression guard for the SESSION_TERMINATED-only completion wait (jaato
-PR #316 class).  A completion-gated session emits ``SESSION_TERMINATED``;
-a PLAIN turn that just answers emits only ``TURN_COMPLETED`` and the
-session then goes IDLE — it never self-terminates.  A client that waits on
-``SESSION_TERMINATED`` alone blocks forever on the plain path.  The
-``client`` / ``host-tools`` archetypes therefore wait on first-of
-``{TURN_COMPLETED, SESSION_TERMINATED}``.
+TWO GUARANTEES, AND THE SECOND IS WHY THE FIRST STAYS TRUE
+==========================================================
 
-This test generates a REAL client via ``build.run`` (so the whole template
-+ build path is exercised), then drives the generated ``main()`` with a
-fake client that emits ONLY ``TURN_COMPLETED`` — and asserts ``main()``
-returns instead of blocking.  Wrapped in ``asyncio.wait_for`` so a
-regression surfaces as a hard timeout, not a hung suite.
+1. **No hang on a plain turn.**  A completion-gated session emits
+   ``SESSION_TERMINATED``; a PLAIN turn that just answers emits only
+   ``TURN_COMPLETED`` and the session then goes IDLE — it never
+   self-terminates.  A client that waits on ``SESSION_TERMINATED`` alone
+   blocks forever on the plain path (jaato PR #316 / #399).
+
+2. **The wait is the SDK's, not the template's.**  That recipe lives in
+   ``jaato_sdk.client.convenience``, whose docstring names it as the thing it
+   exists to prevent.  The templates used to write it out by hand anyway —
+   which is what made (1) something a generated script could regress on, and
+   what left every scaffolded client behind the settle rule the facade
+   learned in #767 (jaato #825 / #826 / #827).
+
+So these tests generate a REAL client via ``build.run`` (the whole template +
+build path), then drive the generated ``main()`` against a fake client that
+emits ONLY ``TURN_COMPLETED`` — through the facade, exactly as a daemon
+would — and assert ``main()`` returns instead of blocking.  Wrapped in
+``asyncio.wait_for`` so a regression surfaces as a hard timeout, not a hung
+suite.
 """
 
 from __future__ import annotations
@@ -26,6 +36,7 @@ from types import SimpleNamespace
 import pytest
 
 from jaato_sdk import EventType
+from jaato_sdk.client.convenience import Session
 
 from shared.scaffold import build, introspect
 from shared.scaffold import _client_templates as tpl
@@ -66,8 +77,15 @@ def _import(py: Path, name: str):
 
 
 class _FakeClient:
-    """Minimal stand-in for IPCClient/IPCRecoveryClient that fires a
-    scripted terminal event when ``send_message`` is called."""
+    """Minimal stand-in for the SDK clients that fires a scripted terminal
+    event when ``send_message`` is called.
+
+    Implements exactly the surface the facade's ``Session`` uses —
+    ``subscribe`` / ``subscribe_once`` / ``send_message`` — plus the
+    ``connect`` / ``create_session`` / ``disconnect`` the session context
+    manager drives.  ``subscribe`` returns an unsubscribe callable because
+    ``ask`` / ``stream`` / ``complete`` each clean up after themselves.
+    """
 
     def __init__(self, fire):
         self._fire = fire                      # list[(EventType, event_obj)]
@@ -78,7 +96,13 @@ class _FakeClient:
 
     def subscribe(self, event_type, handler):
         self._handlers.setdefault(event_type, []).append(handler)
-        return lambda: None
+
+        def _unsub():
+            try:
+                self._handlers[event_type].remove(handler)
+            except (KeyError, ValueError):
+                pass
+        return _unsub
 
     # subscribe_once shares storage — we fire each scripted event exactly once
     subscribe_once = subscribe
@@ -89,17 +113,35 @@ class _FakeClient:
     async def register_client_tools(self, tools):
         return None
 
-    async def send_message(self, prompt):
+    async def send_message(self, prompt, **kwargs):
         for event_type, ev in self._fire:
-            for h in self._handlers.get(event_type, []):
+            for h in list(self._handlers.get(event_type, [])):
                 h(ev)
 
     async def disconnect(self):
         return None
 
 
+class _FakeSessionContext:
+    """Stands in for the facade's ``_SessionContext``: yields a REAL
+    ``Session`` wrapping the fake client, so the generated script exercises
+    the SDK's actual wait recipe rather than a mock of it."""
+
+    def __init__(self, client):
+        self._client = client
+
+    async def __aenter__(self) -> Session:
+        await self._client.connect()
+        return Session(self._client, "sid-1", None)
+
+    async def __aexit__(self, *exc) -> bool:
+        await self._client.disconnect()
+        return False
+
+
 def _run_main(mod, fire) -> int:
-    mod._new_client = lambda: _FakeClient(fire)
+    """Drive the generated ``main()`` with a scripted event sequence."""
+    mod._open_session = lambda **spec: _FakeSessionContext(_FakeClient(fire))
 
     async def _go():
         return await asyncio.wait_for(mod.main(), timeout=5.0)
@@ -123,7 +165,11 @@ def test_recoverable_client_plain_turn_does_not_hang(tmp_path):
 
 
 def test_error_terminal_surfaces_failure(tmp_path):
-    """SESSION_TERMINATED(reason='error') must still drive a non-zero exit."""
+    """SESSION_TERMINATED(reason='error') must still drive a non-zero exit.
+
+    Through the facade it arrives as a typed ``AgentError`` rather than a
+    reason string, which is why the template catches one.
+    """
     mod = _import(_generate(tmp_path, "client"), "gen_client_err")
     rc = _run_main(mod, [(
         EventType.SESSION_TERMINATED,
@@ -144,23 +190,74 @@ def test_completion_gated_success_still_works(tmp_path):
     assert rc == 0
 
 
-def test_send_and_wait_templates_subscribe_to_both_terminals():
-    """Static guard: the send-and-wait archetypes subscribe to BOTH
-    TURN_COMPLETED and SESSION_TERMINATED (the anti-hang invariant)."""
-    for src in (tpl.CLIENT_TEMPLATE, tpl.HOST_TOOLS_TEMPLATE):
-        assert "EventType.SESSION_TERMINATED, on_done" in src
-        assert "EventType.TURN_COMPLETED, on_done" in src
+# ------------------------------------------------------------------ statics
+
+#: Every archetype that takes a turn — i.e. everything but the read-only
+#: observer, which attaches to someone else's cascade and sends nothing.
+_TURN_TAKING = ("client", "host-tools", "cascade", "sweep")
+
+
+@pytest.mark.parametrize("name", _TURN_TAKING)
+def test_no_template_hand_rolls_the_wait(name):
+    """The wait belongs to the SDK.
+
+    The specific shapes banned here are the ones the templates actually
+    shipped: an ``asyncio.Event`` woken by ``subscribe_once`` on the terminal
+    events, then ``await done.wait()``.  That is ``convenience.py``'s recipe
+    written out a second time — the second statement of a contract being the
+    one that rots (jaato #825 / #826 / #827).
+    """
+    _, src, _ = tpl.TEMPLATES[name]
+    assert "done.wait()" not in src, (
+        f"{name} waits on its own asyncio.Event; the facade owns that recipe"
+    )
+    assert "subscribe_once(EventType.SESSION_TERMINATED" not in src, (
+        f"{name} hand-rolls the terminal subscription the facade installs"
+    )
+
+
+@pytest.mark.parametrize("name", _TURN_TAKING)
+def test_every_turn_taking_template_uses_the_facade(name):
+    """...and it uses the facade INSTEAD, rather than merely not hand-rolling."""
+    _, src, _ = tpl.TEMPLATES[name]
+    assert "_open_session(" in src, f"{name} opens no facade session"
+    assert any(f"s.{m}(" in src or f"stage.{m}(" in src
+               for m in ("ask", "stream", "complete")), (
+        f"{name} opens a session and never takes a turn through it"
+    )
+
+
+@pytest.mark.parametrize("name", ["client", "host-tools"])
+def test_non_gated_archetypes_use_a_turn_method(name):
+    """A NON-GATED session's turn IS its terminus, so ask/stream is right —
+    they wait on first-of {TURN_COMPLETED, SESSION_TERMINATED}."""
+    _, src, _ = tpl.TEMPLATES[name]
+    assert "s.ask(" in src or "s.stream(" in src
+
+
+@pytest.mark.parametrize("name", ["cascade", "sweep"])
+def test_gated_archetypes_use_complete(name):
+    """A COMPLETION-GATED session's terminus is signal_completion, not its
+    first turn — and ``complete()`` is also the only method that RETURNS the
+    payload the stage's own schema exists to produce (jaato #827)."""
+    _, src, _ = tpl.TEMPLATES[name]
+    assert ".complete(" in src, (
+        f"{name} is completion-gated by construction and does not call "
+        "Session.complete(); waiting on the terminal alone discards the payload"
+    )
+
+
+def _code(src: str) -> str:
+    """Comments stripped — a template may WARN about a pattern in prose, and
+    ``fire`` does exactly that ("NOT s.ask()/s.complete() — those WAIT")."""
+    return "\n".join(line.split("#", 1)[0] for line in src.splitlines())
 
 
 def test_fire_template_does_not_wait():
-    """Fire-and-forget must not wait on any terminal."""
-    assert "done.wait()" not in tpl.FIRE_TEMPLATE
-    assert "subscribe_once(EventType.SESSION_TERMINATED" not in tpl.FIRE_TEMPLATE
-
-
-def test_cascade_waits_on_session_terminated_only():
-    """Cascade stages are completion-gated by design (signal_completion
-    drives the slot handoff), so they intentionally wait on
-    SESSION_TERMINATED only — NOT first-of."""
-    assert "EventType.SESSION_TERMINATED, on_done" in tpl.CASCADE_TEMPLATE
-    assert "EventType.TURN_COMPLETED, on_done" not in tpl.CASCADE_TEMPLATE
+    """Fire-and-forget must not wait on any terminal — so NOT ask/complete
+    either, which is the trap now that a turn method is one call away."""
+    src = _code(tpl.FIRE_TEMPLATE)
+    assert "done.wait()" not in src
+    assert "subscribe_once(EventType.SESSION_TERMINATED" not in src
+    assert "s.ask(" not in src and "s.complete(" not in src
+    assert "s.client.send_message(" in tpl.FIRE_TEMPLATE

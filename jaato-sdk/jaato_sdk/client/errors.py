@@ -111,18 +111,43 @@ class SessionRefused(SessionCreateFailed):
     RETRY IS SAFE — nothing was created — but futile unless the request
     changes.
 
+    EXCEPT when the daemon says otherwise.  A create can also fail AFTER the
+    session is registered and serving (#975: the state snapshot the
+    confirmation is built from raised, with a live runner on the other side),
+    and there the whole paragraph above inverts — a session exists, it is
+    usable, and a retry makes a second one.  The daemon names it on the
+    refusal (``ErrorEvent.details['created_session_id']``); when it does,
+    ``session_id`` carries it and ``may_exist`` is ``True`` **on this
+    instance**.  Never inferred: absence of the field means nothing was
+    created, which is what makes the safe-to-retry claim provable rather
+    than hopeful.
+
     Attributes:
         error_type: The daemon's own ``ErrorEvent.error_type``, or ``None``
             when it did not supply one.  Never inferred: a refusal whose type
             the daemon did not state must not be given a likely-looking one.
+        session_id: The session that exists despite the failure, when the
+            daemon named one; ``None`` otherwise.
+        may_exist: ``False`` for an ordinary refusal, ``True`` when
+            ``session_id`` is set.  Overwritten per-instance by
+            ``__init__``; the class-level value is the common case so
+            introspecting the CLASS stays meaningful.
     """
 
     cause = "refused"
     may_exist = False
 
-    def __init__(self, message: str, *, error_type: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        error_type: Optional[str] = None,
+        session_id: Optional[str] = None,
+    ) -> None:
         super().__init__(message)
         self.error_type = error_type
+        self.session_id = session_id
+        self.may_exist = session_id is not None
 
 
 class SessionNotConfirmed(SessionCreateFailed):

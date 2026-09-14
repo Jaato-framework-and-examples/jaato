@@ -28,11 +28,14 @@ PROVIDER_CAPABILITIES = ProviderCapabilities(
     user_message_images=True,
     tool_result_images=True,
     pdf_input=True,
+    audio_input=True,   # any inline_data rides as a Blob with its own mime (#830)
     tool_choice_forwarding=False,
     thinking=False,
     prompt_caching=True,
     streaming=True,
     cancellation=True,
+    output_media=False,
+    reasoning_replay=False,
 )
 
 # --- Provider config-knob contract (authored from provider.py read sites) ---

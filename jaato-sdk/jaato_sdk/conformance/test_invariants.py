@@ -339,3 +339,126 @@ def test_complete_returns_at_the_session_terminus_not_the_first_turn(daemon):
             await c.disconnect()
 
     asyncio.run(go())
+
+
+# ------------------------------------------------------- the refused session
+
+def test_a_gate_that_always_refuses_stops_refusing_at_its_ceiling(daemon):
+    """The refusal ceiling must have an effect on a REAL session loop.
+
+    ``completion_processors`` is the framework's fix-until-it-passes loop, and
+    ``max_refusals`` is what bounds it. Nothing upstream does: ``max_turns``
+    bounds the session rather than this gate, and ``MAX_COMPLETION_NUDGES``
+    bounds the opposite direction (an agent that stops WITHOUT signalling).
+    Unbounded, the shape is stable and does not terminate — the gate refuses,
+    the agent re-claims completion, the gate refuses again. Measured in
+    production before the ceiling existed: seven refusals in 156 seconds, all
+    reporting the same two errors, with no work in between; the run ended with
+    its whole budget spent where the one before it had reached a verdict
+    (jaato #768).
+
+    ``conformance-refused`` is that shape, deterministically: a processor that
+    can never be satisfied, and an echo told to re-claim completion every time
+    rather than fall back to prose. Nothing in the profile ends the loop.
+    ``max_refusals: 2`` does, and this asserts that it does — against a real
+    daemon running the real chat loop, which is what #770 asked for after the
+    unit-level guard.
+
+    Bounded by a poll count rather than by waiting for the terminal, for the
+    reason the nudge invariant above is: the failing case does not stop on its
+    own, so a test that waited for it would hang instead of failing, and a
+    hung CI job reads as infrastructure rather than as the defect.
+    """
+    async def go():
+        c = await _client(daemon)
+        terminal: list = []
+        completed: list = []
+        try:
+            c.subscribe(EventType.SESSION_TERMINATED, terminal.append)
+            c.subscribe(EventType.AGENT_COMPLETED, completed.append)
+            await c.create_session(profile="conformance-refused")
+            await c.send_message("go")
+            for _ in range(120):
+                if terminal:
+                    break
+                await asyncio.sleep(0.25)
+            assert terminal, (
+                "a session whose completion gate always refuses was still "
+                "going after 30s -- max_refusals does not bound the loop, "
+                "which is jaato #768's incident"
+            )
+            assert completed, (
+                "the session ended without ever completing: exhausting the "
+                "ceiling under on_exhausted='allow' must ACCEPT the "
+                "unfinished completion, on the reasoning that a FAIL verdict "
+                "carries information and a BLOCKED one carries none"
+            )
+        finally:
+            await c.disconnect()
+
+    asyncio.run(go())
+
+
+# ----------------------------------------------------- the unmetered session
+
+def test_a_turn_that_reports_no_usage_still_reaches_its_terminus(daemon):
+    """A session must end because its WORK ended, not because it was billed.
+
+    The one profile in this suite that passes no ``usage``, and the reason it
+    exists: every other one passes ``TURN_USAGE``, so the whole suite went
+    green for the life of jaato #881 (9/9 when the issue was filed, 10/10 by
+    the time it was fixed -- growing it did not help).  The post-turn event
+    fan-out gated on the USAGE ledger growing, and the session only appends
+    to that ledger when the provider reported tokens -- so a turn that ran
+    and reported nothing emitted NEITHER half of the terminus, and every
+    driver waiting on one blocked until its own timeout with nothing logged
+    on either side.  Measured against a live daemon: dropping
+    ``plugin_configs.echo.usage`` was the whole difference.
+
+    ``AGENT_COMPLETED`` is asserted FIRST and separately, because it is what
+    separates this defect from a broken profile.  On the pre-fix tree it
+    arrives -- the agent did the work and the payload was accepted -- and
+    then nothing follows.  A run where it is also missing is a different
+    failure and must not be read as this one.
+
+    Bounded by a poll count rather than by awaiting the terminal, for the
+    reason the refusal invariant is: the failing case does not stop on its
+    own, and a hung CI job reads as infrastructure rather than as the defect.
+    Not a timing bet either -- on the pre-fix tree the events are never
+    emitted at all, so no amount of extra waiting produces them.
+    """
+    async def go():
+        c = await _client(daemon)
+        completed: list = []
+        turns: list = []
+        terminal: list = []
+        try:
+            c.subscribe(EventType.AGENT_COMPLETED, completed.append)
+            c.subscribe(EventType.TURN_COMPLETED, turns.append)
+            c.subscribe(EventType.SESSION_TERMINATED, terminal.append)
+            await c.create_session(profile="conformance-unmetered")
+            await c.send_message("go")
+            for _ in range(120):
+                if turns and terminal:
+                    break
+                await asyncio.sleep(0.25)
+
+            assert completed, (
+                "the unmetered session never signalled completion at all; "
+                "that is a broken profile, not the usage/lifecycle coupling "
+                "this invariant is about"
+            )
+            assert turns, (
+                "the agent completed and no TURN_COMPLETED followed -- "
+                "ask() and stream() have no terminus and block until their "
+                "own timeout, because the turn reported no tokens"
+            )
+            assert terminal, (
+                "the agent completed and no SESSION_TERMINATED followed -- "
+                "complete() has no terminus and blocks until its own "
+                "timeout, because the turn reported no tokens"
+            )
+        finally:
+            await c.disconnect()
+
+    asyncio.run(go())

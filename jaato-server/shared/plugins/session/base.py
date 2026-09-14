@@ -89,6 +89,21 @@ class SessionState:
     workspace_path: Optional[str] = None
     """Workspace path (directory) where this session was created."""
 
+    created_by: Optional[str] = None
+    """The authenticated user the session was created for (record version
+    2.9+, issue #859).
+
+    The daemon has held this in memory as ``Session.created_by`` since the
+    WS/SSO work, but the record never carried it, so once a session was
+    unloaded nothing on disk said whose it was -- an auditor had to join
+    the session id against telemetry ``user.id`` spans, and a keyless
+    deployment had no telemetry to join against.  Restored onto the daemon
+    ``Session`` and ferried to the revived runner session on load.
+
+    ``None`` on records written before 2.9 and on sessions created over an
+    unauthenticated transport (local IPC carries no user).
+    """
+
     config_root: Optional[str] = None
     """Framework-config root override at session-creation time.
 
@@ -109,7 +124,26 @@ class SessionState:
     """
 
     sandbox_mode: Optional[str] = None
-    """Confinement mode at session-creation time (e.g. ``"apparmor"``).
+    """Confinement mode at session-creation time.
+
+    ``"apparmor"`` (a profile the kernel is ENFORCING),
+    ``"apparmor-complain"`` (#1014 — a profile loaded under
+    ``JAATO_APPARMOR_COMPLAIN``, where the kernel logs denials and allows
+    them, so there is NO boundary), ``"soft"`` (directory sandboxing only)
+    or ``None``.  A record must not claim a boundary the kernel was not
+    applying: this is what an operator reads weeks later during a
+    post-mortem, and what an auditor would read as evidence of enforcement.
+
+    Ask it through :func:`shared.apparmor_label.sandbox_mode_is_apparmor`
+    ("was a profile provisioned at all") or
+    :func:`~shared.apparmor_label.sandbox_mode_is_enforced` ("was there a
+    boundary") rather than by equality.  ``apparmor-complain`` widened this
+    field's value vocabulary rather than adding a record key, so the record
+    version was NOT bumped: the ``version`` string has one reader, right
+    here, and it gates on the MAJOR (``1.x`` / ``2.x``) — a field that gains
+    a value is what that gate is indifferent to.  An older reader comparing
+    ``== "apparmor"`` reads it as "not confined", which is TRUE and is the
+    safe direction.
 
     Persisted so disk-restore / orphan-revive re-applies the SAME
     confinement on runner re-spawn.  Without it a revived session's
@@ -269,6 +303,27 @@ class SessionState:
     # a reload while the MEMBERSHIP did not, so a revived sibling held a name
     # belonging to a cascade it was no longer in.
     cascade_driver_id: Optional[str] = None
+    # WHICH PROCESS RAN THIS SESSION (record version 2.10+, issue #812) --
+    # the dict ``server.session_identity.RunnerIdentity.to_dict`` produces:
+    # runner pid, whether it was pool-served and the slot pid if so, the
+    # cascade, and the AppArmor profile.
+    #
+    # Persisted because an operator who can SEE a session must be able to ACT
+    # on it.  #812 reports a session whose client had died, still executing
+    # tools and spending money, that could not be stopped from outside: the
+    # workspace index named a workspace and no process, this record had no
+    # runner-, slot- or pid-shaped key, and the per-session logs named only an
+    # IPC connection number.  The only options were killing a
+    # circumstantially-identified runner on a daemon shared with another live
+    # session, or waiting for the budget to burn.
+    #
+    # Restored with ``stale=True``: after a reload the pid named belonged to a
+    # previous process lifetime, so it is EVIDENCE (what last ran this) and
+    # never a handle.  A re-spawn overwrites it with a live record.
+    #
+    # ``None`` on records written before 2.10 and on sessions with no runner
+    # subprocess at all.
+    runner_identity: Optional[Dict[str, Any]] = None
     """Serialized conversation budget for restoration."""
 
     interrupted_turn: Optional[Dict[str, Any]] = None

@@ -5,7 +5,7 @@ Python client SDK for connecting to a [jaato](https://github.com/Jaato-framework
 ## Installation
 
 ```bash
-pip install --extra-index-url https://test.pypi.org/simple/ jaato-sdk
+pip install jaato-sdk
 ```
 
 ## Quick Start

@@ -56,7 +56,10 @@ def test_ws_is_wsclient(tmp_path):
 def test_ws_recoverable_is_wsrecoveryclient(tmp_path):
     src = _gen(tmp_path, transport="ws", recoverable=True, url="wss://h:1")
     assert "from jaato_sdk import WSRecoveryClient" in src
-    assert "WSRecoveryClient(" in src
+    # ``WSRecoveryClient.session`` is its OWN override (it wires url / token /
+    # ssl / ca and reuses the transport-agnostic _SessionContext), which is
+    # what makes the facade available on WS at parity with IPC.
+    assert "WSRecoveryClient.session(" in src
     assert "on_status_change=_on_status" in src
 
 
@@ -80,7 +83,7 @@ def test_ws_recoverable_with_ca(tmp_path):
     """--transport ws --recoverable --ca -> WSRecoveryClient with ca= + on_status."""
     src = _gen(tmp_path, transport="ws", recoverable=True,
                url="wss://h:1", ca="/etc/jaato/ca.crt")
-    assert "WSRecoveryClient(" in src
+    assert "WSRecoveryClient.session(" in src
     assert "ca=CA," in src
     assert "on_status_change=_on_status" in src
 
@@ -90,7 +93,9 @@ def test_in_process_emits_inprocessclient(tmp_path):
     daemon/socket/url, no recovery."""
     src = _gen(tmp_path, transport="in_process", recoverable=False)
     assert "from jaato import InProcessClient" in src
-    assert "InProcessClient(" in src
+    # ``InProcessClient.session`` yields the SAME facade Session the daemon
+    # transports do, so the archetype body is identical across transports.
+    assert "InProcessClient.session(" in src
     assert "model=MODEL" in src and "provider=PROVIDER" in src
     assert "SOCKET" not in src and "URL" not in src
     assert "on_status_change" not in src

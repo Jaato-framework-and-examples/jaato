@@ -60,7 +60,7 @@ The framework uses a server-first architecture where the server runs as a daemon
   - `--ipc-socket PATH`: Unix domain socket for local clients
   - `--web-socket [HOST:]PORT`: WebSocket for remote clients
   - `--socket-mode MODE`: Octal file permissions for the IPC socket (default: `660`, owner and group only). The IPC transport is unauthenticated, so any principal that can open the socket can fully drive the agent. Pass `666` to opt into world-accessible (e.g. cross-user containers on a trusted host).
-  - `--ws-token TOKEN` / `--ws-token-file PATH`: bearer token clients must present in the WS Upgrade. Token-file mode 0600 enforced. When neither flag is passed (and `--web-socket` is set), the daemon reads `~/.jaato/ws.token`; if the file doesn't exist, it generates a 32-byte token and persists it there with mode 0600. Local clients can read the same default path for zero-config auth.
+  - `--ws-token TOKEN` / `--ws-token-file PATH`: bearer token clients must present in the WS Upgrade. Token-file mode 0600 enforced. When neither flag is passed (and `--web-socket` is set), the daemon reads `~/.jaato/ws.token`; if the file doesn't exist, it generates a 32-byte token and persists it there with mode 0600. Local clients can read the same default path for zero-config auth. **Prefer `--ws-token-file`, or neither flag.** A token passed as `--ws-token TOKEN` sits in the daemon's `argv` and is therefore served by `/proc/<daemon_pid>/cmdline` to anything on the host that can read it. AppArmor template v30 denies that read from inside a confined session (#712), but the exposure to everything else on the box is a property of the flag, not of the profile.
   - `--ws-unsafe-no-auth`: explicit opt-out of WS bearer auth (legacy open-accept). Logs a startup WARNING. Required to keep the historical behaviour.
   - `--daemon`: Run as background process
   - `--status`/`--stop`: Server management
@@ -135,6 +135,9 @@ Four plugin types:
 **Model Provider Plugins** - SDK abstraction for multi-provider support:
 - `model_provider/types.py`: Provider-agnostic types (`ToolSchema`, `Message`, `ProviderResponse`)
 - `model_provider/google_genai/`: Google GenAI/Vertex AI
+- `model_provider/openai/`: OpenAI, natively — **two wires in one plugin**: Chat Completions (the shared `_openai_compat` transport, with PDF `file` blocks and `input_audio` enabled because OpenAI's own endpoint carries them) and the **Responses API** (`api: responses` — flat `input` items, typed SSE events, reasoning summaries). `context_length` must be set: OpenAI's catalog reports no window for any model
+- `model_provider/azure_openai/`: Azure OpenAI — deployment-name routing (`model:` carries the *deployment*, not the model id), a required `api_version`, and resource-key **or** Microsoft Entra ID auth (`auth: aad`, via `azure-identity`); `context_length` must be set
+- `model_provider/bedrock/`: **AWS Bedrock** — Anthropic, Amazon Nova, Meta, Mistral, Cohere, AI21 and DeepSeek behind ONE message-shaped API (`Converse` / `ConverseStream`) in the customer's own AWS account. The only provider here that resolves **no credential of its own**: SigV4 signing is botocore's, so `initialize()` builds a `boto3.Session` and asks it what it found (env / profile / SSO / instance role). `context_length` must be set — Bedrock's catalog reports no capacity
 - `model_provider/anthropic/`: Anthropic Claude API
 - `model_provider/claude_cli/`: Claude Code CLI wrapper (uses subscription, not API credits)
 - `model_provider/github_models/`: GitHub Models API (uses `azure-ai-inference` SDK)
@@ -149,6 +152,11 @@ Four plugin types:
 - `model_provider/nebius/`: Nebius Token Factory (serverless open-model inference, OpenAI-compatible; `/v1/models` catalog auto-detects context window + input modalities)
 - `model_provider/ovhcloud/`: OVHcloud AI Endpoints (serverless open-model inference on OVHcloud's EU cloud, OpenAI-compatible unified gateway; catalog auto-detects context window when reported, manual knobs otherwise; opt-in keyless free tier)
 - `model_provider/doubleword/`: Doubleword (serverless open-model inference priced by delivery window, OpenAI-compatible; `api_params.service_tier: flex` opts into the discounted async tier — queued work, ~1 min to first token — on the same chat endpoint; `context_length` must be set — the catalog reports no per-model window)
+- `model_provider/minimax/`: MiniMax (hosted, OpenAI-compatible; `MiniMax-M3` 1M window with adaptive thinking + image input, `MiniMax-M2.7` 200K always-thinking; `reasoning_split` requested on every call, reasoning replayed as `reasoning_content` + `reasoning_details`; `tool_choice` folded to `none`/`auto`; `max_completion_tokens` always sent; built-in context table beneath the `context_length` knob; region-bound keys, `.cn` platform via `base_url`)
+- `model_provider/kimi/`: Moonshot AI Kimi (hosted, OpenAI-compatible; `kimi-k3` 1M, `kimi-k2.7-code` / `kimi-k2.6` 256K; `GET /v1/models` reports context length **and** image/reasoning flags, so both are catalog-detected; `thinking_level` → K3 `reasoning_effort`, `enable_thinking` / `thinking_keep` → K2.6's `thinking` object; sampling parameters are a 400 on this wire and are not forwarded; tools stamped `strict: false`; the quota-exhausted 429 stops the retry loop; Kimi Code plan via `base_url`)
+- `model_provider/mimo/`: Xiaomi MiMo (hosted, OpenAI-compatible; `mimo-v2.5-pro` text / `mimo-v2.5` omnimodal, both 1M; thinking toggle `enable_thinking` → `thinking: {type}`; **reasoning replay is mandatory** — the vendor answers 400 to a tool loop that omits `reasoning_content`; `tool_choice` is `auto` only; not available in the EU, UK or Korea)
+
+All three set `replay_reasoning = True` — see **Reasoning Replay** below.
 
 **Model Quirks** — per-model workarounds a profile opts into via `quirks:`
 (injected into `config.extra["quirks"]`; each provider declares the names it
@@ -156,7 +164,7 @@ honors in its `PROVIDER_QUIRKS` contract):
 
 | Quirk | Honored by | Effect |
 |-------|-----------|--------|
-| `prose_tool_calls` | all OpenAI-compat providers (nim, nebius, ovhcloud, lmstudio, tensorrt_llm, triton, vllm, zhipuai_openai) + openrouter | Prose-emulated tool calling for upstream models that cannot emit native tool calls: the `tools` array is withheld, schemas are prompt-injected (hashed wire ids, model picks by description), tool traffic in history is replayed as text, and fenced ` ```tool_call ` JSON blocks in the response are parsed back into `FunctionCall` parts. Reliability tier below native tool calling (hallucinated ids surface as recoverable unknown-tool errors; malformed blocks stay visible in text). Shared machinery in `model_provider/_prose_tools.py` — the same protocol `chrome_ai` uses unconditionally. |
+| `prose_tool_calls` | all OpenAI-compat providers (nim, nebius, ovhcloud, doubleword, minimax, kimi, mimo, lmstudio, tensorrt_llm, triton, vllm, zhipuai_openai) + openrouter | Prose-emulated tool calling for upstream models that cannot emit native tool calls: the `tools` array is withheld, schemas are prompt-injected (hashed wire ids, model picks by description), tool traffic in history is replayed as text, and fenced ` ```tool_call ` JSON blocks in the response are parsed back into `FunctionCall` parts. Reliability tier below native tool calling (hallucinated ids surface as recoverable unknown-tool errors; malformed blocks stay visible in text). Shared machinery in `model_provider/_prose_tools.py` — the same protocol `chrome_ai` uses unconditionally. |
 | `coerce_typed_tool_args`, `force_tool_choice_for_lifecycle`, `force_narration_between_tools`, `auto_finalize_on_complete` | vllm | Small-model tool-calling workarounds; see `vllm/provider.py` |
 
 ```yaml
@@ -166,6 +174,41 @@ model: some-vendor/cheap-model
 quirks:
   prose_tool_calls: true
 ```
+
+### Reasoning Replay (interleaved thinking)
+
+The thinking models of MiniMax, Kimi and MiMo ask the client to send the
+assistant's `reasoning_content` **back** on the next request of a tool-call
+loop — MiMo returns `400` without it, Kimi K3 wants the assistant message
+back "as-is", MiniMax measures a large quality drop. Before the seam the
+session dropped thought parts from history and every OpenAI-shaped converter
+ignored `Part.thought` on replay, so no provider could satisfy that rule.
+
+The seam is opt-in per provider via `OpenAICompatProvider.replay_reasoning`
+(default `False`; every pre-existing inheritor's wire is byte-identical) and
+declared to the capability contract as `reasoning_replay`:
+
+| Touch | Where | Effect |
+|-------|-------|--------|
+| the turn's reasoning becomes a leading `Part.thought` | `_openai_compat/base.py` (streaming loop + `_finish_batch_response`) | history has something to replay; `ProviderResponse.thinking` still feeds the UI |
+| the session keeps thought parts in history | `JaatoSession._add_model_response_to_history`, gated `provider.replay_reasoning is True` | a mock or a non-opted provider changes nothing |
+| the converter replays them | `message_to_openai(..., reasoning_fields=)` → `{"reasoning_content": text}` by default, `content: ""` next to `tool_calls` | a vendor with a second field overrides `_reasoning_replay_fields` (MiniMax adds `reasoning_details`) |
+| GC sizes them | `gc/utils.estimate_message_tokens` | replayed reasoning is context, and a K3 turn at max effort carries tens of thousands of tokens of it |
+| persistence round-trips them | `serialize_message` / `deserialize_message` (already did) | a revived session replays what it replayed live |
+
+Reasoning is read off streaming deltas through `_reasoning_from_delta`, so a
+wire that streams it under another field (MiniMax's `reasoning_details[]`)
+overrides one method. Full design and the cost argument (auto-caching makes
+the replayed prefix cheaper, not dearer): [MiniMax, Kimi and MiMo providers](docs/design/minimax-kimi-mimo-providers.md) §3.
+
+The same PR gave the base three more inert hooks the three providers share:
+`_THINKING_KNOBS` + `_apply_thinking_knobs` (profile thinking keys consumed
+rather than warned about), `_thinking_request_fields` (merged beneath the
+profile's `extra_body`), `_tool_choice_vocabulary` + `_narrow_tool_choice`
+(a value the vendor rejects becomes `auto` **with a warning** — never a
+silent drop, never a 400), `_MAX_TOKENS_WIRE_NAME` (`max_completion_tokens`
+where the vendor deprecated `max_tokens`), `_wire_tools` and
+`_map_finish_reason`.
 
 ### Tool Execution Flow
 
@@ -184,8 +227,113 @@ quirks:
 When model returns multiple function calls, jaato executes them in parallel using a thread pool.
 - Enabled by default (`JAATO_PARALLEL_TOOLS=true`)
 - Set `JAATO_PARALLEL_TOOLS=false` to disable
-- Maximum 8 concurrent tools per turn
+- Width: 8 concurrent tools per turn by default, capped per session by
+  `runtime_limits.max_parallel_tools` (#862)
 - Thread-safe callbacks via thread-local storage
+
+**Whether vs how wide.** `JAATO_PARALLEL_TOOLS` is an on/off switch and was
+the ONLY lever: the width was the literal `8`, written twice in
+`jaato_session.py` (tool execution, and the background token-count fan-out).
+Eight is a reasonable desktop default and a poor fit for two deployment shapes
+this tree already supports — a confined runner whose profile deliberately set a
+small `pids_max` (eight simultaneous `cli` subprocesses hit the cgroup ceiling
+and fail non-deterministically) and a rate-limited internal service behind
+`service_connector` (a burst of eight is the wrong shape whatever the memory
+ceiling says). Both are `runtime_limits` questions, so:
+
+```yaml
+runtime_limits:
+  pids_max: 64
+  max_parallel_tools: 2      # 1..256; unset = 8
+```
+
+`max_parallel_tools` is application-enforced by `JaatoSession` itself rather
+than by the subprocess plugins, which makes it the one `runtime_limits` field
+an **in-process** subagent can honour — the kernel-enforced trio is refused
+there (`ConfinementUnavailableError`), because there is no `fork()/exec()`
+boundary to confine. It reaches a runner-served session on the **envelope**
+(v6), not by env var: `JAATO_RUNNER_MAX_OUTPUT_CHARS` and friends are set at
+cold spawn, and a pre-warm pool slot is forked before the session exists, so a
+knob delivered that way would be inert exactly where the default path runs.
+**Its two subprocess siblings now ride the same envelope** (v7) for a stronger
+version of that reason — see below.
+
+Inheritance is **most-restrictive-wins** — the minimum across every layer that
+declares it, like `max_turns` and `budget_control.limits`, and unlike the rest
+of `runtime_limits`, which is child-REPLACES. A child may narrow the pool,
+never widen it; two parents differing only in the width are resolved by `min()`
+rather than reported as a conflict. `jaato-scaffold explain runtime` prints the
+whole block with the effective value.
+
+### A Cap Nobody Was Wearing (#735)
+
+`explain runtime` said `tool_timeout_seconds → cli/shell →
+subprocess.run(timeout=) per tool call`, and `cli/plugin.py` does exactly that
+— when it has been handed a `RuntimeLimits`. Nothing ever handed it one. On a
+real daemon, a profile declaring `tool_timeout_seconds: 2` ran a `sleep 60`
+for **60.02 s**, and `max_output_bytes: 1000` truncated at the compile-time
+50 000:
+
+| path | cap declared | observed |
+|---|---|---|
+| pool-served (the default) | `tool_timeout_seconds: 2` | tool ran **60.02 s** |
+| cold-spawn | `tool_timeout_seconds: 2` | tool ran **60.02 s** |
+| both | `max_output_bytes: 1000` | truncated at **50 000** |
+| control: `plugin_configs.cli.max_output_chars: 1000` | — | truncated at **1 000** ✅ |
+
+The control run is what locates the defect: the enforcement point was always
+fine, and only the **delivery** of `runtime_limits` was broken.
+
+**The env pair was never the session's enforcement path.**
+`JAATO_RUNNER_TOOL_TIMEOUT_SECONDS` / `JAATO_RUNNER_MAX_OUTPUT_CHARS` arrive
+correctly — the runner's own startup line prints them — and configure
+`server/runner/tool_executor.ToolExecutor`, the **Phase-2, cli-only**
+`execute_fn`. `RunnerRPC._dispatch_method` uses that object only as a fallback
+and routes to `host.session._executor` whenever a session host exists, which
+is on every path that dispatches `session.bootstrap` — all of them. A
+session's tools run through `shared.ai_tool_runner.ToolExecutor`, whose
+`set_runtime_limits` had **no non-test caller**, so `CliPlugin._runtime_limits`
+was `None` everywhere. The issue's own table marked cold-spawn ✅ for
+forwarding the values; it forwarded them to an executor the session does not
+use.
+
+**One vehicle, one application point.**
+
+| Seat | What it does |
+|------|--------------|
+| `build_session_envelope` + the isolated sub-runner builder | stamp the whole resolved block onto `SessionInitEnvelope.runtime_limits` (**envelope v7**), outside any spawn branch, so pool-served and cold-spawned sessions carry the same thing |
+| `server/runner/session.py` | `_runtime_limits_from_envelope` re-parses it; a block this runner cannot parse degrades to "nobody declared limits" with a WARNING rather than refusing the bootstrap |
+| `JaatoSession.configure()` | `_apply_runtime_limits` calls `executor.set_runtime_limits(None, limits)` **after** `set_registry` — the forwarding loop walks `registry.list_exposed()`, so a caller that ran earlier would arm nothing |
+
+`configure()` rather than the runner bootstrap is what makes it *one*
+mechanism: the in-process lead and in-process subagents reach the same code
+with no second call site. Two properties the implementation holds to:
+
+- **`limits=None` is a no-op, not a clear.** Sessions on one runtime SHARE the
+  plugin registry, so a limitless in-process subagent calling
+  `set_runtime_limits(None, None)` would strip the cap off its parent's tools.
+- **`attach_callback` is `None` deliberately.** The runner PROCESS is migrated
+  into its cgroup at fork time and its children inherit it, so a per-plugin
+  `preexec_fn` would be redundant. The kernel trio still rides the cgroup, not
+  the envelope.
+
+**The env pair is kept, and relabelled.** It is the only configuration the
+Phase-2 executor has, and that surface is still live for a runner with no
+session host (cli-only runners, harnesses, tests); deleting it would silently
+drop those back to compile-time defaults — the same class of regression, in
+the same direction. Both surfaces read the one source of truth
+(`server._profile.runtime_limits`), so they cannot disagree about a number;
+they bound different executors. What changed is that the comments no longer
+claim the env pair enforces a session's caps — including the slot-mode
+docstring in `runner/__main__.py` and the `JaatoServer.set_runtime_limits`
+stub, both of which asserted a mechanism that did not exist.
+
+**A cap that silently does not apply is worse than no cap**, so `configure()`
+logs the effective block and **names the plugins that took it**
+(`runtime_limits armed: tool_timeout=120.0s max_output_bytes=8192
+max_parallel_tools=None; receivers=['cli', 'interactive_shell']`). An empty
+receiver list beside a declared timeout is the visible form of "this profile
+enables no subprocess plugin, so the cap bounds nothing".
 
 ### Application Identity (naming the app, not the framework)
 
@@ -252,6 +400,11 @@ plugin_configs: {}
 # Agent identity and instructions belong in .jaato/agents/<name>.md (persona)
 # layered on top of .jaato/instructions/ base instructions.
 # system_instructions: DEPRECATED — use agents instead.
+# default_agent: the persona THIS profile spawns with when the caller names
+#   no `agent` (#944).  A profile supplies plugins, an agent supplies
+#   instructions — this binds the two, so spawn_subagent(profile=...) alone
+#   yields a subagent that has both.  An explicit `agent=` still wins.
+default_agent: researcher
 # suppress_base_instructions: drop framework-injected instruction layers
 #   (persona + plugin instructions are ALWAYS kept). Accepts a bool or a
 #   granular map over three pieces:
@@ -265,20 +418,72 @@ plugin_configs: {}
 #     suppress_base_instructions: {constants: true}       # keep disk + security
 #     suppress_base_instructions: {disk: true, constants: true, security: true}
 #   Inheritance merges by UNION (a piece any layer drops stays dropped).
+# runtime_limits: per-session resource caps.  memory/pids/cpu are
+#   kernel-enforced (cgroup v2); tool_timeout_seconds / max_output_bytes /
+#   max_parallel_tools are application-enforced.  max_parallel_tools (#862)
+#   is the width of the tool thread pool (default 8) and inherits
+#   most-restrictive-wins; the rest of the block is child-replaces.
+#   max_session_seconds / max_orphan_seconds (#812) are the two WALL-CLOCK
+#   bounds, enforced daemon-side by the session-lifetime watchdog so they
+#   still apply when the client that created the session has died.  Both
+#   inherit most-restrictive-wins; 0 = explicitly unbounded.
+#   max_orphan_seconds is the one field here with a framework default (900s).
+runtime_limits:
+  pids_max: 64
+  max_parallel_tools: 2
+  max_orphan_seconds: 300
+# scrub_secret_env: secret env vars stripped from every model-driven
+#   subprocess (cli / interactive_shell / mcp).  ON by default (#863) —
+#   absent = the framework set; `none` opts out (announced at WARNING);
+#   `[default, '!GH_TOKEN']` keeps one tool's token while the provider
+#   key stays out of the shell.  plugin_configs.<surface>.scrub_secret_env
+#   overrides it for one surface.  See "Secret Env Scrubbing" below.
+scrub_secret_env: default
 gc:
   type: budget
   threshold_percent: 80.0
+  # media accounting + consumed-media eviction (#850); omit to keep defaults
+  media_bytes_threshold: 8388608     # bytes of binary payload; 0 disables
+  evict_consumed_media: true         # purge audio once its turn completed
+  media_evict_mime_prefixes: ["audio/"]
 # trace: typed diagnostic log paths — the validated sibling of the
 #   JAATO_TRACE_LOG / JAATO_PROVIDER_TRACE env vars, which remain the
 #   lower-precedence default (the block outranks both the workspace .env
 #   and this profile's own `env:` map).  Absolute = one file shared by
 #   every session using the profile; relative = one file per session,
-#   resolved against the workspace by jaato_sdk.trace.  Refuses a switch
-#   written into a path field — `env: {JAATO_PROVIDER_TRACE: '1'}` is a
-#   valid str and wrote every session's trace to a file named `1` (#775).
+#   resolved against the workspace by jaato_sdk.trace.  Takes ${VAR}
+#   expansion like `env:` does, and the per-agent {agent} /
+#   {agent_suffix} placeholders.  Refuses a switch written into a path
+#   field — `env: {JAATO_PROVIDER_TRACE: '1'}` wrote every session's
+#   trace to a file named `1` (#775), and is now refused on BOTH routes.
+#   `jaato-scaffold explain profile` prints the whole vocabulary.
 trace:
-  provider_log: .jaato/logs/provider_trace.jsonl
+  provider_log: .jaato/logs/provider{agent_suffix}.jsonl
   session_log: .jaato/logs/session_trace.jsonl
+# completion_processors: kb Python that gates signal_completion — the
+#   OUTPUT-side script hook (the input-side one is the persona's
+#   `{{!py:...}}` prefetch).  A `validate` returning errors blocks the
+#   completion and hands the agent every string, so it fixes and signals
+#   again within max_turns, which IS the retry budget.
+#   `max_refusals:` bounds how many times THIS GATE may block — without it
+#   the loop does not terminate (the processor refuses, the agent
+#   re-claims, forever); `on_exhausted:` says what happens at the ceiling.
+#   Full contract: `jaato-scaffold explain completion`, and
+#   docs/design/completion-gate.md.
+completion_processors:
+  - script: scripts/processors/acceptance.py
+    name: acceptance          # stable identity for suppress_inherited_processors
+    on_error: fail_completion # fail_completion (default) | warn
+    phase: finalization       # finalization (default) | completeness
+    max_refusals: 3           # unset = unbounded (the pre-#768 behaviour)
+    on_exhausted: allow       # allow (default) | fail
+# max_completion_nudges: the OTHER direction — how many times the framework
+#   re-prompts an agent that ended its loop without calling
+#   signal_completion at all, before giving up with NudgeExhausted.  Where
+#   `max_refusals` bounds how many times the gate may BLOCK a completion,
+#   this bounds how many chances the model gets to CALL it (#919).
+#   Unset = 2, which is right for a strong tool-caller and is unchanged.
+max_completion_nudges: 4
 ```
 
 **SDK API:**
@@ -293,8 +498,190 @@ await client.create_session(profile="researcher")
 **IPC command protocol:**
 - `session.new [name] --profile <name>` — create session from profile
 - `session.profiles` — list available profiles (→ `SessionProfilesEvent`)
+- `session.orphans` — list LOADED sessions with no client attached
+  (→ `SessionListEvent`; see [A Session Nobody Was Watching](#a-session-nobody-was-watching-812))
+- `session.stop <id>` — stop ANY loaded session by id, not just the caller's own
 
 **Flow:** Client sends `session.new --profile researcher` → server discovers profiles from `.jaato/profiles/` → resolves `SubagentProfile` → `JaatoServer` applies profile overrides (model, provider, plugins, plugin_configs, GC) during `initialize()`.
+
+### The Completion-Nudge Budget (#919, #934)
+
+A session whose surface carries `signal_completion` is expected to call it
+before its loop ends. When the loop settles without that call the framework
+re-prompts the model — a **nudge** — and re-enters the loop; the budget bounds
+how many times, before it gives up and emits `NudgeExhausted`.
+
+That budget was a function-local `MAX_COMPLETION_NUDGES = 2` in **three**
+files — `server/core.py` (the daemon's top-level guard),
+`jaato_embedded/client.py` (the in-process lead) and
+`shared/plugins/subagent/plugin.py` (the subagent loop). Nothing kept the three
+equal, and none was reachable from a profile — which made it the one bound in
+the completion path a deployment could not express:
+
+| bound | configurable? |
+|---|---|
+| completion-processor refusals | `max_refusals` + `on_exhausted`, per processor |
+| turns before the (sub)agent returns | `max_turns` |
+| session resource caps | `runtime_limits` |
+| **completion nudges** | **`max_completion_nudges`** |
+
+`try_completion_nudge(max_nudges)` always took the bound as an argument, so the
+plumbing was already there; what was missing was a value to pass.
+
+```yaml
+# .jaato/profiles/<agent>.yaml
+max_completion_nudges: 4      # default 2, unchanged when unset
+```
+
+**Two stays the default.** For a strong tool-caller it is right, and raising it
+globally would make weak models loop longer for everyone. The number belongs to
+the deployment: a voice agent whose audio tier hands off, writes to memory,
+narrates the write and never calls the tool routinely burns one of its two
+nudges on a redundant `enter_tier` (`already_at_tier`), leaving exactly one real
+attempt — announcing a tool instead of invoking it is a documented weakness of
+that model class, not something persona prose fixes.
+
+- **Per TURN** — how many retries ONE turn gets, not how many turns a
+  conversation may have. See below; it used to be per session.
+- **Positive integer.** `0` is refused at load, not read as "never nudge": the
+  give-up predicate is `nudges_fired >= max`, so a budget of 0 would report
+  `NudgeExhausted` on sessions that completed **cleanly**. A deployment that
+  wants no nudging keeps `signal_completion` out of the surface.
+- **Inheritance follows `max_turns`**: child overrides outright, else the
+  minimum across the parents that declared one.
+- **One definition.** `shared/completion_nudge.py` owns
+  `DEFAULT_MAX_COMPLETION_NUDGES` and the resolver every site now calls, so the
+  three paths cannot drift again. A profile predating the field — an older
+  session snapshot, or no profile at all — resolves to the default rather than
+  raising, so an unconfigured deployment behaves exactly as before.
+  `jaato_eval.sign_off` restates the number deliberately (the eval engine must
+  not import `server.*` / `shared.*`); that copy is a reporting ceiling, and is
+  stale in exactly one direction against a profile that raised its own.
+
+**Whose turn spent it (#934).** The budget lives in one counter,
+`_completion_nudges_fired`, and the only question about it is when a turn start
+clears it. Both simple answers are wrong, and each was shipped:
+
+| Reset | Bounds | Breaks |
+|-------|--------|--------|
+| every turn | nothing — a nudge RE-PROMPTS, so the turn the nudge created handed back the token it had just spent. Observed: "nudge 1/2" logged three times in one session, 735 turns in 40 seconds against a live daemon, and the subagent loop's `while ... < MAX_COMPLETION_NUDGES` could not terminate at all (#767) | the runaway guard |
+| never | the SESSION | the conversation (#934) |
+| **the turns a nudge did not create** | one turn's retries | — |
+
+Never resetting was correct while one clause held: *a completion-gated session
+is one-shot by construction*, so a session-lifetime budget cost nothing.
+**#913 / #915 made that false** — recording `signal_completion`'s tool result
+is precisely what lets a completed session be driven again, and #845 / #914
+lets the next turn arrive with an attachment. A bound written to stop a runaway
+retry loop *inside one turn* had become a ceiling on how many turns a
+conversation may have.
+
+It shows up wherever the nudge is load-bearing on **every** turn rather than
+being an exception path — measured on a voice agent across 43 sessions, whose
+model announces `signal_completion` instead of invoking it (a documented
+weakness of that model class, not something persona prose fixes):
+
+```
+ 1 model text  ->   2 NUDGE  ->   3 signal_completion   ok
+13 model text  ->  14 NUDGE  ->  15 signal_completion   ok
+18 model text  ->  19 NUDGE  ->  20 signal_completion   ok
+29 model text  ->  30 NUDGE  ->  31 signal_completion   ok
+38 model text  ->  (no budget left)                     never completes
+```
+
+Deterministic, and every later turn ends `NudgeExhausted`. Raising the knob only
+moves the wall: 2 dies at turn 3, 40 at turn 41.
+
+The distinction #767 actually needs is not *never reset* but *do not let a
+nudge refund itself*, so the reset asks **who started this turn**.
+`try_completion_nudge` latches `_completion_nudge_turn_pending` in the same
+call that spends a token; `_begin_turn_completion_state` consumes the latch and
+KEEPS the counter, so the nudge loop terminates exactly as before. Any other
+turn — a user message, a `session.wake`, a parent's `send_to_subagent` — is
+caller-originated and starts with a full budget. Consequences:
+
+- **Every nudge site spends through `try_completion_nudge`.** The subagent loop
+  used to bump `_completion_nudges_fired` in place; that re-prompt now reads as
+  caller-originated, the reset refills the budget, and #767 is back. The method
+  is the only writer.
+- **Exhaustion is a verdict on the turn that failed**, not on every turn after
+  it. `NudgeExhausted` still terminates the session at the ceiling.
+- **Nothing is persisted**, so a revived session begins with a full budget —
+  the same answer the reset gives its first caller-originated turn.
+
+### A Tier Binds (provider, model), and Half of It Did Not Take
+
+Reported as *"two tiers of the same profile do not share history; each
+tier keeps its own."* The premise is false, and saying so is what locates
+the real defects: a session has ONE `_history`, `switch_tier` never
+touches it, and every request is built from `_history_for_provider()`,
+whose only per-tier filter withholds **binary** content. Driven end to
+end, the tier entered second is handed the first tier's turns verbatim —
+`test_a_tier_binds_provider_and_window.py` measures that on the wire
+rather than leaving it as folklore.
+
+What a tier *does* bind is a **pair**, and the session applied one half of
+it in two places.
+
+**The initial tier's provider was dropped.** `configure()` overrode
+`self._model_name` from the initial tier and left
+`self._provider_name_override` at the profile's top-level `provider:` —
+`None` when the profile declares none, which is the normal shape when
+every tier declares its own. So turn 0 ran the initial tier's MODEL on
+somebody else's PROVIDER (the runtime default, or a top-level value that
+disagrees), and the binding the profile declared did not take effect
+until the first `enter_tier`.
+
+The second consequence is the one the report is about.
+`_active_provider_name` — what `_connect_tier_entry` compares
+`entry.provider` against to decide whether to SWAP — was that same wrong
+value, and `_ensure_provider` seeded the per-provider cache only when the
+override was non-`None`. Entering a tier that named the provider the
+session was **already running** therefore compared unequal and built a
+SECOND instance of it:
+
+| Provider | What a duplicate instance costs |
+|----------|--------------------------------|
+| any stateless one (all but one) | a wasted handshake |
+| `claude_cli` | **a second conversation.** It sends `messages[-1]` and nothing else, leaving the transcript to the CLI's own `--resume` session (`_cli_session_id`), so the new instance starts empty and accumulates only the turns taken while its tier holds the wheel |
+
+That last row is the one shape in this tree that genuinely produces
+"each tier keeps its own history", and it is a property of that provider
+rather than of `switch_tier`: even on ONE instance, a `claude_cli` tier
+never receives the turns another tier took. Two fixes, because they cover
+different cases and neither subsumes the other —
+`_apply_initial_tier_binding` overrides the provider alongside the model,
+and `_ensure_provider` resolves the name from the runtime
+(`cfg['provider_name'] or runtime.provider_name`) when the override is
+absent, since `None` there never meant "no provider", it meant "whichever
+one the runtime is configured for" — which is exactly what
+`create_provider` had just resolved. A tier declaring no `provider` still
+leaves the choice alone: that is what "use the session's main provider"
+means.
+
+**The window did not follow the model.**
+`InstructionBudget.context_limit` is the denominator for the after-turn GC
+threshold, the pre-send refusal guard and `get_context_usage` (so
+`aspect="context"` and every client's readout). It was stamped ONCE, when
+the provider was lazily created, and never again — while
+`get_context_limit()` answers live for whatever provider is active.
+Measured: a session that booted on a 200k tier and entered an 8k one
+reported `get_context_limit() == 8000` against a budget still saying
+`200000`.
+
+The direction that hurts is entering a **smaller** window: GC cannot fire
+before the request overflows, the guard lets it through, the upstream
+rejects it, and `_try_gc_for_context_recovery` then trims history in the
+**store** — destructive, and shared, so the tier that had the room loses
+the conversation too. Which is how a stale denominator ends up looking
+like the isolation that was reported.
+`_refresh_context_limit_from_provider` is now the one definition, called
+from both points where the binding changes (first materialisation, and
+every tier connect), so the two cannot disagree about where the number
+comes from. It joins the post-connect block that must not raise, and
+therefore joins its rule: a failure is counted onto
+`jaato.tier.context_limit_refresh_failures`, beside its two siblings —
+best-effort blocks are not the problem, unobservable ones are.
 
 ### Session Revive (waking a persisted session)
 
@@ -307,6 +694,8 @@ with what the files on disk say today (issue #787):
 | the resolved profile | `SessionState.profile_snapshot` (`profile_to_snapshot`) | `profile_from_snapshot` → `BootstrapEnvelope.profile` |
 | the rendered system instruction | `SessionState.rendered_instructions` (snapshotted at the end of `JaatoSession.configure()`) | `BootstrapEnvelope.system_instruction_override` |
 | the creation `agent_params` | `SessionState.agent_params` | `BootstrapEnvelope.agent_params` |
+| the authenticated creator (#859, record 2.9+) | `SessionState.created_by` | `BootstrapEnvelope.created_by` → `SessionInitEnvelope.created_by` → `set_client_user_id` |
+| the runner that ran it (#812, record 2.10+) | `SessionState.runner_identity` | restored onto `Session.runner_identity` as **`stale=True`** — the pid named is from a previous process lifetime, so it is evidence, never a handle |
 
 Record version 2.8+. Restoring the render means a revive does **not** re-run
 the persona's `{{!py:...}}` prefetch scripts — which is what made a session
@@ -346,6 +735,211 @@ Subagents share the parent's `JaatoRuntime` but get their own `JaatoSession`:
 - **No redundant connections** - subagents share provider config
 - **Fast spawning** - `create_session()` is lightweight
 - **Resource sharing** - registry, permissions, ledger shared
+
+**A shared registry is a shared mutable object (#938).** The last bullet is
+also a concurrency contract: `spawn_subagent` exposes the child's plugins —
+`self._exposed.add(...)` on the `PluginRegistry` — from the spawning thread
+while the parent's model thread is part-way through a read that walks the same
+set. `registry.get_plugin_for_tool` iterated it live, so a spawn could raise
+`RuntimeError: Set changed size during iteration` inside the parent's model
+loop and terminate the parent's turn — reaching the caller as an opaque
+`RunnerCallError`, indistinguishable from a provider failure.
+
+Two things made it routine rather than theoretical: it is the **cache-miss**
+path, which a profile that subsets tools (`plugins: ["memory(tools:[...])"]`)
+is in constantly because it is resolving names the cache has not seen, and
+`_apply_tool_scopes` runs on **every** provider call — so the parent is in that
+loop for the whole round trip that follows the `spawn_subagent` result.
+
+The registry takes **no lock**: every read path calls into plugin code, and
+holding a lock across those callbacks invites deadlock. The invariant is
+cheaper — **every read path iterates a snapshot** (`list(self._exposed)`,
+`list(self._plugins.items())`, ...), never the live container, and looks each
+name up inside the `try`/`except` that already wraps these loops, which is what
+absorbs a plugin that vanished between the snapshot and the lookup. Removals
+use `dict.pop(key, None)` rather than `del` for the same reason. A snapshot
+buys consistency-of-iteration, not a consistent view: a reader may see a plugin
+being unexposed or miss one being exposed — both were already true of any
+unsynchronized read here, and both are recoverable where a lost turn is not.
+`test_registry_iteration_snapshots.py` carries an AST guard over `registry.py`
+so the next read path cannot reintroduce the shape silently.
+
+### Spawning Requires a Profile (#944)
+
+`spawn_subagent` let the model omit `profile`. The subagent then inherited the
+parent's **entire** plugin set with **no system instructions**, and the call
+returned `success: true` — indistinguishable, from the caller's side, from a
+correct delegation. A voice agent told to delegate document-writing to a
+`documentalista` profile spawned that instead: no `file_edit`, no persona,
+nothing written, and the person was told a document was on its way.
+
+The knob against it, `allow_inline`, was declared, documented, and **advertised
+to the model** by `list_subagent_profiles` — and read nowhere. Setting
+`allow_inline: false` changed nothing, so a profile could tell an agent "inline
+is not allowed" and then allow it. The dataclass said `True`; the config schema
+every consumer reads said `False`. The advertised contract was already the
+right one — what was missing was the implementation.
+
+**`allow_inline` now defaults to `false`, and enabling it is the explicit,
+WARNING-announced act** — the posture `scrub_secret_env` (#863) and
+`--ws-unsafe-no-auth` already take. A workspace that genuinely spawns inline
+sets `plugin_configs.subagent.allow_inline: true`; every other workspace gets
+the safe default without editing anything.
+
+Four surfaces answer to the knob, and the **schema is the load-bearing one**:
+
+| Surface | With inline denied (default) |
+|---------|------------------------------|
+| `spawn_subagent`'s `required` | `["task", "profile"]` — the bad call is *unrepresentable*, enforced by the provider's function-calling validator, not corrected after the fact |
+| the tool + `profile` descriptions | stop offering "EITHER a profile OR a descriptive name"; models read descriptions, and leaving that in place while `required` says otherwise reproduces the same mismatch one layer up |
+| `inline_config` | absent from the wire body, and refused at execution |
+| the executor's gate | an omitted `profile` is an error listing what IS available — the wording a *wrong* profile name has always produced |
+
+A runtime error alone would be a retry loop that spends turns and can exhaust
+the completion-nudge budget; a `required` field is a contract the model cannot
+step outside of. The schema is rebuilt **per exposure** — subagents share the
+parent's `PluginRegistry`, so a memoised one would leak one agent's knob into
+another's tool list.
+
+The gate sits **before** the remote-spawn branch, which forwards
+`profile_name or ''` and returns: unprofiled means the same thing on a peer as
+it does here.
+
+**`inline_allowed_plugins` binds both inline paths.** Its only enforcement site
+was nested inside `if inline_config:` → `if 'plugins' in inline_config:`, so a
+profile saying "inline subagents may hold only `cli` and `todo`" delivered the
+parent's whole set to any spawn that simply did not mention `inline_config` —
+the restriction bound only an agent that opted into being restricted.
+
+**A profile can name its own persona: `default_agent:`.** `profile` supplies
+plugins; `agent` supplies instructions, and requiring only the first yields a
+correctly-tooled subagent with nothing to tell it what to do. The binding
+belongs in the profile that already knows which persona is its own, rather than
+in every caller:
+
+```yaml
+# .jaato/profiles/documentalista.yaml
+plugins: [file_edit, memory]
+default_agent: documentalista      # .jaato/agents/documentalista.md
+```
+
+`spawn_subagent(profile="documentalista")` then resolves that persona through
+the same `_resolve_agent` path an explicit `agent=` uses — and an explicit
+`agent=` still wins, so the profile's binding is a default, not a ceiling. A
+`default_agent` naming a file that is not on disk fails by blaming the
+*profile*, not the caller who passed no agent, and `jaato-scaffold validate`
+reports it as `default_agent_missing` (**error**) before any spawn — by
+locating the file, never by rendering it, since rendering runs the persona's
+`{{!py:...}}` prefetch and `validate` is side-effect free.
+
+**And WHICH profile, not only that there is one (#1052).** `profile` stayed an
+unconstrained string, so the schema said a profile is mandatory and said
+nothing about which ones exist. A production bot's model invented
+`profile="summarizer"` — a name present in no profiles tier — read the
+not-found result as retryable, re-worded the task and spawned again, once per
+permission prompt, until the operator denied the tool to stop it. Same shape as
+#944 one layer in: the valid set was already computed
+(`_available_profile_names`, for the error message the model had already
+failed to act on) and was never put where the model reads before it chooses.
+`_spawn_profile_enum` now stamps it as the parameter's `enum`.
+
+**It is a strong default, not a contract, and the difference matters here.**
+`required` is enforced by the provider's function-calling validator on every
+wire; an `enum` is *enforced* only under grammar-constrained decoding
+(`strict: true` — opt-in via `api_params.strict_tools`, which the framework
+deliberately does not turn on for you). Everywhere else it is read as part of
+the description, and under the `prose_tool_calls` quirk the whole parameter
+schema is prompt-injected text — the tier whose models are likeliest to invent
+a name. Nothing in this framework validates tool arguments against the schema
+before dispatch either (`jsonschema` here serves `signal_completion` payloads,
+not tool args), so **the runtime not-found refusal remains the only layer that
+actually refuses one**, and it stays. The issue's "cannot be emitted" is true of
+one configuration and of no other.
+
+Two cases withhold the enum rather than narrowing it:
+
+| State | Schema |
+|---|---|
+| `allow_inline: true` | no enum — hung off `_inline_allowed()`, the predicate `required` and `inline_config` already read, so the surfaces cannot disagree about the knob |
+| no profile available | no enum. `enum: []` makes every value invalid and some providers reject it outright; that state is reported in prose by `_inline_spawn_denial` and `list_subagent_profiles`. The `profile` PROPERTY stays either way — it is in `required` when inline is disallowed, and a required property absent from `properties` is an unsatisfiable schema |
+
+The list is **sorted**, not in discovery order: `_scan_profiles_dir` builds the
+profile dict from an unsorted `iterdir()`, and the tool schema sits in the
+prompt-cache prefix, so a per-host order would re-read the whole prefix for
+nothing. It is rebuilt per exposure for #944's reason — a shared registry means
+a cached schema leaks one agent's profile set into another's tool list.
+
+**Remote spawn is NOT exempted, and that is the one known cost.**
+`spawn_subagent(server=...)` forwards the name verbatim to a PEER, which
+resolves it against the peer's own `config_root`; the enum is built from
+`self._config.profiles`, which is local. No predicate available at schema-build
+time decides whether a peer is reachable, and both candidates are unsound
+rather than merely imperfect:
+
+| Candidate | Why it fails |
+|---|---|
+| enum iff `_remote_spawn_handler is None` | jaato-premium registers that handler on the **daemon-side** instance through a post-initialization session hook, while this schema is built **runner-side**, where the attribute is `None` even when remote spawn works (the runner→daemon bridge carries the call). It reads `None` on every path — an unconditional enum wearing a comment that claims otherwise — and is silently wrong on the one path that is live |
+| no enum where a `runner_rpc_client` bridge exists | true on every runner-served session, i.e. the default and the deployment in the incident. Fixes nothing |
+| a JSON Schema conditional (`oneOf` / `if`) | breaks strict mode and several providers |
+
+So the constraint is documented instead of branched on: under
+`strict_tools: true`, a spawn naming a **peer-only** profile becomes
+schema-invalid. Under every other configuration it still executes — nothing
+validates here, and the remote branch returns *before* profile resolution — the
+model is merely steered away from it. The workaround is exact: declare a local
+profile of that name. The stub satisfies the schema and changes nothing about
+what the peer runs. `spawn_subagent`'s own `server` parameter description says
+so, so the model reads it where it chooses.
+
+### A Failure the Framework Was Told Was a Success (#1053)
+
+`ToolExecutor` hands the reliability plugin one flag — `ok` — and derives it
+from the executor's return SHAPE: `(ok, payload)` says what it means, and
+`_normalize_executor_return` reads anything else as a success. The subagent
+plugin returned a **bare dict** on 26 of its 33 failure paths:
+
+```python
+return SubagentResult(success=False, error="Profile 'x' not found…").to_dict()
+```
+
+so `on_tool_result` was told `success=True`, `PatternDetector` recorded it as
+a success, and `_check_error_retry_loop` — which only walks entries with
+`success is False` — could not see it. The plugin's own circuit-breaker and
+retry policies were blind to five of its seven executors.
+
+**The precedent was in the same file.** `_execute_send_to_sibling` and
+`_execute_list_siblings` had already been converted, with a comment giving
+this exact argument (*"making a failing tool invisible to anything watching
+the event stream"*). Five executors were left behind — `spawn_subagent` (11
+failure returns), `cancel_subagent` (6), `send_to_subagent` (4),
+`_dispatch_isolated_spawn` (3, returned directly by `spawn_subagent`) and
+`close_subagent` (2).
+
+It is why #1052's invented-profile spawn loop ran unchecked: the detector's
+similarity test is on argument **keys** (`patterns.py:543`), the loop reworded
+only the values, and the default threshold is 3 — it matches, and never
+reached the check.
+
+**Only the flag changed; the payload did not.** `normalize_result_dict`
+reshapes on `not ok` in exactly one case — an `error`-ONLY dict collapses to a
+bare string — and `SubagentResult.to_dict` always emits `success` and
+`turns_used` beside it, so the collapse cannot fire and the model reads the
+same dict either way. What does change is correct and was already true of the
+144 tuple-contract failures elsewhere: enrichment skips the result, the
+telemetry span marks `is_error`, and the #951 `TOOL_RUNNER` trace records
+`ok=False`.
+
+| Property | Why |
+|---|---|
+| **failures explicit, successes left bare** | `split_executor_result` documents a bare value as `ok=True`, and 144 sites rely on it; converting successes is churn with no signal |
+| **the guard is an AST scan, not a list of executors** | a failure path added later is covered whether or not its author remembers the contract |
+| **`reliability` is opt-in** | it is not in `_ALWAYS_INITIALIZE_PLUGINS`, so this makes the failures VISIBLE to a detector a deployment must still enable. The flag is right regardless — telemetry and tracing read it too |
+
+Not done here: `_normalize_executor_return` learning to read `success: False`
+out of a bare dict. That shape survives at 9 more sites across `telepathy`,
+`background` and `streaming`; changing the boundary would reclassify every
+result whose `success` key means something else, and wants those enumerated
+first.
 
 ### MCP Server Configuration
 
@@ -405,9 +999,122 @@ gc_config = GCConfig(
     threshold_percent=80.0,    # Trigger when context is 80% full
     preserve_recent_turns=5,   # Keep last 5 turns
     auto_trigger=True,
+    # Media is a SECOND denominator, in bytes (#850) — a voice session can
+    # sit far below its token threshold while carrying megabytes of audio.
+    media_bytes_threshold=8 * 1024 * 1024,   # 0 disables
+    evict_consumed_media=True,               # purge bytes after the turn
+    media_evict_mime_prefixes=("audio/",),   # images survive by default
 )
 client.set_gc_plugin(gc_plugin, gc_config)
 ```
+
+The same three keys are settable per session from a profile's `gc:` block and
+from `.jaato/gc.json`; both layers pass a key only when it is present, so
+omitting one leaves the framework default (and `JAATO_GC_MEDIA_BYTES`) in
+charge rather than silently overriding it.
+
+### One Invariant, Enforced Where History Leaves (#674)
+
+Every provider here requires that an assistant turn's function calls and
+the results answering them stay **paired**: one `ToolResult` per
+`FunctionCall` id, no result before its call, no empty content block. Break
+it and the upstream rejects the *whole* request — several turns after the
+damage, which is what makes the class expensive.
+
+**Five subsystems edit history independently and none can see the others**:
+the four GC strategies, cancellation (`CancelToken` mid-batch, widened by
+8-wide parallel execution), `rewind`, subagent history sharing, and the
+**wire** — an OpenAI-compatible endpoint that streams a tool call with no
+id puts a call into history no result can ever match. Enforcing at each site
+means auditing five subsystems plus every future GC plugin; enforcing at the
+boundary is one place.
+
+`shared/history_invariant.py` is that place. `validate_history` reports
+defects (`unmatched_call`, `orphan_result`, `missing_call_id`,
+`duplicate_call_id`, `empty_content`); `repair_history` fixes them in four
+ordered passes — mint missing ids, drop orphan results, **answer** unmatched
+calls, drop empty content — and is called from
+`JaatoSession._history_for_provider`, the seam every `provider.complete()`
+call site already reads (#847).
+
+| Property | Why it is load-bearing |
+|---|---|
+| **repairs the per-request COPY, never stored history** | the #847 precedent, inverted: a turn cancelled mid-batch must keep its unanswered calls on disk, because the session may still execute them and real results would collide with synthetic ones written into the store |
+| **an unanswered call is ANSWERED, never deleted** | deleting the assistant message is the obvious repair and it strips `Part.thought` — which `replay_reasoning` providers require back (MiMo answers **400** without `reasoning_content`, Kimi K3 wants the message as-is). That trades a pairing 400 for a reasoning 400. No MODEL message is ever removed |
+| **the synthesised result is byte-CONSTANT** | `repair_history` runs on every request built from the same history, so a timestamp or random id in the payload would change the request prefix each turn and cost a full prompt-cache re-read on Anthropic/Gemini upstreams |
+| **a healthy history is returned unchanged** (same list object) | the overwhelmingly common case allocates nothing |
+| **every repair traces `HISTORY_INVARIANT: ...`** | a silent repair hides the subsystem producing bad histories, which was half the original defect |
+
+**Empty content blocks are MORE reachable now, not less.** *"Text content
+blocks must be non-empty"* after a thought-only turn is exactly the shape
+reasoning replay makes routine: a `replay_reasoning` session deliberately
+keeps thought parts in history. The empty text beside the thought is removed
+and the thought is kept.
+
+**The wire seam is fixed too, not only the backstop.**
+`synthetic_tool_call_id(index, nonce)` mints an id at accumulation time in
+all four streaming loops that key tool-call deltas by index
+(`_openai_compat` — so nim/nebius/ovhcloud/doubleword/zhipuai_openai — plus
+`openrouter`, `vllm` and `github_models`). The **nonce is required, not
+defaulted**: `index` is unique only *within* a response, so index alone
+would put two different calls from two turns under one id in the same
+history — the defect wearing the fix as a disguise. An upstream-supplied id
+is never replaced.
+
+**Measured, and recorded because it is a negative result.** On a seeded
+corpus of multi-call histories all four GC strategies are *already*
+pair-safe — they cut on turn boundaries (`split_into_turns` /
+`flatten_turns` keep an assistant turn and its results together), removing
+~500 messages across 40 seeds without orphaning a call. So those tests are a
+regression detector, guarded by `test_gc_collection_is_not_vacuous`.
+
+**The defect was in the repair, not the strategies.**
+`ensure_tool_call_integrity` — the GC-path repair, named for the invariant —
+*produced* the violation it exists to prevent, on the shape #674 is about:
+
+```
+MODEL calls {A, B}  ->  TOOL answers A  ->  USER turn
+```
+
+Pass 1 kept the TOOL message (`A` is valid); pass 2 reached the USER branch
+with `B` still pending and deleted the **MODEL** message, leaving `A`'s
+result answering a call present nowhere. Every case with at least one real
+result — 14 of 18 at widths 2/3/5/8. And its output is **stored**, so a
+session GC'd into that state and then persisted came back corrupt on revive.
+
+So the producer is fixed at source: `ensure_tool_call_integrity` now
+delegates to `repair_history`, giving one policy in one place. Writing
+synthetic results into the store is safe there because all four call sites
+run **between** turns — `_maybe_collect_after_turn` and
+`_maybe_collect_before_send` sit on turn boundaries, `manual_gc` is
+operator-driven, and `_try_gc_for_context_recovery` pops the trailing MODEL
+message with pending calls before calling it. The boundary validator remains,
+now as a backstop for a *fixed* producer rather than the sole defence — it
+covers what GC never sees (cancellation, rewind, subagent sharing, the wire).
+Its complexity baseline entry dropped from **41** to gone (the function is
+now 1).
+
+**Already-corrupt records are not migrated**, deliberately. Such a history is
+never *sent* corrupt (every request goes through `_history_for_provider`), and
+the first GC pass in a revived session heals the stored record — but an
+untouched record stays corrupt on disk until one of those happens. Rewriting
+persisted session records is a migration with its own failure modes; the two
+paths above cover every route this tree reads history by.
+
+Tests: `shared/tests/test_history_invariant.py` (unit per defect kind,
+seeded property tests over all four GC strategies / cancel-at-turn-N / every
+suffix / every partial-batch width, plus the **prose** wire — `_prose_tools`
+carries the pairing in text, so a repair that is pair-safe on the Anthropic
+wire is not automatically pair-safe there; both pairing survival *and*
+byte-stability are asserted on it, since the prose form re-serialises the
+whole result including its `(call <id>)` label),
+`shared/plugins/gc/tests/test_utils.py` (the stored-history half — the
+`{A,B}`/answer-`A`/USER regression, and the renamed tests that used to
+encode the deletion policy) and
+`shared/plugins/model_provider/_openai_compat/tests/test_streamed_tool_call_without_id_674.py`
+(drives the real streaming loop of three providers; verified to fail 9/15
+when the mint is neutralised, because a test that cannot fail proves
+nothing).
 
 ### Deferred Tool Loading
 
@@ -421,21 +1128,1260 @@ Model uses `list_tools()` → `get_tool_schemas()` workflow to discover tools.
 
 Sessions consume a pre-warm runner subprocess from a pool instead of cold-spawning one each time.  Cuts per-session bootstrap from ~30s (with full plugin discovery + imports) to ~7s on cascade workloads.
 
-Architecture: daemon spawns a **template subprocess** at startup that imports all runner-tier plugin modules.  N pre-warm **pool slots** fork from the template (no exec), inheriting the warm imports.  When a session arrives, daemon claims a pool slot and dispatches `session.bootstrap` to it via the same `RunnerRPCClient` it would use for a cold-spawned runner.  Slot self-confines to the session's AppArmor profile in bootstrap step 1c via `aa_change_profile` (main-thread dispatch so subsequently-spawned worker threads inherit the confined cred).
+Architecture: daemon spawns a **template subprocess** at startup that imports all runner-tier plugin modules.  N pre-warm **pool slots** fork from the template (no exec), inheriting the warm imports.  When a session arrives, daemon claims a pool slot and dispatches `session.bootstrap` to it via the same `RunnerRPCClient` it would use for a cold-spawned runner.  A slot that has never been confined self-confines to the session's AppArmor profile in bootstrap step 1c via `aa_change_profile` (main-thread dispatch so subsequently-spawned worker threads inherit the confined cred).  A slot that already wears a profile does **not** transition — it is only ever handed to a session that wants the profile it has, which is what the reuse key enforces (#1033, below).
 
 **Operational properties:**
 - **Subreaper**: daemon calls `prctl(PR_SET_CHILD_SUBREAPER, 1)` at startup so orphaned descendants (slots whose template died) re-parent to the daemon.
 - **Watchdog**: `PoolManager` replenishment thread detects template death + auto-respawns + refills pool.
 - **READY handshake**: template sends `"READY\n"` after plugin discovery completes; daemon's `TemplateManager.spawn` blocks for it (30s timeout) instead of a fixed sleep.
-- **Telemetry**: `PoolManager.get_telemetry()` exposes counters (`pool_slot_acquired_total`, `pool_acquire_miss_total`, `pool_replenish_success_total`, `pool_replenish_failures_total`, `template_respawn_attempts_total`, `template_respawn_failures_total`).
+- **Telemetry**: `PoolManager.get_telemetry()` exposes counters (`pool_slot_acquired_total`, `pool_acquire_miss_total`, `pool_replenish_success_total`, `pool_replenish_failures_total`, `template_respawn_attempts_total`, `template_respawn_failures_total`, `pool_slots_over_cap_total`, `pool_stale_reservation_evicted_total`, `pool_replenish_ceiling_blocked_total`, `pool_profile_mismatch_skips_total`, `pool_dead_slot_evicted_total`, `pool_duplicate_return_refused_total`).
+- **Liveness**: a slot whose `RunnerRPCClient` has died is never handed out and is reaped rather than skipped — see [A Slot the Pool Kept Offering After Its Channel Died](#a-slot-the-pool-kept-offering-after-its-channel-died-1058).
 
 **Configuration:**
 - Enabled by default (`JAATO_RUNNER_POOL_ENABLED=true`).  Disable with `=false` / `0` / `no` / `off`.
 - Pool size via `JAATO_RUNNER_POOL_SIZE` (default 2).
+- Ceiling via `JAATO_RUNNER_POOL_MAX_SIZE` (default `2 x` the pool size) — see below.
 
-**Pool routing gates** (`spawn_session_runner`): pool is consulted iff `pool_manager` wired AND env flag enabled AND `cgroup_attach is None` (cgroup migration mid-life is a follow-up).  Apparmor opt-in sessions ARE eligible (slot self-confines to the per-session profile).
+**A reservation is not capacity (#898).** Slots carry a `cascade_id` and
+cross-cascade reuse is forbidden by design (warm plugin state belongs to the
+original cascade), so a cascade-affined idle slot is capacity for exactly ONE
+tenant. Both capacity sites counted it as capacity for everybody, and a pool at
+capacity could therefore be empty from the point of view of every tenant but
+one: with two idle slots affined to cascade B and `target_size=2`,
+`acquire_slot(cascade=A)` returned `None` (no affine match, no pure-idle) while
+replenishment read `idle_count() == 2 >= 2` and never forked. Nothing to run on,
+and nothing in the system that would ever create one, until B released — 31 s
+past A's 60 s client budget.
+
+The floor and the ceiling now count different things:
+
+| Knob | Counts | Means |
+|------|--------|-------|
+| `JAATO_RUNNER_POOL_SIZE` (`target_size`, default 2) | **unreserved** idle slots — those with no cascade affinity | how many warm slots ANY arriving session may take.  What replenishment tops up. |
+| `JAATO_RUNNER_POOL_MAX_SIZE` (`max_size`, default `2 x target_size`) | **all** idle slots, reservations included | the memory ceiling.  A slot is 129–187 MB, so one reservation per live cascade cannot accumulate unbounded. |
+
+Reservations sit ON TOP of the floor rather than consuming it, which is what
+lets a second tenant's arrival grow the pool instead of starving behind the
+first. Eviction at the ceiling follows from the same principle — **liveness
+outranks warmth**: a returning slot whose cascade is demonstrably mid-run
+displaces the **stalest reservation** (the one the 300 s cascade-idle sweep was
+going to reap anyway), and only when there is no reservation to spend does it
+displace a pure-idle resident, as before. A cascade that loses its reservation
+still RUNS — it falls through to an unreserved slot and pays a cold plugin
+bootstrap. Warm state for one tenant is negotiable; capacity for every tenant is
+not.
+
+Nothing here depends on a tenant declaring "cascade finished" — there is no such
+call, and the crash case is when a pinned slot hurts most. The 300 s
+cascade-idle sweep remains the backstop. Two counters are the sizing signal:
+`pool_stale_reservation_evicted_total` (reservations spent at the ceiling) and
+`pool_replenish_ceiling_blocked_total` (replenishment wanted an unreserved slot
+and `max_size` refused) — nonzero on a multi-tenant daemon means raise
+`JAATO_RUNNER_POOL_MAX_SIZE`.
+
+**Pool routing gates** (`spawn_session_runner`): pool is consulted iff `pool_manager` wired AND env flag enabled AND `cgroup_attach is None` (cgroup migration mid-life is a follow-up).  Apparmor opt-in sessions ARE eligible — but **not** because the slot re-confines itself per session; see the next section for what actually makes that true.
+
+### A Slot the Pool Kept Offering After Its Channel Died (#1058)
+
+`PoolManager` had **no notion of RPC liveness**. `_closed` is set in exactly
+two places — `RunnerRPCClient.close` and the read loop's `finally` — and the
+second runs long after the session that created the client ended, while the
+slot sits in `_idle_slots`. Nothing told the pool. `acquire_slot` handed back
+whatever was at the head of the list, and the next session discovered the
+corpse by failing its own bootstrap:
+
+```
+19:00:25,826  spawn_session_runner: session ... served by pool slot pid=5307
+19:00:25,826  spawn_session_runner: session ... reused slot's rpc client
+19:00:25,828  [ERROR] runner session.bootstrap FAILED:
+              error_type=RunnerCallError error=RunnerRPCClient is closed
+```
+
+**The one reaper the pool had was exempt from looking.** `_sweep_cascade_idle`
+skips `cascade_id is None`, which is right — a PURE IDLE slot has no cascade
+affinity to *time out* — and a standalone session returns its slot as PURE IDLE
+(#1033). So the reported slots sat in the one state nothing ever inspected.
+Warmth has a timeout; liveness is not warmth, and `_sweep_dead_slots` exempts
+nobody.
+
+**A poll, not a callback.** The read loop already knows and already sets the
+flag; what was missing was anybody asking. `slot_rpc_death` is asked at the two
+points where a slot's liveness is load-bearing — `acquire_slot`, and the
+replenish sweep — because a poll at the point of use cannot silently stop
+working, where a callback registered at slot construction is inert the moment
+one of the two construction paths forgets it (#735). Only **positive evidence**
+counts, the posture #1014 and #1023 take about confinement labels: no client is
+alive (nothing has died), and a client that cannot answer `is_closed` is alive
+(reading absence as death would empty the pool).
+
+**Skipping would have been cheaper and wrong twice.** A corpse left in the list
+leaks its runner process, and — the sharper half — keeps counting toward
+`unreserved_idle_count` and `max_size`, so replenishment reads the pool as full
+and never forks the replacement. That is #898's failure in a new costume:
+capacity no arriving session can use, counted as capacity for everybody. Dead
+slots go to `_pending_teardown`, which the existing drain reaps.
+
+**Layer 2 does more than check a flag.** `spawn_session_runner` runs OFF the
+daemon loop while the read loop that sets the flag runs on it, so the reuse
+fast-path can still be handed a client that died since the acquire. What it
+does about it depends on **how** the client died, which is why the cause is now
+recorded (`close_reason`):
+
+| `close_reason` | What survives | Action |
+|---|---|---|
+| `cancelled` | the runner, the socket, the transport — only the READER task is gone | start a **fresh read task** on the surviving transport (`revive_read_loop`) |
+| `eof` | nothing — the peer is gone | discard the slot, cold-spawn |
+| `explicit-close` | nothing — `close()` reaped the runner | discard, cold-spawn |
+| `oversized-frame` / `malformed-frame` | the stream is desynchronised mid-frame | discard, cold-spawn |
+
+A task cannot be un-cancelled, so clearing the boolean would hand back a channel
+nobody is reading — a hang instead of an error. Re-**adopting** the socket is
+never an option: it is already owned by the dead client's asyncio transport, and
+a second `connect_accepted_socket` on it is the PR #173 failure the shared-client
+design exists to avoid. `close()` can never produce `cancelled` — it stamps
+`explicit-close` *before* cancelling the read task and the first cause wins — so
+that reason is a statement of provenance: something **outside** this client
+cancelled it.
+
+**Two nearby defects the same investigation turned up, both fixed:**
+
+- **A read task cancelled before its first step never runs its `finally`**, so
+  `_closed` stayed `False` and the channel reported itself HEALTHY with no
+  reader: writes land, replies are never consumed, every call waits out its
+  deadline. Worse than the reported failure, because the liveness poll answers
+  "alive". A done-callback records it, narrowly — only when the task was
+  cancelled and nothing else has recorded a cause.
+- **`return_slot_after_session` logged "returned to pool" for a slot it did not
+  pool.** At capacity with a pure-idle returner, the returner is the one
+  dropped — and the line still said it was pooled. The incident's key log line
+  (`slot pid=5307 returned to pool (idle_count=4/4)`) is *exactly* that branch's
+  shape, and reading it as proof the slot entered the pool cost two rounds of
+  diagnosis. The method now returns whether the slot was retained, and both its
+  own line and `JaatoServer.shutdown`'s say which happened.
+
+**One slot, one entry.** `return_slot_after_session` refuses (by identity) a
+slot already in `_idle_slots`, at ERROR, counted. `JaatoServer.shutdown`
+captures and nulls `_runner_rpc` / `_spawned_runner` / `_pool_manager_ref`
+**without a lock** and is called from session unload, `session.stop`, the #812
+orphan sweep and daemon shutdown — so two concurrent callers can both see the
+live triple and both return the same slot. The two entries share one `rpc`:
+tear either down and the other is a corpse in the pool that no teardown line
+names. Guarded at the pool rather than at the four teardown paths, the #674
+argument — the pool owns the list, so one boundary check covers callers that do
+not exist yet. It does not *fix* the double shutdown; it makes it audible.
+
+**What killed the reported client is still unknown, and is now answerable.**
+Both read-loop exit lines named no channel (`RunnerRPCClient: runner closed
+connection`, `read loop crashed`), so an operator's grep for a pid could not
+detect a read-loop exit at all — which is why three rounds of evidence went into
+distinguishing lines that could have named themselves. Both carry
+`pid=` now, `close_reason` records which of the five endings it was, and the
+pool's eviction WARNING prints it. Counters: `pool_dead_slot_evicted_total`
+(**not** a success metric — each unit is a runner that died unasked) and
+`pool_duplicate_return_refused_total`.
+
+Latent, not the cause, and worth its own change: `MCPClientManager.__aexit__`
+cancels **every task on the running loop** (`asyncio.all_tasks()`, unscoped).
+Today it runs on a dedicated loop in a dedicated thread in the runner process,
+so it cannot reach a daemon-side read task — but it is one `async with` on the
+daemon loop away from doing exactly what this issue describes.
+
+### A Key That Said "Reusable" and a Name That Said "New" (#1033)
+
+The slot reuse key was `(cascade_id, config_root)` and the AppArmor profile
+was named `jaato-ws-{session_id}` — **the one property guaranteed to differ
+on every reuse**. Both statements cannot be true once confinement is
+per-task, and #1023 is what made that visible: `aa_change_profile` confines
+the CALLING TASK, the kernel refuses `current != task` (`-EACCES`), and
+#1026 can retire only the two RPC executor lanes. `OtelBatchSpanRe` and the
+reader/`Thread-N` set are not executors, so on every **reused** slot the
+thread population straddled two profiles and `verify_thread_confinement`
+correctly refused the bootstrap.
+
+Measured on the maintainer's enforcing host: five consecutive session
+creations failed with `RunnerCallError`, each naming four of five threads
+still labelled with the PRIOR session's profile. Deterministic per slot — a
+fresh slot bootstrapped, a reused one refused — which is exactly why it read
+as intermittent.
+
+**The guard was right; the naming was wrong.** So the profile is named after
+the BOUNDARY (`server/confinement_id.py`), and the key contains it:
+
+| property the slot carries | in the key |
+|---|---|
+| warm plugin state from the config tree | `config_root` |
+| warm plugin instances, tenant isolation | `cascade_id` |
+| **the AppArmor profile its threads wear** | **`workspace_root` + `profile_name`** |
+| the cgroup (`runtime_limits` kernel trio) | not needed — `cgroup_attach is not None` routes the session away from the pool entirely |
+| session `env:` / secrets | not needed — overlaid per turn, never baked into the slot |
+
+The rule that generates it: **the key must contain every property of the
+slot that the next session cannot change.** With the name derived from the
+key, "reused slot" and "same profile" are one statement, so a reused slot
+takes `_maybe_self_confine`'s **idempotent** path — no `aa_change_profile`,
+nothing to diverge.
+
+`confinement_id` = a workspace slug plus a digest of the **rendered profile
+body**, which folds in the config root, the env file, the composed fragments'
+contents and the plugin-contributed rules. Rendering rather than hashing the
+inputs is what stops a second "what goes into a profile" implementation
+drifting from the renderer. Including the body is not belt-and-braces: two
+CONCURRENT sessions of one cascade — a narrow stage and a broad one, each on
+its own slot — would otherwise share a name, and provisioning the broad one
+would reload the profile the narrow one is confined to. A silent widening of
+a live boundary is worse than the failure being fixed.
+
+Three consequences, each handled rather than inherited:
+
+- **The gate is on BOTH acquire paths.** A standalone session (no cascade)
+  returns its slot as PURE IDLE — profile and all — and path (2) hands it to
+  the next arrival of any kind. The cascade key never covered that path, so
+  every unrelated pair of workspaces on one daemon reproduced the same
+  straddle. `SlotKey.accepts_unaffined` is that gate: a never-confined slot
+  fits anybody, a confined one fits only the profile it already wears.
+  Counter: `pool_profile_mismatch_skips_total`.
+- **Profile teardown is per-SLOT, not per-session.** A boundary-derived
+  profile outlives its session, so unloading it at session end would strip
+  the boundary off a live runner. `PoolManager._reap_slot_profile` unloads
+  when the last slot wearing it dies; `AppArmorManager.teardown_profile`
+  refuses to unload an id a live session still holds. Unbounded accumulation
+  goes with the per-session name: boundary-derived names are bounded by the
+  number of distinct boundaries a deployment has.
+- **The profile name no longer identifies the session.** It stays
+  human-readable (`jaato-ws-my-repo-3f2a9c1b7d4e`), and #812's
+  `runner_identity` is what records which runner ran which session.
+
+**Two standalone sessions in one workspace and config root now share a slot
+and a profile.** With `cascade_id = None` the key collapses to the boundary,
+which is identical for both, and #890 parks nothing for a standalone
+session — so there is no warm state to leak, and the kernel boundary they
+share is the one each would have been given separately.
+
+Costs, stated: a cascade whose stages have genuinely different boundaries now
+uses a slot per boundary instead of one slot and a transition, and a
+boundary's AppArmor **reference fragments** (`selectReferences` grants) are
+shared by every session on it rather than starting empty per session. Both
+are the direct price of a slot being unable to change the profile it wears.
+
+Not verified here: no kernel. This container carries no AppArmor LSM, so the
+tests exercise the naming, the key and the lifetime with `is_available()` and
+`apparmor_parser` stubbed — they prove the framework stops ASKING the kernel
+to do what #1023 says it cannot, not that the kernel then behaves.
 
 See `docs/design/runner_prewarm_pool_plan.md` for the full multi-PR plan + decision log.
+
+### Slot-scoped Plugin Lifetime (#890)
+
+A pool slot serves several sessions of one cascade in turn, and
+`reset_for_next_session()` is the hook at that boundary — several plugins
+answer it with "keep everything, the next stage benefits". They were keeping
+state on an object nobody would read: every `session.bootstrap` built a fresh
+`PluginRegistry` and re-ran `discover()`, which calls `create_plugin()`, and
+nothing shut the outgoing registry down. Dropping a reference is not freeing a
+resource, so `lsp` started a language server per stage and left the previous
+one running with no owner — three live jdtls (~2.3 GB) on a 5-subphase run,
+each stage paying the cold start the preserved state existed to avoid.
+
+**`TRAIT_SLOT_SCOPED` is what makes the hook reachable.** A plugin declaring it
+is carried across the boundary as an INSTANCE:
+
+| When | What happens |
+|------|--------------|
+| `session.end` (warm — slot returns to the pool) | `reset_for_next_session()` on every plugin as before, then `slot_plugins.park_from`: slot-scoped instances move into a process-level store, **every other initialized plugin gets `shutdown()`** |
+| next `session.bootstrap` on that slot | `slot_plugins.adopt_into` registers the parked instances **before** `discover()` — both discovery paths skip a name already registered, so no rival is constructed. `expose_all` still calls `initialize()`; the plugin's own `_initialized` guard is what makes it a no-op and preserves the warm resource |
+| `session.shutdown` (cold — slot is being reaped) | everything is shut down, parked and current alike; a graceful `shutdown()` beats the SIGKILL-only process-exit backstop |
+
+Declared today by `lsp` (connected LSP clients + the thread that owns them) and
+`todo` (the per-agent plan map a later stage reads). **A no-op
+`reset_for_next_session()` is not on its own a reason to declare it** —
+`references` has one because it has nothing to clear, while its state
+(sources, selected ids, preselected paths) is emphatically per-session, and
+carrying that instance would leak one stage's context into the next. The trait
+means "everything I hold is deliberately cross-session".
+
+**Reuse is conditional.** A slot returns to the pool and may be handed
+unrelated work, so an instance is adopted only when the arriving session
+matches on cascade (`cascade_driver_id`), workspace, config root, and that
+plugin's declared config — session-identity keys (`session_id`, `agent_name`)
+excluded, since counting them would make every comparison a miss. Any
+mismatch shuts the parked instance down rather than leaving it running. A
+standalone session (no cascade) parks nothing, and neither does a boundary
+whose reset sweep raised — the daemon won't pool that slot, so parking for a
+next session that never arrives is only a slower leak.
+
+`PluginRegistry` gains `adopt_plugin()` / `is_adopted()` / `shutdown_all()`,
+and `set_session_id()` now **broadcasts** to plugins implementing it: a carried
+instance's `initialize()` early-returns, so nothing else refreshes the session
+identity it logs under.
+
+### A Profile the Process Wore and Two of Its Threads Did Not (#1023)
+
+`aa_change_profile` confines the **calling task**, not the process.
+`/proc/self/attr/current` resolves to `/proc/<pid>/attr/current`, which
+reports the label of the task whose tid == pid — the **main thread**. Every
+confinement check in this tree read exactly that path:
+
+| Reader | Saw |
+|---|---|
+| the post-transition readback (`runner/bootstrap.py`) | `(enforce)` ✅ |
+| the idempotency check (`runner/session.py`) | `(enforce)` ✅ |
+| `sandbox_mode` in the session record | `"apparmor"` ✅ |
+| an operator running `cat /proc/<pid>/attr/current` | `(enforce)` ✅ |
+
+So a worker thread created **before** the transition kept its `unconfined`
+cred for the life of the pool slot, and nothing in the framework could see
+it. Confirmed live on a fully enforcing host: **2 of 5 running session
+runners**, each with a `runner-rpc-work` thread in the unconfined set.
+
+`session.bootstrap` running synchronously on the reader thread was
+necessary and **not sufficient**, which the dispatch site's own comment had
+stated as a premise (*"main confines BEFORE any worker spawns"*).
+`ThreadPoolExecutor` spawns workers lazily on first submit, and a slot
+fields RPCs before its first bootstrap — `session.end` from the previous
+session of a cascade, a dispatch-watchdog probe — so the population is
+routine. Executors reuse workers and `TRAIT_SLOT_SCOPED` instances are
+deliberately carried across session boundaries, so it is durable and
+**re-accumulates** after any manual clear.
+
+The exposure is not the notebook, which is only the canary (the one
+subprocess surface that inherits passively, so the one whose failure is
+visible — and its failure was the audit-tier fail-safe working). It is
+**every in-process tool** dispatched onto such a thread: `readFile`,
+`file_edit`, `glob_files`, the notebook `local` backend, any in-process
+plugin. AppArmor restricts tasks, so those run bounded only by the
+application-layer containment heuristic, leave no AVC, and the session
+record asserts `sandbox_mode: apparmor` throughout.
+
+**Two changes, and the second is the one that makes the first checkable.**
+
+| | What | Where |
+|---|---|---|
+| retire | `RunnerRPC.recycle_worker_pools` replaces both executor OBJECTS, so every later RPC spawns a fresh worker under the confined cred | `runner/rpc.py` |
+| verify | `verify_thread_confinement` walks `/proc/self/task/*/attr/current` and refuses the bootstrap on divergence | `runner/bootstrap.py` |
+
+An existing thread cannot be repaired — the kernel enforces
+`current != task -> -EACCES` on an `attr/current` write, so no thread can
+confine another — it can only be retired. Both run on the **idempotent**
+path too, which is deliberate: a slot serving its second session of a
+cascade under the same profile takes that path, and a worker created before
+the slot's *first* bootstrap is unconfined on it.
+
+**Nothing in flight is dropped.** The recycle runs on the reader thread
+inside the synchronous bootstrap handler, which is the only submitter, so
+no *new* work can arrive while it runs. What may still be executing is a
+pre-bootstrap RPC, so the old executors are shut down with `wait=False` and
+**without** `cancel_futures`: cancelling would leave the daemon waiting for
+a response nobody writes, and waiting could deadlock against a task blocked
+on an `outgoing_call` that only the reader thread can resolve. A worker
+draining its last task is therefore briefly alive holding the old cred,
+which is why verification re-scans across a short grace window before
+calling divergence durable.
+
+**Divergence fails the bootstrap, and only positive evidence counts.** A
+label read successfully that names a different profile is proof that code
+in this process runs outside the boundary the record claims. A label that
+could not be read proves nothing — a restricted `/proc`, an unusual
+container, a profile template predating the task-dir grant — so that is
+logged and the session continues. Failing closed on *absence of evidence*
+would take down every session on a host whose `/proc` it merely could not
+read. The alternative for real divergence — log an ERROR and proceed — is
+the incident state itself, and #1013's proposed `require` mode would
+certify such a runner. An operator who cannot tolerate the refusal already
+has an honest opt-out: an empty `profile_name` runs the session unconfined
+and the record then claims nothing.
+
+**Template v32** adds `/proc/*/task/ r,` to the base and isolated
+sub-runner bodies — the *directory listing*; the per-tid `attr/current`
+reads inside it have been granted since v15. It reveals tids and nothing
+else (the v30 `audit deny` on per-tid `environ` / `mem` / `pagemap` /
+`auxv` / `cmdline` is unaffected, a deny beating an allow at any
+specificity). Without it the walk still runs — it falls back to
+`threading.enumerate()`, which needs no grant because it reads no file and
+sees every thread the interpreter created, i.e. every thread this defect is
+known to produce — so a runner confined by an older profile is checked
+rather than unchecked, and pays one denial AVC per bootstrap. The scan
+reports which route it took, because that bounds what it could have seen.
+
+**Checking a deployment** (any runner whose threads are not uniformly
+labelled is exposed; `/proc/<pid>/attr/current` alone will say it is fine):
+
+```bash
+for p in $(pgrep -f 'server\.runner'); do
+  proc=$(tr -d '\0' < /proc/$p/attr/current)
+  for t in /proc/$p/task/*; do
+    lbl=$(tr -d '\0' < "$t/attr/current")
+    [ "$lbl" = "$proc" ] || echo "DIVERGENT pid=$p tid=${t##*/} proc='$proc' thread='$lbl'"
+  done
+done
+```
+
+Not done here: giving the notebook kernel an explicit `//child` transition
+(the issue's fix 4). It is defence in depth against a *future* passive-`ix`
+spawn path, it does not address the in-process exposure above, and it
+changes what every notebook cell runs under on confined hosts — which
+cannot be exercised without an enforcing kernel. It belongs in its own
+change.
+
+### A Profile Attached and a Kernel Enforcing Nothing (#1014)
+
+#1023 asked **which task** is confined. This is the other axis of the same
+readback: **which mode** the kernel is applying. `JAATO_APPARMOR_COMPLAIN=1`
+stamps `flags=(complain)` on the whole profile chain — base, `tool_hat` and
+`//child` alike — and a complain-mode profile **logs each denial and allows
+the syscall**. There is a profile and there is no boundary.
+
+Four of the five places that asked "is this session confined?" answered
+without consulting the mode — two by prefix-matching the profile NAME, one
+from the fact that provisioning succeeded, one from the presence of a
+callback:
+
+| Reader | Under complain |
+|---|---|
+| the post-transition readback (`runner/bootstrap.py`) | **"confined"** — the comment even read `# e.g. "jaato-ws-... (enforce)"` while the match accepted `(complain)` |
+| the idempotency check (`runner/session.py`) | **"already confined"** |
+| `sandbox_mode` in the session record | **`"apparmor"`** — mode never consulted |
+| `interactive_shell.require_confinement: true` | **satisfied** — the transition into `//child (complain)` succeeds |
+| `notebook/kernel_sandbox.apparmor_enforced_profile` | correctly reports no boundary |
+
+The fourth row is the sharpest: `require_confinement` is the strictest
+fail-closed knob in the tree — *"Refuse to spawn at all when no AppArmor…"* —
+and it passed while the kernel blocked nothing. The fifth is why the only
+visible symptom was a notebook cell failing to `import numpy`.
+
+And it was **silent**: grepping `complain` against `logger|warn` in
+`server/apparmor.py` returned nothing — no WARNING at generation, at
+provisioning or at startup, while every other weakened boundary here
+announces itself (`scrub_secret_env: none`, `--ws-unsafe-no-auth`,
+`notebook.allow_uncontained_exec`).
+
+**One definition, in one module.** `shared/apparmor_label.py` parses an
+`attr/current` value into profile + mode and is the only place either
+question is answered. Pure stdlib with zero jaato imports, the shape
+`shared/runtime_limits.py` already has, because `shared/` cannot import
+`server/` and `server.runner.bootstrap` must stay importable before plugin
+discovery — that is the bootstrap's one documented cross-import, and a
+guard test pins the module's import set. `apparmor_enforced_profile()` is
+unchanged in behaviour and now delegates; it was the one right answer, and
+lifting it out is what stops the other four carrying a fifth and sixth
+opinion.
+
+**Two questions, deliberately kept apart.** `profile_name_ignoring_mode` is
+mode-TOLERANT and named so it cannot be read as an enforcement assertion.
+Its callers ask *which profile is this task in* — #1023's per-thread
+comparison, and the bootstrap idempotency skip — where a complain-mode
+label is not divergence, and reading it as one would make the diagnostic
+unusable. `AppArmorLabel.enforced` is the only predicate that may stand
+behind a claim that a boundary exists. A label with **no** `(mode)`
+annotation is not enforced: absence of evidence is not a boundary.
+
+| Ask | Change |
+|---|---|
+| one predicate | `confine_to_profile` classifies the mode; the idempotency skip stays mode-tolerant and says so; `interactive_shell` and the notebook resolve through the same helper |
+| record the mode | `sandbox_mode` gains **`apparmor-complain`** beside `apparmor` and `soft` |
+| announce it | complain-mode generation WARNs once per daemon, naming the env var; `confine_to_profile` and the idempotency path WARN per session |
+| `require_confinement` means enforce | an installed child transition is necessary and no longer sufficient — the spawning thread's label must be `(enforce)` |
+
+**A value, not a field.** `apparmor-complain` widens an existing string's
+vocabulary rather than adding a record key, so the record version is not
+bumped. The record's `version` does have a reader — `deserialize_session_state`
+— and it gates on the **major** (`1.x` / `2.x`), which is exactly what a field
+gaining a value is indifferent to; 2.10 → 2.11 would have been cosmetic. An
+older reader comparing `sandbox_mode == "apparmor"` reads it as "not
+confined", which is TRUE and is the safe direction. In-tree readers ask through
+`sandbox_mode_is_apparmor` ("was a profile provisioned at all" — the revive
+gate, which re-arms confinement for either mode because the mode is
+re-decided at the next provisioning) or `sandbox_mode_is_enforced` ("was
+there a boundary" — the question the field could not answer before).
+
+**Complain mode is announced, not refused.** It is a documented diagnostic
+(harvest the missing-rule set in one cascade run, then ship targeted
+grants), and refusing to start under it would delete the diagnostic. What
+the default does instead is stop lying: the readback's leading words no
+longer say "confined", which is what made #1014's evidence unfindable — the
+truth sat in the parenthetical of `runner confined to AppArmor profile X
+(kernel reports: X (complain))`, and nobody greps a parenthetical.
+
+**The hook #1013 needs.** `confine_to_profile(..., require_enforce=True)`
+raises `ConfinementModeError`. #1013 names this readback as where
+`JAATO_APPARMOR_BEHAVIOR=require` would assert that the kernel applied the
+profile; built on the mode-blind version, `require` would have been
+satisfied by the exact posture it exists to refuse. That is why ask 1 is a
+prerequisite rather than a parallel cleanup — the flag itself is not wired
+to an env knob here, which is #1013's own change.
+
+Not done here: no kernel-side verification. This container carries no
+AppArmor LSM, so every site is exercised from a fabricated `attr/current`
+value — which is the point of routing the decision through one parser, and
+is also the limit of what was checked. `JAATO_APPARMOR_COMPLAIN` stays a
+`host`-scoped env var with no typed profile key; it is a whole-daemon
+diagnostic, not a per-session knob.
+
+### Binary Media Chunks (delivery)
+
+Binary content (audio, images, PDFs) moves in three directions, and they are
+NOT the same path: **inbound** (content the model looks at), **outbound** (the
+model emits speech), and **tool -> client** (a tool produces bytes a *person*
+consumes; the model may never see them). See
+[Binary Media Chunks](docs/design/binary-media-chunks.md).
+
+**One chunk primitive.** `StreamChunk` (`shared/plugins/streaming/protocol.py`)
+carries text, bytes, or both. `inline_data` mirrors `Part.inline_data`
+(`{mime_type, data}`) so one shape serves inbound parts, tool attachments and
+chunks alike. New fields are appended, so positional construction and every
+existing producer are untouched.
+
+**Audience is data, not policy.** `Audience` (`MODEL` / `CLIENT` / `BOTH`,
+default `MODEL`) selects whether a chunk enters *this session's history* — not
+whether the event is published. Every chunk still reaches all three
+subscription surfaces; a parent agent watching a child sees a `CLIENT` chunk
+and is subject to its own modality gate. Tool streaming was previously
+hardcoded to "for the model, hidden from the user"; media inverts that.
+
+| Audience | Enters history | Delivered to clients |
+|----------|----------------|----------------------|
+| `MODEL` (default) | yes (`<hidden>`, as before) | no |
+| `CLIENT` | **never** | yes |
+| `BOTH` | yes | yes |
+
+**The gate routes, it no longer shreds.** `_gate_one_tool_result` used to
+*destroy* attachments the active model can't consume. Content the model cannot
+consume is exactly what a viewer may want, so those attachments are now emitted
+as `CLIENT` media (correlated by the result's `call_id`) before being stripped
+from the model's copy. The model-facing withheld-note is unchanged.
+
+**Inbound attachments dispatch on mime (they are not all images).**
+`model_provider/_attachments.py` is the inbound counterpart of
+`_media_deltas.py` — a plain module, imported rather than inherited, for the
+same reason: the providers speaking OpenAI's format are not the set that
+inherits `_openai_compat`. It owns the one question every OpenAI-shaped
+converter must answer for an `inline_data` part or a tool-result
+`Attachment`: *does this wire carry this mime?* `image/*` becomes an
+`image_url` block; `application/pdf` becomes a `file` block **only** where
+the wire declares it (`pdf_as_file=True`, i.e. `openrouter`, which declares
+`pdf_input=True`); `audio/*` becomes an `input_audio` block **only** where
+the wire declares it (`audio_as_input_audio=True`, likewise `openrouter`,
+which declares `audio_input=True`); everything else — video, and a part with
+**no** declared mime — is withheld, logged at WARNING, and reported to the
+model with the same `[Attachment withheld: ...]` note the modality gate uses.
+That note now also names what *this* wire accepts, because telling a model
+refused audio to retry as "text, or an image" on a wire that carries PDFs
+and audio wastes a turn on advice that was never true.
+
+**The ears (#830).** Outbound audio was complete — #824 delivers
+model-emitted media to a client, #828 sources `final` from the provider's own
+end-of-audio marker — and there was no inbound path at all: `input_audio`
+appeared **nowhere** in the tree, so an `audio/*` part was withheld by the
+clause that (correctly) withholds video, however loudly a model's catalog
+entry declared `audio` as an input modality. The gates deciding whether audio
+*may* be sent already existed on both the tier path
+(`_validate_modality_tier_capabilities`) and the tool-result path
+(`_gate_one_tool_result`); what was missing was somewhere to send the bytes.
+
+| Wire | Shape | Vocabulary |
+|------|-------|-----------|
+| `openrouter` (and any OpenAI-shaped wire that opts in) | `{"type":"input_audio","input_audio":{"data":"<b64>","format":"wav"}}` | closed: `wav`, `mp3`, `aiff`, `aac`, `ogg`, `flac`, `m4a`, `pcm16` |
+| `google_genai` | `Blob(mime_type=..., data=...)` — already carried any mime | the model's own |
+
+The `format` field is the wire's vocabulary, not ours, so a container it does
+not name (`audio/opus`, `audio/webm`) is **withheld with a note**, never
+relabelled to one it does name — that would be #829 in new clothes. Raw PCM
+is the one mime whose whole shape lives in its parameters, and `pcm16` is an
+assertion about them (s16le / mono / 24 kHz): a parameter that *contradicts*
+it withholds, an absent one is agreement, and `audio/L16` is refused outright
+because RFC 2586 makes it big-endian and relabelled big-endian samples are
+noise. The framework's own `STREAM_AUDIO_MIME` — what a speaking model emits
+— maps to `pcm16`, so the ears accept what the mouth produces.
+
+Gemini needed no wire work at all: `_part_to_google` has always marshalled
+any `inline_data` into a `Blob` with the part's own mime. Its
+`MODEL_INPUT_MODALITIES` table simply omitted `audio`, and that table is what
+the tool-result gate and the tier validator read — so the framework declined
+content the wire beneath it would have delivered.
+
+**An attachment no longer means "do not stream" (#837).** The ears and the
+voice could not be used in the same turn. A user message carrying an
+attachment is routed to `_run_chat_loop_with_parts`, which called the
+**batched** `provider.complete()` unconditionally — `_use_streaming` was
+never consulted there — and OpenAI emits audio only while streaming, so a
+`modalities: {audio: bidirectional}` tier answered the first turn that used
+both directions with `400 Audio output requires stream: true`. The path
+predates media output and was built for images, where a batched vision turn
+is perfectly reasonable; audio input is the first attachment kind whose
+*reply* may itself be audio. Both chat loops now take the streaming decision
+from `JaatoSession._resolve_use_streaming`, and a streamed parts turn stops
+emitting each response's assembled text on top of the chunks it already
+delivered. A provider that reports `supports_streaming() == False` still gets
+the batched call it always got. See
+[Binary Media Chunks §8](docs/design/binary-media-chunks.md).
+
+**An attachment IS content (#838).** One step earlier, the voice turn still
+did nothing. `SessionManager.handle_request` decided whether a
+`SendMessageRequest` becomes a model turn by reading the message **text** and
+nothing else, so a blank-text send returned with a synthetic
+`TurnCompletedEvent` and never called `server.send_message` — while
+`event.attachments` sat on the same object, read twenty lines later on the
+path that branch had already returned from. The same 88 KB `audio/wav`
+attachment *with* text reached the provider (and was refused by it, per #837);
+with `text=""` it was dropped **before** the wire, and the caller was told the
+turn completed. For an image, blank text is unusual — there is normally a
+question about the picture; for **audio it is the normal case**, since the
+attachment *is* the message, so `session.complete("", attachments=[utterance])`
+was exactly the request that silently did nothing. Every layer below already
+handled it (`_parts_from_user_message` documents the no-text parts list, the
+runner RPC accepts `""` as a valid `str` prompt, and the standalone-WS handler
+dispatches such a send with no emptiness check at all), which is what
+identifies this one site as the defect. The remaining blank branch —
+`SessionManager._close_contentless_message` — now distinguishes its two
+arrivals: a solely-`%name --help` message closes quietly because the help
+*was* the answer, and a request with no text and no attachments is refused by
+name (`ErrorEvent(error_type="EmptyMessageError")`), because a bare
+`TurnCompletedEvent` is indistinguishable from a turn that ran and produced
+nothing. See [Binary Media Chunks §9](docs/design/binary-media-chunks.md).
+
+**What a model was GIVEN is replayed to whatever model comes next (#847).**
+A session that had *heard* audio could not `enter_tier` into a text model.
+The utterance stays in history — the audio tier needs it next turn — and
+history is replayed on every later request, so the text tier's first
+request carried `input_audio` and OpenRouter answered `404 No endpoints
+found that support input audio`. Not a missing model: a refused request.
+The modality gate existed and covered one direction only
+(`_gate_tool_results_for_active_modalities`, tool results), so
+`duet`-style outbound-audio profiles were fine and the failure appeared
+only once #830 made *inbound* audio possible.
+`JaatoSession._gate_history_for_active_modalities` is the other half, and
+sits where `docs/design/multimodal-model-support.md` always said the gate
+belonged — the send path, right before history→provider conversion — so
+every `provider.complete()` call site now reads
+`_history_for_provider()` instead of `SessionHistory.messages`. It is
+**per-request, never destructive**: it filters a copy, the stored bytes
+stay, and switching back restores them; a fix that stripped history would
+repair the planner by permanently deafening the session. Withheld content
+leaves a note (`_build_withheld_attachment_note`, now taking a
+`retry_action` because "re-run this tool" is not the remedy when nothing
+needs re-running), since a planner handed a silently-emptied user turn
+answers as though the caller said nothing. Tool results already in history
+are gated too — `_gate_one_tool_result` ran against the model active when
+the result was produced. Gating above the converter rather than teaching
+`openrouter/converters.py` to ask `self.modalities()` answers the same
+latent hardcode in every OpenAI-shaped converter (`_openai_compat` emits
+`image_url` whatever the model declares) with the framework's one answer,
+`provider.supports_modality()`. Consequence: for the providers inheriting
+the text-only floor from `ModalityCapabilityMixin`, a user-message image
+now meets the same withhold their tool-result images always have. See
+[Binary Media Chunks §10](docs/design/binary-media-chunks.md).
+
+**A tier gets what it ASKED for, not what its model can read (#1001).**
+#847's gate had one bound — `provider.supports_modality(kind)`, the active
+model's catalog INPUT capability — and a tier declares a second one nobody
+consulted. A voice bot heard a Telegram voice note in its `executor` tier
+(`google/gemini-2.5-flash`, which accepts audio) and then
+`enter_tier("voz")` to *speak* the answer. `voz` is
+`openai/gpt-audio` with `modalities: {audio: outbound}` — it speaks, it was
+never asked to listen — and `gpt-audio`'s catalog lists audio INPUT
+(verified live: `input: ['text', 'audio']`), so the gate kept the recording
+and the upstream refused the request. The tier that only needed the text to
+vocalise was handed the bytes of the question.
+
+**This is the level at which the question is answerable.** The refusal
+named a container (`Invalid value: 'ogg'`), which invites fixing the
+*format* — and the framework cannot know which containers a given model
+accepts, so a jaato-side allowlist could only ever be stale in one of two
+directions, the argument `api_params` already makes about per-model tables.
+The tier's declared role is knowable, local, and written by the author.
+`_gate_history_for_active_modalities` is where the two bounds meet.
+
+| The active tier | Inbound bound |
+|---|---|
+| no tier config, or no active tier | the model's capability alone — **unchanged** |
+| declares no role of its own | the model's capability alone — **unchanged** |
+| a `vision` tier carrying only its IMPLICIT `{image}` role | the model's capability alone — the shim exists to keep pre-`modalities` profiles working, so it must not arm a gate |
+| declares any role, either direction | the model's capability **∩** its own `inbound_modalities` |
+
+`ModelTierConfig.gating_inbound_modalities` answers that question (`None` =
+"no opinion", distinct from `frozenset()` = "accepts no non-text input"),
+and `JaatoSession._modality_refusal` intersects it with the model —
+**narrow, never widen**, the most-restrictive-wins shape
+`runtime_limits.max_parallel_tools` uses: a tier declaring `audio: inbound`
+on a text-only model still withholds.
+
+**The note names the bound that refused.** A model on `openai/gpt-audio`
+told "the active model can't view audio content" has a true fact to
+contradict and spends a turn contradicting it, so a tier refusal gets its
+own note (`_build_tier_role_withheld_note`) saying the TIER declares no
+inbound role, that the model itself can read it, and which tier does
+declare it — while a model refusal keeps #847's wording unchanged. The
+trace line names both sets for the same reason.
+
+Deliberately NOT done: evicting consumed media at tier entrance. That is a
+context-SIZE concern (#850's territory), it is destructive to stored
+history where this gate filters a per-request copy, and per-tier
+consumption tracking is state nobody has a failing case for — the gate
+above is what fixes the reported failure.
+
+**How long anyone sees it (#850).** #847 fixed *which* model sees an
+utterance; media still had a lifecycle in one direction only. Outbound was
+right — model media is `CLIENT`-audience so it never enters history, and
+`ensure_spoken_part` leaves the *transcript* in its place. Inbound got
+neither: a heard utterance stayed in history verbatim and rode every later
+request. Five questions on one helpdesk call measured ~2.8 MB of accumulated
+audio and a final request carrying all of it (~3.8 MB base64), growing with
+every turn.
+
+**And GC could not see it.** `grep -rn "inline_data" shared/plugins/gc_*/`
+returned nothing: `estimate_message_tokens` walked text, function calls and
+function responses and never looked at `inline_data`, so a 600 KB utterance
+was sized at the one-token floor and no threshold could fire on the payload
+it exists to bound. Two channels now, deliberately different in kind —
+`estimate_media_tokens` puts media in the **token** denominator (so a
+media-carrying turn is sized, and eviction can prefer it), and
+`context_usage["media_bytes"]` is a second denominator in **bytes** that
+`media_pressure_reason` compares against `GCConfig.media_bytes_threshold`
+(all four strategies consult it). Bytes, because the thing that killed the
+session was request *size* and an operator bounding it thinks in megabytes;
+laundering them through a token estimate would hide the quantity that
+matters behind a guess.
+
+**Purging cannot simply delete.** In a call-retention-regulated domain "the
+agent handled a claim from audio nobody can produce" is the audit finding.
+An inbound attachment carried **no id** (`{mime_type, data, display_name}`)
+while outbound media has carried `stream_id`/`sequence` since #824 — so the
+identifier is minted at *ingest* (`jaato_sdk/media_identity.py`), as a
+SHA-256 digest of the payload rather than a uuid, because the archive side
+must be able to **recompute** it from the recording rather than look it up
+in a mapping somebody kept. The SDK client mints it (the sender is what
+archives the file); `_parts_from_user_message` back-fills the same value for
+clients that send none, and never overwrites one the caller supplied.
+
+`JaatoSession._evict_consumed_media` then replaces the bytes with a marker
+naming that id, duration and mime. It runs at the **start** of a turn, from
+both chat loops: everything in history then belongs to a completed turn, and
+a turn that died before the model saw its audio keeps the bytes for a retry.
+Unlike `_gate_history_for_active_modalities` (a per-request *copy*), this is
+destructive — the accepted trade, since re-hearing a recording yields the
+understanding the conversation already records in words. Audio only by
+default; an image is routinely re-examined across turns, a recording is not.
+Shape **A** of the two the issue names; shape **B** (substitute a
+transcript, mirroring `ensure_spoken_part`) needs a transcript source that
+chat-completions does not provide for inbound audio, and composes on top.
+Knobs: profile `gc:` / `.jaato/gc.json` `evict_consumed_media`,
+`media_evict_mime_prefixes`, `media_bytes_threshold`; env
+`JAATO_GC_MEDIA_BYTES`. See
+[Binary Media Chunks §11](docs/design/binary-media-chunks.md).
+
+**What was said reaches the client (#869).** Every spoken turn produced a
+transcript inside the provider and no client could obtain it: the decoder
+put the words in a caller-owned sink, and the sink became a history Part
+(`ensure_spoken_part`) only after the stream closed, past every point that
+emits to a client. A voice client saw 5.45 s of audio in 14 chunks and an
+`ask()` returning `''`; a call log could record how long the agent spoke but
+not what it said. The `pending` one-slot buffer already holds the last chunk
+back to mark it `final`, and the transcript is complete at that moment, so
+the chunk released as `final` now carries the whole utterance in
+`MediaDelta.transcript` — which `_deliver_model_media` already forwarded into
+`ToolOutputEvent.chunk`. Intermediate chunks stay wordless; a client reads
+the words exactly once, off the event that also ends playback. Under the
+same rule history follows: a turn that wrote its own text sends no
+transcript, because those words already went out as `AGENT_OUTPUT`. One
+predicate, `model_wrote_text(parts, accumulated_text)`, answers for both
+destinations, and both streaming loops pass it as a callable read *at the
+marker* rather than a flag read at the start. See
+[Binary Media Chunks §12](docs/design/binary-media-chunks.md).
+
+**A session that ended can be driven with bytes (#845).** Everything above
+concerns one live turn. There are two ways to drive an **existing** session
+— `session.wake` and `inject_prompt` — and both were text-only, while
+`attachments` sat on `send_message`, the *live-session* path. A
+completion-gated session is designed to END (`signal_completion` releases the
+runner) and the documented way back in is `session.wake`; for a voice agent
+the next input is a spoken utterance and there was no field to put it in, so
+the resume path was closed to exactly the sessions #830 made possible. Both
+verbs now take the same `attachments` `send_message` accepts, normalised by
+the same `IPCClient._normalize_attachments`, plus typed
+`IPCClient.wake_session(...)` / `wakeSession(...)` so the field is visible
+from the API surface a reader starts at. Protocol **1.5**.
+
+Three rules the fix holds to:
+
+| Rule | Why |
+|------|-----|
+| the untrusted boundary is **stated beside** the bytes, not inherited | a wake payload is untrusted (a webhook, a cron, a public comment), and an audio part has no marker to defang. `_wrap_wake_content` names each attachment INSIDE the wrapper — mime, display name, ingest id, never the payload — so a **spoken** instruction is not weighed differently from the identical typed one |
+| an attachment-bearing **inject is idle-only** | only the drive branch can carry bytes; a queued message is folded into the running turn as TEXT (a tool result's `model_suffix`, or `Message.from_text`) and has nowhere to put an `inline_data` part. So `deliver_prompt_to_session` forces `require_idle`: a busy target answers `BUSY` with **nothing enqueued** rather than accepting the message and dropping the payload that WAS the message. A text-only inject is unchanged |
+| an old daemon is **refused, not degraded** | an additive optional field normally degrades harmlessly — true of #620's `request_id`, false of bytes: the degraded call is a turn driven without the audio, and for a blank-text utterance an empty turn reported as a success. The SDK raises below `MIN_ATTACHMENT_RESUME_PROTOCOL` |
+
+An attachment IS content here too (#838): a wake carrying only an utterance
+is valid; one carrying neither text nor bytes is refused by name. See
+[Binary Media Chunks §13](docs/design/binary-media-chunks.md).
+
+**A question can be answered with media (#989).** #845 made an existing
+session drivable with bytes; this is the direction the agent itself opens.
+`request_clarification` blocks the turn until someone answers, and the
+answer was text-only — so a user asked "what's your name?" who replies with
+a voice note has nowhere to put it, and submitting the audio as an ordinary
+turn is stashed silently behind the pending clarification. **A clarification
+answer is a tool result, not a user message**, which decides the mechanism:
+the bytes ride `ToolResult.attachments`, where all three converter families
+already marshal them (`input_audio` included, since #830) and where
+`_gate_one_tool_result` already gates them against the active model. The
+ferry the issue first proposed — `_parts_from_user_message` — would put a
+user turn in history the user never sent and leave the tool result claiming
+it carried nothing.
+
+**Attachments are orthogonal to the answer's TYPE.** "Choice answers stay
+ordinal, attachments N/A" is wrong:
+
+```
+How should we design this?
+  1. You attach a screenshot of the design
+  2. We discuss the design
+```
+
+Choosing (1) and attaching it is `selected_choices=[1]` **plus** an image —
+the ordinal says which branch, the attachment says what content. So
+`attachments` is a field of `Answer`, beside `selected_choices` /
+`free_text` / `skipped`, and the question-side declaration
+`Choice.expects_attachment` is per-CHOICE, because in that example option 1
+wants a file and option 2 does not. `QuestionType` stays three values; the
+choice flag is advisory (a client renders an attach control, nothing
+enforces it). The model spells it as `attachment_choices: [1]`, a sibling
+array of 1-based indices — `choices` stays an array of strings, because this
+schema is ordinal throughout (`default_choice` is the same shape) and
+promoting every choice to an object would charge every clarification that
+ceremony for a rarely-used flag.
+
+Protocol **1.6**: `ClarificationBatchResponseEvent.answer_attachments` is a
+PARALLEL map (1-based question index -> the canonical `{mime_type, data,
+display_name, attachment_id}` dicts `send_message` already takes), never a
+widening of `answers` into a union — that list is positional in the TUI, the
+TS SDK and the web store. #845's rule 3 transfers verbatim: an old daemon
+ignores the field and answers with the media gone, which for a voice answer
+is a BLANK answer reported as a success (`_parse_answer` reads an empty
+response as `free_text=""`), so both SDKs REFUSE below 1.6. Rule 1 transfers
+as **labelling only** — today's typed answer is inserted verbatim, so
+defanging just the spoken one would weigh it differently from the identical
+typed one; each attachment is instead NAMED beside the answer it belongs to
+(mime, display name, ingest id — never the payload), which is also what
+makes a multi-question batch attributable.
+
+| Refused at submit, clarification left OPEN | Why there |
+|---|---|
+| an index naming no question; an undecodable payload | the daemon holds the batch it emitted |
+| a batch over **6 MiB** of payload | over it the RPC response frame is never written (`FrameTooLargeError`), the runner's call never resolves, and the turn hangs behind a clarification nobody can answer. A 120 s utterance is ~5.12 MB serialised: one fits, two do not, and the multi-question voice policy is still open |
+| attachments with no relay waiting | the daemon-local `QueueChannel` carries strings and has nowhere to put bytes |
+
+**Not** refused at submit: whether the active model can consume the mime.
+The daemon does not hold the runner's provider and the tier can change
+between question and answer (#847), so that stays with
+`_gate_one_tool_result`, which answers it against the model the bytes
+actually reach and routes what it withholds to the client.
+
+**The GC prerequisite (#850, one part-shape over).** `message_media_bytes`,
+`estimate_media_tokens` and the eviction walk read `part.inline_data`
+exclusively; `function_response` appeared in `gc/utils.py` only for message
+grouping. So a tool result's attachments were sized at the one-token floor
+and immune to `_evict_consumed_media` — pre-existing for the `_multimodal`
+image tools, and a per-clarification voice answer is where it recurs every
+turn. `part_media_views` is now the one answer to "what binary payload does
+this part carry". **No new knob**: `media_evict_mime_prefixes` already
+defaults to `("audio/",)`, which is exactly right here — the screenshot in a
+design discussion survives the turns that discuss it, the voice note
+answering "what's your name" does not.
+
+Scoped out, explicitly: subagents (`ParentBridgedChannel` parses answers out
+of injected TEXT and has no representation for bytes), and advertising the
+accepted mimes at ask time (`ClarificationBatchEvent.accepted_attachment_mimes`
+— worth doing, and an unpopulated field would only lie by omission). See
+[Binary Media Chunks §14](docs/design/binary-media-chunks.md).
+
+Two shapes were available for #830 and only one is implemented here: audio as
+an **input modality** (above), not **transcription as a step**. A transcriber
+is a different animal — `microsoft/mai-transcribe-2` is served on
+`/api/v1/audio/transcriptions` (multipart), not chat-completions, and every
+provider in this tree is a chat provider — so whether it is a tool plugin or a
+new provider kind stays an open design question rather than something settled
+in passing.
+
+> `_openai_compat/converters.py` previously sent *every* `inline_data` part
+> as `image_url` and defaulted a missing mime to `image/png` (#829), so a PDF
+> reached the wire as `data:application/pdf;base64,...` inside an image block
+> and an audio part as `data:audio/wav;...` — for nim, vllm, lmstudio,
+> tensorrt_llm, zhipuai_openai, triton, nebius, ovhcloud and doubleword, every
+> one of which declares `pdf_input=False`. The capability declaration and the
+> converter now agree. Silently mislabelling was the one outcome worse than
+> either carrying the bytes or declining them.
+
+**Delivery.** `ToolOutputEvent` gains `stream_id`, `sequence`, `mime_type`,
+`data_b64`, `final` — widened rather than joined by a rival event, so the SDK
+client, the `subscribeToEvents` agent tool and the `EventBus` all light up with
+no new API. A whole-blob delivery is a single-chunk stream (`sequence=0,
+final=True`).
+
+> **Binary bypasses the formatter.** `server/core.py` `on_tool_output` runs text
+> through `agent_pipeline.process_chunk()` for highlighting and marker
+> transformation. That pipeline reflows its input and would corrupt bytes, so a
+> media chunk skips it entirely.
+
+**Backpressure.** The per-client IPC queue was unbounded, making the `QueueFull`
+branch dead code — a slow consumer grew it without limit (cosmetic for text,
+unbounded memory plus permanent audio drift for media). It is now bounded
+(`JAATO_IPC_EVENT_QUEUE_MAX`, default 2048) with a per-class policy: tool-output
+chunks are **lossy** (oldest evicted, media before text, because recency beats
+completeness for a stream), everything else is **essential** and is queued past
+the bound rather than desynchronising the client. `dropped_chunk_count()`
+reports what was lost.
+
+**Bytes on the runner RPC wire (#920).** The daemon ↔ runner channel is
+length-prefixed JSON, and JSON has no `bytes`. The runner encoded with
+`json.dumps(payload, default=str)`, so a binary payload was serialised as its
+**Python repr** — every non-printable byte becoming `\xNN`, which JSON then
+escaped again. A 120 s utterance (3.84 MB, what `MAX_UTTERANCE_SECONDS`
+legally produces) crossed as a **16.13 MB** frame: over the 10 MB
+`MAX_MESSAGE_SIZE`, so the peer refused it, closed the transport, and every
+in-flight call died with it — including the `session.send_message` that WAS
+the turn. Size was the lesser half: `str(b'\x00\xff')` does not round-trip,
+so a payload small enough to pass the cap (an image, a short clip, a PDF)
+delivered a repr string nothing would ever decode. The cap failing loudly on
+size before it could fail quietly on content was luck, not design.
+
+Three fixes, one per layer:
+
+| Layer | Before | Now |
+|-------|--------|-----|
+| encoding | `default=str` reached bytes | `server/runner/json_codec.py` — bytes become `{"__bytes_b64__": ...}` and decode back to bytes; `str` stays the fallback for genuinely diagnostic objects (a datetime, an enum). Used by **both** ends, so daemon→runner bytes stop raising `TypeError` too |
+| the payload that broke | `agent_history_updated` handed raw `Message` objects to that encoder, which stringified each whole message | serialised with the canonical session serializer — the shape `session.get_history` already used (1.33x, and `AgentState.history` holds `Message`s again instead of repr strings the reconnect replay reads `msg.role` off) |
+| the blast radius | an oversized frame was written, and the reader — which consumes the length prefix but not the body — could only close the channel | oversized frames are refused at the **write** side: the runner answers that one call with `FrameTooLargeError` and keeps serving, the daemon raises it to that one caller before anything reaches the socket |
+
+**Client renderability.** `PresentationContext.renderable_media` declares the
+MIME types a viewer can play (`can_render_media()` honours `type/*` wildcards
+and ignores parameters). This is the CLIENT axis and is kept strictly apart
+from the MODEL axis (`model_tiers.<tier>.modalities`) — different owners,
+different lifetimes.
+
+**Model-emitted media (outbound).** `StreamingCallback` is
+`Callable[[Union[str, MediaDelta]], None]`: `str` is a text token as always,
+`MediaDelta` is model-generated bytes. One callback rather than two, so
+text/audio ordering is preserved by construction. **Consumers must branch on
+the type** — a `MediaDelta` is not text. Model media is `CLIENT`-audience by
+construction (replaying the model's own audio into its history would be
+meaningless) and is delivered on the tool-output channel under the reserved
+`call_id` `"model-output"`.
+
+**The contract is universal; the wire format is not.** Four hooks live on
+`ModalityCapabilityMixin`, which every provider already has, so media support is
+*implemented or left unimplemented* per provider rather than assumed of all:
+
+| Hook | Default | Meaning |
+|------|---------|---------|
+| `output_modalities(model=)` | `{text}` floor, raised by `_output_modalities_knob` | what the model can EMIT |
+| `supports_output_modality(kind, model=)` | derived | probed by name by the tier startup check |
+| `emit_media_delta(delta, on_chunk, seq)` | no-op returning `seq` | decode model media from one streaming delta |
+| `request_output_modalities(kinds)` | no-op | ask the model to emit these on later turns |
+
+Deliberately *not* named `modalities()`, which is framework-wide for **input**.
+
+The **OpenAI wire decoder** lives in `model_provider/_media_deltas.py` — a plain
+module mirroring `_prose_tools.py`, imported rather than inherited. This matters:
+ten providers speak OpenAI's chat-completions format but only five inherit
+`_openai_compat.OpenAICompatProvider` (openrouter, lmstudio, vllm, tensorrt_llm
+and triton each own their streaming loop), so machinery parked on that base class
+is unavailable to half the fleet that speaks its format — which is exactly how
+model audio was unreachable through OpenRouter. `delta.audio.data` as base64
+pcm16 is one vendor's shape (Google delivers model media as `inlineData` on
+parts, Anthropic emits none), so it must not sit in the universal contract either.
+
+Wiring a provider is three touches: add `OpenAIMediaOutputMixin` to its bases,
+call `self.emit_media_delta(...)` in its streaming loop, and call
+`self.apply_requested_output_modalities(kwargs)` where it assembles the request.
+Done for `_openai_compat` (nim, nebius, ovhcloud, doubleword, zhipuai_openai) and
+`openrouter`; lmstudio, vllm, tensorrt_llm and triton are the same three touches
+when someone needs them.
+
+**A tier's outbound role reaches the wire.** `_connect_tier_entry` (every tier
+switch) and the initial-provider build (a session that *starts* in a speaking
+tier) both call `request_output_modalities(entry.outbound_modalities)`, which an
+OpenAI-shaped provider turns into `modalities: ["text","audio"]` +
+`audio: {voice, format}`. The empty set is an instruction, not an absence of one —
+it is how leaving a speaking tier stops requesting audio. The **tier says what**
+to emit, the **profile says how**: `api_params.audio` always wins, because the
+tier stamp uses `setdefault`.
+
+Since no catalog in this tree reports output modalities, an operator assertion is
+the only source of truth — hence the `output_modalities` knob (the counterpart of
+the input `modalities` knob). Without it the floor stays text-only and the startup
+check refuses any outbound role. `ProviderCapabilities.output_media` marks an
+adapter proven to deliver media on the wire — declared today by `openrouter`
+(verified end to end: a spoken answer reaches a separate client process and
+plays) and the five `_openai_compat` inheritors that share its streaming loop.
+`jaato-scaffold validate` reads that capability rather than asserting: an
+outbound role is flagged INERT only when the named provider does not declare
+it, so writing a working speaking tier no longer produces a warning saying it
+does nothing.
+
+**Knowing a spoken turn ENDED is its own problem.** OpenRouter reports no
+terminal event for a request that asked for audio: measured across 19
+consecutive streams of `openai/gpt-audio-mini` — speaking turns and
+tool-call-only turns alike — not one named a finish reason, and OpenRouter's
+own generation record confirms it at the source (`"finish_reason": null`,
+`"native_finish_reason": null`, `"cancelled": false`, `"status": 200`,
+`"tokens_completion": 27` — a completed, billed generation naming no reason).
+Left unhandled the turn is discarded as a fragment by the #687 truncation
+guard. `stream_terminated()` therefore accepts three signals, each evidence
+the upstream REACHED THE END: a named finish reason, decoded media, or a
+**usage frame** (`stream_options.include_usage` is set, and that frame is the
+last of a finished stream, so a severed connection never delivers one).
+Deliberately NOT "a completed tool call arrived" — accumulated calls are
+exactly what a stream cut mid-`arguments` also leaves behind, and reading them
+as completion is how a severed turn becomes an executed one.
+
+```yaml
+# a tier that speaks, on OpenRouter
+provider: openrouter
+plugin_configs:
+  openrouter:
+    framework_overrides:
+      output_modalities: [text, audio]   # assert the model can EMIT audio
+    api_params:
+      audio: {voice: cedar, format: pcm16}   # optional: pin the voice
+model_tiers:
+  planner:
+    model: openai/gpt-audio
+    modalities: {audio: outbound}
+```
+
+> **Naming collision.** OpenAI's request field `modalities` means **OUTPUT**
+> (`["text","audio"]` with `audio: {voice, format}`); a jaato tier's
+> `modalities` key means **INPUT**. Both appear in one profile —
+> `api_params.modalities` vs `model_tiers.<tier>.modalities` — and the layer
+> disambiguates them. Both `modalities` and `audio` are now in
+> `_FORWARDED_API_PARAMS` (`_openai_compat/base.py`); they were previously
+> dropped, which made audio output unrequestable through any OpenAI-compatible
+> provider. While streaming, OpenAI emits **only pcm16** (24 kHz mono s16le,
+> headerless), which is why `STREAM_AUDIO_MIME` spells the parameters out.
+
+### Tool IDs on the Wire and in the Trace (#873)
+
+Tool names reach the model as hashed ids (`t_<8 hex>`, `shared/tool_id_map.py`)
+because upstreams enforce `^[a-zA-Z0-9_-]{1,128}$` and MCP names like
+`mcp.server.tool` do not pass. The reverse map is an **in-process dict**
+populated as a side effect of hashing, not a function of the id — so a
+provider trace record that named a call only by `name=<wire id>` was
+unreadable in any later process, and the tool inventory needed to re-hash
+candidates varies per session and is not recorded.
+
+Every streaming provider that hashes (`_openai_compat` and its inheritors,
+`openrouter`, `github_models`, `anthropic`) now renders its tool-call trace
+records through `wire_name_trace_fields`, which writes
+`name=<wire> tool_name=<resolved>`: `name` keeps meaning "what the wire
+said" so existing readers do not change meaning, and `tool_name` is the
+resolution made in the only process that can make it. Resolution is never
+destructive — a hallucinated id the process never issued is recorded as
+`tool_name='t_deadbeef'`, evidence of the invention rather than a
+resolved-looking name hiding it. The OpenAI-shaped loops also emit a
+`TOOL_CALL_END` record at flush, because an upstream may send the name on a
+later delta than the one that opens the call, leaving the `TOOL_CALL_START`
+record honestly nameless.
+
+### A Turn Ends Because It ENDED, Not Because It Was Billed (#881)
+
+A completion-gated session did its work, the agent called `signal_completion`,
+the payload was accepted and delivered as `AgentCompletedEvent` — and then **no
+terminal event was ever emitted**. `Session.complete()` / `.ask()` / `.stream()`
+waited out their own timeouts. Nothing was logged on either side: the daemon was
+content, the files were written, and only the driver was stuck.
+
+`_turn_accounting` is a **usage ledger**. A turn lands in it only when the
+provider reported tokens, and every consumer of `len()` reads it that way — the
+`turns` figure in `get_context_usage`, `get_consumption`'s unattributed-turn
+reconciliation, the persisted `turn_count`. `rpc._forward_post_turn_hooks` —
+the **single site** that fires both halves of the terminus
+(`on_agent_turn_completed` → `TurnCompletedEvent`, `flush_session_quiescent()` →
+`SessionTerminatedEvent`) — gated on that ledger growing. So a **usage** fact
+stood in for the **lifecycle** fact "a turn ran":
+
+| `plugin_configs.echo.usage` | outcome |
+|---|---|
+| present | `TurnCompletedEvent` immediately; `complete()` returns |
+| absent | `AGENT_COMPLETED`; **no** `TURN_COMPLETED`, **no** `SESSION_TERMINATED` |
+
+**The gate was not buying what its docstring claimed.** It was justified as
+refused-turn suppression, and a refused turn *is* suppressed — but by
+`send_message` returning at the budget gate **before** the chat loop, so no
+`turn_data` is ever built and the append site is never reached. The one thing
+`total > 0` uniquely suppressed was a turn that ran and was not metered.
+
+So the two facts are separated rather than merged. `JaatoSession._record_turn_ran`
+is the one place that closes a turn: it always bumps `_turns_ran` and stamps
+`_last_turn_ran`, and appends to the usage ledger only when tokens were
+reported. `get_turns_ran()` / `get_last_turn_ran()` are what the fan-out reads.
+Option 2 of the issue — drop the gate, append every turn — is deliberately **not**
+taken: it would silently change what all three `len()` consumers mean. Option 3
+— move only the quiescence flush — is deliberately not taken either: it fixes
+`complete()` and leaves `ask()` / `stream()`, whose only terminus is
+`TURN_COMPLETED`, still hanging.
+
+Three properties, each attached to a way it could go wrong:
+
+- **`turn_number` follows the lifecycle count.** `jaato-tui/agent_registry.py`
+  indexes a list by it, so sourcing it from the ledger gave every unmetered turn
+  the same ordinal and the second overwrote the first.
+- **A session without the accessors gets the PRE-#881 behaviour**, not an
+  exception and not an unguarded double emission. `RunnerRPC._turns_ran_snapshot`
+  falls back to the ledger length for a duck-typed double or an out-of-tree
+  session class; a real `JaatoSession` never takes that path.
+- **The in-process path (`shared/jaato_client.py`) already fired
+  unconditionally**, with a comment saying why ("Some providers report 0 tokens;
+  skipping the hook would leave buffered content stuck in the pipeline"). The
+  two paths disagreed, and the runner path — the default — was the wrong one.
+  That path is otherwise unchanged here; it still re-emits the previous turn on
+  a *refused* send, which the runner path has always suppressed.
+
+**Nothing about this is `echo`-specific.** Any provider that completes a turn
+without reporting usage reaches the same state — a stream that never delivers a
+usage frame, a gateway that strips the field, a zero-cost cached turn. `echo` is
+where it is *guaranteed*, and it is what every new harness reaches for first
+because it is credential-free and deterministic.
+
+**And the suite could not see it.** `jaato_sdk/conformance/` stayed green for
+the whole life of the defect precisely because every conformance profile passed
+`usage=TURN_USAGE`; a suite whose every
+profile is metered is structurally unable to catch this class however many
+scenarios it runs. `conformance-unmetered` is the fifth profile, and the only
+one that differs from another by a **missing** key.
+
+**The silence is now announced (#688 item 3).** A turn that carries no tokens
+logs a WARNING **once per session**, naming the provider and model, and saying
+what stops working: the consumption report reads empty and a `budget_control`
+ceiling on `tokens` / `usd` is fed zero, so a run that looks capped is uncapped.
+Deliberately worded as *this turn carried no tokens* rather than *the provider
+reported nothing* — nothing in the tree can yet tell a reported zero from an
+unreported one (`TokenUsage` starts at all-zeros and is only overwritten when a
+frame arrives, so the two share a value), and asserting the stronger claim would
+be a statement the data does not support. Giving them separate representations,
+and deciding what `budget_control` should do with "unknown", is **#688 items 1
+and 2** and is not done here.
+
+### What a Session Spent, and Which Model Spent It
+
+`get_environment(aspect="context")` has always reported how FULL the context
+window is. Nothing reported what the session had **spent** — and nothing
+could, because spend was attributed to no model anywhere in the tree:
+`_turn_accounting` carries no model stamp and neither does the token
+ledger's `response` record. So on a `model_tiers` session "what did the
+voice tier cost me" was not a question the stored data could answer. A
+measurement gap, not a reporting one.
+
+`aspect="consumption"` is the answer, and the two aspects are deliberately
+separate because they are not two views of one number:
+
+| Aspect | Question | Denominator |
+|--------|----------|-------------|
+| `context` | how full is the window right now | the shared history — belongs to no particular model |
+| `consumption` | what has been spent, and on what | the responses each binding served |
+
+A session that calls `enter_tier` has **one history and several bills**.
+
+**The unit of segregation is the BINDING** — `(provider, model, tier)` —
+not the tier name. A budget-control degrade rung **rebinds a tier's model
+in place** (`planner: opus → flash`) leaving the tier's name unchanged, so
+a tier-keyed total would merge two models' spend under one row precisely in
+the session someone is reading it because of; `switch_tier` short-circuits
+on the resolved entry rather than the name for the same reason. Tiers may
+also name different providers, so the model alone is not a key either. A
+single-model session reports a list of one with `tier: null`, so no
+consumer branches on whether the session happened to be tiered.
+
+**Measured once per response, where spend already accumulates.**
+`_accumulate_turn_tokens` is the only hook that runs exactly once per
+response on every path — which is why the `spend_*` keys live there — and
+`_observe_binding_usage` rides it. Per response rather than per turn
+because a turn is not a unit that belongs to one model: `enter_tier` can
+fire mid-turn. The per-CHUNK streaming hook (`_track_streaming_usage`)
+contributes nothing, under the same rule that forbids it a `spend_` key.
+
+```yaml
+get_environment(aspect="consumption")                 # totals + active binding
+get_environment(aspect="consumption", detail="full")  # + per-binding rows
+```
+
+Four rules the payload holds to, each attached to a way it could mislead:
+
+- **The three input buckets are disjoint and named for what they are.**
+  `TokenUsage.prompt_tokens` is the NEW, uncached input and excludes both
+  cache counts (#758), so the aspect reports `uncached_input_tokens`,
+  `cache_read_tokens`, `cache_creation_tokens` and the derived
+  `input_tokens_total`. Passing `prompt_tokens` through under its own name,
+  beside `cache_read_tokens`, invites the model reading it to count the
+  same tokens twice.
+- **Absent is not zero.** A dimension nothing reported is OMITTED, not
+  rendered `null` or `0`: a provider with no prompt cache must not read as
+  a cache that never hits, and a session with no pricing table must not
+  read as free. A reported `0` is a measurement and is shown — which no
+  OpenAI-shaped provider could actually say until `reported_cache_count`
+  replaced the per-seam `and value > 0` gates that folded a reported
+  `cached_tokens: 0` into `None` (`_openai_compat`, `openrouter`, `nebius`,
+  the OpenAI Responses wire, `kimi`, `google_genai`). `TokenUsage` and
+  `compute_cache_hit_percent` had both documented the distinction for
+  longer than anything could feed it.
+- **And a TOTAL is where that rule is easiest to break by arithmetic.**
+  A pooled cache-hit rate sums the numerator over the bindings that HAVE a
+  cache and the denominator over all of them, so a binding reporting no
+  cache dimension contributes zero hits and its whole uncached input.
+  Measured on a two-tier voice session: a caching `executor`
+  (`google/gemini-2.5-flash`, 76.41%) pooled with a non-reporting `voz`
+  (`openai/gpt-audio`, 224,423 uncached input tokens) to **54.66%** — a
+  session-wide "efficiency" figure no binding had, which moves with the
+  tier mix rather than with anything a reader can act on. So `totals`
+  **withholds** `cache_hit_percent` whenever part of its denominator is
+  unmeasured and publishes `cache_hit_basis` instead: how many bindings
+  were measured, how much uncached input could not be, and the rate over
+  the subset that could. A homogeneous pool is unchanged, and a pool that
+  measured nothing explains nothing — `cache_read_tokens` is already
+  absent there, and a basis would explain the absence of a number nobody
+  expected.
+- **A cost says where it came from.** `cost_source` is `provider` (billed),
+  `pricing_table` (computed from `.jaato/pricing.json`) or `mixed`. Nothing
+  in the tree distinguished them before — `cost_usd` arrived as a bare
+  float whose meaning depended on which provider produced it —
+  so `_resolve_span_cost` now delegates to `_resolve_cost_with_source`,
+  one ladder walked once, because a cost and a provenance derived
+  separately is a bug waiting for a provider that reports cost sometimes.
+- **Every figure is SPEND.** Never the end-of-turn context size, which
+  lives under `active` where it belongs to the history. `turns` per binding
+  counts the turns it served in, so a turn crossing an `enter_tier` is
+  counted by both; `totals.turns` is the exact distinct count, taken from
+  the ledger's own set of turn indices — summing the per-binding column
+  double-counts that turn and taking the max under-counts two bindings that
+  served different turns.
+
+Two blocks appear only when they mean something. **`budget`** (when the
+profile declares `budget_control`) reports the declared dimensions, the
+fraction used, and `next_rung` — the lowest rung not yet passed, which is
+the deadline the agent can act on where the rungs behind it are history;
+an absent key is how "unbounded" is said (#947). **`completion`** (when
+`signal_completion` is on the surface) reports the nudge budget:
+`nudges_fired_this_turn` is the per-TURN counter the guard actually reads
+(#934), `nudges_fired_total` is a lifetime figure that **decides nothing** —
+a second meaning layered onto the per-turn counter is how #767's unbounded
+nudge loop returns. `max_nudges_source` is `observed` once a nudge has been
+considered and `framework_default` before that, because the budget is
+resolved from the profile by the caller that nudges and does not reach the
+session on the init envelope: `framework_default` means "not observed yet",
+not "your `max_completion_nudges` was ignored". Carrying it on the envelope
+would remove the caveat and is a wire version bump, deliberately not taken
+here.
+
+**Own session only.** A subagent runs its own `JaatoSession` and reports
+its own spend; a parent's numbers never silently absorb a child's. The
+aggregate has an owner already (`CascadeBudgetPool`), and a second, quieter
+total competing with it is how two answers start disagreeing.
+
+**`detail` bounds the feedback loop.** `summary` (the default) is totals
+plus the active binding; `full` adds the rows and the declared tier ladder
+— including tiers never entered, since a vision tier the agent was given
+and never used looks identical, in a spend report alone, to one it was
+never given. Under `aspect="all"` the detail is FORCED to summary whatever
+is passed: `all` is the eager default a model reaches for when it wants the
+OS name, and the result enters the history of the very session it measures.
+Asking what you have spent is itself spending.
 
 ### Tool Traits
 
@@ -464,6 +2410,56 @@ Tools can declare semantic **traits** on their `ToolSchema` via the `traits` fie
 1. Add a `TRAIT_*` constant in `shared/plugins/model_provider/types.py` with a docstring documenting the contract
 2. Update consumers (session, plugins) to query `get_tool_traits()` for the new trait
 
+### Tool-Result Enrichment Reaches Every Dict Result (#922)
+
+`enrich_tool_result` speaks **strings**, and most tools return a **dict**, so
+something has to decide what text an enricher sees. That decision used to be
+a guess: the session enriched fields named one of six well-known names
+(`result`, `content`, `stdout`, `output`, `text`, `data`) and only from 100
+characters up. Both filters were invisible, and `store_memory` fails both —
+its text lives in `message`, and the message measured **83 characters**. So
+`memory` and `references`, the only two plugins that implement tool-result
+enrichment, never ran on the pairing they exist for (*"the agent just wrote
+down something about X; surface what we know about X"*). A catalogued
+reference matching a memory's tags 3/3 was never offered, and there was no
+error, no warning and not one trace line to say why — the plugin looked
+correctly written and simply never fired. More generally, every dict-returning
+tool had to happen to name its text one of six ways or be exempt forever.
+
+The session no longer guesses which key holds "the text":
+
+| Result shape | What the chain receives |
+|--------------|-------------------------|
+| a **string** result | the string, verbatim (unchanged) |
+| a dict from a tool declaring `TRAIT_FILE_WRITER` / `TRAIT_GREPPABLE_CONTENT` | the whole JSON (unchanged) |
+| **any other dict** | a *text view*: one `key: value` line per scalar field, then the **anchor** field's raw value |
+
+The **anchor** is the field an enriched view is written back to — the first
+present name from the conventional six (so tools already using one keep
+receiving hints exactly where they did), else the **wordiest** string field.
+Wordiest rather than longest is what stops a one-word `status: "success"`
+out-weighing a short sentence. `tool_result_text_view` /
+`apply_text_view_enrichment` (`shared/tool_result_builder.py`) are the two
+halves, and the write-back is what makes one text view serve both enricher
+shapes: whatever still carries the header is the anchor's new value, so an
+appended hint block (`memory`) and an in-place `@ref-id` expansion
+(`references`) both land on the field the tool actually used, and the header
+fields are context for matching only — never written back. A dict with no
+string field at all takes its addition under `_enrichment`.
+
+Three properties follow, each attached to a way the old path went wrong:
+
+- **No length floor.** A tag match does not need 100 characters of context to
+  be valid; the floor was aimed at semantic matching.
+- **One chain invocation per result.** The old loop ran once per matching
+  field, so a dict with both `content` and `output` collected two hint blocks.
+- **A skip is audible.** A dict carrying no text at all traces `ENRICH_SKIP`
+  naming its keys, and a run traces `ENRICH` with the anchor and the plugins
+  that contributed. Silence was half the defect.
+
+Nested payloads are deliberately not rendered into the view — handing an
+enricher a whole structured result is what the two traits above are for.
+
 ### Plugin-Level Traits
 
 Plugins themselves can declare **plugin-level traits** via a `plugin_traits` class attribute (`FrozenSet[str]`). These work like tool traits but identify *plugin* capabilities rather than individual tool behaviors.
@@ -473,6 +2469,13 @@ Plugins themselves can declare **plugin-level traits** via a `plugin_traits` cla
 | Constant | Value | Contract |
 |----------|-------|----------|
 | `TRAIT_AUTH_PROVIDER` | `"auth_provider"` | Plugin provides interactive authentication for a model provider. Must also expose `provider_name` property identifying which provider. |
+| `TRAIT_SESSION_PERSISTENT` | `"session_persistent"` | Plugin state must outlive an unload/reload of the SAME session. Must implement `get_persistence_state()` / `restore_persistence_state()`; `SessionManager` snapshots into `metadata['plugin_states'][<name>]`. |
+| `TRAIT_SLOT_SCOPED` | `"slot_scoped"` | Plugin INSTANCE survives the cascade session boundary — the runner carries it across sessions served by the same pool slot instead of constructing a new one. `shutdown()` then means slot teardown, not session teardown. See [Slot-scoped plugin lifetime](#slot-scoped-plugin-lifetime-890). |
+
+The three answer different questions and compose freely: `session_persistent`
+is "survives THIS session being unloaded and reloaded",  `slot_scoped` is
+"survives the NEXT session of the same cascade starting", `auth_provider` is a
+capability rather than a lifetime.
 
 **How it works:**
 1. Plugin declares: `plugin_traits = frozenset({TRAIT_AUTH_PROVIDER})`
@@ -517,6 +2520,2101 @@ shadow is visible without reading logs.  `jaato-scaffold plugins` marks
 any plugin not supplied by the built-in package with
 `<- <distribution> (<module>)`.
 
+### Out-of-Tree Plugin Authoring (#917, #918)
+
+Passing the trust gate is not the same as being loaded, and building
+against the SDK is not the same as being able to read a credential.
+Both gaps hit exactly one audience — a third party writing a plugin
+against the documented entry-point surface, which is what that
+extension point is *for* — and both failed silently.
+
+**`PLUGIN_TIER` decides whether the session ever sees the plugin.**
+Discovery is tier-filtered and the filter is not the same on both
+sides: the runner, the runner's `__main__` and `jaato_embedded` pass
+`tier_filter="runner"`; the daemon-side registry and
+`shared/scaffold/introspect.py` pass none.  A plugin whose package
+declares no `PLUGIN_TIER` is excluded under **any** filter — the
+deliberate "annotate or be excluded" contract — so the split ran
+straight through the diagnostic: the author installed the
+distribution, ran `jaato-scaffold plugins`, saw the plugin listed with
+its provenance line, wrote `plugins: [m365]` in a profile, and the
+session came up without the tools.  No error, no warning, one debug
+`_trace`.  `test_plugin_tier_partition` fails the build on this, but
+its walk is an AST scan of `shared/plugins/` and cannot see a
+distribution outside that path; nothing in the third party's own repo
+knows the rule exists.  Worse than a trust refusal, which at least
+avoids executing code: `ep.load()` has already run when the tier is
+read, so the module is imported and *then* discarded.
+
+Three surfaces now say it, and each distinguishes the mistake from the
+mechanism working — a **mismatched** tier (`daemon` under a `runner`
+filter) is correct partitioning and stays at debug; only a **missing**
+one is announced:
+
+| Surface | Signal |
+|---|---|
+| `PluginRegistry` | `logger.WARNING` naming the entry point, its `ep.value`, the filter, and the package `__init__.py` to edit — the same PR #171 promotion the protocol-gap check got, for the same audience |
+| `jaato-scaffold explain plugins` | the row is marked `[no PLUGIN_TIER - will not load in the runner]`, with a footer naming the fix.  This walk must keep discovering unfiltered (it is an inventory, not a session); what it must not do is imply the plugin works |
+| `jaato-scaffold validate` | `plugin_missing_tier`, severity **error** — the profile is valid by every other measure and the session is already broken |
+
+The entry-point path never reads `PLUGIN_KIND` either, so a package
+missing **both** constants is registered by that path and dropped by
+every filter.  The in-tree `calculator` plugin shipped in exactly that
+state, listed in this repo's own
+`[project.entry-points."jaato.plugins"]` table and reachable from no
+session; it is annotated now, and the gate covers every package that
+table names rather than only those declaring `PLUGIN_KIND`.
+
+**`get_session_env` is the credential read, and it is on the SDK
+surface.**  The plugin contract is otherwise cleanly SDK-shaped —
+`ToolPlugin` / `UserCommand` / `TRAIT_*` from `jaato_sdk.plugins.base`,
+`ToolSchema` from `jaato_sdk.plugins.model_provider.types`, and
+`jaato-sdk` never imports `shared` — with one hole, sitting where a
+connector's credential handling goes.  The session-scoped read lived
+only in `shared/session_context.py`, so a third-party plugin either
+took a hard dependency on jaato-server or wrote `os.environ.get(...)`.
+
+That is not a missed abstraction.  `JaatoServer._with_session_env()`
+overlays each session's `env:` map onto the daemon's `os.environ` for
+the duration of a turn, so on a daemon serving two tenants a plain read
+can return **another session's token** — non-deterministically, with no
+error.  It works on the author's machine and in every single-session
+test.
+
+```python
+from jaato_sdk.session_env import get_session_env    # also jaato_sdk,
+                                                     # jaato_sdk.plugins.base
+token = get_session_env("GRAPH_CLIENT_SECRET")
+```
+
+`shared/session_context.py` imports the three functions back, so every
+in-tree caller keeps its import path and — the part that makes the fix
+real rather than cosmetic — there is exactly **one `ContextVar`
+object**: the one the daemon sets is the one the plugin reads.  A
+second var declared in the SDK would read empty, fall through to
+`os.environ`, and reproduce the leak wearing the fix as a disguise, so
+the test asserts object identity rather than behaviour.
+`get_current_session` is deliberately **not** exported — it hands back
+a `JaatoSession`, and a plugin reaching into `session._runtime` is not
+something to make easier from out of tree.
+
+### A Knob's Value, Not Only Its Name (#925)
+
+`jaato-scaffold validate` already read every plugin's `get_config_schema()`,
+and already kept each knob's declared `type` — then checked the knob **names**
+and threw the rest away. So a knob violating the plugin's own declared `enum`
+validated clean and exited 0:
+
+```yaml
+plugin_configs:
+  todo:
+    storage_type: sqlite        # declared enum: [memory, file, hybrid]
+```
+
+Nothing fails at runtime either, which is the point: `create_storage` raises,
+`todo/plugin.py` catches, prints two lines to daemon stdout, and installs
+`InMemoryStorage()`. An operator who asked for persistent storage gets none,
+and the only signal is a bare `print()` nobody is reading. That is exactly the
+silent-ignore class `validate` exists to catch — rename the knob to
+`storage_typo` and `unknown_knob` fired immediately, so the schema *was* being
+read.
+
+`ConfigSetting` now carries `enum` alongside `type` (JSON Schema spells the
+closed set `enum`, the `PluginSetting` object form spells it `choices`; both
+land on the one field), and `_validate_plugin_knobs` reads
+`config_settings` rather than `config_keys`:
+
+| Finding | Severity | Why that severity |
+|---------|----------|-------------------|
+| `invalid_knob_value` | **error** | a plugin that spells out `["memory","file","hybrid"]` has left no incompleteness to be generous about |
+| `knob_type_mismatch` | **warn** | YAML scalar typing is easy to trip over, a plugin may coerce, and a declared type can be an incomplete summary |
+| `unknown_knob` | warn (unchanged) | a plugin may accept free-form keys it did not enumerate |
+
+The generosity that makes an unknown **name** a warning is a claim about
+schema *completeness*, and it does not carry over to a **value** the schema
+explicitly closed.
+
+Three properties, each attached to a way the check could go wrong:
+
+- **A deferred value is not judged.** `${VAR}` and `pass://` / `vault://` are
+  resolved later, against an environment the validator does not have, and
+  their literal form is a `str` whatever the knob declares — so
+  `timeout: ${HTTP_TIMEOUT}` is not a type error and
+  `lookup_strategy: ${STRATEGY}` is not an enum violation. `None` is "unset",
+  not "wrongly typed".
+- **`True` is not an integer.** Python makes `bool` a subclass of `int`, so
+  `timeout: true` would otherwise satisfy a knob declared `integer` on a
+  technicality — the same silent shape the check exists to catch. Both type
+  vocabularies are understood (JSON Schema's `integer`/`boolean`/`array`, the
+  object form's `int`/`bool`/`dict`), a union renders as `string|array` rather
+  than a Python repr, and a token in **neither** table asserts nothing: the
+  table is a source of findings, never of guesses.
+- **It reaches out of tree.** `_PLUGIN_VALUE_CHECKS` is a hardcoded
+  jaato-server dict keyed by plugin name, so a third-party distribution had
+  **no** route to value validation even though its `get_config_schema()`
+  already declared the constraint in machine-readable form. The generic path
+  needs no registration. That dict stays for genuinely *structural* knobs
+  (`template.file_conventions`), which no declared type can describe.
+
+Still not descended: nested and free-form sub-structures (`permission.policy`,
+`permission.evaluators`) — only a top-level knob's own shape is judged.
+`jaato-scaffold explain plugins <name>` now prints the permitted set beside
+each knob, because it is the set `validate` enforces.
+
+### A Ceiling Nobody Declared, and One That Cannot Stop (#947)
+
+`budget_control` is complete — five dimensions of `limits`, a `degrade`
+ladder, `CascadeBudgetPool` — fully wired into the profile, parsed at load,
+and validated for internal consistency. That validation runs **only when the
+key is present**. Absent, there was nothing: no warning, no default, no
+mention in `validate` output. So the failure mode was silent by construction
+— an unbudgeted profile behaves identically to a budgeted one right up until
+something loops.
+
+Something did. A `documentalista` subagent whose `file_edit` plugin had
+failed to initialise retried `writeNewFile` **127 times** over four and a
+half minutes, ~800 tokens heavier each cycle (each rejected attempt is
+appended to the conversation) until every request carried ~57k tokens. Its
+parent had ended two minutes in:
+
+```
+Subagent plugin shutdown (running subagents preserved)
+```
+
+which is the *correct* behaviour for a backgrounded subagent, and is exactly
+what makes an unbudgeted one dangerous — the loop outlived the session that
+could have noticed, and stopping it took `kill -TERM` on the pool slot pid.
+
+Two findings, and the second is the one that makes the first honest:
+
+| Code | Severity | Fires when |
+|------|----------|-----------|
+| `budget_control_absent` | warn | no `budget_control` at all — unbounded on `usd`, `tokens`, `seconds`, `tool_calls`, `turns`. The message names all five, because "missing `budget_control`" teaches nothing to an author who has never seen the knob |
+| `budget_limits_without_abort` | warn | `limits` declared and no rung stops the run |
+
+**`limits` are observed, never enforced.** `BudgetTracker` accumulates
+against them and `usage_fraction()` turns them into a percentage — and the
+`degrade` ladder is the *only* consumer of that percentage. A profile
+declaring `limits` and no ladder crosses 100%, 200%, 1000% in silence. Of
+the three terminal actions only `abort` reaches `request_stop`; `finalize`
+and `escalate` are latched on `_budget_terminal_action` for a layer above,
+which is advice a looping model can decline — and did, through 35
+consecutive failures without ever emitting text.
+
+That is why the second check is load-bearing rather than a refinement:
+without it the first one is **actively misleading**. An author told "you
+have no budget" writes `limits: {usd: 5}`, the warning clears, and the loop
+is still unbounded. The pair only works together:
+
+```yaml
+budget_control:
+  limits: {tool_calls: 200, usd: 5.0}
+  degrade:
+    - at: 95
+      action: finalize     # advice
+    - at: 100
+      action: abort        # the ceiling
+```
+
+**Warnings, not errors.** An unbudgeted profile is a legitimate choice for a
+short-lived local agent, and an error would fail every existing workspace at
+once. Surfacing a knob must not break the people who need it — the same
+posture `unknown_knob` takes.
+
+**The danger is not uniform, and the discriminator is used one way.** A
+profile spawned as a subagent outlives the thing that would have noticed, so
+those deserve a stronger message. Every discovered profile is reachable by
+name through `spawn_subagent`, which makes "is it spawnable" useless as a
+separator; a profile that names its own `default_agent` is one built to be
+spawned by profile name alone (#944). So `default_agent` **strengthens** a
+message that fires regardless, and never weakens or suppresses one — its
+absence proves nothing.
+
+Not addressed here: `limits` still do not enforce themselves at runtime, and
+the archetypes `jaato-scaffold new` emits still carry no `budget_control`
+(picking ceilings for someone else's workload is the author's call, which is
+what the warning now asks them to make).
+
+### A Ceiling That Only Counted at Turn End (#955)
+
+The runtime half of the ladder above was wired for subagents and still did
+not hold. A `documentalista` subagent made **196 tool calls** under
+`tool_calls: 100` with `degrade: [{at: 100, action: abort}]` — the very
+ladder `validate` prescribes — and nothing aborted, degraded or logged. The
+profile reached the session (its `gc` block demonstrably applied) and
+`spawn_subagent` passed `budget_control` through; what was missing was the
+**moment of observation**. `_budget_observe_turn` was the only writer of
+`tool_calls`, `seconds` and `turns`, and it runs in the turn's `finally`.
+Every one of the 196 calls happened inside one `send_message`, so the
+tracker was handed the count only when that turn ended — and a runaway loop
+is precisely the turn that does not end. `tokens` and `usd` were exempt
+because they are fed per *response*, which is why only a `usd` ceiling
+small enough to cross within one turn had ever been seen to trip.
+
+| Dimension | Was observed | Now observed |
+|-----------|--------------|--------------|
+| `tokens`, `usd` | per response | unchanged |
+| `tool_calls` | turn end | per completed call (sequential + parts loops), per batch (parallel loop) |
+| `seconds` | turn end | with every tool-call observation, plus the tail at turn end |
+| `turns` | turn end | unchanged — a turn is the unit |
+
+`JaatoSession._budget_observe_tool_calls` is called from every path that
+records a call in `turn_data['function_calls']`, and an AST guard
+(`test_budget_mid_turn_955.py`) fails the build if a new path records
+without observing. `_budget_observe_turn` stays as the **closing entry**: it
+settles whatever was not observed mid-turn and only that, so nothing is
+counted twice and a budget is exact whichever loop produced the turn. An
+`abort` mid-turn cancels the session's token; the sequential loop checks it
+before the next call and the main chat loop before the next model round-trip,
+so the overshoot is one call, or one parallel batch. The parts loop
+(attachment-carrying turns) finishes its batch and is cancelled by the
+provider on the first chunk of the next response. A session at its
+ceiling is also no longer completion-nudged — the re-prompt would be refused
+at turn start, and each refusal spent a nudge on a turn that could not run.
+
+**A ladder that never logs is indistinguishable from one that is not wired**
+(the issue's third question). Every ceiling crossing now traces
+`BUDGET CEILING dim=... used=... limit=...` once per dimension, rung or no
+rung, and every fired rung traces `BUDGET RUNG at=...% action=...`
+(`RUNG_SKIPPED`, `EXHAUSTED`) — on the per-agent provider trace and on the
+application trace (`trace.session_log`), beside the permission DECISION lines
+(#951) an operator correlates them against.
+
+Still true: a profile with `limits` and no `abort` rung crosses in silence
+except for that trace line; `finalize` remains advice, and the subagent
+that outlives its parent is bounded only by what its own profile declares.
+
+### A Session Nobody Was Watching (#812)
+
+An eval sweep created session `20260903_084517` and its client process was
+stopped ~40 s later. The session ran for **seven more minutes and spent
+$2.52**, executing tools and marking plan steps complete against files that
+no longer existed. Nothing graded it and no result row was ever written, so
+the work is unrecoverable. It stopped only because its profile happened to
+declare `budget_control` with a `degrade: at 100 -> abort` rung — **a profile
+omitting `budget_control` would not have been stopped by anything.**
+
+It also could not be stopped from outside. Every ceiling that existed was
+held by something the session could outlive:
+
+| Ceiling | Held by | Why it did not fire |
+|---|---|---|
+| `jaato_eval --arm-timeout` | the client's own runner loop | that process is the one that died |
+| the task pool's `seconds` | reconciled when a session **ends** | a session that never ends never consumes it |
+| `budget_control` | the session itself | worked — and is opt-in |
+
+**Identity: what the daemon knew and never wrote down.** `spawn_session_runner`
+builds a `SpawnedRunner` carrying the pid, and the `PoolSlot` when pool-served,
+and hands it to `set_runner_rpc`. It then went nowhere an outside observer
+could read: `~/.jaato/session_workspace_index.json` mapped the id to a
+workspace and recorded no runner, pid or slot; the session record had no
+runner-, slot- or pid-shaped key; the per-session logs named only an IPC
+connection number (`client_ipc_14`). So the choice was killing a
+circumstantially-identified process on a daemon shared with another live
+session, or waiting for the budget to burn.
+
+`server/session_identity.py` is the record — runner pid, `pool_served` + slot
+pid, cascade, AppArmor profile — written to three places because they answer
+different questions: `Session.runner_identity` (live), the session record
+(**version 2.10**), and the daemon-owned workspace index (the cross-workspace
+lookup for someone holding only an id). Reusable rather than eval-specific:
+#806 needs the same fact to say which runner holds which language server.
+
+Three properties, each attached to a way it could mislead:
+
+- **A restored record is `stale=True`.** After a reload the pid belonged to a
+  previous process lifetime, so it is *evidence* about what ran the session and
+  never a handle. Nothing in the framework acts on a stale record. It is kept
+  rather than cleared because "which process last ran this" is exactly what a
+  post-mortem wants.
+- **`None` means "could not read one", never "there is none".** The save-path
+  refresher never clears a good record, or a transient read would destroy the
+  evidence the field exists to preserve.
+- **The refresh is on the SAVE path, not per spawn site.** There are two spawn
+  call sites (IPC, and the WS pre-init hook) and a third could be added;
+  instrumenting each is the shape that leaves one path armed and one silently
+  not — the #735 failure. The explicit post-spawn stamp is kept for
+  *immediacy* (identifiable from the first tool call, not the first save).
+
+**Surface and stop.** `session.orphans` lists the LOADED sessions with no
+client — how long each has been orphaned, its effective bounds, whether it is
+`is_processing` (spending, right now), and the runner executing it.
+`session.stop <id>` stops any one of them. Shaped after the verbs that already
+exist (`session.list`'s own `SessionListEvent`, `cascade.cancel`'s confirmation
+pair) rather than as a parallel surface, and distinct from both neighbours:
+`session.end` stops the CALLER's session and `cascade.cancel` stops a whole
+cascade, so neither could stop the one session an operator was looking at.
+
+**Stopping is cancellation, not a kill.** Nothing signals the runner pid —
+killing a pool-served runner destroys a slot other stages of the same cascade
+expect to reuse, and stopping by id lets the daemon unwind its own bookkeeping.
+It reaches `server.stop()`, the same cancel token `budget_control`'s `abort`
+rung trips, so a mid-turn session stops at its next check point and is then
+saved to disk.
+
+**The bound.** `runtime_limits` gains two wall-clock fields, enforced
+DAEMON-side by a `SessionManager` sweep (`server/session_lifetime.py`) — the
+odd ones out in *where* they apply, which is the whole point: they are held by
+the one process that is still there when the client dies, and they do not wait
+for the session to end.
+
+| Field | Measures | Default |
+|---|---|---|
+| `max_session_seconds` | total wall-clock LOADED | unbounded (opt-in) |
+| `max_orphan_seconds` | continuous time with **no consumer** | **900 s** |
+
+```yaml
+runtime_limits:
+  max_orphan_seconds: 120     # tighter than the default
+  max_session_seconds: 3600   # opt-in total ceiling
+```
+
+`max_session_seconds` is opt-in because an interactive session left open over
+a lunch break is not a defect and a default would kill it.
+`max_orphan_seconds` is **the one field in the block with a framework
+default**, because the session it exists for is precisely the one whose
+profile declared nothing — a bound you must remember to write would have left
+this session running exactly as long. `0` is the explicit opt-out, the
+0-disables spelling `gc.media_bytes_threshold` and the OpenRouter deadlines
+already use. Inheritance is **most-restrictive-wins** (`min()` across every
+declaring layer, like `max_parallel_tools` / `max_turns`), and `0` cannot win
+that `min()` — a child may disable a bound no ancestor set, and may not
+disable one an ancestor did.
+
+**"Orphaned" is TWO conditions, and the second is the load-bearing one.** A
+session qualifies only when it is loaded with no attached clients **and** the
+sweep has previously *observed* it carrying one:
+
+| Detached shape | Orphaned? |
+|---|---|
+| a completion-gated session that ended | invisible — it is UNLOADED, and the sweep only walks `_sessions` |
+| `session.wake` → `resume_session` (a **cold revive**) | no — never observed attached, so clause 2 fails |
+| a cascade stage mid-run | no — carries its driver's client |
+| an attached interactive session | no — clause 1 fails |
+| an idle orphan | usually unloaded by `_maybe_unload_session` before the grace expires |
+| **a client that existed and went away, mid-turn** | **yes** — the #812 state |
+
+The first draft had only clause 1 and justified it with an invariant —
+*every path that drives a session attaches a client id* — which is **false in
+this tree**. `_load_session_impl` uses its `client_id` for config, env and
+progress events and never attaches it; `wake_session` branches on exactly that
+("revived cold, no client — DEFERRED"). So a cold revive driving a long turn
+would have been cancelled by a bound written for a different situation. An AST
+guard policing the invariant would have failed on `main`, and one exempting the
+revive path would assert almost nothing — so the *dependency* was removed
+instead: the bound now rests on a fact the sweep MEASURES. It fails safe, since
+a session never seen attached is never stopped by the orphan bound (an explicit
+`max_session_seconds` still applies).
+
+The orphan clock is **derived by the sweep** from `attached_clients` rather
+than stamped at the ten-odd sites that mutate it: a bound that silently does
+not apply is #735, and instrumenting every mutation is exactly the shape that
+lets one new call site disarm it. It measures CONTINUOUS orphanhood, so a
+reconnect renews the session's claim on being wanted.
+`test_orphan_bound_observes_attachment_812.py` carries two AST guards — one
+that `_orphan_since` has a single writer, one that the clock is started
+*inside* an `if` consulting `_ever_attached` — each verified to fail on its own
+reversion. The sibling precedents are `test_budget_mid_turn_955.py` and
+`test_registry_iteration_snapshots.py`.
+
+**It logs what it armed.** `start_lifetime_watchdog` is called by the daemon
+(not from `__init__`, so a `SessionManager` in a test grows no thread) and logs
+the sweep period and the *effective* defaults — #735's rule, since the declared
+and effective values differ whenever a field is omitted or set to `0`.
+
+Protocol **1.7** for `IPCClient.stop_session` / `list_orphan_sessions`. An
+additive FIELD degrades harmlessly; a missing VERB does not — an older daemon
+ignores `session.stop` silently, and its caller concludes a runaway session was
+stopped. So the SDK refuses below `MIN_SESSION_STOP_PROTOCOL`, the #845 verdict
+applied to a command rather than a payload.
+
+Not addressed here: nothing grades a session whose harness died (the results
+have no consumer by construction — #812's first ask, "terminate on client
+loss", is deliberately **not** implemented as written), and a session that
+survives its stop because its model thread is wedged is re-judged on the next
+sweep rather than escalated.
+
+### Configuring a Plugin and Enabling It Are Two Decisions (#950)
+
+`plugin_configs.<name>` and `plugins:` answer different questions — *how does
+this plugin behave* and *which tools reach the model* — and `permission` is
+the case that separates them: `PermissionPlugin.get_tool_schemas()` returns
+`[]` **on purpose**, so it is never in a `plugins:` list, and its whole
+configuration is a `policy` block.
+
+`JaatoSession.configure` collapsed the two:
+
+```python
+if plugins is None or plugin_name in plugins:      # the block, or nothing
+```
+
+A top-level session never noticed — its configs reach the plugins through
+`expose_all(plugin_configs)` at bootstrap, and `permission` gets an explicit
+merge on both the daemon (`server/core.py`) and runner
+(`server/runner/session.py` Step 8) paths. **A subagent reuses the parent's
+already-bootstrapped registry**, so that loop was the only place its own
+profile's configs could land. A `documentalista` profile whose
+`plugin_configs.permission` whitelisted `writeNewFile` therefore produced 55
+permission ASKs on that pre-approved tool — under a headless `ClientType.API`
+driver an ASK has no channel to reach, so 56 write attempts at one path wrote
+nothing, silently. Adding the toolless `permission` to `plugins:` was the
+entire difference.
+
+Three other places in the tree already stated the opposite intent —
+`SessionInitEnvelope.plugin_configs` ("carries configs for **all** plugins …
+including ones the runner auto-loads without them appearing in `plugins`"),
+the runner's Phase 4 §C merge, and `PluginRegistry._ALWAYS_INITIALIZE_PLUGINS`
+("`permission` … is wired even when not in profile.plugins"). The gate was the
+one dissenter, and the runner docstring claiming the overrides "aren't
+currently in the envelope" had been stale since §C shipped.
+
+The loop now applies a config for every plugin **the registry knows**, and two
+properties make that safe:
+
+| Property | Why it is load-bearing |
+|----------|------------------------|
+| names the registry does not know are **skipped, not attempted** | `plugin_configs` also carries the PROVIDER sections (`openrouter`, `anthropic`, …), read by `create_provider` and by no plugin. `expose_tool` raises `ValueError` on each; the old gate filtered them out only as a side effect of them never being in `plugins:` |
+| the model's tool surface is **untouched** | bootstrap's `expose_all` already exposed every discovered plugin; what the model sees is filtered per session from `plugins`, which this loop does not write |
+
+Worth knowing, and unchanged in kind: the registry — and so each plugin
+INSTANCE — is shared with the parent and its sibling subagents, so a config
+applied here applies for all of them. That was already true of every plugin a
+subagent *did* list; this widens it to the ones it only configures.
+
+**`permission` is the one plugin that loop does not re-initialize.** The
+route above — `registry.expose_tool(name, config)`, a `shutdown()` +
+`initialize()` on the registry's instance — is the wrong one for the
+enforcer, on every path: see [the next section](#a-subagent-is-judged-by-its-own-profiles-policy-957).
+A session's `plugin_configs.permission` block is stashed by `configure()`
+and installed as a policy of the session's own instead.
+
+**The validator says the other half.** With the config reaching the plugin,
+"unreachable" is no longer the finding; what survives is narrower and still
+worth saying — the plugin is configured and **none of its tools are on the
+wire**:
+
+| Finding | Severity | Fires when |
+|---------|----------|-----------|
+| `plugin_config_without_plugin` | warn | `plugin_configs.<X>` for an installed, tool-bearing plugin absent from `plugins:` |
+
+Warn rather than error, for the reason the whole silent-config family (#910,
+#925, #947) warns: a base profile in an `inherits` chain may legitimately
+carry a config its children enable, and validation runs on every discovered
+profile including those bases. Three exemptions keep it from being noise:
+a plugin that exposes **no tools at all** (`permission`, `sandbox_manager`) is
+configured-only by construction; `introspection`'s tools are core and reach
+every wire whatever `plugins:` says; and a plugin whose tools are not
+statically knowable (`mcp`) reports none offline and is read the same way —
+a false negative, and the right one, since the alternative is asserting a
+missing surface the validator cannot see.
+
+### A Subagent Is Judged by Its Own Profile's Policy (#957)
+
+The permission plugin is a registry-shared singleton: a parent and every
+subagent it spawns are gated by ONE object, and until #957 by one **policy** —
+`_policy`, seeded at bootstrap from the ROOT profile's block. A subagent
+profile that declared its own `plugin_configs.permission` was judged by the
+parent's policy anyway, so a `documentalista` that whitelisted exactly the two
+tools it needed, and worked standalone, was denied `method=default` 14 times
+when spawned. The child's profile was byte-identical throughout; the only
+edit that changed the verdict was adding `writeNewFile` to the **parent's**
+whitelist. The tools that *did* work (`selectReferences`, `retrieve_memories`)
+are auto-approved by their own plugins and resolve `whitelist` under any
+policy, which is what let the profile look correct until it reached a tool
+that was genuinely gated.
+
+The block had two routes, and both were wrong:
+
+| Path | Enforcer | What `registry.expose_tool("permission", block)` did |
+|------|----------|------------------------------------------------------|
+| daemon (`server/core.py`), runner (`runner/session.py` Step 8) | constructed separately, seeded from the root block | re-initialized the registry's **unread copy**; the enforcer kept the parent's policy — #957 as reported |
+| in-process (`jaato_embedded`) | the registry's instance | `shutdown()` + `initialize(child block)` on the enforcer: the parent was now judged by the **child's** policy, and its in-process ASK channel was replaced by a console one — the maintainer's in-tree repro "found the opposite" because it was the same defect from the other side |
+
+**Now: one enforcer, one policy per session.** `PermissionPlugin` keeps
+`_policy` as the runtime-wide policy and gains `_scoped_policies`, one
+`PermissionPolicy` per session that declared a block, keyed by a
+`permission_scope` the session minted at construction. The key travels in the
+executor's per-session permission context — the same dict #951 reads the
+caller's identity from — so `_resolve_policy(context)` picks the session's own
+policy when it installed one and the runtime policy otherwise. Every read and
+every session-level mutation in `_check_permission_impl` goes to the resolved
+object: a subagent's `always` answer whitelists the tool for the subagent, not
+for its parent. The DECISION line names it — `policy=session` /
+`policy=runtime` — the distinction the issue could only infer from the verdict
+changing when the parent's whitelist was edited.
+
+Where the session installs it decides who gets one:
+
+- **A subagent, at `set_agent_context("subagent", …)`** — the point at which a
+  session *becomes* one, called by both spawn paths right after
+  `create_session` and before the first turn. `configure()` runs inside
+  `create_session`, when the session is still `"main"`, so it only stashes the
+  block; a session that is already a subagent when configured (a revive)
+  installs from `configure()` itself.
+- **Never the root.** The runtime policy IS the root's, seeded from the same
+  block at bootstrap on every path, and it is the object the operator's
+  `permissions allow|deny|default` commands mutate. A scoped copy would detach
+  the root from those commands for no gain.
+- **A subagent with no block installs nothing** and is judged by the runtime
+  policy, as before — inheriting the parent's posture is the right default for
+  a profile that declared none. A block that defines no policy (the
+  `agent_name` injection alone) installs nothing either.
+
+Two consequences that were easy to get wrong:
+
+- **Auto-approved tools reach a scoped policy installed later.** `configure()`
+  whitelists the lifecycle tools (`signal_completion`) and each plugin's
+  `get_auto_approved_tools()` on the runtime policy *before* the session
+  becomes a subagent. `add_whitelist_tools` now records every name it is
+  handed and `set_scoped_policy` seeds from that set, or a `defaultPolicy:
+  deny` child would deny its own completion. These names are plugin-declared
+  and identical for every session on the registry; they were never something
+  one session's policy could withhold from another.
+- **`askPermission` fetches the context itself.** The executor dispatches it
+  ungated, so nothing handed it a scope and the model's pre-check answered
+  from the runtime policy while the real call was judged by the child's. It
+  now reads `JaatoSession.permission_context()` off the current session.
+
+A scoped policy is released by `close_session()`, and every scoped policy is
+dropped at `reset_for_next_session()` / `shutdown()`, so a subagent that ends
+without closing is bounded by the slot boundary.
+
+**The validator (issue ask 2).** With the child's block governing the child,
+"does the spawner's whitelist cover the spawnee's gated tools?" stops being a
+question — the cross-profile check the issue floated would now assert a
+relationship that no longer holds. Not added.
+
+### What the Authoring Surface Would Not Say
+
+Six findings from one workspace bring-up, each the same shape: the framework
+already held the answer and no surface a session reads would state it. The
+fix in every case is to make the existing fact reachable, never to invent a
+new source of truth.
+
+**`explain agents` and `explain services` — two directories nothing named.**
+`.jaato/agents/` (the PERSONA layer) appeared in no `explain` scope, while
+`explain profile` listed `system_instructions` — marked DEPRECATED, and the
+only instruction-shaped key on the page. An author who never found the agents
+directory reached for the deprecated key, which works, so nothing corrected
+them. `.jaato/services/` had the same problem with a different fallback: the
+`service_connector` caches OpenAPI specs and auth there and calls an API by
+alias, and unnamed, the path of least resistance is a raw URL with the base
+URL, auth header and pagination re-derived by hand on every call. Both topics
+READ their search order from the runtime's own helpers (`agent_search_dirs`,
+the schema store's tier constants) rather than restating it — a documented
+order that disagrees with the loaded one is worse than none — and both report
+what is actually on disk in the workspace. They are the first entries in a
+`_WORKSPACE_SCOPES` table, which is what turned `sets`' lone `elif` into the
+table this CLI's docstring already asked for.
+
+**A nested parameter is not describable by a signature.**
+`explain plugin service_connector` rendered `configure_service_auth(service,
+auth)` — accurate, and useless, because `auth` is an object whose five accepted
+shapes ARE the tool. `--json` carried the schema all along; the human page
+showed neither the shapes nor the `*_env` field each wants, so the only route
+to a correct call was the plugin source. The page now expands any parameter
+carrying an `enum`, and any `object` parameter's own properties, **one level
+deep** — deeper is a schema dump, which is what `--json` is for. The tool's own
+description was the other half: *"Credentials are read from environment
+variables"* is true and does not say that `bearer` wants `token_env` while
+`apiKey` wants `in` + `name` + `value_env`. The model reads that string.
+
+**`PROVIDER_NOTES` — a caveat no contract field could carry.** On Azure
+OpenAI, a profile's `model:` is the DEPLOYMENT name from your resource, not a
+catalog model id; get it wrong and the failure is a runtime `DeploymentNotFound`
+with nothing earlier naming the cause. The provider module's docstring said so
+and `explain provider azure_openai` did not. `PROVIDER_NOTES` is a tuple of
+prose declared beside `PROVIDER_CAPABILITIES` / `PROVIDER_KNOBS` — co-located so
+it cannot drift from the provider it describes — rendered as a `read this
+first:` block ABOVE the knob table, because a knob table read under the wrong
+premise is still read wrong. Empty for a provider with nothing unusual to say.
+
+**Where the `api_params` check stops.** `validate` checks an `api_params` key
+against the PROVIDER's allow-list, which is the only thing it can check: which
+values a given MODEL accepts is declared nowhere in this tree and moves whenever
+a vendor ships. So `temperature: 0.0` validates clean and is a `400` on a
+reasoning model that accepts only its default. Every provider page with an
+`api_params` layer now says so, and says the thing that is always true —
+omitting a parameter is never the cause of a 400. Deliberately NOT a per-model
+incompatibility table: a stale row would reject what the vendor accepts or pass
+what it rejects, and either beats silence only by accident. `jaato-scaffold new
+profile-set` stopped emitting `temperature: 0.0` live for the same reason; it is
+a commented example now, **header included**, because a live `api_params:` over
+nothing but comments parses as a YAML null that `validate` correctly reports as
+`unknown_knob` — the generator would have failed the file it just wrote.
+
+**Two things a profile says about ITSELF.** `description` is required
+(no default on `SubagentProfile`, `(required)` in `explain profile`) and the
+loader is lenient, so a missing key becomes `""`. Inheritance does not rescue
+it — the merge takes `description=child.description`, so a tier-2 set profile
+that omits it OVERRIDES its base's with the empty string — and every profile
+`new profile-set` emitted was in that state. What breaks is the one line
+`spawn_subagent` advertises to the model, `- worker:  (tools: cli)`: the prose a
+delegate is chosen from. `system_instructions` is the second, deprecated and
+unflagged. Both are `missing_description` / `deprecated_system_instructions`,
+**warn** — either profile loads and runs, and an error would fail existing
+workspaces wholesale, the posture `unknown_knob` and `budget_control_absent`
+already take.
+
+**A skip that names the module but not the install.** `pexpect` IS declared —
+`jaato-server[interactive]`, an extra named after neither the plugin nor the
+module — and the registry's skip line said only *"install it to enable this
+plugin"*, so the reliable next move was `pip install pexpect` into whatever
+interpreter was nearest, and the gap read as an undeclared dependency. The line
+now resolves the install target from installed distribution metadata (the same
+index `explain <unit> dependencies` reads), so a new extra needs no edit and a
+stale one cannot outlive `pyproject.toml`. Best-effort by construction: it runs
+inside discovery's error path, and a diagnostic that raises is worse than a
+vague one.
+
+### Six Things a Session Log Said the Authoring Surface Still Would Not
+
+A 2026-09 transcript of an assistant bringing up a workspace from scratch —
+venv, a simple client, then a two-stage GitLab MR cascade — records eight
+corrections. Three were already closed (`deprecated_system_instructions`,
+`explain services`, the `configure_service_auth` chain), one had since been
+*inverted* (#950 made `plugin_configs.<plugin>` apply whether or not the
+plugin is in `plugins:`, so the transcript's own correction is now false),
+and what survived was six gaps of one shape: **the author wrote something
+that had no effect and nothing said so.**
+
+That family already has four entries — #910, #925, #947, #950 — and the gap
+each of these closes is one layer out from where those stopped.
+
+**A profile's own top-level keys were never checked.** `unknown_knob` covers
+`plugin_configs.<plugin>.<knob>`, `trace:` refuses its own unknown keys,
+`runtime_limits` parks them in `extra` — and the outermost layer had no
+reporter at all. `SubagentProfile` construction is keyword-explicit (the
+snapshot-version note in `config.py` says so), so a key outside
+`PROFILE_FILE_KEYS` is read by nobody, silently.
+
+The transcript contains a live instance nobody noticed: told *"te falta
+activar el config_root"*, the author added `config_root: .jaato` to two base
+profiles. `config_root` is a session/SDK parameter and **not a profile key**,
+so the line did nothing; what actually fixed the session was the duplicated
+`.jaato/` path prefix removed in the same edit (now
+`redundant_config_root_prefix`). The session ended successfully with a wrong
+belief baked into the workspace.
+
+| Finding | Severity | Fires when |
+|---------|----------|-----------|
+| `unknown_profile_key` | warn | a top-level key the loader does not read; a near-miss from the accepted set is named (`plugins_configs` → `plugin_configs`) |
+| `derived_profile_key` | warn | the key IS a `SubagentProfile` field and is DERIVED, not read from the file |
+
+The second exists because `explain profile` renders
+`dataclasses.fields(SubagentProfile)`, and two of those fields cannot be
+written into a file at all: `preloaded_plugins` and `tool_scopes` come out of
+the `plugins:` list's own modifiers (`todo(preload)`, `memory(tools:[a,b])`).
+The page was **advertising two keys a file may not set**; it now says so
+beside each, reading the same `PROFILE_DERIVED_FIELDS` constant the finding
+does.
+
+Warn rather than error, the posture the whole family takes: an `inherits`
+base may carry a key a later version reads, and a snapshot may be newer than
+the installation reading it. `PROFILE_FILE_KEYS` is a declared constant
+because the loader reads four of its keys through block parsers and one
+(`env`) through a parameter default, so no scan alone could produce it —
+and `test_profile_file_keys.py` AST-scans the six loader functions and fails
+the build if any literal key read is missing from it. 26 of 27 keys are
+covered that way.
+
+**`explain plugin permission` rendered the whole policy vocabulary as one
+line.** `policy  object  Permission policy rules` — while
+`get_config_schema()` has always declared `defaultPolicy` with its
+`allow`/`deny`/`ask` enum, `whitelist.tools`, `blacklist.patterns` and the
+four-deep `sanitization.path_scope.*` tree. So the only honest route to the
+shape was `shared/plugins/permission/policy.py`, and the transcript took it —
+for a page whose entire job is to make that unnecessary.
+
+`ConfigSetting` gains `children` and `free_form`, and both surfaces descend:
+`explain` prints the tree at every declared depth, `validate` checks names
+and values at every declared depth. Nesting is rendered **fully**, unlike a
+tool PARAMETER, which stops at one level (#1020): the reader's need is the
+opposite — a nested parameter is one call's argument, while `policy` IS the
+plugin's whole configuration surface. Descent stops at
+`additionalProperties` (`permission.evaluators` maps tool names to scripts,
+so every key there is authored and none is a typo); that frontier is
+declared by the plugin, marked in the render, and is where `validate` stops
+reporting unknown names. `permission.policy.defaultPolicy: denied` is now
+`invalid_knob_value`, an error; it used to validate clean.
+
+**A declared `properties` block is NOT a completeness claim**, and the first
+version of this descent read it as one — which inverts the whole family's
+thesis. `PermissionPolicy.from_config` reads `cwd`,
+`sanitization.custom_blocked_commands` and `path_scope.resolve_symlinks`,
+and the schema declared none of them, so all three were reported as typos:
+a knob that *does* something, told it does not, whose remedy is deleting a
+working line. Measured across the plugin, the schema omits **sixteen** names
+its own reader consumes, so the completeness claim would be wrong far more
+often than right.
+
+So the nested finding is **evidence-driven**, exactly as `_report_undeclared_name`
+is one layer up: a read site → `undeclared_knob` quoting it, no site →
+`unknown_knob`, not scanned → the absence of evidence stated as such. The
+evidence needs a third scanner (`plugin_nested_config_read_sites`), because a
+nested key is read off a LOCAL — `ps_cfg.get("resolve_symlinks")` — and
+`_TOP_LEVEL_CONFIG_RECEIVERS` excludes those on purpose (a nested dict's
+inner names are not `plugin_configs` knobs). Widening that set would have
+been the wrong fix twice over. The three keys above are now declared too, so
+`explain plugin permission` shows them.
+
+**And so are the five an author actually writes.** `agent_name`,
+`config_path`, `workspace_path`, `channel_type` and `channel_config` are read
+straight off `initialize(config)`, and someone configuring a webhook approval
+channel had no route to their shape but the source — which is the sentence
+this whole section opens with. `channel_config` is declared
+`additionalProperties`, because the names inside it (`endpoint`, `headers`,
+`auth_token`, `timeout`, …) belong to the CHANNEL and nothing in this plugin
+should judge them.
+
+**The gap is a measurement before it is a rule.** Reconciling every in-tree
+plugin's schema against its own reader gives 123 undeclared reads across 26
+plugins — and the number is not one number: 33 are the keys
+`PluginRegistry._augment_plugin_config` INJECTS into every plugin's config
+(`workspace_path` / `config_root` / `session_id` / `agent_name`, `setdefault`
+so an author may still override one), and the rest span the block an author
+writes, a nested dict with its own owner, and *a different file the block
+points at* — `permission.config_path` names a permissions JSON whose own keys
+(`version`, `channel`) are not `plugin_configs.permission` keys at all.
+
+So `scripts/plugin_schema_census.py` ships as a **census, not a guard**, with
+its output committed at [Plugin schema census](docs/design/plugin-schema-census.md)
+and `permission` worked through site by site as the one audited row. A
+ratchet needs a definition before it needs a baseline: seeded today it would
+freeze that four-way ambiguity as though it were a fact, and its
+stale-entry rule would then charge every unrelated PR that declares a knob
+with updating a number nobody can re-derive. If it becomes one, the thing to
+count is the block an author writes — keys read off `initialize(config)` —
+said so in its docstring, with the other three surfaces a documented
+exclusion.
+
+**The permission whitelist was unchecked against the tool inventory
+`tool_scopes` has been checked against since the validator shipped.** One key
+over, and the key where being wrong is expensive: under `defaultPolicy: deny`
+a name matching nothing is a permanent denial of a tool the author believes
+they approved, and the runtime symptom is the one #951 exists to make
+legible — the call reaches the gate and vanishes. It is also the cheapest
+thing in a profile to misspell, because nothing else in the file repeats the
+name.
+
+| Finding | Severity | Both lists? |
+|---------|----------|-------------|
+| `unknown_tool` | warn | yes — the name is exposed by no installed plugin and is not a framework session tool |
+| `permission_rule_without_plugin` | warn | **whitelist only** — the tool exists and its plugin is absent from `plugins:`, so the rule governs a tool that never reaches the wire |
+
+The blacklist is deliberately exempt from the second: denying a tool the
+profile does not enable is defence in depth, and a profile that adds the
+plugin later keeps the protection it already wrote. Silent by design: a
+profile whose `plugins:` list is EMPTY (an abstract base declares no
+surface — the carve-out `missing_model` already uses), a name of MCP shape
+(`mcp__server__tool` / `mcp.server.tool`, whose inventory comes from the
+servers a LIVE session connects to), the framework's own session tools
+(`signal_completion`, `askPermission`), and a tool belonging to
+`PluginRegistry._ALWAYS_INITIALIZE_PLUGINS` — `introspection`'s `list_tools`
+/ `get_tool_schemas` are core and reach every wire whatever `plugins:` says,
+the exemption `plugin_config_without_plugin` already applies and this check
+initially dropped. The set is read from the registry, not re-spelled.
+
+"What the author declared" and "what the session will hold" are two
+variables for that reason: folding the framework's always-initialized set
+into the first would make every abstract base look like it declared a
+surface.
+
+**`validate` never asked whether the provider's SDK was installed.** It did
+not import `shared/scaffold/dependencies.py` at all, while both halves of the
+answer lived there: the AST closure of the provider package, and the
+import-name → extra index that turns a missing module into the `pip install`
+line. So `provider: azure_openai` with no `openai` validated clean and died
+at `connect()` with an ImportError several layers from anything the author
+wrote — the transcript's first runtime error.
+
+```
+[warn] provider 'azure_openai' needs azure, openai, which are not installed
+here — the profile is valid and the session will fail at connect() with an
+ImportError.  Run: pip install 'jaato-server[azure-openai]'
+```
+
+`provider_import_gaps` probes with `find_spec`, importing nothing, because
+`validate` is required to be side-effect free and a provider SDK's import can
+register handlers, read environment or open a config file (`_health`, which
+serves an operator-requested report, still imports; a subprocess test asserts
+the difference, with a control run that would notice an import). Every tier's
+provider is checked too — a tier binds a (provider, model) PAIR (#1036), and
+the second provider is the one nobody notices until `enter_tier`. **Warn**,
+not error: validating a workspace from a machine that is not the one that
+will run it is legitimate.
+
+**And the message asserts no runtime consequence.** Its first wording said
+the session "will fail at `connect()` with an ImportError", which a static
+import closure cannot know and which is false for a guarded import:
+`azure_openai`'s closure includes `azure`, and `azure_identity_available()`
+wraps that import in `try/except ImportError` on a path only `auth: aad`
+takes — so a key-auth profile was told it would fail, and it would not. Same
+class as #937, in this change's own new code. What it says now is what it
+measured: the package imports these names, they are not installed here, and
+whether a session reaches them depends on which path its configuration takes.
+
+Only TOP-LEVEL names are probed, so a namespace
+package whose submodule is absent reads as present (`google` resolves from
+`google-api-core`); that blind spot is `_health`'s too, and it is the safe
+direction.
+
+**Processors declared behind a tool that is not on the wire.**
+`_should_hide_signal_completion` gate 1 hides `signal_completion` whenever no
+`completion_payload_schema` is declared, so a profile carrying
+`completion_processors` and no schema has a gate that can never run — the
+agent hunts for the tool through `list_tools`, the nudge budget drains, and
+the driver is handed `None` by a session that looked like it ran. That is
+exactly the state the transcript spent an afternoon in, and the fact was
+already written down: `docs/design/completion-gate.md` §9 is why
+`jaato-scaffold new sweep` emits the schema, the processor and the profile
+keys as ONE set. Nothing enforced it for a profile written by hand, which is
+the only way to reach the state. `completion_processors_without_schema`,
+**error**, matching `completion_asset_missing` — the two are the same defect
+by different routes. Silent for a profile binding neither `model` nor
+`model_tiers`: processors are inherited, so every concrete descendant is
+checked in resolved form.
+
+**And the OTHER gate on `signal_completion` is not a profile key at all.** A
+root session on an interactive client (`terminal` / `web` / `chat`) hides the
+tool; `api` keeps it. So one profile completes under a headless driver and
+cannot complete under the TUI, with the same files — the one gate an author
+cannot see by reading their own workspace, and `explain` stated it only as
+hand-written prose on one page. It is now **probed**
+(`introspect.client_gate()`, which exercises `LifecycleTools` once per
+`ClientType`) and rendered on both `explain completion` and `explain plugin
+lifecycle`, so it cannot drift from the gate it describes.
+
+**`new client` always emitted the inline spec.** The template's comment said
+*"Inline spec so this runs before you have a profile. Swap for
+profile=…"* — and the generator always wrote the spec, whatever the workspace
+already had in it, while the only message an author saw when they supplied no
+flags was `missing required --provider / --model`: the inline answer, pointing
+away from the one form that can carry plugins, a persona, GC, ceilings and a
+completion schema. The transcript's first correction was *"en lugar de un
+.env, usa un profile"*.
+
+```bash
+jaato-scaffold new client --workspace . --profile collector
+```
+
+`--profile` is mutually exclusive with `--provider`/`--model` (two bindings
+for one session, where the profile wins at runtime, so the flags would
+decide nothing), refused on `--transport in_process` where the embedded
+client IS the binding, and **refused by name on an archetype that opens no
+session it can bind**. That last one is derived from the template rather
+than tabulated — the `__SESSION_BINDING__` placeholder is what receives the
+binding — because a hardcoded list is how the flag came to be accepted where
+it could not be honoured: `new cascade --profile worker` resolved the name,
+accepted it, and emitted the `"<profile-name>"` placeholder, byte-identical
+to passing nothing. A cascade's stages each name their own profile, which is
+the point of them.
+
+The name is resolved through the framework's own resolver under the set the
+workspace actually selects — `JAATO_PROFILE_SET` from its `.env`, or
+`--set` — so a profile that resolves only through `inherits` counts, and one
+that exists only inside an unselected set is reported as that rather than as
+missing. Four properties:
+
+- **`[]` and `None` are different answers.** `[]` is "this workspace declares
+  no profiles", which `--profile` can be refused against; `None` is "I could
+  not look", which must not become "your profile does not exist".
+- **The workspace `.env` is never rewritten for a `--profile` client**, even
+  under `--force`: that file is where `JAATO_PROFILE_SET` lives, and this
+  archetype's template carries a provider/model pair the profile supersedes.
+- **With no `--profile`, nothing changes.** An empty workspace gets the same
+  message and the same inline-spec client it always did; the `--profile`
+  suggestion appears only when the workspace demonstrably has profiles to
+  name.
+- **The set that made resolution succeed is persisted, and the banner
+  carries the flag.** `--profile X --set Y` resolved X only because Y was
+  forced, and the generated client resolves its profile from the workspace
+  `.env` — so `JAATO_PROFILE_SET` is written there (never retargeting one
+  already present). `_provenance` names `--profile` too: its whole claim is
+  to be copy-paste reproducible, and without the flag the printed command
+  re-ran to `missing required --provider / --model`.
+
+### When the Introspection Tools Misreport Their Own Environment (#966, #823)
+
+Two findings of one shape, and it is the one thing a diagnostic must not do:
+`jaato-doctor` and `jaato-scaffold explain` describing an environment that is
+not the one they are running in.
+
+**An incomplete install list is worse than none (#966).** `explain
+dependencies` enumerated extras over a hardcoded `("jaato-sdk",
+"jaato-server")` pair — written twice, as `EXTRA_DISTS` and again as an inline
+literal inside `framework_picture()`, which had drifted from the constant
+beside it. `jaato-premium` was in `FIRST_PARTY` and in `JAATO_DISTS` and in
+neither copy, so its nine extras were invisible: an operator was shown a list
+of what to install and the list was short. The same scan feeds the
+missing-import → extra index, so `presidio_analyzer` could not be traced back
+to `pip install 'jaato-premium[pseudonymization]'` the way `pexpect` is traced
+to `jaato-server[interactive]`.
+
+Adding `"jaato-premium"` to the tuple would fix the one distribution that had
+already shipped and leave the next one equally invisible — the same defect
+wearing the fix as a disguise. So the set is **measured**:
+`installed_jaato_dists()` reads installed metadata for every distribution whose
+normalised name starts with `jaato-`, `framework_dists()` unions that with the
+names this repo expects (so "not installed" stays sayable about the ones it
+knows), and one enumeration — `_extras_by_label()` — serves both the rendered
+listing and the index that inverts it. A distribution this repository cannot
+see at authoring time participates with no edit here.
+
+Not installed is **silence, not a finding**: `_requires` answers `[]` for an
+uninstalled distribution, so a workspace without premium is told nothing about
+premium's extras. What it is still told is that `jaato-premium` is not
+installed, which is the honest report and was already there. Deliberately not
+added: a note that `[pseudonymization]` also wants a spaCy model. It is true
+and it is a hardcoded fact about one extra of one package — the thing this
+change exists to stop.
+
+**The daemon is not running the code you are reading (#823).** A client and its
+daemon can resolve `jaato_sdk` from different checkouts with no mistake made by
+anyone: the daemon launched with a `PYTHONPATH` at a feature branch, the client
+launched without one and inheriting the venv's editable install. Both are
+installed correctly and they speak different event shapes, so the daemon sends
+`ToolOutputEvent.mime_type`, the client's class has nowhere to put it, pydantic
+drops it on ingest, and a handler dies with `AttributeError` several frames
+from anything the reader wrote. It bites hardest while the event protocol is
+being extended — the case where a field is new is the case where one side lacks
+it.
+
+`check_checkout_skew` sits beside the HOME comparison because it is the same
+class of defect (an invisible property of the daemon PROCESS that changes
+behaviour) answered from the same `/proc/<pid>/environ` block. The daemon's
+resolution is derived the way CPython would: its own `PYTHONPATH` entries in
+order, then the installed package.
+
+| Both sides resolve | Verdict |
+|---|---|
+| one directory | PASS |
+| two paths, at least one a source **checkout** | **FAIL** — never intentional in a dev loop |
+| two paths, both unpacked **installs** | WARN — what a rolling upgrade looks like; both versions are named |
+
+The discriminator is measured, not declared: a checkout has the distribution's
+`pyproject.toml` beside the package directory, an install in `site-packages`
+does not.
+
+**The false PASS it must never produce.** With no daemon `PYTHONPATH`, "the
+installed package" means installed for the DAEMON's interpreter. Resolving the
+caller's own `site-packages` instead would compare a path against itself and
+report PASS about two environments that were never compared — so
+`/proc/<pid>/exe` is read beside the environ, and when the interpreters
+demonstrably differ the check says it cannot tell. Every probe here is
+best-effort and returns rather than raises: `_proc_exe` uses `readlink` (not
+`realpath`, which answers with the path it was handed when nothing is there,
+reporting an interpreter that does not exist), and a `PYTHONPATH` entry that
+cannot be walked is skipped.
+
+### Five Ways a Session Came Up Wrong and Said Nothing
+
+The findings above are about surfaces that would not TELL you something. These
+are about a running session that was already broken and reported success. Each
+was traced from a live cascade that returned `None`.
+
+**A plugin the profile named that did not load.** `expose_tool` deliberately
+refuses to let one broken plugin take the session down: it logs, records the
+failure in `PluginRegistry._failed_plugins`, and carries on. That recovery had
+no audience — `_failed_plugins` was written in four places and read in **none**
+— so the session came up looking healthy with a plugin the profile asked for
+simply absent from the model's surface. `get_failed_plugins()` is the read, and
+`expose_all` now names, at WARNING, every REQUESTED plugin that failed. A
+failure in a plugin the session did **not** request stays quiet: only the
+profile's own list is a promise to the author.
+
+**`config_root` was documented as defaulting and did not.** The contract is
+written down three times — the SDK parameter's own docstring,
+`shared/config_resolver.py`, `explain paths` — and applied in one place: the
+in-process client, whose comment names the reason ("config-rooted plugins like
+`file_edit` fail to init without a config_root"). The daemon transports left it
+`None`, so the same driver got a different session depending on how it
+connected, and every scaffolded driver was on the wrong side of that.
+
+The asymmetry that hid it is worth stating, because it is why the failure looks
+unrelated to its cause. `config_root` has two consumers and only one falls
+back:
+
+| Consumer | With the value unset |
+|---|---|
+| the config SEARCH PATH (`resolve_config_search_path`) | appends `<workspace>/.jaato` anyway — profiles, agents, schemas all resolve, and the session looks fine |
+| a plugin that WRITES under the root | reads the VALUE. `file_edit` puts backups in `<config_root>/sessions/<id>/backups/` and raises at `initialize()` without one |
+
+So the session started, `writeNewFile` was gone, and the only trace was one
+daemon-side ERROR. `IPCClient` (and thus `WSClient` / both recovery clients)
+now derives `<workspace_path>/.jaato` when a workspace is given. Derived, not
+required: an explicit value still wins, so rooting config elsewhere to keep it
+out of the agent's filesystem tools works exactly as before, and with no
+workspace there is nothing to derive from.
+
+**A completion asset that resolved nowhere.** Nothing checked that a profile's
+`completion_payload_schema` or `completion_processors[].script` exists. An
+unresolvable one is a WARNING in the runner log and nothing else — and the
+consequence is total: with no schema `_should_hide_signal_completion` removes
+`signal_completion` from the surface entirely, so the agent hunts for it
+through `list_tools`, the framework spends its nudge budget re-prompting, and
+the driver gets `None` from a session that looked like it ran. `validate` now
+reports `completion_asset_missing` (**error**, matching
+`prefetch_script_missing`) and locates paths without loading them, since
+importing a processor would execute it.
+
+**...usually because the path carried the prefix the resolver adds.** Every
+relative reference is joined onto the config root, so
+`.jaato/completion_schemas/x.json` resolves to
+`<ws>/.jaato/.jaato/completion_schemas/x.json`. It is an easy mistake — every
+other path an author writes is spelled from the workspace root — and it gets
+its own code, `redundant_config_root_prefix`, so the message names the fix
+instead of sending someone to look on disk for a file that is exactly where
+they put it.
+
+**A hidden `signal_completion` that could not be told from an intentional
+one.** `_should_hide_signal_completion` reads `_payload_schema is None`, which
+is true both when a profile declared no schema (the documented way to opt out)
+and when it declared one that failed to resolve (a mistake). `LifecycleTools`
+now distinguishes them at construction and logs the second by name — the
+runtime backstop for a session that never went through `validate`.
+
+### `configure_service_auth` Configured Auth That Never Reached the Wire
+
+Reported from a live cascade: an `apiKey`/header scheme was configured, the
+call returned `env_vars_present: ["GITLAB_TOKEN"]`, and `preview_request`
+showed the request going out with no `PRIVATE-TOKEN` header. Every reasonable
+auth spelling was tried; the workaround was passing the header by hand on every
+`call_service`. Three defects in one chain, and a fourth that only became
+reachable once they were fixed:
+
+1. **`preview_request` had the config precedence backwards.** `call_service`
+   reads the stored `<service>/_service.yaml` first and falls back to the
+   in-memory discovered cache — with a comment explaining why. `preview_request`
+   did the opposite. Since `configure_service_auth` writes to disk, the preview
+   kept showing the auth the OpenAPI spec was PARSED with: an invented
+   `<scheme>_API_KEY` env var, because a spec declares the header name and never
+   the credential. The two verbs disagreed about the request, and the one that
+   lied was the one an agent uses to check its work.
+2. **The in-memory entry was never refreshed**, so that stale config outlived
+   the call meant to replace it, for the rest of the session.
+3. **`build_request` swallowed the resulting `AuthError`** — "for preview, we
+   can skip auth errors" — and returned a request with no auth header, which
+   reads as *this endpoint needs none*: the one answer a caller acts on and the
+   one that is wrong. A preview still must not raise, so it now carries
+   `auth_unresolved` naming the env var that did not resolve.
+4. **The credential then reaches a preview that is returned to the MODEL**, and
+   `redact_headers` matched a hardcoded four names (`authorization`,
+   `x-api-key`, `api-key`, `apikey`). No operator-chosen header is in that list
+   and none could be — an `apiKey` scheme's header name belongs to the API.
+   Redaction is now by **provenance**: the caller passes the header names the
+   auth manager actually resolved a credential into on this request, and the
+   name list stays for headers a caller supplied by hand, which have no
+   provenance to read.
+
+`explain plugin service_connector` now prints the whole `auth` object (see
+above), and the tool's own description names the fields each `type` needs — the
+thing a model reads before it guesses.
+
+### The MCP SDK Moved Its Decode Seam (mcp 2.x)
+
+`mcp[cli]` is an unpinned dependency, so a fresh `pip install` resolves
+whatever is current — and on any `mcp>=2` install, EVERY MCP server in the
+workspace was unreachable. `_ensure_mcp_patch` read
+`types.JSONRPCMessage.model_validate_json` to install the filter that keeps a
+server's own stdout log lines from being decoded as JSON-RPC; mcp 2.x turned
+`JSONRPCMessage` into a PEP 604 `UnionType`, which has no such method, and the
+`AttributeError` escaped the MCP thread's `run_until_complete`. The only
+evidence was a traceback in that thread's log — printed, incidentally, on top
+of every `jaato-scaffold` invocation in the same environment.
+
+The client beneath it was never the problem: driven against a real mcp 2.x
+stdio server, `connect` → `list_tools` → `call_tool` all work unchanged. So the
+fix is to find the seam, not to pin the SDK back:
+
+| Generation | `JSONRPCMessage` | Decode seam | Silenced by |
+|------------|------------------|-------------|-------------|
+| mcp 1.x | Pydantic model | `JSONRPCMessage.model_validate_json` | wrapping `traceback` / `builtins.print` (1.x *prints* the failure) |
+| mcp 2.x | PEP 604 union | `types.jsonrpc_message_adapter.validate_json` | a logging filter on `mcp.client.stdio`'s own logger |
+
+`detect_jsonrpc_seam(mcp_types)` is module-level and separate from installing
+anything, so `jaato-doctor` can ASK the question cold — the `mcp sdk` check
+reports the version and the seam in use, and WARNs when a build exposes
+neither. Three properties follow from what went wrong:
+
+- **`SkipMessage` is a `ValueError`.** mcp 2.x's `_parse_line` catches exactly
+  `ValueError` and hands it to the session as a value; a sentinel outside that
+  hierarchy escapes the stdout reader and takes the connection down — the
+  opposite of what the filter is for. 1.x catches `Exception` there, so the
+  narrower base serves both.
+- **No seam is not a failure.** The filter is a convenience and MCP works
+  without it, so an unrecognised shape is announced once at WARNING and left
+  unfiltered. The install is wrapped too: this method used to be able to kill
+  the MCP thread, and no future SDK shape may cost an operator their servers
+  again.
+- **The 2.x silencer is scoped to one logger object.** A filter installed on
+  an ancestor logger is not consulted for records propagating up from a child,
+  and every parse failure that is not our sentinel still reaches the operator.
+
+### Secret Env Scrubbing (#863)
+
+The runner legitimately holds secrets in its own `os.environ` — the
+provider key, the tokens `web_fetch` expands into headers.  A shell
+command, PTY session or MCP server the *model* drives inherits that
+environment, so `env` or `echo $GITHUB_TOKEN` hands every credential to
+model-controlled code.  `shared/secret_scrub.py` removes a set of secret
+names from the environment *given to the subprocess* (never from the
+runner's own), at three surfaces: the `cli` subprocess boundary, every
+`interactive_shell` spawn, and MCP stdio spawn.
+
+**Scrubbing is on by default.**  Until #863 it was opt-in: the module
+defined `DEFAULT_SECRET_ENV_PATTERNS` and applied it nowhere, so a profile
+with `cli` or `mcp` and no scrub configuration passed the daemon's full
+environment, provider keys included, to every command the model ran.  The
+reason was real — `gh`, `git push`, cloud CLIs need their tokens — but the
+failure was silent and the default was the unsafe one.  Now the default set
+applies when nothing is declared, and opting *out* is the explicit,
+WARNING-announced act, like `--ws-unsafe-no-auth`.
+
+One grammar, accepted at the profile top level (`scrub_secret_env:`, which
+covers all three surfaces) and per surface
+(`plugin_configs.<cli|interactive_shell|mcp>.scrub_secret_env`, which wins
+for that surface):
+
+| Value | Meaning |
+|-------|---------|
+| absent / `default` | the framework set: `*_API_KEY`, `*_APIKEY`, `*_TOKEN`, `*_SECRET`, `*_SECRET_KEY`, `*_PASSWORD`, `*_PASSWD`, `*_ACCESS_KEY`, `*_ACCESS_KEY_ID`, `*_SECRET_ACCESS_KEY`, `*_PRIVATE_KEY`, `*_CREDENTIALS`, `ANTHROPIC_AUTH_TOKEN`, `GH_TOKEN`, `AWS_SESSION_TOKEN` |
+| `none` | scrub nothing — the developer-desktop opt-out, logged at WARNING by each surface that applies it. The **only** spelling that disables: `[]`, `""`, a boolean, or a list holding only `!` exemptions are rejected (`invalid_scrub_secret_env`, fail closed), because in this codebase `plugins: []` means "the minimal set", not "off", and an author writing `[]` or `["!GH_TOKEN"]` to mean "nothing beyond the default" must not land on the leaky posture |
+| `"*_TOKEN"` | one glob (a lone string is one pattern, never split into characters) |
+| `[glob, ...]` | an explicit list; the entry `default` expands to the framework set in place |
+| `"!NAME"` in a list | an **exemption**: a variable matching it survives whatever else matches — `[default, '!GH_TOKEN']` keeps `gh` working while the provider key stays out of the shell |
+
+```yaml
+# a developer-desktop profile: gh and the AWS CLI keep their credentials,
+# everything else in the framework set is still scrubbed
+plugins: [cli, interactive_shell, mcp]
+scrub_secret_env: [default, "!GH_TOKEN", "!AWS_*"]
+plugin_configs:
+  mcp:
+    scrub_secret_env: default     # the MCP servers get no exemption
+```
+
+Rules the implementation holds to:
+
+- **A malformed value fails closed.**  The plugin applies the default set,
+  logs an ERROR, and `jaato-scaffold validate` reports
+  `invalid_scrub_secret_env`.  The only outcome worse than a broken
+  workflow is a silently leaked credential.
+- **An explicit grant is not scrubbed.**  A secret in an MCP server's own
+  `env` (in `.mcp.json`) or in the `env=` an interactive-shell caller
+  passes reaches that process; only the *inherited* `os.environ` is
+  filtered.  A profile's `env:` map is **not** a grant — it is where the
+  provider key usually lives.
+- **The primitives stay policy-free.**  `run_command(scrub_env=None)`,
+  `ShellSession(scrub_env=None)` and `ServerConfig.scrub_secret_env=()`
+  still mean "scrub nothing"; the default lives in the three plugins
+  (`resolve_scrub_patterns`), so it applies however a session was built,
+  profile or not.  The profile key is folded into the surfaces the profile
+  enables by `inject_scrub_secret_env` at every profile-to-session site
+  (runner envelope, in-process root session, both subagent spawn paths),
+  beneath an explicit per-surface knob.
+- **Inheritance is scalar-override**: a child's value replaces the
+  parents' outright, so `none` in one leaf profile does not leak into its
+  siblings.  The value is persisted raw in the session snapshot (#787).
+- **The leaky posture is announced three times**: `jaato-scaffold
+  validate` warns `secret_scrub_disabled` per enabled surface (and
+  `scrub_secret_env_inert` when the key names no enabled surface),
+  `jaato-doctor` preflight WARNs naming each such profile in the
+  workspace, and the plugin logs at WARNING when it applies the opt-out.
+
+**The scrub's one bypass now has a backstop (#712).**  The paragraph above
+is precise about what the scrub does *not* cover: the runner's own
+`os.environ` stays intact by design, so anything that can read
+`/proc/<pid>/environ` reads the unscrubbed store — every provider key and
+OAuth token the session holds — and the more the scrub is relied on, the
+more that one path matters.  Two layers close it, deliberately with
+different reach:
+
+| Layer | Covers | Applies when |
+|-------|--------|--------------|
+| AppArmor template **v30** — `audit deny` on `/proc/*/{environ,mem,pagemap,auxv,cmdline}` and each `task/<tid>/` twin, in base, `tool_hat`, `//child` and the isolated sub-runner | every read from a confined process, in-process tool or subprocess alike | AppArmor is available and the session is confined |
+| `is_sensitive_proc_path` in `shared/plugins/sandbox_utils.py` — the same set plus `maps` / `smaps`, minus `cmdline` | a path handed to a model-driven **file** tool (`readFile`, `glob_files`, `file_edit`) | always, including `workspace_root` unset and the degraded posture of #504 |
+
+The rules are written `/proc/*/...` and never `/proc/self/...`: AppArmor
+resolves that symlink to `/proc/<pid>/` **before** matching, so a
+`/proc/self/environ` deny would never fire against the read it exists to
+stop — the same finding the v15 template note records, and the reason the
+old `/proc/self/** r,` grant was inert rather than generous.  The two
+layers' sets differ on purpose.  `cmdline` is denied only at the kernel
+layer (the `--ws-token TOKEN` exposure; a file-tool read of it is a
+narrower leak than the `ps` workflows a denial would break), and
+`maps` / `smaps` only at the application layer (they leak address layout
+rather than credentials, and the distro's `abstractions/base` may grant
+them for the C library's own use — a deny there would override an
+abstraction on hosts this change could not be tested against).
+
+Known cost of the `cmdline` deny: `ps` / `top` / `pgrep` run by a confined
+agent show empty command columns, and **there is no fragment-level escape
+hatch** — a deny beats an allow at any specificity, including one granted
+from `~/.jaato/apparmor-fragments/*.rules`.  `JAATO_APPARMOR_COMPLAIN=1`
+is the diagnostic route.
+
+Not covered here: the eventual TLS-terminating broker (#505) that keeps a
+credential out of the runner environment entirely, and `/proc/*/fd/*`,
+which stays readable for any pid because CPython's `close_fds` path
+enumerates it at every subprocess spawn and AppArmor has no rule form for
+"my own pid only".
+
+### A Refresh Token That Rotates, and Two Sessions Refreshing It (#683)
+
+An OAuth refresh token **rotates**: the response replaces the token that
+bought it, and the old one is void the moment the provider answers. So
+
+```
+load -> stale? -> refresh -> save
+```
+
+is a read-modify-write on a shared file, and two of them at once produce
+two refreshes, each rotating the other's token away. Last-write-wins
+decides which superseded credential lands on disk. The loser does not
+fail then — it fails at its **next** refresh, and the user is logged out
+with nothing in the failure naming the cause. That opacity is why a
+small defect is a P1: the symptom is an unexplained re-login.
+
+**A daemon is more exposed than a one-process CLI, and the pool makes it
+worse.** Claude Code is one process per session and still needed a
+cross-process lock for this. Here, many sessions share one process,
+runner subprocesses refresh independently of the daemon, and pool slots
+`fork()` from a template that has already imported the auth plugins. A
+cascade fanning out after an idle period is N stages waking at once
+against one expired token — the normal shape, not an edge case. So an
+in-process `threading.Lock` is **not sufficient**: it does not exist
+across the runner boundary, and a lock object held at fork time is
+inherited in a state the child cannot reason about.
+
+`shared/credential_lock.py` is the one mechanism, the shape
+`shared/completion_nudge.py` and `shared/apparmor_label.py` already have:
+one definition, so four auth plugins cannot drift apart on it.
+
+**A lock alone is not the fix.** It converts the race into a queue — N
+sessions still perform N refreshes, politely one at a time, and the last
+one still wins for reasons nobody can see. What collapses the queue into
+a single refresh is **re-reading the credential after acquiring**, so a
+caller that blocked adopts the token the winner just wrote. The guard
+asserts `refresh_count == 1`, not "the writes did not interleave": with
+the lock intact and only the re-read removed, both race tests fail `2 ==
+1`.
+
+| Ask | Where | Note |
+|-----|-------|------|
+| lock spans read-check-refresh-write, cross-process | `credential_lock()` — an `flock` on a sibling `<cred>.lock` | a sibling, not the credential itself: `os.replace` swaps the inode and would detach the lock from what it guards |
+| re-read after acquiring | `refresh_under_lock()` | the half that makes it a fix rather than a queue |
+| refresh before expiry, with a margin | `with_margin()` / `JAATO_OAUTH_REFRESH_MARGIN` | the margin was **already there** (a hardcoded 300s in each provider); it is now one definition and configurable |
+| a transient failure is not a logout | `TransientRefreshError` vs `InvalidGrantError` | only an explicit OAuth error code reads as a dead credential |
+
+**One primitive covers threads and processes.** `fcntl.flock` attaches to
+the open file *description*, and each acquisition opens its own — so two
+threads of one daemon contend exactly as two processes do. That is why
+there is no second in-process lock: two locks are how a deadlock is
+built. The corollary is that the lock is **not reentrant**, so call sites
+stay flat — a helper called from inside the lock must not take it again.
+
+**Nothing is held at import time**, which is the fork answer: the
+descriptor lives inside one call, so a pool slot forked from the template
+inherits no lock state. For the residual case — a `fork()` landing while
+another thread holds it, where the child inherits a descriptor holding a
+lock it never took — live descriptors are closed in the child by an
+`os.register_at_fork` hook.
+
+**The margin does not disperse a herd, and the docs no longer imply it
+does.** Every process computes the same threshold from the same
+`expires_at`, so N sessions cross it at the same instant exactly as they
+crossed real expiry — the margin only moves the instant earlier. Its real
+job is to make the refresh happen while the old token is still **valid**,
+which is what gives a transient failure something to fall back on: a
+token inside the margin is stale but still accepted, so a network blip
+there returns the stored token instead of raising.
+
+**The asymmetry in classifying a failure runs one way, deliberately.**
+Mistaking a dead grant for a transient costs one wasted retry; mistaking
+a transient for a dead grant costs the user their session — the same
+symptom the lock exists to prevent, arriving by a different route. So
+only `invalid_grant` / `invalid_client` / `unauthorized_client` /
+`invalid_token` in the body is read as a dead credential. A bare 401 from
+a proxy, a 429, a 502, a connect timeout: all transient. Both subclass
+`RuntimeError`, so existing callers that catch it are unaffected.
+
+**Which plugins actually share the pattern.** The issue names four; the
+tree says three, and the third is different in kind:
+
+| Plugin | Rotates? | Wired |
+|--------|----------|-------|
+| `anthropic_auth` | yes — `data.get("refresh_token", refresh_token)` | `get_valid_access_token` under the lock |
+| `antigravity_auth` | yes (Google) | `get_valid_access_token` **and** the provider's per-request `_refresh_token_if_needed`, which had its own unlocked refresh and was the hot path |
+| `github_auth` | **no** — the stored device-flow token has no refresh token at all | the *Copilot* exchange is locked anyway: N sessions each made that rate-limited call, and `save_copilot_token` is a read-modify-write of the file that also holds the OAuth section |
+| `zhipuai_auth` | **no refresh path exists** — a static API key | nothing to wire |
+
+**`save_accounts` rewrites the whole account file**, so Antigravity's
+locked helper writes back the manager it read *under the lock* rather
+than the long-lived one the provider holds — saving a stale manager
+republishes every other account's stale tokens over whatever another
+process just refreshed. Not fixed here, and worth knowing: the remaining
+`save_accounts(self._account_manager)` calls in `shutdown()` and
+`_rotate_account_on_rate_limit` are still whole-file last-write-wins
+across accounts. That is a merge problem, not a locking one, and wants
+its own change.
+
+### Approver Identity (#859)
+
+`PermissionResolvedEvent` said HOW a decision was reached (`method`) and
+nothing about WHO reached it; the authenticated user the daemon knew
+(`set_client_user()`) reached only the telemetry `user.id` span attribute,
+so an auditor joined approvals against spans by timestamp, and a keyless
+deployment had nothing to join against.  Three things now carry identity,
+all optional so unauthenticated IPC sessions are unchanged:
+
+| Where | Field | Meaning |
+|-------|-------|---------|
+| `PermissionResolvedEvent` | `user_id` | the identity the daemon authenticated for the client that answered — stamped by the transport that received the `PermissionResponseRequest` (`get_client_user`), never taken from the request body, and carried to the runner on `PromptResponse.user_id` |
+| `PermissionResolvedEvent` | `approver` | the name an external approval system attached to its webhook / file response (`"approver": "..."`); asserted, recorded as claimed |
+| ledger `permission-check` record | `user_id` / `approver` | the same two, on the token ledger |
+| ledger `response` record | `user_id` | the session's user — the same id the telemetry `user.id` attribute carries |
+| session record header | `created_by` | the session's user, persisted (record version 2.9) and restored onto the daemon `Session` and the revived runner session |
+
+Both event fields are `None` for a policy decision (whitelist, evaluator,
+suspension), so "nobody was asked" stays distinguishable from "somebody
+answered".  The session's own user reaches the runner-side `JaatoSession`
+on `SessionInitEnvelope.created_by` — `set_client_user_id` previously had
+no caller, so runner-tier telemetry was anonymous too.  Related: #507 is
+the integrity half (tamper evidence); this is the identity half.
+
+### Observable Permission Decisions (#951)
+
+`check_permission` traced two things: that a check had **started**, and — on
+the ASK branch only — that it was about to prompt. Every terminal decision went
+to `_log_decision`, which appends to `_execution_log`, an in-memory list that
+reaches no file and no event. So an ALLOW and a DENY were **byte-identical in
+every log an operator can read**: one `check_permission: tool=X` line, then
+silence.
+
+A silent denial is invisible to the model too — no error to react to, so it
+re-issues the same call. #951 reports a subagent whose `writeNewFile` was
+checked 38 times and never ran; re-running the same profile with
+`defaultPolicy: deny` instead of `ask` produced *the same* logs and the same
+~10-token tool result. A genuine policy DENY and a call vanishing after the
+gate were indistinguishable, from the operator's side and the model's, so the
+symptom could be described exactly and the verdict could not be named. (#947 is
+the cost: 127 attempts at ~57k tokens each, outliving the parent session.)
+
+Two stages now say what they did.
+
+**The gate.** `check_permission` is a thin **single-exit wrapper** around
+`_check_permission_impl`, which keeps its twenty-odd rule-specific exits:
+
+```
+[PERMISSION] check_permission: tool=writeNewFile call_id=call_1 agent=subagent:documentalista session=20260910_115239
+[PERMISSION] check_permission: DECISION tool=writeNewFile call_id=call_1 agent=subagent:documentalista allowed=False method=default reason='Denied by default policy'
+```
+
+Structural rather than per-branch, deliberately: a branch added later is traced
+whether or not its author remembers to, which is the one property per-branch
+tracing does not have. `test_decision_observability_951.py` carries an AST
+guard that the wrapper stays single-exit, and a second that no exit of the impl
+returns a verdict without recording one — the two that did
+(`not_initialized`, `unknown`) are closed. A **raise** is traced too: it is a
+third outcome the old logging could not express, and `ToolExecutor` converts it
+into a fail-closed denial that reads downstream like a policy decision.
+
+`agent=` comes from the **caller's** per-session context, never from
+`self._agent_name`: the plugin is a registry-shared singleton whose
+`_agent_name` is whatever initialized it last, so a subagent's spawn re-labels
+the parent's own later decisions. (#951's traces show exactly that — the
+subagent's lines carrying the parent's `@escriba`.) The audit entry gains
+`method` / `call_id` / the caller, stamped at the single exit the way approver
+identity already was (#859), so `EvalContext.execution_log` can be reasoned
+over; the ledger's `permission-check` record gains the same three.
+
+**The stage after it.** `ToolExecutor._execute_impl` has three exits that end a
+tool call without running its body, and none left a mark — which is why "the
+call disappears between the permission gate and `file_edit`'s executor" had
+nowhere to look:
+
+```
+[TOOL_RUNNER] permission: tool=writeNewFile call_id=call_1 verdict=DENY method=default reason='Denied by default policy'
+[TOOL_RUNNER] resolve: tool=writeNewFile call_id=call_1 executor=shared.plugins.file_edit.plugin._execute_write_new_file
+[TOOL_RUNNER] result: tool=writeNewFile call_id=call_1 ok=True dict(keys=_permission,_telemetry,lines,path,size,success)
+```
+
+| Line | Says |
+|------|------|
+| `resolve: ... executor=MISSING — refused before the permission check` | no executor resolvable, so the gate was never consulted (`No executor registered for X` — roughly the same ten tokens a denial is) |
+| `permission: ... verdict=DENY\|ALLOW method=...` | the **consumer's** record of the verdict, so a policy plugin that traces nothing of its own (a stub, a wrapper, an out-of-tree engine) is still recorded where its decision takes effect |
+| `auto-background: ... — execution leaves this path` | approved, and its body runs elsewhere |
+| `resolve: ... executor=MISSING` after an ALLOW | the shape that reads, from outside, as a call vanishing after the gate |
+| `result: ... ok=... dict(keys=...)` | what the model was handed — **keys and the error string only**; a trace file is not the place for the file a tool just wrote |
+
+Both stages write to `JAATO_TRACE_LOG` / the profile's `trace.session_log`.
+
+**The line is a contract, and it says whether anybody was asked (#968).**
+The trace is the ONE artefact every deployment gets: the ledger's
+`permission-check` row needs a ledger, `_execution_log` never leaves the
+process, and the event (below) is opt-in. So the DECISION line is
+machine-readable by construction — scalar `key=value` fields first, the
+free-text `reason=` **last**, read back by
+`shared.plugins.permission.plugin.parse_decision_trace`:
+
+```
+[PERMISSION] check_permission: DECISION tool=writeNewFile call_id=call_1 \
+  agent=subagent:documentalista session=20260910_115239 allowed=True \
+  method=allow_all asked=False policy=runtime reason='Pre-approved all requests'
+```
+
+`asked=` is the field `method` could not supply, and the one #797 needed:
+`allow_all`, `turn_suspension` and `idle_suspension` are each produced BOTH
+by a pre-approval short-circuit that consulted nobody and by a human
+answering `a` / `t` / `i` at a prompt. It is recorded where the call
+actually reaches the channel, so it is a fact rather than an inference.
+`user_id=` / `approver=` (#859) are written **only when present** — their
+absence is how "nobody was asked" stays distinguishable from "somebody
+answered", so they are never rendered as `None`.
+
+**The event carries every decision only if you ask for it.** Most terminal
+decisions announce nothing on `PermissionResolvedEvent` — suspensions,
+`allow_all`, the trusted bridge, an `askPermission` grant, an evaluator's
+early exit, an uninitialized plugin — and in subagent mode *nothing at
+all*, which is #951's blind spot. `plugin_configs.permission.emit_decision_events:
+true` makes `check_permission`'s single exit emit one for any decision no
+branch announced (never a second for one that did):
+
+```yaml
+plugin_configs:
+  permission:
+    emit_decision_events: true      # default false
+    policy: {defaultPolicy: ask}
+```
+
+Off by default because it is per-tool-call cost on the hot path, and
+measured rather than assumed: the record's own bookkeeping is **~0.7 µs**
+per decision against a ~36 µs baseline the trace write dominates, while the
+fallback emission adds **~9 µs** with a *no-op* hook — and the daemon's real
+hook emits two events (`PermissionResolvedEvent` plus the
+`PermissionStatusEvent` `emit_permission_status()` appends) and serialises
+both to every connected client. A trace line is cheap; an event is not.
+
+### A Boundary the Notebook Did Not Have (#710)
+
+`cli` contains the paths a model names: every path token in a command goes
+through `check_path_with_jaato_containment` and the command is refused when one
+falls outside the workspace. `notebook_execute` had nothing equivalent, and it
+is the cheapest surface a model can reach (eager, core, and measured at ~93% of
+tool calls in #717). Same daemon, same workspace, two sessions:
+
+| tool | asked for | result |
+|---|---|---|
+| `cli_based_tool` | `cat /etc/hostname` | **refused** |
+| `notebook_execute` | `open('/etc/hostname').read()` | the hostname |
+| `notebook_execute` | `subprocess.run(['cat','/etc/hostname'])` | the hostname |
+
+The third row is the point: the notebook spawned the very command `cli` had
+just refused. Any workspace-confinement claim made about `cli` was void while
+`notebook` was exposed, and nothing had to be jailbroken to get there — the
+reported session was asked to study a sibling checkout and simply browsed it.
+
+**`cwd=workspace_root` was never containment**, and the backend's own docstring
+said as much: it exists so `os.getcwd()` and *relative* paths resolve
+in-workspace. Absolute paths were untouched, and `_set_pdeathsig` is lifecycle,
+not isolation.
+
+**The in-process gate is a different question, and it stays.**
+`_inprocess_exec_allowed` (`backends/local.py`) asks *may model-authored code
+run in the host interpreter at all* — where a cell can reach the runtime, the
+tool executor and other plugins' memory — and fails closed without AppArmor or
+`allow_inprocess_exec`. It bounds the PROCESS. It never bounded the
+FILESYSTEM, and it is on the `local` backend while `subprocess` is the default,
+so `CLAUDE.md` describing notebook execution as failing closed described one
+backend of it. Both halves exist now, and neither replaces the other.
+
+**Three tiers, strongest first, decided in the kernel before any cell arrives:**
+
+| Tier | What bounds the cell |
+|------|----------------------|
+| AppArmor | the runner's per-session profile, inherited by the kernel through the profile's `ix` exec rule. A real kernel boundary; nothing else is installed on this path |
+| audit hook | `kernel_sandbox` installs a PEP 578 hook applying the same containment `cli` applies — to `open`, the `os.*` mutators, `listdir`/`scandir`, every spawn, and `ctypes.dlopen` |
+| nothing | the kernel answers every cell with a refusal naming the knob, and stays up so the refusal reads as a cell error rather than a dead kernel |
+
+The hook sees **actual I/O**, so it does not care how a path was spelled,
+built or obfuscated — the standing weakness of the static `code_analyzer`
+scan, which reads source text and (in the default `warn` mode) blocks nothing.
+Spawns are checked on their arguments, because a child process runs in another
+interpreter where no hook of ours is installed; `ctypes.dlopen` of anything
+outside the interpreter installation is refused for the same reason, one layer
+down — native code's own `open(2)` raises no audit event.
+
+**Be clear about what an in-process hook is.** It is not a kernel boundary. A
+cell that *sets out* to escape can attack the hook itself — rebind the module's
+policy, reach it through `gc`. It closes the accidental and the opportunistic
+case, which is what #710 measured, and makes a deliberate escape an act that
+has to defeat a declared boundary rather than walk through an open door. For a
+hostile-model threat model the answer is AppArmor, and the layering says so.
+
+**The gate belongs to notebook execution, not to one backend.** Every backend
+answers `NotebookBackend.execution_boundary()`, `NotebookPlugin` asks before
+dispatching a cell, and the base class's default is a **refusal** — a backend
+added later is contained once its author has decided how, rather than
+inheriting "allowed" and reproducing this defect. `local` answers with its
+in-process gate, `subprocess` with the tiers above, `kaggle` with "the code
+never touches this host".
+
+**And it is asked on both dispatch paths.** `supports_streaming` is `True` for
+`notebook_execute`, so the streaming path is the live one in a daemon — and it
+ran neither the boundary check nor the static analyzer. `sandbox_mode: strict`
+therefore blocked nothing in a real session. One `_guard_execution` now serves
+both paths; a gate that covers one of two dispatch paths is the same shape as a
+gate that covers one of two backends.
+
+**Escape hatches, narrow before wide:**
+
+```yaml
+plugin_configs:
+  notebook:
+    allow_read_paths: ["/srv/corpus"]   # extra readable roots
+    allow_uncontained_exec: false       # the whole boundary, off (WARNING)
+```
+
+`sandbox add <path>` is the operator's live equivalent and is honoured too: a
+kernel outlives many cells, so the session's authorized and denied paths ride
+**every** `execute` frame rather than the kernel's argv — a grant made after
+the kernel spawned takes effect on the next cell, and a revocation likewise. A
+denial outranks every allowance, the workspace included.
+
+Not addressed here: an AppArmor child profile for the kernel on an unconfined
+host (there is no profile to transition from), and the in-process backend's
+memory-reach, which #710's grooming correctly separates and which the deferred
+kernel + tool-RPC redesign owns.
+
+#### The audit tier cannot import `ctypes`, and so cannot import numpy (#1011)
+
+The row above says `ctypes.dlopen` of anything **outside the interpreter
+installation** is refused. `dlopen(None)` — "this process's own symbols" — is
+refused too, and that one is paid by code that never mentions `ctypes`:
+CPython's `ctypes/__init__.py` runs `pythonapi = PyDLL(None)` at module import,
+so **`import ctypes` raises the event by itself**. `numpy/_core/_internal.py`
+does `import ctypes` guarded by `except ImportError`, and
+`NotebookContainmentError` is a `PermissionError`, so the guard does not catch
+it and the whole numpy import dies. With it go pandas, scipy, scikit-learn,
+matplotlib, shapely-via-geopandas, osmnx and torch. **On the audit tier a cell
+cannot run the scientific stack at all.**
+
+The compiled extension modules were never the problem — they load through the
+import machinery (`open` events) and site-packages is a read root via
+`sys.path`. Measured: with `dlopen(None)` permitted and every other rule
+intact, `import numpy` succeeds and `(numpy.arange(10)**2).sum()` is `285`.
+Only the stdlib's own initialization line fails.
+
+**This is not a sloppy check and relaxing it is not the fix.** `dlopen(None)`
+returns a handle to the whole process symbol table, so the object the stdlib
+builds *is* the escape: `ctypes.pythonapi.system(b"...")` resolves **and calls**
+libc `system(3)` — verified, it ran a shell command. The only event that path
+raises is `ctypes.dlsym`, which this hook does not audit, so a frame-gated
+exemption permitting just `ctypes/__init__.py`'s own `PyDLL(None)` would hand a
+cell arbitrary libc with nothing left to stop it. Auditing `dlsym` as well would
+not close it either: once the module is imported, `memmove` over a
+`from_buffer` view and `string_at` at a raw address give in-process memory
+read/write with no library load at all — the `_POLICY`-rebinding limit the
+module docstring already names. Under the audit tier you genuinely cannot have
+both `import ctypes` and this boundary.
+
+**The AppArmor tier has no such restriction**, because `establish_containment`
+installs no hook at all when `/proc/self/attr/current` reports an enforced
+profile — there, `import ctypes` and numpy work normally. Neither does a
+**subprocess**: a spawned child is bounded by the OS and nothing else, so the
+same import runs through `cli` or `!python`, which is also why `!pip install X`
+works. Those are the remedies, and they are all *other surfaces* — which is the
+whole reason the next section exists.
+
+#### Which boundary is in force, said before the first cell (#1012)
+
+The tier materially changes what a cell can do and the model was told none of
+it: it discovered the tier by hitting a refusal mid-task and reverse-engineering
+the boundary from one error string. A live session hit the `ctypes` refusal,
+read its old wording ("loading native code would bypass the notebook's
+filesystem boundary") as *the sandbox forbids native code*, told the user so
+three times with increasing confidence, and steered them to an external API. It
+had `cli` throughout, where one `python -c "import numpy, osmnx"` would have
+falsified the theory in a single call. It never occurred to it that the two
+surfaces have different containment.
+
+Both shapes the issue offers are implemented, because neither covers the other:
+
+| Surface | Carries | Why this one too |
+|---------|---------|------------------|
+| the plugin's **instruction contribution** | the active tier + its two consequences | the standing fact, in the system prompt, read BEFORE the first cell rather than after a refusal |
+| the **first `notebook_execute` result** of each kernel | the tier the KERNEL reported on its READY frame | a kernel that respawned under a different posture — or whose interpreter could install no hook — contradicts the prompt visibly, in the result the model is already reading |
+
+Both render through `kernel_sandbox.boundary_notice`, the **one** place a
+tier's consequences are written down, so the standing fact and the per-kernel
+one cannot disagree. Nothing derives a second answer: the tier comes from
+`establish_containment` in the kernel and travels on the READY frame (where the
+kind was already sent and was being discarded), and the pre-spawn expectation is
+`SubprocessKernelBackend.boundary_kind()` — the ladder `execution_boundary` used
+to write out inline, now named once and worded from there. A backend whose
+containment is not one of the four tiers answers `None`, which renders as **no
+claim** rather than a plausible wrong one.
+
+Two things the text gets right, both of them the distinction the failing session
+could not make:
+
+- **refused-by-containment is not not-installed.** The audit notice says so in
+  those words, and adds that other compiled extension modules import normally.
+- **a subprocess is not audited.** The same import succeeds through `cli`, and
+  `!pip install X` works — the single fact that would have ended the incident.
+
+It is paid on every request (it lands in the prompt-cache prefix), so only the
+**active** tier's lines are rendered, never a table of four, and it stops at two
+consequences. The answer is stable within a session — each backend's
+`boundary_kind` derives from AppArmor state, the operator's opt-out and whether
+a workspace resolved, none of which changes under a running daemon — so the
+prefix is stable; the respawn case is exactly what the per-result announcement
+covers, and it is spent **once per kernel**, re-armed by `_spawn`.
+
+**A refusal now names its tier.** Every message the hook raises is prefixed
+`notebook containment (audit tier)`, and the `ctypes` one names the culprit,
+denies the general claim, and lists the remedies. The hook is installed on the
+audit tier and on **no other**, so that prefix is also an operator signal: seeing
+it on a deployment that believes AppArmor is enforced is evidence of a silent
+degrade, where previously the only trace was a runner log line nobody reads.
+(`JAATO_REQUIRE_APPARMOR=1` remains the way to make that a refusal to start;
+this only stops the evidence being invisible.)
+
+### A Bootstrap That Failed, Discovered at an Unrelated Verb (#1033)
+
+`session.new` began failing intermittently on a live daemon with
+
+```
+RunnerCallError: session.get_context_usage failed:
+ToolError: session not bootstrapped on this runner
+```
+
+`session.get_context_usage` is a read-only toolbar RPC. It is not what
+failed; it is what happened to ask first.
+
+**`dispatch_bootstrap_envelope` does not propagate a bootstrap failure** —
+deliberately: it emits `SessionTerminatedEvent` so cascade observers see the
+death, and it calls `mark_runner_ready()` so a warm pool slot cannot strand a
+client-tool push on a readiness timeout. Both are right and both still happen.
+What did not happen is anyone being **told**, so session creation carried
+straight on into `server.initialize()` — which asks the runner for its context
+usage with no guard, two dozen lines below the one call in that function that
+IS guarded, whose comment names this exact contingency (*"the runner-side
+handler may return `stage="no_session"` if `session.bootstrap` RPC hasn't
+completed"*). Every bootstrap failure class — an AppArmor confinement
+mismatch, a provider connect failure, a secret that would not resolve, the
+30 s bootstrap deadline — therefore reached the client as a toolbar read,
+with the real cause in a daemon-side WARNING nobody was reading.
+
+**It is not a race, and the lane split is not involved.** `session.bootstrap`
+runs SYNCHRONOUSLY on the runner's reader thread, so no frame can even be
+DECODED while it runs; and the daemon's own order is strictly sequential —
+spawn, dispatch bootstrap, then initialize, all in one function. A control-lane
+call cannot be served mid-bootstrap on this path. `no_host` was the honest
+answer to a question that should not have been asked.
+
+| Half | Where |
+|------|-------|
+| the outcome is recorded where it is known | `dispatch_bootstrap_envelope` → `JaatoServer.note_runner_bootstrap_outcome` (a summary on every failure path, `None` on success, so the field means "the outcome of THIS bootstrap" rather than "one failed once") |
+| it is consulted where session creation is decided | `session_manager.initialize_or_refuse` — a free function, because it reaches nothing on the manager: it is a precondition of the SERVER |
+
+Three properties:
+
+- **`_require_ready_session` is untouched.** Making it wait, retry or answer
+  optimistically would convert a visible refusal into a session reporting
+  usage nobody measured. The predicate is right; the dispatch was wrong.
+- **The refusal names the bootstrap failure**, as a non-recoverable
+  `ErrorEvent(error_type="RunnerBootstrapFailed")` through the in-init sink —
+  the shape `core.py`'s own in-init refusals use, followed by #882's
+  correlated `session.new` answer.
+- **`mark_runner_ready()` is still called on failure, and no longer claims
+  what it used to.** Readiness and success were one question in that
+  docstring ("the daemon-side JaatoSession remains authoritative"), naming a
+  §7c rollout window that has since closed: `initialize()` itself now reads
+  the runner's session. The log line moves WARNING → ERROR for the same
+  reason — it is the one place the real cause is recorded.
+
+**A bootstrap failure is a session failure either way; what changed is that it
+says so.** A server that dispatched no bootstrap at all (the embedded path,
+standalone WS) records nothing and initializes exactly as before.
+
+### A Cancel the Daemon Wrote and the Runner Threw Away (#988)
+
+`client.stop()` / `session.request_stop()` reach a runner-served tool as a
+`kind: "cancel"` frame on the daemon ↔ runner socket. The daemon wrote it, the
+runner decoded it, and under load the tool ran to completion and answered
+`ok=True` — measured from a plain `asyncio.run()` driver with no pytest
+involved: token tripped at 0.201 s, frame written at 0.206 s with no
+exception, result at 10.971 s.
+
+**The frame was not lost on the wire; it lost a race inside the runner.**
+`serve()` reads frames on one thread and dispatches each request to a pool
+worker, and the worker's FIRST act was to register the call:
+
+```python
+self._pool.submit(self._handle_request, env)   # serve, reader thread
+...
+def _handle_request(self, env):                # pool worker
+    token = CancelToken()
+    self._active_calls[env.id] = _ActiveCall(cancel_token=token)
+```
+
+so `serve` went straight back to reading while the worker was still being
+scheduled. A cancel frame already sitting in the socket buffer — which is the
+normal case, because a runner takes ~0.5 s to boot and both frames are queued
+before it reads either — reached `_handle_cancel` first, found no
+`_active_calls[id]`, logged at DEBUG and returned. Nothing re-checked. The
+token the worker then created was a **different object**, never tripped, and
+the `cli` executor polled it ~200 times without seeing anything.
+
+| Layer | Verdict |
+|-------|---------|
+| the runner never reads the frame | **no** — `_handle_cancel` ran, every time |
+| `_handle_cancel` finds no `_active_calls[id]` | **yes** — 12/12 losses under load, 0/10 idle |
+| the executor does not observe a tripped token | **no** — the token was never tripped |
+
+**Registration moved to the reader thread** (`_register_call`, called from
+`serve` before the next frame is decoded; the token is then handed to
+`_handle_request`, which publishes that same object to its thread-local). The
+daemon only cancels an id whose request frame it has already written, and the
+reader handles frames in wire order, so by the time a cancel for id *N* is
+read the entry for *N* is either present (trip it) or gone (already finished).
+*Not registered yet* is no longer reachable. This is shared RPC machinery, so
+the **session-hosted path was affected identically** — `session.send_message`
+takes the same work-lane branch — and is fixed by the same change.
+
+**Why the loss was invisible, and what says it now.** Two swallows on one
+path made a lost cancel indistinguishable from "no cancel was requested".
+Both are promoted, and each miss is told apart from the others rather than
+lumped together, because one of them is routine and the other never is:
+
+| Site | Event | Now |
+|------|-------|-----|
+| `RunnerRPCClient._send_cancel` | the write FAILED — the runner is alive and never heard | **WARNING**, counted in `cancel_write_failures()` |
+| same | the channel is already closed — the call dies with it | DEBUG |
+| `RunnerRPC._handle_cancel` | id ≤ the highest registered — the call finished first | DEBUG, counted `late` |
+| same | id > the highest registered — a cancel for a call this runner was never asked to run (#856's signature) | **WARNING**, counted `unknown` |
+
+`RunnerRPC.cancel_stats()` reports `received / tripped / late / unknown`, and
+`received == tripped + late + unknown` by construction — so a nonzero
+`unknown` is the one number that says *a cancel reached this runner and
+nothing was cancelled*.
+
+**The test that hid it.** `test_cancel_token_trips_runner_cancel` is a timing
+bet, and a previous attempt to stabilise it widened the command from 200 to
+2000 iterations on the theory that the event loop was starved. It was not, and
+the extra iterations bought nothing: a dropped cancel is dropped
+*permanently* — the frame is consumed and no later cancel-check can recover it
+— measured at 2000 iterations under the same load, still `ok=True`, at 105.1 s
+instead of 10.9 s. The count is back at 200, and
+`server/runner/tests/test_cancel_before_worker_registers_988.py` reproduces
+the loaded case **with no clock at all**: one work-lane worker, held by a
+gated call, so the cancelled call is provably still queued; wire ordering is
+established by a control-lane probe rather than by polling. It fails
+`unknown=1, tripped=0` against the old registration site, deterministically.
+
+### A Turn That Ended the Session, Handed Back as a Turn (#1007)
+
+#988 and #856 are a call that never returns. This is the other half of the
+same family: a call that **returns, on time, saying nothing true**.
+
+`Session.ask` settled on first-of `{TURN_COMPLETED, SESSION_TERMINATED}`. The
+daemon emits both from one thread, and the turn event comes **first** — 2-3 ms
+first, measured on the issue's credential-free `echo` repro. So a session its
+`budget_control` ceiling had just ended answered `''`, indistinguishable from a
+model that said nothing, and `_raise_if_needed` raised only for
+`reason == "error"`. **This half needs no cascade at all.**
+
+On a **cascade-stamped** session it then hangs. The terminal also unloads the
+session (`_apply_default_cascade_policy` detaches every IPC client), so the
+next send is answered at once with `ErrorEvent("Session not found: …")` —
+which `ask` did not subscribe to. `timeout=` converts the wait into
+`TurnTimeout`; without one it waits forever. A real run blocked **12+ minutes**
+in `pipe_read` and left no line in the daemon log, because that reply was not
+logged either.
+
+**`complete` already did the right thing, and that is the whole lever.** It
+settles on the daemon's confirmation (#767) and on the terminal, so a
+completion-gated stage over its ceiling returns cleanly. The facade had **two**
+settle rules; one of them was wrong, and nothing kept them in agreement.
+
+**One rule now, in `_TurnWatch`, parameterised by SPAN** — which is the entire
+difference between what a turn verb and a session verb want from the same
+events:
+
+| | `span="turn"` (`ask` / `stream`) | `span="session"` (`complete`) |
+|---|---|---|
+| `TURN_COMPLETED` (latched agent) | proposes a terminus | proposes a terminus |
+| that agent's next `AGENT_STATUS_CHANGED` | **any** status confirms — the turn is over either way | `active` **withdraws** (a nudge, a drained send); `idle`/`done` confirms |
+| `SESSION_TERMINATED` | unconditional; the only thing that sets `session_ended` | same |
+| `ErrorEvent(error_type="SessionError")` | the session is not there — fail, do not wait | same |
+| never latched (no opening `active`) | first turn settles, as pre-#767 | same |
+| latched, never confirmed | settle the proposal after `TERMINUS_GRACE` | after `SETTLE_GRACE` |
+
+**Two graces, because they bound different questions.** `SETTLE_GRACE` (10 s)
+asks *is this agent going to take another turn* — about the AGENT, which may
+legitimately pause. `TERMINUS_GRACE` (1 s) asks *did the daemon emit a terminal
+in the same breath as this turn event* — about ONE emit sequence on ONE thread,
+answered in milliseconds or not at all. **Its expiry costs information, never
+correctness**: the call settles on the turn and returns the turn's text, which
+is exactly the pre-#1007 behaviour. Measured after the fix, the confirming
+status arrives 4-9 ms after the turn event on every plain turn and the grace
+never fires; `ask` costs ~7 ms more per turn than it did.
+
+**What reaches the caller.**
+
+| | turn verbs (`ask` / `stream`) | `complete` |
+|---|---|---|
+| the turn was **cut short** by the session ending | raises **`SessionEnded`** (`reason`, `details`) | returns the payload; records it |
+| the session ended **cleanly** (`natural`, `client_request`, `stopped`) | returns the turn; records it | same |
+| the daemon says the session is gone | raises `SessionEnded(reason="not_found")` | same — a request that reached nothing is not a terminus anybody drove to |
+| `reason == "error"` | `AgentError`, as always — the richer type wins | same |
+| either way | `Session.terminus` (`reason`, `details`, `session_ended`) | same |
+
+A turn verb promises one turn **with the session still there for the next
+one**; a terminal that cut the turn short breaks that promise and every later
+call on the handle is dead, so it raises. `CLEAN_TERMINAL_REASONS` is the
+exception and it has a consumer in this tree: a scaffolded `client` drives a
+completion-gated profile with `ask`, and its one successful turn ends the
+session with `natural` — raising there would fail every such run
+(`shared/scaffold/tests/test_client_template_completion_wait.py`, which is
+what caught it). It is an **allow-list**, so a reason that does not exist yet
+raises rather than passing quietly: #1007 *is* a new reason arriving and going
+unconsidered, and a deny-list would let the next one do it again. The ending
+reaches the caller on `terminus` either way.
+
+`complete` promises to drive the session to its terminus,
+so a terminal is its success condition — but "no payload" was a caller's whole
+account of a budget stop, which is why `terminus` exists. The partial text is
+not lost: chunks reach `on_media` and any `s.client` listener as they arrive,
+and `stream` yields everything it had before raising.
+
+**`ERROR` is narrow on purpose.** Only `error_type == "SessionError"` — the
+daemon's four "this request could not reach a session" replies — settles a
+call; an ordinary mid-turn error still belongs to the turn. `recoverable` is
+**not** the discriminator: the "Session not found" reply leaves it at its
+`True` default. An event naming a different session is ignored; one naming
+none is accepted, because a daemon predating the stamp sends it unattributed
+and degrading to "wait forever" is the defect.
+
+**Two daemon-side consequences, both of them why the run left no trace.**
+`handle_request` now logs the refusal at WARNING, naming the request type, and
+stamps the target `session_id` on the `ErrorEvent` — `_emit_to_client` stamps
+from `_client_to_session`, and on this exact path the client has already been
+detached, so the stamp found nothing. And
+`_apply_default_cascade_policy`'s docstring said "all four current reasons
+(`natural`, `error`, `stopped`, `client_request`)". There are **six**;
+`budget_exhausted` is one of the two it did not name and is the one this policy
+turns into a hang. The policy never reads the reason at all, which is what the
+docstring says now.
+
+**A claim that used to stand in `complete`'s docstring and does not.** "The
+daemon closes every turn of the main agent with exactly one
+`AGENT_STATUS_CHANGED`" is false on a cascade session: the status emitted after
+the unload reaches nobody. `complete` survives only because the terminal comes
+first, so **nothing may be built on the status event alone arriving** — which
+is why `SESSION_TERMINATED` settles unconditionally in both spans.
+
+**Side effect of one rule: `ask` inherits #767's agent latch.** A subagent's
+`TURN_COMPLETED` no longer settles the parent's `ask`, which it did before.
+
+Tests: `jaato-sdk/jaato_sdk/tests/test_a_turn_that_ended_the_session_says_so.py`
+(deterministic — `ScriptedClient` delivers one event per loop tick, so "did it
+return before the terminal arrived?" is a counter, not a clock; 17 of its 24
+fail on the parent commit) and
+`jaato-server/shared/tests/test_one_settle_rule_1007.py` (an AST guard that no
+verb decides a terminus outside `_TurnWatch`, and that the watch still wires
+all four settle events — dropping `ERROR` restores the hang exactly).
+
+### A Request the Daemon Wrote and the Runner Does Not Have (#856)
+
+#988 is a cancel that lost a race inside the runner. This is the turn
+itself. A session's second turn was registered in the daemon's
+`_in_flight` and never happened; sixty-eight minutes later the client was
+still blocked in `session.ask()` and py-spy showed **every thread in all
+three processes idle** — no lock held, no read outstanding, the pipe
+healthy, the runner alive with an empty work queue. The daemon's entire
+record was four lines:
+
+```
+[RPC_DIAG] daemon _in_flight SET id=30 client=129050257488880
+[RPC_DIAG] daemon _in_flight SET id=31 ...
+```
+
+which are emitted ~25 lines BEFORE the write, so they say what the daemon
+INTENDED and nothing about what became of it.
+
+**Three failure modes, and one had no name and no bound:**
+
+| what happened | how it surfaces | session survives? |
+|---|---|---|
+| the runner died (#851) | `RunnerCallError` — the read loop sees EOF and fails every future | no — terminal |
+| the runner is slow | `RunnerAnswerTimeout` | yes |
+| **the dispatch is lost** | **`RunnerDispatchLost`** | yes |
+
+`call()`'s `return await fut` had no deadline, and the two calls that
+matter most default to `timeout=None` (`session.send_message`,
+`call_threadsafe`) because a turn legitimately runs for minutes. So a
+dead runner reached a person as an error and a lost request reached them
+as the agent apparently thinking.
+
+**The bound is a reconciliation, not a wall clock.** A wall-clock cap on
+an RPC would kill healthy long turns, which is worse than the hang. What
+is bounded is how long the daemon will believe, *unchecked*, that a
+request it wrote is being worked on: after a window with no frame bearing
+that id, it ASKS the runner — over the **control lane**, so the answer
+arrives while the work lane is busy with the very turn in question.
+
+| verdict | the runner says | action | may have run? |
+|---|---|---|---|
+| `running` | the id is in `active_call_ids` | another full window, indefinitely | — |
+| `finished` | it left `active_call_ids`, still in the window | fail — the RESPONSE was lost | **yes** |
+| `never_received` | not in a window that has evicted nothing | fail — **the bug** | no |
+| `indeterminate` | the window has rolled past the id | fail | **yes** |
+| `unreachable` | the probe itself did not come back | fail | **yes** |
+
+`session.health_check` carries the transport view (`active_call_ids`,
+`known_request_ids`, `highest_request_id`, `seen_window_capacity`),
+reported whether or not a session host exists because it describes the
+CHANNEL, not the session.
+
+**The last column is the whole point, and it is a TYPE.** `finished` and
+`never_received` have opposite consequences: one says the work did not
+happen and retrying is safe; the other says it RAN — history advanced,
+tools executed, files were written, a provider was billed — and only the
+daemon's view of the result was lost, so retrying re-executes it. A
+single exception hid that, which is the shape
+`jaato_sdk.client.errors.SessionNotConfirmed` already names: *"the one
+failure where the correct action depends on something the caller cannot
+see, which is why it is a distinct type rather than a detail in a
+message"*.
+
+| exception | verdict(s) | `may_have_run` |
+|---|---|---|
+| `RunnerDispatchNotReceived` | `never_received` | `False` — retry is safe |
+| `RunnerResultLost` | `finished` | `True` — retry re-executes |
+| `RunnerDispatchUnknown` | `indeterminate`, `unreachable` | `True` — nobody could say |
+
+All three subclass `RunnerDispatchLost`, so `except RunnerDispatchLost`
+still catches every one. `may_have_run` is the axis
+`SessionCreateFailed.may_exist` established, `verdict` is the
+machine-readable mechanism token its `cause` established, and both **fail
+safe**: the base defaults to `may_have_run = True`, so a verdict added
+later cannot inherit "safe to retry" by forgetting to decide.
+
+It reaches a client on **`ErrorEvent.details`** — the field documented as
+"what a driver branches on", with `error` left as the human sentence.
+Deliberately **not** `recoverable`: in this tree that flag means *this
+session can continue* (every `recoverable=False` site is a config or
+provider-connect failure that ends initialisation), and sparing a
+`RunnerRPCTimeout` here is precisely what keeps the session alive.
+Encoding retry-safety there would assert something false about session
+viability to every consumer that reads it the documented way.
+
+**The window's FULLNESS, not its size, is the correctness bound.**
+`known_request_ids` is a `deque(maxlen=...)`, so it has evicted something
+only once it is FULL; until then "not in the window" proves "never
+registered". A full window whose floor sits above the id is answered
+`indeterminate`, never `never_received` — that one misclassification is
+exactly the unsafe direction, and raising 256 to a larger number would
+only make it rarer, not impossible. The runner reports its own
+`seen_window_capacity` rather than the daemon assuming the constant,
+because a number asserted on one side of a wire about the other is how
+that distinction goes stale unnoticed.
+
+Two counters, because the two need different operator responses:
+`dispatch_lost_count()` is every lost dispatch,
+`dispatch_lost_may_have_run_count()` the subset whose side effects are
+already in the world. The first is logged at WARNING, the second at
+ERROR.
+
+**The predicate is a window, not a high-water mark.** The probe is itself
+a request, registered on the runner's reader thread *before* its own
+handler runs — so `highest_request_id` at answer time is always the
+probe's own id, and comparing against it would report every id as
+received, including the ones that never arrived: the one answer that
+makes the whole mechanism worthless. `SEEN_REQUEST_ID_MEMORY` (256) only
+has to outlive the ack window. This is the daemon-side half of #988's
+`unknown` cancel counter — both count a peer disagreeing about what is in
+flight — and `dispatch_lost_count()` is its counter.
+
+**`RunnerDispatchLost` subclasses `RunnerRPCTimeout`**, which decides the
+blast radius: `core.py`'s model thread terminates the session for
+anything it catches EXCEPT a `RunnerRPCTimeout`, so the TURN fails and
+the SESSION lives. That is also what makes it distinguishable from #851
+in the client-visible error, since `ErrorEvent.error_type` is
+`type(exc).__name__`. The message names the id, the method and the
+session, because the incident's whole record named none of them.
+
+**Two exemptions, each for a runner that cannot answer:**
+
+- `session.health_check` — it IS the probe, and watching it would have
+  the watchdog answer its own question, recursively.
+- any window in which `session.bootstrap` is outstanding. It runs on the
+  runner's MAIN thread (synchronously, so `aa_change_profile` confines
+  the thread that later spawns the workers), so the reader thread is
+  inside it and NEITHER lane answers; a probe would time out and read as
+  a lost dispatch. The 120s default also sits clear above bootstrap's own
+  30s deadline, so two independent things stop it.
+
+**And the dispatch is logged.** `_dispatched[id] = method` is set AFTER
+the frame reaches the wire, beside a `[RPC_DIAG] daemon DISPATCHED
+id=N method=...` line. An `_in_flight` entry with no `_dispatched` entry
+is "registered, never written" — the state the four original log lines
+could not be told apart from a healthy in-flight turn.
+
+Knob: `JAATO_RUNNER_ACK_TIMEOUT` (host-scoped — it bounds the channel,
+which a pool slot shares across several sessions in turn). `0` disables,
+following the provider-deadline convention; a negative or unparseable
+value falls back to the default rather than disabling, because
+"unbounded" is the bug this exists to fix.
+
+**What the triage established, and what it did not.** The request-write
+path was ruled OUT as a silent drop: `_write_frame_json` awaits
+`writer.drain()` and `call()` catches only `FrameTooLargeError`, which it
+re-raises after deregistering, so any other write failure reaches the
+caller. There is no queue on that path to drop from. A runner-side
+dispatch-table miss was ruled out too — an unknown method returns an
+error RESPONSE (`unknown method: ...`), and `serve()` wraps its loop body
+in no broad `except`, so an unexpected reader-thread exception closes the
+channel and becomes #851 rather than this.
+
+What WAS reachable, and demonstrated in
+`test_the_response_side_drop_that_produced_this_state_is_closed`, is a
+response-side drop. #920 refuses to write an oversized frame and
+substitutes a small typed error for the call — guarded by `if not ok or
+self._closed: return`, so the substitution happened for a SUCCESS
+response and not for an ERROR one, on the reasoning that an error frame
+that did not fit will not fit again. But the substitute is small by
+construction; what did not fit is the original, whose `result` dict
+carries megabytes of tool output beside the traceback. Measured: `ok=True`
+answered the caller in 221 bytes, `ok=False` wrote **nothing at all** and
+left `_closed` **False** — the channel open, the runner idle, the
+daemon waiting forever. Not a claim about the reported incident, which
+would need the runner's own log; a demonstration that the class is
+reachable, and it is precisely what the `finished` verdict answers.
+
+**That producer is closed (#999).** Both paths substitute now, and
+`_emit_response`'s guard is `if self._closed` alone — the only half of it
+that was ever true. The substitute also carries the original failure's
+`type` and a bounded prefix of its `message`, because the runner held the
+reason and telling the caller only "too large" threw it away; the
+traceback is deliberately not carried, being usually what made the frame
+oversized. `OVERSIZE_MESSAGE_CHARS` (2000, against a 10 MB cap) makes
+"small by construction" an enforced property rather than the unchecked
+claim the old guard rested on, and a second, quotation-free attempt is
+written if even that is refused.
+
+The deadline is unaffected and is still what matters here: it bounds the
+CLASS rather than any one producer, and the `finished` verdict remains
+the right answer whenever a response is lost — a closed channel, a
+severed peer, or whatever drops one next. An oversized STREAM chunk is
+still dropped with no substitute, now as a stated decision: a chunk is
+display output rather than an answer, so the call still ends in a
+response, and a per-chunk error would arrive interleaved with real output
+as though the model had said it.
+
 ### Interactive Shell Sessions (`shared/plugins/interactive_shell/`)
 
 The `interactive_shell` plugin lets the model drive any user-interactive command by spawning persistent PTY sessions. Unlike `cli/` (which uses `subprocess` and can only run non-interactive commands), this plugin uses `pexpect` to provide a real pseudo-terminal where the model can read output and send input back and forth.
@@ -544,6 +4642,73 @@ The `interactive_shell` plugin lets the model drive any user-interactive command
 **Session lifecycle:** Sessions have configurable max lifetime (default 600s) and max idle time (default 300s). A background reaper thread periodically closes expired sessions. Max concurrent sessions defaults to 8.
 
 **Use cases:** Database REPLs (`psql`, `mysql`), SSH sessions, debuggers (`gdb`, `pdb`), package manager wizards (`npm init`), interactive installers, language REPLs (`python`, `node`), container shells (`docker exec -it`).
+
+#### Path Containment (#722, absorbing the `cwd` half of #503)
+
+`cli` inspects the paths in a command and refuses those outside the
+workspace. `interactive_shell` — which spawns a real PTY and is strictly more
+capable — refused **nothing**: its only spatial notion was `cwd`, which sets
+where relative paths start and says nothing about absolute ones. So a session
+that could not `cat /etc/hostname` through `cli` could `shell_spawn` a shell
+and read anything the daemon user could. Whichever tool enforces containment,
+the model routes around it through one that does not.
+
+Three layers now answer, and they are deliberately **not** equal:
+
+| Layer | What it covers | On a string it cannot parse |
+|-------|----------------|-----------------------------|
+| `shell_spawn`'s `command` | the workspace check `cli` applies, on the same analyzer | **refuses** — this string IS a shell command |
+| `shell_input`'s `text` | the same check, best effort | **allows** — typed text is whatever the running program reads (Python, SQL, a password), so a shell-grammar failure is the normal case, not an evasion |
+| the AppArmor child profile | everything, kernel-enforced | n/a |
+
+Only the third is a boundary in the strict sense, which is why the string
+layers are stated as what they are rather than sold as one: a live PTY's
+working directory drifts under `cd`, and the analyzer does not descend into
+the quoted argument of `sh -c` (a blind spot inherited from `cli`, whose
+analyzer this is). The check refuses the direct attempt, in a vocabulary the
+model can act on, and claims nothing more.
+
+**The enforcement point is one module, not two.** `cli`'s classification and
+workspace test moved to `shared/plugins/command_containment.py`
+(`classify_command_paths`, `path_within_workspace`, `first_denied_path`); `cli`
+keeps its result-shaping (it refuses by mimicking "No such file or directory")
+and delegates the analysis. Fail-closed is the caller's decision and
+`first_denied_path` makes each caller state it — `on_parse_error="deny"` for a
+command, `"allow"` for typed input.
+
+**Unconfined is announced, not inherited.** When the runner installed no
+AppArmor child-profile transition, the plugin logs **once per session at
+WARNING** that the kernel boundary is absent — the posture `scrub_secret_env:
+none` and `--ws-unsafe-no-auth` already take. `require_confinement: true`
+refuses every spawn instead, the shape `notebook`'s in-process-exec gate has.
+The default is `false` because a PTY child is a separate process, the same risk
+class as a `cli` subprocess, which does not fail closed either.
+
+**`require_confinement` means ENFORCE (#1014).** An installed child
+transition is necessary and not sufficient: under `JAATO_APPARMOR_COMPLAIN`
+the transition into `//child (complain)` succeeds and the kernel blocks
+nothing, so the knob used to pass on a profile containing nothing. It now
+also reads the **spawning thread's** own label
+(`/proc/thread-self/attr/current` — `fork()` inherits the cred of the thread
+that calls it, and per #1023 a worker can differ from the main thread) and
+refuses anything that is not `(enforce)`, with wording distinct from the
+no-transition refusal because the operator's next move is different. The
+label is read only when the knob is set, so the default posture gains no
+per-spawn `/proc` read.
+
+```yaml
+plugin_configs:
+  interactive_shell:
+    require_confinement: true     # default false
+```
+
+**The spawn `cwd` is verified where the process starts** (the remainder of
+#503): `ShellSession` takes the workspace root beside the `cwd` and refuses one
+that resolves outside it, both sides canonicalised so a symlinked `cwd` is
+judged by its target. The plugin passes its own workspace root, so the check is
+a tautology on today's only caller — which is the point: the invariant holds at
+the seam that spawns, rather than being a property of one call site a later
+caller could drop.
 
 ### WebMCP Plugin (`shared/plugins/webmcp/`)
 
@@ -617,15 +4782,177 @@ The webhook plugin provides an inbound HTTP listener for receiving external webh
       "secret_header": "X-Hub-Signature-256",
       "secret_algo": "hmac-sha256",
       "event_type_header": "X-GitHub-Event"
+    },
+    "gitlab": {
+      "path": "/webhook/gitlab",
+      "secret_header": "X-Gitlab-Token",
+      "secret_algo": "token",
+      "event_type_header": "X-Gitlab-Event"
+    },
+    "slack": {
+      "path": "/webhook/slack",
+      "secret_header": "X-Slack-Signature",
+      "secret_algo": "hmac-sha256",
+      "signature_scheme": "slack-v0",
+      "timestamp_header": "X-Slack-Request-Timestamp",
+      "max_age_seconds": 300
     }
   }
 }
 ```
 
+**Route auth: two modes, and they are not peers (#930).** `secret_algo` names
+how the route's shared secret is checked:
+
+| Mode | Header carries | Property |
+|------|----------------|----------|
+| `hmac-sha256` | an HMAC digest keyed by the secret | the secret never travels; a captured request cannot be replayed against another payload — but it **can** be replayed against the same one, see below |
+| `token` | the shared secret **verbatim**, compared with `hmac.compare_digest` | **weaker**: readable by anything that terminates TLS, and replayable against any payload |
+
+`token` exists because a large class of producers signs nothing — GitLab sends
+the configured secret in `X-Gitlab-Token` and expects an equality check. Before
+it, the *only* configuration that ingested such a webhook was
+`allow_unauthenticated: true`: a secret sitting in the request, thrown away, on
+the flag whose whole purpose is to be unreachable by omission.
+
+Three properties keep the wider vocabulary from becoming a softer posture:
+
+- **A pair, still fail-closed.** `secret_header` without `secret_algo` (or the
+  reverse) is a 500, and an `secret_algo` outside `SECRET_ALGOS` is a hard
+  config-validation error *and* a 500 at request time — never a downgrade to
+  unsigned. Widening the vocabulary widens what `secret_algo` may **say**, never
+  what it may omit.
+- **No cross-mode leniency.** `token` strips no `sha256=` prefix and reads no
+  body; a valid HMAC digest does not authenticate a `token` route, and the
+  reverse. Either transformation would accept a secret nobody configured.
+- **Announced, not silent.** Every `token` route logs a WARNING at listener
+  startup naming route and header, and a louder one when TLS is off (the secret
+  is then sent in the clear). Same posture as `--ws-unsafe-no-auth` and
+  `scrub_secret_env: none` — so `token` cannot become the quiet path of least
+  resistance for a producer that *does* sign bodies. Pair it with TLS.
+
+#### A Signature That Never Expired (#713)
+
+`secret_algo` says how the credential is CHECKED. It cannot say **what was
+signed** — and a digest over the request body alone binds no time, so it
+authenticates the same bytes forever. Whoever observes one delivery (a proxy
+log, a mirrored port, a misrouted retry) replays it verbatim, indefinitely, and
+it authenticates every time. Driven against the tree at `9abaffa5`: the original
+ACCEPTED, the replay ACCEPTED, the replay a year later ACCEPTED.
+
+Here that is not a duplicate row. The plugin exists to let external events drive
+long-running agent sessions (`webhook_subscribe` → `webhook_poll` → the agent
+acts), so a replayed webhook is a **re-triggered turn** — tool calls, ledger
+spend, whatever the persona authorises. The hardening already present (TLS/mTLS,
+CIDR allowlists, token buckets) constrains *who may connect*; none of it
+constrains replaying a request that was legitimately signed. And #930's `token`
+mode made it load-bearing for two modes rather than one: that mode is documented
+as *"replayable against any payload"* and the mitigation its weakness implies
+did not exist.
+
+**`signature_scheme` is the missing axis**, orthogonal to `secret_algo`:
+
+| `signature_scheme` | Signed payload | Timestamp from | Sender |
+|---|---|---|---|
+| `body` (default) | the request body | — binds none | GitHub, GitLab, most internal senders |
+| `slack-v0` | `v0:{ts}:{body}` | `timestamp_header` | Slack |
+| `stripe-v1` | `{ts}.{body}` | `t=` inside the signature header | Stripe |
+
+Both constructions are taken from the vendors' published documentation, and
+Slack's **published worked example** (secret, timestamp, body, digest) is a test
+vector in the suite — a signature this tree builds a different way cannot
+satisfy it.
+
+Two mechanisms, complements rather than alternatives. **A freshness window**
+(`max_age_seconds`, default 300, two-sided so a future-dated capture is refused
+too) bounds how long a captured delivery stays useful, and by construction
+catches nothing *inside* the window. **A bounded, TTL'd replay cache**
+(`replay_cache_size`, default 10 000 keys) catches the copy that arrives inside
+it, answering **409** — distinct from 403 so a repeat and a forgery are
+distinguishable in the access log.
+
+Three orderings are the security argument rather than style:
+
+- **Signature first, freshness second.** In both timestamped schemes the
+  timestamp is *part of the signed payload*, so it is evidence of nothing until
+  the signature holds — which is also what makes the window unbypassable:
+  rewriting the header to refresh a stale capture breaks the digest.
+- **The cache is written last**, only for a delivery that passed both. Recording
+  on arrival would let anyone who can reach the port register a guessed delivery
+  id and have the *genuine* delivery refused as a replay — a denial of service
+  built out of the anti-replay control.
+- **The cache TTL is the window.** Past it the entry is gone and the delivery is
+  also no longer fresh, so it is refused as stale rather than accepted; the two
+  hand off with no gap.
+
+**What each route shape gets**, and the backward-compatibility choice stated
+rather than inherited:
+
+| Route | Window | Replay cache |
+|---|---|---|
+| `slack-v0` / `stripe-v1` | on by default (300s) | keyed on the signature — automatic |
+| `body` + `replay_key_header` | none available | keyed on the delivery id |
+| **`body`, no delivery id** | **none available** | **none — a replay is accepted** |
+| `token` + `replay_key_header` | none available | keyed on the delivery id |
+| `token`, no delivery id | none available | none |
+
+The bold row is where **every route configured before #713 sits**, and it could
+not be fixed by choosing a braver default: the sender signs no timestamp, so
+there is nothing to check, and the credential is a pure function of the body, so
+two genuine deliveries of one payload are indistinguishable from a replay. The
+posture #863 took — make the default safe, make opting out the explicit act — is
+applied exactly where the material exists: a `slack-v0` / `stripe-v1` route gets
+a window and a cache with **no** extra keys, and `max_age_seconds: 0` is the
+announced opt-out. Where it does not, what is switched on instead is **saying
+so**: each such route logs a WARNING at listener startup naming itself and both
+remedies (`signature_scheme`, or `replay_key_header` — GitHub's
+`X-GitHub-Delivery`, GitLab's `X-Gitlab-Event-UUID`). **Stated cost:** the
+weakness persists for a deployment that reads no logs and changes nothing. The
+alternative was to break every existing route.
+
+**For `token` routes, `replay_key_header` is the whole answer.** There is no
+signed payload to bind a timestamp into, and the credential is byte-identical
+every time — so a cache keyed on it would refuse the second *legitimate*
+delivery. A delivery id refuses a verbatim replay within the TTL; it does not
+stop an attacker who *holds* the token from minting fresh requests, which is
+credential compromise rather than replay, and which that mode concedes by design.
+
+**The pair rule is preserved and extended.** Each of these is a
+`validate_config` **error** and a **500** at request time, never a fall-through:
+a `signature_scheme` outside the vocabulary (a typo does not degrade to `body`);
+`slack-v0` with no `timestamp_header`; `stripe-v1` *with* one (its timestamp is
+in the signature header, and an unsigned second source could win the window
+check); `timestamp_header` on `body`, where the value is not covered by the
+signature and whoever replays the request simply rewrites it — a window checking
+an attacker-controlled value reads like protection and is not; and a
+timestamp-bound scheme paired with `secret_algo: token`. An unparseable
+timestamp is a refusal, not a skipped check. No cross-mode leniency: `slack-v0`
+rejects a bare hex digest and an HMAC over the body alone, and `stripe-v1`
+ignores Stripe's legacy `v0` test-mode signature per Stripe's own downgrade
+guidance.
+
+**Constant-time comparison confirmed** (the issue's fourth ask): every
+credential comparison — both `secret_algo` modes and both schemes — goes through
+one helper over `hmac.compare_digest`, which encodes to UTF-8 first so a crafted
+non-ASCII header cannot turn a verification failure into a 500. A source-level
+guard fails the build if a `==` on a digest appears beside it.
+
+Also confirmed clean in the same pass, as the issue reported: the unbounded
+pre-auth body read. `do_POST` compares `Content-Length` against
+`config.max_body_size` **before** `self.rfile.read(content_length)`.
+
+Tests: `shared/plugins/webhook/tests/test_replay_protection_713.py` — the
+vendor vectors, a replayed request refused and a fresh one accepted on each
+scheme, an expired and a future-dated timestamp, a tampered body and a tampered
+timestamp, the cache-poisoning refusal, and the bounded-cache eviction counter.
+No test sleeps: both the window and the TTL take `now` as a parameter, so a test
+states the instant it means rather than betting on a clock (#996).
+
 **Corporate hardening** (all stdlib, no external deps):
 - **TLS/SSL**: HTTPS with optional mutual TLS (client certificate verification)
 - **IP allowlisting**: CIDR-aware, IPv4/IPv6, IPv4-mapped-IPv6 normalization
 - **Rate limiting**: Per-IP token-bucket algorithm
+- **Replay refusal**: per-route freshness window + a bounded, TTL'd delivery cache
 
 **Architecture:** HTTP server runs in a daemon thread using `http.server.HTTPServer`. Per-subscription event buffers (`deque(maxlen=1000)`) with `threading.Event`-based long-poll wakeup. Server starts lazily on first subscribe call.
 
@@ -720,6 +5047,209 @@ Plugins are automatically wired during initialization - no manual wiring needed:
 
 The device code flow uses GitHub Copilot's OAuth client ID and doesn't require creating a PAT manually.
 
+### OpenAI (native — Chat Completions and the Responses API)
+| Variable | Purpose |
+|----------|---------|
+| `JAATO_OPENAI_API_KEY` | API key (jaato namespace, highest priority) |
+| `OPENAI_API_KEY` | API key (the vendor's own documented variable; honored so a machine already set up for the OpenAI SDK works with no extra config) |
+| `JAATO_OPENAI_BASE_URL` / `OPENAI_BASE_URL` | Endpoint (default: `https://api.openai.com/v1`) |
+| `JAATO_OPENAI_MODEL` | Default model name (e.g. `gpt-5.1`) |
+| `JAATO_OPENAI_CONTEXT_LENGTH` | Context window (**required in practice** — see below) |
+| `JAATO_OPENAI_ORG_ID` / `OPENAI_ORG_ID` | `OpenAI-Organization` header (billing attribution) |
+| `JAATO_OPENAI_PROJECT_ID` / `OPENAI_PROJECT_ID` | `OpenAI-Project` header; a project-scoped key needs it |
+| `JAATO_OPENAI_API` | Wire selector: `chat` (default) or `responses` |
+
+**Authentication (in priority order):**
+1. `plugin_configs.openai.api_key` (may carry a `pass://` / `vault://` URI)
+2. `JAATO_OPENAI_API_KEY`, then the vendor's `OPENAI_API_KEY`
+3. The stored `openai_auth.json` (`config_root` → `<workspace>/.jaato/` → `~/.jaato/`)
+
+**Two wires, one plugin.**  jaato already reached OpenAI's models through
+OpenRouter and through nine OpenAI-*compatible* gateways.  What it had no
+way to speak was the endpoint OpenAI itself serves — and, in particular,
+the **Responses API**, which no compatible gateway offers and which is
+where OpenAI ships first.  `plugin_configs.openai.api` selects:
+
+| `api:` | Transport | Shape |
+|--------|-----------|-------|
+| `chat` (default) | the shared `_openai_compat` streaming loop | `messages`, choice deltas, `prompt_tokens`/`completion_tokens` |
+| `responses` | `openai/responses.py` | a flat `input` item list, top-level `function_call` items keyed by `call_id`, typed SSE events, `input_tokens`/`output_tokens` |
+
+The two disagree about the name of the most-used knob
+(`max_output_tokens` vs `max_tokens`), so the `api_params` allow-list is
+**per wire**: a chat-only key on the Responses wire is dropped with a
+warning rather than forwarded into a 400.  The Responses transport streams
+text and reasoning deltas for the UX but builds the parts that become
+history from the `response` object on the terminal event — the API's own
+account of what it produced.  Every request is sent `store: false` with the
+full `input`: jaato owns the history and its GC decides what the model
+sees, so a server-side thread keyed by `previous_response_id` would
+silently diverge from it (`api_params.store: true` opts back in).
+
+**You must set a context window.**  OpenAI's `GET /v1/models` serves bare
+entries — `{id, object, created, owned_by}`, no capacity for any model — so
+`plugin_configs.openai.context_length` (or `JAATO_OPENAI_CONTEXT_LENGTH`)
+is required and `connect()` fails loud without it.  No per-model table is
+hardcoded: GC sizes the whole history against that number, and a stale
+table would truncate a session or over-fill a request without saying so.
+Input *modalities* are a different question and do carry a table (a wrong
+entry withholds an attachment, visibly; it does not corrupt the history),
+with `plugin_configs.openai.modalities` above it.
+
+```yaml
+# profile example: the Responses wire, with reasoning
+provider: openai
+model: gpt-5.1
+plugin_configs:
+  openai:
+    api: responses
+    context_length: 400000      # required — the catalog reports none
+    project: proj_abc123        # a project-scoped key needs its header
+    api_params:
+      reasoning: {effort: high, summary: auto}
+      max_output_tokens: 16384
+```
+
+`pip install 'jaato-server[openai]'`.
+
+**Smoke test.**  `examples/provider_smoke_openai_azure.py` drives this
+provider on both wires, and the Azure one, against a local stand-in —
+no account, no key, no spend — and prints the requests that reached it,
+so deployment routing and the `api-version` query string are visible as
+facts.  `--live-openai` / `--live-azure` run the *same* assertions
+against the real endpoints.  A green mock run means the framework is not
+the problem; only a live run proves the vendor agrees.
+
+### Azure OpenAI
+| Variable | Purpose |
+|----------|---------|
+| `JAATO_AZURE_OPENAI_ENDPOINT` / `AZURE_OPENAI_ENDPOINT` | Resource URL, `https://<resource>.openai.azure.com` (**required**) |
+| `JAATO_AZURE_OPENAI_API_VERSION` / `AZURE_OPENAI_API_VERSION` | The `api-version` date, e.g. `2024-10-21` (**required**) |
+| `JAATO_AZURE_OPENAI_API_KEY` / `AZURE_OPENAI_API_KEY` | Resource key (not needed under Entra auth) |
+| `JAATO_AZURE_OPENAI_DEPLOYMENT` / `AZURE_OPENAI_DEPLOYMENT` | Default deployment name when a profile names none |
+| `JAATO_AZURE_OPENAI_CONTEXT_LENGTH` | Context window (**required in practice** — see below) |
+| `JAATO_AZURE_OPENAI_AUTH` | Credential kind: `key` (default) or `aad` |
+
+Azure serves OpenAI's models on the same request and response shapes, so
+the transport is the shared `_openai_compat` one unchanged.  Everything
+*around* the request is Azure's, and each piece is load-bearing:
+
+- **Deployment-name routing.**  `model:` carries the DEPLOYMENT name your
+  subscription chose, not a model id; the SDK's `AzureOpenAI` client turns
+  it into `/openai/deployments/<name>/chat/completions`.  The same name can
+  be repointed at a different model version without changing, which is also
+  why no per-model context table could be right here.
+- **A pinned `api-version`.**  Required, with no default: the date decides
+  which request fields exist, so a framework-chosen default would silently
+  decide what your deployment accepts and change under you when it moved.
+- **Key or Microsoft Entra ID.**  `auth: aad` mints a bearer token per
+  request from whatever identity the host already has (managed identity,
+  workload identity, `az login`) and stores no secret at all — which is why
+  "no key found" is not the end of the credential search for this provider.
+  Needs `pip install 'jaato-server[azure-openai]'` for `azure-identity`.
+- **Wire extensions are not assumed.**  PDFs (`file` blocks) and audio
+  (`input_audio`) are gated on Azure by api-version *and* by what the
+  deployment points at, so this provider declares `pdf_input=False` /
+  `audio_input=False` and uses the shared images-only converter.  The
+  native `openai` provider declares both because its one endpoint carries
+  them unconditionally; here it would be a guess about someone's resource.
+
+```yaml
+# profile example: Entra ID auth, no secret anywhere
+provider: azure_openai
+model: prod-gpt4o            # the DEPLOYMENT name, not "gpt-4o"
+plugin_configs:
+  azure_openai:
+    endpoint: https://my-resource.openai.azure.com
+    api_version: "2024-10-21"
+    auth: aad
+    context_length: 128000   # required — Azure reports no capacity
+    model_name: gpt-4o       # what the deployment serves, so vision is detected
+```
+
+Check the wiring before spending anything:
+`python examples/provider_smoke_openai_azure.py` (mock, then
+`--live-azure --deployment <name>` for the real resource).
+
+### AWS Bedrock
+| Variable | Purpose |
+|----------|---------|
+| `JAATO_BEDROCK_REGION` | AWS region (**required** — via this, `AWS_REGION`, `AWS_DEFAULT_REGION`, the named profile, or the `region` knob) |
+| `AWS_REGION` | The vendor's documented region variable. Read by jaato because Python's botocore maps `region` to `AWS_DEFAULT_REGION` **alone**, so a host configured the documented way resolves nothing through boto3 |
+| `JAATO_BEDROCK_MODEL` | Default model id / inference-profile id |
+| `JAATO_BEDROCK_CONTEXT_LENGTH` | Context window (**required in practice** — see below) |
+| `JAATO_BEDROCK_PROFILE` | Named AWS profile for this session (the per-session override of boto3's `AWS_PROFILE`) |
+| `JAATO_BEDROCK_ENDPOINT_URL` | `bedrock-runtime` endpoint override (a VPC endpoint) |
+
+**Authentication: jaato resolves nothing.**  Every other provider in this
+tree resolves an API key.  SigV4 signing belongs to botocore, and so does
+the chain behind it, so `initialize()` builds a `boto3.Session` and reads
+`get_credentials()` — env vars, a named profile, IAM Identity Center, an
+ECS/EKS task role, an EC2 instance role, in boto3's own order.  There is no
+`api_key` knob and no interactive login (AWS's own is `aws sso login`, run
+outside the process).  The practical consequence: **a confined runner on EC2
+or EKS needs no provider credential in its environment at all** — which also
+means `scrub_secret_env` has nothing of Bedrock's to strip.
+
+Bedrock is one endpoint over many vendors, so the wire is Amazon's rather
+than OpenAI's, and three things follow from what its catalog does *not*
+report:
+
+- **You must set a context window.**  `ListFoundationModels` describes
+  modalities and streaming support, never capacity, so
+  `plugin_configs.bedrock.context_length` (or the env var) is required and
+  `connect()` fails loud without it — as with the native OpenAI and Azure
+  providers.  A guessed window truncates a session without saying so.
+- **Input modalities come from a documented per-family table**, not from
+  detection.  The catalog's vocabulary is `TEXT | IMAGE | EMBEDDING`, which
+  cannot express the `document` and `audio` blocks Converse plainly carries;
+  an incomplete source wearing the authoritative *detect* tier would withhold
+  every PDF from a model that reads PDFs.  `plugin_configs.bedrock.modalities`
+  is above the table for a model it does not name.  Cross-region inference
+  profiles (`us.` / `eu.` / `apac.` prefixes) are matched with the prefix
+  stripped: it routes the request and says nothing about the model.
+- **Every media block names a format from a CLOSED vocabulary** — `png`,
+  `jpeg`, `gif`, `webp` for images; `pdf`, `csv`, `doc`, `docx`, `xls`,
+  `xlsx`, `html`, `txt`, `md` for documents; a fixed audio list; a fixed
+  video list.  A mime outside a vocabulary is **withheld with a note**, never
+  relabelled into one that is inside it (that is #829).  Raw PCM is accepted
+  only when its parameters agree with Bedrock's `pcm` (s16le); `audio/L16` is
+  refused outright, because RFC 2586 makes it big-endian.
+
+**Extended thinking is extraction-only by default, and deliberately.**
+Converse's `reasoningContent` block carries the upstream's `signature` beside
+the text, and the Anthropic-family models require that block back — signature
+included — on the next request of a tool-call loop.  `Part.thought` has
+nowhere to put a signature, so replaying the text alone would be rejected by
+the very models that produced it.  The provider therefore reads reasoning out
+(it reaches the UI and `ProviderResponse.thinking`) and does not write it
+back; `api_params.enable_thinking` exists and **WARNS at connect** that a
+thinking turn which also calls tools may be refused.  Wiring it properly
+needs a signature-carrying part — the reasoning-replay seam's next step,
+which is why `reasoning_replay` is declared `False` rather than fudged.
+
+```yaml
+# profile example: Claude on Bedrock, cross-region, cached, no secret anywhere
+provider: bedrock
+model: us.anthropic.claude-sonnet-4-5-20250929-v1:0   # an inference profile
+plugin_configs:
+  bedrock:
+    region: us-east-1
+    context_length: 200000        # required — the catalog reports none
+    enable_caching: true          # Converse cachePoint blocks
+    cache_ttl: "1h"               # 5m | 1h; anything else is dropped
+    api_params:
+      max_tokens: 8192
+      temperature: 0.0
+```
+
+`pip install 'jaato-server[bedrock]'`.
+
+> **Not covered here:** the `InvokeModel` wire (Converse supersedes it for
+> every text model), Bedrock Agents / Knowledge Bases (a different service
+> shape), and the batch inference API (submit → poll → collect, the same
+> follow-up shape Doubleword's batch tier is).
+
 ### Anthropic Claude
 | Variable | Purpose |
 |----------|---------|
@@ -766,7 +5296,7 @@ plugin_configs:
 | Layer | Keys | Purpose |
 |-------|------|---------|
 | top-level | `api_key`, `oauth_token` | auth / identity |
-| top-level (cache) | `enable_caching`, `cache_ttl`, `cache_history`, `cache_exclude_recent_turns`, `cache_min_tokens` | Prompt-cache control, consumed by the `cache_anthropic` plugin (explicit `cache_control` breakpoints on system / tools / history). These are not Messages-API body fields, so they sit at top level rather than under `api_params`. `enable_caching` unset falls back to `JAATO_ANTHROPIC_ENABLE_CACHING` (default off). **Server 0.7.1+**: before the `_wire_cache_plugin` fix these keys were silently ignored — the plugin was built from an always-empty config. See [Model Tiers × Prompt Caching](docs/design/model-tier-prompt-cache.md) §4. |
+| top-level (cache) | `enable_caching`, `cache_ttl`, `cache_history`, `cache_exclude_recent_turns`, `cache_min_tokens` | Prompt-cache control, consumed by the `cache_anthropic` plugin (explicit `cache_control` breakpoints on system / tools / history). These are not Messages-API body fields, so they sit at top level rather than under `api_params`. `enable_caching` unset falls back to `JAATO_ANTHROPIC_ENABLE_CACHING` (default off). **Server 0.7.0+**: before the `_wire_cache_plugin` fix these keys were silently ignored — the plugin was built from an always-empty config. See [Model Tiers × Prompt Caching](docs/design/model-tier-prompt-cache.md) §4. |
 | `api_params` | `temperature`, `top_p`, `top_k`, `max_tokens`, `enable_thinking`, `thinking_budget` | Anthropic Messages API body fields. Sampling params are omitted from the request when unset, letting Anthropic apply its server-side defaults. Setting `temperature: 0.0` is the framework's determinism knob. |
 | `framework_overrides` | (reserved) | Future escape hatches |
 
@@ -1076,6 +5606,13 @@ plugin_configs:
                                    # Pairs with routing.sort.partition="none"
                                    # to find the best provider across all
                                    # candidate models.
+      tool_choice: "required"      # auto|required|none, or a dict naming
+                                   # one tool.  Forwarded since the
+                                   # provider gained the parameter its
+                                   # own contract declared; dropped on a
+                                   # turn that sends no tools, and a
+                                   # name-bearing choice is mapped to the
+                                   # hashed wire id.
       service_tier: "flex"         # auto|default|flex|priority|scale —
                                    # OpenAI-style processing tier forwarded
                                    # to tier-supporting upstreams (flex =
@@ -1124,7 +5661,7 @@ plugin_configs:
 | Layer | Keys | Purpose |
 |-------|------|---------|
 | top-level | `api_key`, `http_referer`, `app_title`, `app_categories`, `extra_headers` | auth / identity. `http_referer` / `app_title` are the highest tier of app attribution: unset, they fall back to `JAATO_OPENROUTER_*` and then to the resolved [application identity](#application-identity-naming-the-app-not-the-framework) (`JAATO_APP_NAME` → `"<app> (powered by jaato)"`), and finally to jaato's own name. `app_categories` (`List[str]`) is jaato's hook into [OpenRouter's app marketplace](https://openrouter.ai/docs/app-attribution) — emitted as the `X-OpenRouter-Categories` header. Default is `["cli-agent"]` (jaato is a terminal-driven agentic tool orchestrator); pass `[]` to opt out of category attribution entirely. Validated strictly: lowercase hyphen-separated slugs, ≤30 chars each, ≤5 entries; unrecognized categories are silently dropped server-side. `extra_headers` (`Dict[str,str]`) is the hook for OpenRouter's [provider-specific beta headers](https://openrouter.ai/docs/features/provider-routing#provider-specific-headers) — Anthropic `x-anthropic-beta` is the canonical case (`fine-grained-tool-streaming-2025-05-14`, `interleaved-thinking-2025-05-14`, `structured-outputs-2025-11-13`). Both merge into the OpenAI client's `default_headers`; profile values win on key collisions. |
-| `api_params` | `temperature`, `top_p`, `top_k`, `max_tokens`, `models`, `service_tier`, `enable_thinking`, `thinking_budget`, `thinking_level`, `cache_prompt`, `cache_ttl`, `strict_tools` | OpenAI Chat Completions body fields. `models` is OpenRouter's request-level cross-model fallback list (sibling of `model`; OpenRouter walks candidates on failure). `service_tier` (`auto` / `default` / `flex` / `priority` / `scale`) is the OpenAI-style processing-tier selector, forwarded to tier-supporting upstreams (OpenAI, Gemini, ...) per [service tiers](https://openrouter.ai/docs/guides/features/service-tiers) — `flex` trades latency for ~50% off, `priority` the reverse; the response reports the tier actually used. `thinking_*` keys mirror Anthropic / Antigravity; when both `thinking_level` and `thinking_budget` are set, `level` wins (more portable across upstreams). `cache_prompt: "auto"` (default) places `cache_control: {type: ephemeral}` breakpoints on the system block and last tool definition for explicit-cache upstreams (Anthropic, Gemini 1.5+/2.5+/3+); other upstreams (OpenAI, DeepSeek, Grok) cache automatically and need no client annotation. Response-side parsing of `prompt_tokens_details.cached_tokens` / `cache_creation_input_tokens` / `cost` is unconditional. `strict_tools: true` (server 0.6.118+) emits `"strict": true` as a sibling of `parameters` in each tool definition; OpenRouter forwards to supported upstreams (Sonnet 4.5 / Opus 4.1+, GPT-4o+, Gemini, OSS, Fireworks per [structured outputs list](https://openrouter.ai/docs/guides/features/structured-outputs)) for grammar-constrained tool-arg sampling. Required for cascade-determinism use cases (see `feedback_cascade_completion_schemas_require_strict_model_support` memory); the framework does NOT auto-rewrite schemas to satisfy OpenAI's strict-mode requirements (kb authors own schema shape — `additionalProperties: false` on every object, exhaustive `required` arrays, no `oneOf`/`anyOf` if you enable strict). |
+| `api_params` | `temperature`, `top_p`, `top_k`, `max_tokens`, `models`, `service_tier`, `enable_thinking`, `thinking_budget`, `thinking_level`, `cache_prompt`, `cache_ttl`, `strict_tools`, `tool_choice` | OpenAI Chat Completions body fields. `models` is OpenRouter's request-level cross-model fallback list (sibling of `model`; OpenRouter walks candidates on failure). `service_tier` (`auto` / `default` / `flex` / `priority` / `scale`) is the OpenAI-style processing-tier selector, forwarded to tier-supporting upstreams (OpenAI, Gemini, ...) per [service tiers](https://openrouter.ai/docs/guides/features/service-tiers) — `flex` trades latency for ~50% off, `priority` the reverse; the response reports the tier actually used. `thinking_*` keys mirror Anthropic / Antigravity; when both `thinking_level` and `thinking_budget` are set, `level` wins (more portable across upstreams). `cache_prompt: "auto"` (default) places `cache_control: {type: ephemeral}` breakpoints on the system block and last tool definition for explicit-cache upstreams (Anthropic, Gemini 1.5+/2.5+/3+); other upstreams (OpenAI, DeepSeek, Grok) cache automatically and need no client annotation. Response-side parsing of `prompt_tokens_details.cached_tokens` / `cache_creation_input_tokens` / `cost` is unconditional. `tool_choice` (`auto` / `required` / `none`, or a dict naming one tool) selects whether the model MAY, MUST or MUST NOT call a tool this turn. OpenRouter declared `tool_choice_forwarding=False` and had no such parameter at all — the implementation lived on `_openai_compat`, which it does not inherit, the same gap that made model audio unreachable through it. It is dropped when the turn sends no tools (OpenAI rejects it without `tools`) and a name-bearing choice is mapped through `tool_choice_to_wire`, because tool names are hashed on the wire. **`required` is not free on a speaking tier**: measured against `openai/gpt-audio-mini`, it does force a single-generation native call and remove the completion nudge, and it produces zero audio — the model satisfies the constraint by calling the tool and saying nothing. `strict_tools: true` (server 0.6.118+) emits `"strict": true` as a sibling of `parameters` in each tool definition; OpenRouter forwards to supported upstreams (Sonnet 4.5 / Opus 4.1+, GPT-4o+, Gemini, OSS, Fireworks per [structured outputs list](https://openrouter.ai/docs/guides/features/structured-outputs)) for grammar-constrained tool-arg sampling. Required for cascade-determinism use cases (see `feedback_cascade_completion_schemas_require_strict_model_support` memory); the framework does NOT auto-rewrite schemas to satisfy OpenAI's strict-mode requirements (kb authors own schema shape — `additionalProperties: false` on every object, exhaustive `required` arrays, no `oneOf`/`anyOf` if you enable strict). |
 | `routing` | any [provider routing](https://openrouter.ai/docs/features/provider-routing) key (`order`, `allow_fallbacks`, `require_parameters`, `data_collection`, `ignore`, `only`, `quantizations`, `sort` (string or `{by, partition}`), `zdr`, `enforce_distillable_text`, `max_price`, `preferred_min_throughput`, `preferred_max_latency`, ...) | constrains which upstream host serves a request. Composes with `model: "openrouter/auto"` (auto picks model, routing constrains hosts) and `api_params.models` (cross-model fallback list, routing constrains providers across all of them). Opaque pass-through — new routing keys land automatically. |
 | `framework_overrides` | `context_length`, `base_url`, `connect_timeout`, `request_timeout`, `stream_idle_timeout` | rare escape hatches; normally context length is discovered from the OpenRouter catalog at connect time. The three deadlines are what bounds a single request (#732) — before them, a stalled upstream left the provider waiting forever and delegated the timeout to whoever sat above it. `connect_timeout` (15s) and `request_timeout` (600s, httpx read/write/pool) are byte-level; `stream_idle_timeout` (300s) is *payload*-level, enforced by a watchdog around the streaming chunk loop, because OpenRouter's `: OPENROUTER PROCESSING` keep-alive comments reset httpx's read clock while no chunk is ever yielded. On expiry the provider closes the transport and raises `StallTimeoutError` (a retryable `InfrastructureError`), so `with_retry` handles it like any other transient. Each accepts `0` to disable. The OpenAI SDK's own `max_retries` is pinned to 0 — the framework owns retries, and a hidden second budget would triple every deadline. |
 
@@ -1313,6 +5850,124 @@ plugin_configs:
 > this provider; background-job polling and batch-job support are a
 > follow-up.
 
+### MiniMax
+| Variable | Purpose |
+|----------|---------|
+| `JAATO_MINIMAX_API_KEY` | API key (jaato namespace, highest priority) — an API key from https://platform.minimax.io or a Token Plan subscription key (`sk-cp-...`), which works on `/v1` unchanged |
+| `MINIMAX_API_KEY` | API key (the vendor's own variable; honoured beneath the jaato one) |
+| `JAATO_MINIMAX_BASE_URL` | Endpoint (default: `https://api.minimax.io/v1`; China: `https://api.minimax.cn/v1` — keys are region-bound, a China key is `401` on `.io`) |
+| `JAATO_MINIMAX_MODEL` | Default model name (e.g. `MiniMax-M3`, `MiniMax-M2.7`) |
+| `JAATO_MINIMAX_CONTEXT_LENGTH` | Override the built-in per-model window |
+
+**Authentication (in priority order):** `JAATO_MINIMAX_API_KEY`, then `MINIMAX_API_KEY`, then `minimax-auth key <key>` (validated against `GET /v1/models`, stored as `minimax_auth.json`).
+
+| Model | Context | Thinking | Input |
+|-------|---------|----------|-------|
+| `MiniMax-M3` | 1,000,000 | `thinking: {type: adaptive\|disabled}` via `api_params.enable_thinking`; default on | text + image |
+| `MiniMax-M2.7`, `-highspeed` (+ legacy M2 / M2.1 / M2.5) | 204,800 | always on (`enable_thinking: false` is logged and ignored) | text |
+
+The catalog is bare, so the window comes from a built-in table beneath
+`plugin_configs.minimax.context_length`. `reasoning_split: true` is sent on
+every call so reasoning never arrives as `<think>` inside the text (a block
+that still leaks is moved to the reasoning channel); replay echoes both
+`reasoning_content` and `reasoning_details`. `tool_choice` accepts `none` /
+`auto` (anything else is folded to `auto` with a warning). `max_completion_tokens`
+is always sent — the vendor default truncates tool-call JSON — defaulting to
+the model's recommended cap (M3 131072, M2.x 65536). `presence_penalty` /
+`frequency_penalty` are unsupported and `response_format` is silently ignored
+upstream for M2.x, so neither is forwarded. `api_params.service_tier: priority`
+is 1.5× price. Error code `2056` (Token Plan 5-hour window, names the reset
+time) and `1008` (balance) are non-transient quota errors; `1026` / `1027` are
+the content filter.
+
+```yaml
+provider: minimax
+model: MiniMax-M3
+plugin_configs:
+  minimax:
+    api_params:
+      enable_thinking: true      # M3 only
+      max_tokens: 131072         # sent as max_completion_tokens
+```
+
+### Moonshot AI Kimi
+| Variable | Purpose |
+|----------|---------|
+| `JAATO_KIMI_API_KEY` | API key (jaato namespace, highest priority) from https://platform.kimi.ai/console/api-keys (K3 unlocks after a first top-up) |
+| `MOONSHOT_API_KEY` | API key (the vendor's own variable; honoured beneath the jaato one) |
+| `JAATO_KIMI_BASE_URL` | Endpoint (default: `https://api.moonshot.ai/v1`; China `https://api.moonshot.cn/v1`; Kimi Code plan `https://api.kimi.com/coding/v1` with the plan's own ids `k3`, `kimi-for-coding`) |
+| `JAATO_KIMI_MODEL` | Default model name (e.g. `kimi-k3`) |
+| `JAATO_KIMI_CONTEXT_LENGTH` | Manual override when the catalog lacks the model |
+
+**Authentication (in priority order):** `JAATO_KIMI_API_KEY`, then `MOONSHOT_API_KEY`, then `kimi-auth key <key>` (validated against `GET /v1/users/me/balance`, stored as `kimi_auth.json`).
+
+`GET /v1/models` reports `context_length`, `supports_image_in` and
+`supports_reasoning` per model, so the window, input modalities and thinking
+support are **catalog-detected at connect** (catalog → knob → fail-loud, no
+table). Every id before `kimi-k2.6` was retired on 2026-08-31 and answers
+`404`.
+
+| Model | Context | Thinking control | `tool_choice` |
+|-------|---------|------------------|---------------|
+| `kimi-k3` | 1,048,576 | always on; `api_params.thinking_level: low\|high\|max` → `reasoning_effort` (changing it mid-session restarts the prefix cache) | full set |
+| `kimi-k2.7-code`, `-highspeed` | 262,144 | forced `{type: enabled, keep: all}` | `auto` / `none` |
+| `kimi-k2.6` | 262,144 | `enable_thinking` → `thinking.type`; `thinking_keep: all` → `thinking.keep` | `auto` / `none` |
+
+**Sampling parameters are a 400 on this wire** (`temperature`, `top_p`, `n`,
+penalties are fixed per model), so the forwarded allow-list is exactly what
+the request schema names: `max_tokens` (→ `max_completion_tokens`),
+`tool_choice`, `stop`, `response_format`, `prompt_cache_key`. Tool
+definitions are stamped `strict: false` (Kimi defaults strict **on** and the
+framework's schemas are not authored for it; `api_params.strict_tools: true`
+opts in). Cache hits are read from top-level `usage.cached_tokens`. `429` is
+split by `error.type`: `engine_overloaded_error` and `rate_limit_reached_error`
+back off, `exceeded_current_quota_error` (balance) stops the retry loop.
+
+```yaml
+provider: kimi
+model: kimi-k3
+plugin_configs:
+  kimi:
+    api_params:
+      thinking_level: high
+      prompt_cache_key: my-task-42   # required on the Kimi Code plan
+```
+
+### Xiaomi MiMo
+| Variable | Purpose |
+|----------|---------|
+| `JAATO_MIMO_API_KEY` | API key (jaato namespace, highest priority) from https://platform.xiaomimimo.com/#/console/api-keys |
+| `MIMO_API_KEY` | API key (the vendor's own variable; honoured beneath the jaato one) |
+| `JAATO_MIMO_BASE_URL` | Endpoint (default: `https://api.xiaomimimo.com/v1`; Token Plan keys `tp-...` only work against `https://token-plan-{cn,sgp,ams}.xiaomimimo.com/v1`) |
+| `JAATO_MIMO_MODEL` | Default model name (`mimo-v2.5-pro` or `mimo-v2.5`) |
+| `JAATO_MIMO_CONTEXT_LENGTH` | Override the built-in per-model window |
+
+**Authentication (in priority order):** `JAATO_MIMO_API_KEY`, then `MIMO_API_KEY`, then `mimo-auth key <key>` (validated against `GET /v1/models`, stored as `mimo_auth.json`). Not available in the EU, the UK or Korea (`403`).
+
+| Model | Context | Input | Thinking |
+|-------|---------|-------|----------|
+| `mimo-v2.5-pro` | 1,048,576 | text | `api_params.enable_thinking` → `thinking: {type: enabled\|disabled}`; default on |
+| `mimo-v2.5` | 1,048,576 | text + image (the model also takes video and audio; neither wire is probed yet) | same |
+
+The V2 series was deprecated on 2026-06-30 and is not in the table. **In
+thinking mode the vendor refuses (`400`) the next request of a tool loop
+unless the assistant message carries its `reasoning_content`** — the case
+the reasoning-replay seam exists for. While thinking is on the vendor forces
+`temperature=1.0` / `top_p=0.95` whatever is sent. `tool_choice` accepts
+`auto` only. `finish_reason: repetition_truncation` maps to `MAX_TOKENS`.
+`402` (balance), `403` (region / key) and `421` (content filter) are
+non-transient.
+
+```yaml
+provider: mimo
+model: mimo-v2.5
+plugin_configs:
+  mimo:
+    api_params:
+      enable_thinking: false     # the vendor's own advice for tool-heavy work
+      response_format: {type: json_object}
+```
+
 ### Claude CLI Provider
 | Variable | Purpose |
 |----------|---------|
@@ -1341,6 +5996,69 @@ Available Models:
 - Antigravity quota: `antigravity-gemini-3-pro/flash`, `antigravity-claude-sonnet-4-5[-thinking]`
 - Gemini CLI quota: `gemini-2.5-flash/pro`, `gemini-3-flash/pro-preview`
 
+### Substitution in Config Values (two vocabularies, two resolution times)
+
+A value an author writes into a profile may carry placeholders. There are
+**two** sets, they use different syntax, and the distinction that matters is
+**when** each is resolved — a token resolved daemon-side cannot carry a value
+that does not exist until a subagent thread writes a line.
+
+| Syntax | Resolved by | When | Honoured in |
+|--------|-------------|------|-------------|
+| `${workspaceRoot}` `${cwd}` `${jdtlsStateRoot}` `${HOME}` `${USER}` `${ANY_ENV_VAR}`, plus `pass://` / `vault://` secret URIs | `expand_variables` (daemon) | once, while the profile resolves | `env:`, `plugin_configs:`, `trace:`, and the plugins that expand (lsp, webhook, web_fetch, service_connector, references) |
+| `{agent}` `{agent_suffix}` | `jaato_sdk.trace` (the writer) | per line written | `trace.session_log` / `trace.provider_log` and their env vars |
+
+The two are told apart by the `$`: `${agent}` is an env var nobody sets,
+`{agent}` is the per-agent token. `jaato-scaffold explain profile` and
+`explain env` render both tables from the live registries
+(`EXPANSION_CONTEXT_VARS`, `TRACE_PATH_PLACEHOLDERS`), so a token added to
+either appears in the docs without anyone writing it down.
+
+**The `trace:` block used to be the one typed route that expanded nothing.**
+A profile's `env:` map has always been run through `expand_variables`, while
+`TraceProfileConfig.as_env()` was applied verbatim — so `${HOME}/t.log` in
+the *validated* block was not absolute, was joined onto the workspace, and
+`trace_write`'s `os.makedirs` created a directory literally named `${HOME}`
+inside it. That is the #775 shape inside the block written to stop #775, and
+the asymmetry is the defect: the route that outranks the other must not
+understand less than it.
+
+**A provider trace splits per agent whether or not you ask.** With no
+placeholder the agent id is appended before the extension
+(`provider.jsonl` → `provider_subagent_1.jsonl`) — unchanged, and what every
+existing deployment gets. Naming a placeholder puts the id where you want it
+instead (`logs/{agent}/provider.jsonl`), suppresses the implicit suffix, and
+is the **only** way to split a *session* trace, which never splits on its own.
+For the main agent the two forms differ deliberately: implicit leaves the path
+alone, explicit renders `{agent}` as `main`, because an author who asked for
+the id wants it on every file rather than one anonymous file among named
+siblings.
+
+**What is refused, where.** A path-valued knob given a *switch* is refused at
+profile **load** on both routes — the typed block always did, and the `env:`
+map (the spelling that actually caused #775, since it was the only route that
+existed then) now does too, for `JAATO_TRACE_LOG`, `JAATO_PROVIDER_TRACE` and
+`JAATO_SESSION_LOG_DIR`. Closing one and leaving the other open made the block
+a suggestion: an author who hit the refusal satisfied it by moving the same
+value one key over. The workspace `.env` is deliberately **not** covered — it
+is the operator's own file, lower precedence, and outside the validated
+surface. An unknown `{token}` is refused too, because unresolved it becomes a
+literal directory.
+
+`jaato-scaffold validate` reports the cases that load fine and are still
+probably wrong:
+
+| Finding | Severity | Fires when |
+|---------|----------|-----------|
+| `trace_path_placeholder_unknown` | error | a `{token}` nothing substitutes, reaching via the `env:` route (the `trace:` route is refused at load) |
+| `trace_path_daemon_scoped_var` | warn | `${workspaceRoot}` / `${cwd}` in a trace path — on the main-session path these expand to the **daemon's** workspace, so every session shares one file. A relative path is the per-session idiom |
+| `trace_path_unexpanded_var` | warn | a `${VAR}` nothing in the workspace defines — an undefined name stays **literal**, so the path gains a `${VAR}` directory |
+| `trace_env_shadowed` | warn | both routes set for one variable: the block wins, so the `env:` value is dead |
+
+Before this, `validate.py` contained the string `trace` **zero** times — the
+one profile block whose silent-ignore failures had no reporter, the family
+#910 / #925 / #947 / #950 each closed for a different knob.
+
 ### General
 
 Every env var the installed tree reads is tagged with a **scope** in
@@ -1362,15 +6080,22 @@ covers it, where one exists. `jaato-scaffold explain env` renders the tags;
 | `AI_USE_CHAT_FUNCTIONS` | Enable function calling mode (`1`/`true`) |
 | `LEDGER_PATH` | Output path for token accounting JSONL |
 | `JAATO_GC_THRESHOLD` | GC trigger threshold % (default: 80.0) |
+| `JAATO_GC_MEDIA_BYTES` | Binary payload a history may carry before GC triggers, in **bytes** (default 8 MiB; `0` disables). The second GC denominator: a voice session can sit far below its token threshold while carrying megabytes of audio, which is the state GC could not see at all before #850. Typed sibling: `gc.media_bytes_threshold`. |
 | `JAATO_PARALLEL_TOOLS` | Enable parallel tool execution (default: `true`) |
 | `JAATO_DEFERRED_TOOLS` | Enable deferred tool loading (default: `true`) |
 | `JAATO_RUNNER_POOL_ENABLED` | Enable pre-warm runner pool routing (default: `true`).  Sessions consume pre-warm pool slots instead of cold-spawning a runner subprocess.  Set to `false` / `0` / `no` / `off` to disable.  See `docs/design/runner_prewarm_pool_plan.md`. |
-| `JAATO_RUNNER_POOL_SIZE` | Number of pre-warm pool slots to keep idle (default: 2).  Raise for cascades that fan out stages **concurrently** (each simultaneous stage needs its own warm slot).  Sequential/back-to-back stages do NOT need a larger pool — they reuse one warm slot via the `slot.settled` handoff (the next stage is spawned on slot-availability), so pool size >1 only helps parallel fan-out. |
+| `JAATO_RUNNER_POOL_SIZE` | Number of **unreserved** pre-warm pool slots to keep idle (default: 2) — slots any arriving session may take.  Raise for cascades that fan out stages **concurrently** (each simultaneous stage needs its own warm slot).  Sequential/back-to-back stages do NOT need a larger pool — they reuse one warm slot via the `slot.settled` handoff (the next stage is spawned on slot-availability), so pool size >1 only helps parallel fan-out.  Cascade-affined idle slots (reservations) are **not** counted here (#898): they are capacity for one tenant only, and counting them as pool capacity starved everybody else. |
+| `JAATO_RUNNER_ACK_TIMEOUT` | Seconds a dispatched runner RPC may go with NO frame bearing its id before the daemon stops assuming and asks the runner what it actually has (default 120; `0` disables). **Not** a cap on how long an RPC may take — a turn legitimately runs for minutes, and a runner that claims the id buys another full window. What it bounds is an unbounded WAIT: before it, a request the daemon wrote and the runner does not have hung the caller forever with every thread idle (#856). Host-scoped, because it bounds the channel, which a pool slot shares across several sessions in turn. A negative or unparseable value falls back to the default — "unbounded" is the bug this exists to fix. |
+| `JAATO_RUNNER_POOL_MAX_SIZE` | Hard ceiling on **total** idle pool slots, reservations included (default: `2 x JAATO_RUNNER_POOL_SIZE`).  This is the memory bound — a slot is 129–187 MB — on the growth that per-tenant reservations imply.  Raise it when `pool_replenish_ceiling_blocked_total` is nonzero: some tenant is being served by cold-spawn while reservations hold the ceiling. |
+| `JAATO_IPC_EVENT_QUEUE_MAX` | Per-client IPC event-queue bound (default 2048). Beyond it, lossy tool-output chunks are evicted oldest-first (media before text); essential lifecycle events are queued past the bound rather than dropped, because losing one desynchronises the client permanently. A non-numeric or non-positive value falls back to the default — "unbounded" is the bug this exists to fix. See [Binary Media Chunks](docs/design/binary-media-chunks.md). |
+| `JAATO_CREDENTIAL_LOCK_TIMEOUT` | Seconds a caller waits for another process to finish refreshing a rotating OAuth credential before giving up (default 60). Host-scoped for the reason `JAATO_RUNNER_ACK_TIMEOUT` is: what is bounded is contention on a FILE, and the contenders — daemon, runner subprocesses, pool slots — serve sessions that have no say in each other's timeouts. A non-numeric or non-positive value falls back to the default; "unbounded" is the bug this exists to fix. See [A Refresh Token That Rotates](#a-refresh-token-that-rotates-and-two-sessions-refreshing-it-683). |
+| `JAATO_OAUTH_REFRESH_MARGIN` | Seconds before real expiry at which an OAuth access token is treated as stale and refreshed (default 300 — the value each provider previously hardcoded). Host-scoped because every process sharing one credential file must agree on when that file's token is stale. Note what it does **not** do: a fixed margin does not disperse a thundering herd (every process crosses it at the same instant), it makes the refresh happen while the old token is still valid — which is what lets a transient failure fall back on it instead of logging the user out. |
 | `JAATO_AMBIGUOUS_WIDTH` | Width for East Asian Ambiguous chars in tables (`1` default, `2` for CJK terminals) |
 | `JAATO_SESSION_LOG_DIR` | Per-session log directory, relative to workspace (default: `.jaato/logs`) |
 | `JAATO_CGROUPS_ROOT` | Parent cgroup v2 directory for the WS server's per-session cgroup tree (default: `/sys/fs/cgroup/jaato`). Override when the host has subtree_control delegated under a different path. Must already exist with `memory`, `pids`, `cpu` in `cgroup.subtree_control`. |
 | `JAATO_REQUIRE_APPARMOR` | Require kernel-enforced AppArmor confinement (`1`/`true`/`yes`). Promotes the WS server's auto-detect mode to *required*: if confinement is unavailable the server refuses to start instead of silently degrading to directory-sandbox-only isolation. Equivalent to the WS `--apparmor` flag; combining it with `--no-apparmor` is a contradiction the server rejects at startup. When unset (auto), unavailability is logged at WARNING with the specific failing precondition and the server degrades. |
-| `JAATO_NOTEBOOK_ALLOW_INPROCESS_EXEC` | Opt into in-process execution of model-authored notebook cells (`1`/`true`/`yes`). The `notebook` plugin's `local` backend runs cells via `exec`/`eval` in the host interpreter, so by default it **fails closed** unless a kernel-enforced AppArmor profile is active (the production confined-runner path). Set this (or notebook plugin config `allow_inprocess_exec: true`) to accept in-process execution on unconfined hosts (e.g. trusted single-user dev). Logs a one-time WARNING when execution runs unconfined via this opt-in. |
+| `JAATO_NOTEBOOK_ALLOW_INPROCESS_EXEC` | Opt into in-process execution of model-authored notebook cells (`1`/`true`/`yes`). The `notebook` plugin's `local` backend runs cells via `exec`/`eval` in the host interpreter, so by default it **fails closed** unless a kernel-enforced AppArmor profile is active (the production confined-runner path). Set this (or notebook plugin config `allow_inprocess_exec: true`) to accept in-process execution on unconfined hosts (e.g. trusted single-user dev). Logs a one-time WARNING when execution runs unconfined via this opt-in. Bounds the PROCESS, not the filesystem — see the row below and [A Boundary the Notebook Did Not Have](#a-boundary-the-notebook-did-not-have-710). |
+| `JAATO_NOTEBOOK_ALLOW_UNCONTAINED_EXEC` | Opt into notebook cells reaching **outside the workspace** (`1`/`true`/`yes`; profile key `plugin_configs.notebook.allow_uncontained_exec`). Cells are otherwise contained to the workspace and `/tmp` — the same boundary `cli` applies — by an AppArmor profile where one is enforced and by the kernel's own audit hook otherwise (#710). Announced at WARNING on every kernel that takes it. `plugin_configs.notebook.allow_read_paths` and the operator's `sandbox add` are the narrow alternatives. |
 | `JAATO_PLUGIN_ENTRY_POINT_ALLOWLIST` | Comma-separated distribution names allowed to contribute plugins through the `jaato.*` entry-point groups. Unset (the default) means every installed distribution participates. When set, an entry point from any other distribution is refused **before** `ep.load()` — so its module is never imported — with a WARNING naming it. The built-in package is always honoured and never needs listing. See [Entry-point plugin trust](#entry-point-plugin-trust). |
 | `JAATO_REVIVE_PROFILE` | Where a REVIVED session's profile comes from: `persisted` (default — the resolved recipe the session froze at creation) or `disk` (re-resolve `profile_name` against the profile files as they stand now). Set `disk` to interrogate a finished session under a different contract, where a `JAATO_PROFILE_SET` switch must actually take effect. |
 | `JAATO_REVIVE_PERSONA` | Where a REVIVED session's system instruction comes from: `persisted` (default — the exact prompt rendered at session-prep, prefetch output included) or `disk` (re-render from the agent markdown, **re-running** the persona's `{{!py:...}}` prefetch scripts against the session's original `agent_params`). The default is what makes a prefetch run once as documented; `disk` may execute side effects. |
@@ -1411,7 +6136,22 @@ anthropic-auth login/logout/status     # Anthropic OAuth (PKCE flow)
 antigravity-auth login/logout/status   # Google OAuth (PKCE flow)
 github-auth login/poll/logout/status   # GitHub OAuth (device code flow)
 nim-auth login/key/logout/status       # NVIDIA NIM API key
+minimax-auth login/key/logout/status   # MiniMax API key
+kimi-auth login/key/logout/status      # Moonshot AI Kimi API key
+mimo-auth login/key/logout/status      # Xiaomi MiMo API key
+nebius-auth login/key/logout/status    # Nebius Token Factory API key
+ovhcloud-auth login/key/logout/status  # OVHcloud AI Endpoints API key
+doubleword-auth login/key/logout/status # Doubleword API key
 ```
+
+Every provider whose `PROVIDER_AUTH_RESOLUTION` names a `stored` command has
+a plugin registering it, and
+`shared/tests/test_a_named_auth_command_exists.py` derives both halves from
+the tree so a new provider cannot advertise a command nothing provides
+(#888). A `stored` entry naming a FILE instead — `openai_auth.json`,
+`~/.aws/credentials`, `GOOGLE_APPLICATION_CREDENTIALS` — has no command and
+is not expected to: Bedrock resolves through botocore's chain and Google
+through ADC.
 
 ### Session Commands
 ```
@@ -1442,7 +6182,21 @@ Config files: `.jaato/keybindings.json` (project) or `~/.jaato/keybindings.json`
 
 Key syntax (prompt_toolkit): `enter`, `c-c` (Ctrl+C), `f1`, `pageup`, `["escape", "enter"]`
 
-Default keybindings: `submit`=enter, `cancel`=c-c, `exit`=c-d, `toggle_plan`=c-p, `toggle_tools`=c-t, `open_editor`=c-g, `search`=c-f
+Default keybindings: `submit`=enter, `cancel`=c-c, `exit`=c-d, `toggle_plan`=c-p, `toggle_tools`=c-t, `toggle_thinking`=c-r, `open_editor`=c-g, `search`=c-f
+
+**Reasoning blocks** (`toggle_thinking`, Ctrl+R by default): a model's
+reasoning reaches the TUI as its own output source (`thinking`) ahead of the
+answer. It renders **collapsed by default** as one summary line
+(`▸ Internal thinking (14 lines, 412 words)  ───  Ctrl+R to expand`), the
+sibling of the collapsed tool tree behind Ctrl+T; the toggle expands every
+reasoning block in the active buffer into the bordered `Internal thinking`
+box. The session bar shows a `Reasoning: ▶ collapsed [Ctrl+R]` indicator once
+the buffer holds any. Note that most sessions will show **no** reasoning at
+all: providers discard it unless the profile asks for it
+(`plugin_configs.<provider>.api_params.enable_thinking: true`), because
+reasoning costs output tokens. Reasoning is streamed like text — the first
+delta is a `write`, the rest `append` — so it lands in one block; before #755
+every delta was a `write` and each rendered on its own line.
 
 The `open_editor` keybinding (Ctrl+G) opens the current input in your external editor (`$EDITOR` or `$VISUAL`, defaults to `vi`). Useful for composing complex multi-line prompts.
 
@@ -1510,6 +6264,70 @@ collector, set `OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf` (or the `protocol`
 config key) yourself. See
 [docs/opentelemetry-design.md §12.1](docs/opentelemetry-design.md).
 
+### The Telemetry Block a Profile Wrote and Nothing Read (#858)
+
+`plugin_configs.telemetry` is a documented surface — `env_scope.py` named a
+typed key for all five `JAATO_TELEMETRY_*` vars, and `OTelPlugin.initialize()`
+reads every one of them. The factory in between assembled its own config dict
+from the environment and passed **that**:
+
+```python
+redact = os.environ.get("JAATO_TELEMETRY_REDACT_CONTENT", "true") ...
+plugin.initialize({"enabled": True, "exporter": exporter,
+                   "redact_content": redact})
+```
+
+So the whole block was inert. Not a missing key — a **missing argument**, and
+the same silent-ignore family as #910 / #925 / #947 / #950.
+
+`redact_content` is why this was P1 rather than a tidy-up: it is a **privacy**
+control. An operator who sets it in the typed place and reads `explain profile`
+has every reason to believe prompt and response content is withheld from the
+collector, and it is being exported. That the env default happens to be the
+safe one does not make the ignore correct — setting it explicitly to `false`
+was ignored just as completely, and nothing, at any severity, said so.
+
+**The whole block, not one key.** `exporter` had the identical defect and
+`file_path` / `backend` / `enabled` were each one line away from it, so
+`create_plugin(config)` carries the block through to `initialize()` and layers
+the env vars **beneath** it with `setdefault`. A key the profile did not supply
+is left ABSENT rather than filled in, because `initialize()` already resolves
+`config.get(key, os.environ[...])` per key — forcing an env-derived value in
+would make the profile's silence outrank the env var it is the default for.
+
+| Key | Reaches | Precedence beneath it |
+|-----|---------|----------------------|
+| `enabled` | the gate that returns `NullTelemetryPlugin` | `JAATO_TELEMETRY_ENABLED` |
+| `backend` | `otel` vs `langfuse` | `JAATO_TELEMETRY_BACKEND`, then Langfuse auto-detect |
+| `exporter` | `initialize()` | `JAATO_TELEMETRY_EXPORTER` |
+| `redact_content` | `initialize()` | `JAATO_TELEMETRY_REDACT_CONTENT` (default **true**) |
+| `file_path`, `endpoint`, `headers`, `protocol`, `service_name`, `instance_id`, `sample_rate`, `batch_export`, `public_key`, `secret_key`, `host` | `initialize()` unchanged | each key's own env fallback inside `initialize()` |
+
+**Backend selection is not widened by accident.** A profile carrying no
+`telemetry` block selects exactly the backend it always did. The Langfuse
+auto-detect gains the block's own `public_key` / `endpoint` as signals under the
+*same* rule it applies to `LANGFUSE_PUBLIC_KEY` / `OTEL_EXPORTER_OTLP_ENDPOINT`,
+because the profile outranks the environment everywhere else and a Langfuse
+setup expressed purely in a profile would otherwise be served by the generic
+backend.
+
+**Where it is plumbed.** Telemetry is **runtime**-scoped — one plugin per
+`JaatoRuntime`, shared by the main session and every in-process subagent, built
+in `JaatoRuntime.__init__` before any session exists. It is not a registry
+plugin, so `JaatoSession._apply_plugin_configs` (#950) cannot serve it and the
+block has to arrive at construction: `JaatoRuntime(telemetry_config=...)`, fed
+from `SessionInitEnvelope.plugin_configs` (runner-served sessions, the default
+path), from `JaatoServer._profile.plugin_configs` (the daemon's in-process
+runtime), and from `JaatoClient.set_telemetry_config()` before `connect()` (the
+embedded path, whose runtime factory is a documented test seam that could not
+take a fourth argument).
+
+**The safe default is unchanged.** With no block and no env vars: telemetry
+off; switched on by env alone: `exporter=otlp`, `redact_content=True`. A
+misspelled boolean resolves to the default rather than to `False`, so a typo
+cannot quietly disable redaction. All five vars leave the `AWAITING_TYPED_KEY`
+ratchet for a resolving `typed_key`.
+
 ## Coding Policies
 
 ### Cyclomatic Complexity
@@ -1539,6 +6357,67 @@ of defensive `x.get(k) or ""` defaults can push an otherwise flat function over
 the line. The ceiling is 15 rather than 10 precisely to leave room for that; see
 the test module's docstring for the measurements behind the choice.
 
+### Comparison and Design Docs Are Checked Against the Tree
+
+`docs/compare-*.md` and the multimodal design doc carry claims an evaluator
+quotes — the licence, whether AppArmor is free, which wires carry images —
+and both comparison docs had drifted once before (#866). The guard is
+`jaato-server/shared/tests/test_docs_do_not_contradict_the_tree.py`, in the
+required `contract-guards` job:
+
+- no line a comparison doc attributes to jaato may call it MIT or open source
+  (the identifier is read from `jaato-server/pyproject.toml`; a competitor's
+  licence on its own line or in its own column is fine);
+- no comparison-doc line may call AppArmor premium while `server/apparmor.py`
+  ships in the free package;
+- the "Where jaato is now" table in `docs/design/multimodal-model-support.md`
+  must name exactly the providers whose `PROVIDER_CAPABILITIES` declare the
+  row's capability, so adding `pdf_input` to a provider means updating that
+  row.
+
+### The Reversion Meta-Guard Never Writes to Your Checkout (#995)
+
+`jaato-server/shared/tests/test_every_guard_detects_its_own_reversion.py`
+proves each contract guard is not decorative by putting its defect **back** —
+rewriting a source file, running the one guard test that must fail, and
+restoring. Until #995 it rewrote the file **in the working tree** and restored
+it in a per-case `finally`, which is an exception handler and not a
+crash-safety mechanism: SIGKILL, a CI job timeout, a container restart or an
+interrupt between the write and the restore leaves the sabotage on disk,
+looking exactly like deliberate work in progress. Measured in one session: a
+dirty tree in **seven of nine** runs, and one occasion where a `git add -A`
+committed the suite's live deletion of `__repr__ = secret_safe_repr("api_key")`
+— #721's protection against an API key reaching a log through a default
+`repr`. It was caught only by diffing failing test **IDs** against a baseline.
+
+The suite now copies the checkout once per session and does every sabotage,
+every guard subprocess and every restore **inside the copy**. No code path in
+it opens a file under the repository root for writing, so there is no signal,
+timeout or interrupt that can leave your tree modified — the failure is
+unreachable rather than recoverable. Three things hold that up: the one path
+helper every write goes through refuses anything resolving outside the sandbox
+or inside the checkout (symlinks resolved before comparing), each case asserts
+the real file's bytes are unchanged afterwards, and one test states the
+property directly on a real reversion.
+
+A green run is itself evidence the copy is being read: if the subprocess
+resolved the real tree instead it would see **unsabotaged** source, the guard
+would pass, and the case would fail as "decorative". There is no configuration
+in which a broken copy reports success.
+
+Consequences worth knowing:
+
+- The sandbox is a **snapshot** taken at session start. Editing the tree while
+  the suite runs means the guards report on the source as it was, and the
+  per-case tripwire says so by name rather than blaming the suite.
+- The folklore that this suite must never run under `pytest -n` or alongside
+  anything else, and that `git status` is untrustworthy near it, was a
+  consequence of the in-place design and no longer applies. Each xdist worker
+  builds its own sandbox, which costs disk rather than correctness.
+- Cost is one copy of ~2.4k files plus a `compileall` pass — a couple of
+  seconds once per session, against ~5s per case. A case runs marginally
+  *faster* in the sandbox than in the checkout.
+
 ### Docstring Maintenance
 
 Whenever you read or modify code, check that the docstrings on the classes, methods, and functions you touch are **present, accurate, and complete**. If they are missing, outdated, or misleading, update them as part of the same change. Specifically:
@@ -1561,9 +6440,12 @@ This is not optional cleanup — treat missing or inaccurate docstrings as a def
 - [Daemon Extensions](docs/design/daemon-extensions.md) - Extension points for external packages (session hooks, WS interceptors, custom aspects, remote handlers)
 - [Application Identity](docs/design/app-identity.md) - Naming the application an integrator built, rather than reporting every SDK-based harness upstream as "jaato". `AppIdentity` + the four-tier precedence (provider knob → provider env → `JaatoRuntime(app_identity=)` → `JAATO_APP_*`), the `(powered by jaato)` suffix, header-safety sanitisation, and why the env vars are `host`-scoped.
 - [Env Vars vs Profile Keys](docs/design/env-vars-vs-profile-keys.md) - Which of the 186 env vars earned a typed profile/`plugin_configs` key, and which are correctly env-only. The tagged catalog lives in `shared/env_scope.py` (scope: `session` / `host` / `ambient` / `internal`, plus the typed key where one exists) and is enforced by `test_env_scope_catalog.py`; 38 session-scoped knobs with no typed key sit in a may-only-shrink ratchet, each carrying a tier and a **proposed** key (`explain env untyped` prints both). Includes the credential policy for the three providers whose peers expose an `api_key` knob and they don't.
-- [Payload-Schema Conventions](docs/design/payload-schema-conventions.md) - Symmetric authoring guide for `spawn_payload_schema` (input boundary) and `completion_payload_schema` (output boundary). Mirror prefetch required-keys; always carry `warnings[]` / `errors[]` escape hatches; persona ↔ schema consistency check; canonical-hash strip rules; `agent_params` interaction with agent-continuity (§6).
+- [The Self-Bounding Completion Gate](docs/design/completion-gate.md) - What `completion_processors` is for and the seven rules a working one had to get right, each attached to the incident that produced it. Covers `max_refusals:` / `on_exhausted:` (the gate's own refusal ceiling, distinct from `max_turns`, which is and remains the retry budget), the `faults[]` channel that keeps an unfixable environment fault from burning the retry budget, why a broken gate must never read as a passing one, and the load-once-per-session caching the counter used to depend on as folklore. Start from `jaato-scaffold explain completion` and `jaato-scaffold new processor` — both are computed from the framework, so they cannot drift the way the prose can. §9 covers why the gate is three files rather than one: `jaato-scaffold new sweep` emits the checks (`acceptance.sh`, shared with the post-hoc graders), the processor, and the profile's `completion_processors:` + `completion_payload_schema:` as ONE set (`--no-gate` opts out), because a profile carrying processors and no schema has no lenient gate — `_should_hide_signal_completion` removes `signal_completion` entirely, so the agent cannot signal and the gate never runs. §11 covers why a session that completed is still drivable: `signal_completion` ends the TURN, and the continuation it skips was also the only writer of that batch's results into history, so a completed conversation used to end on a `tool_calls` block nothing answered and every later request — `send_message` and `session.wake` alike — was rejected by the provider (#913). `_record_terminal_tool_results` writes them without the round-trip, which is what makes "complete every turn to enforce a contract, then keep talking" usable.
+- [Payload-Schema Conventions](docs/design/payload-schema-conventions.md) - Symmetric authoring guide for `spawn_payload_schema` (input boundary) and `completion_payload_schema` (output boundary) — symmetric in everything but the type system: a completion payload is JSON the model emitted, a spawn payload crosses the IPC wire as `key=value` argv tokens, so **every spawn property is a `string`** (`pattern` carries the shape, the consumer parses). #883 ratified that rather than reopening the transport, and both spawn boundaries now validate the same string view — the in-process `spawn_subagent` call used to accept a typed value the wire could never deliver, so one profile meant two things. A refusal caused by the schema names the profile; `jaato-scaffold validate` catches it before any spawn as `spawn_schema_type_unreachable`. Mirror prefetch required-keys; always carry `warnings[]` / `errors[]` escape hatches; persona ↔ schema consistency check; canonical-hash strip rules; `agent_params` interaction with agent-continuity (§6).
 - [Competitor Memory Systems](docs/design/competitor-memory-systems.md) - Survey of nine agent-memory products, sorted by what a *framework* owes: pattern (nothing) / seam (an extension point) / fidelity (a fix) / not ours. Records which items were already expressible as cascade patterns, which memory hot paths are not pluggable, and why the pattern corpus needs `certify/`-style contract tests run against `main`.
 - [Agent Continuity Pattern](docs/design/agent-continuity.md) - `{{continuity_scope}}` + memory plugin enrichment + raw/curated lifecycle: persona-level continuity across sessions composed from existing primitives, no new framework code. Reference impl in `jaato-knowledge-manager/.jaato.example/`.
 - [Model Tiers × Prompt Caching](docs/design/model-tier-prompt-cache.md) - What `enter_tier` costs when prompt caching is on: cache is keyed per model, so an in-place tier switch re-reads the whole prefix cold (break-even ~6 consecutive calls at the new tier). Covers the `_wire_cache_plugin` gap that made profile cache knobs inert, the system-block tier line that invalidates BP1, and the per-provider knob divergence + proposed common `cache:` field.
+- [MiniMax, Kimi and MiMo providers](docs/design/minimax-kimi-mimo-providers.md) - Design for three first-party OpenAI-compatible providers (`minimax`, `kimi`, `mimo`) and the framework prerequisite they share: **reasoning replay** — sending an assistant turn's `reasoning_content` back on the next request of a tool-call loop, which the session currently drops from history and every OpenAI-shaped converter ignores. Covers the surface decision (chat completions, not the Anthropic shims), per-vendor thinking-control dialects, tool-choice vocabularies, catalog vs table context resolution, error taxonomies, and the registration checklist.
+- [Plugin schema census](docs/design/plugin-schema-census.md) - Which config keys each plugin READS that its `get_config_schema()` does not DECLARE, measured tree-wide by `scripts/plugin_schema_census.py`. A census, deliberately **not** a guard: the raw count spans four surfaces (framework-injected keys, the block an author writes, a nested dict with its own owner, and a separate file the block points at), and a ratchet seeded before those are separated would freeze the ambiguity as a fact. `permission` is worked through site by site as the one audited row.
 - [AppArmor Setup](docs/apparmor-setup.md) - Kernel-enforced workspace isolation. WS deployments confine automatically when AppArmor is available; IPC clients opt in via `IPCClient(..., apparmor=True)` (defaults to `False`).
 - [GCP Setup Guide](docs/gcp-setup.md) - Setting up GCP project for Vertex AI

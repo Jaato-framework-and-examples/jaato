@@ -45,6 +45,17 @@ from .enrichment_formatter import (
 )
 from shared.trace import trace as _trace_write
 
+# Config keys that name WHO is exposing a plugin rather than HOW it
+# should behave.  Every in-process subagent spawn stamps ``agent_name``
+# into the config of each plugin its profile lists — see
+# ``shared/plugins/subagent/plugin.py`` — including the plugins it
+# declares no configuration for, because on a registry whose
+# ``expose_all`` was filtered to the ROOT profile's plugins that stamp is
+# what exposes them at all.  It is not an operator knob, and on a shared
+# registry it is not a reason to rebuild a live plugin.  Consumed by
+# :meth:`PluginRegistry._config_requires_reinit` (#951).
+_IDENTITY_ONLY_CONFIG_KEYS = frozenset({"agent_name"})
+
 # Entry point group names by plugin kind
 PLUGIN_ENTRY_POINT_GROUPS = {
     "tool": "jaato.plugins",
@@ -82,8 +93,11 @@ def _tier_filter_matches(
     ``_discover_via_entry_points`` and ``_discover_via_directory``
     share one implementation.  Plugins lacking a ``PLUGIN_TIER``
     annotation are excluded under ANY filter (the "annotate or be
-    excluded" contract from §3.3.5) — silent exclusion is what the
-    build-fail gate in ``test_plugin_tier_partition`` catches.
+    excluded" contract from §3.3.5).  In-tree, that exclusion is caught
+    at build time by ``test_plugin_tier_partition``; out of tree there
+    is no such gate, so the exclusion itself is announced at WARNING by
+    :func:`_report_tier_skip` (issue #917) rather than left to a debug
+    trace nobody reads.
 
     Args:
         plugin_tier: Declared ``PLUGIN_TIER`` value, or ``None`` if
@@ -131,6 +145,118 @@ def _trace(msg: str, include_traceback: bool = False, warning: bool = False) -> 
         logger.debug(msg)
 
 
+def _tier_fix_location(module_name: str) -> str:
+    """Where an entry-point plugin's ``PLUGIN_TIER`` belongs, as a path hint.
+
+    ``_lookup_module_tier`` reads the annotation off the factory's own
+    module OR its parent package, so the fix has two valid homes and the
+    warning must name a real one rather than a generic "somewhere in
+    your package".  We name the parent package's ``__init__.py``, which
+    is where every in-tree plugin declares it and where the entry-point
+    convention ``<package>.<plugin>.plugin:create_plugin`` puts it.
+
+    Args:
+        module_name: The factory's ``__module__``, e.g.
+            ``jaato_m365.plugin``.  Empty when the factory carries none.
+
+    Returns:
+        ``"the jaato_m365 package's __init__.py"``, or a generic phrase
+        when the module name gives nothing to point at.
+    """
+    package = module_name.rsplit(".", 1)[0] if "." in module_name else module_name
+    if not package:
+        return "your plugin package's __init__.py"
+    return f"the {package} package's __init__.py"
+
+
+def _describe_entry_point(ep: Any, origin: Any) -> str:
+    """Identify an entry point for a diagnostic: name, target, distribution.
+
+    All three, because each answers a different question the reader has.
+    The ``ep.name`` is what a profile writes; the ``ep.value`` is the
+    factory to go and edit; the **distribution** is who to fix it in --
+    and on a machine with several plugin packages installed, that last
+    one is what turns "some plugin is broken" into "this dependency is".
+    The trust gate has already resolved it (:class:`PluginOrigin`), so
+    the diagnostic costs nothing to include it.
+
+    The distribution is omitted rather than rendered as ``None`` when
+    the entry point carries no ``dist`` -- a synthesised or
+    locally-registered one.
+    """
+    value = getattr(ep, "value", "<unknown>")
+    dist = getattr(origin, "distribution", None)
+    suffix = f", from {dist}" if dist else ""
+    return f"Entry point '{getattr(ep, 'name', '?')}' ({value}{suffix})"
+
+
+def _report_tier_skip(
+    *,
+    what: str,
+    plugin_tier: Optional[str],
+    tier_filter: str,
+    fix_location: str,
+) -> None:
+    """Record a tier-filter skip, loudly iff the author made a mistake.
+
+    The one ``_trace`` this replaces conflated two different events
+    (issue #917):
+
+    - **A mismatched annotation is correct partitioning.**  A
+      ``PLUGIN_TIER = "daemon"`` plugin not loading under
+      ``tier_filter="runner"`` is the partition working; it stays at
+      debug, because saying it out loud would print a line for every
+      daemon-tier plugin on every runner bootstrap.
+    - **A MISSING annotation is a mistake**, and the only one an
+      out-of-tree author can make without knowing the concept exists.
+      ``_tier_filter_matches`` excludes an unannotated plugin under ANY
+      filter, and the in-tree build gate
+      (``test_plugin_tier_partition``) that catches this cannot see a
+      distribution outside ``shared/plugins/``.  So the plugin is
+      discovered, listed by ``jaato-scaffold plugins``, accepted by the
+      trust gate — and silently absent from the session that was
+      supposed to use it.
+
+    Warning on the second is the same promotion the protocol-gap check
+    got at PR #171, for the same reason and the same audience: a plugin
+    vanishing from the registry with no operator-visible signal.
+
+    Args:
+        what: Human-readable identity of the skipped plugin, already
+            including how it was declared (entry point vs directory
+            module) — this is the string the author greps for.
+        plugin_tier: The declared ``PLUGIN_TIER``, or ``None`` when the
+            annotation is absent (the case that warns).
+        tier_filter: The filter in force (``"runner"`` / ``"daemon"``).
+        fix_location: Where to add the annotation, phrased for this
+            discovery path (a distribution's package ``__init__.py``, or
+            an in-tree plugin's).
+    """
+    if plugin_tier is not None:
+        _trace(
+            f" {what}: PLUGIN_TIER={plugin_tier!r} not accepted by "
+            f"filter={tier_filter!r}; skipping"
+        )
+        return
+    logger.warning(
+        "%s declares no PLUGIN_TIER, so it will NOT be loaded by the "
+        "%s tier — its tools will be missing from sessions that name "
+        "it, with no further warning. Fix: add a module-level "
+        "PLUGIN_TIER = \"%s\" to %s. (Valid values: \"runner\" — "
+        "loaded in the session runner, the right answer for a plugin "
+        "that provides tools; \"daemon\" — daemon-side only; "
+        "\"daemon_callable\" — discovered on both sides.)",
+        what,
+        tier_filter,
+        tier_filter,
+        fix_location,
+    )
+    _trace(
+        f" {what}: PLUGIN_TIER missing; skipped under "
+        f"filter={tier_filter!r}",
+    )
+
+
 #: Which Protocol a discovered plugin must satisfy, per plugin kind.
 #: Kinds absent from this map (``gc``, ``cache``) carry no structural
 #: contract the registry can check, so they are admitted unchecked.
@@ -138,6 +264,44 @@ _PLUGIN_KIND_PROTOCOLS: Dict[str, type] = {
     "tool": ToolPlugin,
     "enrichment": EnrichmentPlugin,
 }
+
+
+def _install_advice(missing: str) -> str:
+    """What to run to get import name *missing* into this environment.
+
+    A skip message that only names the module leaves the reader to guess the
+    distribution AND the extra.  For ``pexpect`` the answer is
+    ``pip install 'jaato-server[interactive]'`` — an extra whose name is not
+    the plugin's, not the module's, and not discoverable from the message,
+    so "install it" reliably became ``pip install pexpect`` into whatever
+    interpreter was nearest.  jaato-server ALREADY declares the requirement;
+    what was missing was saying so.
+
+    Resolved from the installed distribution metadata (the same index
+    ``jaato-scaffold explain <unit> dependencies`` reads) rather than from a
+    table here, so a new extra needs no edit in this file and a stale one
+    cannot outlive ``pyproject.toml``.  Best-effort by construction: this is
+    an error path in plugin discovery, and a diagnostic that raises is worse
+    than a vague one, so any failure falls back to the generic advice.
+
+    Args:
+        missing: The import name from ``ModuleNotFoundError.name``.
+
+    Returns:
+        A sentence naming the install target, ending in a period.
+    """
+    try:
+        from shared.scaffold.dependencies import _core_index, _extras_index
+        targets = _extras_index().get(missing) or _core_index().get(missing)
+    except Exception:              # noqa: BLE001 — diagnostics never raise
+        targets = None
+    if not targets:
+        return ("install it to enable this plugin (`jaato-scaffold explain "
+                f"plugin <name> dependencies` names what ships '{missing}').")
+    # Several extras can declare the same package; name them all rather than
+    # picking one, since any of them satisfies the import.
+    joined = " / ".join(f"pip install '{t}'" for t in sorted(targets))
+    return f"enable this plugin with: {joined}."
 
 
 def _protocol_gap(plugin: Any, plugin_kind: str) -> Optional[str]:
@@ -239,6 +403,34 @@ class PluginRegistry:
                 def set_workspace_path(self, path: str) -> None:
                     self._workspace_path = path
                     self._sandbox.set_root(path)
+
+    Concurrency (issue #938):
+        A registry is SHARED, and it is read from one thread while another
+        mutates it.  Subagents share the parent's registry by design (see
+        "Subagent Architecture"), so ``spawn_subagent`` exposes the child's
+        plugins — ``self._exposed.add(...)`` — on the spawning thread while
+        the parent's model thread is part-way through a read that walks the
+        same set.  The observed casualty was
+        :meth:`get_plugin_for_tool`, reached from ``_apply_tool_scopes`` on
+        every provider call: ``RuntimeError: Set changed size during
+        iteration`` escaped the model loop and terminated the parent's turn.
+
+        The registry takes no lock — every read path calls into plugin code,
+        and holding a lock across those callbacks invites deadlock.  The
+        invariant is weaker and cheaper instead:
+
+        **Every read path iterates a snapshot** (``list(self._exposed)``,
+        ``list(self._plugins.items())``, ...), never the live container, and
+        looks each name up defensively — the ``try``/``except`` already
+        wrapping these loops is what absorbs a plugin that disappeared
+        between the snapshot and the lookup.  Removals likewise use
+        ``dict.pop(key, None)`` rather than ``del``, so a concurrent clear
+        cannot turn a removal into a ``KeyError``.
+
+        A snapshot buys consistency-of-iteration, not a consistent view: a
+        reader may see a plugin that is being unexposed, or miss one being
+        exposed.  Both are already true of any un-synchronized read here, and
+        both are recoverable — a lost turn is not.
     """
 
     def __init__(self, model_name: Optional[str] = None):
@@ -256,6 +448,11 @@ class PluginRegistry:
         # later claim on an occupied name can name the incumbent
         # (issue #684).
         self._plugin_sources: Dict[str, PluginOrigin] = {}
+        # Names registered by :meth:`adopt_plugin` — instances carried
+        # over from a previous session on the same pool slot rather than
+        # constructed by discovery (#890).  Kept so introspection can
+        # tell a warm instance from a fresh one.
+        self._adopted: Set[str] = set()
         self._exposed: Set[str] = set()
         self._enrichment_only: Set[str] = set()  # Plugins for prompt enrichment only
         self._configs: Dict[str, Dict[str, Any]] = {}
@@ -607,8 +804,11 @@ class PluginRegistry:
             plugin_kind: Kind of plugin to discover ('tool', 'gc', etc.).
             tier_filter: Optional tier restriction (Phase 3 §3.3.5).
                 When set, the loaded plugin's module-level
-                ``PLUGIN_TIER`` must match; mismatched plugins are
-                skipped (a debug trace records the skip reason).
+                ``PLUGIN_TIER`` must match.  A *mismatched*
+                annotation is correct partitioning and is skipped at
+                debug; a *missing* one is an authoring mistake and is
+                skipped at WARNING (issue #917) -- see
+                :func:`_report_tier_skip`.
 
         Returns:
             List of discovered plugin names.
@@ -650,10 +850,11 @@ class PluginRegistry:
                         ep_module = getattr(create_plugin, "__module__", "")
                         ep_tier = self._lookup_module_tier(ep_module)
                         if not _tier_filter_matches(ep_tier, tier_filter):
-                            _trace(
-                                f" Entry point '{ep.name}': PLUGIN_TIER "
-                                f"={ep_tier!r} not accepted by "
-                                f"filter={tier_filter!r}; skipping"
+                            _report_tier_skip(
+                                what=_describe_entry_point(ep, origin),
+                                plugin_tier=ep_tier,
+                                tier_filter=tier_filter,
+                                fix_location=_tier_fix_location(ep_module),
                             )
                             continue
 
@@ -895,7 +1096,9 @@ class PluginRegistry:
                 When set, the module's ``PLUGIN_TIER`` must match;
                 missing or mismatched annotations are skipped.  Read
                 directly from the imported module so the pre-§3.3.5
-                "annotate or be excluded" contract holds.
+                "annotate or be excluded" contract holds.  A missing
+                annotation is announced at WARNING, a mismatched one at
+                debug -- see :func:`_report_tier_skip`.
 
         Returns:
             List of discovered plugin names.
@@ -948,10 +1151,11 @@ class PluginRegistry:
                 if tier_filter is not None:
                     module_tier = getattr(module, 'PLUGIN_TIER', None)
                     if not _tier_filter_matches(module_tier, tier_filter):
-                        _trace(
-                            f" Plugin '{name}': PLUGIN_TIER={module_tier!r} "
-                            f"not accepted by filter={tier_filter!r}; "
-                            f"skipping"
+                        _report_tier_skip(
+                            what=f"Plugin '{name}' ({module.__name__})",
+                            plugin_tier=module_tier,
+                            tier_filter=tier_filter,
+                            fix_location=f"{name}/__init__.py",
                         )
                         continue
 
@@ -1012,7 +1216,7 @@ class PluginRegistry:
                 missing = exc.name or str(exc)
                 _trace(
                     f" Plugin '{name}' skipped: missing dependency "
-                    f"'{missing}' — install it to enable this plugin.",
+                    f"'{missing}' — {_install_advice(missing)}",
                     warning=True,
                 )
             except Exception as exc:
@@ -1265,8 +1469,13 @@ class PluginRegistry:
     def expose_tool(self, name: str, config: Optional[Dict[str, Any]] = None) -> bool:
         """Expose a plugin's tools to the model.
 
-        Calls the plugin's initialize() method if this is the first time
-        exposing it, or if a new config is provided.
+        Calls the plugin's ``initialize()`` if this is the first time
+        exposing it.  An already-exposed plugin is shut down and
+        re-initialized when the config actually reconfigures it; a
+        config that only names a different agent relabels it in place
+        instead, because the instance is shared with the caller's parent
+        and siblings.  :meth:`_config_requires_reinit` is that decision,
+        and documents what the rebuild used to destroy (#951).
 
         If a model_name is set and the plugin has model_requirements that
         don't match, the plugin is skipped with a warning.
@@ -1345,19 +1554,19 @@ class PluginRegistry:
             if hasattr(plugin, 'set_plugin_registry'):
                 plugin.set_plugin_registry(self)
                 _trace(f" Plugin '{name}' wired with registry")
-        elif config and config != self._configs.get(name):
+        elif config and self._config_requires_reinit(name, config):
             # Snapshot authorized/denied paths owned by this plugin so that
             # shutdown() + initialize() doesn't lose in-memory-only state
             # (e.g. sandbox paths added by a parent session that aren't in
             # the subagent's session-tier config file).
             prev_authorized = {
                 path: (src, access)
-                for path, (src, access) in self._authorized_external_paths.items()
+                for path, (src, access) in list(self._authorized_external_paths.items())
                 if src == name
             }
             prev_denied = {
                 path: src
-                for path, src in self._denied_external_paths.items()
+                for path, src in list(self._denied_external_paths.items())
                 if src == name
             }
 
@@ -1551,7 +1760,7 @@ class PluginRegistry:
 
         # Identify plugins that opt into parallel init (I/O-heavy, like MCP)
         parallel_names = [
-            name for name, plugin in self._plugins.items()
+            name for name, plugin in list(self._plugins.items())
             if getattr(plugin, 'PARALLEL_INIT', False)
             and name not in self._exposed
             and (target_names is None or name in target_names)
@@ -1580,7 +1789,7 @@ class PluginRegistry:
         # initialized (their initialize() is idempotent) and skip the
         # initialization step.
         skipped: List[str] = []
-        for name in self._plugins:
+        for name in list(self._plugins):
             if target_names is not None and name not in target_names:
                 # Plugin is discovered + registered but not requested
                 # by this session — skip both initialize() and tool
@@ -1605,11 +1814,172 @@ class PluginRegistry:
                 f"expose_all: skipped initialize for {len(skipped)} "
                 f"plugins not requested by session: {sorted(skipped)}"
             )
+        self._report_requested_but_failed(requested_plugins)
+
+    def _report_requested_but_failed(self, requested_plugins) -> None:
+        """Announce plugins the session ASKED FOR that did not initialize.
+
+        ``expose_tool`` already refuses to let one broken plugin take the
+        session down: it logs the failure, records it in
+        :attr:`_failed_plugins`, and carries on.  That is right — and until
+        now ``_failed_plugins`` was WRITE-ONLY, recorded in four places and
+        read in none, so the recovery had no audience.
+
+        The session then starts looking healthy while a plugin the PROFILE
+        named is simply absent.  Neither the model nor the driver is told:
+        the model discovers it by calling ``list_tools`` and not finding what
+        it was asked to use, and the driver sees a task that quietly did
+        nothing.  ``file_edit`` is the canonical case — it requires a
+        ``config_root`` and raises at ``initialize()`` without one, so a
+        session whose client supplied none comes up with `writeNewFile` and
+        friends missing and no line in the transcript saying why.
+
+        A failure to initialize a plugin the session did not request is not
+        reported: only the profile's own list is a promise to the author.
+        Nothing raises here — this is a diagnostic, at the end of a method
+        whose whole contract is to survive a broken plugin.
+        """
+        if not self._failed_plugins:
+            return
+        wanted = (set(requested_plugins) if requested_plugins is not None
+                  else set(self._plugins))
+        broken = sorted(n for n in wanted if n in self._failed_plugins)
+        if not broken:
+            return
+        detail = "; ".join(
+            f"{n} ({self._failed_plugins[n][0]}: {self._failed_plugins[n][1]})"
+            for n in broken)
+        _trace(
+            f" {len(broken)} plugin(s) this session REQUESTED are not "
+            f"available — their tools are missing from the model's surface: "
+            f"{detail}",
+            warning=True,
+        )
+
+    def get_failed_plugins(self) -> Dict[str, tuple]:
+        """Plugins that raised during a lifecycle call, ``{name: (phase, error)}``.
+
+        ``phase`` is one of ``initialize`` / ``re-initialize`` / ``shutdown``.
+        A copy, so a caller iterating it cannot be tripped by a concurrent
+        spawn (see the snapshot rule in :meth:`get_plugin_for_tool`).
+
+        The read half of :attr:`_failed_plugins`, which had none — a plugin
+        the profile named could fail to initialize and no surface could ask
+        about it.  ``jaato-doctor`` and a driver checking whether the session
+        it built is the session it asked for are the intended callers.
+        """
+        return dict(self._failed_plugins)
 
     def unexpose_all(self) -> None:
         """Stop exposing all plugins' tools."""
         for name in list(self._exposed):
             self.unexpose_tool(name)
+
+    def adopt_plugin(
+        self,
+        name: str,
+        plugin: AnyPlugin,
+        origin: Optional[PluginOrigin] = None,
+        *,
+        enrichment_only: bool = False,
+    ) -> None:
+        """Register an ALREADY-CONSTRUCTED plugin instance before discovery.
+
+        The carry-over half of :data:`~jaato_sdk.plugins.base.TRAIT_SLOT_SCOPED`
+        (#890).  A pool slot that serves several cascade sessions builds a
+        fresh registry per ``session.bootstrap``; without this the fresh
+        registry calls ``create_plugin()`` again and the previous instance —
+        along with whatever OS resource it owned — is simply dropped.  The
+        runner moves slot-scoped instances into a slot-level store at the
+        session boundary and adopts them here on the next bootstrap.
+
+        Adoption must run BEFORE :meth:`discover`, because both discovery
+        paths skip a name that is already registered.  That skip is the
+        mechanism: an adopted plugin keeps its instance and discovery never
+        constructs a rival.  Passing the ``origin`` recorded for the
+        previous registration also keeps the skip quiet — the
+        already-provided-by warning exempts a collision between two
+        registrations of the same module (see :meth:`_warn_name_taken`), so
+        an adopted built-in does not masquerade as a shadowing attempt.
+
+        The instance is registered but NOT exposed: ``expose_all`` still runs
+        for it, which calls ``initialize()`` with this session's config.  A
+        slot-scoped plugin is expected to early-return on its own
+        ``_initialized`` guard, which is precisely what preserves the warm
+        resource across the boundary.
+
+        Args:
+            name: Plugin name to register under.
+            plugin: The live instance carried over.
+            origin: Provenance recorded for the previous registration.
+                Defaults to a directory-scan origin for the built-in
+                package, which is what a built-in carries.
+            enrichment_only: True when the previous registry had this
+                plugin in its enrichment-only set (it provides no tools).
+        """
+        self._plugins[name] = plugin
+        self._plugin_sources[name] = origin or PluginOrigin(
+            name=name,
+            via="directory",
+            module=f"{_BUILTIN_PLUGIN_PACKAGE}.{name}",
+        )
+        self._adopted.add(name)
+        if enrichment_only:
+            self._enrichment_only.add(name)
+        self._tool_plugin_cache.clear()
+        _trace(f" Plugin '{name}' adopted (carried over from a previous session)")
+
+    def is_adopted(self, name: str) -> bool:
+        """True when ``name`` was registered by :meth:`adopt_plugin`.
+
+        Distinguishes an instance carried over from a previous session on
+        the same pool slot from one discovery constructed for this session.
+        """
+        return name in self._adopted
+
+    def shutdown_all(self, skip: Optional[Set[str]] = None) -> List[str]:
+        """Shut down every INITIALIZED plugin and forget it.
+
+        The teardown counterpart of :meth:`expose_all`.  ``unexpose_all``
+        covers only ``_exposed``; enrichment-only plugins are initialized
+        through the same path and hold resources too, so a teardown that
+        skips them is not a teardown.
+
+        Nothing called this before #890: the runner dropped its registry
+        reference at the session boundary and relied on garbage collection,
+        which does not terminate a subprocess a plugin started.
+
+        Args:
+            skip: Plugin names to leave alone — the slot-scoped instances
+                the caller is about to carry into the next session.
+
+        Returns:
+            Names of plugins whose ``shutdown()`` raised.  The plugin is
+            forgotten regardless; a failed teardown must not wedge the
+            slot.
+        """
+        skip = skip or set()
+        errors: List[str] = []
+        for name in list(self._exposed | self._enrichment_only):
+            if name in skip:
+                continue
+            plugin = self._plugins.get(name)
+            if plugin is None:
+                continue
+            try:
+                plugin.shutdown()
+            except Exception as exc:  # noqa: BLE001 — per-plugin boundary
+                logger.warning(
+                    "Plugin '%s' shutdown() during registry teardown "
+                    "failed: %s. Continuing.", name, exc, exc_info=True,
+                )
+                self._failed_plugins[name] = ("shutdown", str(exc))
+                errors.append(name)
+            self._exposed.discard(name)
+            self._enrichment_only.discard(name)
+            self._configs.pop(name, None)
+        self._tool_plugin_cache.clear()
+        return errors
 
     def collect_prerequisite_policies(self) -> list:
         """Collect prerequisite policies from all exposed plugins.
@@ -1663,7 +2033,7 @@ class PluginRegistry:
         # subprocess backend that spawns kernels rooted at the workspace).  The
         # exposed-only scope was a #344-class propagation gap: registered-but-
         # unexposed plugins silently kept their init-time (launch-dir) default.
-        for name, plugin in self._plugins.items():
+        for name, plugin in list(self._plugins.items()):
             if plugin and hasattr(plugin, 'set_workspace_path'):
                 try:
                     plugin.set_workspace_path(path)
@@ -1697,7 +2067,7 @@ class PluginRegistry:
 
         # Parity with set_workspace_path: broadcast to ALL registered plugins,
         # not just exposed ones (same #344-class propagation gap).
-        for name, plugin in self._plugins.items():
+        for name, plugin in list(self._plugins.items()):
             if plugin and hasattr(plugin, 'set_config_root'):
                 try:
                     plugin.set_config_root(path)
@@ -1706,18 +2076,37 @@ class PluginRegistry:
                     _trace(f"  -> {name}.set_config_root() failed: {exc}")
 
     def set_session_id(self, session_id: Optional[str]) -> None:
-        """Set the session_id injected into plugin configs at init.
+        """Set the session_id injected into plugin configs at init, and
+        broadcast it to plugins that track it themselves.
 
-        Server 0.6.129+: matches :meth:`set_workspace_path` /
-        :meth:`set_config_root` shape but doesn't broadcast — session_id
-        doesn't change mid-session, so no broadcast hook needed.  The
-        value is read by :meth:`_augment_plugin_config` at
-        :meth:`expose_tool` time.
+        Server 0.6.129+: matched :meth:`set_workspace_path` /
+        :meth:`set_config_root` in shape but deliberately did not
+        broadcast, on the reasoning that session_id doesn't change
+        mid-session.  The value is read by :meth:`_augment_plugin_config`
+        at :meth:`expose_tool` time, which covers every plugin that
+        learns its session id from ``initialize(config)``.
+
+        A slot-scoped plugin (#890) is the case that reasoning missed.
+        It is carried across the cascade session boundary and its
+        ``initialize()`` early-returns, so the id in its config is the id
+        of the session that constructed it — not the session now running.
+        For ``lsp`` that id names the trace log, so every stage after the
+        first wrote under the first stage's tag.  Broadcasting keeps the
+        two in step; plugins without the method are skipped, so this is a
+        no-op for everything that already learns its id at init.
 
         Args:
             session_id: Session identifier, or ``None`` to clear.
         """
         self._session_id = session_id
+        for name, plugin in list(self._plugins.items()):
+            if plugin is None or not hasattr(plugin, 'set_session_id'):
+                continue
+            try:
+                plugin.set_session_id(session_id)
+                _trace(f"  -> {name}.set_session_id()")
+            except Exception as exc:  # noqa: BLE001 — broadcast boundary
+                _trace(f"  -> {name}.set_session_id() failed: {exc}")
 
     @property
     def session_id(self) -> Optional[str]:
@@ -1755,6 +2144,63 @@ class PluginRegistry:
         (e.g. ``file_edit``, ``memory``).
         """
         self._agent_name = agent_name
+
+    def _config_requires_reinit(
+        self, name: str, config: Dict[str, Any],
+    ) -> bool:
+        """Whether ``config`` reconfigures exposed plugin ``name``, or
+        only relabels the agent it traces under (#951).
+
+        :meth:`expose_tool` answers a changed config with ``shutdown()``
+        + ``initialize()``.  That is right for an operator's
+        ``plugin_configs`` block and destructive for anything else: the
+        registry — and therefore each plugin INSTANCE — is shared with a
+        session's parent and its siblings, so the rebuild lands on live
+        objects in the middle of someone else's turn.
+
+        An in-process subagent spawn stamps ``agent_name`` into the
+        config of every plugin its profile lists, the ones it declares
+        no configuration for included, because that stamp is what
+        exposes them on a registry whose ``expose_all`` was filtered to
+        the root profile's plugins.  For a plugin the parent had
+        already exposed, the same stamp replaced the parent's entire
+        configuration with a dict holding nothing but the child's name.
+        Measured on a real registry: the parent's ``file_edit`` lost
+        ``max_edit_span_chars`` and had ``allow_full_replace`` turned
+        back on — a whole-file-rewrite path the profile author had
+        deliberately closed, reopened by a spawn and left open for the
+        rest of the parent's life — and every live ``interactive_shell``
+        PTY the parent owned was killed, its next ``shell_input``
+        answered ``No session with id 'session_0'``.
+
+        So a config whose only key is an identity key is not a
+        reconfiguration: the plugin keeps running, and the new label is
+        handed to it in place when it implements ``set_agent_name``
+        (``subagent`` does, because there ``agent_name`` is the
+        self-spawn guard rather than a trace label).  A config carrying
+        any operator key re-initializes exactly as before, so #950's
+        contract — a profile's ``plugin_configs`` reach the plugin it
+        names — is unchanged.
+
+        Args:
+            name: Name of a plugin already in ``self._exposed``.
+            config: The raw, un-augmented config handed to
+                :meth:`expose_tool`.
+
+        Returns:
+            True when the plugin must be shut down and re-initialized.
+        """
+        if config == self._configs.get(name):
+            return False
+        if not set(config) <= _IDENTITY_ONLY_CONFIG_KEYS:
+            return True
+        agent_name = config.get("agent_name")
+        relabel = getattr(self._plugins[name], "set_agent_name", None)
+        if callable(relabel):
+            relabel(agent_name)
+        _trace(f" Plugin '{name}' identity-only config "
+               f"(agent_name={agent_name!r}): not re-initialized")
+        return False
 
     def _augment_plugin_config(
         self, config: Optional[Dict[str, Any]],
@@ -1880,7 +2326,7 @@ class PluginRegistry:
         """
         schemas = []
         # Add plugin tool schemas
-        for name in self._exposed:
+        for name in list(self._exposed):
             if exclude_runner_tier:
                 plugin = self._plugins.get(name)
                 tier = self._lookup_module_tier(
@@ -1900,7 +2346,7 @@ class PluginRegistry:
         """Get executor callables from all exposed plugins and core tools."""
         executors = {}
         # Add plugin executors
-        for name in self._exposed:
+        for name in list(self._exposed):
             try:
                 executors.update(self._plugins[name].get_executors())
             except Exception as exc:
@@ -1918,7 +2364,7 @@ class PluginRegistry:
             List of all tool names (regardless of enabled/disabled state).
         """
         names = []
-        for name in self._exposed:
+        for name in list(self._exposed):
             try:
                 schemas = self._plugins[name].get_tool_schemas()
                 names.extend(schema.name for schema in schemas)
@@ -1939,7 +2385,7 @@ class PluginRegistry:
         Returns:
             The tool's declared traits, or ``frozenset()`` if not found.
         """
-        for name in self._exposed:
+        for name in list(self._exposed):
             try:
                 schemas = self._plugins[name].get_tool_schemas()
                 for schema in schemas:
@@ -2020,7 +2466,7 @@ class PluginRegistry:
             List of dicts with 'name', 'description', 'enabled', 'plugin' keys.
         """
         status = []
-        for plugin_name in self._exposed:
+        for plugin_name in list(self._exposed):
             try:
                 schemas = self._plugins[plugin_name].get_tool_schemas()
                 for schema in schemas:
@@ -2045,7 +2491,7 @@ class PluginRegistry:
             List of ToolSchema objects for enabled tools only.
         """
         schemas = []
-        for name in self._exposed:
+        for name in list(self._exposed):
             try:
                 plugin = self._plugins[name]
                 plugin_schemas = plugin.get_tool_schemas()
@@ -2064,7 +2510,7 @@ class PluginRegistry:
                 _trace(f" Error getting tool schemas from '{name}': {exc}", include_traceback=True)
 
         # Add core tool schemas (excluding disabled)
-        for name, schema in self._core_tools.items():
+        for name, schema in list(self._core_tools.items()):
             if name not in self._disabled_tools:
                 schemas.append(schema)
 
@@ -2117,7 +2563,7 @@ class PluginRegistry:
             List of ToolSchema objects for core tools only.
         """
         schemas = []
-        for name in self._exposed:
+        for name in list(self._exposed):
             try:
                 plugin = self._plugins[name]
                 plugin_schemas = plugin.get_tool_schemas()
@@ -2140,7 +2586,7 @@ class PluginRegistry:
                 _trace(f" Error getting tool schemas from '{name}': {exc}", include_traceback=True)
 
         # Add core tool schemas that have discoverability='core' (excluding disabled)
-        for name, schema in self._core_tools.items():
+        for name, schema in list(self._core_tools.items()):
             if name not in self._disabled_tools:
                 if getattr(schema, 'discoverability', DISCOVERABILITY_DEFERRED) == DISCOVERABILITY_EAGER:
                     schemas.append(schema)
@@ -2154,7 +2600,7 @@ class PluginRegistry:
             Dict mapping tool names to executor callables for enabled tools only.
         """
         executors = {}
-        for name in self._exposed:
+        for name in list(self._exposed):
             try:
                 plugin_executors = self._plugins[name].get_executors()
                 # Filter out disabled tools
@@ -2165,7 +2611,7 @@ class PluginRegistry:
                 _trace(f" Error getting executors from '{name}': {exc}", include_traceback=True)
 
         # Add core tool executors (excluding disabled)
-        for tool_name, executor in self._core_executors.items():
+        for tool_name, executor in list(self._core_executors.items()):
             if tool_name not in self._disabled_tools:
                 executors[tool_name] = executor
 
@@ -2216,7 +2662,7 @@ class PluginRegistry:
         """
         base_name = self.get_base_tool_name(tool_name)
 
-        for plugin_name in self._exposed:
+        for plugin_name in list(self._exposed):
             try:
                 plugin = self._plugins[plugin_name]
                 if base_name in plugin.get_executors():
@@ -2234,7 +2680,7 @@ class PluginRegistry:
             List of base tool names (without :stream suffix) that support streaming.
         """
         streaming_tools = []
-        for plugin_name in self._exposed:
+        for plugin_name in list(self._exposed):
             try:
                 plugin = self._plugins[plugin_name]
                 if isinstance(plugin, StreamingCapable):
@@ -2295,7 +2741,7 @@ class PluginRegistry:
             or None if no plugins have instructions.
         """
         instructions = []
-        for name in self._exposed:
+        for name in list(self._exposed):
             try:
                 if skip_discoverable_only and not self.plugin_has_core_tools(name):
                     continue
@@ -2327,7 +2773,7 @@ class PluginRegistry:
         # Include core auto-approved tools
         tools.extend(self._core_auto_approved)
         # Include plugin auto-approved tools
-        for name in self._exposed:
+        for name in list(self._exposed):
             try:
                 if hasattr(self._plugins[name], 'get_auto_approved_tools'):
                     auto_approved = self._plugins[name].get_auto_approved_tools()
@@ -2352,7 +2798,7 @@ class PluginRegistry:
             List of UserCommand objects from all exposed plugins.
         """
         commands: List[UserCommand] = []
-        for name in self._exposed:
+        for name in list(self._exposed):
             try:
                 if hasattr(self._plugins[name], 'get_user_commands'):
                     user_commands = self._plugins[name].get_user_commands()
@@ -2385,11 +2831,19 @@ class PluginRegistry:
             if tool_name in cached.get_executors():
                 return cached
             # Stale entry — evict and fall through to full scan
-            del self._tool_plugin_cache[tool_name]
+            self._tool_plugin_cache.pop(tool_name, None)
 
-        # Slow path: scan all exposed plugins
-        _trace(f" get_plugin_for_tool: cache miss for '{tool_name}', scanning {len(self._exposed)} plugins")
-        for name in self._exposed:
+        # Slow path: scan a SNAPSHOT of the exposed plugins.  Iterating
+        # ``self._exposed`` directly is what issue #938 reported: a
+        # subagent spawn adds to the same set from another thread, and the
+        # resulting ``RuntimeError: Set changed size during iteration``
+        # escaped the model loop and killed the parent's turn.  This is the
+        # cache-MISS path, which a session that subsets tools
+        # (``plugins: ["memory(tools:[...])"]``) is in constantly, so the
+        # window is reliably reachable rather than theoretical.
+        exposed = list(self._exposed)
+        _trace(f" get_plugin_for_tool: cache miss for '{tool_name}', scanning {len(exposed)} plugins")
+        for name in exposed:
             try:
                 plugin = self._plugins[name]
                 executors = plugin.get_executors()
@@ -2478,7 +2932,7 @@ class PluginRegistry:
         normalized = os.path.realpath(os.path.abspath(path))
         entry = self._authorized_external_paths.get(normalized)
         if entry and entry[0] == source_plugin:
-            del self._authorized_external_paths[normalized]
+            self._authorized_external_paths.pop(normalized, None)
             _trace(f"deauthorize_external_path: {normalized} (from {source_plugin})")
             return True
         return False
@@ -2519,7 +2973,7 @@ class PluginRegistry:
             return _access_sufficient(entry_access)
 
         # Check if any authorized path is a parent directory
-        for authorized_path, (_, entry_access) in self._authorized_external_paths.items():
+        for authorized_path, (_, entry_access) in list(self._authorized_external_paths.items()):
             # Check if normalized path is under an authorized directory
             auth_with_sep = authorized_path.rstrip(os.sep) + os.sep
             if normalized.startswith(auth_with_sep):
@@ -2547,7 +3001,7 @@ class PluginRegistry:
             return source
 
         # Check parent directories
-        for authorized_path, (source, _access) in self._authorized_external_paths.items():
+        for authorized_path, (source, _access) in list(self._authorized_external_paths.items()):
             auth_with_sep = authorized_path.rstrip(os.sep) + os.sep
             if normalized.startswith(auth_with_sep):
                 return source
@@ -2574,7 +3028,7 @@ class PluginRegistry:
             return access
 
         # Check parent directories
-        for authorized_path, (_source, access) in self._authorized_external_paths.items():
+        for authorized_path, (_source, access) in list(self._authorized_external_paths.items()):
             auth_with_sep = authorized_path.rstrip(os.sep) + os.sep
             if normalized.startswith(auth_with_sep):
                 return access
@@ -2599,11 +3053,11 @@ class PluginRegistry:
 
         # Clear only paths from the specified plugin
         to_remove = [
-            path for path, (source, _access) in self._authorized_external_paths.items()
+            path for path, (source, _access) in list(self._authorized_external_paths.items())
             if source == source_plugin
         ]
         for path in to_remove:
-            del self._authorized_external_paths[path]
+            self._authorized_external_paths.pop(path, None)
 
         _trace(f"clear_authorized_paths: cleared {len(to_remove)} paths from {source_plugin}")
         return len(to_remove)
@@ -2618,7 +3072,22 @@ class PluginRegistry:
             For backward compatibility this returns source plugin names as values.
             Use list_authorized_paths_detailed() to get access mode info.
         """
-        return {path: source for path, (source, _access) in self._authorized_external_paths.items()}
+        return {path: source for path, (source, _access) in list(self._authorized_external_paths.items())}
+
+    def list_denied_paths(self) -> Dict[str, str]:
+        """List all explicitly denied external paths.
+
+        The read counterpart of :meth:`deny_external_path`, and the mirror of
+        :meth:`list_authorized_paths`.  Exists because denial has to travel:
+        the notebook kernel enforces containment in its own process and cannot
+        call :meth:`is_path_denied`, so it is handed the list (#710).  A denial
+        outranks every allowance wherever it is applied.
+
+        Returns:
+            Dict mapping normalized (realpath) paths to the plugin that denied
+            them.
+        """
+        return dict(self._denied_external_paths)
 
     def list_authorized_paths_detailed(self) -> Dict[str, Dict[str, str]]:
         """List all authorized external paths with access mode details.
@@ -2628,7 +3097,7 @@ class PluginRegistry:
         """
         return {
             path: {"source": source, "access": access}
-            for path, (source, access) in self._authorized_external_paths.items()
+            for path, (source, access) in list(self._authorized_external_paths.items())
         }
 
     # ==================== External Path Denial ====================
@@ -2684,7 +3153,7 @@ class PluginRegistry:
             return True
 
         # Check if any denied path is a parent directory
-        for denied_path in self._denied_external_paths:
+        for denied_path in list(self._denied_external_paths):
             # Check if normalized path is under a denied directory
             denied_with_sep = denied_path.rstrip(os.sep) + os.sep
             if normalized.startswith(denied_with_sep):
@@ -2711,7 +3180,7 @@ class PluginRegistry:
             return self._denied_external_paths[normalized]
 
         # Check parent directories
-        for denied_path, source in self._denied_external_paths.items():
+        for denied_path, source in list(self._denied_external_paths.items()):
             denied_with_sep = denied_path.rstrip(os.sep) + os.sep
             if normalized.startswith(denied_with_sep):
                 return source
@@ -2736,11 +3205,11 @@ class PluginRegistry:
 
         # Clear only paths from the specified plugin
         to_remove = [
-            path for path, source in self._denied_external_paths.items()
+            path for path, source in list(self._denied_external_paths.items())
             if source == source_plugin
         ]
         for path in to_remove:
-            del self._denied_external_paths[path]
+            self._denied_external_paths.pop(path, None)
 
         _trace(f"clear_denied_paths: cleared {len(to_remove)} paths from {source_plugin}")
         return len(to_remove)

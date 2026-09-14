@@ -96,13 +96,17 @@ BASELINE: Dict[str, int] = {
     "jaato-server/server/__main__.py::JaatoDaemon.start": 25,
     "jaato-server/server/__main__.py::main": 33,
     "jaato-server/server/apparmor.py::AppArmorManager._render_profile": 18,
-    "jaato-server/server/command_router.py::CommandRouter._dispatch": 33,
+    # 33 -> 30 by #812.  The two orphan-management verbs needed a branch in
+    # this chain, and a baselined function may not grow -- so the six uniform
+    # ``cascade.*`` arms were lifted into ``_dispatch_cascade_command``, which
+    # pays for the new branch and leaves the chain shorter than it was.
+    "jaato-server/server/command_router.py::CommandRouter._dispatch": 30,
     "jaato-server/server/command_router.py::CommandRouter._execute_daemon_command": 16,
     "jaato-server/server/command_router.py::CommandRouter._handle_session_bind_wake": 18,
     "jaato-server/server/command_router.py::CommandRouter._handle_session_new": 18,
     "jaato-server/server/command_router.py::CommandRouter.get_command_list": 52,
     "jaato-server/server/core.py::JaatoServer._build_profile_session_kwargs": 17,
-    "jaato-server/server/core.py::JaatoServer._build_send_message_notification_handler._handle": 93,
+    "jaato-server/server/core.py::JaatoServer._build_send_message_notification_handler._handle": 92,
     "jaato-server/server/core.py::JaatoServer._check_auth_completion": 17,
     "jaato-server/server/core.py::JaatoServer._emit_conversation_replay": 19,
     "jaato-server/server/core.py::JaatoServer._setup_permission_hooks.on_permission_requested": 35,
@@ -111,7 +115,13 @@ BASELINE: Dict[str, int] = {
     # loop is a single long function by construction and splitting it is a
     # real refactor, not a tidy-up to bundle into a CI change.  It is the
     # one entry in this file that moved the ratchet the wrong way.
-    "jaato-server/server/core.py::JaatoServer._start_model_thread.model_thread": 41,
+    #
+    # 41 -> 40 by #877, which had to carry attachments through the
+    # wind-down stash and lifted the merge out into the module-level
+    # ``merge_pending_continuations``.  A net improvement rather than the
+    # +3 the inline version cost -- and the lifted rule is now reachable
+    # from a test, which is what #877 needed it to be.
+    "jaato-server/server/core.py::JaatoServer._start_model_thread.model_thread": 40,
     "jaato-server/server/core.py::JaatoServer.execute_command": 28,
     "jaato-server/server/core.py::JaatoServer.initialize": 44,
     "jaato-server/server/core.py::JaatoServer.initialize._run_load_plugins": 17,
@@ -128,7 +138,10 @@ BASELINE: Dict[str, int] = {
     "jaato-server/server/runner/rpc.py::RunnerRPC._dispatch_method": 54,
     "jaato-server/server/runner/rpc.py::RunnerRPC._handle_session_register_client_tools": 17,
     "jaato-server/server/runner/rpc.py::RunnerRPC._handle_session_resolve_fork_point": 17,
-    "jaato-server/server/runner/rpc.py::RunnerRPC._handle_session_send_message": 20,
+    # Down one in #881: the inline try/except that snapshotted
+    # ``len(turn_accounting)`` became a call to ``_turns_ran_snapshot``,
+    # which is where the lifecycle-vs-usage question is now answered once.
+    "jaato-server/server/runner/rpc.py::RunnerRPC._handle_session_send_message": 18,
     "jaato-server/server/runner/rpc.py::RunnerRPC._handle_subagent_forward_event": 19,
     "jaato-server/server/runner/rpc.py::RunnerRPC._install_session_notification_callbacks": 20,
     "jaato-server/server/runner/rpc.py::RunnerRPC._restore_session_notification_callbacks": 29,
@@ -139,24 +152,24 @@ BASELINE: Dict[str, int] = {
     "jaato-server/server/runner_rpc_client.py::RunnerRPCClient._read_loop": 23,
     "jaato-server/server/runner_rpc_handlers/profile_payload_schema.py::validate_profile_payload": 16,
     "jaato-server/server/runner_rpc_handlers/spawn_isolated_runner.py::SpawnIsolatedRunnerHandler.handle": 26,
-    "jaato-server/server/runner_spawn.py::build_session_envelope": 40,
-    "jaato-server/server/runner_spawn.py::spawn_session_runner": 19,
-    "jaato-server/server/session_manager.py::SessionManager._build_isolated_envelope": 23,
+    "jaato-server/server/runner_spawn.py::build_session_envelope": 37,
+    "jaato-server/server/runner_spawn.py::spawn_session_runner": 16,
+    "jaato-server/server/session_manager.py::SessionManager._build_isolated_envelope": 21,
     "jaato-server/server/session_manager.py::SessionManager._build_session_info_event": 22,
     "jaato-server/server/session_manager.py::SessionManager._cascade_teardown_isolated_subagents": 20,
-    "jaato-server/server/session_manager.py::SessionManager._create_session_impl": 61,
+    "jaato-server/server/session_manager.py::SessionManager._create_session_impl": 52,
     "jaato-server/server/session_manager.py::SessionManager._expand_prompt_references": 18,
     "jaato-server/server/session_manager.py::SessionManager._handle_turn_tracking_event": 21,
     "jaato-server/server/session_manager.py::SessionManager._intercept_prompt_help_refs": 17,
     "jaato-server/server/session_manager.py::SessionManager._load_session_impl": 51,
-    "jaato-server/server/session_manager.py::SessionManager._provision_ipc_apparmor_and_spawn_runner": 25,
+    "jaato-server/server/session_manager.py::SessionManager._provision_ipc_apparmor_and_spawn_runner": 24,
     "jaato-server/server/session_manager.py::SessionManager._run_ephemeral_session_impl": 21,
     "jaato-server/server/session_manager.py::SessionManager._save_session": 42,
     "jaato-server/server/session_manager.py::SessionManager._spawn_isolated_runner": 17,
     "jaato-server/server/session_manager.py::SessionManager.attach_session": 16,
     "jaato-server/server/session_manager.py::SessionManager.build_sibling_roster": 18,
     "jaato-server/server/session_manager.py::SessionManager.deliver_sibling_message": 17,
-    "jaato-server/server/session_manager.py::SessionManager.handle_request": 103,
+    "jaato-server/server/session_manager.py::SessionManager.handle_request": 101,
     "jaato-server/server/session_manager.py::SessionManager.wake_session": 17,
     "jaato-server/server/test_client.py::format_event": 29,
     "jaato-server/server/tests/test_runner_cgroup_attach_7d.py::test_websocket_pre_init_hook_provisions_cgroup_before_spawn": 23,
@@ -172,11 +185,13 @@ BASELINE: Dict[str, int] = {
     "jaato-server/server/websocket.py::JaatoWSServer.start": 21,
     "jaato-server/server/workspace_monitor.py::WorkspaceMonitor._on_fs_event": 18,
     "jaato-server/server/workspace_monitor.py::WorkspaceMonitor.reconcile": 30,
-    "jaato-server/shared/ai_tool_runner.py::ToolExecutor._execute_impl": 73,
+    # 73 -> 57: the permission gate moved out into check_permission_only so
+    # the streaming route could share it rather than run unchecked (#797).
+    "jaato-server/shared/ai_tool_runner.py::ToolExecutor._execute_impl": 57,
     "jaato-server/shared/ai_tool_runner.py::ToolExecutor._execute_with_auto_background": 16,
     "jaato-server/shared/change_tools.py::changed_lines_tool": 24,
     "jaato-server/shared/client_commands.py::parse_user_input": 24,
-    "jaato-server/shared/completion_processors.py::invoke_processors": 30,
+    "jaato-server/shared/completion_processors.py::invoke_processors": 18,
     "jaato-server/shared/event_bus_tools.py::_format_event_notification": 18,
     "jaato-server/shared/instruction_budget_builder.py::collect_instruction_texts": 28,
     "jaato-server/shared/jaato_runtime.py::JaatoRuntime._cache_tool_configuration": 26,
@@ -196,13 +211,25 @@ BASELINE: Dict[str, int] = {
     "jaato-server/shared/jaato_session.py::JaatoSession._execute_tools_and_continue": 22,
     "jaato-server/shared/jaato_session.py::JaatoSession._get_framework_enrichments": 16,
     "jaato-server/shared/jaato_session.py::JaatoSession._handle_cancellation": 18,
-    "jaato-server/shared/jaato_session.py::JaatoSession._run_chat_loop": 89,
-    "jaato-server/shared/jaato_session.py::JaatoSession._run_chat_loop_with_parts": 36,
+    # Both fell in #837, which stopped "the message carries an attachment"
+    # from meaning "do not stream".  _run_chat_loop gave up its inline
+    # streaming decision to _resolve_use_streaming (89 -> 86); the parts
+    # loop gained that decision but handed both of its provider calls to
+    # _complete_parts_turn and its two text emissions to
+    # _emit_batched_response_text, so it came down rather than up
+    # (36 -> 31).  Down one more in #913, which moved the parts loop's
+    # cap-gate-append onto the shared _append_tool_results_to_history so
+    # the terminal signal_completion path writes history the same way.
+    # Both down one more in #881: the ``if turn_data['total'] > 0`` append
+    # in each loop's ``finally`` became a call to ``_record_turn_ran``,
+    # which owns the split between the lifecycle fact and the usage one.
+    "jaato-server/shared/jaato_session.py::JaatoSession._run_chat_loop": 85,
+    "jaato-server/shared/jaato_session.py::JaatoSession._run_chat_loop_with_parts": 29,
     "jaato-server/shared/jaato_session.py::JaatoSession._send_tool_results_and_continue": 27,
     "jaato-server/shared/jaato_session.py::JaatoSession._track_activated_tools_in_budget": 20,
     "jaato-server/shared/jaato_session.py::JaatoSession._update_conversation_budget": 37,
     "jaato-server/shared/jaato_session.py::JaatoSession.activate_discovered_tools": 21,
-    "jaato-server/shared/jaato_session.py::JaatoSession.configure": 87,
+    "jaato-server/shared/jaato_session.py::JaatoSession.configure": 76,
     "jaato-server/shared/jaato_session.py::JaatoSession.resolve_fork_point": 17,
     "jaato-server/shared/jaato_session.py::JaatoSession.send_message": 29,
     "jaato-server/shared/lifecycle_tools.py::LifecycleTools._describe_pending_field": 28,
@@ -227,7 +254,6 @@ BASELINE: Dict[str, int] = {
     "jaato-server/shared/plugins/clarification/plugin.py::ClarificationPlugin._execute_clarification": 32,
     "jaato-server/shared/plugins/cli/plugin.py::CLIToolPlugin._execute": 23,
     "jaato-server/shared/plugins/cli/plugin.py::CLIToolPlugin._execute_streaming": 24,
-    "jaato-server/shared/plugins/cli/plugin.py::CLIToolPlugin.initialize": 18,
     "jaato-server/shared/plugins/code_block_formatter/plugin.py::CodeBlockFormatterPlugin._render_code_block": 23,
     "jaato-server/shared/plugins/diff_formatter/renderers/side_by_side.py::SideBySideRenderer._render_pair": 17,
     "jaato-server/shared/plugins/enrichment_formatter.py::_word_wrap": 16,
@@ -246,7 +272,6 @@ BASELINE: Dict[str, int] = {
     "jaato-server/shared/plugins/filesystem_query/plugin.py::FilesystemQueryPlugin.execute_streaming": 23,
     "jaato-server/shared/plugins/gc/__init__.py::load_gc_from_file": 20,
     "jaato-server/shared/plugins/gc/utils.py::dedup_identical_tool_results": 16,
-    "jaato-server/shared/plugins/gc/utils.py::ensure_tool_call_integrity": 41,
     "jaato-server/shared/plugins/gc_budget/plugin.py::BudgetGCPlugin._build_tool_call_pair_map": 17,
     "jaato-server/shared/plugins/gc_budget/plugin.py::BudgetGCPlugin.collect": 28,
     "jaato-server/shared/plugins/gc_budget/tests/test_budget_gc.py::TestEndToEndPairAwareGC.test_gc_removes_tool_result_keeps_pairing": 21,
@@ -268,16 +293,19 @@ BASELINE: Dict[str, int] = {
     "jaato-server/shared/plugins/mcp/plugin.py::MCPToolPlugin.execute_streaming": 26,
     "jaato-server/shared/plugins/mcp/plugin.py::MCPToolPlugin.get_command_completions": 22,
     "jaato-server/shared/plugins/memory/plugin.py::MemoryPlugin._enrich_text": 23,
-    "jaato-server/shared/plugins/memory/plugin.py::MemoryPlugin._execute_retrieve": 31,
+    # 31 -> 19 (#982): the two-store tag search moved out to
+    # _search_both_stores / _search_stores_for, which is also what made
+    # an honest `matched` total possible.
+    "jaato-server/shared/plugins/memory/plugin.py::MemoryPlugin._execute_retrieve": 19,
     "jaato-server/shared/plugins/memory/plugin.py::MemoryPlugin._execute_update": 20,
     "jaato-server/shared/plugins/memory/plugin.py::MemoryPlugin._memory_edit": 23,
     "jaato-server/shared/plugins/memory/plugin.py::MemoryPlugin._validate_memory_schema": 24,
     "jaato-server/shared/plugins/memory/test_standalone.py::test_basic_functionality": 17,
     "jaato-server/shared/plugins/mermaid_formatter/backends/sixel.py::SixelBackend.render": 17,
     "jaato-server/shared/plugins/model_provider/_openai_compat/base.py::OpenAICompatProvider._handle_api_error": 16,
-    "jaato-server/shared/plugins/model_provider/_openai_compat/base.py::OpenAICompatProvider._stream_response": 43,
-    "jaato-server/shared/plugins/model_provider/_openai_compat/base.py::OpenAICompatProvider.complete": 19,
-    "jaato-server/shared/plugins/model_provider/_openai_compat/converters.py::message_to_openai": 26,
+    "jaato-server/shared/plugins/model_provider/_openai_compat/base.py::OpenAICompatProvider._stream_response": 42,
+    "jaato-server/shared/plugins/model_provider/_openai_compat/base.py::OpenAICompatProvider.complete": 17,
+    "jaato-server/shared/plugins/model_provider/_openai_compat/converters.py::message_to_openai": 16,
     "jaato-server/shared/plugins/model_provider/anthropic/converters.py::validate_tool_use_pairing": 19,
     "jaato-server/shared/plugins/model_provider/anthropic/provider.py::AnthropicProvider._handle_api_error": 22,
     "jaato-server/shared/plugins/model_provider/anthropic/provider.py::AnthropicProvider._stream_response": 51,
@@ -306,14 +334,18 @@ BASELINE: Dict[str, int] = {
     "jaato-server/shared/plugins/model_provider/github_models/provider.py::GitHubModelsProvider._responses_api_response_to_provider": 19,
     "jaato-server/shared/plugins/model_provider/github_models/provider.py::GitHubModelsProvider.initialize": 18,
     "jaato-server/shared/plugins/model_provider/google_genai/converters.py::part_from_sdk": 23,
-    "jaato-server/shared/plugins/model_provider/google_genai/provider.py::GoogleGenAIProvider._complete_streaming": 43,
+    # 43 -> 42: the cached-token gate lost its ``and cached_tokens > 0``
+    # clause when the zero-vs-absent rule moved to
+    # ``types.reported_cache_count``.  radon counts ``and`` as a decision
+    # point, so centralising the rule pays for itself here too.
+    "jaato-server/shared/plugins/model_provider/google_genai/provider.py::GoogleGenAIProvider._complete_streaming": 42,
     "jaato-server/shared/plugins/model_provider/google_genai/provider.py::GoogleGenAIProvider.initialize": 16,
     "jaato-server/shared/plugins/model_provider/nebius/auth.py::validate_api_key": 16,
-    "jaato-server/shared/plugins/model_provider/nebius/converters.py::message_to_openai": 26,
+    "jaato-server/shared/plugins/model_provider/nebius/converters.py::message_to_openai": 16,
     "jaato-server/shared/plugins/model_provider/nebius/provider.py::NebiusProvider.verify_auth": 17,
     "jaato-server/shared/plugins/model_provider/nim/auth.py::validate_api_key": 16,
     "jaato-server/shared/plugins/model_provider/nim/provider.py::NIMProvider.verify_auth": 17,
-    "jaato-server/shared/plugins/model_provider/openrouter/converters.py::message_to_openai": 27,
+    "jaato-server/shared/plugins/model_provider/openrouter/converters.py::message_to_openai": 16,
     "jaato-server/shared/plugins/model_provider/openrouter/provider.py::OpenRouterProvider._handle_api_error": 14,
     "jaato-server/shared/plugins/model_provider/openrouter/provider.py::OpenRouterProvider._stream_response": 49,
     "jaato-server/shared/plugins/model_provider/openrouter/provider.py::OpenRouterProvider.complete": 27,
@@ -328,14 +360,19 @@ BASELINE: Dict[str, int] = {
     "jaato-server/shared/plugins/notebook/backends/kaggle.py::KaggleBackend._get_kernel_output": 18,
     "jaato-server/shared/plugins/notebook/backends/kaggle.py::KaggleBackend._parse_kernel_output": 18,
     "jaato-server/shared/plugins/notebook/backends/kaggle.py::KaggleBackend.execute": 36,
-    "jaato-server/shared/plugins/notebook/plugin.py::NotebookPlugin._execute_code": 45,
+    "jaato-server/shared/plugins/notebook/plugin.py::NotebookPlugin._execute_code": 40,
     "jaato-server/shared/plugins/notebook/plugin.py::NotebookPlugin._execute_streaming_impl": 28,
-    "jaato-server/shared/plugins/notebook/plugin.py::NotebookPlugin.execute_streaming": 18,
+    "jaato-server/shared/plugins/notebook/plugin.py::NotebookPlugin.execute_streaming": 16,
     "jaato-server/shared/plugins/notebook/plugin.py::NotebookPlugin.format_permission_request": 17,
     "jaato-server/shared/plugins/permission/channels.py::ConsoleChannel.request_permission": 16,
+    # #951: the twenty-odd-exit policy evaluation, unchanged; the public
+    # ``check_permission`` is now a thin single-exit tracing wrapper.
+    # 88 -> 84: #968 routed every resolved-hook call site through
+    # ``_emit_resolved``, which absorbed the four
+    # ``and self._on_permission_resolved`` conjunctions radon was counting.
+    "jaato-server/shared/plugins/permission/plugin.py::PermissionPlugin._check_permission_impl": 83,
     "jaato-server/shared/plugins/permission/plugin.py::PermissionPlugin._get_tool_completions": 16,
     "jaato-server/shared/plugins/permission/plugin.py::PermissionPlugin._handle_channel_response": 16,
-    "jaato-server/shared/plugins/permission/plugin.py::PermissionPlugin.check_permission": 88,
     "jaato-server/shared/plugins/permission/plugin.py::PermissionPlugin.execute_permissions": 17,
     "jaato-server/shared/plugins/permission/policy.py::PermissionPolicy.check": 18,
     "jaato-server/shared/plugins/permission/runner_rpc_channel.py::RunnerRPCChannel.request_permission": 17,
@@ -406,16 +443,14 @@ BASELINE: Dict[str, int] = {
     "jaato-server/shared/plugins/service_connector/plugin.py::ServiceConnectorPlugin._execute_call_service": 69,
     "jaato-server/shared/plugins/service_connector/plugin.py::ServiceConnectorPlugin._execute_discover_service": 16,
     "jaato-server/shared/plugins/service_connector/plugin.py::ServiceConnectorPlugin._execute_list_endpoints": 19,
-    "jaato-server/shared/plugins/service_connector/plugin.py::ServiceConnectorPlugin._execute_preview_request": 17,
     "jaato-server/shared/plugins/service_connector/validation.py::_validate_schema": 44,
-    "jaato-server/shared/plugins/subagent/config.py::_discover_premium_profiles": 27,
+    "jaato-server/shared/plugins/subagent/config.py::_discover_premium_profiles": 26,
     "jaato-server/shared/plugins/subagent/config.py::_merge_profiles": 44,
     "jaato-server/shared/plugins/subagent/config.py::_scan_profiles_dir": 33,
-    "jaato-server/shared/plugins/subagent/config.py::build_inline_profile": 16,
-    "jaato-server/shared/plugins/subagent/config.py::resolve_agent": 25,
+    "jaato-server/shared/plugins/subagent/config.py::resolve_agent": 16,
     "jaato-server/shared/plugins/subagent/config.py::validate_profile": 53,
     "jaato-server/shared/plugins/subagent/plugin.py::SubagentPlugin._dispatch_isolated_spawn": 22,
-    "jaato-server/shared/plugins/subagent/plugin.py::SubagentPlugin._execute_spawn_subagent": 64,
+    "jaato-server/shared/plugins/subagent/plugin.py::SubagentPlugin._execute_spawn_subagent": 48,
     "jaato-server/shared/plugins/subagent/plugin.py::SubagentPlugin._run_subagent_async": 75,
     "jaato-server/shared/plugins/subagent/plugin.py::SubagentPlugin.initialize": 17,
     "jaato-server/shared/plugins/subagent/plugin.py::SubagentPlugin.restore_persistence_state": 29,
@@ -428,7 +463,6 @@ BASELINE: Dict[str, int] = {
     "jaato-server/shared/plugins/template/plugin.py::TemplatePlugin._execute_render_template_to_file": 30,
     "jaato-server/shared/plugins/template/plugin.py::TemplatePlugin._parse_mustache_structure": 45,
     "jaato-server/shared/plugins/template/plugin.py::TemplatePlugin._preprocess_mustache_dotted_paths": 17,
-    "jaato-server/shared/plugins/template/plugin.py::TemplatePlugin._resolve_template_path": 16,
     "jaato-server/shared/plugins/template/plugin.py::TemplatePlugin._validate_render_inputs_against_structure": 31,
     "jaato-server/shared/plugins/template/plugin.py::TemplatePlugin._validate_template_index": 26,
     "jaato-server/shared/plugins/template/plugin.py::TemplatePlugin.enrich_tool_result": 29,
@@ -444,27 +478,24 @@ BASELINE: Dict[str, int] = {
     "jaato-server/shared/plugins/web_fetch/plugin.py::WebFetchPlugin._fetch_url": 30,
     "jaato-server/shared/plugins/web_fetch/plugin.py::WebFetchPlugin._html_to_markdown": 36,
     "jaato-server/shared/plugins/web_fetch/plugin.py::WebFetchPlugin.initialize": 18,
-    "jaato-server/shared/plugins/webhook/config.py::validate_config": 40,
+    "jaato-server/shared/plugins/webhook/config.py::validate_config": 31,
     "jaato-server/shared/retry_utils.py::classify_error": 17,  # -5 (#687): the redundant "TUPLE and isinstance(exc, TUPLE)" guards went
     "jaato-server/shared/retry_utils.py::is_context_limit_error": 22,
     "jaato-server/shared/retry_utils.py::with_retry": 23,
     "jaato-server/shared/rewind.py::detect_truncated_tool_call": 16,
-    "jaato-server/shared/runtime_limits.py::RuntimeLimits.__post_init__": 18,
     "jaato-server/shared/scaffold/__main__.py::_cmd_validate": 16,
-    "jaato-server/shared/scaffold/build.py::_compose_env": 17,
-    "jaato-server/shared/scaffold/build.py::_new_client_archetype": 24,
+    "jaato-server/shared/scaffold/build.py::_new_client_archetype": 17,
     "jaato-server/shared/scaffold/build.py::_new_profile_set": 26,
     "jaato-server/shared/scaffold/explain.py::event": 21,
     "jaato-server/shared/scaffold/explain.py::events": 17,
-    "jaato-server/shared/scaffold/explain.py::plugin": 17,
     "jaato-server/shared/scaffold/explain.py::profile_cost": 23,
-    "jaato-server/shared/scaffold/explain.py::provider": 16,
     "jaato-server/shared/scaffold/explain.py::sets": 17,
-    "jaato-server/shared/scaffold/introspect.py::_env_reads": 21,
     "jaato-server/shared/scaffold/introspect.py::events": 32,
-    "jaato-server/shared/scaffold/introspect.py::plugins": 24,
+    "jaato-server/shared/scaffold/introspect.py::plugins": 17,
     "jaato-server/shared/scaffold/validate.py::_check_prefetch_directives": 18,
-    "jaato-server/shared/scaffold/validate.py::validate_profile": 70,
+    # 70 -> 68: the provider branch moved out to
+    # `_resolve_and_check_provider`.  Ratcheted down, per the guard.
+    "jaato-server/shared/scaffold/validate.py::validate_profile": 53,
     "jaato-server/shared/session_envelope.py::SessionInitEnvelope.from_dict": 19,
     "jaato-server/shared/subprocess_runner.py::run_command": 28,
     "jaato-server/shared/tests/test_session_envelope.py::test_bootstrap_envelope_minimal_construction": 20,
@@ -490,10 +521,10 @@ BASELINE: Dict[str, int] = {
     "jaato-tui/output_buffer.py::OutputBuffer._finalize_completed_tools": 16,
     "jaato-tui/output_buffer.py::OutputBuffer._measure_display_lines": 16,
     "jaato-tui/output_buffer.py::OutputBuffer._render_active_tools_inline": 79,
-    "jaato-tui/output_buffer.py::OutputBuffer._render_impl": 117,
+    "jaato-tui/output_buffer.py::OutputBuffer._render_impl": 108,
     "jaato-tui/output_buffer.py::OutputBuffer._render_single_notebook_row": 17,
     "jaato-tui/output_buffer.py::OutputBuffer._render_tool_block": 53,
-    "jaato-tui/output_buffer.py::OutputBuffer._scroll_to_selected_tool": 21,
+    "jaato-tui/output_buffer.py::OutputBuffer._scroll_to_selected_tool": 20,
     "jaato-tui/output_buffer.py::OutputBuffer.add_active_tool": 31,
     # 47 since the tool-tree finalize stopped being gated on
     # ``mode == "write"`` — one fewer decision point, and prose of any

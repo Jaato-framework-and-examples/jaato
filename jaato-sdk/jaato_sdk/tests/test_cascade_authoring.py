@@ -48,9 +48,17 @@ def test_toolcallentry_reexported_from_cascade_authoring_umbrella():
 def test_processorresult_field_set():
     """Field names match the framework's
     ``invoke_processors`` dual-shape handler (server
-    ``shared/completion_processors.py``)."""
+    ``shared/completion_processors.py``).
+
+    ``faults`` joined the set with the refusal budget (jaato #768): an
+    environment fault is neither a wrong answer nor advisory, so it needed
+    a channel of its own — one that blocks but never spends a refusal.
+    The server-side half of this pairing is asserted in
+    ``shared/tests/test_scaffold_completion_contract.py``, which compares
+    these annotations against what ``explain completion`` renders.
+    """
     hints = get_type_hints(ProcessorResult)
-    assert set(hints.keys()) == {"errors", "warnings", "incomplete"}
+    assert set(hints.keys()) == {"errors", "warnings", "incomplete", "faults"}
 
 
 def test_processorresult_accepts_populated_shape():

@@ -17,6 +17,7 @@ import threading
 import time
 
 from shared.path_utils import is_msys2_environment, normalize_path, get_display_separator
+from shared.session_consumption import DETAIL_SUMMARY, VALID_DETAIL_LEVELS
 from shared.plugins.runner_forwarding import RunnerForwardingMixin
 
 if TYPE_CHECKING:
@@ -34,7 +35,8 @@ class EnvironmentPlugin(RunnerForwardingMixin):
     and internal context (token usage, GC thresholds) when a session is set.
     """
 
-    VALID_ASPECTS = ["os", "shell", "arch", "cwd", "terminal", "context", "session", "datetime", "network", "all"]
+    VALID_ASPECTS = ["os", "shell", "arch", "cwd", "terminal", "context",
+                     "consumption", "session", "datetime", "network", "all"]
 
     @property
     def name(self) -> str:
@@ -122,6 +124,20 @@ class EnvironmentPlugin(RunnerForwardingMixin):
                             "type": "string",
                             "enum": self.VALID_ASPECTS,
                             "description": self._build_aspect_description()
+                        },
+                        "detail": {
+                            "type": "string",
+                            "enum": list(VALID_DETAIL_LEVELS),
+                            "description": (
+                                "Only meaningful for aspect='consumption'. "
+                                "'summary' (default) reports session totals "
+                                "and the model serving you now; 'full' adds "
+                                "the per-binding breakdown -- one row per "
+                                "(provider, model, tier) you have spent "
+                                "tokens on -- and the declared tier ladder. "
+                                "Ask for 'full' when you need to know which "
+                                "tier the spend went to."
+                            )
                         }
                     },
                     "required": []
@@ -142,60 +158,80 @@ class EnvironmentPlugin(RunnerForwardingMixin):
             "get_environment": self._get_environment,
         })
 
-    def _get_environment(self, args: Dict[str, Any]) -> str:
-        """
-        Get environment information.
+    def _builtin_aspect_builders(self, detail: str) -> Dict[str, Any]:
+        """Built-in aspect name -> the zero-argument builder for it.
+
+        A table rather than an ``if/elif`` chain so that adding an aspect
+        is one entry rather than two branches that must agree (the
+        single-aspect dispatch and the ``"all"`` assembly).  Insertion
+        order is the order ``"all"`` reports in.
+
+        Custom aspects registered by extensions are deliberately NOT here:
+        they are excluded from ``"all"`` and dispatched separately, which
+        is the contract :meth:`register_aspect` documents.
 
         Args:
-            args: Dict with optional 'aspect' key.
+            detail: The ``detail`` argument, bound into the one builder
+                that takes it.  Passed in rather than read from the
+                instance because it is per-CALL state and this plugin
+                instance is shared across a session's threads.
+        """
+        return {
+            "os": self._get_os_info,
+            "shell": self._get_shell_info,
+            "arch": self._get_arch_info,
+            "cwd": lambda: normalize_path(self._workspace_path or os.getcwd()),
+            "terminal": self._get_terminal_info,
+            "context": self._get_context_info,
+            "consumption": lambda: self._get_consumption_info(detail),
+            "session": self._get_session_info,
+            "datetime": self._get_datetime_info,
+            "network": self._get_network_info,
+        }
+
+    def _get_environment(self, args: Dict[str, Any]) -> str:
+        """Get environment information.
+
+        Args:
+            args: Dict with optional ``aspect`` and ``detail`` keys.
+                ``detail`` is only meaningful for ``aspect="consumption"``
+                and is ignored by every other aspect.
 
         Returns:
-            JSON string with environment details.
+            JSON string with environment details.  A single aspect returns
+            that aspect's own object (flattened); ``"all"`` returns a map
+            keyed by aspect name.
         """
         aspect = args.get("aspect", "all")
+        detail = args.get("detail") or DETAIL_SUMMARY
+
+        if detail not in VALID_DETAIL_LEVELS:
+            return json.dumps({
+                "error": f"Invalid detail '{detail}'. "
+                         f"Valid: {list(VALID_DETAIL_LEVELS)}"
+            }, indent=2)
 
         if aspect not in self.VALID_ASPECTS:
             return json.dumps({
                 "error": f"Invalid aspect '{aspect}'. Valid: {self.VALID_ASPECTS}"
             }, indent=2)
 
-        result = {}
+        # Under "all" the detail is FORCED to summary: a five-tier
+        # session's binding list on every environment query is real
+        # context spend, and "all" is the eager default the model reaches
+        # for when it wants the OS name.  The breakdown is one
+        # aspect="consumption", detail="full" away.
+        builders = self._builtin_aspect_builders(
+            DETAIL_SUMMARY if aspect == "all" else detail)
 
-        if aspect in ("os", "all"):
-            result["os"] = self._get_os_info()
-
-        if aspect in ("shell", "all"):
-            result["shell"] = self._get_shell_info()
-
-        if aspect in ("arch", "all"):
-            result["arch"] = self._get_arch_info()
-
-        if aspect in ("cwd", "all"):
-            result["cwd"] = normalize_path(self._workspace_path or os.getcwd())
-
-        if aspect in ("terminal", "all"):
-            result["terminal"] = self._get_terminal_info()
-
-        if aspect in ("context", "all"):
-            result["context"] = self._get_context_info()
-
-        if aspect in ("session", "all"):
-            result["session"] = self._get_session_info()
-
-        if aspect in ("datetime", "all"):
-            result["datetime"] = self._get_datetime_info()
-
-        if aspect in ("network", "all"):
-            result["network"] = self._get_network_info()
-
-        # Custom aspects registered by extensions are excluded from "all"
-        # — only returned when the model queries them directly.
-        if aspect in self._custom_aspects:
-            result[aspect] = self._custom_aspects[aspect]()
-
-        # For single aspect (not "all"), flatten the response
-        if aspect != "all" and len(result) == 1:
-            result = result[aspect]
+        if aspect == "all":
+            # Custom aspects registered by extensions are excluded from
+            # "all" — only returned when the model queries them directly.
+            result: Any = {name: build() for name, build in builders.items()}
+        elif aspect in builders:
+            result = builders[aspect]()
+        else:
+            result = self._custom_aspects[aspect]()
 
         return json.dumps(result, indent=2)
 
@@ -420,6 +456,54 @@ class EnvironmentPlugin(RunnerForwardingMixin):
 
         return result
 
+    def _get_consumption_info(self, detail: str = DETAIL_SUMMARY) -> Dict[str, Any]:
+        """What this session has spent, segregated by model binding.
+
+        The consumption counterpart of :meth:`_get_context_info`, and a
+        separate aspect because the two answer different questions that
+        are easy to confuse.  ``context`` is OCCUPANCY — how full the
+        window is, a property of the shared history.  ``consumption`` is
+        SPEND — the sum over the responses each ``(provider, model,
+        tier)`` binding served.  A session that calls ``enter_tier`` has
+        one history and several bills, and only this aspect can tell them
+        apart.
+
+        The unit of segregation is the binding rather than the tier name,
+        because a budget-control degrade rung rebinds a tier's model in
+        place: a tier-keyed report would merge two models' spend under one
+        row precisely in the session someone is reading it because of.
+        See ``shared/session_consumption.py``.
+
+        Own session only — a subagent reports its own spend and a parent's
+        numbers never silently include a child's.
+
+        Args:
+            detail: ``summary`` (totals + the active binding) or ``full``
+                (adds the per-binding list and the declared tier ladder).
+                Validated by the session; an unknown value degrades to
+                summary rather than raising.
+
+        Returns:
+            The session's consumption report, or an error dict when no
+            session has been injected (same shape as every other
+            session-dependent aspect here).
+        """
+        if self._session is None:
+            return {
+                "error": "Session not available. Consumption info requires session injection.",
+                "hint": "Use set_session_plugin() or ensure plugin is properly registered."
+            }
+        if not hasattr(self._session, "get_consumption"):
+            # A session object predating the ledger -- an old runner across
+            # the RPC seam, or a test double.  Saying so beats an
+            # AttributeError reaching the model as a tool failure.
+            return {
+                "error": "This session does not report consumption.",
+                "hint": "Requires a jaato-server session with per-binding "
+                        "accounting; use aspect='context' for window usage."
+            }
+        return self._session.get_consumption(detail)
+
     def _get_session_info(self) -> Dict[str, Any]:
         """Get session identifier and agent information.
 
@@ -572,7 +656,13 @@ class EnvironmentPlugin(RunnerForwardingMixin):
             "'arch' = CPU architecture, ",
             "'cwd' = current working directory, ",
             "'terminal' = terminal emulation, capabilities, and TTY detection, ",
-            "'context' = token usage and GC thresholds, ",
+            "'context' = how FULL the context window is now, plus GC "
+            "thresholds (an occupancy reading -- it is not what you have "
+            "spent), ",
+            "'consumption' = what you have SPENT: input / output / cached "
+            "tokens, cost and cache hit rate, segregated per model you have "
+            "actually run on, plus your budget ceilings and completion-nudge "
+            "state.  Pair with the 'detail' parameter, ",
             "'session' = current session identifier and agent info, ",
             "'datetime' = current date, time, timezone, and UTC offset, ",
             "'network' = proxy settings, proxy authentication, SSL/TLS config, and no-proxy rules, ",

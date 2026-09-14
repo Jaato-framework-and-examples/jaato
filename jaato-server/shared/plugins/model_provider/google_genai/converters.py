@@ -30,6 +30,7 @@ from jaato_sdk.plugins.model_provider.types import (
     ToolResult,
     ToolSchema,
     normalize_inclusive_usage,
+    reported_cache_count,
 )
 
 from shared.tool_id_map import id_to_name, name_to_id
@@ -569,8 +570,10 @@ def extract_usage_from_response(response) -> TokenUsage:
         usage.total_tokens = getattr(metadata, 'total_token_count', 0) or 0
 
         # Extract cached content token count (context caching)
-        cached_tokens = getattr(metadata, 'cached_content_token_count', None)
-        if isinstance(cached_tokens, int) and cached_tokens > 0:
+        # A reported zero is kept -- see the sibling site in provider.py.
+        cached_tokens = reported_cache_count(
+            getattr(metadata, 'cached_content_token_count', None))
+        if cached_tokens is not None:
             usage.cache_read_tokens = cached_tokens
             normalize_inclusive_usage(usage)
 

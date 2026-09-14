@@ -2,6 +2,7 @@
 
 import os
 import platform
+import re
 import sys
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -681,6 +682,120 @@ class TestRenderProfile:
                 "audit deny /workspace/.jaato/apparmor-fragments/** wlk"
                 in child_body
             ), "//child body missing apparmor-fragments write-deny"
+
+    def test_workspace_templates_writes_denied_in_all_profiles(
+        self, manager,
+    ):
+        """Pin: ``<workspace>/.jaato/templates/**`` is write-denied in
+        EVERY profile body — base, isolated sub-profile (§4.3.4),
+        tool_hat (§5.10), //child (§5.10).
+
+        Issue #893: a template is authored content that BECOMES code at
+        render time, and in a KB-driven pipeline it is where a governed
+        rule is *prevented* rather than merely detected.  Without this
+        deny a confined agent could rewrite ``Entity.tpl`` and then call
+        ``renderTemplateToFile`` — the constraint the template encoded is
+        gone and the generated file still looks entirely normal.  Same
+        ``wlk`` pattern as the other v13 narrow per-subpath denies.
+        """
+        # Column-aligned in the template, so match the padding loosely.
+        deny = re.compile(
+            r"audit deny /workspace/\.jaato/templates/\*\*\s+wlk,"
+        )
+
+        # Base profile
+        profile = manager._render_profile("s1", "/workspace")
+        assert deny.search(profile), (
+            "base profile missing templates write-deny"
+        )
+
+        # Isolated sub-profile
+        sub = manager._render_sub_profile(
+            parent_session_id="parent-A",
+            subagent_id="agent-B",
+            workspace_path="/workspace",
+        )
+        assert deny.search(sub), (
+            "isolated sub-profile missing templates write-deny"
+        )
+
+        # tool_hat body (extract via brace counting)
+        if "profile tool_hat" in profile:
+            tool_hat_body = self._extract_brace_body(
+                profile, "profile tool_hat",
+            )
+            assert deny.search(tool_hat_body), (
+                "tool_hat body missing templates write-deny"
+            )
+
+        # //child body
+        if "profile child" in profile:
+            child_body = self._extract_brace_body(
+                profile, "profile child",
+            )
+            assert deny.search(child_body), (
+                "//child body missing templates write-deny"
+            )
+
+    def test_workspace_template_routing_writes_denied_in_all_profiles(
+        self, manager,
+    ):
+        """``.jaato/template_routing.yaml`` is denied alongside the catalog.
+
+        The routing table decides WHERE a rendered template lands
+        (``TemplatePlugin._apply_path_routing``).  The plugin only ever
+        reads it, so denying costs nothing — and leaving it writable
+        would let an agent redirect generated files out from under the
+        rule the routing encodes, which is the #893 gap in another
+        shape.
+        """
+        deny = re.compile(
+            r"audit deny /workspace/\.jaato/template_routing\.yaml\s+wlk,"
+        )
+        profile = manager._render_profile("s1", "/workspace")
+        assert deny.search(profile), "base profile missing routing write-deny"
+
+        sub = manager._render_sub_profile(
+            parent_session_id="parent-A",
+            subagent_id="agent-B",
+            workspace_path="/workspace",
+        )
+        assert deny.search(sub), (
+            "isolated sub-profile missing routing write-deny"
+        )
+
+        for label in ("profile tool_hat", "profile child"):
+            if label in profile:
+                assert deny.search(
+                    self._extract_brace_body(profile, label)
+                ), f"{label} body missing routing write-deny"
+
+    def test_workspace_templates_stay_readable_and_extracts_writable(
+        self, manager,
+    ):
+        """The #893 deny is write-only, and it stops at the catalog.
+
+        ``renderTemplateToFile`` runs under ``tool_hat`` and must READ
+        the catalog, so templates get no read-deny (unlike agents/,
+        profiles/, prompts/ ...).  The template plugin's own runtime
+        writes go to the sibling ``.jaato/template_extracts/``, which
+        must stay under no deny at all — AppArmor does not let a
+        more-specific allow override a less-specific deny, so a
+        carve-out *under* the templates deny would not have worked.
+        """
+        profile = manager._render_profile("s1", "/workspace")
+
+        read_deny = re.compile(
+            r"audit deny /workspace/\.jaato/templates/\*\*\s+r,"
+        )
+        assert not read_deny.search(profile), (
+            "templates must stay readable — renderTemplateToFile reads "
+            "the catalog from inside tool_hat"
+        )
+        assert "/workspace/.jaato/template_extracts" not in profile, (
+            "the extracts directory must be under no deny; it falls "
+            "through to the broad workspace rwkl grant"
+        )
 
     def test_allows_reading_user_tier_services(self, manager):
         """Regression: SchemaStore's tiered lookup reads
@@ -2681,4 +2796,101 @@ class TestRenderedProfileCompiles:
         assert res.returncode != 0, (
             "expected apparmor_parser to REJECT a bare 'd,' mode; if it now "
             "accepts one, delete-only grants may be reconsidered"
+        )
+
+
+class TestEveryRenderedProfileDeclaresItsVariables:
+    """A profile that references ``@{VAR}`` must pull in the file that
+    declares it, in the SAME file, because that is how it is parsed.
+
+    Both provisioning paths — ``_provision_profile_impl`` and
+    ``_provision_sub_profile_impl`` — write one rendered body to one file
+    and run ``apparmor_parser -r <that file>`` on it, with no ``-I``
+    include path and no concatenation with anything else.  So a variable
+    the body does not declare is a variable nothing declares, and the
+    parser refuses the whole profile:
+
+        Found reference to variable HOME, but is never declared
+
+    The isolated sub-runner body spent its whole life in that state.  It
+    references ``@{HOME}`` in two rules and carried no
+    ``#include <tunables/global>``, which the main ``PROFILE_TEMPLATE``
+    has had since v1 — so every isolated-subagent spawn was refused by
+    ``SessionManager._spawn_isolated_runner`` (fail-closed: no unconfined
+    fallback, so a dead feature rather than a confinement hole).  Nothing
+    caught it because every test of that path mocks ``subprocess.run``.
+
+    This is the cheap structural form of the compile check above: it
+    needs no ``apparmor_parser`` on the box, so it runs everywhere and
+    fails the build on the next renderer that forgets the include.
+    """
+
+    VAR_REF = re.compile(r"@\{([A-Za-z_][A-Za-z0-9_]*)\}")
+    # Declared inline by the renderers themselves rather than by tunables.
+    LOCALLY_DECLARED: frozenset = frozenset()
+
+    def _renders(self, manager):
+        return {
+            "base": manager._render_profile("s1", "/workspace"),
+            "isolated_sub_runner": manager._render_sub_profile(
+                parent_session_id="parent-A",
+                subagent_id="agent-B",
+                workspace_path="/workspace",
+            ),
+        }
+
+    def test_a_profile_referencing_a_variable_includes_tunables(
+        self, manager,
+    ):
+        for label, text in self._renders(manager).items():
+            referenced = {
+                name for name in self.VAR_REF.findall(text)
+                if name not in self.LOCALLY_DECLARED
+            }
+            declared_inline = set(
+                re.findall(r"^\s*@\{([A-Za-z_][A-Za-z0-9_]*)\}\s*\+?=", text, re.M)
+            )
+            undeclared = referenced - declared_inline
+            if not undeclared:
+                continue
+            assert "include <tunables/global>" in text, (
+                f"{label} references {sorted(undeclared)} and includes no "
+                f"<tunables/global>; it is parsed standalone, so the parser "
+                f"will refuse it with 'Found reference to variable ..., but "
+                f"is never declared' and the profile will never load"
+            )
+
+    def test_the_isolated_profile_specifically_carries_the_include(
+        self, manager,
+    ):
+        """Named on its own because it is the one that regressed, and
+        because the generic test above goes quiet the moment someone
+        removes the last ``@{HOME}`` rule rather than fixing the include.
+        """
+        sub = manager._render_sub_profile(
+            parent_session_id="parent-A",
+            subagent_id="agent-B",
+            workspace_path="/workspace",
+        )
+        assert "#include <tunables/global>" in sub, (
+            "the isolated sub-runner profile must declare its variables; "
+            "without this line every isolated-subagent spawn is refused at "
+            "stage=sub_profile"
+        )
+
+    def test_the_include_sits_outside_the_profile_block(self, manager):
+        """``#include <tunables/global>`` must precede ``profile ... {``.
+
+        Variable declarations are file-scoped preprocessor state; inside
+        a profile block the parser rejects them outright.  Getting this
+        wrong turns a load failure into a different load failure, so pin
+        the position rather than only the presence.
+        """
+        sub = manager._render_sub_profile(
+            parent_session_id="parent-A",
+            subagent_id="agent-B",
+            workspace_path="/workspace",
+        )
+        assert sub.index("#include <tunables/global>") < sub.index("profile \""), (
+            "tunables include must come before the profile block opens"
         )

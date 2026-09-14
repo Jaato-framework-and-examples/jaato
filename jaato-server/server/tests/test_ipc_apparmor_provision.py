@@ -52,6 +52,8 @@ class _FakeAppArmorManager:
         self.available = True
         self.provision_outcome = True
         self.provision_calls: List[Dict[str, Any]] = []
+        self.confinement_id_calls: List[Dict[str, Any]] = []
+        self._confinement_ids: Dict[str, str] = {}
         _FakeAppArmorManager.instances.append(self)
 
     def is_available(self) -> bool:
@@ -65,6 +67,7 @@ class _FakeAppArmorManager:
         env_file: Optional[str] = None,
         requested_fragments: Optional[List[str]] = None,
         plugin_rules: Optional[List[str]] = None,
+        confinement_id: Optional[str] = None,
     ) -> bool:
         self.provision_calls.append({
             "session_id": session_id,
@@ -73,11 +76,50 @@ class _FakeAppArmorManager:
             "env_file": env_file,
             "requested_fragments": requested_fragments,
             "plugin_rules": plugin_rules,
+            "confinement_id": confinement_id,
         })
+        if confinement_id:
+            self._confinement_ids[session_id] = confinement_id
         return self.provision_outcome
 
+    def confinement_id_for_boundary(
+        self,
+        workspace_path: str,
+        config_root: Optional[str] = None,
+        env_file: Optional[str] = None,
+        requested_fragments: Optional[List[str]] = None,
+        plugin_rules: Optional[List[str]] = None,
+    ) -> str:
+        """#1033: the boundary-derived id the profile is NAMED after.
+
+        Mirrors the real manager's contract at the level these tests
+        care about — deterministic in the boundary, independent of the
+        session — without re-rendering a profile.
+        """
+        self.confinement_id_calls.append({
+            "workspace_path": workspace_path,
+            "config_root": config_root,
+            "env_file": env_file,
+            "requested_fragments": requested_fragments,
+            "plugin_rules": plugin_rules,
+        })
+        from server.confinement_id import confinement_id
+        return confinement_id(
+            workspace_root=workspace_path,
+            config_root=config_root,
+            rendered_body=repr(
+                (env_file, requested_fragments, plugin_rules)),
+        )
+
     def get_profile_name(self, session_id: str) -> str:
-        return f"jaato-ws-{session_id}"
+        return f"jaato-ws-{self._confinement_ids.get(session_id, session_id)}"
+
+    def profile_is_complain_mode(self, session_id: str) -> bool:
+        """#1014: the real manager records whether it RENDERED a
+        complain-mode profile.  This fake mirrors the surface; set
+        ``complain_mode`` on an instance to simulate
+        ``JAATO_APPARMOR_COMPLAIN``."""
+        return getattr(self, "complain_mode", False)
 
 
 class _FakeWSServer:
@@ -320,7 +362,13 @@ def test_success_returns_apparmor_and_calls_spawn(
     assert call["server"] is server
     assert call["session_id"] == "s-ok"
     assert call["workspace_path"] == workspace
-    assert call["profile_name"] == "jaato-ws-s-ok"
+    # #1033: the profile is named after the BOUNDARY, not the session.
+    # A per-session name is what made a reused pool slot straddle two
+    # profiles, so the session id must not appear in it.
+    assert call["profile_name"].startswith("jaato-ws-")
+    assert "s-ok" not in call["profile_name"]
+    assert call["profile_name"] == (
+        _FakeAppArmorManager.instances[0].get_profile_name("s-ok"))
     assert call["daemon_loop"] == "<loop>"
     # An info-style notification was emitted.
     styles = [getattr(ev, "style", None) for _, ev in sm._emit_calls]
@@ -544,14 +592,22 @@ class TestConfigRootEnvelopeUnification:
         assert result == "apparmor"
         assert len(_FakeAppArmorManager.instances) == 1
         provision_calls = _FakeAppArmorManager.instances[0].provision_calls
-        assert provision_calls == [{
+        assert len(provision_calls) == 1
+        # ``confinement_id`` (#1033) is asserted separately below; the
+        # rest of the envelope is what this test is about.
+        assert {k: v for k, v in provision_calls[0].items()
+                if k != "confinement_id"} == {
             "session_id": "s-headless-cr",
             "workspace_path": str(tmp_path),
             "config_root": "/srv/operator/.jaato",
             "env_file": "/srv/operator/.env",
             "requested_fragments": None,
             "plugin_rules": None,
-        }]
+        }
+        # The id is derived from the boundary, and the config root is
+        # part of that boundary.
+        assert provision_calls[0]["confinement_id"]
+        assert "s-headless-cr" not in provision_calls[0]["confinement_id"]
 
     def test_envelope_override_wins_over_client_config(
         self, fake_session_manager, tmp_path,

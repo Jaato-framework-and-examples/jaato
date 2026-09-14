@@ -269,6 +269,11 @@ class AgentUIHooks(Protocol):
         agent_id: str,
         call_id: str,
         chunk: str,
+        stream_id: str = "",
+        sequence: Optional[int] = None,
+        mime_type: Optional[str] = None,
+        data_b64: Optional[str] = None,
+        final: bool = False,
     ) -> None: ...
 
     def on_agent_instruction_budget_updated(

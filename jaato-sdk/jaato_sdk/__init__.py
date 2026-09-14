@@ -17,6 +17,9 @@ from jaato_sdk.client.convenience import (
     Session,
     AgentError,
     PermissionUnhandled,
+    SessionEnded,
+    Terminus,
+    TurnTimeout,
     ask,
 )
 # Exported from the package root ON PURPOSE.  The SDK's existing connection
@@ -40,6 +43,7 @@ from jaato_sdk.events import (
     EventType,
     ClientType,
     CommunicationStyle,
+    MODEL_MEDIA_CALL_ID,
     PresentationContext,
     serialize_event,
     deserialize_event,
@@ -62,6 +66,11 @@ from jaato_sdk.trace import (
     trace_write,
     resolve_trace_path,
 )
+# Session-scoped environment reads (issue #918).  Exported from the
+# package root so an out-of-tree plugin author finds it without reading
+# server source: a credential read MUST go through this rather than
+# ``os.environ``, which concurrent sessions clobber.
+from jaato_sdk.session_env import get_session_env
 
 __all__ = [
     # Client
@@ -75,6 +84,13 @@ __all__ = [
     "Session",
     "AgentError",
     "PermissionUnhandled",
+    # jaato #1007 — a turn verb whose session ended says so, with the
+    # daemon's own reason and details.  Root-level like its siblings: a
+    # driver that must catch it cannot be made to reach into
+    # ``jaato_sdk.client.convenience`` for the name.
+    "SessionEnded",
+    "Terminus",
+    "TurnTimeout",
     "truncation_reason",
     "SessionCreateFailed",
     "SessionNotConfirmed",
@@ -86,6 +102,7 @@ __all__ = [
     # Events
     "Event",
     "EventType",
+    "MODEL_MEDIA_CALL_ID",
     "ClientType",
     "CommunicationStyle",
     "PresentationContext",
@@ -108,4 +125,7 @@ __all__ = [
     "provider_trace",
     "trace_write",
     "resolve_trace_path",
+    # Session-scoped environment reads (issue #918) -- the plugin-safe
+    # alternative to ``os.environ.get`` for a credential.
+    "get_session_env",
 ]

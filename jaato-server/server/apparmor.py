@@ -5,12 +5,31 @@ available, provides kernel-enforced filesystem isolation so that CLI and
 interactive-shell commands executed by one session cannot access files
 belonging to another session.
 
+The profile also confines a second thing the filename does not suggest:
+the RUNNER'S OWN SECRETS.  A confined session's process legitimately holds
+provider API keys and OAuth tokens in its environment —
+``shared/secret_scrub.py`` scrubs the environment handed to a model-driven
+subprocess and deliberately leaves the runner's intact — so every profile
+body denies the procfs entries that serve them back
+(``/proc/*/environ`` and siblings; see the template v30 note on
+``_TEMPLATE_VERSION`` for the full set and the reasoning).
+
 When AppArmor is not available (non-Linux, not installed, or insufficient
 privileges), all methods are no-ops and ``is_available()`` returns False.
 Callers should check availability and fall back to directory-level sandboxing
 (which is the existing default behaviour).
 
-Profile naming convention: ``jaato-ws-{session_id}``
+Profile naming convention: ``jaato-ws-{confinement_id}``, where the id names
+the BOUNDARY rather than the session — the workspace, the config root and a
+digest of the rendered rules (``server.confinement_id``).  It was
+``jaato-ws-{session_id}`` until #1033: a pre-warm pool slot cannot change the
+profile its existing threads wear (``aa_change_profile`` is per-task, and the
+kernel refuses ``current != task``), so a per-session name meant every slot
+reuse straddled two profiles and its bootstrap was refused by #1023's
+verification.  Callers that supply no ``confinement_id`` still get
+``jaato-ws-{session_id}``; the two are the same string for a session whose id
+IS its boundary id.  The ``{session_id}`` placeholder inside PROFILE_TEMPLATE
+keeps its name and is fed whichever id was resolved.
 
 Thread-level confinement
 ------------------------
@@ -42,9 +61,55 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, ContextManager, Dict, List, Optional, Tuple
 
+from shared.apparmor_label import (
+    COMPLAIN_ENV_VAR,
+    complain_mode_requested,
+)
 from shared.session_id import validate_session_id
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------
+# Complain mode is announced, not silent (#1014 ask 3)
+# ---------------------------------------------------------------------
+#
+# ``JAATO_APPARMOR_COMPLAIN=1`` stamps ``flags=(complain)`` on the whole
+# profile chain and, until #1014, emitted no log line of ANY kind --
+# grepping ``complain`` against ``logger|warn`` in this module returned
+# nothing.  Every other weakened boundary in this tree announces itself
+# at WARNING (``scrub_secret_env: none``, ``--ws-unsafe-no-auth``,
+# ``notebook.allow_uncontained_exec``); this one was the exception, and
+# it is the one that turns every confinement claim in the process into a
+# false positive.
+#
+# Once per PROCESS rather than once per profile: a daemon provisions a
+# profile per session, and one line per session would be noise an
+# operator filters out -- which is the same outcome as silence.
+_complain_announced = threading.Event()
+
+
+def announce_complain_mode_once() -> None:
+    """WARN, once per daemon process, that profiles are log-only.
+
+    No-op when :data:`~shared.apparmor_label.COMPLAIN_ENV_VAR` is unset,
+    so an ordinary deployment gains nothing.
+    """
+    if not complain_mode_requested():
+        return
+    if _complain_announced.is_set():
+        return
+    _complain_announced.set()
+    logger.warning(
+        "%s is set: every AppArmor profile this daemon generates carries "
+        "flags=(complain), for the base profile and for the tool_hat / "
+        "//child sub-profiles alike.  The kernel will LOG each denial and "
+        "ALLOW the syscall -- these sessions have no kernel boundary.  "
+        "Sessions provisioned under this posture record "
+        "sandbox_mode='apparmor-complain' rather than 'apparmor'.  Unset "
+        "%s to enforce.",
+        COMPLAIN_ENV_VAR, COMPLAIN_ENV_VAR,
+    )
 
 
 class AppArmorManager:
@@ -277,7 +342,129 @@ class AppArmorManager:
     # sub-profile does NOT inherit this rule; only the runner main
     # thread can trigger the transition (the LLM-driven scope can't
     # cross profile boundaries).
-    _TEMPLATE_VERSION = 28
+    # v29 (2026-09-08): ``audit deny .jaato/templates/** wlk,`` added to
+    # the base, ``tool_hat``, ``//child`` and isolated-subagent bodies.
+    # ``.jaato/templates/`` was the one user-authored config subpath the
+    # v13 list missed, so a confined agent could rewrite a template and
+    # then render it — removing a governed rule from generated code
+    # while the output still looked normal (#893).  The template
+    # plugin's in-confinement writers (embedded-template extraction,
+    # index persistence) moved to the sibling ``.jaato/template_extracts/``
+    # in the same change, so the runtime authoring path survives the
+    # deny instead of silently failing.  Read access is untouched:
+    # ``renderTemplateToFile`` runs under ``tool_hat`` and must still
+    # read the catalog, so templates get no read-deny.  The routing
+    # table ``.jaato/template_routing.yaml`` — which decides where a
+    # rendered template lands — is denied alongside it, being read-only
+    # to the plugin and of the same class.
+    #  30 — (2026-09-11) procfs credential hardening (#712).  Every
+    #       profile body — base, ``tool_hat``, ``//child`` and the
+    #       isolated sub-runner — gains an ``audit deny`` block on the
+    #       procfs entries that leak a process's secrets:
+    #       ``environ``, ``mem``, ``pagemap``, ``auxv`` and
+    #       ``cmdline``, each with its ``task/<tid>/`` twin.
+    #
+    #       The runner legitimately holds provider keys and OAuth
+    #       tokens in its own ``os.environ`` — ``shared/secret_scrub.py``
+    #       strips them from the environment handed to a model-driven
+    #       SUBPROCESS and deliberately leaves the runner's own intact.
+    #       #863 turned that scrub on by default, which makes its one
+    #       bypass matter more, not less: anything that can read
+    #       ``/proc/<pid>/environ`` reads the unscrubbed store.  Before
+    #       v30 the only control on that path was application-layer
+    #       workspace containment, and #668 establishes that layer is
+    #       porous.  These rules are the kernel backstop.
+    #
+    #       ``cmdline`` is denied for the ``--ws-token TOKEN`` exposure:
+    #       a token passed that way sits in the daemon's argv, which
+    #       every confined session could otherwise read.
+    #       ``--ws-token-file`` is the spelling that avoids it.
+    #
+    #       Written in the ``/proc/*/`` form, NEVER ``/proc/self/``:
+    #       AppArmor resolves the ``/proc/self`` symlink to
+    #       ``/proc/<pid>/`` before matching (see the v15 note below),
+    #       so a ``/proc/self/environ`` deny would never match the read
+    #       it is meant to stop.  The ``*`` form is also what covers
+    #       the sibling case — reading ANOTHER process's environ.
+    #
+    #       ``maps`` / ``smaps`` are deliberately NOT denied here: they
+    #       leak address layout rather than credentials, and the
+    #       distro's ``abstractions/base`` may grant them for the C
+    #       library's own use, which a deny would override on a host
+    #       this change was not able to test against.  The
+    #       application-layer denylist in
+    #       ``shared/plugins/sandbox_utils.py`` — which gates only
+    #       model-driven path-taking tools, and so can afford to be
+    #       stricter — does cover them.
+    #  31 — (2026-09-11) ``#include <tunables/global>`` added to the
+    #       ISOLATED sub-runner profile body
+    #       (``_render_sub_profile``).  Pre-existing defect, surfaced by
+    #       the v30 work rather than caused by it: that body references
+    #       ``@{{HOME}}`` in two rules and declared the variable nowhere,
+    #       so ``apparmor_parser`` refused it with
+    #
+    #           Found reference to variable HOME, but is never declared
+    #
+    #       ``_provision_sub_profile_impl`` writes this body to its OWN
+    #       file and runs ``apparmor_parser -r <file>`` on it — no
+    #       ``-I`` include path, no concatenation with the parent's
+    #       file — so the parse it gets is the same one a standalone
+    #       compile gets.  Verified against ``origin/main``: the
+    #       isolated body fails and the base body (which has carried
+    #       the include since v1) compiles; delete the include from the
+    #       base and it fails identically.
+    #
+    #       Effect until now: EVERY isolated-subagent spawn was refused.
+    #       ``SessionManager._spawn_isolated_runner`` is fail-closed by
+    #       design — a failed provision returns
+    #       ``ok=False, stage='sub_profile'`` and there is no
+    #       unconfined fallback — so this was a dead feature, NOT a
+    #       confinement hole.  It went unnoticed because every existing
+    #       test of the path mocks ``subprocess.run``; the first thing
+    #       in the tree to hand this body to a real parser was
+    #       ``test_apparmor_proc_hardening_712.py``.
+    #
+    #       The include itself grants NOTHING — every file under
+    #       ``/etc/apparmor.d/tunables/`` is variable declarations and
+    #       further includes, with no rule of any kind.  What it changes
+    #       is that the two ``@{{HOME}}/.jaato/{{keybindings,theme}}.json r,``
+    #       rules already in this body can now compile and therefore
+    #       take effect.  Both are a strict subset of what the PARENT
+    #       profile already grants (it carries the same two plus
+    #       ``@{{HOME}}/.jaato/themes/**``), so no access appears here
+    #       that the session did not already have.
+    #  32 — (2026-09-13) ``/proc/*/task/ r,`` in the base body and in
+    #       the isolated sub-runner body (#1023).  Grants the DIRECTORY
+    #       listing of a task dir; the per-tid ``attr/current`` reads
+    #       inside it were already granted by v15.
+    #
+    #       ``aa_change_profile`` is per-TASK, and every confinement
+    #       check in this tree reads ``/proc/self/attr/current`` — which
+    #       AppArmor and procfs alike resolve to ``/proc/<pid>/``, i.e.
+    #       the MAIN THREAD's label.  A worker thread created before the
+    #       runner's transition keeps its own ``unconfined`` cred for the
+    #       life of the pool slot and is invisible to all of them; the
+    #       runner now walks ``/proc/self/task/*/attr/current`` after
+    #       confining and refuses the session on divergence.  The walk
+    #       needs to LIST the directory to be complete.
+    #
+    #       Without this rule the walk still runs: it falls back to
+    #       ``threading.enumerate()``, which needs no grant because it
+    #       reads no file, and which sees every thread the interpreter
+    #       created — the RPC lanes, the reader, the telemetry exporter,
+    #       i.e. every thread this defect is known to produce.  What the
+    #       fallback cannot see is a thread created by a C extension.  So
+    #       a runner confined by a v31-or-earlier profile is checked, not
+    #       unchecked, and pays one denial AVC per bootstrap.
+    #
+    #       It is a strict widening of what a confined session may read,
+    #       and it reveals tids and nothing else: the v30 hardening's
+    #       per-tid ``audit deny`` on ``environ`` / ``mem`` / ``pagemap``
+    #       / ``auxv`` / ``cmdline`` is unaffected, a deny beating an
+    #       allow at any specificity.  ``/proc/*/`` (one level up) has
+    #       been granted in the isolated body since v30 for the same
+    #       class of reason.
+    _TEMPLATE_VERSION = 32
 
     # AppArmor profile template.  Placeholders are filled per-session by
     # ``_render_profile()``.
@@ -301,9 +488,9 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
   # Server 0.6.55+ (template v13): broad ``.jaato/** w`` deny replaced
   # with narrow per-subpath denies on user-authored config ONLY
   # (agents, profiles, prompts, scripts, schemas, services definitions,
-  # reactors.json, instructions, references).  Pre-0.6.55 the broad
-  # deny was empirically shown to win over more-specific allows on
-  # AppArmor 4.0 — the carve-out approach didn't work as designed.
+  # reactors.json, instructions, references, templates).  Pre-0.6.55
+  # the broad deny was empirically shown to win over more-specific
+  # allows on AppArmor 4.0 — the carve-out approach didn't work as designed.
   # Narrow per-subpath denies avoid the deny-vs-allow specificity
   # conflict entirely: tenant-runtime subpaths are not under any deny,
   # only the explicitly-named user-authored config subpaths are.
@@ -333,6 +520,27 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
   audit deny {workspace_path}/.jaato/spawn_schemas/**      wlk,
   audit deny {workspace_path}/.jaato/instructions/**       wlk,
   audit deny {workspace_path}/.jaato/references/**         wlk,
+  # Template catalog (#893) — a template is not inert data: it is
+  # authored content that BECOMES code at render time, and in a
+  # KB-driven pipeline it is where a governed rule is *prevented*
+  # rather than merely detected.  A confined agent that could rewrite
+  # ``Entity.tpl`` before calling ``renderTemplateToFile`` would have
+  # removed the constraint the template encoded, and the generated
+  # file would look entirely normal.
+  #
+  # The template plugin's own runtime writes (embedded-template
+  # extraction from tool output, index persistence) target
+  # ``.jaato/template_extracts/``, a SIBLING directory deliberately
+  # left out of every deny — not a carve-out under this one, because
+  # a more-specific allow does not override a less-specific deny
+  # (see v13 above).
+  audit deny {workspace_path}/.jaato/templates/**          wlk,
+  # The routing table that decides WHERE a rendered template lands
+  # (``_apply_path_routing``).  Same class as the catalog itself: the
+  # plugin only reads it, and an agent that could rewrite it would
+  # redirect generated files out from under the rule the routing
+  # encodes.
+  audit deny {workspace_path}/.jaato/template_routing.yaml wlk,
   # Workspace-tier AppArmor fragments — read by _render_profile on
   # the NEXT session spawn.  A confined runner that could write a
   # fragment here would be authoring its own future-session rules
@@ -435,6 +643,46 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
   /dev/null            rw,
   /dev/urandom         r,
   /dev/pts/*           rw,
+
+  # ---- procfs credential + memory hardening (template v30, #712) ----
+  # The runner's own os.environ is a live credential store: provider API
+  # keys, OAuth tokens — exactly what shared/secret_scrub.py strips from
+  # the environment handed to a model-driven SUBPROCESS while
+  # deliberately leaving the runner's own intact.  A process that can
+  # read /proc/<pid>/environ walks straight around that scrub, so the
+  # scrub gets its kernel backstop here.
+  #
+  # These are ``/proc/*/`` and never ``/proc/self/``: AppArmor resolves
+  # the /proc/self symlink to /proc/<pid>/ BEFORE matching rules (the
+  # v15 note below records the empirical finding), so a
+  # ``/proc/self/environ`` deny would never match the read it is meant
+  # to stop.  The ``*`` form also covers reading ANOTHER process's
+  # entry, which is the same leak from the sibling direction.
+  #
+  # A deny beats an allow at any specificity (the v13 note below), so
+  # these hold over the broad ``/proc/self/** r`` grant above, over the
+  # ``#include`` abstractions, and over any extension or plugin
+  # fragment spliced in below.  There is therefore no fragment-level
+  # escape hatch for a deployment that needs one of these back; the
+  # diagnostic route is ``JAATO_APPARMOR_COMPLAIN=1``, which puts the
+  # whole profile chain in complain mode and logs instead of enforcing.
+  #
+  # ``audit`` so a violation lands in dmesg, matching the .jaato rules.
+  audit deny /proc/*/environ            r,
+  audit deny /proc/*/task/*/environ     r,
+  audit deny /proc/*/mem                rw,
+  audit deny /proc/*/task/*/mem         rw,
+  audit deny /proc/*/pagemap            r,
+  audit deny /proc/*/task/*/pagemap     r,
+  audit deny /proc/*/auxv               r,
+  audit deny /proc/*/task/*/auxv        r,
+  # cmdline: ``--ws-token TOKEN`` is a documented way to start the
+  # daemon, and a token passed that way sits in the daemon's argv where
+  # every confined session could read it.  ``--ws-token-file`` is the
+  # spelling that avoids the exposure.  Known cost: ``ps`` / ``top``
+  # run by an agent show empty command columns for every process.
+  audit deny /proc/*/cmdline            r,
+  audit deny /proc/*/task/*/cmdline     r,
 
   # ---- network: outbound only ----
   network inet  stream,
@@ -564,6 +812,17 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
   change_profile -> jaato-ws-*,
   owner /proc/*/attr/current      rw,
   owner /proc/*/task/*/attr/current rw,
+  # Template v32 (#1023): LIST the task directory, so the runner's
+  # post-transition per-thread confinement check can enumerate every
+  # thread rather than only the ones the interpreter knows about.  The
+  # per-tid ``attr/current`` reads above were already granted; without
+  # this the ``opendir`` is denied, the walk falls back to
+  # ``threading.enumerate()`` and a thread created by a C extension
+  # would go unexamined.  Grants tids and nothing else — ``environ``,
+  # ``mem``, ``pagemap``, ``auxv`` and ``cmdline`` stay denied per-tid
+  # by the v30 block above, and a deny beats an allow at any
+  # specificity.
+  /proc/*/task/                   r,
 
   # ---- per-session reference fragments ----
   # ``add_reference_fragment(session_id, ref_id, path)`` writes one
@@ -678,6 +937,27 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
         self._sessions_root = self._workspace_root / "sessions"
         self._venv_path = Path(venv_path or sys.prefix).resolve()
         self._profile_dir = Path(profile_dir)
+
+        # session_id -> was this session's profile GENERATED in complain
+        # mode?  Recorded at render time rather than re-read from the env
+        # later: ``JaatoServer._with_session_env`` overlays a profile's
+        # ``env:`` map onto the daemon's ``os.environ`` for the duration
+        # of a turn, so a second read is a second question.  #1014.
+        self._complain_profiles: Dict[str, bool] = {}
+
+        # session_id -> the CONFINEMENT ID its profile is named after.
+        #
+        # The profile name used to be ``jaato-ws-{session_id}``, so it
+        # changed on every session — and a pre-warm pool slot cannot
+        # change the profile its existing threads wear, because
+        # ``aa_change_profile`` is per-task and the kernel refuses to let
+        # one thread re-confine another (#1023).  The name is therefore
+        # derived from the BOUNDARY (workspace + config root + rendered
+        # rules) and this map records which id each session landed on.
+        # Absent = the caller supplied none and the id IS the session id,
+        # which is the pre-fix shape and what every untaught caller and
+        # every test still gets.
+        self._confinement_ids: Dict[str, str] = {}
 
         # User-local cache directory for apparmor_parser, avoiding the
         # system-level /var/cache/apparmor which requires root access.
@@ -915,6 +1195,7 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
         env_file: Optional[str] = None,
         requested_fragments: Optional[List[str]] = None,
         plugin_rules: Optional[List[str]] = None,
+        confinement_id: Optional[str] = None,
     ) -> bool:
         """Create and load an AppArmor profile for a session.
 
@@ -923,11 +1204,21 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
         unconfined main loop when called from a confined worker
         (e.g. a reactor-spawned child session whose creation fires
         from a confined parent thread).
+
+        Args:
+            confinement_id: Name the profile after this id instead of
+                after *session_id* (#1033).  A pool slot cannot change
+                the profile its existing threads wear, so the name has
+                to be a property of the BOUNDARY rather than of whoever
+                is using it this time; see
+                :meth:`confinement_id_for_boundary`.  ``None`` keeps the
+                pre-fix ``jaato-ws-{session_id}`` name, which is what an
+                un-pooled caller and every existing test get.
         """
         return self._run_unconfined(
             self._provision_profile_impl,
             session_id, workspace_path, config_root, env_file,
-            requested_fragments, plugin_rules,
+            requested_fragments, plugin_rules, confinement_id,
         )
 
     def _provision_profile_impl(
@@ -938,6 +1229,7 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
         env_file: Optional[str] = None,
         requested_fragments: Optional[List[str]] = None,
         plugin_rules: Optional[List[str]] = None,
+        confinement_id: Optional[str] = None,
     ) -> bool:
         """Inner body of :meth:`provision_profile`.
 
@@ -985,10 +1277,19 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
         if not self.is_available():
             return False
 
-        profile_name = self.get_profile_name(session_id)
+        # Record the boundary-derived name BEFORE rendering, so every
+        # later lookup for this session — ``get_profile_name``, the refs
+        # dir, the complain-mode readback, teardown — resolves to the
+        # profile the kernel is about to be handed.
+        if confinement_id:
+            validate_session_id(confinement_id)
+            self._confinement_ids[session_id] = confinement_id
+        render_id = self.confinement_id_of(session_id)
+
+        profile_name = self.profile_name_for_confinement_id(render_id)
         profile_path = self._profile_dir / profile_name
         profile_content = self._render_profile(
-            session_id, workspace_path, config_root, env_file,
+            render_id, workspace_path, config_root, env_file,
             requested_fragments=requested_fragments,
             plugin_rules=plugin_rules,
         )
@@ -1155,6 +1456,11 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
         if not self.is_available():
             return False, "AppArmor unavailable on this host"
 
+        # Compose the sub-profile under the parent's CONFINEMENT id, so
+        # its ``jaato-ws-<parent>//<sub>`` prefix names the profile the
+        # parent runner is actually wearing (#1033).  Resolves to the
+        # session id when the parent was provisioned the pre-fix way.
+        parent_session_id = self.confinement_id_of(parent_session_id)
         sub_profile_name = self.get_sub_profile_name(
             parent_session_id, subagent_id,
         )
@@ -1258,6 +1564,14 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
         if not self.is_available():
             return False
 
+        # Same resolution the provisioning side does (#1033): the
+        # sub-profile was composed under the parent's CONFINEMENT id, so
+        # that is the name on disk.  Resolves to the session id when the
+        # parent was provisioned the pre-fix way, and when the parent's
+        # own teardown has already released its row — in which case the
+        # file is simply not there and this reports success, as it
+        # already did for a sub-profile that was never written.
+        parent_session_id = self.confinement_id_of(parent_session_id)
         sub_profile_name = self.get_sub_profile_name(
             parent_session_id, subagent_id,
         )
@@ -1379,6 +1693,18 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
 # Standalone profile with a //-prefixed name per Audit 6.
 # Loaded as a separate kernel-level profile; the sub-runner
 # self-confines to this profile via change_profile.
+#
+# ``tunables/global`` declares the @{{...}} variables this body
+# references (template v31).  It is REQUIRED, not decorative: this
+# profile is written to its own file and parsed standalone by
+# ``_provision_sub_profile_impl``'s ``apparmor_parser -r <file>``,
+# with no ``-I`` include path and no concatenation with the parent's
+# file — so nothing else declares them.  Without it the parser stops
+# at "Found reference to variable HOME, but is never declared" and
+# the profile never loads.  The main PROFILE_TEMPLATE has carried
+# this line from the beginning; this body did not, and was the one
+# renderer no test had ever run through the parser.
+#include <tunables/global>
 
 profile "{sub_profile_name}" flags=(attach_disconnected) {{
   #include <abstractions/base>
@@ -1404,6 +1730,16 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
   audit deny {workspace_path}/.jaato/spawn_schemas/**      wlk,
   audit deny {workspace_path}/.jaato/instructions/**       wlk,
   audit deny {workspace_path}/.jaato/references/**         wlk,
+  # Template catalog — governed content that becomes code at render
+  # time (mirrors base, #893).  Runtime extraction writes to the
+  # sibling ``.jaato/template_extracts/``, which is under no deny.
+  audit deny {workspace_path}/.jaato/templates/**          wlk,
+  # The routing table that decides WHERE a rendered template lands
+  # (``_apply_path_routing``).  Same class as the catalog itself: the
+  # plugin only reads it, and an agent that could rewrite it would
+  # redirect generated files out from under the rule the routing
+  # encodes.
+  audit deny {workspace_path}/.jaato/template_routing.yaml wlk,
   # Workspace-tier AppArmor fragments — privilege-escalation guard
   # (mirrors base; isolated sub-runner could otherwise plant rules
   # for the next session's profile).
@@ -1451,13 +1787,37 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
   /tmp/jaato-*/**           rwkl,
 
   # ---- self-introspection ----
+  # ``/proc/*/cmdline r,`` was here until template v30 and is now denied
+  # below (#712): this block grants for ANY pid, so it handed every
+  # isolated sub-runner the daemon's argv — which carries the bearer
+  # token whenever the operator started the daemon with
+  # ``--ws-token TOKEN``.  Nothing in the tree reads cmdline from a
+  # confined scope; the readers (server/__main__.py's socket-owner
+  # check, jaato_sdk.doctor) are unconfined operator-side code.
+  #
+  # ``/proc/*/fd/`` is kept: CPython's close_fds path enumerates it at
+  # every subprocess spawn.  It is granted for any pid for the same
+  # reason as the rest of this block — AppArmor has no "my own pid"
+  # rule form — which is a smaller version of the same exposure and is
+  # left as is deliberately rather than broken silently.
   /proc/*/                  r,
   /proc/*/status            r,
   /proc/*/stat              r,
-  /proc/*/cmdline           r,
   /proc/*/comm              r,
   /proc/*/fd/               r,
   /proc/*/fd/*              r,
+
+  # ---- procfs credential + memory hardening (mirrors base, #712) ----
+  audit deny /proc/*/environ            r,
+  audit deny /proc/*/task/*/environ     r,
+  audit deny /proc/*/mem                rw,
+  audit deny /proc/*/task/*/mem         rw,
+  audit deny /proc/*/pagemap            r,
+  audit deny /proc/*/task/*/pagemap     r,
+  audit deny /proc/*/auxv               r,
+  audit deny /proc/*/task/*/auxv        r,
+  audit deny /proc/*/cmdline            r,
+  audit deny /proc/*/task/*/cmdline     r,
   # Read-only access to attr/current — required by the sub-runner's
   # confine_to_profile.read_current_profile verify-after-write step
   # (server/runner/bootstrap.py:188).  ``owner`` qualifier matches the
@@ -1469,6 +1829,10 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
   # profiles keep is intentionally absent.  Phase 5 template v15.
   owner /proc/*/attr/current      r,
   owner /proc/*/task/*/attr/current r,
+  # Template v32 (#1023): task-directory listing for the per-thread
+  # confinement check.  Same rationale as the base body; an isolated
+  # sub-runner bootstraps a session through the same code path.
+  /proc/*/task/                   r,
 
   # ---- DROP: external-reference admit (no add_reference_fragment
   # from sub-runner — Phase 5+ behind opt-in).
@@ -1488,8 +1852,26 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
         Dispatches to ``_teardown_profile_impl`` via ``_run_unconfined``
         so unloading + file deletion run on the unconfined main loop
         when called from a confined session-end path.
+
+        Refuses to unload a boundary another live session still holds —
+        see :meth:`_teardown_profile_impl`.
         """
         return self._run_unconfined(self._teardown_profile_impl, session_id)
+
+    def teardown_profile_by_confinement_id(self, confinement_id: str) -> bool:
+        """Unload the profile named after *confinement_id*, if unheld.
+
+        The slot-teardown counterpart of :meth:`teardown_profile` (#1033).
+        A boundary-derived profile OUTLIVES the session that created it —
+        the pool slot goes on wearing it — so the thing that may reap it
+        is the death of the last wearer, not the end of a session.  Every
+        guard in :meth:`_teardown_profile_impl` applies: an id still
+        claimed by a live session is left loaded.
+
+        Safe to call with an id no session ever used; the profile is
+        simply not on disk and the method reports success.
+        """
+        return self.teardown_profile(confinement_id)
 
     def _teardown_profile_impl(self, session_id: str) -> bool:
         """Inner body of :meth:`teardown_profile`.
@@ -1514,8 +1896,32 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
         if not self.is_available():
             return False
 
-        profile_name = self.get_profile_name(session_id)
+        confinement_id = self.confinement_id_of(session_id)
+        profile_name = self.profile_name_for_confinement_id(confinement_id)
         profile_path = self._profile_dir / profile_name
+
+        # Release THIS session's claim on the name first, then ask whether
+        # anybody else still holds one.  A boundary-derived profile is
+        # shared by every session on that boundary (#1033), so unloading
+        # it on one session's exit would strip the kernel boundary off a
+        # sibling that is still running — the exact failure direction this
+        # whole change exists to avoid.
+        self._confinement_ids.pop(session_id, None)
+        if confinement_id in self._confinement_ids.values():
+            logger.info(
+                "AppArmor: leaving profile %s loaded — session %s released "
+                "it but %d other live session(s) share this boundary",
+                profile_name, session_id,
+                sum(1 for v in self._confinement_ids.values()
+                    if v == confinement_id),
+            )
+            return True
+
+        # Drop the recorded enforcement mode with the profile it describes
+        # (#1014); a stale entry would outlive its session on a long-lived
+        # daemon.  Done before the early return, so a profile already gone
+        # from disk still releases it.
+        self._complain_profiles.pop(confinement_id, None)
 
         if not profile_path.exists():
             return True  # Already gone
@@ -1559,12 +1965,14 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
             logger.exception("Failed to delete AppArmor profile file %s", profile_path)
             return False
 
-        # Drop any per-session reference fragments and the lock state.
-        # Both are session-scoped — keeping them around after the
-        # profile is gone would leak across session_id reuse.
-        self._remove_all_reference_fragments(session_id)
+        # Drop any reference fragments and the lock state.  Keyed by the
+        # CONFINEMENT id, not the session id: both hang off the profile
+        # name (the refs dir is ``<profile>.refs.d``), and this session's
+        # row in ``_confinement_ids`` is already gone, so a session-keyed
+        # lookup here would resolve to a directory nobody ever wrote.
+        self._remove_all_reference_fragments(confinement_id)
         with self._session_locks_guard:
-            self._session_locks.pop(session_id, None)
+            self._session_locks.pop(confinement_id, None)
 
         logger.info("Removed AppArmor profile %s", profile_name)
         return True
@@ -1747,7 +2155,11 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
         fragment_path = refs_dir / safe_id
         fragment_body = self._fragment_content(path)
 
-        with self._session_lock(session_id):
+        # Locked by CONFINEMENT id: the refs dir hangs off the profile
+        # name, which several sessions may share (#1033), and a
+        # session-keyed lock would let two of them write the same
+        # directory concurrently.
+        with self._session_lock(self.confinement_id_of(session_id)):
             try:
                 refs_dir.mkdir(parents=True, exist_ok=True)
                 tmp_path = fragment_path.with_suffix(".tmp")
@@ -1808,7 +2220,7 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
         profile_path = self._profile_dir / self.get_profile_name(session_id)
         fragment_path = refs_dir / safe_id
 
-        with self._session_lock(session_id):
+        with self._session_lock(self.confinement_id_of(session_id)):
             if not fragment_path.exists():
                 return True
 
@@ -1862,15 +2274,102 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     # Helpers
     # ------------------------------------------------------------------
 
+    def confinement_id_of(self, session_id: str) -> str:
+        """The id this session's profile is NAMED after.
+
+        The session's own id when nothing else was recorded, which keeps
+        every pre-#1033 caller and every test on the behaviour they had.
+        See :attr:`_confinement_ids`.
+        """
+        return self._confinement_ids.get(session_id, session_id)
+
+    def confinement_id_for_boundary(
+        self,
+        workspace_path: str,
+        config_root: Optional[str] = None,
+        env_file: Optional[str] = None,
+        requested_fragments: Optional[List[str]] = None,
+        plugin_rules: Optional[List[str]] = None,
+    ) -> str:
+        """Compute the confinement id for a boundary, without loading it.
+
+        Renders the profile body once with :data:`confinement_id.PROBE_ID`
+        standing in for the identifier and digests the result, so the id
+        is a function of the RULES — workspace, config root, env file,
+        the composed fragments' CONTENTS, the plugin-contributed rules,
+        the complain flag — rather than of the session that asked.  Two
+        boundaries that differ anywhere get two ids; two that are alike
+        get one, which is what lets a pool slot keep the profile its
+        threads already wear.
+
+        Rendering rather than hashing the inputs is deliberate: a
+        separate input-hash would be a second implementation of "what
+        goes into a profile" and would drift from the renderer the first
+        time a placeholder was added.
+
+        A render that raises degrades to a workspace+config-root digest
+        with a WARNING rather than failing session creation here: the
+        same render is about to run inside ``provision_profile``, which
+        is where that failure is already reported.
+        """
+        from server.confinement_id import PROBE_ID, confinement_id
+
+        body: Optional[str] = None
+        try:
+            body = self._render_profile(
+                PROBE_ID, workspace_path, config_root, env_file,
+                requested_fragments=requested_fragments,
+                plugin_rules=plugin_rules,
+            )
+        except Exception as exc:  # noqa: BLE001 — diagnostic, not a gate
+            logger.warning(
+                "AppArmor: could not render a probe profile for "
+                "workspace=%s to derive its confinement id (%s: %s); "
+                "falling back to a workspace+config_root digest.  "
+                "provision_profile will report the underlying failure.",
+                workspace_path, type(exc).__name__, exc,
+            )
+        finally:
+            # The probe is not a session; it must not leave a row in the
+            # per-session complain map it shares with real renders.
+            self._complain_profiles.pop(PROBE_ID, None)
+
+        return confinement_id(
+            workspace_root=workspace_path,
+            config_root=config_root,
+            rendered_body=body,
+        )
+
     def get_profile_name(self, session_id: str) -> str:
         """Return the AppArmor profile name for a session.
+
+        Resolves through :meth:`confinement_id_of`, so a session whose
+        profile was provisioned under a boundary-derived id gets THAT
+        name — the one the kernel actually reports for its runner.
 
         Fail-closed on an unsafe id: the name is interpolated into the profile
         grammar and the on-disk profile filename, so a traversal / injection id
         must never reach it.
         """
-        validate_session_id(session_id)
-        return f"jaato-ws-{session_id}"
+        return self.profile_name_for_confinement_id(
+            self.confinement_id_of(session_id))
+
+    @staticmethod
+    def profile_name_for_confinement_id(confinement_id: str) -> str:
+        """``jaato-ws-<id>`` — the one place the prefix is spelled."""
+        validate_session_id(confinement_id)
+        return f"jaato-ws-{confinement_id}"
+
+    def profile_is_complain_mode(self, session_id: str) -> bool:
+        """Was this session's profile generated in complain (log-only) mode?
+
+        Answers from what was RENDERED, not from the environment as it
+        stands now — see ``_complain_profiles``.  ``False`` for a session
+        this manager never rendered a profile for, which is the same
+        answer "no complain-mode profile exists here" deserves.
+        """
+        return self._complain_profiles.get(
+            self.confinement_id_of(session_id), False)
 
     @staticmethod
     def _format_plugin_contributed_rules(
@@ -2073,7 +2572,13 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
         # AppArmor sub-profiles do NOT inherit base rules — every allow
         # and deny must be redeclared.  We mirror the base body
         # verbatim and append the hat-specific read-denies on
-        complain = os.environ.get("JAATO_APPARMOR_COMPLAIN", "").lower() in ("1", "true", "yes")  # env: generate AppArmor profiles in complain (log-only) mode; confinement debugging aid
+        # env: generate AppArmor profiles in complain (log-only) mode;
+        # confinement debugging aid.  #1014: announced at WARNING (once per
+        # daemon) and recorded per session, instead of being applied in
+        # silence while every confinement check in the tree said "confined".
+        complain = complain_mode_requested()
+        announce_complain_mode_once()
+        self._complain_profiles[session_id] = complain
         profile_flags = "attach_disconnected, complain" if complain else "attach_disconnected"
         # v22 (2026-05-16): propagate complain to sub-profiles.  AppArmor
         # sub-profiles do NOT inherit the parent's flag set, so
@@ -2181,6 +2686,12 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     audit deny {workspace_path}/.jaato/spawn_schemas/**      wlk,
     audit deny {workspace_path}/.jaato/instructions/**       wlk,
     audit deny {workspace_path}/.jaato/references/**         wlk,
+    # Template catalog — governed content that becomes code at render
+    # time (mirrors base, #893).  Runtime extraction writes to the
+    # sibling ``.jaato/template_extracts/``, which is under no deny.
+    audit deny {workspace_path}/.jaato/templates/**          wlk,
+    # Routing table for rendered output (mirrors base, #893).
+    audit deny {workspace_path}/.jaato/template_routing.yaml wlk,
     # Workspace-tier AppArmor fragments — privilege-escalation guard
     # (mirrors base; a tool execution under tool_hat could otherwise
     # plant rules for the next session's profile).
@@ -2234,6 +2745,22 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     /dev/null            rw,
     /dev/urandom         r,
     /dev/pts/*           rw,
+
+    # ---- procfs credential + memory hardening (mirrors base, #712) ----
+    # Sub-profiles do NOT inherit base rules, so the deny block has to
+    # be restated here or tool execution — the one scope that is
+    # entirely model-driven — would be the one scope without it.
+    # ``/proc/*/`` form, not ``/proc/self/``: see the base profile.
+    audit deny /proc/*/environ            r,
+    audit deny /proc/*/task/*/environ     r,
+    audit deny /proc/*/mem                rw,
+    audit deny /proc/*/task/*/mem         rw,
+    audit deny /proc/*/pagemap            r,
+    audit deny /proc/*/task/*/pagemap     r,
+    audit deny /proc/*/auxv               r,
+    audit deny /proc/*/task/*/auxv        r,
+    audit deny /proc/*/cmdline            r,
+    audit deny /proc/*/task/*/cmdline     r,
 
     # ---- network (mirrors base) ----
     network inet  stream,
@@ -2331,6 +2858,12 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     audit deny {workspace_path}/.jaato/spawn_schemas/**      wlk,
     audit deny {workspace_path}/.jaato/instructions/**       wlk,
     audit deny {workspace_path}/.jaato/references/**         wlk,
+    # Template catalog — governed content that becomes code at render
+    # time (mirrors base, #893).  Runtime extraction writes to the
+    # sibling ``.jaato/template_extracts/``, which is under no deny.
+    audit deny {workspace_path}/.jaato/templates/**          wlk,
+    # Routing table for rendered output (mirrors base, #893).
+    audit deny {workspace_path}/.jaato/template_routing.yaml wlk,
     # Workspace-tier AppArmor fragments — privilege-escalation guard
     # (mirrors base; a //child subprocess could otherwise plant
     # rules for the next session's profile).
@@ -2424,6 +2957,23 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     /dev/null            rw,
     /dev/urandom         r,
     /dev/pts/*           rw,
+
+    # ---- procfs credential + memory hardening (mirrors tool_hat, #712) ----
+    # //child is where a model-controlled SUBPROCESS runs — the exact
+    # process shared/secret_scrub.py scrubs the environment of.  Without
+    # this block that subprocess could read back through
+    # /proc/<runner_pid>/environ what the scrub just removed from its
+    # own.  ``/proc/*/`` form, not ``/proc/self/``: see the base profile.
+    audit deny /proc/*/environ            r,
+    audit deny /proc/*/task/*/environ     r,
+    audit deny /proc/*/mem                rw,
+    audit deny /proc/*/task/*/mem         rw,
+    audit deny /proc/*/pagemap            r,
+    audit deny /proc/*/task/*/pagemap     r,
+    audit deny /proc/*/auxv               r,
+    audit deny /proc/*/task/*/auxv        r,
+    audit deny /proc/*/cmdline            r,
+    audit deny /proc/*/task/*/cmdline     r,
 
     # ---- network (mirrors tool_hat) ----
     network inet  stream,
