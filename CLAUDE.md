@@ -823,6 +823,65 @@ reports it as `default_agent_missing` (**error**) before any spawn — by
 locating the file, never by rendering it, since rendering runs the persona's
 `{{!py:...}}` prefetch and `validate` is side-effect free.
 
+**And WHICH profile, not only that there is one (#1052).** `profile` stayed an
+unconstrained string, so the schema said a profile is mandatory and said
+nothing about which ones exist. A production bot's model invented
+`profile="summarizer"` — a name present in no profiles tier — read the
+not-found result as retryable, re-worded the task and spawned again, once per
+permission prompt, until the operator denied the tool to stop it. Same shape as
+#944 one layer in: the valid set was already computed
+(`_available_profile_names`, for the error message the model had already
+failed to act on) and was never put where the model reads before it chooses.
+`_spawn_profile_enum` now stamps it as the parameter's `enum`.
+
+**It is a strong default, not a contract, and the difference matters here.**
+`required` is enforced by the provider's function-calling validator on every
+wire; an `enum` is *enforced* only under grammar-constrained decoding
+(`strict: true` — opt-in via `api_params.strict_tools`, which the framework
+deliberately does not turn on for you). Everywhere else it is read as part of
+the description, and under the `prose_tool_calls` quirk the whole parameter
+schema is prompt-injected text — the tier whose models are likeliest to invent
+a name. Nothing in this framework validates tool arguments against the schema
+before dispatch either (`jsonschema` here serves `signal_completion` payloads,
+not tool args), so **the runtime not-found refusal remains the only layer that
+actually refuses one**, and it stays. The issue's "cannot be emitted" is true of
+one configuration and of no other.
+
+Two cases withhold the enum rather than narrowing it:
+
+| State | Schema |
+|---|---|
+| `allow_inline: true` | no enum — hung off `_inline_allowed()`, the predicate `required` and `inline_config` already read, so the surfaces cannot disagree about the knob |
+| no profile available | no enum. `enum: []` makes every value invalid and some providers reject it outright; that state is reported in prose by `_inline_spawn_denial` and `list_subagent_profiles`. The `profile` PROPERTY stays either way — it is in `required` when inline is disallowed, and a required property absent from `properties` is an unsatisfiable schema |
+
+The list is **sorted**, not in discovery order: `_scan_profiles_dir` builds the
+profile dict from an unsorted `iterdir()`, and the tool schema sits in the
+prompt-cache prefix, so a per-host order would re-read the whole prefix for
+nothing. It is rebuilt per exposure for #944's reason — a shared registry means
+a cached schema leaks one agent's profile set into another's tool list.
+
+**Remote spawn is NOT exempted, and that is the one known cost.**
+`spawn_subagent(server=...)` forwards the name verbatim to a PEER, which
+resolves it against the peer's own `config_root`; the enum is built from
+`self._config.profiles`, which is local. No predicate available at schema-build
+time decides whether a peer is reachable, and both candidates are unsound
+rather than merely imperfect:
+
+| Candidate | Why it fails |
+|---|---|
+| enum iff `_remote_spawn_handler is None` | jaato-premium registers that handler on the **daemon-side** instance through a post-initialization session hook, while this schema is built **runner-side**, where the attribute is `None` even when remote spawn works (the runner→daemon bridge carries the call). It reads `None` on every path — an unconditional enum wearing a comment that claims otherwise — and is silently wrong on the one path that is live |
+| no enum where a `runner_rpc_client` bridge exists | true on every runner-served session, i.e. the default and the deployment in the incident. Fixes nothing |
+| a JSON Schema conditional (`oneOf` / `if`) | breaks strict mode and several providers |
+
+So the constraint is documented instead of branched on: under
+`strict_tools: true`, a spawn naming a **peer-only** profile becomes
+schema-invalid. Under every other configuration it still executes — nothing
+validates here, and the remote branch returns *before* profile resolution — the
+model is merely steered away from it. The workaround is exact: declare a local
+profile of that name. The stub satisfies the schema and changes nothing about
+what the peer runs. `spawn_subagent`'s own `server` parameter description says
+so, so the model reads it where it chooses.
+
 ### A Failure the Framework Was Told Was a Success (#1053)
 
 `ToolExecutor` hands the reliability plugin one flag — `ok` — and derives it
