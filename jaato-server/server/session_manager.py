@@ -5236,11 +5236,13 @@ class SessionManager:
 
         ``SessionTerminatedEvent`` is by definition a terminal-state
         signal (see :class:`jaato_sdk.events.SessionTerminatedEvent`
-        — "Session has fully wound down — safe to disconnect").  All
-        four current reasons (``natural``, ``error``, ``stopped``,
-        ``client_request``) are terminal; any of them on a headless /
-        cascade-owned / cascade-stamped session means it's safe to
-        unload now, which
+        — "Session has fully wound down — safe to disconnect").  EVERY
+        reason is terminal — ``natural``, ``error``, ``stopped``,
+        ``client_request``, ``cascade_cancelled`` and
+        ``budget_exhausted`` — and this policy does not read the reason
+        at all, so it applies to whatever the event type grows next.
+        Any of them on a headless / cascade-owned / cascade-stamped
+        session means it's safe to unload now, which
         triggers ``JaatoServer.shutdown()`` → ``session_end`` RPC →
         ``pool_manager.return_slot_after_session(...)``.  Without this
         unload, the runner subprocess stays alive and the pool slot
@@ -5263,6 +5265,23 @@ class SessionManager:
         handler can preempt: if the owner deletes the session, the
         default's ``_maybe_unload_session`` call becomes a no-op
         (session already gone from ``self._sessions``).
+
+        WHAT THIS COSTS A DRIVER THAT IS STILL HOLDING THE SESSION.
+        This docstring used to say "all four current reasons", written
+        when there were four.  ``budget_exhausted`` is one of the two it
+        did not name, and it is the one where the unload is felt: a
+        driver holding a long-lived cascade session gets its terminal,
+        then its next send finds no session and is answered by
+        ``handle_request`` with ``ErrorEvent(error_type="SessionError")``
+        (jaato #1007 — for 12+ minutes of a real run, nothing in the SDK
+        listened to that reply and the driver simply waited).  The
+        unload is still right: the terminal means the session is over,
+        and pinning a runner slot for a driver that may never come back
+        is what the cascade-stamped disjunct above exists to stop.  What
+        was missing was on the other side — the facade now settles on
+        that ``ErrorEvent`` and raises, and the reply is logged here.
+        A stale list of reasons in a docstring is how the fifth one went
+        unconsidered.
         """
         # Local import to avoid widening the module-level import
         # graph; SessionTerminatedEvent is a small SDK type.
@@ -11927,9 +11946,32 @@ class SessionManager:
 
         session = self.get_session(session_id)
         if not session:
+            # LOG IT.  This reply is a client's only notice that the session
+            # it is driving is gone, and until jaato #1007 it left no trace
+            # daemon-side at all: a run that blocked here for 12+ minutes had
+            # nothing in the log to attribute it to, because the last thing
+            # the log said about the session was that it had been unloaded
+            # (normally, by ``_apply_default_cascade_policy``).  WARNING, not
+            # debug — a request for a session that is not there is the
+            # daemon's half of a stuck caller, and the request TYPE is what
+            # says whether the caller was driving a turn or reading a toolbar.
+            logger.warning(
+                "handle_request: no session %s for client %s — refusing "
+                "%s with ErrorEvent(SessionError). The session was never "
+                "created, or has been unloaded (a cascade-stamped session "
+                "is unloaded at its SessionTerminatedEvent).",
+                session_id, client_id, type(event).__name__,
+            )
             self._emit_to_client(client_id, ErrorEvent(
                 error=f"Session not found: {session_id}",
                 error_type="SessionError",
+                # NAME THE SESSION.  ``_emit_to_client`` stamps from
+                # ``_client_to_session``, and on the path this reply exists
+                # for the client has already been detached from it — so the
+                # stamp finds nothing and the event arrived unattributed,
+                # leaving a consumer to parse the id out of the prose.  The
+                # stamper never overwrites, so setting it here wins.
+                session_id=session_id,
             ))
             return
 

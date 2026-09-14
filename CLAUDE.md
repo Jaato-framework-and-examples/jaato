@@ -4070,6 +4070,119 @@ gated call, so the cancelled call is provably still queued; wire ordering is
 established by a control-lane probe rather than by polling. It fails
 `unknown=1, tripped=0` against the old registration site, deterministically.
 
+### A Turn That Ended the Session, Handed Back as a Turn (#1007)
+
+#988 and #856 are a call that never returns. This is the other half of the
+same family: a call that **returns, on time, saying nothing true**.
+
+`Session.ask` settled on first-of `{TURN_COMPLETED, SESSION_TERMINATED}`. The
+daemon emits both from one thread, and the turn event comes **first** — 2-3 ms
+first, measured on the issue's credential-free `echo` repro. So a session its
+`budget_control` ceiling had just ended answered `''`, indistinguishable from a
+model that said nothing, and `_raise_if_needed` raised only for
+`reason == "error"`. **This half needs no cascade at all.**
+
+On a **cascade-stamped** session it then hangs. The terminal also unloads the
+session (`_apply_default_cascade_policy` detaches every IPC client), so the
+next send is answered at once with `ErrorEvent("Session not found: …")` —
+which `ask` did not subscribe to. `timeout=` converts the wait into
+`TurnTimeout`; without one it waits forever. A real run blocked **12+ minutes**
+in `pipe_read` and left no line in the daemon log, because that reply was not
+logged either.
+
+**`complete` already did the right thing, and that is the whole lever.** It
+settles on the daemon's confirmation (#767) and on the terminal, so a
+completion-gated stage over its ceiling returns cleanly. The facade had **two**
+settle rules; one of them was wrong, and nothing kept them in agreement.
+
+**One rule now, in `_TurnWatch`, parameterised by SPAN** — which is the entire
+difference between what a turn verb and a session verb want from the same
+events:
+
+| | `span="turn"` (`ask` / `stream`) | `span="session"` (`complete`) |
+|---|---|---|
+| `TURN_COMPLETED` (latched agent) | proposes a terminus | proposes a terminus |
+| that agent's next `AGENT_STATUS_CHANGED` | **any** status confirms — the turn is over either way | `active` **withdraws** (a nudge, a drained send); `idle`/`done` confirms |
+| `SESSION_TERMINATED` | unconditional; the only thing that sets `session_ended` | same |
+| `ErrorEvent(error_type="SessionError")` | the session is not there — fail, do not wait | same |
+| never latched (no opening `active`) | first turn settles, as pre-#767 | same |
+| latched, never confirmed | settle the proposal after `TERMINUS_GRACE` | after `SETTLE_GRACE` |
+
+**Two graces, because they bound different questions.** `SETTLE_GRACE` (10 s)
+asks *is this agent going to take another turn* — about the AGENT, which may
+legitimately pause. `TERMINUS_GRACE` (1 s) asks *did the daemon emit a terminal
+in the same breath as this turn event* — about ONE emit sequence on ONE thread,
+answered in milliseconds or not at all. **Its expiry costs information, never
+correctness**: the call settles on the turn and returns the turn's text, which
+is exactly the pre-#1007 behaviour. Measured after the fix, the confirming
+status arrives 4-9 ms after the turn event on every plain turn and the grace
+never fires; `ask` costs ~7 ms more per turn than it did.
+
+**What reaches the caller.**
+
+| | turn verbs (`ask` / `stream`) | `complete` |
+|---|---|---|
+| the turn was **cut short** by the session ending | raises **`SessionEnded`** (`reason`, `details`) | returns the payload; records it |
+| the session ended **cleanly** (`natural`, `client_request`, `stopped`) | returns the turn; records it | same |
+| the daemon says the session is gone | raises `SessionEnded(reason="not_found")` | same — a request that reached nothing is not a terminus anybody drove to |
+| `reason == "error"` | `AgentError`, as always — the richer type wins | same |
+| either way | `Session.terminus` (`reason`, `details`, `session_ended`) | same |
+
+A turn verb promises one turn **with the session still there for the next
+one**; a terminal that cut the turn short breaks that promise and every later
+call on the handle is dead, so it raises. `CLEAN_TERMINAL_REASONS` is the
+exception and it has a consumer in this tree: a scaffolded `client` drives a
+completion-gated profile with `ask`, and its one successful turn ends the
+session with `natural` — raising there would fail every such run
+(`shared/scaffold/tests/test_client_template_completion_wait.py`, which is
+what caught it). It is an **allow-list**, so a reason that does not exist yet
+raises rather than passing quietly: #1007 *is* a new reason arriving and going
+unconsidered, and a deny-list would let the next one do it again. The ending
+reaches the caller on `terminus` either way.
+
+`complete` promises to drive the session to its terminus,
+so a terminal is its success condition — but "no payload" was a caller's whole
+account of a budget stop, which is why `terminus` exists. The partial text is
+not lost: chunks reach `on_media` and any `s.client` listener as they arrive,
+and `stream` yields everything it had before raising.
+
+**`ERROR` is narrow on purpose.** Only `error_type == "SessionError"` — the
+daemon's four "this request could not reach a session" replies — settles a
+call; an ordinary mid-turn error still belongs to the turn. `recoverable` is
+**not** the discriminator: the "Session not found" reply leaves it at its
+`True` default. An event naming a different session is ignored; one naming
+none is accepted, because a daemon predating the stamp sends it unattributed
+and degrading to "wait forever" is the defect.
+
+**Two daemon-side consequences, both of them why the run left no trace.**
+`handle_request` now logs the refusal at WARNING, naming the request type, and
+stamps the target `session_id` on the `ErrorEvent` — `_emit_to_client` stamps
+from `_client_to_session`, and on this exact path the client has already been
+detached, so the stamp found nothing. And
+`_apply_default_cascade_policy`'s docstring said "all four current reasons
+(`natural`, `error`, `stopped`, `client_request`)". There are **six**;
+`budget_exhausted` is one of the two it did not name and is the one this policy
+turns into a hang. The policy never reads the reason at all, which is what the
+docstring says now.
+
+**A claim that used to stand in `complete`'s docstring and does not.** "The
+daemon closes every turn of the main agent with exactly one
+`AGENT_STATUS_CHANGED`" is false on a cascade session: the status emitted after
+the unload reaches nobody. `complete` survives only because the terminal comes
+first, so **nothing may be built on the status event alone arriving** — which
+is why `SESSION_TERMINATED` settles unconditionally in both spans.
+
+**Side effect of one rule: `ask` inherits #767's agent latch.** A subagent's
+`TURN_COMPLETED` no longer settles the parent's `ask`, which it did before.
+
+Tests: `jaato-sdk/jaato_sdk/tests/test_a_turn_that_ended_the_session_says_so.py`
+(deterministic — `ScriptedClient` delivers one event per loop tick, so "did it
+return before the terminal arrived?" is a counter, not a clock; 17 of its 24
+fail on the parent commit) and
+`jaato-server/shared/tests/test_one_settle_rule_1007.py` (an AST guard that no
+verb decides a terminus outside `_TurnWatch`, and that the watch still wires
+all four settle events — dropping `ERROR` restores the hang exactly).
+
 ### A Request the Daemon Wrote and the Runner Does Not Have (#856)
 
 #988 is a cancel that lost a race inside the runner. This is the turn

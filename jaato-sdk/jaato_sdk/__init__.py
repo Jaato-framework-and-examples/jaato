@@ -17,6 +17,8 @@ from jaato_sdk.client.convenience import (
     Session,
     AgentError,
     PermissionUnhandled,
+    SessionEnded,
+    Terminus,
     TurnTimeout,
     ask,
 )
@@ -82,6 +84,12 @@ __all__ = [
     "Session",
     "AgentError",
     "PermissionUnhandled",
+    # jaato #1007 — a turn verb whose session ended says so, with the
+    # daemon's own reason and details.  Root-level like its siblings: a
+    # driver that must catch it cannot be made to reach into
+    # ``jaato_sdk.client.convenience`` for the name.
+    "SessionEnded",
+    "Terminus",
     "TurnTimeout",
     "truncation_reason",
     "SessionCreateFailed",
