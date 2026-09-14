@@ -22,6 +22,7 @@ from unittest.mock import MagicMock
 
 from ..plugin import SubagentPlugin
 from ..config import SubagentProfile
+from shared.tool_result_builder import split_executor_result as _split
 
 
 def _make_plugin_with_registry(runner_rpc_client=None):
@@ -67,14 +68,14 @@ class TestNoRunnerRpcClient:
 
     def test_returns_error_envelope_with_stage_rpc_unavailable(self):
         plugin = _make_plugin_with_registry(runner_rpc_client=None)
-        result = plugin._dispatch_isolated_spawn(
+        ok, result = _split(plugin._dispatch_isolated_spawn(
             agent_id="agent-1",
             profile=_make_profile(),
             task="do thing",
             workspace_path="/work",
             agent_params={"isolated": True},
             display_name="researcher",
-        )
+        ))
         # Returns a SubagentResult error dict, NOT None.
         assert result is not None
         assert result["success"] is False
@@ -94,14 +95,14 @@ class TestRpcRaises:
         rpc.spawn_isolated_runner.side_effect = RuntimeError("transport closed")
         plugin = _make_plugin_with_registry(runner_rpc_client=rpc)
 
-        result = plugin._dispatch_isolated_spawn(
+        ok, result = _split(plugin._dispatch_isolated_spawn(
             agent_id="agent-1",
             profile=_make_profile(),
             task="do thing",
             workspace_path="/work",
             agent_params={"isolated": True},
             display_name="researcher",
-        )
+        ))
 
         assert result is not None
         assert result["success"] is False
@@ -123,14 +124,14 @@ class TestRpcOk:
         }
         plugin = _make_plugin_with_registry(runner_rpc_client=rpc)
 
-        result = plugin._dispatch_isolated_spawn(
+        ok, result = _split(plugin._dispatch_isolated_spawn(
             agent_id="agent-1",
             profile=_make_profile(),
             task="do thing",
             workspace_path="/work",
             agent_params={"isolated": True},
             display_name="researcher",
-        )
+        ))
 
         assert result["success"] is True
         assert result["subagent_id"] == "agent-1"
@@ -204,14 +205,14 @@ class TestRpcOkFalse:
         }
         plugin = _make_plugin_with_registry(runner_rpc_client=rpc)
 
-        result = plugin._dispatch_isolated_spawn(
+        ok, result = _split(plugin._dispatch_isolated_spawn(
             agent_id="agent-1",
             profile=_make_profile(),
             task="do thing",
             workspace_path="/work",
             agent_params={"isolated": True},
             display_name="researcher",
-        )
+        ))
 
         assert result["success"] is False
         assert "stage=sub_profile" in result["error"]

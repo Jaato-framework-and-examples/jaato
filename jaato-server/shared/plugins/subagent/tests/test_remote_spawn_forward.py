@@ -20,6 +20,7 @@ import pytest
 from shared.session_context import _current_session, set_current_session
 
 from ..plugin import SubagentPlugin
+from shared.tool_result_builder import split_executor_result as _split
 
 
 @pytest.fixture(autouse=True)
@@ -60,8 +61,8 @@ def test_runner_side_forwards_with_parent_session_id_stamped():
     plugin = _make_plugin(runner_rpc_client=rpc, remote_handler=None)
     set_current_session(SimpleNamespace(_daemon_session_id="sess-A"))
 
-    result = plugin._execute_spawn_subagent(
-        {"task": "do it", "server": "peer1", "profile": "remote-worker"})
+    ok, result = _split(plugin._execute_spawn_subagent(
+        {"task": "do it", "server": "peer1", "profile": "remote-worker"}))
 
     rpc.daemon_plugin_execute.assert_called_once()
     kwargs = rpc.daemon_plugin_execute.call_args.kwargs
@@ -99,10 +100,10 @@ def test_daemon_side_calls_handler_with_parent_session_id_kwarg():
         return _OK
 
     plugin = _make_plugin(runner_rpc_client=None, remote_handler=handler)
-    result = plugin._execute_spawn_subagent({
+    ok, result = _split(plugin._execute_spawn_subagent({
         "task": "do it", "server": "peer1", "profile": "remote-worker",
         "parent_session_id": "sess-A",
-    })
+    }))
 
     assert captured["server"] == "peer1"
     assert captured["task"] == "do it"
@@ -115,8 +116,8 @@ def test_no_premium_and_no_channel_returns_install_error():
     """Neither a registered handler nor a runner→daemon channel →
     premium genuinely absent → actionable install error."""
     plugin = _make_plugin(runner_rpc_client=None, remote_handler=None)
-    result = plugin._execute_spawn_subagent(
-        {"task": "do it", "server": "peer1", "profile": "remote-worker"})
+    ok, result = _split(plugin._execute_spawn_subagent(
+        {"task": "do it", "server": "peer1", "profile": "remote-worker"}))
     assert result["success"] is False
     assert "jaato-premium" in result["error"]
 
@@ -132,7 +133,7 @@ def test_remote_spawn_without_profile_is_refused_before_forwarding():
     rpc = MagicMock()
     plugin = _make_plugin(runner_rpc_client=rpc, remote_handler=None)
 
-    result = plugin._execute_spawn_subagent({"task": "do it", "server": "peer1"})
+    ok, result = _split(plugin._execute_spawn_subagent({"task": "do it", "server": "peer1"}))
 
     assert result["success"] is False
     assert "requires a 'profile'" in result["error"]

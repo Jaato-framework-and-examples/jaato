@@ -32,6 +32,7 @@ from __future__ import annotations
 
 from shared.plugins.subagent.config import SubagentConfig, SubagentProfile
 from shared.plugins.subagent.plugin import SubagentPlugin
+from shared.tool_result_builder import split_executor_result
 from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
 
 REVERSIONS = [
@@ -227,10 +228,18 @@ class TestTheEnumIsNotAWall:
     def test_the_runtime_not_found_refusal_still_exists(self):
         """The real backstop.  Nothing in this framework validates tool
         arguments against the schema before dispatch, so an invented name
-        still reaches the executor on every non-strict provider."""
+        still reaches the executor on every non-strict provider.
+
+        Read through ``split_executor_result``, the contract #1053 put on
+        this path: the same refusal now also carries ``ok=False``, so the
+        two layers can be asserted together rather than one of them
+        pinning a return shape the other owns.
+        """
         plugin = _plugin(profile_names=["researcher"])
-        result = plugin._execute_spawn_subagent(
-            {"task": "t", "profile": "summarizer"})
+        ok, result = split_executor_result(
+            plugin._execute_spawn_subagent(
+                {"task": "t", "profile": "summarizer"}))
+        assert ok is False, "the refusal must reach the reliability plugin (#1053)"
         assert result["success"] is False
         assert "not found" in result["error"]
 
@@ -273,7 +282,9 @@ class TestTheRemoteConstraint:
             return {"success": True, "subagent_id": "remote_1"}
 
         plugin._remote_spawn_handler = handler
-        result = plugin._execute_spawn_subagent(
-            {"task": "t", "profile": "peer-only", "server": "peer-a"})
+        ok, result = split_executor_result(
+            plugin._execute_spawn_subagent(
+                {"task": "t", "profile": "peer-only", "server": "peer-a"}))
+        assert ok is True
         assert result["success"] is True
         assert seen["profile_name"] == "peer-only"

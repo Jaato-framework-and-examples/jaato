@@ -2408,13 +2408,13 @@ class SubagentPlugin(DaemonForwardingMixin):
         message = args.get('message', '')
 
         if not subagent_id:
-            return {
+            return False, {
                 'success': False,
                 'error': 'No subagent_id provided'
             }
 
         if not message:
-            return {
+            return False, {
                 'success': False,
                 'error': 'No message provided'
             }
@@ -2427,7 +2427,7 @@ class SubagentPlugin(DaemonForwardingMixin):
                 session_info = None  # Not owned by this parent
 
         if not session_info:
-            return {
+            return False, {
                 'success': False,
                 'error': f'No active session found with ID: {subagent_id}. Use list_active_subagents to see available sessions.'
             }
@@ -2497,7 +2497,7 @@ class SubagentPlugin(DaemonForwardingMixin):
 
         except Exception as e:
             logger.exception(f"Error sending to subagent {subagent_id}")
-            return {
+            return False, {
                 'success': False,
                 'error': f'Error processing message: {str(e)}'
             }
@@ -2631,7 +2631,7 @@ class SubagentPlugin(DaemonForwardingMixin):
         subagent_id = args.get('subagent_id', '')
 
         if not subagent_id:
-            return {
+            return False, {
                 'success': False,
                 'message': 'No subagent_id provided'
             }
@@ -2640,7 +2640,7 @@ class SubagentPlugin(DaemonForwardingMixin):
         with self._sessions_lock:
             info = self._active_sessions.get(subagent_id)
             if not info or info.get('owner_id') != owner_id:
-                return {
+                return False, {
                     'success': False,
                     'message': f'No active session found with ID: {subagent_id}'
                 }
@@ -2690,7 +2690,7 @@ class SubagentPlugin(DaemonForwardingMixin):
         subagent_id = args.get('subagent_id', '')
 
         if not subagent_id:
-            return {
+            return False, {
                 'success': False,
                 'message': 'No subagent_id provided'
             }
@@ -2701,28 +2701,28 @@ class SubagentPlugin(DaemonForwardingMixin):
             if session_info and session_info.get('owner_id') != owner_id:
                 session_info = None  # Not owned by this parent
         if not session_info:
-            return {
+            return False, {
                 'success': False,
                 'message': f'No active session found with ID: {subagent_id}'
             }
 
         session = session_info.get('session')
         if not session:
-            return {
+            return False, {
                 'success': False,
                 'message': f'Session {subagent_id} has no valid session object'
             }
 
         # Check if session is currently running
         if not session.is_running:
-            return {
+            return False, {
                 'success': False,
                 'message': f'Session {subagent_id} is not currently running (status: waiting)'
             }
 
         # Check if cancellation is supported
         if not session.supports_stop:
-            return {
+            return False, {
                 'success': False,
                 'message': f'Session {subagent_id} does not support cancellation (provider limitation)'
             }
@@ -2746,7 +2746,7 @@ class SubagentPlugin(DaemonForwardingMixin):
                 },
             }
         else:
-            return {
+            return False, {
                 'success': False,
                 'message': f'Failed to cancel session {subagent_id} - may have already completed'
             }
@@ -3011,7 +3011,7 @@ class SubagentPlugin(DaemonForwardingMixin):
                 "agent_params.isolated=true",
                 agent_id,
             )
-            return SubagentResult(
+            return False, SubagentResult(
                 success=False,
                 response='',
                 error=(
@@ -3123,7 +3123,7 @@ class SubagentPlugin(DaemonForwardingMixin):
                 "_dispatch_isolated_spawn: RPC failed for subagent %s",
                 agent_id,
             )
-            return SubagentResult(
+            return False, SubagentResult(
                 success=False,
                 response='',
                 error=(
@@ -3167,7 +3167,7 @@ class SubagentPlugin(DaemonForwardingMixin):
             }
 
         # ok=False — domain failure.  Surface the stage + error.
-        return SubagentResult(
+        return False, SubagentResult(
             success=False,
             response='',
             error=(
@@ -3487,7 +3487,7 @@ class SubagentPlugin(DaemonForwardingMixin):
             SubagentResult as a dict.
         """
         if not self._initialized:
-            return SubagentResult(
+            return False, SubagentResult(
                 success=False,
                 response='',
                 error='Subagent plugin not initialized'
@@ -3495,7 +3495,7 @@ class SubagentPlugin(DaemonForwardingMixin):
 
         task = args.get('task', '')
         if not task:
-            return SubagentResult(
+            return False, SubagentResult(
                 success=False,
                 response='',
                 error='No task provided'
@@ -3512,7 +3512,7 @@ class SubagentPlugin(DaemonForwardingMixin):
         # Prevent self-spawning loops: reject spawning the same profile
         # this agent was created from.
         if profile_name and profile_name == self._self_profile_name:
-            return SubagentResult(
+            return False, SubagentResult(
                 success=False,
                 response='',
                 error=self._self_spawn_error(profile_name),
@@ -3532,7 +3532,7 @@ class SubagentPlugin(DaemonForwardingMixin):
         # same way.
         inline_denied = self._inline_spawn_denial(profile_name, inline_config)
         if inline_denied:
-            return SubagentResult(
+            return False, SubagentResult(
                 success=False, response='', error=inline_denied,
             ).to_dict()
 
@@ -3576,7 +3576,7 @@ class SubagentPlugin(DaemonForwardingMixin):
                 # No runner→daemon channel AND no handler → premium
                 # genuinely isn't installed (or this is a non-runner
                 # context).  Surface the actionable error.
-                return SubagentResult(
+                return False, SubagentResult(
                     success=False,
                     response='',
                     error=(
@@ -3639,7 +3639,7 @@ class SubagentPlugin(DaemonForwardingMixin):
             profile = self._config.get_profile(profile_name) if self._config else None
             if not profile:
                 available = list(self._config.profiles.keys()) if self._config else []
-                return SubagentResult(
+                return False, SubagentResult(
                     success=False,
                     response='',
                     error=f"Profile '{profile_name}' not found. Available: {available}"
@@ -3647,7 +3647,7 @@ class SubagentPlugin(DaemonForwardingMixin):
         else:
             # No profile specified - use inherited plugins with optional overrides
             if not self._parent_plugins:
-                return SubagentResult(
+                return False, SubagentResult(
                     success=False,
                     response='',
                     error='No plugins available to inherit. Configure parent plugins first.'
@@ -3692,7 +3692,7 @@ class SubagentPlugin(DaemonForwardingMixin):
             # agent that opted into being restricted.
             plugin_denial = self._disallowed_inline_plugins(plugins)
             if plugin_denial:
-                return SubagentResult(
+                return False, SubagentResult(
                     success=False, response='', error=plugin_denial,
                 ).to_dict()
 
@@ -3732,7 +3732,7 @@ class SubagentPlugin(DaemonForwardingMixin):
         persona_error = self._apply_persona(
             profile, agent_name_arg, agent_params_arg, parent_cwd)
         if persona_error:
-            return SubagentResult(
+            return False, SubagentResult(
                 success=False, response='', error=persona_error,
             ).to_dict()
 
@@ -3763,7 +3763,7 @@ class SubagentPlugin(DaemonForwardingMixin):
             config_root=self._config_root,
         )
         if spawn_details:
-            return SubagentResult(
+            return False, SubagentResult(
                 success=False,
                 response='',
                 error=(
@@ -3788,7 +3788,7 @@ class SubagentPlugin(DaemonForwardingMixin):
                 # Validate context.files shape: must be dict {path: content}, not a list
                 files_val = context.get('files')
                 if files_val is not None and isinstance(files_val, list):
-                    return SubagentResult(
+                    return False, SubagentResult(
                         success=False,
                         response='',
                         error=(

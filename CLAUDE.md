@@ -882,6 +882,56 @@ profile of that name. The stub satisfies the schema and changes nothing about
 what the peer runs. `spawn_subagent`'s own `server` parameter description says
 so, so the model reads it where it chooses.
 
+### A Failure the Framework Was Told Was a Success (#1053)
+
+`ToolExecutor` hands the reliability plugin one flag — `ok` — and derives it
+from the executor's return SHAPE: `(ok, payload)` says what it means, and
+`_normalize_executor_return` reads anything else as a success. The subagent
+plugin returned a **bare dict** on 26 of its 33 failure paths:
+
+```python
+return SubagentResult(success=False, error="Profile 'x' not found…").to_dict()
+```
+
+so `on_tool_result` was told `success=True`, `PatternDetector` recorded it as
+a success, and `_check_error_retry_loop` — which only walks entries with
+`success is False` — could not see it. The plugin's own circuit-breaker and
+retry policies were blind to five of its seven executors.
+
+**The precedent was in the same file.** `_execute_send_to_sibling` and
+`_execute_list_siblings` had already been converted, with a comment giving
+this exact argument (*"making a failing tool invisible to anything watching
+the event stream"*). Five executors were left behind — `spawn_subagent` (11
+failure returns), `cancel_subagent` (6), `send_to_subagent` (4),
+`_dispatch_isolated_spawn` (3, returned directly by `spawn_subagent`) and
+`close_subagent` (2).
+
+It is why #1052's invented-profile spawn loop ran unchecked: the detector's
+similarity test is on argument **keys** (`patterns.py:543`), the loop reworded
+only the values, and the default threshold is 3 — it matches, and never
+reached the check.
+
+**Only the flag changed; the payload did not.** `normalize_result_dict`
+reshapes on `not ok` in exactly one case — an `error`-ONLY dict collapses to a
+bare string — and `SubagentResult.to_dict` always emits `success` and
+`turns_used` beside it, so the collapse cannot fire and the model reads the
+same dict either way. What does change is correct and was already true of the
+144 tuple-contract failures elsewhere: enrichment skips the result, the
+telemetry span marks `is_error`, and the #951 `TOOL_RUNNER` trace records
+`ok=False`.
+
+| Property | Why |
+|---|---|
+| **failures explicit, successes left bare** | `split_executor_result` documents a bare value as `ok=True`, and 144 sites rely on it; converting successes is churn with no signal |
+| **the guard is an AST scan, not a list of executors** | a failure path added later is covered whether or not its author remembers the contract |
+| **`reliability` is opt-in** | it is not in `_ALWAYS_INITIALIZE_PLUGINS`, so this makes the failures VISIBLE to a detector a deployment must still enable. The flag is right regardless — telemetry and tracing read it too |
+
+Not done here: `_normalize_executor_return` learning to read `success: False`
+out of a bare dict. That shape survives at 9 more sites across `telepathy`,
+`background` and `streaming`; changing the boundary would reclassify every
+result whose `success` key means something else, and wants those enumerated
+first.
+
 ### MCP Server Configuration
 
 MCP servers are configured in `.mcp.json`:
