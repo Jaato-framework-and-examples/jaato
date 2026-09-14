@@ -11,9 +11,17 @@ import base64
 import hashlib
 import http.server
 import json
+import logging
 import os
 from shared.session_context import get_workspace_root, get_config_root
 from shared.secret_repr import secret_safe_repr
+from shared.credential_lock import (
+    TransientRefreshError,
+    credential_lock,
+    has_expired,
+    raise_for_refresh_failure,
+    with_margin,
+)
 import secrets
 import threading
 import time
@@ -38,6 +46,8 @@ from .constants import (
     OAUTH_USERINFO_URL,
 )
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass
 class OAuthTokens:
@@ -57,8 +67,25 @@ class OAuthTokens:
 
     @property
     def is_expired(self) -> bool:
-        """Check if access token is expired (with 5 min buffer)."""
-        return time.time() > (self.expires_at - 300)
+        """Whether the access token is stale — real expiry minus a margin.
+
+        Wider than "expired" on purpose: the margin
+        (``JAATO_OAUTH_REFRESH_MARGIN``, 5 minutes by default) makes the
+        refresh happen while the current token is still valid, which is
+        what gives :attr:`is_hard_expired` something to fall back on when
+        a refresh fails transiently.  See :mod:`shared.credential_lock`.
+        """
+        return with_margin(self.expires_at)
+
+    @property
+    def is_hard_expired(self) -> bool:
+        """Whether the access token is past real expiry, margin ignored.
+
+        A token that is stale but not hard-expired is still accepted by
+        the API, so a transient refresh failure in that window must not
+        become a logout (#683).
+        """
+        return has_expired(self.expires_at)
 
     def to_dict(self) -> dict:
         return {
@@ -544,10 +571,13 @@ def refresh_tokens(refresh_token: str) -> OAuthTokens:
         resp.raise_for_status()
         data = resp.json()
     except requests.exceptions.HTTPError as e:
-        error_body = e.response.text if e.response else str(e)
-        raise RuntimeError(f"Token refresh failed: {error_body}")
+        status = e.response.status_code if e.response is not None else None
+        body = e.response.text if e.response is not None else str(e)
+        raise_for_refresh_failure(status, body, "Antigravity")
     except requests.exceptions.RequestException as e:
-        raise RuntimeError(f"Token refresh failed: {e}")
+        # No HTTP response at all: DNS, connect, TLS, timeout.  Transient
+        # by definition — nothing about the stored token was disproved.
+        raise_for_refresh_failure(None, str(e), "Antigravity")
 
     access_token = data.get("access_token")
     # Google may rotate refresh tokens
@@ -555,7 +585,11 @@ def refresh_tokens(refresh_token: str) -> OAuthTokens:
     expires_in = data.get("expires_in", 3600)
 
     if not access_token:
-        raise RuntimeError(f"Invalid refresh response: {data}")
+        # A 200 with no token is the server misbehaving, not the
+        # credential being rejected: do not read it as a logout.
+        raise_for_refresh_failure(
+            None, f"invalid refresh response: {data}", "Antigravity",
+        )
 
     # Get user email
     email = _get_user_email(access_token)
@@ -683,14 +717,86 @@ def clear_accounts(workspace_path: Optional[str] = None) -> None:
         path.unlink()
 
 
+def _refreshed_into_manager(
+    account: Account,
+    manager: AccountManager,
+    workspace_path: Optional[str] = None,
+) -> OAuthTokens:
+    """Refresh ``account`` and persist the manager it belongs to.
+
+    ``manager`` must be the freshly-loaded one, not a long-lived
+    in-memory copy: :func:`save_accounts` rewrites the WHOLE account
+    file, so saving a stale manager republishes every other account's
+    stale tokens over whatever another process just refreshed.  Writing
+    back the copy we read under the lock is what keeps this a
+    single-account update instead of a whole-file clobber.
+    """
+    new_tokens = refresh_tokens(account.tokens.refresh_token)
+    # refresh_tokens re-derives the email from the new access token but
+    # knows nothing of the project; carry both across.
+    new_tokens.email = account.email
+    new_tokens.project_id = account.project_id
+    account.tokens = new_tokens
+    save_accounts(manager, workspace_path=workspace_path)
+    return new_tokens
+
+
+def refresh_account_under_lock(
+    email: str,
+    workspace_path: Optional[str] = None,
+) -> Optional[OAuthTokens]:
+    """Refresh one account's tokens under the cross-process credential lock.
+
+    The entry point for a caller holding a long-lived
+    :class:`AccountManager` (the provider does) that must not be the
+    thing written back.  Re-reads the account file after acquiring, so a
+    caller that waited adopts the tokens the winner just wrote instead of
+    refreshing again and rotating the winner's refresh token out from
+    under it (#683).
+
+    Returns the account's current tokens, or ``None`` when the account is
+    no longer in the file (another process logged it out).
+    """
+    path = _get_token_storage_path(for_write=True, workspace_path=workspace_path)
+
+    with credential_lock(path):
+        manager = load_accounts(workspace_path=workspace_path)
+        account = next((a for a in manager.accounts if a.email == email), None)
+        if account is None:
+            return None
+        if not account.tokens.is_expired:
+            # Somebody else refreshed while we waited.
+            return account.tokens
+        try:
+            return _refreshed_into_manager(account, manager, workspace_path)
+        except TransientRefreshError:
+            if not account.tokens.is_hard_expired:
+                logger.warning(
+                    "Antigravity token refresh for %s failed transiently; the "
+                    "stored token has not expired, continuing with it", email,
+                )
+                return account.tokens
+            raise
+
+
 def get_valid_access_token() -> Optional[Tuple[str, str, Optional[str]]]:
     """Get a valid access token, refreshing if needed.
+
+    The load-check-refresh-write sequence runs under a cross-process lock
+    on the account file, and the accounts are **re-read after the lock is
+    acquired** — so when a cascade fans out and N sessions all find the
+    token stale at once, one refreshes and the rest adopt what it wrote.
+    Google rotates refresh tokens, so without the re-read a lock only
+    converts the race into a queue and the loser stores a superseded
+    credential (#683).
 
     Returns:
         Tuple of (access_token, email, project_id), or None if no accounts stored.
 
     Raises:
-        RuntimeError: If refresh fails.
+        InvalidGrantError: Re-authentication is required.
+        TransientRefreshError: The refresh failed and the stored token had
+            already passed real expiry.  Both subclass ``RuntimeError``.
     """
     manager = load_accounts()
     account = manager.get_active_account()
@@ -698,14 +804,13 @@ def get_valid_access_token() -> Optional[Tuple[str, str, Optional[str]]]:
     if not account:
         return None
 
-    # Refresh if expired
     if account.tokens.is_expired:
-        new_tokens = refresh_tokens(account.tokens.refresh_token)
-        # Preserve email and project_id
-        new_tokens.email = account.email
-        new_tokens.project_id = account.project_id
-        account.tokens = new_tokens
-        save_accounts(manager)
+        # get_active_account() advances current_index, so the account we
+        # were handed is the one to refresh by NAME — re-resolving by
+        # position under the lock would pick a different one.
+        refreshed = refresh_account_under_lock(account.email)
+        if refreshed is not None:
+            account.tokens = refreshed
 
     return (
         account.tokens.access_token,

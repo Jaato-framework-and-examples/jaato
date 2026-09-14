@@ -229,6 +229,24 @@ CATALOG: Dict[str, EnvClass] = {
         "behaviour"),
     "JAATO_CGROUPS_ROOT": EnvClass(HOST, None,
         "where the host delegated cgroup v2 subtree_control; one per host"),
+    "JAATO_CREDENTIAL_LOCK_TIMEOUT": EnvClass(HOST, None,
+        "seconds a caller waits for another process to finish refreshing "
+        "a rotating OAuth credential before giving up (#683).  Host-"
+        "scoped for the reason JAATO_RUNNER_ACK_TIMEOUT is: the thing "
+        "being bounded is contention on a FILE, and the contenders are "
+        "the daemon, its runner subprocesses and every pool slot -- "
+        "several of which serve sessions that have no say in each "
+        "other's timeouts.  A per-session value would also be "
+        "incoherent, since the waiter and the holder are different "
+        "sessions by construction"),
+    "JAATO_OAUTH_REFRESH_MARGIN": EnvClass(HOST, None,
+        "seconds before real expiry at which an OAuth access token is "
+        "treated as stale and refreshed (#683).  Host-scoped because "
+        "every process sharing one credential file must agree on when "
+        "that file's token is stale: two sessions disagreeing would have "
+        "the shorter-margin one repeatedly decline to refresh a token "
+        "the other has already replaced, which is the desynchronisation "
+        "the margin exists to prevent"),
     # chrome_ai reads its knobs through get_session_env, which is the
     # framework's own recommended API -- and until the scan learned to see
     # that call (#508) these seven were read by the installed tree,
