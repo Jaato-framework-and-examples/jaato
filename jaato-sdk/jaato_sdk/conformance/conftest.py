@@ -69,7 +69,7 @@ ALWAYS_REFUSES = (
 
 @pytest.fixture(scope="module")
 def daemon():
-    """A daemon serving FOUR profiles, one per ending a session can have.
+    """A daemon serving FIVE profiles, one per ending a session can have.
 
     The first two are needed and neither substitutes for the other -- the
     defects that hide behind a prose ending are exactly the ones the terminus
