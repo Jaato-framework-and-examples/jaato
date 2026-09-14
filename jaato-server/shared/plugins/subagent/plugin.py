@@ -789,6 +789,14 @@ class SubagentPlugin(DaemonForwardingMixin):
     # These are recomputed on every ``get_tool_schemas()`` call rather than
     # memoised: subagents share the parent's ``PluginRegistry``, so a
     # cached schema would leak one agent's knob into another's tool list.
+    #
+    # #1052 extends the same reasoning one step further, from whether a
+    # ``profile`` must be given to WHICH names exist: ``profile`` was an
+    # unconstrained string, so an invented name reached execution, returned
+    # "not found", and read as retryable.  ``_spawn_profile_enum`` names the
+    # discovered set in the schema.  Unlike ``required``, an ``enum`` binds
+    # only where the provider constrains decoding, so it is a strong default
+    # rather than a contract — the runtime not-found check stays.
 
     def _inline_allowed(self) -> bool:
         """Whether ``spawn_subagent`` may be called without a ``profile``.
@@ -845,6 +853,88 @@ class SubagentPlugin(DaemonForwardingMixin):
             "subagent has; a profile may also bind its own persona via "
             "`default_agent`, so naming the profile alone is usually enough."
         )
+
+    def _spawn_profile_enum(self) -> Dict[str, Any]:
+        """The ``enum`` fragment for ``spawn_subagent``'s ``profile`` (#1052).
+
+        ``profile`` was an unconstrained string, so a model could name a
+        profile that exists nowhere; the not-found result reads as
+        retryable and weaker models re-word the task and spawn again.  A
+        production bot looped on ``profile="summarizer"`` — a name present
+        in no profiles tier — until the operator denied the tool.  Naming
+        the real set in the schema is the #944 move applied to the VALUE
+        rather than to ``required``: the model is told what exists at the
+        same layer that already tells it what is mandatory.
+
+        What this does NOT do, stated because the issue overstated it: an
+        ``enum`` is only *enforced* under grammar-constrained decoding
+        (``strict: true``, opt-in here via ``api_params.strict_tools``,
+        which the framework deliberately does not turn on for you).  Every
+        other provider treats it as part of the description — usually
+        respected, never guaranteed — and under the ``prose_tool_calls``
+        quirk the whole parameter schema is prompt-injected text
+        (``model_provider/_prose_tools.py``), i.e. exactly the tier whose
+        models are likeliest to invent a name.  Nothing in this framework
+        validates tool arguments against the schema before dispatch, so
+        the not-found check in :meth:`_execute_spawn_subagent` remains the
+        only layer that actually refuses an invented name.  This raises the
+        floor; it is not a wall.
+
+        Returns an empty dict — so ``profile`` keeps its previous,
+        unconstrained shape — in two cases:
+
+        * inline spawning is allowed.  Hung off :meth:`_inline_allowed`,
+          the predicate ``required`` and ``inline_config`` already read, so
+          the surfaces cannot disagree about the knob.
+        * no profile is available.  ``enum: []`` makes every value invalid
+          and is rejected outright by some providers; the honest report of
+          that state is the runtime prose ``_inline_spawn_denial`` and
+          ``list_subagent_profiles`` already produce ("No subagent profiles
+          are configured in this workspace").  The ``profile`` PROPERTY is
+          kept either way: it is in ``required`` when inline is disallowed,
+          and a required property that is absent from ``properties`` is an
+          unsatisfiable schema.
+
+        Sorted, not in discovery order: ``_scan_profiles_dir`` builds the
+        profile dict from an unsorted ``iterdir()``, and the tool schema
+        sits in the prompt-cache prefix — an order that varies per host
+        would re-read the whole prefix for nothing.
+
+        REMOTE SPAWN IS NOT EXEMPTED, deliberately, and it is the one known
+        cost of this change.  ``spawn_subagent(server=...)`` forwards
+        ``profile_name`` verbatim to a PEER, which resolves it against the
+        peer's own ``config_root``; this enum is built from
+        ``self._config.profiles``, which is purely local.  No predicate
+        available here decides whether a peer is reachable:
+        ``_remote_spawn_handler`` is registered by jaato-premium on the
+        DAEMON-side instance through a post-initialization session hook,
+        while this schema is built RUNNER-side, where the attribute is
+        ``None`` even when remote spawn works (the runner→daemon bridge in
+        :meth:`_execute_spawn_subagent` is what carries the call).  So
+        gating on it would read ``None`` on every path — an unconditional
+        enum wearing a comment that claims otherwise — and would be
+        silently wrong on the one path where remote spawn is live.  The
+        inverse (withhold the enum wherever a ``runner_rpc_client`` bridge
+        exists) holds on every runner-served session, i.e. the default, so
+        it would fix nothing.  A JSON Schema conditional is the third
+        option and is refused: ``oneOf``/``if`` break strict mode and
+        several providers.
+
+        The consequence, in full: under ``strict_tools: true`` a spawn
+        naming a peer-only profile becomes schema-invalid.  Under every
+        other configuration it still executes — nothing validates here, and
+        the remote branch never resolves the name locally — the model is
+        merely steered away from it.  The workaround is a local profile
+        declaring that name: the remote branch runs BEFORE profile
+        resolution, so a local stub satisfies the schema and changes
+        nothing about what the peer runs.
+        """
+        if self._inline_allowed():
+            return {}
+        names = self._available_profile_names()
+        if not names:
+            return {}
+        return {"enum": sorted(names)}
 
     def _spawn_inline_config_property(self) -> Dict[str, Any]:
         """The ``inline_config`` schema property, or nothing.
@@ -945,6 +1035,12 @@ class SubagentPlugin(DaemonForwardingMixin):
                         },
                         "profile": {
                             "type": "string",
+                            # Constrained to the profiles this session
+                            # actually discovered, when there are any and
+                            # inline spawning is disallowed (#1052).  A
+                            # strong default, not a guarantee — see
+                            # :meth:`_spawn_profile_enum`.
+                            **self._spawn_profile_enum(),
                             "description": self._spawn_profile_param_text(),
                         },
                         "agent": {
@@ -1015,7 +1111,11 @@ class SubagentPlugin(DaemonForwardingMixin):
                                 "Optional: name of a remote peer server to run the subagent on. "
                                 "When specified, the subagent is delegated to the remote server "
                                 "instead of running locally. Use the environment tool's cluster "
-                                "topology to see available servers and their capabilities."
+                                "topology to see available servers and their capabilities. "
+                                "NOTE: 'profile' is resolved by the PEER, but the values listed "
+                                "for it here are this server's own profiles (#1052) — a "
+                                "peer-only profile name must also be declared locally for the "
+                                "call to satisfy the schema."
                             )
                         },
                         # ``inline_config`` exists only while inline
