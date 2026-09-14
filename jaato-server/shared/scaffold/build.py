@@ -761,6 +761,7 @@ def _resolve_client_binding(args, archetype: str, transport: str):
         return _resolve_profile_binding(args, archetype, transport,
                                         profile_name, provider, model)
 
+
     binding_optional = (archetype in PROVIDER_OPTIONAL
                         and transport != "in_process")
     required = (["workspace"] if binding_optional
@@ -783,6 +784,44 @@ def _resolve_client_binding(args, archetype: str, transport: str):
     return None, provider, model
 
 
+def _profile_set_env_lines(args) -> List[str]:
+    """``JAATO_PROFILE_SET=<set>`` when a set is what made ``--profile`` resolve.
+
+    ``--profile X --set Y`` resolved X only because Y was forced, and the
+    GENERATED client resolves its profile from the workspace ``.env`` — so
+    writing that file without the selector produces a client naming a
+    profile it cannot find, after the generator accepted the name.  The
+    set is honoured at generation and lost at run time, which is the shape
+    ``--profile`` exists to remove.
+
+    Only when both are given: ``--set`` alone is the profile-set
+    generator's flag and this archetype has no business acting on it, and
+    ``--profile`` alone resolved without a set and needs none.
+    """
+    set_name = getattr(args, "set", None)
+    if not (set_name and getattr(args, "profile", None)):
+        return []
+    return [f"JAATO_PROFILE_SET={set_name}"]
+
+
+def _append_profile_set(plan: "_Plan", env_file: Path, args) -> None:
+    """Add the selector to an EXISTING ``.env`` that lacks it.
+
+    The file is otherwise left alone (:func:`_should_write_client_env`), and
+    an existing ``JAATO_PROFILE_SET`` is never retargeted behind the
+    author's back — the rule ``_emit_set_env`` already applies to a
+    scaffolded profile-set's own ``.env``.
+    """
+    lines = _profile_set_env_lines(args)
+    if not lines or not env_file.exists():
+        return
+    existing = env_file.read_text(encoding="utf-8")
+    if "JAATO_PROFILE_SET" in existing:
+        return
+    prefix = existing if existing.endswith("\n") else existing + "\n"
+    plan.write(env_file, prefix + "\n".join(lines) + "\n", action="update")
+
+
 def _should_write_client_env(args, env_file: Path) -> bool:
     """Whether ``new <client-archetype>`` may write the workspace ``.env``.
 
@@ -797,6 +836,29 @@ def _should_write_client_env(args, env_file: Path) -> bool:
         return True
     return bool(getattr(args, "force", False)) and not getattr(
         args, "profile", None)
+
+
+def _archetype_takes_a_session_binding(archetype: str) -> bool:
+    """Whether this archetype's template has somewhere to put ``--profile``.
+
+    DERIVED from the template text rather than tabulated: the placeholder
+    is what actually receives the binding, so a template that gains or
+    loses one is answered correctly with no edit here.  A hardcoded list is
+    how the flag came to be accepted where it could not be honoured —
+    ``new cascade --profile worker`` resolved the name, accepted it, and
+    emitted the ``"<profile-name>"`` placeholder, byte-identical to passing
+    nothing.
+
+    ``cascade`` / ``sweep`` are the archetypes that legitimately have no
+    single binding: each stage or job names its OWN profile, which is the
+    point of them, and ``observer`` opens no session at all.
+    """
+    from ._client_templates import TEMPLATES
+
+    entry = TEMPLATES.get(archetype)
+    if not entry:
+        return True         # unknown archetype: let the normal path refuse it
+    return "__SESSION_BINDING__" in entry[1]
 
 
 def _resolve_profile_binding(args, archetype: str, transport: str,
@@ -822,6 +884,12 @@ def _resolve_profile_binding(args, archetype: str, transport: str,
         print(f"new {archetype}: --profile needs a daemon to resolve it "
               f"against; --transport in_process IS the binding, so pass "
               f"--provider/--model there")
+        return 2, None, None
+    if not _archetype_takes_a_session_binding(archetype):
+        print(f"new {archetype}: --profile binds ONE session, and this "
+              f"archetype does not open one it can bind — its stages/jobs "
+              f"carry their own profile names, which you edit in the "
+              f"generated file.  Drop --profile")
         return 2, None, None
     code = _check_named_profile(args, archetype, profile_name)
     return (code, None, None) if code else (None, None, None)
@@ -882,6 +950,12 @@ def _provenance(args, archetype: str, transport: str, provider, model) -> str:
         prov.append(f"--provider {provider}")
     if model:
         prov.append(f"--model {model}")
+    # ``--profile`` IS the binding when it is given, and a banner that
+    # claims to be copy-paste reproducible must carry it: without it the
+    # printed command re-runs to `missing required --provider / --model`,
+    # so the one line asserting reproducibility reproduced a failure.
+    if getattr(args, "profile", None):
+        prov.append(f"--profile {args.profile}")
     prov.append(f"--transport {transport}")
     for flag, value in (("--recoverable", getattr(args, "recoverable", False)),
                         ("--url", getattr(args, "url", None)),
@@ -994,8 +1068,11 @@ def _new_client_archetype(args, archetype: str) -> int:
     if _should_write_client_env(args, env_file):
         active = ([f"JAATO_PROVIDER={provider}", f"MODEL_NAME={model}"]
                   if provider else [])
+        active += _profile_set_env_lines(args)
         plan.write(env_file, _compose_env(provider, active),
                    action="update" if env_file.exists() else "create")
+    else:
+        _append_profile_set(plan, env_file, args)
 
     # The completion gate, for the archetypes whose jobs are graded.  Written
     # in the same pass as the client so the two agree about the profile name

@@ -2915,6 +2915,26 @@ declared by the plugin, marked in the render, and is where `validate` stops
 reporting unknown names. `permission.policy.defaultPolicy: denied` is now
 `invalid_knob_value`, an error; it used to validate clean.
 
+**A declared `properties` block is NOT a completeness claim**, and the first
+version of this descent read it as one — which inverts the whole family's
+thesis. `PermissionPolicy.from_config` reads `cwd`,
+`sanitization.custom_blocked_commands` and `path_scope.resolve_symlinks`,
+and the schema declared none of them, so all three were reported as typos:
+a knob that *does* something, told it does not, whose remedy is deleting a
+working line. Measured across the plugin, the schema omits **sixteen** names
+its own reader consumes, so the completeness claim would be wrong far more
+often than right.
+
+So the nested finding is **evidence-driven**, exactly as `_report_undeclared_name`
+is one layer up: a read site → `undeclared_knob` quoting it, no site →
+`unknown_knob`, not scanned → the absence of evidence stated as such. The
+evidence needs a third scanner (`plugin_nested_config_read_sites`), because a
+nested key is read off a LOCAL — `ps_cfg.get("resolve_symlinks")` — and
+`_TOP_LEVEL_CONFIG_RECEIVERS` excludes those on purpose (a nested dict's
+inner names are not `plugin_configs` knobs). Widening that set would have
+been the wrong fix twice over. The three keys above are now declared too, so
+`explain plugin permission` shows them.
+
 **The permission whitelist was unchecked against the tool inventory
 `tool_scopes` has been checked against since the validator shipped.** One key
 over, and the key where being wrong is expensive: under `defaultPolicy: deny`
@@ -2935,9 +2955,17 @@ plugin later keeps the protection it already wrote. Silent by design: a
 profile whose `plugins:` list is EMPTY (an abstract base declares no
 surface — the carve-out `missing_model` already uses), a name of MCP shape
 (`mcp__server__tool` / `mcp.server.tool`, whose inventory comes from the
-servers a LIVE session connects to), and the framework's own session tools
-(`signal_completion`, `askPermission`), which belong to no entry in
-`plugins:`.
+servers a LIVE session connects to), the framework's own session tools
+(`signal_completion`, `askPermission`), and a tool belonging to
+`PluginRegistry._ALWAYS_INITIALIZE_PLUGINS` — `introspection`'s `list_tools`
+/ `get_tool_schemas` are core and reach every wire whatever `plugins:` says,
+the exemption `plugin_config_without_plugin` already applies and this check
+initially dropped. The set is read from the registry, not re-spelled.
+
+"What the author declared" and "what the session will hold" are two
+variables for that reason: folding the framework's always-initialized set
+into the first would make every abstract base look like it declared a
+surface.
 
 **`validate` never asked whether the provider's SDK was installed.** It did
 not import `shared/scaffold/dependencies.py` at all, while both halves of the
@@ -2961,7 +2989,19 @@ the difference, with a control run that would notice an import). Every tier's
 provider is checked too — a tier binds a (provider, model) PAIR (#1036), and
 the second provider is the one nobody notices until `enter_tier`. **Warn**,
 not error: validating a workspace from a machine that is not the one that
-will run it is legitimate. Only TOP-LEVEL names are probed, so a namespace
+will run it is legitimate.
+
+**And the message asserts no runtime consequence.** Its first wording said
+the session "will fail at `connect()` with an ImportError", which a static
+import closure cannot know and which is false for a guarded import:
+`azure_openai`'s closure includes `azure`, and `azure_identity_available()`
+wraps that import in `try/except ImportError` on a path only `auth: aad`
+takes — so a key-auth profile was told it would fail, and it would not. Same
+class as #937, in this change's own new code. What it says now is what it
+measured: the package imports these names, they are not installed here, and
+whether a session reaches them depends on which path its configuration takes.
+
+Only TOP-LEVEL names are probed, so a namespace
 package whose submodule is absent reads as present (`google` resolves from
 `google-api-core`); that blind spot is `_health`'s too, and it is the safe
 direction.
@@ -3005,15 +3045,23 @@ completion schema. The transcript's first correction was *"en lugar de un
 jaato-scaffold new client --workspace . --profile collector
 ```
 
-`--profile` satisfies the binding on any archetype and is mutually exclusive
-with `--provider`/`--model` (two bindings for one session, where the profile
-wins at runtime, so the flags would decide nothing). It is refused on
-`--transport in_process`, where the embedded client IS the binding. The name
-is resolved through the framework's own resolver under the set the workspace
-actually selects — `JAATO_PROFILE_SET` from its `.env`, or `--set` — so a
-profile that resolves only through `inherits` counts, and one that exists
-only inside an unselected set is reported as that rather than as missing.
-Three properties:
+`--profile` is mutually exclusive with `--provider`/`--model` (two bindings
+for one session, where the profile wins at runtime, so the flags would
+decide nothing), refused on `--transport in_process` where the embedded
+client IS the binding, and **refused by name on an archetype that opens no
+session it can bind**. That last one is derived from the template rather
+than tabulated — the `__SESSION_BINDING__` placeholder is what receives the
+binding — because a hardcoded list is how the flag came to be accepted where
+it could not be honoured: `new cascade --profile worker` resolved the name,
+accepted it, and emitted the `"<profile-name>"` placeholder, byte-identical
+to passing nothing. A cascade's stages each name their own profile, which is
+the point of them.
+
+The name is resolved through the framework's own resolver under the set the
+workspace actually selects — `JAATO_PROFILE_SET` from its `.env`, or
+`--set` — so a profile that resolves only through `inherits` counts, and one
+that exists only inside an unselected set is reported as that rather than as
+missing. Four properties:
 
 - **`[]` and `None` are different answers.** `[]` is "this workspace declares
   no profiles", which `--profile` can be refused against; `None` is "I could
@@ -3025,6 +3073,13 @@ Three properties:
   message and the same inline-spec client it always did; the `--profile`
   suggestion appears only when the workspace demonstrably has profiles to
   name.
+- **The set that made resolution succeed is persisted, and the banner
+  carries the flag.** `--profile X --set Y` resolved X only because Y was
+  forced, and the generated client resolves its profile from the workspace
+  `.env` — so `JAATO_PROFILE_SET` is written there (never retargeting one
+  already present). `_provenance` names `--profile` too: its whole claim is
+  to be copy-paste reproducible, and without the flag the printed command
+  re-ran to `missing required --provider / --model`.
 
 ### When the Introspection Tools Misreport Their Own Environment (#966, #823)
 

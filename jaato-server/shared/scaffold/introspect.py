@@ -1492,6 +1492,11 @@ def plugin_config_read_sites(plugin: str) -> Optional[Dict[str, str]]:
     which callers must not render as "not read".  An empty dict is the
     different answer "scanned, and it reads no config key literally".
 
+    A key NESTED inside an object-valued knob is not in here, and must not
+    be: this set answers "is this a top-level ``plugin_configs.<plugin>``
+    knob", and a nested dict's inner names are not.  Nested evidence has its
+    own scanner, :func:`plugin_nested_config_read_sites`.
+
     The scan still over-approximates: a shared helper that reads its own
     ``config`` dict contributes its keys to the plugin that vends it.  That
     bias is deliberate (#910) — the cost of not flagging a typo is a puzzled
@@ -1517,6 +1522,87 @@ def plugin_config_read_sites(plugin: str) -> Optional[Dict[str, str]]:
                 if key and key not in sites:
                     sites[key] = f"{py.name}:{node.lineno}"
     _PLUGIN_READ_SITE_CACHE[plugin] = sites
+    return sites
+
+
+#: Memo for :func:`plugin_nested_config_read_sites`.
+_PLUGIN_NESTED_READ_SITE_CACHE: Dict[str, Optional[Dict[str, str]]] = {}
+
+
+def _nested_read_site_key(node: ast.AST) -> Optional[str]:
+    """The literal key read off ANY config-shaped receiver.
+
+    The wide counterpart of :func:`_read_site_key`.  A key inside an
+    object-valued knob is read off a LOCAL rather than off ``config`` —
+    ``permission`` unpacks ``policy.sanitization`` into ``san_cfg`` and
+    ``…path_scope`` into ``ps_cfg``, then reads
+    ``ps_cfg.get("resolve_symlinks")`` — so the narrow receiver set sees
+    none of them.
+    """
+    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "get" and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and isinstance(node.args[0].value, str)
+            and _is_config_receiver(node.func.value)):
+        return node.args[0].value
+    if (isinstance(node, ast.Subscript)
+            and isinstance(node.slice, ast.Constant)
+            and isinstance(node.slice.value, str)
+            and _is_config_receiver(node.value)):
+        return node.slice.value
+    return None
+
+
+def _is_config_receiver(node: ast.AST) -> bool:
+    """Whether a ``.get`` / subscript receiver names a config-shaped mapping."""
+    base = _config_base(node).lower()
+    return base.endswith("config") or base.endswith("cfg") or base == "opts"
+
+
+def plugin_nested_config_read_sites(plugin: str) -> Optional[Dict[str, str]]:
+    """Where a plugin's source reads each key, at ANY depth.
+
+    The evidence :func:`plugin_config_read_sites` provides for a top-level
+    knob, extended to the names inside an object-valued one — which is what
+    the validator needs once it descends a declared ``properties`` tree.
+
+    WHY A THIRD SCANNER.  The top-level set is narrow ON PURPOSE (a nested
+    dict's inner names are not ``plugin_configs`` knobs), and
+    :func:`plugin_config_keys` is wide for a different question and unions
+    in schema ``properties``, including tool parameters.  Neither answers
+    "does this plugin read a key by this name anywhere", which is the only
+    thing that can stand behind telling an author a NESTED key is dead.
+
+    It over-approximates by construction — a nested name is not attributed
+    to the parent it sits under, so a key declared under one object and read
+    under another reads as live.  That is the #910 bias, deliberately: the
+    cost of not flagging a typo is a puzzled hour; the cost of calling a
+    working knob dead is an author deleting a line that was doing something.
+    Measured against ``permission``: the schema omits sixteen names its own
+    reader consumes, so a completeness claim here would be wrong far more
+    often than right.
+
+    ``None`` means the plugin's source is not in the scanned tree, the same
+    "not checked" its top-level sibling returns.
+    """
+    if plugin in _PLUGIN_NESTED_READ_SITE_CACHE:
+        return _PLUGIN_NESTED_READ_SITE_CACHE[plugin]
+    root = _PLUGIN_DIR / plugin
+    sites: Optional[Dict[str, str]] = None
+    if root.is_dir():
+        sites = {}
+        for py in sorted(root.rglob("*.py")):
+            if "__pycache__" in py.parts or "tests" in py.parts:
+                continue
+            try:
+                tree = ast.parse(py.read_text(encoding="utf-8"))
+            except (SyntaxError, OSError, UnicodeDecodeError):
+                continue
+            for node in ast.walk(tree):
+                key = _nested_read_site_key(node)
+                if key and key not in sites:
+                    sites[key] = f"{py.name}:{node.lineno}"
+    _PLUGIN_NESTED_READ_SITE_CACHE[plugin] = sites
     return sites
 
 

@@ -279,6 +279,16 @@ def _check_provider_dependencies(profile, provider_name, add) -> None:
     fail that honest case.  What the message must do instead is be
     imperative, because for the common case (one machine) it is the whole fix.
 
+    **WHAT THE MESSAGE MAY NOT SAY.**  Its first wording asserted the
+    session "will fail at connect() with an ImportError", which this check
+    cannot know and which is false for a guarded import.  The live case is
+    ``azure_openai``: its closure includes ``azure``, and
+    ``azure_identity_available()`` wraps that import in ``try/except
+    ImportError`` on a path only ``auth: aad`` takes — so a key-auth profile
+    was told it would fail, and it would not.  Same class as #937, in this
+    PR's own new code: the closure is a static fact about the package, the
+    consequence is a claim about a code path nobody walked.
+
     Nothing is imported to answer it: :func:`~shared.scaffold.dependencies.
     provider_import_gaps` probes with ``find_spec``, so ``validate`` stays
     side-effect free.  A provider with no in-tree package reports nothing
@@ -294,10 +304,12 @@ def _check_provider_dependencies(profile, provider_name, add) -> None:
             continue
         run = "; ".join(commands) if commands else f"install {', '.join(missing)}"
         add("warn", "provider_dependency_missing",
-            f"provider '{name}' needs {', '.join(missing)}, which "
-            f"{'is' if len(missing) == 1 else 'are'} not installed here — "
-            f"the profile is valid and the session will fail at connect() "
-            f"with an ImportError.  Run: {run}",
+            f"provider '{name}' imports {', '.join(missing)}, which "
+            f"{'is' if len(missing) == 1 else 'are'} not installed here.  "
+            f"Whether a given session reaches the import depends on which "
+            f"path its configuration takes — some are guarded, some belong "
+            f"to one auth mode — so this is a gap to close before running, "
+            f"not a certain failure.  Run: {run}",
             where=f"provider.{name}")
 
 
@@ -357,6 +369,28 @@ def _session_tool_names() -> set:
     return names
 
 
+def _always_initialized_plugins() -> frozenset:
+    """Plugins the registry wires whether or not ``plugins:`` names them.
+
+    Read from ``PluginRegistry._ALWAYS_INITIALIZE_PLUGINS`` rather than
+    re-spelled, so the two cannot disagree about the set.
+    ``plugin_config_without_plugin`` already exempts it and this check did
+    not — so whitelisting ``list_tools`` without naming ``introspection``
+    produced a ``permission_rule_without_plugin`` for a tool that is CORE
+    and reaches every session's wire, which is the opposite of true.
+
+    Degrades to the empty set rather than raising: a missing attribute costs
+    one over-report, an exception costs the whole validation.
+    """
+    try:
+        from shared.plugins.registry import PluginRegistry
+
+        return frozenset(getattr(
+            PluginRegistry, "_ALWAYS_INITIALIZE_PLUGINS", frozenset()))
+    except Exception:       # pragma: no cover — a diagnostic must not raise
+        return frozenset()
+
+
 def _check_permission_tool_lists(profile, plugins, add) -> None:
     """Check the tool names in ``permission.policy.{white,black}list.tools``.
 
@@ -394,17 +428,28 @@ def _check_permission_tool_lists(profile, plugins, add) -> None:
     * a profile enabling ANY plugin whose tool list is not statically
       knowable — the whole check, not just that plugin's names, because a
       live-session inventory could supply any of them.  The same rule the
-      ``tool_scopes`` check has always applied to one plugin at a time.
+      ``tool_scopes`` check has always applied to one plugin at a time;
+    * a tool belonging to a plugin the registry always initializes
+      (:func:`_always_initialized_plugins`) — ``introspection``'s
+      ``list_tools`` / ``get_tool_schemas`` are core and reach every wire
+      whatever ``plugins:`` says, so they are never "without plugin".
     """
     rules = _permission_rule_tools(profile)
     if not rules:
         return
-    enabled_names = list(getattr(profile, "plugins", None) or [])
-    if any(getattr(plugins.get(p), "dynamic", False) for p in enabled_names):
+    # TWO questions, deliberately two variables.  ``declared`` is what the
+    # AUTHOR wrote, and an empty one means "this profile declares no
+    # surface" — the abstract-base carve-out.  ``enabled`` is what the
+    # session will actually hold, which includes the plugins the registry
+    # wires regardless.  Folding the framework's set into the first would
+    # make every abstract base look like it declared a surface.
+    declared = list(getattr(profile, "plugins", None) or [])
+    enabled_names = declared + [p for p in _always_initialized_plugins()
+                                if p not in declared]
+    if any(getattr(plugins.get(p), "dynamic", False) for p in declared):
         return      # a live-session inventory: nothing here is knowable
     owners = _tool_owners(plugins)
     session = _session_tool_names()
-    enabled = enabled_names
     for rule, name, where in rules:
         if _MCP_TOOL_SHAPE.match(name) or name in session:
             continue
@@ -417,9 +462,9 @@ def _check_permission_tool_lists(profile, plugins, add) -> None:
                 f"disappears at the gate rather than failing loudly",
                 where=where)
             continue
-        if rule != "whitelist" or not enabled:
+        if rule != "whitelist" or not declared:
             continue
-        if not any(h in enabled for h in holders):
+        if not any(h in enabled_names for h in holders):
             add("warn", "permission_rule_without_plugin",
                 f"permission whitelist names '{name}', exposed by "
                 f"{' / '.join(sorted(holders))} — none of which is in "
@@ -1713,6 +1758,19 @@ def _validate_plugin_knobs(cfg_name, cfg, plugins, add):
     _walk_knobs(cfg_name, cfg, pinfo.config_settings, "", sites, True, add)
 
 
+def _nested_sites(cfg_name):
+    """Read-site evidence for names INSIDE an object-valued knob.
+
+    Wrapped so a scanner failure degrades to "no evidence" rather than
+    taking a validation down; the caller reads ``None`` as "not checked",
+    which is also what an out-of-tree plugin returns.
+    """
+    try:
+        return introspect.plugin_nested_config_read_sites(cfg_name)
+    except Exception:       # pragma: no cover — a diagnostic must not raise
+        return None
+
+
 def _walk_knobs(cfg_name, cfg, settings, prefix, sites, strict, add) -> None:
     """Check one level of a plugin config against its declared settings.
 
@@ -1740,7 +1798,8 @@ def _walk_knobs(cfg_name, cfg, settings, prefix, sites, strict, add) -> None:
             if not strict:
                 continue
             if prefix:
-                _report_unknown_nested_knob(cfg_name, path, declared, add)
+                _report_unknown_nested_knob(cfg_name, path, declared,
+                                            _nested_sites(cfg_name), add)
             else:
                 _report_undeclared_name(cfg_name, path, declared, sites, add)
             continue
@@ -1751,27 +1810,55 @@ def _walk_knobs(cfg_name, cfg, settings, prefix, sites, strict, add) -> None:
         _check_knob_value(cfg_name, path, value, setting, add)
 
 
-def _report_unknown_nested_knob(cfg_name, path, declared, add) -> None:
+def _report_unknown_nested_knob(cfg_name, path, declared, sites, add) -> None:
     """Report a key the plugin's schema does not declare INSIDE an object knob.
 
-    Deliberately not routed through :func:`_report_undeclared_name`.  That
-    function's three-way split is evidence-driven — it quotes a
-    ``config.get("<key>")`` site found in the plugin's source — and the scan
-    that produces those sites reads top-level config keys only.  Applying it
-    here would report "no config read site for it appears in the plugin's
-    source" about a key the scan was never capable of finding, which is the
-    check inventing evidence rather than reporting it.
+    The #910 evidence split, one layer down, and it has to be: a declared
+    ``properties`` block is NOT a completeness claim, and treating it as one
+    inverts this whole family's thesis.  Measured on ``permission``, whose
+    ``policy`` tree is the deepest in the tree: ``PermissionPolicy.from_config``
+    reads ``cwd``, ``sanitization.custom_blocked_commands`` and
+    ``path_scope.resolve_symlinks``, and the schema declares none of them.
+    Called typos, all three would have sent an author to delete a line that
+    was working — the exact failure ``_report_undeclared_name`` exists to
+    avoid, reached from the other side.
 
-    What is true at this depth is simpler and stronger: the parent object
-    declares a closed ``properties`` set (a ``free_form`` parent never
-    reaches here), so a name outside it is read by nobody.
+    ``sites`` comes from :func:`~shared.scaffold.introspect.
+    plugin_nested_config_read_sites` rather than its top-level sibling,
+    because a nested key is read off a local (``ps_cfg.get("…")``) that the
+    narrow top-level receiver set deliberately excludes.
+
+    Three outcomes, by what the scan established and nothing beyond it:
+
+    * a read site exists → ``undeclared_knob`` (**warn**), quoting it: the
+      key is live and merely absent from the published schema;
+    * scanned, no site → ``unknown_knob`` (**warn**), saying the parent
+      declares a narrower set than the plugin reads and that this name is in
+      neither;
+    * not scanned (an out-of-tree plugin) → ``unknown_knob`` with the
+      absence of evidence stated as such.
     """
-    valid = ", ".join(sorted(declared)) or "(none)"
+    where = f"plugin_configs.{cfg_name}.{path}"
+    key = path.rsplit(".", 1)[-1]
     parent = path.rsplit(".", 1)[0]
+    site = sites.get(key) if sites else None
+    if site:
+        add("warn", "undeclared_knob",
+            f"'{path}' is absent from the {cfg_name} plugin's "
+            f"get_config_schema(), but the plugin's source reads a config "
+            f"key by that name ({site}) — so it is most likely live and "
+            f"undocumented, and 'explain plugin {cfg_name}' will not show it",
+            where=where)
+        return
+    valid = ", ".join(sorted(declared)) or "(none)"
+    tail = ("and no config read site for it appears in the plugin's source "
+            "either, so it is most likely a typo"
+            if sites is not None else
+            "and the plugin's source is not in the scanned tree, so whether "
+            "it is read anyway was not checked")
     add("warn", "unknown_knob",
-        f"'{path}' is not declared by the {cfg_name} plugin — "
-        f"'{parent}' accepts only: {valid}",
-        where=f"plugin_configs.{cfg_name}.{path}")
+        f"'{path}' is not declared by the {cfg_name} plugin — {tail} "
+        f"('{parent}' declares: {valid})", where=where)
 
 
 def _check_template_routing(cfg, add):

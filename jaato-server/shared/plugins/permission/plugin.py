@@ -658,6 +658,13 @@ class PermissionPlugin(RunnerForwardingMixin):
                             "default": "deny",
                             "description": "Default action when no rule matches",
                         },
+                        "cwd": {
+                            "type": "string",
+                            "description": (
+                                "Working directory relative path_scope rules "
+                                "resolve against.  Unset = the session's own."
+                            ),
+                        },
                         "sanitization": {
                             "type": "object",
                             "description": "Input sanitization for CLI commands",
@@ -683,6 +690,15 @@ class PermissionPlugin(RunnerForwardingMixin):
                                     "default": [],
                                     "description": "Dangerous commands to allow (e.g. 'git')",
                                 },
+                                "custom_blocked_commands": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "default": [],
+                                    "description": (
+                                        "Extra commands to block, beyond the "
+                                        "built-in dangerous set"
+                                    ),
+                                },
                                 "path_scope": {
                                     "type": "object",
                                     "description": "Filesystem path restrictions",
@@ -707,6 +723,14 @@ class PermissionPlugin(RunnerForwardingMixin):
                                             "type": "boolean",
                                             "default": True,
                                             "description": "Block parent directory traversal (../)",
+                                        },
+                                        "resolve_symlinks": {
+                                            "type": "boolean",
+                                            "default": True,
+                                            "description": (
+                                                "Judge a path by its symlink "
+                                                "TARGET rather than its name"
+                                            ),
                                         },
                                         "allow_home": {
                                             "type": "boolean",
