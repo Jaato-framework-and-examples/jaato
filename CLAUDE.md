@@ -545,6 +545,51 @@ The `interactive_shell` plugin lets the model drive any user-interactive command
 
 **Use cases:** Database REPLs (`psql`, `mysql`), SSH sessions, debuggers (`gdb`, `pdb`), package manager wizards (`npm init`), interactive installers, language REPLs (`python`, `node`), container shells (`docker exec -it`).
 
+### WebMCP Plugin (`shared/plugins/webmcp/`)
+
+Invokes the tools a **web page** declares for agents via
+[WebMCP](https://github.com/webmachinelearning/webmcp)
+(`document.modelContext`) — so the model drives a web app through its own
+declared operations instead of scraping and clicking. WebMCP is *not* an MCP
+transport (no server, no JSON-RPC); it is an in-page JS API, so the plugin
+drives a browser over `shared/cdp.py`.
+
+**Not in the default plugin set** — it drives a browser. Enable it explicitly
+in a profile's `plugins:` list.
+
+| Tool | Purpose |
+|------|---------|
+| `webmcp_list_tools` | Harvest the open page's currently-declared tools (name, description, parsed `input_schema`, `origin`). Auto-approved (read-only). |
+| `webmcp_call` | Invoke one page tool by name. **Not** auto-approved — it runs the page's own code and can post, delete, or buy on the user's behalf. |
+
+**Why two tools and not one schema per page tool.** A page's toolset changes on
+navigation and with app state, while the registry exposes schemas once at
+configure time — so page tools are *discovered* through this pair rather than
+registered. The security consequence is the larger half: arriving as a tool
+**result** rather than as `ToolSchema` objects, page-authored names and
+descriptions never enter the trusted schema block, so the existing
+`TRAIT_UNTRUSTED_CONTENT` boundary covers them and neither
+`TRAIT_UNTRUSTED_SCHEMA` nor `sanitize_untrusted_schema` is needed. Each entry
+is labelled with the `origin` Chrome reports for it.
+
+**The shipped browser API differs from the published explainer in six places**
+(measured on Chrome for Testing 153): the API is on `document` not `navigator`;
+there is no `unregisterTool` or `provideContext` (unregistration is via
+`AbortSignal`); `inputSchema` and the call arguments and the result are all
+**JSON strings**; and `executeTool` requires a live `RegisteredTool`, not a
+name. Chrome also does **not validate arguments** — a missing `required`
+property reaches the page as `undefined`. See
+[the WebMCP assessment](docs/design/webmcp.md) §1.1 for the full table.
+
+| Config key (`plugin_configs.webmcp`) | Env | Purpose |
+|---|---|---|
+| `page_url` | `JAATO_WEBMCP_PAGE_URL` | Page to drive; an already-open tab with this URL is preferred over creating one |
+| `cdp_url` | `JAATO_WEBMCP_CDP_URL` | Attach to a running browser instead of launching (left running on shutdown) |
+| `binary` | `JAATO_WEBMCP_BINARY` | Browser binary when launching |
+| `user_data_dir`, `headless`, `extra_args`, `connect_timeout`, `call_timeout` | — | Launch and deadline knobs |
+
+Requires Chrome/Edge 149+ (origin trial), or `chrome://flags/#enable-webmcp-testing`.
+
 ### Webhook Plugin (`shared/plugins/webhook/`)
 
 The webhook plugin provides an inbound HTTP listener for receiving external webhooks (GitHub, Slack, Jira, etc.) and delivering them to agent sessions via subscribe/poll tools. Enables long-running daemon sessions that react to external events.

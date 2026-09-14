@@ -28,10 +28,16 @@ lines on top of both.
 
 ## Status & verification disclaimer
 
-Framework claims verified against `c232cb9` (2026-09-05).  **Steps 1-3 of §7
+Framework claims verified against `c232cb9` (2026-09-05).  **Steps 1-4 of §7
 have since landed on this branch**, so §2 and §5 describe defects that are now
 FIXED; each says so inline rather than being edited away, because the argument
-of this document is that reading the proposal is what found them.  WebMCP claims are
+of this document is that reading the proposal is what found them.
+
+**§1's API description is now measured, not read.**  The spike (step 4) ran
+against Google Chrome for Testing **153.0.8010.36**, and the shipped surface
+differs from the explainer in six places -- see §1.1.  Everything in §1 that is
+not in that table came from the published explainer and should be re-checked
+before being relied on.  WebMCP claims are
 from the `webmachinelearning/webmcp` explainer, its `implementation-status.md`,
 and the spec repo's issue tracker on the same date; the API surface has already
 moved twice (see §1), so **re-check the spec before writing code against it**,
@@ -86,6 +92,46 @@ Leo.  Consumed today by ChatGPT Desktop.  Firefox and Safari are in the working
 group and have shipped nothing.
 
 [#101]: https://github.com/webmachinelearning/webmcp/issues/101
+
+### 1.1 What Chrome actually ships (measured, not read)
+
+Probed against **Google Chrome for Testing 153.0.8010.36** with
+`shared/cdp.py`, driving a page that really registers tools.  The published
+explainer and every secondary write-up disagree with the browser in six
+places, and a client written from the documentation would fail on all six:
+
+| Claim in the docs | Chrome 153 |
+|---|---|
+| `navigator.modelContext` | **absent** — the API is on `document` |
+| `unregisterTool()` | **absent** — unregistration is via `AbortSignal` |
+| `provideContext()` / `clearContext()` | **absent** |
+| `inputSchema` is an object | it is a **JSON string** |
+| `executeTool(name, args)` | refuses a name: `TypeError … not of type 'RegisteredTool'` |
+| arguments are an object | refused (`Failed to parse input arguments`) — they are a **JSON string** |
+
+The prototype is exactly `["ontoolchange", "executeTool", "getTools",
+"registerTool"]`.  A harvested descriptor carries `{name, title, description,
+inputSchema, origin, window}` — and `window` is a live back-reference, so
+`JSON.stringify` on a tool throws *Converting circular structure to JSON*; the
+fields have to be named explicitly.
+
+Two findings changed the design rather than just the code:
+
+**`origin` is reported per tool.**  Chrome tells you which origin authored each
+tool.  That is the provenance label §5 wanted and could not otherwise have
+built, and it is now carried through into the listing the model sees.
+
+**The browser does not validate arguments.**  A call omitting a `required`
+property *resolved successfully*, with `undefined` reaching the page's
+`execute()`.  `inputSchema` is advisory documentation for the model, never an
+enforced contract — so a plugin must not treat a successful return as evidence
+the arguments were right, and the tool description says so.
+
+Error taxonomy, also measured: a page-side `execute()` that throws surfaces as
+`UnknownError: "Tool was executed but the invocation failed…"`, which is
+indistinguishable from other invocation failures — the page's own error message
+does **not** reach the caller.  That is a real limitation for diagnostics.
+
 
 ---
 
@@ -201,6 +247,27 @@ should expose two stable core tools —
 the registry has to survive: the model re-lists when it needs to, and a stale
 listing costs one recoverable unknown-tool error rather than a corrupted schema
 block.
+
+> **BUILT** (step 7.4), and the shape turned out to matter for a second reason
+> that outranks the first.
+>
+> Churn was the stated motivation.  The **security** consequence is the larger
+> half: because page tools arrive as a tool *result* rather than as
+> `ToolSchema` objects, page-authored names and descriptions never enter the
+> trusted schema block at all.  They are therefore covered by the boundary that
+> already existed — `webmcp_list_tools` declares `TRAIT_UNTRUSTED_CONTENT` and
+> the session wraps its result — and the plugin needs **neither**
+> `TRAIT_UNTRUSTED_SCHEMA` nor `sanitize_untrusted_schema`.  Step 2's machinery
+> is what makes that safe, but this plugin reaches safety by not needing it.
+>
+> Had the obvious design been taken instead (one `ToolSchema` per page tool,
+> regenerated on `toolchange`), every page tool would have landed in the
+> trusted region and the sanitiser would have been load-bearing on every
+> navigation.  The deferred-discovery shape is the cheaper *and* the safer one.
+>
+> `webmcp_call` is deliberately **not** auto-approved: it runs the page's own
+> code and can post, delete, or buy on the user's behalf.  `webmcp_list_tools`
+> is a read and is auto-approved.
 
 ---
 
@@ -324,29 +391,38 @@ it should be argued on its own merits later rather than smuggled in on WebMCP's.
 1. ~~**Fix the `sse` help line**~~ — **DONE.**  The help now states that stdio
    is the only transport, that `"type"` is ignored, and that a URL entry will
    not connect.  Implementing HTTP/SSE transports remains open as its own
-   feature (egress, auth, and secret-handling questions of its own).
+   feature.
 2. ~~**Close the schema-text trust gap**~~ — **DONE.**  `TRAIT_UNTRUSTED_SCHEMA`
    + `sanitize_untrusted_schema()` + a fenced system-instruction listing,
-   guarded by `test_untrusted_schema_is_sanitized.py` with four reversions.
-   See §5 — including the worse instance the implementation turned up.
-3. ~~**Lift `cdp.py`**~~ — **DONE.**  Now `shared/cdp.py`, provider-neutral,
-   with `chrome_ai` as its first consumer.  See §3.
-4. **Spike a `webmcp` tool plugin** behind deferred discovery (§4), against the
-   Chrome 149 origin trial and one of the `WebMCP-org/examples` pages.  Keep it
-   out of the default plugin set.  **Not started** — it needs a browser with the
-   origin trial enabled and a page that actually registers tools, so it cannot
-   be written or validated from the tree alone.  Steps 1-3 are its
-   prerequisites and are now in place.
-5. **Re-evaluate when a second engine ships non-trial support.**  Until Firefox
-   or Safari implements, or a site jaato users actually care about registers
-   tools, the client stays a spike.
+   guarded by `test_untrusted_schema_is_sanitized.py`.  See §5.
+3. ~~**Lift `cdp.py`**~~ — **DONE.**  Now `shared/cdp.py`, provider-neutral.
+   First exercised against a real browser by step 4, which is what validated
+   the lift: launch, target enumeration, attach, evaluate, teardown.  See §3.
+4. ~~**Spike a `webmcp` tool plugin**~~ — **DONE**, and it works end to end
+   against real Chrome 153 driving a real WebMCP page (the page's DOM actually
+   changed — the tools drove the application, not a simulation).
+   `shared/plugins/webmcp/` exposes `webmcp_list_tools` + `webmcp_call` behind
+   deferred discovery, on `shared/cdp.py`.  **Kept out of the default plugin
+   set**: it drives a browser, and a session that did not ask for one should
+   not get one.  Enable it in a profile's `plugins:` list.  23 unit tests
+   (stubbed at the one CDP seam, with payloads transcribed from a real Chrome)
+   plus one opt-in integration test gated on `JAATO_WEBMCP_IT_BINARY`, because
+   CI has no WebMCP-capable browser.
+5. **Re-evaluate when a second engine ships non-trial support.**  **Still the
+   open item.**  Firefox and Safari have shipped nothing; the surface is
+   young enough that six documented behaviours are already wrong (§1.1), and
+   `unregisterTool` / `provideContext` appear in the explainer but not in the
+   browser.  Treat the plugin as a spike against a moving target, not as a
+   supported integration, until a second engine ships.
 
-Steps 1-3 were worth doing on their own terms and would have been the right call
-even if WebMCP were abandoned tomorrow — which is the honest case for this
-survey.  Reading the proposal carefully is what found a live defect (step 1) and
-a real injection surface (step 2, in two places, one of them worse than the one
-originally argued).  Neither is a WebMCP problem.  WebMCP would only have made
-the second one reachable without an operator's consent.
+**What this survey actually bought.**  Steps 1-3 were worth doing on their own
+terms and would have been right even if WebMCP were abandoned tomorrow: reading
+the proposal carefully found a live defect (step 1) and a real injection surface
+(step 2, in two places, one worse than the one first argued).  Neither is a
+WebMCP problem — WebMCP would only have made the second reachable without an
+operator's consent.  Step 4 then found that the published API is wrong in six
+places, which is the argument for keeping step 5 open rather than promoting the
+plugin.
 
 ---
 

@@ -621,6 +621,21 @@ CATALOG: Dict[str, EnvClass] = {
         "the profile's own `model` field selects the model"),
     "ZHIPUAI_THINKING_BUDGET": EnvClass(SESSION, "plugin_configs.zhipuai.api_params.thinking_budget",
         "zhipuai exposes the knob; the env var is its fallback"),
+
+    # ---- webmcp (driving a page's own declared tools) -----------------
+    # All three have typed homes under ``plugin_configs.webmcp``: which page
+    # to drive and which browser to drive it with are per-session choices --
+    # two sessions in one daemon may legitimately be pointed at different
+    # web apps, which is the definition of ``session`` scope.  None is a
+    # credential (the browser holds the user's own auth, and this plugin
+    # never sees it), so none needs the credential policy.
+    "JAATO_WEBMCP_PAGE_URL": EnvClass(SESSION, "plugin_configs.webmcp.page_url",
+        "which page to drive; a per-session target, not a deployment fact"),
+    "JAATO_WEBMCP_CDP_URL": EnvClass(SESSION, "plugin_configs.webmcp.cdp_url",
+        "attach to an already-running browser instead of launching one"),
+    "JAATO_WEBMCP_BINARY": EnvClass(SESSION, "plugin_configs.webmcp.binary",
+        "browser binary used when launching"),
+
 }
 
 #: THE RATCHET.  Session-scoped vars that have no typed key yet, with the
