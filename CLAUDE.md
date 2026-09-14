@@ -2844,6 +2844,273 @@ stale one cannot outlive `pyproject.toml`. Best-effort by construction: it runs
 inside discovery's error path, and a diagnostic that raises is worse than a
 vague one.
 
+### Six Things a Session Log Said the Authoring Surface Still Would Not
+
+A 2026-09 transcript of an assistant bringing up a workspace from scratch —
+venv, a simple client, then a two-stage GitLab MR cascade — records eight
+corrections. Three were already closed (`deprecated_system_instructions`,
+`explain services`, the `configure_service_auth` chain), one had since been
+*inverted* (#950 made `plugin_configs.<plugin>` apply whether or not the
+plugin is in `plugins:`, so the transcript's own correction is now false),
+and what survived was six gaps of one shape: **the author wrote something
+that had no effect and nothing said so.**
+
+That family already has four entries — #910, #925, #947, #950 — and the gap
+each of these closes is one layer out from where those stopped.
+
+**A profile's own top-level keys were never checked.** `unknown_knob` covers
+`plugin_configs.<plugin>.<knob>`, `trace:` refuses its own unknown keys,
+`runtime_limits` parks them in `extra` — and the outermost layer had no
+reporter at all. `SubagentProfile` construction is keyword-explicit (the
+snapshot-version note in `config.py` says so), so a key outside
+`PROFILE_FILE_KEYS` is read by nobody, silently.
+
+The transcript contains a live instance nobody noticed: told *"te falta
+activar el config_root"*, the author added `config_root: .jaato` to two base
+profiles. `config_root` is a session/SDK parameter and **not a profile key**,
+so the line did nothing; what actually fixed the session was the duplicated
+`.jaato/` path prefix removed in the same edit (now
+`redundant_config_root_prefix`). The session ended successfully with a wrong
+belief baked into the workspace.
+
+| Finding | Severity | Fires when |
+|---------|----------|-----------|
+| `unknown_profile_key` | warn | a top-level key the loader does not read; a near-miss from the accepted set is named (`plugins_configs` → `plugin_configs`) |
+| `derived_profile_key` | warn | the key IS a `SubagentProfile` field and is DERIVED, not read from the file |
+
+The second exists because `explain profile` renders
+`dataclasses.fields(SubagentProfile)`, and two of those fields cannot be
+written into a file at all: `preloaded_plugins` and `tool_scopes` come out of
+the `plugins:` list's own modifiers (`todo(preload)`, `memory(tools:[a,b])`).
+The page was **advertising two keys a file may not set**; it now says so
+beside each, reading the same `PROFILE_DERIVED_FIELDS` constant the finding
+does.
+
+Warn rather than error, the posture the whole family takes: an `inherits`
+base may carry a key a later version reads, and a snapshot may be newer than
+the installation reading it. `PROFILE_FILE_KEYS` is a declared constant
+because the loader reads four of its keys through block parsers and one
+(`env`) through a parameter default, so no scan alone could produce it —
+and `test_profile_file_keys.py` AST-scans the six loader functions and fails
+the build if any literal key read is missing from it. 26 of 27 keys are
+covered that way.
+
+**`explain plugin permission` rendered the whole policy vocabulary as one
+line.** `policy  object  Permission policy rules` — while
+`get_config_schema()` has always declared `defaultPolicy` with its
+`allow`/`deny`/`ask` enum, `whitelist.tools`, `blacklist.patterns` and the
+four-deep `sanitization.path_scope.*` tree. So the only honest route to the
+shape was `shared/plugins/permission/policy.py`, and the transcript took it —
+for a page whose entire job is to make that unnecessary.
+
+`ConfigSetting` gains `children` and `free_form`, and both surfaces descend:
+`explain` prints the tree at every declared depth, `validate` checks names
+and values at every declared depth. Nesting is rendered **fully**, unlike a
+tool PARAMETER, which stops at one level (#1020): the reader's need is the
+opposite — a nested parameter is one call's argument, while `policy` IS the
+plugin's whole configuration surface. Descent stops at
+`additionalProperties` (`permission.evaluators` maps tool names to scripts,
+so every key there is authored and none is a typo); that frontier is
+declared by the plugin, marked in the render, and is where `validate` stops
+reporting unknown names. `permission.policy.defaultPolicy: denied` is now
+`invalid_knob_value`, an error; it used to validate clean.
+
+**A declared `properties` block is NOT a completeness claim**, and the first
+version of this descent read it as one — which inverts the whole family's
+thesis. `PermissionPolicy.from_config` reads `cwd`,
+`sanitization.custom_blocked_commands` and `path_scope.resolve_symlinks`,
+and the schema declared none of them, so all three were reported as typos:
+a knob that *does* something, told it does not, whose remedy is deleting a
+working line. Measured across the plugin, the schema omits **sixteen** names
+its own reader consumes, so the completeness claim would be wrong far more
+often than right.
+
+So the nested finding is **evidence-driven**, exactly as `_report_undeclared_name`
+is one layer up: a read site → `undeclared_knob` quoting it, no site →
+`unknown_knob`, not scanned → the absence of evidence stated as such. The
+evidence needs a third scanner (`plugin_nested_config_read_sites`), because a
+nested key is read off a LOCAL — `ps_cfg.get("resolve_symlinks")` — and
+`_TOP_LEVEL_CONFIG_RECEIVERS` excludes those on purpose (a nested dict's
+inner names are not `plugin_configs` knobs). Widening that set would have
+been the wrong fix twice over. The three keys above are now declared too, so
+`explain plugin permission` shows them.
+
+**And so are the five an author actually writes.** `agent_name`,
+`config_path`, `workspace_path`, `channel_type` and `channel_config` are read
+straight off `initialize(config)`, and someone configuring a webhook approval
+channel had no route to their shape but the source — which is the sentence
+this whole section opens with. `channel_config` is declared
+`additionalProperties`, because the names inside it (`endpoint`, `headers`,
+`auth_token`, `timeout`, …) belong to the CHANNEL and nothing in this plugin
+should judge them.
+
+**The gap is a measurement before it is a rule.** Reconciling every in-tree
+plugin's schema against its own reader gives 123 undeclared reads across 26
+plugins — and the number is not one number: 33 are the keys
+`PluginRegistry._augment_plugin_config` INJECTS into every plugin's config
+(`workspace_path` / `config_root` / `session_id` / `agent_name`, `setdefault`
+so an author may still override one), and the rest span the block an author
+writes, a nested dict with its own owner, and *a different file the block
+points at* — `permission.config_path` names a permissions JSON whose own keys
+(`version`, `channel`) are not `plugin_configs.permission` keys at all.
+
+So `scripts/plugin_schema_census.py` ships as a **census, not a guard**, with
+its output committed at [Plugin schema census](docs/design/plugin-schema-census.md)
+and `permission` worked through site by site as the one audited row. A
+ratchet needs a definition before it needs a baseline: seeded today it would
+freeze that four-way ambiguity as though it were a fact, and its
+stale-entry rule would then charge every unrelated PR that declares a knob
+with updating a number nobody can re-derive. If it becomes one, the thing to
+count is the block an author writes — keys read off `initialize(config)` —
+said so in its docstring, with the other three surfaces a documented
+exclusion.
+
+**The permission whitelist was unchecked against the tool inventory
+`tool_scopes` has been checked against since the validator shipped.** One key
+over, and the key where being wrong is expensive: under `defaultPolicy: deny`
+a name matching nothing is a permanent denial of a tool the author believes
+they approved, and the runtime symptom is the one #951 exists to make
+legible — the call reaches the gate and vanishes. It is also the cheapest
+thing in a profile to misspell, because nothing else in the file repeats the
+name.
+
+| Finding | Severity | Both lists? |
+|---------|----------|-------------|
+| `unknown_tool` | warn | yes — the name is exposed by no installed plugin and is not a framework session tool |
+| `permission_rule_without_plugin` | warn | **whitelist only** — the tool exists and its plugin is absent from `plugins:`, so the rule governs a tool that never reaches the wire |
+
+The blacklist is deliberately exempt from the second: denying a tool the
+profile does not enable is defence in depth, and a profile that adds the
+plugin later keeps the protection it already wrote. Silent by design: a
+profile whose `plugins:` list is EMPTY (an abstract base declares no
+surface — the carve-out `missing_model` already uses), a name of MCP shape
+(`mcp__server__tool` / `mcp.server.tool`, whose inventory comes from the
+servers a LIVE session connects to), the framework's own session tools
+(`signal_completion`, `askPermission`), and a tool belonging to
+`PluginRegistry._ALWAYS_INITIALIZE_PLUGINS` — `introspection`'s `list_tools`
+/ `get_tool_schemas` are core and reach every wire whatever `plugins:` says,
+the exemption `plugin_config_without_plugin` already applies and this check
+initially dropped. The set is read from the registry, not re-spelled.
+
+"What the author declared" and "what the session will hold" are two
+variables for that reason: folding the framework's always-initialized set
+into the first would make every abstract base look like it declared a
+surface.
+
+**`validate` never asked whether the provider's SDK was installed.** It did
+not import `shared/scaffold/dependencies.py` at all, while both halves of the
+answer lived there: the AST closure of the provider package, and the
+import-name → extra index that turns a missing module into the `pip install`
+line. So `provider: azure_openai` with no `openai` validated clean and died
+at `connect()` with an ImportError several layers from anything the author
+wrote — the transcript's first runtime error.
+
+```
+[warn] provider 'azure_openai' needs azure, openai, which are not installed
+here — the profile is valid and the session will fail at connect() with an
+ImportError.  Run: pip install 'jaato-server[azure-openai]'
+```
+
+`provider_import_gaps` probes with `find_spec`, importing nothing, because
+`validate` is required to be side-effect free and a provider SDK's import can
+register handlers, read environment or open a config file (`_health`, which
+serves an operator-requested report, still imports; a subprocess test asserts
+the difference, with a control run that would notice an import). Every tier's
+provider is checked too — a tier binds a (provider, model) PAIR (#1036), and
+the second provider is the one nobody notices until `enter_tier`. **Warn**,
+not error: validating a workspace from a machine that is not the one that
+will run it is legitimate.
+
+**And the message asserts no runtime consequence.** Its first wording said
+the session "will fail at `connect()` with an ImportError", which a static
+import closure cannot know and which is false for a guarded import:
+`azure_openai`'s closure includes `azure`, and `azure_identity_available()`
+wraps that import in `try/except ImportError` on a path only `auth: aad`
+takes — so a key-auth profile was told it would fail, and it would not. Same
+class as #937, in this change's own new code. What it says now is what it
+measured: the package imports these names, they are not installed here, and
+whether a session reaches them depends on which path its configuration takes.
+
+Only TOP-LEVEL names are probed, so a namespace
+package whose submodule is absent reads as present (`google` resolves from
+`google-api-core`); that blind spot is `_health`'s too, and it is the safe
+direction.
+
+**Processors declared behind a tool that is not on the wire.**
+`_should_hide_signal_completion` gate 1 hides `signal_completion` whenever no
+`completion_payload_schema` is declared, so a profile carrying
+`completion_processors` and no schema has a gate that can never run — the
+agent hunts for the tool through `list_tools`, the nudge budget drains, and
+the driver is handed `None` by a session that looked like it ran. That is
+exactly the state the transcript spent an afternoon in, and the fact was
+already written down: `docs/design/completion-gate.md` §9 is why
+`jaato-scaffold new sweep` emits the schema, the processor and the profile
+keys as ONE set. Nothing enforced it for a profile written by hand, which is
+the only way to reach the state. `completion_processors_without_schema`,
+**error**, matching `completion_asset_missing` — the two are the same defect
+by different routes. Silent for a profile binding neither `model` nor
+`model_tiers`: processors are inherited, so every concrete descendant is
+checked in resolved form.
+
+**And the OTHER gate on `signal_completion` is not a profile key at all.** A
+root session on an interactive client (`terminal` / `web` / `chat`) hides the
+tool; `api` keeps it. So one profile completes under a headless driver and
+cannot complete under the TUI, with the same files — the one gate an author
+cannot see by reading their own workspace, and `explain` stated it only as
+hand-written prose on one page. It is now **probed**
+(`introspect.client_gate()`, which exercises `LifecycleTools` once per
+`ClientType`) and rendered on both `explain completion` and `explain plugin
+lifecycle`, so it cannot drift from the gate it describes.
+
+**`new client` always emitted the inline spec.** The template's comment said
+*"Inline spec so this runs before you have a profile. Swap for
+profile=…"* — and the generator always wrote the spec, whatever the workspace
+already had in it, while the only message an author saw when they supplied no
+flags was `missing required --provider / --model`: the inline answer, pointing
+away from the one form that can carry plugins, a persona, GC, ceilings and a
+completion schema. The transcript's first correction was *"en lugar de un
+.env, usa un profile"*.
+
+```bash
+jaato-scaffold new client --workspace . --profile collector
+```
+
+`--profile` is mutually exclusive with `--provider`/`--model` (two bindings
+for one session, where the profile wins at runtime, so the flags would
+decide nothing), refused on `--transport in_process` where the embedded
+client IS the binding, and **refused by name on an archetype that opens no
+session it can bind**. That last one is derived from the template rather
+than tabulated — the `__SESSION_BINDING__` placeholder is what receives the
+binding — because a hardcoded list is how the flag came to be accepted where
+it could not be honoured: `new cascade --profile worker` resolved the name,
+accepted it, and emitted the `"<profile-name>"` placeholder, byte-identical
+to passing nothing. A cascade's stages each name their own profile, which is
+the point of them.
+
+The name is resolved through the framework's own resolver under the set the
+workspace actually selects — `JAATO_PROFILE_SET` from its `.env`, or
+`--set` — so a profile that resolves only through `inherits` counts, and one
+that exists only inside an unselected set is reported as that rather than as
+missing. Four properties:
+
+- **`[]` and `None` are different answers.** `[]` is "this workspace declares
+  no profiles", which `--profile` can be refused against; `None` is "I could
+  not look", which must not become "your profile does not exist".
+- **The workspace `.env` is never rewritten for a `--profile` client**, even
+  under `--force`: that file is where `JAATO_PROFILE_SET` lives, and this
+  archetype's template carries a provider/model pair the profile supersedes.
+- **With no `--profile`, nothing changes.** An empty workspace gets the same
+  message and the same inline-spec client it always did; the `--profile`
+  suggestion appears only when the workspace demonstrably has profiles to
+  name.
+- **The set that made resolution succeed is persisted, and the banner
+  carries the flag.** `--profile X --set Y` resolved X only because Y was
+  forced, and the generated client resolves its profile from the workspace
+  `.env` — so `JAATO_PROFILE_SET` is written there (never retargeting one
+  already present). `_provenance` names `--profile` too: its whole claim is
+  to be copy-paste reproducible, and without the flag the printed command
+  re-ran to `missing required --provider / --model`.
+
 ### When the Introspection Tools Misreport Their Own Environment (#966, #823)
 
 Two findings of one shape, and it is the one thing a diagnostic must not do:
@@ -5682,5 +5949,6 @@ This is not optional cleanup — treat missing or inaccurate docstrings as a def
 - [Agent Continuity Pattern](docs/design/agent-continuity.md) - `{{continuity_scope}}` + memory plugin enrichment + raw/curated lifecycle: persona-level continuity across sessions composed from existing primitives, no new framework code. Reference impl in `jaato-knowledge-manager/.jaato.example/`.
 - [Model Tiers × Prompt Caching](docs/design/model-tier-prompt-cache.md) - What `enter_tier` costs when prompt caching is on: cache is keyed per model, so an in-place tier switch re-reads the whole prefix cold (break-even ~6 consecutive calls at the new tier). Covers the `_wire_cache_plugin` gap that made profile cache knobs inert, the system-block tier line that invalidates BP1, and the per-provider knob divergence + proposed common `cache:` field.
 - [MiniMax, Kimi and MiMo providers](docs/design/minimax-kimi-mimo-providers.md) - Design for three first-party OpenAI-compatible providers (`minimax`, `kimi`, `mimo`) and the framework prerequisite they share: **reasoning replay** — sending an assistant turn's `reasoning_content` back on the next request of a tool-call loop, which the session currently drops from history and every OpenAI-shaped converter ignores. Covers the surface decision (chat completions, not the Anthropic shims), per-vendor thinking-control dialects, tool-choice vocabularies, catalog vs table context resolution, error taxonomies, and the registration checklist.
+- [Plugin schema census](docs/design/plugin-schema-census.md) - Which config keys each plugin READS that its `get_config_schema()` does not DECLARE, measured tree-wide by `scripts/plugin_schema_census.py`. A census, deliberately **not** a guard: the raw count spans four surfaces (framework-injected keys, the block an author writes, a nested dict with its own owner, and a separate file the block points at), and a ratchet seeded before those are separated would freeze the ambiguity as a fact. `permission` is worked through site by site as the one audited row.
 - [AppArmor Setup](docs/apparmor-setup.md) - Kernel-enforced workspace isolation. WS deployments confine automatically when AppArmor is available; IPC clients opt in via `IPCClient(..., apparmor=True)` (defaults to `False`).
 - [GCP Setup Guide](docs/gcp-setup.md) - Setting up GCP project for Vertex AI

@@ -19,6 +19,7 @@ exists to surface.
 
 from __future__ import annotations
 
+import difflib
 import json
 import os
 import re
@@ -185,6 +186,293 @@ def _check_plugin_configs_expose_tools(profile: Any, plugins, add) -> None:
             where=f"plugin_configs.{cfg_name}")
 
 
+#: A tool name this shape belongs to an MCP server, whose inventory comes from
+#: the servers a LIVE session connects to — never from anything installed here.
+#: ``mcp/plugin.py`` normalizes every exposed name to ``mcp__<server>__<tool>``,
+#: and ``shared/tool_id_map.py`` carries the dotted ``mcp.server.tool`` form, so
+#: the shape is the signal.  Names matching it are exempt from the unknown-name
+#: check: reporting one would be the validator asserting the absence of a tool
+#: it has no way to see.
+_MCP_TOOL_SHAPE = re.compile(r"^mcp[._]")
+
+
+def _check_completion_gate_shape(profile, add) -> None:
+    """Flag ``completion_processors`` declared with no payload schema.
+
+    ``LifecycleTools._should_hide_signal_completion`` gate 1: **no declared
+    ``completion_payload_schema`` → the tool is not on the wire**, root and
+    subagent alike.  So a profile carrying processors and no schema has
+    declared a gate on a tool the model cannot call — the processors never
+    run, the agent hunts for ``signal_completion`` through ``list_tools``,
+    the framework spends its nudge budget re-prompting, and the driver is
+    handed ``None`` by a session that looked like it ran.
+
+    The fact is already written down — ``docs/design/completion-gate.md`` §9
+    is the reason ``jaato-scaffold new sweep`` emits the schema, the
+    processor and the profile keys as ONE set — and nothing enforced it for
+    a profile written by hand, which is the only way to reach this state.
+
+    **Error**, matching ``completion_asset_missing``: the two are the same
+    defect reached by different routes (a schema that does not resolve, and
+    one never declared), and both leave a session that cannot complete.
+
+    Silent for a profile that binds NEITHER ``model`` nor ``model_tiers``.
+    That is the discriminator ``missing_model`` already uses for an abstract
+    base, and it costs no coverage: processors are inherited, so every
+    concrete descendant is checked in resolved form, where the pair is
+    either completed by the child or reported against it.
+    """
+    procs = getattr(profile, "completion_processors", None) or ()
+    if not procs:
+        return
+    if getattr(profile, "completion_payload_schema", None):
+        return
+    if not (getattr(profile, "model", None)
+            or (getattr(profile, "model_tiers", None) or {})):
+        return          # abstract base — its concrete children carry the check
+    add("error", "completion_processors_without_schema",
+        f"{len(procs)} completion processor(s) declared and no "
+        f"completion_payload_schema — signal_completion is then hidden from "
+        f"the session entirely, so the gate can never run and the agent "
+        f"cannot complete at all.  Declare completion_payload_schema, or "
+        f"drop the processors (`jaato-scaffold explain completion`)",
+        where="completion_processors")
+
+
+def _profile_provider_names(profile, provider_name) -> List[str]:
+    """Every provider a session built from this profile could connect to.
+
+    The flat ``provider:`` and each ``model_tiers.<tier>.provider`` — a tier
+    binds a (provider, model) PAIR (#1036), so a profile whose planner tier
+    runs on one vendor and whose voice tier runs on another needs both SDKs
+    installed, and the second is the one nobody notices until ``enter_tier``.
+    """
+    names = [provider_name] if provider_name else []
+    for entry in (getattr(profile, "model_tiers", None) or {}).values():
+        tier_provider = entry.get("provider") if isinstance(entry, dict) else None
+        if isinstance(tier_provider, str) and tier_provider:
+            names.append(tier_provider)
+    seen: List[str] = []
+    for n in names:
+        if n not in seen:
+            seen.append(n)
+    return seen
+
+
+def _check_provider_dependencies(profile, provider_name, add) -> None:
+    """Flag a provider whose SDK is not installed.
+
+    Providers declare their vendor SDK as an optional extra — ``openai``
+    lives behind ``jaato-server[openai]``, ``boto3`` behind
+    ``[bedrock]`` — so the normal shape of a first run against a new
+    provider is a profile that validates clean and dies at ``connect()``
+    with an ``ImportError`` several layers from anything the author wrote.
+    The validator knew the provider name and never asked the question: it
+    does not import :mod:`~shared.scaffold.dependencies` at all, while both
+    halves of the answer already lived there — the AST closure of the
+    provider package, and the import-name → extra index that turns a missing
+    module into the ``pip install`` line to run.
+
+    **Warn, not error.**  Validating a workspace from a machine that is not
+    the one that will run it is legitimate — an author checking profiles in
+    CI, or a workspace whose daemon lives in a container — and an error would
+    fail that honest case.  What the message must do instead is be
+    imperative, because for the common case (one machine) it is the whole fix.
+
+    **WHAT THE MESSAGE MAY NOT SAY.**  Its first wording asserted the
+    session "will fail at connect() with an ImportError", which this check
+    cannot know and which is false for a guarded import.  The live case is
+    ``azure_openai``: its closure includes ``azure``, and
+    ``azure_identity_available()`` wraps that import in ``try/except
+    ImportError`` on a path only ``auth: aad`` takes — so a key-auth profile
+    was told it would fail, and it would not.  Same class as #937, in this
+    PR's own new code: the closure is a static fact about the package, the
+    consequence is a claim about a code path nobody walked.
+
+    Nothing is imported to answer it: :func:`~shared.scaffold.dependencies.
+    provider_import_gaps` probes with ``find_spec``, so ``validate`` stays
+    side-effect free.  A provider with no in-tree package reports nothing
+    rather than guessing.
+    """
+    from . import dependencies
+    for name in _profile_provider_names(profile, provider_name):
+        try:
+            missing, commands = dependencies.provider_import_gaps(name)
+        except Exception:       # pragma: no cover — a diagnostic must not raise
+            continue
+        if not missing:
+            continue
+        run = "; ".join(commands) if commands else f"install {', '.join(missing)}"
+        add("warn", "provider_dependency_missing",
+            f"provider '{name}' imports {', '.join(missing)}, which "
+            f"{'is' if len(missing) == 1 else 'are'} not installed here.  "
+            f"Whether a given session reaches the import depends on which "
+            f"path its configuration takes — some are guarded, some belong "
+            f"to one auth mode — so this is a gap to close before running, "
+            f"not a certain failure.  Run: {run}",
+            where=f"provider.{name}")
+
+
+def _permission_rule_tools(profile) -> List[tuple]:
+    """Every tool name named in the profile's permission whitelist / blacklist.
+
+    Returns:
+        ``(rule, name, where)`` triples, ``rule`` being ``"whitelist"`` or
+        ``"blacklist"``.  ``patterns`` is deliberately not read — a glob is
+        not a tool name, and nothing here could tell a deliberate wildcard
+        from a typo.
+    """
+    cfg = (getattr(profile, "plugin_configs", None) or {}).get("permission")
+    policy = (cfg or {}).get("policy") if isinstance(cfg, dict) else None
+    if not isinstance(policy, dict):
+        return []
+    out: List[tuple] = []
+    for rule in ("whitelist", "blacklist"):
+        block = policy.get(rule)
+        tools = block.get("tools") if isinstance(block, dict) else None
+        if not isinstance(tools, (list, tuple)):
+            continue
+        for name in tools:
+            if isinstance(name, str) and name:
+                out.append((rule, name,
+                            f"plugin_configs.permission.policy.{rule}.tools"))
+    return out
+
+
+def _tool_owners(plugins: Dict[str, Any]) -> Dict[str, List[str]]:
+    """Map every statically-knowable tool name to the plugins exposing it."""
+    owners: Dict[str, List[str]] = {}
+    for pname, pi in plugins.items():
+        if getattr(pi, "dynamic", False):
+            continue
+        for t in pi.tools:
+            owners.setdefault(t.name, []).append(pname)
+    return owners
+
+
+def _session_tool_names() -> set:
+    """Tool names the FRAMEWORK wires in, which belong to no entry in ``plugins:``.
+
+    Three sources, and a permission rule may legitimately name any of them:
+    the lifecycle tools (``signal_completion`` and friends, gated by a
+    profile's own ``completion_payload_schema`` / ``model_tiers`` rather than
+    by a plugin), and ``askPermission``, which ``ai_tool_runner`` dispatches
+    ungated and which ``permission/plugin.py`` deliberately does not expose to
+    the model.  Whitelisting the last is redundant, not wrong, so it is
+    accepted in silence rather than reported.
+    """
+    names = {"askPermission"}
+    try:
+        names |= {t.name for t in introspect.session_tools()}
+    except Exception:          # pragma: no cover - probe is best-effort
+        pass
+    return names
+
+
+def _always_initialized_plugins() -> frozenset:
+    """Plugins the registry wires whether or not ``plugins:`` names them.
+
+    Read from ``PluginRegistry._ALWAYS_INITIALIZE_PLUGINS`` rather than
+    re-spelled, so the two cannot disagree about the set.
+    ``plugin_config_without_plugin`` already exempts it and this check did
+    not — so whitelisting ``list_tools`` without naming ``introspection``
+    produced a ``permission_rule_without_plugin`` for a tool that is CORE
+    and reaches every session's wire, which is the opposite of true.
+
+    Degrades to the empty set rather than raising: a missing attribute costs
+    one over-report, an exception costs the whole validation.
+    """
+    try:
+        from shared.plugins.registry import PluginRegistry
+
+        return frozenset(getattr(
+            PluginRegistry, "_ALWAYS_INITIALIZE_PLUGINS", frozenset()))
+    except Exception:       # pragma: no cover — a diagnostic must not raise
+        return frozenset()
+
+
+def _check_permission_tool_lists(profile, plugins, add) -> None:
+    """Check the tool names in ``permission.policy.{white,black}list.tools``.
+
+    The same inventory ``tool_scopes`` has been checked against since the
+    validator shipped, one key over — and this is the key where getting it
+    wrong is expensive.  Under ``defaultPolicy: deny`` a name that never
+    matches is a permanent denial of a tool the author believes they
+    approved, and the runtime symptom is the one #951 exists to make
+    legible: the call reaches the gate and vanishes.  A whitelist entry is
+    also the single cheapest thing in a profile to misspell, because nothing
+    else in the file repeats the name.
+
+    Two findings, and the whitelist earns one the blacklist does not:
+
+    ``unknown_tool`` (**warn**, both lists)
+        the name is exposed by no installed plugin and is not a framework
+        session tool.  Warn rather than error because the inventory is
+        installation-shaped: a plugin the author has not installed yet is
+        indistinguishable here from a typo.
+
+    ``permission_rule_without_plugin`` (**warn**, whitelist only)
+        the tool exists and its plugin is absent from ``plugins:``, so the
+        rule governs a tool that never reaches the wire.  Deliberately NOT
+        reported for a blacklist: denying a tool the profile does not enable
+        is defence in depth, and a profile that adds the plugin later keeps
+        the protection it already wrote.
+
+    Silent by design:
+
+    * a profile whose ``plugins:`` list is EMPTY — an abstract base in an
+      ``inherits`` chain declares no surface, so it cannot be said to be
+      missing one (the rule :func:`_check_profile_identity`'s
+      ``missing_model`` already follows);
+    * a name of MCP shape (:data:`_MCP_TOOL_SHAPE`);
+    * a profile enabling ANY plugin whose tool list is not statically
+      knowable — the whole check, not just that plugin's names, because a
+      live-session inventory could supply any of them.  The same rule the
+      ``tool_scopes`` check has always applied to one plugin at a time;
+    * a tool belonging to a plugin the registry always initializes
+      (:func:`_always_initialized_plugins`) — ``introspection``'s
+      ``list_tools`` / ``get_tool_schemas`` are core and reach every wire
+      whatever ``plugins:`` says, so they are never "without plugin".
+    """
+    rules = _permission_rule_tools(profile)
+    if not rules:
+        return
+    # TWO questions, deliberately two variables.  ``declared`` is what the
+    # AUTHOR wrote, and an empty one means "this profile declares no
+    # surface" — the abstract-base carve-out.  ``enabled`` is what the
+    # session will actually hold, which includes the plugins the registry
+    # wires regardless.  Folding the framework's set into the first would
+    # make every abstract base look like it declared a surface.
+    declared = list(getattr(profile, "plugins", None) or [])
+    enabled_names = declared + [p for p in _always_initialized_plugins()
+                                if p not in declared]
+    if any(getattr(plugins.get(p), "dynamic", False) for p in declared):
+        return      # a live-session inventory: nothing here is knowable
+    owners = _tool_owners(plugins)
+    session = _session_tool_names()
+    for rule, name, where in rules:
+        if _MCP_TOOL_SHAPE.match(name) or name in session:
+            continue
+        holders = owners.get(name)
+        if not holders:
+            add("warn", "unknown_tool",
+                f"permission {rule} names '{name}', which no installed "
+                f"plugin exposes — under `defaultPolicy: deny` a rule that "
+                f"matches nothing is a permanent denial, and the call "
+                f"disappears at the gate rather than failing loudly",
+                where=where)
+            continue
+        if rule != "whitelist" or not declared:
+            continue
+        if not any(h in enabled_names for h in holders):
+            add("warn", "permission_rule_without_plugin",
+                f"permission whitelist names '{name}', exposed by "
+                f"{' / '.join(sorted(holders))} — none of which is in "
+                f"plugins:, so the tool never reaches the model and the rule "
+                f"governs nothing.  Add the plugin, or drop the rule",
+                where=where)
+
+
 def validate_profile(
     profile: Any,
     *,
@@ -236,12 +524,18 @@ def validate_profile(
             f"provider '{provider_name}' set but no model and no model_tiers — "
             "set-overlay or inherits did not bind a model", where="model")
 
+    # --- provider SDKs actually installed here ---------------------------
+    _check_provider_dependencies(profile, provider_name, add)
+
     # --- plugins ---------------------------------------------------------
     _check_plugins(getattr(profile, "plugins", None) or [], plugins, add)
 
     # --- model_tiers (V2: cross-provider tiers allowed) ------------------
     _check_model_tiers(getattr(profile, "model_tiers", None) or {}, add,
                        getattr(profile, "provider", None))
+
+    # --- the completion gate's own shape ---------------------------------
+    _check_completion_gate_shape(profile, add)
 
     # --- budget_control (incl. its ABSENCE, #947) -----------------------
     _check_budget_control(profile, add)
@@ -263,6 +557,9 @@ def validate_profile(
                     f"tool '{t}' not exposed by plugin '{plug}' "
                     f"(has: {', '.join(sorted(known))})",
                     where=f"tool_scopes.{plug}")
+
+    # --- permission whitelist / blacklist tool names ---------------------
+    _check_permission_tool_lists(profile, plugins, add)
 
     # --- discovery-gated tools (the deferred-loading nuance) -------------
     # A tool is in the model's INITIAL schema iff it is [core] OR its plugin is
@@ -300,16 +597,19 @@ def validate_profile(
         cfg_provider = introspect.resolve_provider(cfg_name)
         if cfg_provider is None or cfg_provider.knobs is None:
             # Non-provider plugin config (permission / cli / notebook / …):
-            # validate top-level knob NAMES against the plugin's declared
+            # validate knob NAMES against the plugin's declared
             # get_config_schema (a mistyped knob is silently ignored at
             # runtime otherwise), and each declared knob's VALUE against the
             # ``enum`` / ``type`` that same schema publishes (#925) — a knob
             # violating its own declared enum used to validate clean and then
-            # fall back silently.  Nested / free-form sub-structures — e.g.
-            # ``permission.policy`` tree, ``permission.evaluators`` map — are
-            # still NOT descended; only top-level knobs are.  A knob whose
-            # STRUCTURE decides behaviour badly enough to need more than a
-            # declared type registers a check in ``_PLUGIN_VALUE_CHECKS``.
+            # fall back silently.  Nested objects are descended to every
+            # declared depth, so ``permission.policy.defaultPolicy``
+            # is checked against its own enum; descent stops at a knob
+            # declaring ``additionalProperties`` (``permission.evaluators``),
+            # where the plugin itself has said the key set is open.  A knob
+            # whose STRUCTURE decides behaviour badly enough to need more
+            # than a declared type registers a check in
+            # ``_PLUGIN_VALUE_CHECKS``.
             _validate_plugin_knobs(cfg_name, cfg, plugins, add)
             _check_plugin_knob_values(cfg_name, cfg, add)
             continue
@@ -1312,8 +1612,12 @@ def _knob_value_is_deferred(value) -> bool:
         "${" in value or bool(_KNOB_URI_RE.match(value)))
 
 
-def _check_knob_value(cfg_name, key, value, setting, add):
+def _check_knob_value(cfg_name, path, value, setting, add):
     """Check one knob's VALUE against the plugin's own declared schema (#925).
+
+    ``path`` is the knob's dotted path beneath ``plugin_configs.<plugin>`` —
+    a bare name at the top level, ``policy.defaultPolicy`` inside a declared
+    object — so a finding points at the line the author wrote.
 
     Two findings, and their severities differ because the declarations differ
     in strength:
@@ -1348,14 +1652,14 @@ def _check_knob_value(cfg_name, key, value, setting, add):
     That dict stays for genuinely structural knobs
     (``template.file_conventions``), which no declared type can describe.
     """
-    where = f"plugin_configs.{cfg_name}.{key}"
+    where = f"plugin_configs.{cfg_name}.{path}"
     # ``None`` is "unset", not "wrongly typed" — many knobs default to it.
     if value is None or _knob_value_is_deferred(value):
         return
     if setting.enum is not None and value not in setting.enum:
         valid = ", ".join(repr(c) for c in setting.enum)
         add("error", "invalid_knob_value",
-            f"{cfg_name}.{key} = {value!r} is not one of the values the "
+            f"{cfg_name}.{path} = {value!r} is not one of the values the "
             f"plugin declares ({valid}) — what happens next is the plugin's "
             f"choice: it may raise, or fall back silently", where=where)
         return
@@ -1366,7 +1670,7 @@ def _check_knob_value(cfg_name, key, value, setting, add):
         return          # undeclared or unrecognised type — nothing asserted
     if not any(pred(value) for pred in predicates):
         add("warn", "knob_type_mismatch",
-            f"{cfg_name}.{key} = {value!r} ({type(value).__name__}) does not "
+            f"{cfg_name}.{path} = {value!r} ({type(value).__name__}) does not "
             f"match the declared type '{setting.type}' — the plugin may "
             f"coerce it, reject it, or carry it downstream as-is", where=where)
 
@@ -1417,7 +1721,7 @@ def _report_undeclared_name(cfg_name, key, declared, sites, add):
 
 
 def _validate_plugin_knobs(cfg_name, cfg, plugins, add):
-    """Flag top-level knob names — and values — a non-provider plugin rejects.
+    """Flag knob names — and values — a non-provider plugin rejects, at any depth.
 
     Uses the plugin's introspected ``get_config_schema``
     (``config_settings``).  Only validates when the plugin declares a schema —
@@ -1430,23 +1734,131 @@ def _validate_plugin_knobs(cfg_name, cfg, plugins, add):
     :func:`~shared.scaffold.introspect.plugin_config_read_sites` found.  See
     :func:`_report_undeclared_name`.  That generosity does not carry over to
     a declared knob's VALUE — see :func:`_check_knob_value`, which is where a
-    declared ``enum`` or ``type`` is actually checked.  Nested / free-form
-    sub-structures are still not descended: only a top-level knob's own
-    scalar shape is judged.
+    declared ``enum`` or ``type`` is actually checked.
+
+    NESTED structures are descended now.  They used to be skipped,
+    and the knob that mattered most was the one that cost it:
+    ``permission.policy`` carries ``defaultPolicy`` with a declared
+    ``enum`` of ``allow`` / ``deny`` / ``ask``, and every misspelling of it
+    validated clean.  The declaration was machine-readable the whole time;
+    only the walk stopped short.
     """
     if not isinstance(cfg, dict):
         return
     pinfo = plugins.get(cfg_name)
     if pinfo is None or not pinfo.config_settings:
         return
-    declared = {s.name: s for s in pinfo.config_settings}
+    # Kept as a named local rather than inlined into the call: it is the
+    # EVIDENCE #910 asked for, ``test_validate_claims_only_what_it_knows``
+    # declares a reversion against this exact line, and a reversion whose
+    # target text has been refactored away sabotages nothing — the guard
+    # then passes decoratively, which is the one failure mode that suite
+    # exists to prevent.
     sites = introspect.plugin_config_read_sites(cfg_name)
+    _walk_knobs(cfg_name, cfg, pinfo.config_settings, "", sites, True, add)
+
+
+def _nested_sites(cfg_name):
+    """Read-site evidence for names INSIDE an object-valued knob.
+
+    Wrapped so a scanner failure degrades to "no evidence" rather than
+    taking a validation down; the caller reads ``None`` as "not checked",
+    which is also what an out-of-tree plugin returns.
+    """
+    try:
+        return introspect.plugin_nested_config_read_sites(cfg_name)
+    except Exception:       # pragma: no cover — a diagnostic must not raise
+        return None
+
+
+def _walk_knobs(cfg_name, cfg, settings, prefix, sites, strict, add) -> None:
+    """Check one level of a plugin config against its declared settings.
+
+    Args:
+        cfg_name: The plugin name — the ``plugin_configs.<name>`` segment.
+        cfg: The authored mapping at this level.
+        settings: The :class:`~shared.scaffold.introspect.ConfigSetting` list
+            declared for this level.
+        prefix: Dotted path of the level, ``""`` at the top, so a finding
+            reads ``permission.policy.whitelist.tools`` rather than ``tools``.
+        sites: Config read sites from the plugin's source, or ``None``.  Only
+            meaningful at the top level: the scan finds ``config.get("x")``
+            calls, which say nothing about a key nested inside a value.
+        strict: Whether an undeclared NAME at this level is reportable.
+            ``False`` under a ``free_form`` parent — ``permission.evaluators``
+            maps tool names to scripts, so every key there is authored and
+            none is a typo.
+        add: The per-profile diagnostic sink.
+    """
+    declared = {s.name: s for s in settings}
     for key, value in cfg.items():
+        path = f"{prefix}{key}"
         setting = declared.get(key)
         if setting is None:
-            _report_undeclared_name(cfg_name, key, declared, sites, add)
+            if not strict:
+                continue
+            if prefix:
+                _report_unknown_nested_knob(cfg_name, path, declared,
+                                            _nested_sites(cfg_name), add)
+            else:
+                _report_undeclared_name(cfg_name, path, declared, sites, add)
             continue
-        _check_knob_value(cfg_name, key, value, setting, add)
+        if isinstance(value, dict) and (setting.children or setting.free_form):
+            _walk_knobs(cfg_name, value, setting.children or [],
+                        f"{path}.", None, not setting.free_form, add)
+            continue
+        _check_knob_value(cfg_name, path, value, setting, add)
+
+
+def _report_unknown_nested_knob(cfg_name, path, declared, sites, add) -> None:
+    """Report a key the plugin's schema does not declare INSIDE an object knob.
+
+    The #910 evidence split, one layer down, and it has to be: a declared
+    ``properties`` block is NOT a completeness claim, and treating it as one
+    inverts this whole family's thesis.  Measured on ``permission``, whose
+    ``policy`` tree is the deepest in the tree: ``PermissionPolicy.from_config``
+    reads ``cwd``, ``sanitization.custom_blocked_commands`` and
+    ``path_scope.resolve_symlinks``, and the schema declares none of them.
+    Called typos, all three would have sent an author to delete a line that
+    was working — the exact failure ``_report_undeclared_name`` exists to
+    avoid, reached from the other side.
+
+    ``sites`` comes from :func:`~shared.scaffold.introspect.
+    plugin_nested_config_read_sites` rather than its top-level sibling,
+    because a nested key is read off a local (``ps_cfg.get("…")``) that the
+    narrow top-level receiver set deliberately excludes.
+
+    Three outcomes, by what the scan established and nothing beyond it:
+
+    * a read site exists → ``undeclared_knob`` (**warn**), quoting it: the
+      key is live and merely absent from the published schema;
+    * scanned, no site → ``unknown_knob`` (**warn**), saying the parent
+      declares a narrower set than the plugin reads and that this name is in
+      neither;
+    * not scanned (an out-of-tree plugin) → ``unknown_knob`` with the
+      absence of evidence stated as such.
+    """
+    where = f"plugin_configs.{cfg_name}.{path}"
+    key = path.rsplit(".", 1)[-1]
+    parent = path.rsplit(".", 1)[0]
+    site = sites.get(key) if sites else None
+    if site:
+        add("warn", "undeclared_knob",
+            f"'{path}' is absent from the {cfg_name} plugin's "
+            f"get_config_schema(), but the plugin's source reads a config "
+            f"key by that name ({site}) — so it is most likely live and "
+            f"undocumented, and 'explain plugin {cfg_name}' will not show it",
+            where=where)
+        return
+    valid = ", ".join(sorted(declared)) or "(none)"
+    tail = ("and no config read site for it appears in the plugin's source "
+            "either, so it is most likely a typo"
+            if sites is not None else
+            "and the plugin's source is not in the scanned tree, so whether "
+            "it is read anyway was not checked")
+    add("warn", "unknown_knob",
+        f"'{path}' is not declared by the {cfg_name} plugin — {tail} "
+        f"('{parent}' declares: {valid})", where=where)
 
 
 def _check_template_routing(cfg, add):
@@ -1676,6 +2088,7 @@ def validate_profile_file(file_path: str) -> List[Diagnostic]:
             se or f"could not load profile from '{fp.name}'",
             profile=name or fp.stem)]
 
+    out.extend(_profile_key_findings(data, name or fp.stem))
     out.extend(validate_profile(
         target,
         providers=introspect.providers(),
@@ -1686,6 +2099,121 @@ def validate_profile_file(file_path: str) -> List[Diagnostic]:
 
 
 # ---------------------------------------------------------------- workspace
+
+#: Suffixes :func:`~shared.plugins.subagent.config._scan_profiles_dir` reads.
+_PROFILE_SUFFIXES = (".yaml", ".yml", ".json")
+
+
+def _profile_key_findings(data: Any, name: str) -> List[Diagnostic]:
+    """Report top-level profile keys the loader does not read.
+
+    The outermost layer of the silent-ignore family (#910 / #925 / #947 /
+    #950), and the one layer none of those closed.  ``SubagentProfile``
+    construction is keyword-explicit — ``config.py`` says so in as many
+    words — so a key outside
+    :data:`~shared.plugins.subagent.config.PROFILE_FILE_KEYS` is never read,
+    by anything, ever.  No warning is logged, the profile resolves, the
+    session starts, and the author is left believing a line works.
+
+    That is not hypothetical.  A 2026-09 workspace bring-up added
+    ``config_root: .jaato`` to two base profiles to fix unresolvable
+    completion assets; ``config_root`` is a session/SDK parameter and not a
+    profile key at all, so the line did nothing.  What actually fixed it was
+    the duplicated ``.jaato/`` path prefix removed in the same edit (now
+    ``redundant_config_root_prefix``).  The session ended successfully with
+    a wrong belief baked into the workspace, and nothing in the framework
+    would ever contradict it.
+
+    Two findings, because two mistakes with the same symptom want different
+    fixes:
+
+    ``unknown_profile_key`` (**warn**)
+        the key is read by nobody.  A near-miss from the accepted set is
+        named when there is one, since the overwhelmingly common case is a
+        typo (``plugins_configs``) or a key borrowed from a neighbouring
+        surface (``config_root``, ``tools``).
+
+    ``derived_profile_key`` (**warn**)
+        the key IS a ``SubagentProfile`` field — so it appears in ``explain
+        profile`` — and is DERIVED rather than read from the file:
+        ``preloaded_plugins`` and ``tool_scopes`` come out of the
+        ``plugins:`` list's own modifiers.  Writing them is the mistake
+        ``explain profile`` actively invites, so the message names the
+        modifier to write instead.
+
+    **Warn, not error**, for the reason this whole family warns: an
+    ``inherits`` base may carry a key a later framework version reads, a
+    profile snapshot may be newer than this installation, and failing every
+    existing workspace over a key that has always been inert is a worse
+    trade than saying so.
+    """
+    from shared.plugins.subagent.config import (
+        PROFILE_DERIVED_FIELDS, PROFILE_FILE_KEYS,
+    )
+
+    if not isinstance(data, dict):
+        return []
+    out: List[Diagnostic] = []
+    for key in data:
+        if not isinstance(key, str) or key in PROFILE_FILE_KEYS:
+            continue
+        if key in PROFILE_DERIVED_FIELDS:
+            out.append(Diagnostic(
+                "warn", "derived_profile_key",
+                f"'{key}' is a SubagentProfile field but NOT a profile-file "
+                f"key — it is {PROFILE_DERIVED_FIELDS[key]}.  Written here "
+                f"it is read by nobody",
+                profile=name, where=key))
+            continue
+        near = difflib.get_close_matches(key, sorted(PROFILE_FILE_KEYS), n=1,
+                                         cutoff=0.75)
+        hint = f" — did you mean '{near[0]}'?" if near else "."
+        out.append(Diagnostic(
+            "warn", "unknown_profile_key",
+            f"'{key}' is not a profile key{hint}  The loader builds "
+            f"SubagentProfile keyword by keyword, so this line is read by "
+            f"nobody and nothing at runtime will say so "
+            f"(`jaato-scaffold explain profile` lists every key)",
+            profile=name, where=key))
+    return out
+
+
+def _check_profile_file_keys(config_root: str, out: List[Diagnostic]) -> None:
+    """Run :func:`_profile_key_findings` over every workspace profile FILE.
+
+    Reads the raw files rather than the resolved profiles, because the whole
+    point is a key the resolver has already thrown away: by the time
+    ``discover_profiles`` hands back a ``SubagentProfile``, an unknown key
+    has left no trace on the object for any later check to find.
+
+    Workspace tier only.  The user tier (``~/.jaato/profiles``) is merged
+    into the effective set and is not the author's to edit from here, and a
+    finding about a file they cannot see in their own checkout is noise.
+    """
+    from shared.plugins.subagent.config import _parse_profile_file
+
+    root = Path(config_root) / "profiles"
+    if not root.is_dir():
+        return
+    for fp in sorted(root.rglob("*")):
+        if not fp.is_file() or fp.suffix not in _PROFILE_SUFFIXES:
+            continue
+        try:
+            name, data, err = _parse_profile_file(fp)
+        except Exception:       # pragma: no cover — a diagnostic must not raise
+            continue
+        if err or not isinstance(data, dict):
+            continue            # already reported as parse_error
+        if "plugins" not in data:
+            # ``plugins:`` is REQUIRED, and ``_scan_profiles_dir`` refuses
+            # the file by name when it is absent — so this is either a
+            # profile whose real error is already reported, or a YAML file
+            # under profiles/ that is not a profile at all.  Listing its
+            # other keys as unknown is noise on top of a reported error in
+            # the first case and an invented error in the second.
+            continue
+        out.extend(_profile_key_findings(data, name or fp.stem))
+
 
 def _check_prefetch_directives(
     ws: Path, config_root: str, out: List[Diagnostic],
@@ -1973,6 +2501,7 @@ def validate_workspace(
     # PrefetchError at session-prep — surface it here, before runtime.  These are
     # workspace-tier assets.
     _before = len(out)
+    _check_profile_file_keys(config_root, out)
     _check_prefetch_directives(ws, config_root, out)
     _check_spawn_schema_wire_types(result.profiles, config_root, out)
     _check_completion_assets(result.profiles, ws, config_root, out)

@@ -27,6 +27,7 @@ that is not the one running.
 from __future__ import annotations
 
 import ast
+import importlib.util
 import json
 import re
 import sys
@@ -653,11 +654,67 @@ def _display(path: Path, scope_root: Optional[Path]) -> str:
 
 
 def for_provider(name: str) -> Dict[str, Any]:
-    base = Path(__file__).resolve().parents[1] / "plugins" / "model_provider" / name
+    base = _provider_package(name)
     files = _pkg_files(base)
     return _unit("provider", name, files,
                  base.parent if base.is_dir() else None,
                  base if base.is_dir() else None)
+
+
+def _provider_package(name: str) -> Path:
+    """The in-tree package directory of one provider (may not exist)."""
+    return Path(__file__).resolve().parents[1] / "plugins" / "model_provider" / name
+
+
+def _spec_present(name: str) -> bool:
+    """Whether *name* would import, WITHOUT executing its module body.
+
+    ``_health`` answers the same question by importing, which is right for a
+    report an operator asked for and wrong for ``validate``, which is
+    required to be side-effect free — a provider SDK's import can register
+    handlers, read environment, or open a config file.  ``find_spec`` locates
+    the module instead; it imports the *parent* package of a dotted name,
+    which is why only top-level names are ever passed here.
+
+    Every exception is an absence: ``find_spec`` raises ``ValueError`` for a
+    module already in ``sys.modules`` with no spec and ``ModuleNotFoundError``
+    for a missing parent, and a diagnostic that raises is worse than one that
+    is wrong.
+    """
+    try:
+        return importlib.util.find_spec(name) is not None
+    except Exception:           # noqa: BLE001 — see docstring
+        return False
+
+
+@lru_cache(maxsize=None)
+def provider_import_gaps(name: str) -> Tuple[Tuple[str, ...], Tuple[str, ...]]:
+    """``(missing imports, install commands)`` for one provider, importing nothing.
+
+    The cheap half of :func:`for_provider`, for the caller that must not
+    import: the third-party closure comes from the same AST walk, and each
+    name is probed with :func:`_spec_present` rather than ``__import__``.
+
+    Returns two empty tuples for a provider with no in-tree package — an
+    out-of-tree or renamed one — because "this installation ships no source
+    to parse" is not evidence that anything is missing.
+
+    Only TOP-LEVEL names are probed, so a namespace package whose submodule
+    is absent reads as present (``google`` resolves from ``google-api-core``
+    while ``google.genai`` is not installed).  ``_health`` has the same blind
+    spot for the same reason, and it is the safe direction: this reports what
+    it can prove absent and stays quiet otherwise.
+    """
+    base = _provider_package(name)
+    files = _pkg_files(base)
+    if not files:
+        return (), ()
+    imports, _walked = import_closure(files, base.parent)
+    missing = tuple(n for n in sorted(imports) if not _spec_present(n))
+    if not missing:
+        return (), ()
+    hint = _install_hint(list(missing), name)
+    return missing, tuple(hint.get("commands") or ())
 
 
 def for_plugin(name: str, source: str) -> Dict[str, Any]:

@@ -3797,6 +3797,64 @@ class ProfileDiscoveryResult:
     errors: Dict[str, str] = field(default_factory=dict)
 
 
+#: Every key :func:`_scan_profiles_dir` reads out of a profile FILE.
+#:
+#: Not the same set as ``dataclasses.fields(SubagentProfile)``, and the two
+#: differ in both directions — which is the whole reason this is written down
+#: rather than derived from the dataclass:
+#:
+#: * ``preloaded_plugins`` and ``tool_scopes`` are dataclass fields and NOT
+#:   file keys.  They are DERIVED by :func:`parse_plugin_list` from the
+#:   ``plugins:`` list's own modifiers (``todo(preload)``,
+#:   ``memory(tools:[...])``), so a file spelling either of them out is read
+#:   by nobody.
+#: * ``cache`` / ``gc`` / ``trace`` / ``env`` reach the dataclass through the
+#:   four block parsers rather than a ``data.get`` in the builder, so a scan
+#:   of the builder alone would miss them.
+#:
+#: Construction is keyword-explicit, so anything outside this set is simply
+#: never read — silently, which is what ``jaato-scaffold validate`` reports as
+#: ``unknown_profile_key``.  ``test_profile_file_keys.py`` fails the build if
+#: the loader gains a key that is not listed here.
+PROFILE_FILE_KEYS = frozenset({
+    'name',
+    'description',
+    'plugins',
+    'plugin_configs',
+    'system_instructions',      # deprecated; still read
+    'default_agent',
+    'suppress_base_instructions',
+    'model',
+    'provider',
+    'max_turns',
+    'max_completion_nudges',
+    'gc',
+    'cache',
+    'trace',
+    'env',
+    'inherits',
+    'completion_payload_schema',
+    'spawn_payload_schema',
+    'completion_processors',
+    'suppress_inherited_processors',
+    'runtime_limits',
+    'budget_control',
+    'model_tiers',
+    'apparmor',
+    'apparmor_fragments',
+    'quirks',
+    'scrub_secret_env',
+})
+
+#: Dataclass fields that are NOT profile-file keys, and what supplies them.
+#: ``explain profile`` renders the dataclass, so without this it advertises
+#: two keys a file may not set.
+PROFILE_DERIVED_FIELDS = {
+    'preloaded_plugins': "derived from plugins: — write `todo(preload)`",
+    'tool_scopes': "derived from plugins: — write `memory(tools:[a,b])`",
+}
+
+
 def _scan_profiles_dir(
     directory: Path,
     profiles: Dict[str, 'SubagentProfile'],

@@ -630,6 +630,51 @@ class PermissionPlugin(RunnerForwardingMixin):
         return {
             "type": "object",
             "properties": {
+                "agent_name": {
+                    "type": "string",
+                    "description": (
+                        "Name this session's decisions are attributed to in "
+                        "the DECISION trace line.  Set per session by the "
+                        "caller; the plugin is a registry-shared singleton, "
+                        "so a decision is labelled from the CALLER's context "
+                        "rather than from this value (#951)."
+                    ),
+                },
+                "config_path": {
+                    "type": "string",
+                    "description": (
+                        "Path to a permissions JSON file.  That file is its "
+                        "OWN surface — its keys are version / defaultPolicy "
+                        "/ blacklist / whitelist / channel — and is not part "
+                        "of this block; an inline 'policy' here overrides it."
+                    ),
+                },
+                "workspace_path": {
+                    "type": "string",
+                    "description": (
+                        "Workspace root handed to permission evaluators as "
+                        "context.  Normally set by the framework."
+                    ),
+                },
+                "channel_type": {
+                    "type": "string",
+                    "enum": ["console", "webhook", "queue", "file"],
+                    "description": (
+                        "How an ASK reaches a human.  Falls back to the "
+                        "permissions file's channel.type when unset."
+                    ),
+                },
+                "channel_config": {
+                    "type": "object",
+                    "additionalProperties": True,
+                    "description": (
+                        "Options for the chosen channel_type, passed through "
+                        "to it (webhook: endpoint / headers / auth_token / "
+                        "timeout; file: base_path / poll_interval).  An OPEN "
+                        "key set: the accepted names belong to the channel, "
+                        "not to this plugin, so nothing here judges them."
+                    ),
+                },
                 "emit_decision_events": {
                     "type": "boolean",
                     "default": False,
@@ -658,6 +703,13 @@ class PermissionPlugin(RunnerForwardingMixin):
                             "default": "deny",
                             "description": "Default action when no rule matches",
                         },
+                        "cwd": {
+                            "type": "string",
+                            "description": (
+                                "Working directory relative path_scope rules "
+                                "resolve against.  Unset = the session's own."
+                            ),
+                        },
                         "sanitization": {
                             "type": "object",
                             "description": "Input sanitization for CLI commands",
@@ -683,6 +735,15 @@ class PermissionPlugin(RunnerForwardingMixin):
                                     "default": [],
                                     "description": "Dangerous commands to allow (e.g. 'git')",
                                 },
+                                "custom_blocked_commands": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                    "default": [],
+                                    "description": (
+                                        "Extra commands to block, beyond the "
+                                        "built-in dangerous set"
+                                    ),
+                                },
                                 "path_scope": {
                                     "type": "object",
                                     "description": "Filesystem path restrictions",
@@ -707,6 +768,14 @@ class PermissionPlugin(RunnerForwardingMixin):
                                             "type": "boolean",
                                             "default": True,
                                             "description": "Block parent directory traversal (../)",
+                                        },
+                                        "resolve_symlinks": {
+                                            "type": "boolean",
+                                            "default": True,
+                                            "description": (
+                                                "Judge a path by its symlink "
+                                                "TARGET rather than its name"
+                                            ),
                                         },
                                         "allow_home": {
                                             "type": "boolean",
