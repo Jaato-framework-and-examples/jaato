@@ -1,11 +1,9 @@
 # jaato-web-server: sign-in and ticket custody for the browser client
 
-**Status:** design, blocked on #1074, whose implementation is in progress
-(scoped to jaato-server and the Python SDK). The wire shapes in §4 were
-proposed here and **confirmed** in
-[#1074's answer comment](https://github.com/Jaato-framework-and-examples/jaato/issues/1074#issuecomment-5686953669);
-the one point still open is §4.4 (clustered daemons). Everything downstream
-of §4 is written against the confirmed shape.
+**Status:** design. The daemon half, #1074, is implemented in
+[PR #1075](https://github.com/Jaato-framework-and-examples/jaato/pull/1075)
+(protocol 1.10) and §4 is read from that branch. Nothing on the BFF side is
+implemented yet; §9 is the order.
 
 ## 1. What this is, and what it is not
 
@@ -64,15 +62,15 @@ sequenceDiagram
     S-->>B: Set-Cookie: session (HttpOnly, Secure, SameSite=Lax)
 
     B->>S: POST /api/ticket  (cookie, Sec-Fetch-Site: same-origin)
-    S->>D: ticket.bind {user: "alice", ttl_seconds: 60, single_use: true}
-    D-->>S: ticket.bound {ticket, qualified: "web:alice", expires_at}
+    S->>D: ticket.bind {request_id, user: "alice", ttl_seconds: 60, single_use: true}
+    D-->>S: ticket.bind.result {status: bound, ticket, qualified: "jaato-web:alice", expires_at}
     S-->>B: {ticket, daemon}
 
     B->>D: WS Upgrade ?token=<ticket>
-    D->>D: resolve ticket → BoundIdentity{app_id: "web", user: "alice"}
-    D-->>B: ConnectedEvent (connection attributed to web:alice)
+    D->>D: resolve ticket → BoundIdentity{app_id: "jaato-web", user: "alice"}, consume it
+    D-->>B: ConnectedEvent (connection attributed to jaato-web:alice)
 
-    Note over B,D: every session this connection creates carries created_by = "web:alice"
+    Note over B,D: every session this connection creates carries created_by = "jaato-web:alice"
 
     B--xD: connection drops
     B->>S: POST /api/ticket  (fresh ticket; the old one was consumed)
@@ -113,90 +111,100 @@ The static server is the one the launcher already ships. `@jaato/web` gains
 an `exports` entry so `createStaticServer` is importable, and the BFF passes
 it a `config` object whose `ticketUrl` replaces the launcher's `token`.
 
-## 4. The daemon-side contract this depends on (#1074)
+## 4. The daemon-side contract (#1074, implemented in PR #1075)
 
-Everything in this section is what the BFF **assumes** of #1074. Where the
-issue leaves a decision open, the BFF's need is stated so the implementer
-can weigh it.
+Everything in this section is read from PR #1075's branch
+(`server/ws_tickets.py`, `server/websocket.py`, `jaato_sdk/events.py`),
+not assumed. Protocol **1.10**.
 
 ### 4.1 Credentials
 
 | | BFF's use |
 |---|---|
-| **app credential** | presented once, on the bind channel's Upgrade, as `Authorization: Bearer` (the BFF is Node, so the header form is available; no query string). Read from a file with mode 0600, never from argv |
-| **user ticket** | minted per connect through `ticket.bind`, handed to the browser in a JSON response body (never a URL), presented by the browser as `?token=` |
+| **app credential** | one entry in the daemon's `--ws-app-credentials` JSON file, `{"jaato-web": "<credential>"}` (mode 0600 enforced, at least 16 characters, the key is the `app_id`). The BFF presents it once, on the bind channel's Upgrade, as `Authorization: Bearer` (Node can set the header; no query string). It is **bind-only**: the daemon refuses every frame on that connection other than the two ticket verbs, so it can never open or attach a session |
+| **user ticket** | minted per connect through `ticket.bind`, handed to the browser in a JSON response body (never a URL), presented by the browser as `?token=` on its own Upgrade, exactly where the shared token goes today. Consumed at accept when `single_use` (the default) |
 
-**Confirmed: the app credential is bind-only.** The issue asked whether an
-app credential alone should open a session; the answer is no. The BFF never
-wants that: a session opened on the bind channel would be attributed to the
-application, which is exactly the anonymous session the ticket mechanism
-exists to make unreachable.
+Configuring `--ws-app-credentials` turns WS auth **on**, and the flag is
+refused alongside `--ws-unsafe-no-auth`. The shared `--ws-token-file` may
+stay configured beside it for the TUI and the local launcher; the daemon
+tries the shared token, then app credentials, then tickets, hashing the
+presented value once.
 
-**Confirmed, and it falls out of the same argument: only the app that bound
-a ticket may revoke it.** The daemon enforces this from the credential on
-the channel, without being told, the same way it qualifies the identity. So
-the BFF's `ticket.revoke` can only ever touch its own users' tickets, and a
-second application on the daemon cannot log this one's users out.
+**Only the app that bound a ticket may revoke it.** The daemon scopes
+`ticket.revoke` to the `app_id` of the credential on the channel, and a
+ticket belonging to another application answers `not_found`, the same as an
+unknown one, so the verb is not an existence oracle across applications.
 
-### 4.2 Wire shapes (confirmed)
+### 4.2 Wire shapes
 
-The issue sketched `TicketRegistry.bind/resolve/revoke/revoke_user` and said
-the bind channel is a WS connection carrying a `ticket.bind` message. The
-answer comment confirms the two verbs as request/response pairs with a
-correlation id, following the in-tree precedent of protocol 1.3
-(`InjectPromptRequest.request_id` + `inject_prompt.result`: one channel,
-many concurrent callers, a reply that says what actually happened). They
-are declared in `jaato-sdk/jaato_sdk/events.py`, so the codegen puts them
-in `@jaato/sdk`'s `events.ts` and the CI staleness gate keeps the two in
-step; the additions land as **protocol 1.10**, with a changelog entry
-stating how each side degrades against an older peer.
+Four events, declared in `events.py` and codegen'd into `@jaato/sdk`
+(`TicketBindRequest`, `TicketBindResultEvent`, `TicketRevokeRequest`,
+`TicketRevokeResultEvent`), all correlated by `request_id` on the protocol
+1.3 precedent so one bind channel serves many concurrent logins:
 
 ```jsonc
 // BFF → daemon
 {"type": "ticket.bind", "request_id": "r1",
  "user": "alice", "ttl_seconds": 60, "single_use": true}
 
-// daemon → BFF
-{"type": "ticket.bound", "request_id": "r1",
- "ticket": "…", "qualified": "web:alice", "expires_at": "2026-09-15T20:01:00Z"}
+// daemon → BFF   (status: bound | denied | invalid | capacity)
+{"type": "ticket.bind.result", "request_id": "r1", "status": "bound",
+ "ticket": "…", "qualified": "jaato-web:alice", "app_id": "jaato-web",
+ "expires_at": "2026-09-15T20:01:00Z"}
 
-// BFF → daemon, on logout
+// BFF → daemon, on logout: exactly ONE of `ticket` / `user`
 {"type": "ticket.revoke", "request_id": "r2", "user": "alice"}
 
-// daemon → BFF
-{"type": "ticket.revoked", "request_id": "r2", "count": 1}
-
-// daemon → BFF, any failure
-{"type": "error", "request_id": "r1", "error_type": "TicketBindError", "error": "…"}
+// daemon → BFF   (status: revoked | not_found | denied | invalid)
+{"type": "ticket.revoke.result", "request_id": "r2", "status": "revoked", "revoked": 1}
 ```
 
-- `app_id` is **absent from the request** on purpose: the daemon derives it
-  from the credential that authenticated the channel, which is the point the
-  issue makes about no integrator being able to forget the qualification.
+- Failure is a `status` on the result event, never a separate error frame,
+  and `ticket` is `""` in every non-`bound` result. The BFF branches on
+  `status` and reads `ticket` only under `bound`.
+- `app_id` is absent from the request: the daemon derives it from the
+  credential on the channel and returns both `app_id` and `qualified`, so
+  the BFF logs what the daemon will stamp rather than reconstructing it.
+  `app_id` may not contain `:`, the join character of `qualified`.
 - `user` is the claim the BFF is configured to use (`auth.oidc.subject_claim`,
-  §7). Against Keycloak the default is `preferred_username`: it is unique
-  within the realm, the daemon qualifies it with `app_id` anyway, and it
-  makes `created_by` readable in an audit (`web:alice`, not
-  `web:2f1c9e0a-…`). `sub` is available for a deployment that renames users
-  and would rather have the stable UUID. Either way the daemon qualifies it.
-- `ttl_seconds: 60` is what the BFF will ask for. The issue's default is 300;
-  the BFF mints a ticket only in response to a connect attempt, so 60 covers
-  the round trip with margin and shortens the window a logged URL is useful.
-- `qualified` crosses the wire in `ticket.bound`, so the BFF logs what the
-  daemon will stamp rather than reconstructing it.
-- Because the events are typed, the BFF's bind channel is an ordinary
-  `JaatoClient` using the generated types, not hand-written dicts. Until
-  1.10 is published to npm, `jaato-web-server` builds against the sibling
-  `jaato-sdk-ts` checkout the way `jaato-web` does.
+  §7). Against Keycloak the default is `preferred_username`: unique within
+  the realm, qualified by the daemon anyway, and readable in an audit
+  (`jaato-web:alice`, not `jaato-web:2f1c9e0a-…`). `sub` is available for a
+  deployment that renames users. The daemon refuses an empty, over-long or
+  control-character `user` with `invalid`.
+- `ttl_seconds` is `1..3600` and a value outside is `invalid`, never
+  clamped. The BFF asks for **60**: it mints only in response to a connect
+  attempt, so 60 covers the round trip and shortens the window a logged URL
+  is useful. The daemon's own default is 300.
+- `capacity` means the daemon is at its ceiling of outstanding tickets. The
+  BFF answers the browser with 503 and a retry hint; it never retries in a
+  loop, since the remedy is tickets expiring.
+- **Logout after a completed login revokes nothing** by design: the ticket
+  was consumed at connect, so `ticket.revoke {user}` answers `not_found`
+  with `revoked: 0`. The BFF treats that as success. What the revoke
+  actually protects against is a ticket minted and not yet presented.
 
-### 4.3 What the BFF needs from the identity
+### 4.3 The bind channel is a plain `JaatoClient`
 
-`created_by` and the permission-decision `user_id` are stamped from
-`get_client_user`, which #1074 sets at connect. The BFF relies on the
-qualified form (`web:alice`) being what those fields carry, so that:
+The BFF opens it with `@jaato/sdk`'s `JaatoClient`, `headers: {Authorization:
+"Bearer <app credential>"}` and **no `clientConfig`**: the client sends
+`client.config` after the handshake only when that option is set, and an
+app-credential connection answers any non-ticket frame with an error. The
+two verbs go through `sendRawEvent` and are matched to results by
+`request_id` on `subscribeAll`. The client's reconnect loop keeps the
+channel up across daemon restarts; a bind attempted while it is down fails
+fast and the browser retries its connect, which re-mints.
+
+### 4.4 What the BFF needs from the identity
+
+`created_by` and the permission-decision `user_id` are stamped from the
+connection's identity, and PR #1075 makes `set_client_user` **refuse to
+overwrite** a ticket-established identity, so a later SSO hook cannot
+silently relabel the connection. The BFF relies on the qualified form
+(`jaato-web:alice`) being what those fields carry, so that:
 
 - two BFF deployments against one daemon, each with its own app credential
-  (`web-eu:alice`, `web-us:alice`), cannot collide;
+  (`jaato-web-eu:alice`, `jaato-web-us:alice`), cannot collide;
 - daemon-side ownership guards, when they exist in the free package, compare
   the right thing. Today the free daemon *records* identity and never
   compares it (`session.attach` checks id syntax and workspace mismatch only;
@@ -204,14 +212,15 @@ qualified form (`web:alice`) being what those fields carry, so that:
   the point those checks would go; adding the checks is a follow-up the BFF
   design does not depend on, but a multi-user deployment does.
 
-### 4.4 Where bindings live
+### 4.5 Where bindings live
 
-The issue leans in-memory. The BFF is compatible with that because it never
-holds a ticket across a daemon restart: a restart drops the bind channel, the
-BFF reconnects it, and the next browser connect mints a fresh ticket. A
-ticket bound on one clustered node not resolving on another is the one
-consequence the BFF cannot paper over; a deployment fronting a gossip cluster
-needs the BFF pinned to the node its browsers reach, or the registry shared.
+In memory, in the daemon. The BFF is compatible with that because it never
+holds a ticket across a daemon restart: a restart drops the bind channel,
+the BFF's client reconnects it, and the next browser connect mints a fresh
+ticket. A ticket bound on one clustered node not resolving on another is
+the one consequence the BFF cannot paper over; a deployment fronting a
+gossip cluster needs the BFF pinned to the node its browsers reach, or the
+registry shared.
 
 ## 5. What changes in the existing packages
 
@@ -283,9 +292,10 @@ tls: {cert: /etc/jaato-web/tls.crt, key: /etc/jaato-web/tls.key}   # or terminat
 public_url: https://jaato.example.org
 
 daemon:
-  url: wss://jaato.example.org:8080         # what the BROWSER connects to (direct mode)
-  bind_url: ws://10.0.0.5:8080              # what the BFF connects to; defaults to url
-  app_credential_file: /etc/jaato-web/app.credential   # mode 0600 enforced
+  url: wss://jaato.example.org/daemon       # what the BROWSER connects to (direct mode)
+  bind_url: ws://127.0.0.1:8080             # what the BFF connects to; defaults to url
+  app_id: jaato-web                         # the key of this BFF's entry in the daemon's --ws-app-credentials file
+  app_credential_file: /etc/jaato-web/app.credential   # its value; mode 0600 enforced on both sides
 mode: direct                                 # direct | proxy
 
 auth:
@@ -313,6 +323,16 @@ ticket:
 Secrets are files, never inline values or argv, for the reason
 `--ws-token-file` is preferred over `--ws-token` in the daemon: argv is
 world-readable through `/proc`.
+
+The daemon side of the same pairing:
+
+```bash
+# /etc/jaato/ws-apps.json, mode 0600:  {"jaato-web": "<the same credential>"}
+python -m server --web-socket 127.0.0.1:8080 --ws-app-credentials /etc/jaato/ws-apps.json --daemon
+```
+
+`--ws-token-file` may stay beside it so the TUI and `npx @jaato/web` keep
+working with the shared token on the same daemon.
 
 ## 8. Security properties, each with the attack it answers
 
@@ -357,7 +377,13 @@ Asked in the first version of this document; answered in
 | events declared in `events.py`, codegen'd into the TS SDK? | yes; protocol 1.10 |
 | app credential bind-only? | yes |
 | *(raised by the implementer)* who may revoke a ticket? | only the app that bound it, enforced by the daemon from the credential |
-| a ticket bound on one clustered node resolving on another? | **still open**; §4.4 states how the BFF behaves either way |
+| a ticket bound on one clustered node resolving on another? | **still open**; §4.5 states how the BFF behaves either way |
+
+Two details PR #1075 settled differently from this document's first draft,
+now corrected in §4: the result events are `ticket.bind.result` /
+`ticket.revoke.result` carrying a `status` field (not `ticket.bound` /
+`ticket.revoked` plus a separate error frame), and `ticket.revoke` takes
+exactly one of `ticket` / `user` rather than `user` alone.
 
 What remains this design's to build, in the order of §9: the SDK token
 provider (`jaato-sdk-ts` is outside #1074's scope), the `ticketUrl` path
