@@ -21,8 +21,13 @@
   "bin": {
     "jaato-web-coder-ui": "bin/jaato-web-coder-ui.js"
   },
+  "exports": {
+    ".": "./bin/jaato-web-coder-ui.js",
+    "./package.json": "./package.json"
+  },
   "files": [
     "dist",
+    "!dist/**/*.map",
     "bin/jaato-web-coder-ui.js",
     "README.md"
   ],

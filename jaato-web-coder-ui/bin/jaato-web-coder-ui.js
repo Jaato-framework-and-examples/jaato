@@ -21,6 +21,14 @@
  * similar can publish the same file by hand, or none at all, in which
  * case the form starts empty.  See ``src/app/launcherConfig.ts``.
  *
+ * Importing this module
+ * ---------------------
+ * It is also the package's ``exports`` entry: ``createStaticServer``,
+ * ``parseArgs``, ``resolveToken``, ``readBuildInfo`` and ``DIST_DIR`` are
+ * what a host that serves the bundle itself (``jaato-web-coder-server``)
+ * reuses, and importing has no side effects — the CLI runs only when this
+ * file is the entry point.
+ *
  * Where the token goes
  * --------------------
  * The daemon's bearer token grants full control of the agent, so the
@@ -41,7 +49,9 @@ import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const DEFAULT_ROOT = join(HERE, "..", "dist");
+/** The bundle this package ships; importable by a host that serves it itself (jaato-web-coder-server). */
+export const DIST_DIR = join(HERE, "..", "dist");
+const DEFAULT_ROOT = DIST_DIR;
 const DEFAULT_DAEMON = "ws://127.0.0.1:8080";
 const DEFAULT_TOKEN_FILE = join(homedir(), ".jaato", "ws.token");
 
@@ -230,10 +240,27 @@ function packageVersion() {
   catch { return "unknown"; }
 }
 
+/**
+ * The build stamp vite writes beside the bundle (``dist/build-info.json``):
+ * UI version, the @jaato/sdk revision compiled in, its protocol floor and
+ * the commit.  ``null`` when the root carries none (a foreign ``--root``).
+ */
+export function readBuildInfo(root = DEFAULT_ROOT) {
+  try { return JSON.parse(readFileSync(join(root, "build-info.json"), "utf8")); }
+  catch { return null; }
+}
+
+function versionLines(root) {
+  const lines = [packageVersion()];
+  const b = readBuildInfo(root);
+  if (b) lines.push(`@jaato/sdk ${b.sdk} · protocol ≥ ${b.protocolMin} · ${b.commit} · built ${b.builtAt}`);
+  return lines.join("\n") + "\n";
+}
+
 /** Start serving per ``opts`` (from ``parseArgs``); resolves to the listening server. */
 export async function main(opts) {
   if (opts.help) { process.stdout.write(USAGE); return null; }
-  if (opts.version) { process.stdout.write(packageVersion() + "\n"); return null; }
+  if (opts.version) { process.stdout.write(versionLines(opts.root)); return null; }
   if (!existsSync(join(opts.root, "index.html"))) {
     throw new Error(`no index.html under ${opts.root} — run \`npm run build\` first, or pass --root`);
   }

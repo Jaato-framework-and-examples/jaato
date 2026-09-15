@@ -11,7 +11,9 @@ name: "Publish @jaato/web-coder-ui to npm"
 #
 # Byproduct for people who host the bundle themselves: the same run
 # uploads `jaato-web-coder-ui-dist-<version>.tar.gz` (the contents of `dist/`)
-# as a workflow artifact.
+# as a workflow artifact AND, once npm publish succeeded, attaches it to a
+# GitHub Release tagged `web-coder-ui-v<version>` — artifacts expire after
+# 90 days, a release is a stable URL an operator can pin.
 #
 # Setup once on the npm side: the same @jaato org token that publishes
 # @jaato/sdk (granular, read+write on @jaato/*) lives in the repo's
@@ -75,6 +77,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: npm-sdk
+    permissions:
+      contents: write        # the release that carries the self-hosting tarball
     steps:
       - uses: actions/checkout@v5
 
@@ -137,3 +141,18 @@ jobs:
         run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Attach the self-hosting tarball to a GitHub Release
+        # After publish, so a failed publish never leaves a release that
+        # names a version npm does not have.  The tag is prefixed because
+        # this repository publishes several packages.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${{ steps.version.outputs.version }}"
+          tag="web-coder-ui-v${version}"
+          gh release create "$tag" \
+            "jaato-web-coder-ui/jaato-web-coder-ui-dist-${version}.tar.gz" \
+            --target "$GITHUB_SHA" \
+            --title "@jaato/web-coder-ui ${version}" \
+            --notes "Self-hosting bundle for @jaato/web-coder-ui ${version} (the contents of dist/). Also on npm: npx @jaato/web-coder-ui@${version}. Serve it behind any static host and publish a config.json next to index.html to pre-fill the daemon URL — see jaato-web-coder-ui/README.md."

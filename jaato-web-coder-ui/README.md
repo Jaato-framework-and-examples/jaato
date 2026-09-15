@@ -77,9 +77,22 @@ nginx, a CDN or a file server, and optionally publish a `config.json` next to
 
 `token` is also accepted there, but a token in a file every visitor can read
 is only right when the file server is as private as the daemon. Every
-publish run of the npm workflow uploads `jaato-web-coder-ui-dist-<version>.tar.gz`
-(the contents of `dist/`) as a workflow artifact for this use; `npm run
-build` produces the same directory from a checkout.
+publish run of the npm workflow attaches `jaato-web-coder-ui-dist-<version>.tar.gz`
+(the contents of `dist/`) to the GitHub Release `web-coder-ui-v<version>` for
+this use; `npm run build` produces the same directory from a checkout.
+
+### Knowing what you deployed
+
+The SDK is compiled into the bundle, so the build stamps what it speaks:
+`dist/build-info.json` carries the UI version, the `@jaato/sdk` revision,
+its protocol floor and the commit. The connect screen and the status bar
+show the same line, and the launcher prints it:
+
+```bash
+npx @jaato/web-coder-ui --version
+# 0.1.0
+# @jaato/sdk 0.6.0 · protocol ≥ 1.0 · cb65e5e · built 2026-09-15T20:40:00.000Z
+```
 
 ## Develop
 

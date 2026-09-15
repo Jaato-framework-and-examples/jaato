@@ -350,9 +350,16 @@ What it does **not** give, stated so nobody reads it in: OS-level separation
 between users. Every session still runs as the daemon's uid, as #1074's
 "What it does not do" says.
 
-## 9. Phasing
+## 9. Phasing and publishing order
 
-1. **#1074 lands** with the two verbs from §4.2 (or their agreed shape).
+The server package will depend on `@jaato/sdk` (protocol 1.10 events and
+the token provider) and on `@jaato/web-coder-ui` (the bundle and its static
+server) **from npm**, so the first publish of each has to happen in this
+order: **SDK, then UI, then server**. Until the SDK's first publish,
+`npx @jaato/web-coder-ui` cannot work at all (its `npx` has nothing to
+fetch), and the server can only be built from a checkout.
+
+1. **#1074 lands** (PR #1075) with the two verbs from §4.2.
 2. **SDK token provider** (§5.1). Small, independently testable, and useful
    to any client that rotates credentials.
 3. **`jaato-web-coder-ui` ticket URL + sign-in screen** (§5.2), tested with a mock BFF
@@ -393,6 +400,12 @@ and sign-in screen in `jaato-web-coder-ui`, and the `jaato-web-coder-server` pac
 
 The first target deployment runs Keycloak on the host the BFF runs on. That
 fixes several choices that a generic-IdP design leaves open.
+
+Keycloak is a **native install** on that host, not a container, and so is
+everything beside it: the daemon is a `pip`-installed `jaato-server`, the
+BFF an `npm`-installed `@jaato/web-coder-server`, and the front is the
+host's reverse proxy. So the deployment artifact is **systemd units and a
+proxy config**, not a compose file (§11.7).
 
 ### 11.1 One public origin, two internal ports
 
@@ -492,3 +505,28 @@ OIDC back-channel logout spec. The two Keycloak-specific claims read
 (`realm_access` / `resource_access`) are behind the `required_role` knob and
 unused when it is unset, so a second deployment on another IdP loses only
 that knob.
+
+### 11.7 Process supervision and the deployment artifacts
+
+Three services under systemd, each in the foreground under its unit rather
+than self-daemonising:
+
+| Unit | Runs | Note |
+|---|---|---|
+| `keycloak.service` | Keycloak's own `kc.sh start` with `--hostname` set to the public URL and `--hostname-backchannel-dynamic=true` | the host's existing install |
+| `jaato-server.service` | `python -m server --web-socket 127.0.0.1:8080 --ws-app-credentials /etc/jaato/ws-apps.json` **without `--daemon`** | `--daemon` double-forks, which fights systemd's process tracking; `Type=simple` and let systemd own it |
+| `jaato-web-coder-server.service` | `jaato-web-coder-server --config /etc/jaato-web-coder/server.yaml` | `DynamicUser=` or a dedicated user; the secret files are readable by that user only |
+
+Plus the reverse proxy's site config (`/`, `/auth/`, `/daemon` with the
+WebSocket upgrade), and one provisioning step that is otherwise the most
+error-prone part of the setup: the app credential must be byte-identical in
+the daemon's `--ws-app-credentials` file and the BFF's
+`app_credential_file`, both mode 0600. `jaato-web-coder-server init`
+generates the credential, writes the BFF's side, and prints the daemon-side
+JSON entry for the operator to paste, so nobody types a 43-character
+secret twice.
+
+These ship in a `deploy/` directory of the server package — the unit
+files, a Caddyfile and an nginx equivalent, and the `init` command — as
+part of phase 4 (§9). They are the deployment mechanism; nothing here needs
+a container, and the repository has no Dockerfile for these components.

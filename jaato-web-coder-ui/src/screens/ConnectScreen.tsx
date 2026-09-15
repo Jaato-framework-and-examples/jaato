@@ -24,6 +24,7 @@ import { connect, probeWorkspaceMode } from "@/sdk/connection";
 import { useJaato } from "@/store/store";
 import { loadLauncherConfig } from "@/app/launcherConfig";
 import { SignInRequiredError, ticketProvider } from "@/app/tickets";
+import { buildLine } from "@/app/buildInfo";
 
 function defaultUrl(): string {
   const env = (import.meta as unknown as { env: Record<string, string | undefined> }).env.VITE_WS_URL;
@@ -123,6 +124,7 @@ export function ConnectScreen() {
         {error && <div className="text-sm text-error whitespace-pre-wrap">{error}</div>}
         {conn.detail && !error && <div className="text-xs text-text-muted">{conn.detail}</div>}
         <button type="submit" disabled={busy || !url} className="w-full rounded-md bg-primary text-bg font-semibold py-1.5 disabled:opacity-50">{busy ? "Connecting…" : "Connect"}</button>
+        <div className="text-[11px] text-text-muted font-mono" data-testid="build-info">{buildLine()}</div>
         <div className="text-[11px] text-text-muted">
           Dev tip: <code className="font-mono">npm run dev</code> proxies <code className="font-mono">/ws</code> to <code className="font-mono">ws://127.0.0.1:8080</code>; set <code className="font-mono">JAATO_WS_TARGET</code> to change it.
         </div>
