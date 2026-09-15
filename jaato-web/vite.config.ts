@@ -33,6 +33,11 @@ export default defineConfig({
       },
     },
   },
+  // Relative asset URLs: the bundle is served from a local port by the
+  // ``jaato-web`` launcher (``bin/jaato-web.js``) or from any path an
+  // operator mounts ``dist/`` under, so ``index.html`` must not assume it
+  // sits at ``/``.
+  base: "./",
   build: { sourcemap: true },
   test: {
     pool: "threads",

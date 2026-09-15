@@ -3,10 +3,17 @@
  * Defaults to the dev proxy path (``/ws`` on this origin) so
  * ``npm run dev`` against ``python -m server --web-socket :8080`` needs
  * no configuration; ``VITE_WS_URL`` or the form override it.
+ *
+ * When the bundle was served by the ``jaato-web`` launcher (or any host
+ * publishing a ``config.json`` — see ``app/launcherConfig.ts``) the
+ * daemon URL and token come pre-filled, and with ``autoConnect`` the
+ * screen connects on its own; a failure drops back to the form with the
+ * error shown, so a wrong token is fixed by typing, not by restarting.
  */
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { connect, probeWorkspaceMode } from "@/sdk/connection";
 import { useJaato } from "@/store/store";
+import { loadLauncherConfig } from "@/app/launcherConfig";
 
 function defaultUrl(): string {
   const env = (import.meta as unknown as { env: Record<string, string | undefined> }).env.VITE_WS_URL;
@@ -26,14 +33,17 @@ export function ConnectScreen() {
   const [error, setError] = useState<string | null>(null);
   const conn = useJaato((s) => s.connection);
   const setScreen = useJaato((s) => s.setScreen);
+  const launched = useRef(false);
 
-  const go = async (e?: React.FormEvent) => {
+  const go = async (e?: React.FormEvent, override?: { url: string; token: string }) => {
     e?.preventDefault();
+    const u = override?.url ?? url;
+    const t = override?.token ?? token;
     setBusy(true);
     setError(null);
     try {
-      try { localStorage.setItem("jaato.url", url); sessionStorage.setItem("jaato.token", token); } catch { /* ignore */ }
-      await connect({ url, token: token || undefined });
+      try { localStorage.setItem("jaato.url", u); sessionStorage.setItem("jaato.token", t); } catch { /* ignore */ }
+      await connect({ url: u, token: t || undefined });
       const mode = await probeWorkspaceMode();
       setScreen(mode === "enabled" ? "workspaces" : "session");
     } catch (err) {
@@ -42,6 +52,22 @@ export function ConnectScreen() {
       setBusy(false);
     }
   };
+
+  useEffect(() => {
+    let cancelled = false;
+    void loadLauncherConfig().then((cfg) => {
+      if (cancelled || launched.current) return;
+      launched.current = true;
+      if (!cfg.daemon && !cfg.token) return;
+      const next = { url: cfg.daemon ?? url, token: cfg.token ?? token };
+      setUrl(next.url);
+      setToken(next.token);
+      if (cfg.autoConnect && next.url) void go(undefined, next);
+    });
+    return () => { cancelled = true; };
+    // Runs once: the launcher config is a property of the page load, not of the form.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   return (
     <div className="h-full flex items-center justify-center p-6">

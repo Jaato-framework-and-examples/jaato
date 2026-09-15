@@ -182,10 +182,11 @@ For the complete reference, see the **[Plugin Documentation](https://jaato-frame
 
 ### Installation
 
-jaato is structured as three packages:
+jaato is structured as four packages:
 - **jaato-sdk** - Lightweight client library and event protocol for building custom clients
 - **jaato-server** - Runtime daemon with all plugins, providers, and core logic
 - **jaato-tui** - Feature-rich terminal user interface client
+- **jaato-web** (`@jaato/web` on npm) - Browser client; `npx @jaato/web` serves it against a daemon started with `--web-socket`
 
 ```bash
 git clone https://github.com/Jaato-framework-and-examples/jaato.git
@@ -205,6 +206,9 @@ python3 -m venv .venv
 
 # TUI with all optional dependencies
 .venv/bin/pip install "jaato-tui/.[all]"
+
+# Browser client: nothing to install — `npx @jaato/web` fetches the published
+# bundle (Node 20+). From this checkout: cd jaato-web && npm install && npm run build
 ```
 
 ### Configuration
@@ -236,6 +240,10 @@ python3 -m venv .venv
 ```bash
 # TUI client (interactive)
 .venv/bin/python jaato-tui/rich_client.py --connect /tmp/jaato.sock
+
+# Browser client, against the daemon's --web-socket port (reads ~/.jaato/ws.token
+# for a local daemon; --daemon ws://host:8080 --token-file … for a remote one)
+npx @jaato/web
 
 # With an agent profile (model + provider + plugins + GC from .jaato/profiles/<name>)
 .venv/bin/python jaato-tui/rich_client.py --connect /tmp/jaato.sock --profile researcher

@@ -147,3 +147,15 @@ test("subagents get their own tab", async ({ page }) => {
   await tab.click();
   await expect(page.getByRole("heading", { name: "Research notes" })).toBeVisible();
 });
+
+test("a launcher config.json pre-fills the form and connects on its own", async ({ page }) => {
+  // The Vite dev server answers /config.json with index.html; stand in for
+  // ``bin/jaato-web.js`` by serving what it would.
+  await page.route("**/config.json", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ daemon: WS, autoConnect: true }) }),
+  );
+  await page.goto("/");
+  await expect(page.getByRole("button", { name: /default/ })).toBeVisible();
+  await page.getByRole("button", { name: /default/ }).click();
+  await expect(page.getByText("Connected to the mock daemon")).toBeVisible();
+});

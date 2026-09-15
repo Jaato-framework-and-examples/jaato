@@ -189,9 +189,9 @@ jobs:
       - name: Type-check
         working-directory: jaato-web
         run: npx tsc -p tsconfig.json --noEmit
-      - name: Unit tests (protocol, store)
+      - name: Unit tests (protocol, store, launcher)
         working-directory: jaato-web
-        run: npx vitest run
+        run: npm test
       - name: Production build
         working-directory: jaato-web
         run: npx vite build

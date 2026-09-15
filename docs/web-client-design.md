@@ -158,6 +158,40 @@ npm run mock-daemon # ws://127.0.0.1:8090; prompts: code, tool, permit, ask, fai
 The CI job `web-client` in `.github/workflows/ci-tests.yml` runs all of the
 above on Node 22.
 
+## Distribution
+
+The client is a peer of the TUI, not a feature of the daemon: the server's
+only HTTP route is the task-artifact upload, and a coding UI does not belong
+in it any more than the TUI does. So the bundle ships on its own channel, as
+**`@jaato/web` on npm**, next to `@jaato/sdk`:
+
+* The package is `dist/` (Vite's output, with the SDK compiled in) plus
+  `bin/jaato-web.js`, a launcher written against Node's `http` module and
+  nothing else — so the published package has **no runtime dependencies**;
+  React and the rest are `devDependencies`, being build inputs.
+* `npx @jaato/web` serves the bundle on a loopback port, opens the browser,
+  and tells the page which daemon to use through `GET /config.json`
+  (`{daemon, token, autoConnect}`), which `src/app/launcherConfig.ts` reads
+  relative to the page. The same file is the contract for anyone hosting
+  `dist/` by hand; the Vite dev server answers the path with `index.html`,
+  which the loader treats as "no config".
+* The bearer token grants full control of the agent, so the launcher hands
+  it to the page only on a loopback bind, only with a `Host` header naming
+  the bound address (DNS rebinding), as JSON with `nosniff` (a cross-origin
+  `<script src>` cannot execute it and a cross-origin `fetch` has no CORS
+  grant). The default token file (`~/.jaato/ws.token`) is used only for a
+  loopback daemon, since it is the secret of the daemon on *this* machine.
+* `vite.config.ts` sets `base: "./"` so the bundle can be mounted under any
+  path.
+* `publish-npm-web.yml` mirrors `publish-npm-sdk-ts.yml`: manual dispatch,
+  the `web-client` CI gates, a version-not-on-registry check, then
+  `npm publish --access public`; it also uploads
+  `jaato-web-dist-<version>.tar.gz` as a workflow artifact for self-hosting.
+
+A pip wrapper (the same bundle as package data with a `jaato-web` console
+script, for people who only ever `pip install jaato-tui`) and a container
+image are possible later channels; both would ship the identical `dist/`.
+
 ## Follow-ups
 
 1. Split panes / docking across agents (dockview) — the TUI's `split_pane` /
@@ -167,6 +201,7 @@ above on Node 22.
    `WorkspaceFilesSnapshotEvent`.
 4. Client-side tool-argument editing on permission prompts.
 5. A thin BFF package for token custody and SSO, and a Tauri shell for the
-   local (IPC) use case — both wrap this bundle unchanged.
+   local (IPC) use case — both wrap this bundle unchanged (the `config.json`
+   contract above is what they would implement).
 6. History replay on attach (`HistoryEvent` → blocks) for reattaching to a
    running session.

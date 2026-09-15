@@ -1,0 +1,139 @@
+name: "Publish @jaato/web to npm"
+
+# Mirror of publish-npm-sdk-ts.yml for the browser client — manual
+# trigger, the same gates the `web-client` CI job runs, a
+# version-already-on-registry check, then publish.
+#
+# What ships: `dist/` (the Vite bundle, with @jaato/sdk compiled in) and
+# `bin/jaato-web.js`, the dependency-free launcher behind
+# `npx @jaato/web`.  The package has NO runtime dependencies — see the
+# note above `devDependencies` in jaato-web/package.json.
+#
+# Byproduct for people who host the bundle themselves: the same run
+# uploads `jaato-web-dist-<version>.tar.gz` (the contents of `dist/`)
+# as a workflow artifact.
+#
+# Setup once on the npm side: the same @jaato org token that publishes
+# @jaato/sdk (granular, read+write on @jaato/*) lives in the repo's
+# `npm-sdk` environment as NPM_TOKEN, so this workflow reuses it.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: |
+            jaato-sdk-ts/package-lock.json
+            jaato-web/package-lock.json
+
+      - name: Install + build the TS SDK (declarations for the type-check)
+        working-directory: jaato-sdk-ts
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+
+      - name: Install jaato-web
+        working-directory: jaato-web
+        run: npm ci --no-audit --no-fund
+
+      - name: Type-check
+        working-directory: jaato-web
+        run: npx tsc -p tsconfig.json --noEmit
+
+      - name: Unit tests (protocol, store, launcher)
+        working-directory: jaato-web
+        run: npm test
+
+      - name: Production build
+        working-directory: jaato-web
+        run: npx vite build
+
+      - name: Drop the unused third-party apt sources
+        # Same reason as ci-tests.yml: `--with-deps` runs apt-get update.
+        run: sudo rm -f /etc/apt/sources.list.d/google-chrome.list
+                        /etc/apt/sources.list.d/google-chrome.sources
+
+      - name: Install Playwright Chromium
+        working-directory: jaato-web
+        run: npx playwright install --with-deps chromium
+
+      - name: End-to-end against the mock daemon
+        working-directory: jaato-web
+        run: npx playwright test
+
+  publish:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: npm-sdk
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Read package version
+        id: version
+        working-directory: jaato-web
+        run: |
+          version=$(node -p "require('./package.json').version")
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "Package @jaato/web version: ${version}"
+
+      - name: Check version not already on npm
+        # 200 → version already published, 404 → ours to publish.
+        # Anything else (rate-limited, registry transient) → fail loudly
+        # so we don't accidentally re-publish or skip.
+        run: |
+          version="${{ steps.version.outputs.version }}"
+          status=$(curl -s -o /dev/null -w '%{http_code}' \
+            "https://registry.npmjs.org/@jaato/web/${version}")
+          if [ "$status" = "200" ]; then
+            echo "::error::Version ${version} of @jaato/web already exists on npm"
+            exit 1
+          fi
+          if [ "$status" != "404" ]; then
+            echo "::error::Unexpected status ${status} from registry — refusing to publish"
+            exit 1
+          fi
+          echo "Version ${version} is available for publishing"
+
+      - name: Install dependencies
+        run: |
+          npm --prefix jaato-sdk-ts ci --no-audit --no-fund
+          npm --prefix jaato-web ci --no-audit --no-fund
+
+      - name: Build
+        # `npm run build` builds the SDK declarations, type-checks, then
+        # runs `vite build` → jaato-web/dist/.
+        working-directory: jaato-web
+        run: npm run build
+
+      - name: Pack the self-hosting tarball
+        working-directory: jaato-web
+        run: tar -czf "jaato-web-dist-${{ steps.version.outputs.version }}.tar.gz" -C dist .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jaato-web-dist-${{ steps.version.outputs.version }}
+          path: jaato-web/jaato-web-dist-${{ steps.version.outputs.version }}.tar.gz
+          if-no-files-found: error
+
+      - name: Publish to npm
+        # --access public: scoped packages default to restricted on npm;
+        # we want @jaato/web to be installable without auth.
+        working-directory: jaato-web
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
