@@ -18,11 +18,26 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    # Measured: the suite is 9m30s and `.[all]` adds a few minutes of install
-    # (gssapi compiles from sdist; this job has no pip cache). 30 leaves room
-    # on a slow runner without letting a hung gate hold a release for
+    # 30 was measured when the suite was 9m30s.  It is not any more, and the
+    # release is what paid for the drift: two `jaato-server` publish runs were
+    # killed here at exactly 30m00s (0.15.0rc1 on ef909325, 0.15.0 on
+    # 3fc5d883), each with the `test` job cancelled and `build-and-publish`
+    # therefore SKIPPED -- a green tree, nothing published, and a "cancelled"
+    # conclusion that reads like somebody pressed the button.
+    #
+    # What grew is test_every_guard_detects_its_own_reversion: it sabotages a
+    # source file, runs the one guard that must fail, restores, once per
+    # declared reversion, and since #995 it does all of that inside a COPY of
+    # the checkout.  On the 3fc5d883 run it entered that file at 06:33 and was
+    # still in it 26 minutes later, at 32% of the suite.  ci-tests gives the
+    # same file 30 minutes in `contract-guards` and runs the REST of
+    # shared/tests in five parallel `suite` legs; this job runs everything in
+    # one process, so it needs the sum, not the larger half.
+    #
+    # 60 is the sum with headroom (~3.5m install + ~10m for the rest of the
+    # suite + ~20m of meta-guard), and still bounds a hung gate well inside
     # GitHub's default six hours.
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v5
 
