@@ -1,3 +1,4 @@
+import { BUILD, buildLine } from "@/app/buildInfo";
 import { useJaato } from "@/store/store";
 
 export function StatusBar() {
@@ -16,6 +17,7 @@ export function StatusBar() {
     <div className="flex items-center gap-3 px-3 h-7 text-[11px] surface-2 border-t hairline font-mono select-none">
       <span className="flex items-center gap-1.5"><span className={`inline-block w-2 h-2 rounded-full ${dot}`} />{conn.phase}{conn.attempt ? ` #${conn.attempt}` : ""}</span>
       {conn.serverVersion && <span className="text-text-muted">server {conn.serverVersion}</span>}
+      <span className="text-text-muted" title={buildLine()}>ui {BUILD.ui}</span>
       {ws && <span className="text-accent">{ws}</span>}
       {sessionId && <span className="text-text-muted" title={sessionId}>session {sessionId.slice(0, 8)}</span>}
       {(session.provider || session.model) && <span>{[session.provider, session.model].filter(Boolean).join(" / ")}</span>}
