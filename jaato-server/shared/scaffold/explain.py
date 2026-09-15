@@ -145,7 +145,8 @@ def transports() -> Rendered:
                    "also jaato-sdk-ts (TypeScript) / browser client jaato-web",
             "scope": "remote / browser daemon",
             "daemon_flags": ["--web-socket [HOST:]PORT", "--ws-token TOKEN",
-                             "--ws-token-file PATH", "--ws-unsafe-no-auth"],
+                             "--ws-token-file PATH", "--ws-unsafe-no-auth",
+                             "--ws-app-credentials PATH"],
             "token_default": "~/.jaato/ws.token (auto-generated, 0600, on first WS start)",
             "auth": "bearer token (required unless --ws-unsafe-no-auth)",
             "client_auth": ["Authorization: Bearer <token>  (header)",
@@ -177,6 +178,17 @@ def transports() -> Rendered:
         "                                   new WebSocket())\n"
         "  bad token → WS close 1008.  Daemon stores only the SHA-256 digest and\n"
         "  compares with hmac.compare_digest.\n\n"
+        "identity at connect — per-user tickets (opt-in, --ws-app-credentials):\n"
+        "  an application that already authenticated a user in ITS OWN realm\n"
+        "  binds a short-lived single-use ticket to that user (ticket.bind, on a\n"
+        "  connection authenticated by an application credential), hands it to\n"
+        "  that user's client, and the client presents it in the SAME two places\n"
+        "  as the shared token above.  The daemon resolves it during the Upgrade\n"
+        "  and stamps '<app_id>:<user>' on the connection, so identity exists\n"
+        "  before the first frame instead of arriving as a message a client can\n"
+        "  simply not send.  An application credential binds and revokes; it\n"
+        "  cannot open a session.  With the flag absent, none of this exists and\n"
+        "  WS auth is the single shared token above.\n\n"
         "preflight the WS daemon side (port + token file + auth mode):\n"
         "  jaato-doctor --web-socket [host:]port\n\n"
         "scaffold any transport:\n"
