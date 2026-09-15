@@ -291,7 +291,7 @@ mode: direct                                 # direct | proxy
 auth:
   kind: oidc                                 # oidc | local
   oidc:
-    issuer: https://jaato.example.org/auth/realms/eng   # the `iss` Keycloak puts in tokens
+    issuer: https://jaato.example.org/auth/realms/jaato-web-coder-shell   # the `iss` Keycloak puts in tokens
     backchannel_url: http://127.0.0.1:8180             # optional: discovery, token, JWKS over loopback (§11)
     client_id: jaato-web
     client_secret_file: /etc/jaato-web/oidc.secret
@@ -403,7 +403,7 @@ two must not be confused:
 
 | | URL | Used for |
 |---|---|---|
-| front channel | `https://jaato.example.org/auth/realms/eng` | authorization redirect, RP-initiated logout; also the `issuer` the BFF validates against |
+| front channel | `https://jaato.example.org/auth/realms/jaato-web-coder-shell` | authorization redirect, RP-initiated logout; also the `issuer` the BFF validates against |
 | back channel | `http://127.0.0.1:8180` (`auth.oidc.backchannel_url`) | discovery document, token exchange, JWKS, userinfo |
 
 Keycloak supports this split when started with `--hostname-backchannel-dynamic=true`
@@ -416,7 +416,10 @@ is not a loopback address.
 
 ### 11.3 Client registration in Keycloak
 
-One confidential client in the realm:
+The application's realm is **`jaato-web-coder-shell`**: a realm of its own,
+so its users, roles and sessions are separate from any other application's
+on the same Keycloak, and so `app_id` on the daemon side (§4.1) has a
+one-to-one counterpart on the identity side. One confidential client in it:
 
 | Setting | Value |
 |---|---|
