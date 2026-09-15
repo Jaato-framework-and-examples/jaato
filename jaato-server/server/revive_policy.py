@@ -194,10 +194,10 @@ def capture() -> Dict[str, str]:
     _CAPTURED = {
         ENV_REVIVE_PROFILE: _resolve(
             ENV_REVIVE_PROFILE,
-            os.environ.get(ENV_REVIVE_PROFILE)),  # env: where a REVIVED session's profile comes from -- persisted (default: the recipe it froze at creation) or disk (re-resolve profile_name against the files as they stand now)
+            os.environ.get(ENV_REVIVE_PROFILE)),  # env: a revived session's profile: persisted (default, frozen at creation) or disk (re-resolve now)
         ENV_REVIVE_PERSONA: _resolve(
             ENV_REVIVE_PERSONA,
-            os.environ.get(ENV_REVIVE_PERSONA)),  # env: where a REVIVED session's system instruction comes from -- persisted (default: the prompt it rendered at creation) or disk, which RE-RUNS the persona's {{!py:...}} prefetch scripts and may have side effects
+            os.environ.get(ENV_REVIVE_PERSONA)),  # env: a revived session's system prompt: persisted (default) or disk, which RE-RUNS prefetch scripts
     }
     non_default = {k: v for k, v in _CAPTURED.items() if v != PERSISTED}
     if non_default:

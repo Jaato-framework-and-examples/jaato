@@ -398,7 +398,7 @@ def path_checks_disabled() -> bool:
     ``send_message``, long after a client's paths were accepted.
     """
     global _announced_opt_out
-    disabled = os.environ.get(TRUST_PEER_PATHS_ENV, "").strip().lower() in _TRUTHY  # env: switch OFF the IPC peer check -- act on any workspace / config_root a client names without verifying the connecting account could reach it
+    disabled = os.environ.get(TRUST_PEER_PATHS_ENV, "").strip().lower() in _TRUTHY  # env: switch OFF the IPC peer check: act on any path a client names, unverified
     if disabled and not _announced_opt_out:
         _announced_opt_out = True
         logger.warning(
