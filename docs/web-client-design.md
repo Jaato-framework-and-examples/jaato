@@ -200,8 +200,10 @@ image are possible later channels; both would ship the identical `dist/`.
 3. `@path` completion: needs a `workspace.files.list`-style verb or reuse of
    `WorkspaceFilesSnapshotEvent`.
 4. Client-side tool-argument editing on permission prompts.
-5. A thin BFF package for token custody and SSO, and a Tauri shell for the
-   local (IPC) use case — both wrap this bundle unchanged (the `config.json`
-   contract above is what they would implement).
+5. A thin BFF package for token custody and SSO — designed in
+   [jaato-web-server](design/web-server-bff.md) against the per-user ticket
+   mechanism of #1074 — and a Tauri shell for the local (IPC) use case; both
+   wrap this bundle unchanged (the `config.json` contract above is what they
+   implement).
 6. History replay on attach (`HistoryEvent` → blocks) for reattaching to a
    running session.
