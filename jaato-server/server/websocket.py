@@ -330,9 +330,13 @@ class WSEventSinkAdapter:
 
         A WS client may be on another machine, so there is no local OS
         account for the kernel to vouch for.  Identity on this transport is
-        the bearer token plus whatever an auth middleware attaches through
-        :meth:`set_client_user`, so the client-path entitlement guards are
-        inert here and this transport's own auth is what applies.
+        the bearer token, a bound user ticket (#1074), or whatever an auth
+        middleware attaches through :meth:`set_client_user` -- none of which
+        is a peer CREDENTIAL.  A ticket says which person an application
+        vouched for; it does not name an OS account, and every session runs
+        as the daemon's uid either way.  So the client-path entitlement
+        guards stay inert here and this transport's own auth is what
+        applies.
         """
         return None
 

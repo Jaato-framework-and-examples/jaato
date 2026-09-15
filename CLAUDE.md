@@ -4394,9 +4394,13 @@ segregates identity, attribution and — with per-app `workspace_root` /
 `config_root` — configuration and filesystem confinement; not the OS
 principal. Separating *that* needs a privileged daemon and a uid-keyed slot
 pool, and is a decision about the process model rather than about the
-transport. The IPC analogue is the `--socket-mode` bullet above: *the IPC
-transport is unauthenticated, so any principal that can open the socket can
-fully drive the agent.*
+transport. [Two Principals on One Socket](#two-principals-on-one-socket)
+reaches the same line from the other transport: `SO_PEERCRED` tells the daemon
+which OS account opened the socket and binds the paths that account may name,
+and the session still runs as the daemon's uid. Two transports, two ways of
+learning who is calling, one process model neither of them changes — and the
+two identities are not interchangeable, which is why `get_client_peer` answers
+`None` on WS however firmly a ticket has established a user.
 
 **Not addressed here:** premium's JWT route keeps working unchanged and is
 not on the critical path any more, but the three defects the issue attributes
