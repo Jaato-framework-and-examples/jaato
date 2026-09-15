@@ -45,6 +45,7 @@ from shared.framing import (
     write_frame,
 )
 from shared.session_id import is_safe_session_id
+from shared.peer_identity import PeerCredentials, peer_credentials
 from shared.plugins.path_safety import ensure_private_dir
 
 
@@ -252,6 +253,19 @@ class IPCClientConnection:
     session_id: Optional[str]
     connected_at: str
     workspace_path: Optional[str] = None  # Client's working directory
+    #: The OS account that opened this connection, read from the kernel at
+    #: accept time (``SO_PEERCRED``).  ``None`` when the transport cannot
+    #: report one -- a Windows named pipe, a non-Linux socket -- which is
+    #: the state every IPC connection was in before
+    #: :mod:`shared.peer_identity` existed, and which degrades to the
+    #: historical behaviour rather than to a refusal.
+    #:
+    #: Two consumers, deliberately distinct: :meth:`JaatoIPCServer.get_client_user`
+    #: turns it into the attribution string that becomes ``Session.created_by``
+    #: and the ledger's ``user_id``, and the client-path guards ask it
+    #: whether the peer could have reached a workspace or ``config_root``
+    #: they named.
+    peer: Optional["PeerCredentials"] = None
 
 
 class _PipeServerProtocol(asyncio.StreamReaderProtocol):
@@ -600,6 +614,14 @@ class JaatoIPCServer:
         writer: asyncio.StreamWriter,
     ) -> None:
         """Handle a single client connection."""
+        # WHO opened this socket, asked of the kernel before any frame is
+        # read.  A Unix peer credential is established at ``connect(2)`` and
+        # cannot be forged by the client, which makes it the one identity in
+        # this tree that is evidence rather than assertion.  ``None`` on a
+        # transport that cannot report one; nothing downstream then changes
+        # behaviour.
+        peer_cred = peer_credentials(writer.get_extra_info('socket'))
+
         # Assign client ID
         async with self._lock:
             self._client_counter += 1
@@ -611,13 +633,18 @@ class JaatoIPCServer:
                 client_id=client_id,
                 session_id=None,
                 connected_at=datetime.now(timezone.utc).isoformat(),
+                peer=peer_cred,
             )
             self._clients[client_id] = client
             self._event_queues[client_id] = asyncio.Queue()
             self._dropped_chunks[client_id] = 0
 
         peer = writer.get_extra_info('peername') or 'unknown'
-        logger.info(f"IPC client connected: {client_id} from {peer}")
+        logger.info(
+            "IPC client connected: %s from %s%s",
+            client_id, peer,
+            f" as {peer_cred}" if peer_cred else " (no peer credential)",
+        )
 
         # Send connected event
         try:
@@ -1153,16 +1180,52 @@ class JaatoIPCServer:
         client = self._clients.get(client_id)
         return client.workspace_path if client else None
 
+    def get_client_peer(self, client_id: str) -> Optional[PeerCredentials]:
+        """The OS account that opened *client_id*'s connection.
+
+        ``None`` for an unknown client, and on any transport whose peer
+        credential cannot be read — see
+        :func:`shared.peer_identity.peer_credentials`.  Consumed by the
+        client-path entitlement guards, which must distinguish "this peer
+        may not name that path" from "there is no peer to ask about".
+        """
+        client = self._clients.get(client_id)
+        return client.peer if client else None
+
     def get_client_user(self, client_id: str) -> Optional[str]:
         """Get the authenticated user for an IPC client.
 
-        IPC connections are local and unauthenticated — always returns
-        ``None``.  User identity is a WS/SSO concept.
+        The kernel-vouched peer credential, rendered as a name
+        (:attr:`~shared.peer_identity.PeerCredentials.identity`) — so a
+        session created over IPC carries ``created_by``, its ledger
+        ``response`` and ``permission-check`` records carry ``user_id``,
+        and its telemetry spans carry ``user.id``, exactly as a WS/SSO
+        session's do (#859).
+
+        This used to be a hardcoded ``None``, on the premise that user
+        identity is a WS/SSO concept.  That is true of a daemon serving
+        one human and false of the cross-user deployment ``--socket-mode
+        666`` documents, where several accounts share one socket and
+        every ledger row, approval and session record was anonymous.
+
+        ``None`` when the transport reports no peer (Windows pipes,
+        non-Linux sockets), which keeps those deployments byte-identical
+        to before: #859's consumers omit the key rather than write a
+        ``None``.
         """
-        return None
+        client = self._clients.get(client_id)
+        return client.peer.identity if client and client.peer else None
 
     def set_client_user(self, client_id: str, user_id: str) -> None:
-        """No-op for IPC — local connections have no user identity."""
+        """No-op for IPC — the peer credential is the identity.
+
+        Deliberately inert rather than wired: the WS equivalent exists so
+        auth middleware can attach an identity it verified against an IdP,
+        whereas an IPC peer's identity is asserted by the kernel and there
+        is nothing better for a caller to replace it with.  Accepting an
+        override here would let a client claim to be somebody else on the
+        one transport where that claim is checkable.
+        """
         pass
 
     def broadcast_to_session(self, session_id: str, event: Event) -> None:

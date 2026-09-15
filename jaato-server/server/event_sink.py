@@ -9,9 +9,12 @@ Each transport silently ignores ``client_id`` values it doesn't own, so
 the composite can safely fan-out to all registered sinks.
 """
 
-from typing import List, Optional, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, List, Optional, Protocol, runtime_checkable
 
 from jaato_sdk.events import Event
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from shared.peer_identity import PeerCredentials
 
 
 @runtime_checkable
@@ -72,6 +75,22 @@ class EventSink(Protocol):
 
     def set_client_user(self, client_id: str, user_id: str) -> None:
         """Associate an authenticated user identity with a client."""
+        ...
+
+    def get_client_peer(self, client_id: str) -> Optional["PeerCredentials"]:
+        """The OS account that opened this client's connection.
+
+        Distinct from :meth:`get_client_user`, which returns a string for
+        ATTRIBUTION.  This returns the structured credential the
+        client-path entitlement guards evaluate against — a uid and its
+        groups, which is a question only a local socket can answer.
+
+        ``None`` on every transport that cannot report one, which is all
+        of them but IPC-on-Linux.  Callers must read it as "there is no
+        peer to ask about" and fall back to whatever access control that
+        transport does have (the WS bearer, the socket's file mode), never
+        as a denial.
+        """
         ...
 
 
@@ -137,3 +156,22 @@ class CompositeEventSink:
         """Fan-out to all registered sinks."""
         for sink in self._sinks:
             sink.set_client_user(client_id, user_id)
+
+    def get_client_peer(self, client_id: str) -> Optional["PeerCredentials"]:
+        """Return the first non-None peer credential from any sink.
+
+        Same shape as :meth:`get_client_user`: unknown ``client_id`` values
+        are ignored by sinks that do not own them, so the first sink that
+        recognises the id supplies the answer.  A sink predating this
+        method (an out-of-tree transport) contributes ``None`` rather than
+        raising, because an absent peer is a valid answer here and must not
+        become an error on a transport that simply has none.
+        """
+        for sink in self._sinks:
+            getter = getattr(sink, "get_client_peer", None)
+            if getter is None:
+                continue
+            peer = getter(client_id)
+            if peer is not None:
+                return peer
+        return None
