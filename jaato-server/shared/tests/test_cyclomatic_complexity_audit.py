@@ -106,7 +106,16 @@ BASELINE: Dict[str, int] = {
     "jaato-server/server/command_router.py::CommandRouter._handle_session_new": 18,
     "jaato-server/server/command_router.py::CommandRouter.get_command_list": 52,
     "jaato-server/server/core.py::JaatoServer._build_profile_session_kwargs": 17,
-    "jaato-server/server/core.py::JaatoServer._build_send_message_notification_handler._handle": 92,
+    # 92 -> 91 by #1069.  The budget-rung notification needed a branch in
+    # this chain, and a baselined function may not grow -- so the two arms
+    # whose whole body was "build an event, emit it, return"
+    # (``prompt_injected`` and the new one) moved into the module-level
+    # ``_PURE_NOTIFICATION_EVENTS`` table, which pays for the addition and
+    # leaves the chain one shorter than it was.  Arms with a side effect
+    # (``continuation_needed`` starting a model thread, the GC phases
+    # mutating server state) stay explicit: a table of builders cannot
+    # express those.
+    "jaato-server/server/core.py::JaatoServer._build_send_message_notification_handler._handle": 91,
     "jaato-server/server/core.py::JaatoServer._check_auth_completion": 17,
     "jaato-server/server/core.py::JaatoServer._emit_conversation_replay": 19,
     "jaato-server/server/core.py::JaatoServer._setup_permission_hooks.on_permission_requested": 35,

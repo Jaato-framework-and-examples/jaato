@@ -1,0 +1,12 @@
+{
+  "type": "budget.rung_fired",
+  "timestamp": "<TIMESTAMP>",
+  "session_id": "",
+  "at_percent": 0.0,
+  "action": null,
+  "origin": "self-enforced",
+  "pressure": "",
+  "usage": null,
+  "driving_dimension": null,
+  "tier_changes": {}
+}

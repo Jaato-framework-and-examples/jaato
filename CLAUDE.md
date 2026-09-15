@@ -2858,6 +2858,99 @@ Still true: a profile with `limits` and no `abort` rung crosses in silence
 except for that trace line; `finalize` remains advice, and the subagent
 that outlives its parent is bounded only by what its own profile declares.
 
+### A Rung a Client Could See and Not Read (#1069)
+
+#955 made the ladder observable **in the trace**. This is the same argument
+one layer out, and it starts by correcting the premise it was reported under:
+*"degrade rungs are observable only in the trace log — no client-visible event
+fires when one applies"*. A fired rung has always reached the client.
+`_apply_budget_rungs` calls `_surface_budget_event` on both paths, and that
+method emits `AgentOutputEvent(source="system")`:
+
+```
+[budget[self-enforced] tokens 85%: degraded planner opus -> flash]
+```
+
+So the gap is not *a signal*. It is **a signal a client can branch on**, and
+one that is not mixed into the stream the client renders as what the agent
+said. A bot that already decorates tier switches and memory stores cannot
+decorate this without string-matching `[budget[`, and a client that renders
+agent output verbatim shows the framework's cost machinery to users as the
+agent talking. That is a sharper argument than "nothing is emitted" was.
+
+**`BudgetRungFiredEvent`** (protocol **1.8**) is the typed sibling. The prose
+channel is unchanged and still fires — it has consumers, and its docstring
+records that it was already broken once (routed through `_ui_hooks`, never
+set on the runner path, so every budget decision was silently dropped).
+
+| Field | Notes |
+|-------|-------|
+| `at_percent`, `action`, `pressure` | the rung and what drove it |
+| `origin` | `self-enforced` / `cascade-pushed` — the MECHANISM, carried rather than dropped at the boundary because `_apply_budget_rungs` argues it is the distinction a consumer needs: *I hit my own ceiling* invites a narrower retry, *the shared pot ran out* means the run is winding down |
+| `usage`, `driving_dimension` | per-dimension fractions. **Present only when `origin == "self-enforced"`** — a cascade-pushed rung was crossed by the POOL, and publishing this child's own fractions beside the pool's pressure is the exact contradiction the prose line already avoids (*"degrading at 50% (tokens 32%)"*). Absent means "not measured here", never zero |
+| `tier_changes` | `{tier: "old -> new"}`, the shape `overlay_tier_table` returns — whose own docstring already named this event as its consumer. What the overlay **did**, not what the rung declared: a tier already bound to that model contributes nothing, and a session with no tier config contributes none |
+
+A rung **skipped** by the backwards-rebind guard emits nothing: it changed
+nothing, and telling a user the model was downgraded when it was not is worse
+than silence.
+
+**`action: notify`** is a rung that only emits — no rebind, no latch.
+
+```yaml
+budget_control:
+  limits: {usd: 15, tool_calls: 1500}
+  degrade:
+    - {at: 60,  action: notify}    # checkpoint: changes nothing
+    - {at: 80,  action: notify}
+    - {at: 95,  action: finalize}  # advice
+    - {at: 100, action: abort}     # the ceiling
+```
+
+The issue floated an alternative — treat a rung with neither `model_tiers`
+nor an action as emit-only — and it is not available: `DegradeRung.from_dict`
+refuses such a rung outright (*"degrade[N] does nothing"*), so the vocabulary
+had to grow rather than the bare form being reinterpreted. Naming it is the
+better half of that anyway: a bare rung is ambiguous between *checkpoint* and
+*author forgot the action*.
+
+Three properties, each attached to a way it could go wrong:
+
+- **`notify` does not latch, and exactly one thing decides that.**
+  `TERMINAL_ACTIONS` (`finalize`/`abort`/`escalate`) is what
+  `_budget_terminal_action` is gated on. An earlier draft ALSO relied on the
+  `notify` branch short-circuiting before the latch, and the reversion
+  meta-guard correctly called both copies decorative — each masked the other,
+  so neither could be shown to do anything. That is #688's *one check, one
+  door* in a second place. Membership is the test rather than "not notify",
+  so a future non-terminal action is excluded by default instead of being
+  latched until someone remembers to add a branch.
+- **`has_abort_rung` is untouched**, which is what #947's
+  `budget_limits_without_abort` finding reads: a ladder of pure checkpoints
+  must not start looking like one that stops the run.
+- **A checkpoint surfaces on the prose channel too.** A rung visible only
+  through an event type shipped in this same change would be invisible in
+  exactly the deployments asking for it. Opt-in by construction — you get
+  that line only by writing `action: notify`.
+
+**A new EVENT is the third degradation shape in the protocol changelog**, and
+it degrades unlike both an additive field and a missing verb.
+`deserialize_event` RAISES on an unrecognised `type`, but the SDK reader
+wraps it, logs and continues — so an older client on a 1.8 daemon with a
+ladder configured loses the event and logs a line per rung rather than
+dropping the connection. Bounded, noisy in exactly the deployment that
+configured a ladder, hence a version bump rather than a silent addition. No
+SDK refusal: the direction is inverted from 1.5/1.6 (a NEW daemon emitting to
+an OLD client, which cannot opt out), so a minimum to refuse below would fail
+the wrong party.
+
+**Overlap with #675, stated because both are open.** That issue names budget
+degradation as subsystem 1 of 3 that changes the model with nothing emitting.
+The **brownout** case is inside it; `finalize`/`escalate` is not (nothing
+about the model changes) and `notify` is not (it changes nothing at all).
+They are different events — *a rung fired* versus *the model changed* — and a
+brownout fires both from one code path, so #675 should subscribe to that site
+rather than add a second emission.
+
 ### A Session Nobody Was Watching (#812)
 
 An eval sweep created session `20260903_084517` and its client process was

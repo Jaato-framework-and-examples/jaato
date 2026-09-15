@@ -60,11 +60,18 @@ def _session(budget=None):
         # #955: every fired rung leaves a trace line on both channels.
         _trace=lambda *a, **k: None,
         _get_trace_prefix=lambda: "session:main",
+        # #1069: the typed per-rung notification.  ``None`` is the shape
+        # production has whenever no client callback is installed -- the
+        # setter is wired per-send -- so the cascade-push path is exercised
+        # with the emit disabled, as it was before the event existed.
+        _on_budget_rung=None,
     )
     for n in ("_is_connected_to", "_connect_tier_entry",
               "_reconnect_active_tier_if_rebound", "_apply_budget_rungs",
               "_surface_budget_event", "apply_cascade_degrade",
-              "_budget_trace", "_budget_trace_rung"):
+              "_budget_trace", "_budget_trace_rung",
+              # #1069: the typed sibling of the prose notice.
+              "_notify_budget_rung"):
         setattr(s, n, (lambda nm: (lambda *a, **k:
                 getattr(JaatoSession, nm)(s, *a, **k)))(n))
     s.request_stop = lambda reason="": s.__setattr__("_stopped", reason) or True

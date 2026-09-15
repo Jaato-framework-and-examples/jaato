@@ -11,6 +11,7 @@ import pytest
 
 from shared.budget_control import (
     ACTION_FINALIZE,
+    TERMINAL_ACTIONS,
     VALID_ACTIONS,
     VALID_DIMENSIONS,
     BudgetControlConfig,
@@ -148,7 +149,19 @@ def test_thresholds_must_strictly_increase():
 
 def test_constants_are_the_documented_sets():
     assert VALID_DIMENSIONS == {"usd", "tokens", "seconds", "tool_calls", "turns"}
-    assert VALID_ACTIONS == {"finalize", "abort", "escalate"}
+    assert VALID_ACTIONS == {"finalize", "abort", "escalate", "notify"}
+
+
+def test_notify_is_valid_but_not_terminal():
+    """#1069 widened the vocabulary without widening what LATCHES.
+
+    ``TERMINAL_ACTIONS`` is what ``_budget_terminal_action`` is gated on, so
+    a rung declared to change nothing must not appear in it.  The two sets
+    are pinned together because the gap between them IS the contract.
+    """
+    assert "notify" in VALID_ACTIONS
+    assert TERMINAL_ACTIONS == {"finalize", "abort", "escalate"}
+    assert TERMINAL_ACTIONS < VALID_ACTIONS
 
 
 # ------------------------------------------------------- merge_limits
