@@ -256,6 +256,14 @@ def _apply_client_config(manager: _FakeManager, event: Any) -> None:
             manager, SessionManager))
     manager._CLIENT_CONFIG_PATH_FIELDS = (
         SessionManager._CLIENT_CONFIG_PATH_FIELDS)
+    # The entitlement guard runs between the relativity check and the
+    # apply, so it is bound too: with `peer=None` it answers "not
+    # applicable" and changes nothing here, and binding it keeps this
+    # helper a faithful stand-in rather than one that skips a gate the
+    # real method runs.
+    manager._reject_unentitled_client_paths = (
+        SessionManager._reject_unentitled_client_paths.__get__(
+            manager, SessionManager))
     # Bound rather than stubbed: the live-session push is the other half
     # of "apply", and a stub would let a reversion that skipped validation
     # still look clean here.

@@ -15,7 +15,7 @@ import uuid
 from typing import Any, Dict, List, Optional
 
 from jaato_sdk.events import Event
-from server.event_sink import EventSink
+from server.event_sink import EventSink, client_peer
 from server.session_manager import SessionManager
 from server.session_logging import set_logging_context, clear_logging_context
 from shared.path_utils import describe_relative_path
@@ -206,7 +206,10 @@ class CommandRouter:
             return
         refusals = unreachable_client_paths(
             [("workspace", workspace_path)],
-            self._event_sink.get_client_peer(client_id),
+            # Through the shared tolerance, not a direct attribute read: a
+            # sink predating ``get_client_peer`` must contribute "no peer"
+            # rather than raise, exactly as it does inside the composite.
+            client_peer(self._event_sink, client_id),
         )
         if refusals:
             error = (

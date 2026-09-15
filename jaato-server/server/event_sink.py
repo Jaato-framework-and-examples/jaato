@@ -9,7 +9,7 @@ Each transport silently ignores ``client_id`` values it doesn't own, so
 the composite can safely fan-out to all registered sinks.
 """
 
-from typing import TYPE_CHECKING, List, Optional, Protocol, runtime_checkable
+from typing import Any, TYPE_CHECKING, List, Optional, Protocol, runtime_checkable
 
 from jaato_sdk.events import Event
 
@@ -94,6 +94,28 @@ class EventSink(Protocol):
         ...
 
 
+def client_peer(sink: Any, client_id: str) -> Optional["PeerCredentials"]:
+    """Ask a sink for a client's peer credential, tolerating one without it.
+
+    ``get_client_peer`` post-dates the :class:`EventSink` protocol, so a
+    sink written against the older shape — an out-of-tree transport, a
+    test double — simply does not have the method.  An absent peer is a
+    VALID answer on every transport but IPC-on-Linux, so its absence must
+    read as "there is no peer to ask about" rather than raise.
+
+    One definition because the tolerance is needed at two DIFFERENT
+    boundaries: :class:`CompositeEventSink` tolerates its members, and a
+    caller holding a sink directly (``CommandRouter``) tolerates its own.
+    Deriving it twice is how the two come to disagree — which is exactly
+    what happened: the composite tolerated absence and the router raised
+    ``AttributeError`` on the same sink.
+    """
+    getter = getattr(sink, "get_client_peer", None)
+    if getter is None:
+        return None
+    return getter(client_id)
+
+
 class CompositeEventSink:
     """Multiplexes event delivery across multiple transport sinks.
 
@@ -168,10 +190,7 @@ class CompositeEventSink:
         become an error on a transport that simply has none.
         """
         for sink in self._sinks:
-            getter = getattr(sink, "get_client_peer", None)
-            if getter is None:
-                continue
-            peer = getter(client_id)
+            peer = client_peer(sink, client_id)
             if peer is not None:
                 return peer
         return None
