@@ -103,7 +103,28 @@ from pydantic import BaseModel, ConfigDict, Field
 # runaway session has been stopped.  That is the #845 verdict (refuse, don't
 # degrade) applied to a command rather than a payload, so the SDK raises
 # below ``MIN_SESSION_STOP_PROTOCOL``.
-PROTOCOL_VERSION = "1.7"
+#
+# 1.8 -- ``BudgetRungFiredEvent``: a new Server -> Client event, emitted once
+# per APPLIED ``budget_control`` degrade rung (#1069).  A fired rung already
+# reached the client, as bracketed PROSE on the agent output stream
+# (``AgentOutputEvent(source="system")``, via
+# ``JaatoSession._surface_budget_event``) -- renderable, not branchable, and
+# interleaved with what the agent itself said, so a client wanting to
+# decorate "switched to a cheaper model" had to string-match ``[budget[``.
+# That prose channel is unchanged and still fires; this is its typed sibling.
+#
+# A new EVENT is the third shape in this changelog, and it degrades
+# differently from both an additive field and a missing verb.
+# ``deserialize_event`` RAISES on an unrecognised ``type``, but the SDK's
+# reader (``IPCClient._drain_loop``) wraps it, logs one error and continues
+# -- so an older client attached to a 1.8 daemon with a degrade ladder
+# configured loses this event and logs a line per rung, rather than dropping
+# the connection.  Bounded, and noisy in exactly the deployment that
+# configured a ladder, which is why it is a version bump rather than a
+# silent addition.  No SDK refusal: the direction is inverted from 1.5/1.6
+# (a NEW daemon emitting to an OLD client, which cannot opt out), so a
+# minimum to refuse below would fail the wrong party.
+PROTOCOL_VERSION = "1.8"
 
 
 # =============================================================================
@@ -195,6 +216,10 @@ class EventType(str, Enum):
     TURN_COMPLETED = "turn.completed"
     TURN_PROGRESS = "turn.progress"
     INSTRUCTION_BUDGET_UPDATED = "instruction_budget.updated"
+    # The COST budget (``budget_control``), not the context/instruction one
+    # above.  The two are one keyword apart and the wrong one was already on
+    # the wire, so the names are kept deliberately unalike (#1069).
+    BUDGET_RUNG_FIRED = "budget.rung_fired"
     GC_CONFIG = "gc.config"
     GC = "gc"                       # GC lifecycle (phase-switched)
 
@@ -2767,6 +2792,63 @@ class MidTurnPromptInjectedEvent(Event):
     text: str = ""
 
 
+class BudgetRungFiredEvent(Event):
+    """A ``budget_control`` degrade rung was APPLIED (#1069).
+
+    Emitted once per rung that actually takes effect — a brownout that
+    rebound tiers, a terminal ``finalize`` / ``abort`` / ``escalate``, or a
+    pure ``notify`` checkpoint.  A rung SKIPPED by the backwards-rebind
+    guard emits nothing: it changed nothing, and telling a user the model was
+    downgraded when it was not is worse than silence.
+
+    This is the branchable form of a signal that already reaches clients as
+    prose (``AgentOutputEvent(source="system")``, ``[budget[...] ...]``).
+    Both fire; the prose has consumers.
+
+    Attributes:
+        at_percent: The rung's declared threshold, 0-100.
+        action: ``finalize`` / ``abort`` / ``escalate`` / ``notify``, or
+            ``None`` for a rung that only carries an overlay.
+        origin: The MECHANISM, not whose ladder it was — ``self-enforced``
+            (this session's tracker crossed its own limit, possibly on a
+            ladder inherited from a parent) or ``cascade-pushed`` (the
+            shared pool crossed and the rung was pushed down).  The
+            distinction a consumer needs: *I hit my own ceiling* invites a
+            narrower retry, *the shared pot ran out* means the run is
+            winding down.
+        pressure: Human-readable "which ceiling is driving this", e.g.
+            ``"tokens 85%, usd 41%"``.  Always present.
+        usage: Declared dimension -> ``used / limit`` fraction, unclamped.
+            **Present only when ``origin == "self-enforced"``** — a
+            cascade-pushed rung was crossed by the POOL, and reporting this
+            session's own fractions beside the pool's pressure would publish
+            a contradiction ("degrading at 50% (tokens 32%)").  Absent means
+            "not measured here", not "zero".
+        driving_dimension: The dimension with the highest fraction; same
+            presence rule as ``usage``.
+        tier_changes: Tier name -> ``"old-model -> new-model"``, the shape
+            ``shared.budget_control.overlay_tier_table`` returns and whose
+            own docstring names this event as a consumer.  It carries BOTH
+            ends deliberately: a client showing "planner: opus -> flash" has
+            what it needs, and deriving the old model afterwards is not
+            possible once the table has been mutated in place.
+
+            What the overlay actually DID, which is not the rung's declared
+            ``model_tiers``: a tier already bound to the overlay's model
+            yields no change, and a session with no tier config yields none.
+            Empty for a rung that rebound nothing — including every
+            ``notify`` checkpoint and every action-only rung.
+    """
+    type: EventType = Field(default=EventType.BUDGET_RUNG_FIRED)
+    at_percent: float = 0.0
+    action: Optional[str] = None
+    origin: str = "self-enforced"
+    pressure: str = ""
+    usage: Optional[Dict[str, float]] = None
+    driving_dimension: Optional[str] = None
+    tier_changes: Dict[str, str] = Field(default_factory=dict)
+
+
 class MidTurnInterruptEvent(Event):
     """Sent when streaming is interrupted to process a mid-turn user prompt.
 
@@ -3077,6 +3159,7 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.CLIENT_CONFIG.value: ClientConfigRequest,
     EventType.MID_TURN_PROMPT_QUEUED.value: MidTurnPromptQueuedEvent,
     EventType.MID_TURN_PROMPT_INJECTED.value: MidTurnPromptInjectedEvent,
+    EventType.BUDGET_RUNG_FIRED.value: BudgetRungFiredEvent,
     EventType.MID_TURN_INTERRUPT.value: MidTurnInterruptEvent,
     EventType.INTERRUPTED_TURN_RECOVERED.value: InterruptedTurnRecoveredEvent,
     # Workspace management

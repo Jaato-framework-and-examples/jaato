@@ -114,6 +114,7 @@ from jaato_sdk.events import (
     StopRequest,
     CommandRequest,
     MidTurnPromptQueuedEvent,
+    BudgetRungFiredEvent,
     MidTurnPromptInjectedEvent,
     MidTurnInterruptEvent,
     MemoryListEvent,
@@ -476,6 +477,48 @@ def _slot_return_phrase(pooled: bool) -> str:
         "handed to the pool and NOT retained (dropped at capacity or "
         "refused as a duplicate) — the pool will tear it down"
     )
+
+
+def _prompt_injected_event(payload: Dict[str, Any]) -> 'MidTurnPromptInjectedEvent':
+    """Build the mid-turn prompt-injection event from its payload."""
+    return MidTurnPromptInjectedEvent(text=payload.get("text", "") or "")
+
+
+def _budget_rung_event(payload: Dict[str, Any]) -> 'BudgetRungFiredEvent':
+    """Build the #1069 event from a runner notification payload.
+
+    A free function so the notification demuxer — already far over the
+    complexity ceiling and frozen at its recorded size — grows by the
+    dispatch branch alone.
+
+    Every field is read defensively rather than splatted: this payload
+    crosses the runner RPC wire, so a runner of a different vintage may
+    send more keys or fewer, and neither may take the turn's notification
+    path down.  ``usage`` and ``driving_dimension`` are passed through
+    WITHOUT a default, because absent means "not measured here" (a
+    cascade-pushed rung) and coercing them to ``{}`` / ``""`` would assert
+    a measurement nobody made.
+    """
+    return BudgetRungFiredEvent(
+        at_percent=float(payload.get("at_percent") or 0.0),
+        action=payload.get("action"),
+        origin=str(payload.get("origin") or "self-enforced"),
+        pressure=str(payload.get("pressure") or ""),
+        usage=payload.get("usage"),
+        driving_dimension=payload.get("driving_dimension"),
+        tier_changes=dict(payload.get("tier_changes") or {}),
+    )
+
+
+#: Runner notification event_type -> the client event it becomes, for the
+#: notifications whose entire handling is "build it, emit it, return".
+#: Everything with a side effect (a continuation that starts a model thread,
+#: a GC phase that mutates server state) stays an explicit branch in the
+#: demuxer, because a table of builders cannot express those.
+_PURE_NOTIFICATION_EVENTS = {
+    "prompt_injected": _prompt_injected_event,
+    "budget_rung": _budget_rung_event,
+}
 
 
 class JaatoServer:
@@ -5044,17 +5087,22 @@ class JaatoServer:
 
         def _handle(event_type: str, payload: Dict[str, Any]) -> None:
             try:
+                # Notifications whose whole handling is "build an event,
+                # emit it, return" go through one table (#1069).  Folding
+                # the two that already had that shape in keeps this
+                # already-over-ceiling function from growing for each new
+                # one — and makes the next addition free.
+                builder = _PURE_NOTIFICATION_EVENTS.get(event_type)
+                if builder is not None:
+                    server.emit(builder(payload))
+                    return
+
                 if event_type == "instruction_budget_updated":
                     snapshot = payload.get("snapshot") or {}
                     server.emit(InstructionBudgetEvent(
                         agent_id=snapshot.get("agent_id", "main"),
                         budget_snapshot=snapshot,
                     ))
-                    return
-
-                if event_type == "prompt_injected":
-                    text = payload.get("text", "") or ""
-                    server.emit(MidTurnPromptInjectedEvent(text=text))
                     return
 
                 if event_type == "continuation_needed":

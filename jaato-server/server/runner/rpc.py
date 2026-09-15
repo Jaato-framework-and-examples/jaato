@@ -3889,6 +3889,7 @@ class RunnerRPC:
     # Event-type constants — daemon-side demuxer matches on these.
     _NOTIF_INSTRUCTION_BUDGET_UPDATED = "instruction_budget_updated"
     _NOTIF_PROMPT_INJECTED = "prompt_injected"
+    _NOTIF_BUDGET_RUNG = "budget_rung"
     _NOTIF_CONTINUATION_NEEDED = "continuation_needed"
     _NOTIF_RETRY = "retry"
     _NOTIF_MID_TURN_INTERRUPT = "mid_turn_interrupt"
@@ -4254,6 +4255,58 @@ class RunnerRPC:
 
         return _shim
 
+    def _install_budget_rung_callback(
+        self, session: Any, originals: Dict[str, Any], request_id: int,
+    ) -> None:
+        """Wire the ``budget_control`` degrade-rung notification (#1069).
+
+        A separate method rather than another block inside
+        ``_install_session_notification_callbacks``: that function is over
+        the complexity ceiling and frozen at its recorded size, so new
+        wiring goes beside it instead of into it.
+
+        Best-effort and skip-if-absent, exactly like its siblings — a
+        session without the setter (a rolling upgrade, a test double)
+        simply never emits the event.
+        """
+        if not hasattr(session, "set_budget_rung_callback"):
+            return
+        originals["budget_rung"] = getattr(session, "_on_budget_rung", None)
+        rpc = self
+
+        def _br_cb(payload: Dict[str, Any]) -> None:
+            try:
+                rpc.emit_notification(
+                    request_id=request_id,
+                    event_type=rpc._NOTIF_BUDGET_RUNG,
+                    payload=dict(payload or {}),
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("budget_rung notify raised")
+
+        try:
+            session.set_budget_rung_callback(_br_cb)
+        except Exception:  # noqa: BLE001
+            logger.debug("set_budget_rung_callback raised")
+
+    @staticmethod
+    def _restore_one_callback(
+        session: Any, originals: Dict[str, Any], key: str, setter: str,
+    ) -> None:
+        """Restore one saved callback, if it was ever installed.
+
+        The shape every branch of ``_restore_session_notification_callbacks``
+        already has, named once so a new one costs that (baselined) function
+        nothing.  A teardown failure is logged and swallowed — it must not
+        mask the ``send_message`` result it runs after.
+        """
+        if key not in originals or not hasattr(session, setter):
+            return
+        try:
+            getattr(session, setter)(originals[key])
+        except Exception:  # noqa: BLE001
+            logger.debug("restore %s callback raised", key)
+
     def _install_session_notification_callbacks(
         self, session: Any, request_id: int,
     ) -> Dict[str, Any]:
@@ -4318,6 +4371,10 @@ class RunnerRPC:
                 session.set_prompt_injected_callback(_pi_cb)
             except Exception:  # noqa: BLE001
                 logger.debug("set_prompt_injected_callback raised")
+
+        # budget_rung_callback(payload: dict) -> None   (#1069).  Installed
+        # by a helper so this already-baselined function does not grow.
+        self._install_budget_rung_callback(session, originals, request_id)
 
         # continuation_callback(child_messages: str) -> None
         if hasattr(session, "set_continuation_callback"):
@@ -4504,6 +4561,8 @@ class RunnerRPC:
                 )
             except Exception:  # noqa: BLE001
                 logger.debug("restore prompt_injected callback raised")
+        self._restore_one_callback(
+            session, originals, "budget_rung", "set_budget_rung_callback")
         if "continuation" in originals and hasattr(
             session, "set_continuation_callback",
         ):

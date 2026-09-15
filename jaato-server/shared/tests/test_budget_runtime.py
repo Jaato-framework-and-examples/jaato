@@ -141,6 +141,11 @@ def _session(active="planner", model="opus", budget=None):
         _budget_applied_rung_pct=0.0,
         _current_output_callback=None,
         _ui_hooks=None,
+        # #1069: the typed per-rung notification.  ``None`` is the
+        # production shape whenever no client callback is installed (the
+        # setter is wired per-send, like its siblings), so the double keeps
+        # the default and the rung path is exercised with the emit disabled.
+        _on_budget_rung=None,
         _connects=connects,
     )
     for name in ("_is_connected_to", "_connect_tier_entry",
@@ -148,6 +153,8 @@ def _session(active="planner", model="opus", budget=None):
                  "_surface_budget_event", "_refuse_if_budget_exhausted",
                  # #955: every fired rung and ceiling leaves a trace line.
                  "_budget_trace", "_budget_trace_rung", "_budget_note_ceilings",
+                 # #1069: the typed sibling of the prose notice.
+                 "_notify_budget_rung",
                  # Post-connect bookkeeping, bound so the double exercises
                  # the real ones rather than silently skipping them.
                  "_wire_cache_plugin", "_retarget_reliability_model",

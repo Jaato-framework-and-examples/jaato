@@ -110,11 +110,24 @@ DEFAULT_UNMETERED_POLICY = "estimate"
 #   finalize -> inject "wrap up and answer with what you have" (graceful)
 #   abort    -> hard stop (ungraceful; for when a partial answer is worthless)
 #   escalate -> hand off to the cascade owner / a human
+#   notify   -> emit the rung event and do NOTHING else (#1069)
 ACTION_FINALIZE = "finalize"
 ACTION_ABORT = "abort"
 ACTION_ESCALATE = "escalate"
-VALID_ACTIONS: frozenset = frozenset(
+ACTION_NOTIFY = "notify"
+
+#: Actions that latch on ``JaatoSession._budget_terminal_action`` for the
+#: reactor layer to act on.  ``notify`` is deliberately NOT one of them: it
+#: exists to be a pure observability checkpoint, so latching it would make a
+#: rung declared to change nothing change the session's terminal disposition
+#: — and ``finalize``'s injection would then be attributed to a rung that
+#: asked for no injection.
+TERMINAL_ACTIONS: frozenset = frozenset(
     {ACTION_FINALIZE, ACTION_ABORT, ACTION_ESCALATE}
+)
+
+VALID_ACTIONS: frozenset = frozenset(
+    {ACTION_FINALIZE, ACTION_ABORT, ACTION_ESCALATE, ACTION_NOTIFY}
 )
 
 
@@ -772,6 +785,39 @@ class BudgetTracker:
         if not ranked:
             return "no limits declared"
         return ", ".join(f"{d} {f * 100:.0f}%" for f, d in ranked[:3])
+
+    def pressure_by_dimension(self) -> Dict[str, float]:
+        """Every DECLARED dimension → its ``used / limit`` fraction.
+
+        The structured sibling of :meth:`describe_pressure`, for the rung
+        event (#1069): a client rendering "budget 85%" needs the number, and
+        re-parsing the prose string to get it is the thing a typed event
+        exists to avoid.
+
+        Unclamped, for :meth:`usage_fraction`'s reason — a run that
+        overshoots reports > 1.0, which says by how much.  Undeclared
+        dimensions are ABSENT rather than zero: nothing was measured against
+        them, and a client must be able to tell "no ceiling here" from "a
+        ceiling at 0%".
+        """
+        usage = self._usage.as_dict()
+        return {
+            dim: usage[dim] / limit
+            for dim, limit in self._config.limits.items()
+            if limit
+        }
+
+    def driving_dimension(self) -> Optional[str]:
+        """The declared dimension with the highest fraction, or ``None``.
+
+        The one :meth:`describe_pressure` names first, hoisted out so the
+        rung event can carry it as a field instead of a reader having to
+        take the prose apart.
+        """
+        pressure = self.pressure_by_dimension()
+        if not pressure:
+            return None
+        return max(pressure.items(), key=lambda kv: kv[1])[0]
 
     def _newly_fired(self) -> Tuple["DegradeRung", ...]:
         """Rungs whose threshold is now crossed and which have not fired."""
