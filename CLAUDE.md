@@ -4107,6 +4107,74 @@ unrelated to the code. Verified non-vacuous: with the check neutralised,
 exactly the five enforcement cases fail and the not-applicable ones still
 pass.
 
+### A Workspace Name That Left the Workspace Root
+
+The section above is about a transport that could not tell its callers
+apart. This is the other transport's version of the same question, and it
+starts by saying what is NOT true of it: a WS client does not name a path
+on the normal path at all. `session.new` from a client with no workspace
+**auto-provisions** one under `{workspace_root}/sessions/{session_id}/`
+from a template, so the tenant serving those clients decides where they
+run. The `startswith(workspace_root + os.sep)` tests in `websocket.py` are
+not the boundary either — they are a ROUTING gate deciding which sessions
+get an AppArmor profile and a cgroup, and a session that fails one is
+skipped with a debug line so IPC and user-CWD sessions pass through the
+same hook.
+
+Reuse is the opt-in, `workspace.select <name>`, and there the name was
+joined onto the root with nothing in between. **A join contains nothing by
+itself**, which is the whole finding:
+
+| name | `workspace_root / name` |
+|---|---|
+| `../../etc` | `<root>/../../etc` — `..` is kept verbatim |
+| `/etc/passwd` | `/etc/passwd` — pathlib DISCARDS the left operand |
+| `..` | the root's PARENT, with no separator involved |
+
+`create_workspace` refused `/` and `\` and so was contained by accident;
+`select_workspace` validated nothing, checked `path.exists()`, and then
+`_analyze_workspace`'d whatever it found — reading that directory's `.env`
+and reporting its provider and model back to the client through
+`get_config_status`. So the escape was also an oracle, and
+`_save_registry` **persisted** the out-of-root row into
+`~/.jaato/workspaces.json`, where `get_workspace_path`'s registry branch
+would return it again across restarts.
+
+`WorkspaceManager._resolve_under_root` is the one rule, and every site that
+turns a NAME into a PATH goes through it — there were five, and containing
+`select_workspace` alone would have left the other four as the next
+route in. It resolves symlinks BEFORE comparing, which is not
+belt-and-braces: provisioned session workspaces live under this same root
+and the agent's own file tools write into them, so a link planted under the
+root is model-reachable.
+
+| Property | Why |
+|---|---|
+| **containment, not a separator check** | `..` carries no separator and resolves to the root's parent, so a character check misses exactly the cheapest escape — and misses symlinks entirely |
+| **checked BEFORE `exists()`** | a refusal must not double as an oracle for what exists outside the root; a present and an absent target answer alike |
+| **the verbs raise, the accessors answer** | `select`/`create` raise `WorkspaceContainmentError`, a `ValueError` **subclass** so the WS handlers' existing `except ValueError` reports it unchanged; `get_workspace_path` / `get_config_status` return their existing "no such workspace" answers, because an accessor that starts raising breaks callers that never expected it |
+| **the stored path is checked, not trusted** | one accepted selection used to persist, so the registry row is re-checked rather than read back as authority |
+| **`create` keeps BOTH checks** | they catch different things and neither masks the other: `".."` passes the naming check and containment refuses it, `"a/b"` passes containment and the naming check refuses it. That is not the duplicated-validation shape the reversion meta-guard flags |
+
+**Two costs, stated rather than hidden.** A workspace an operator
+deliberately symlinked into the root is now refused and must be moved or
+bind-mounted — and such a workspace was *already* running unconfined,
+because the AppArmor gate resolves both sides the same way and skipped it.
+And containment bounds the ROOT, not the tenant: every tenant's
+provisioned workspace is a sibling under one server-wide `workspace_root`,
+so this stops a name leaving the root and says nothing about which
+workspace inside it a client may select. Per-tenant roots are not
+expressible today, and are the same shape as the other WS singletons (one
+bearer-token digest, one `SSOAuth` realm, one cookie secret).
+
+Tests: `server/tests/test_workspace_name_containment.py`. Every deny case
+points at a directory that EXISTS, because the refusal has to come from the
+containment check rather than from the `exists()` test one line below it —
+against the unfixed code those selections SUCCEEDED, so a test using an
+absent target would pass either way. Verified non-vacuous: with
+`_resolve_under_root` reduced to the bare join, exactly the ten enforcement
+cases fail and all six controls still pass.
+
 ### A Refresh Token That Rotates, and Two Sessions Refreshing It (#683)
 
 An OAuth refresh token **rotates**: the response replaces the token that

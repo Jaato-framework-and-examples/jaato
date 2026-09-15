@@ -46,6 +46,18 @@ PROVIDER_DETECTION = [
 ]
 
 
+class WorkspaceContainmentError(ValueError):
+    """A workspace NAME resolved to a path outside the manager's root.
+
+    Subclasses :class:`ValueError` deliberately: every WS handler that
+    turns a workspace verb into an error frame already catches
+    ``ValueError``, so containment refusals reach the client through the
+    path that exists rather than through a new one.  It is a distinct type
+    so a caller that wants to tell "escaped the root" from "does not
+    exist" can, without parsing a message.
+    """
+
+
 @dataclass
 class WorkspaceInfo:
     """Information about a workspace."""
@@ -139,6 +151,63 @@ class WorkspaceManager:
 
         except Exception as e:
             logger.warning(f"Failed to save workspace registry: {e}")
+
+    def _is_under_root(self, path: Path) -> bool:
+        """Whether an ALREADY-RESOLVED path is the root or lives beneath it.
+
+        Takes a resolved path rather than resolving one, so the single
+        caller that has a path instead of a name (the registry branch of
+        :meth:`get_workspace_path`) shares this comparison instead of
+        carrying a second opinion about what "under the root" means.
+        """
+        return path == self.workspace_root or self.workspace_root in path.parents
+
+    def _resolve_under_root(self, name: str) -> Path:
+        """Turn a client-supplied workspace NAME into a path under the root.
+
+        Workspace names arrive from clients (``workspace.select``,
+        ``workspace.create``) and were joined onto ``workspace_root`` with
+        nothing in between.  **The join contains nothing by itself**:
+        pathlib discards the left operand when the right is absolute
+        (``root / "/etc/passwd"`` is ``/etc/passwd``) and keeps ``..``
+        verbatim (``root / ".."`` is the root's PARENT), so a name is a
+        path traversal unless something resolves it and compares.
+
+        Symlinks are resolved BEFORE the comparison, so a link planted
+        inside the root is judged by its target.  That is not theoretical
+        here: provisioned per-session workspaces live under this same root
+        and the agent's own file tools write into them, so a link under
+        the root is model-reachable.
+
+        The cost is stated rather than hidden — a workspace an operator
+        deliberately symlinked into the root is now REFUSED and must be
+        moved or bind-mounted.  Such a workspace was already running
+        without kernel confinement: the AppArmor/cgroup gate in
+        ``websocket.py`` resolves both sides the same way and skips a
+        session whose workspace does not resolve under the root.
+
+        What this does NOT bound: every tenant's provisioned workspace is
+        a sibling under one root, so containment stops a name from leaving
+        the root and says nothing about which workspace *inside* it a
+        client may select.
+
+        Raises:
+            WorkspaceContainmentError: the name resolves outside the root.
+        """
+        candidate = (self.workspace_root / name).expanduser()
+        try:
+            resolved = candidate.resolve()
+        except OSError as e:          # symlink loop, ELOOP, name too long
+            raise WorkspaceContainmentError(
+                f"Cannot resolve workspace name {name!r}: {e}"
+            ) from e
+
+        if not self._is_under_root(resolved):
+            raise WorkspaceContainmentError(
+                f"Workspace {name!r} resolves to {resolved}, which is outside "
+                f"the workspace root {self.workspace_root}"
+            )
+        return resolved
 
     def discover_workspaces(self) -> List[WorkspaceInfo]:
         """Discover workspaces under the root directory.
@@ -261,11 +330,16 @@ class WorkspaceManager:
         Raises:
             ValueError: If workspace already exists or name is invalid.
         """
-        # Validate name
+        # Two checks that catch different things, so neither masks the
+        # other: this one enforces the NAMING rule (a workspace name is one
+        # flat component, which is what ``_analyze_workspace``'s
+        # ``path.name`` keying assumes), and ``_resolve_under_root``
+        # enforces the LOCATION rule.  ".." passes the first and is caught
+        # by the second; "a/b" passes the second and is caught by the first.
         if not name or "/" in name or "\\" in name:
             raise ValueError(f"Invalid workspace name: {name}")
 
-        path = self.workspace_root / name
+        path = self._resolve_under_root(name)
 
         if path.exists():
             raise ValueError(f"Workspace already exists: {name}")
@@ -307,9 +381,12 @@ class WorkspaceManager:
             WorkspaceInfo with current configuration status.
 
         Raises:
+            WorkspaceContainmentError: If the name resolves outside the
+                workspace root.  Checked BEFORE existence, so the refusal
+                does not double as an oracle for what exists out there.
             ValueError: If workspace does not exist.
         """
-        path = self.workspace_root / name
+        path = self._resolve_under_root(name)
 
         if not path.exists():
             raise ValueError(f"Workspace does not exist: {name}")
@@ -375,11 +452,31 @@ class WorkspaceManager:
             return None
 
         ws_info = self._workspaces.get(target)
-        if ws_info:
-            return Path(ws_info.path)
+        if ws_info and ws_info.path:
+            # The registry is daemon-owned but its rows are whatever was
+            # written into it, and one accepted out-of-root selection used
+            # to persist across restarts -- so the stored path is checked
+            # rather than trusted.
+            stored = Path(ws_info.path)
+            try:
+                resolved = stored.resolve()
+            except OSError:
+                resolved = None
+            if resolved is not None and self._is_under_root(resolved):
+                return stored
+            logger.warning(
+                "Refusing registry path for workspace %r: %s is outside the "
+                "workspace root %s", target, ws_info.path, self.workspace_root,
+            )
+            return None
 
-        # Fallback to computed path
-        return self.workspace_root / target
+        # Fallback to computed path.  An accessor stays total: a refusal is
+        # None (its existing "no such workspace" answer), not an exception.
+        try:
+            return self._resolve_under_root(target)
+        except WorkspaceContainmentError as e:
+            logger.warning("Refusing workspace path for %r: %s", target, e)
+            return None
 
     def get_env_file(self, name: Optional[str] = None) -> Optional[Path]:
         """Get the .env file path for a workspace.
@@ -415,7 +512,18 @@ class WorkspaceManager:
 
         ws_info = self._workspaces.get(target)
         if not ws_info:
-            ws_path = self.workspace_root / target
+            try:
+                ws_path = self._resolve_under_root(target)
+            except WorkspaceContainmentError as e:
+                # Reporting a provider/model read out of an arbitrary .env
+                # would make this an oracle for files outside the root.
+                logger.warning("Refusing config status for %r: %s", target, e)
+                return {
+                    "workspace": target,
+                    "configured": False,
+                    "available_providers": list(PROVIDER_ENV_VARS.keys()),
+                    "missing_fields": ["workspace is outside the workspace root"],
+                }
             if ws_path.exists():
                 ws_info = self._analyze_workspace(ws_path)
             else:
@@ -497,7 +605,7 @@ class WorkspaceManager:
         self._write_env_file(env_file, existing)
 
         # Re-analyze and update cache
-        ws_path = self.workspace_root / target
+        ws_path = self._resolve_under_root(target)
         ws_info = self._analyze_workspace(ws_path)
         ws_info.last_accessed = datetime.now(timezone.utc).isoformat()
         self._workspaces[target] = ws_info
