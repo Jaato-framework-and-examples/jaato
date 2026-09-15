@@ -1,8 +1,11 @@
 # jaato-web-server: sign-in and ticket custody for the browser client
 
-**Status:** design, blocked on #1074. Nothing here is implemented yet; the
-wire shapes in §4 are a proposal for the #1074 implementer to confirm or
-correct, and everything downstream of them is written against that proposal.
+**Status:** design, blocked on #1074, whose implementation is in progress
+(scoped to jaato-server and the Python SDK). The wire shapes in §4 were
+proposed here and **confirmed** in
+[#1074's answer comment](https://github.com/Jaato-framework-and-examples/jaato/issues/1074#issuecomment-5686953669);
+the one point still open is §4.4 (clustered daemons). Everything downstream
+of §4 is written against the confirmed shape.
 
 ## 1. What this is, and what it is not
 
@@ -123,18 +126,30 @@ can weigh it.
 | **app credential** | presented once, on the bind channel's Upgrade, as `Authorization: Bearer` (the BFF is Node, so the header form is available; no query string). Read from a file with mode 0600, never from argv |
 | **user ticket** | minted per connect through `ticket.bind`, handed to the browser in a JSON response body (never a URL), presented by the browser as `?token=` |
 
-**Decision the BFF needs: app credential is bind-only.** The issue asks
-whether an app credential alone should open a session. The BFF never wants
-that: a session opened on the bind channel would be attributed to the
+**Confirmed: the app credential is bind-only.** The issue asked whether an
+app credential alone should open a session; the answer is no. The BFF never
+wants that: a session opened on the bind channel would be attributed to the
 application, which is exactly the anonymous session the ticket mechanism
-exists to make unreachable. Fail-closed, as the issue suggests.
+exists to make unreachable.
 
-### 4.2 Wire shapes (proposed)
+**Confirmed, and it falls out of the same argument: only the app that bound
+a ticket may revoke it.** The daemon enforces this from the credential on
+the channel, without being told, the same way it qualifies the identity. So
+the BFF's `ticket.revoke` can only ever touch its own users' tickets, and a
+second application on the daemon cannot log this one's users out.
 
-The issue sketches `TicketRegistry.bind/resolve/revoke/revoke_user` and says
-the bind channel is a WS connection carrying a `ticket.bind` message. The BFF
-needs those two verbs as request/response pairs with a correlation id, so a
-BFF serving many browsers can mint concurrently on one channel:
+### 4.2 Wire shapes (confirmed)
+
+The issue sketched `TicketRegistry.bind/resolve/revoke/revoke_user` and said
+the bind channel is a WS connection carrying a `ticket.bind` message. The
+answer comment confirms the two verbs as request/response pairs with a
+correlation id, following the in-tree precedent of protocol 1.3
+(`InjectPromptRequest.request_id` + `inject_prompt.result`: one channel,
+many concurrent callers, a reply that says what actually happened). They
+are declared in `jaato-sdk/jaato_sdk/events.py`, so the codegen puts them
+in `@jaato/sdk`'s `events.ts` and the CI staleness gate keeps the two in
+step; the additions land as **protocol 1.10**, with a changelog entry
+stating how each side degrades against an older peer.
 
 ```jsonc
 // BFF → daemon
@@ -163,10 +178,12 @@ BFF serving many browsers can mint concurrently on one channel:
 - `ttl_seconds: 60` is what the BFF will ask for. The issue's default is 300;
   the BFF mints a ticket only in response to a connect attempt, so 60 covers
   the round trip with margin and shortens the window a logged URL is useful.
-- Asking for these as typed events in `jaato-sdk/jaato_sdk/events.py` (a
-  `TicketBindRequest` / `TicketBoundEvent` pair and their revoke siblings)
-  rather than ad-hoc dicts means the codegen puts them in `@jaato/sdk`'s
-  `events.ts` and the BFF gets them typed for free.
+- `qualified` crosses the wire in `ticket.bound`, so the BFF logs what the
+  daemon will stamp rather than reconstructing it.
+- Because the events are typed, the BFF's bind channel is an ordinary
+  `JaatoClient` using the generated types, not hand-written dicts. Until
+  1.10 is published to npm, `jaato-web-server` builds against the sibling
+  `jaato-sdk-ts` checkout the way `jaato-web` does.
 
 ### 4.3 What the BFF needs from the identity
 
@@ -321,14 +338,21 @@ between users. Every session still runs as the daemon's uid, as #1074's
    multi-user deployment is isolated and not merely attributed. Separate
    issue; not a BFF change.
 
-## 10. Open questions for the #1074 implementer
+## 10. Questions put to #1074, and their answers
 
-- Are `ticket.bind` / `ticket.revoke` request/response with a `request_id`,
-  as in §4.2? A BFF on one channel needs to correlate concurrent binds.
-- Will the events be declared in `events.py` so the TypeScript SDK gets them
-  through codegen?
-- Is the app credential bind-only (§4.1)? The BFF assumes yes.
-- Does `qualified` come back in the `ticket.bound` response? The BFF wants to
-  log what the daemon will stamp, not reconstruct it.
-- On a clustered daemon, does a ticket resolve on every node or only the one
-  that bound it (§4.4)?
+Asked in the first version of this document; answered in
+[the issue's comment](https://github.com/Jaato-framework-and-examples/jaato/issues/1074#issuecomment-5686953669).
+
+| Question | Answer |
+|---|---|
+| `ticket.bind` / `ticket.revoke` as request/response with a `request_id`? | yes, on the protocol 1.3 `request_id` precedent |
+| `app_id` absent from the request, derived from the credential? | yes, and it is the load-bearing half of the design |
+| `qualified` returned in `ticket.bound`? | yes |
+| events declared in `events.py`, codegen'd into the TS SDK? | yes; protocol 1.10 |
+| app credential bind-only? | yes |
+| *(raised by the implementer)* who may revoke a ticket? | only the app that bound it, enforced by the daemon from the credential |
+| a ticket bound on one clustered node resolving on another? | **still open**; §4.4 states how the BFF behaves either way |
+
+What remains this design's to build, in the order of §9: the SDK token
+provider (`jaato-sdk-ts` is outside #1074's scope), the `ticketUrl` path
+and sign-in screen in `jaato-web`, and the `jaato-web-server` package.
