@@ -132,7 +132,7 @@ def _resolve_event_queue_max() -> int:
     than disabling the bound, because "unbounded" is the bug this exists
     to fix and a typo should not silently reintroduce it.
     """
-    raw = os.environ.get("JAATO_IPC_EVENT_QUEUE_MAX", "").strip()
+    raw = os.environ.get("JAATO_IPC_EVENT_QUEUE_MAX", "").strip()  # env: events buffered per IPC client before lossy tool-output chunks are evicted oldest-first (default 2048; a bad value falls back, never unbounded)
     if raw:
         try:
             parsed = int(raw)
