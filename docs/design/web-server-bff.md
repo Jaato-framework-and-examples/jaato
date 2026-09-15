@@ -173,8 +173,12 @@ stating how each side degrades against an older peer.
 - `app_id` is **absent from the request** on purpose: the daemon derives it
   from the credential that authenticated the channel, which is the point the
   issue makes about no integrator being able to forget the qualification.
-- `user` is the BFF's stable subject: the OIDC `sub` (not `preferred_username`,
-  which can change), or the local username. The daemon qualifies it.
+- `user` is the claim the BFF is configured to use (`auth.oidc.subject_claim`,
+  §7). Against Keycloak the default is `preferred_username`: it is unique
+  within the realm, the daemon qualifies it with `app_id` anyway, and it
+  makes `created_by` readable in an audit (`web:alice`, not
+  `web:2f1c9e0a-…`). `sub` is available for a deployment that renames users
+  and would rather have the stable UUID. Either way the daemon qualifies it.
 - `ttl_seconds: 60` is what the BFF will ask for. The issue's default is 300;
   the BFF mints a ticket only in response to a connect attempt, so 60 covers
   the round trip with margin and shortens the window a logged URL is useful.
@@ -287,11 +291,13 @@ mode: direct                                 # direct | proxy
 auth:
   kind: oidc                                 # oidc | local
   oidc:
-    issuer: https://login.example.org/realms/eng
+    issuer: https://jaato.example.org/auth/realms/eng   # the `iss` Keycloak puts in tokens
+    backchannel_url: http://127.0.0.1:8180             # optional: discovery, token, JWKS over loopback (§11)
     client_id: jaato-web
     client_secret_file: /etc/jaato-web/oidc.secret
     scopes: [openid, profile]
-    subject_claim: sub                       # what becomes ticket.bind's `user`
+    subject_claim: preferred_username        # what becomes ticket.bind's `user`
+    required_role: jaato-user                # optional: realm or client role that gates sign-in (§11)
   local:
     users_file: /etc/jaato-web/users.yaml    # {name: argon2 hash}
 
@@ -356,3 +362,104 @@ Asked in the first version of this document; answered in
 What remains this design's to build, in the order of §9: the SDK token
 provider (`jaato-sdk-ts` is outside #1074's scope), the `ticketUrl` path
 and sign-in screen in `jaato-web`, and the `jaato-web-server` package.
+
+## 11. Deployment with Keycloak on the same host
+
+The first target deployment runs Keycloak on the host the BFF runs on. That
+fixes several choices that a generic-IdP design leaves open.
+
+### 11.1 One public origin, two internal ports
+
+```
+                     https://jaato.example.org
+                    ┌──────────────────────────┐
+  browser ─────────►│ reverse proxy (TLS)      │
+                    │  /            → BFF :8443 (plain HTTP behind the proxy)
+                    │  /auth/       → Keycloak :8180
+                    │  /daemon      → daemon --web-socket 127.0.0.1:8080  (WebSocket upgrade)
+                    └──────────────────────────┘
+                                 │ loopback
+                    BFF ──ticket.bind──► daemon    (bind channel, app credential)
+                    BFF ──token/JWKS──► Keycloak   (back channel, §11.2)
+```
+
+- The daemon binds loopback only and is reached by browsers through the
+  proxy's `/daemon` route, so the BFF's `daemon.url` is
+  `wss://jaato.example.org/daemon` and its `daemon.bind_url` is
+  `ws://127.0.0.1:8080`. `direct` mode (§6) is what this topology wants: the
+  proxy already gives a single origin, so the BFF stays out of the frame path.
+- Keycloak's public URL is under the same origin, so the OIDC redirects are
+  same-site and the session cookie's `SameSite=Lax` carries through the
+  callback with no exceptions.
+- The proxy, not the BFF, terminates TLS. `listen`/`tls` in §7 stay for the
+  deployment without a proxy.
+
+### 11.2 Front channel and back channel
+
+The browser reaches Keycloak at its public URL; the BFF can reach it over
+loopback. Keycloak stamps `iss` with the **public** URL (`KC_HOSTNAME`), and
+OIDC requires the BFF to validate tokens against that same issuer, so the
+two must not be confused:
+
+| | URL | Used for |
+|---|---|---|
+| front channel | `https://jaato.example.org/auth/realms/eng` | authorization redirect, RP-initiated logout; also the `issuer` the BFF validates against |
+| back channel | `http://127.0.0.1:8180` (`auth.oidc.backchannel_url`) | discovery document, token exchange, JWKS, userinfo |
+
+Keycloak supports this split when started with `--hostname-backchannel-dynamic=true`
+(Keycloak 25+), which lets it answer back-channel requests on the internal
+address while keeping the public `iss`. When `backchannel_url` is unset the
+BFF uses the issuer URL for everything, which is correct for a Keycloak
+reached only through the proxy. Plain HTTP on the back channel is acceptable
+only because it is loopback; the BFF refuses an `http://` back channel that
+is not a loopback address.
+
+### 11.3 Client registration in Keycloak
+
+One confidential client in the realm:
+
+| Setting | Value |
+|---|---|
+| Client ID | `jaato-web` |
+| Client authentication | on (confidential); the secret goes in `client_secret_file` |
+| Standard flow | on; direct access grants and implicit flow **off** |
+| PKCE code challenge method | `S256` (the BFF always sends PKCE; this makes Keycloak require it) |
+| Valid redirect URIs | `https://jaato.example.org/auth/callback` only |
+| Valid post-logout redirect URIs | `https://jaato.example.org/` |
+| Back-channel logout URL | `https://jaato.example.org/auth/backchannel-logout` (§11.5) |
+| Back-channel logout session required | on |
+
+### 11.4 Who may sign in at all
+
+Keycloak puts realm roles in `realm_access.roles` and client roles in
+`resource_access.jaato-web.roles` on the ID token. `auth.oidc.required_role`
+names one; a user whose token lacks it is refused at the callback with a
+page saying so, and no ticket is ever minted for them. This is the one piece
+of authorization the BFF does cheaply and correctly, because it is decided
+once at sign-in from a claim the IdP signed. It answers *"may this person use
+jaato through this deployment"*, not *"which session may they see"*, which
+remains the daemon's question (§4.3).
+
+### 11.5 Logout, both directions
+
+- **User-initiated.** `/api/logout` clears the cookie, sends `ticket.revoke`
+  for the user, then redirects to Keycloak's `end_session_endpoint` with
+  `id_token_hint` and the post-logout URI, so the Keycloak SSO session ends
+  too and the next visit prompts for credentials.
+- **Keycloak-initiated (back-channel).** When an administrator logs a user
+  out or the SSO session expires, Keycloak POSTs a signed logout token to
+  `/auth/backchannel-logout`. The BFF validates it against the JWKS, ends the
+  matching cookie session, and revokes the user's tickets. Without this, an
+  administrator's "log out everywhere" would not reach a jaato tab. The
+  browser's live WebSocket is **not** cut by either path: the ticket was
+  consumed at connect and the connection is the daemon's. Cutting it needs a
+  daemon-side "close connections for identity X", which #1074 does not
+  include; recorded here as the gap it is.
+
+### 11.6 What the design does not assume from Keycloak
+
+Nothing beyond OIDC with PKCE, the standard `end_session_endpoint`, and the
+OIDC back-channel logout spec. The two Keycloak-specific claims read
+(`realm_access` / `resource_access`) are behind the `required_role` knob and
+unused when it is unset, so a second deployment on another IdP loses only
+that knob.
