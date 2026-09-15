@@ -25,7 +25,7 @@ The framework supports a server-first architecture where the core logic runs as 
               │                           │
               ▼                           ▼
     ┌──────────────────┐        ┌──────────────────┐
-    │   jaato-tui      │        │   jaato-web      │
+    │   jaato-tui      │        │jaato-web-coder-ui│
     │   (TUI via IPC)  │        │   (via WebSocket)│
     └──────────────────┘        └──────────────────┘
 ```

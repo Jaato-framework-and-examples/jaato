@@ -25,6 +25,7 @@ export {
   MIN_ATTACHMENT_RESUME_PROTOCOL,
   isProtocolCompatible,
   type JaatoClientOptions,
+  type TokenProvider,
 } from "./client.js";
 // High-level convenience facade (mirror of jaato-sdk's convenience.py).
 export {

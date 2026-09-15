@@ -16,12 +16,17 @@
  * will be shown in a browser that can collapse overflow, so it need not
  * shorten for a narrow terminal.
  */
-import { EventTypeValue, JaatoClient, type ConnectionStatus, type JaatoEvent } from "@jaato/sdk";
+import { EventTypeValue, JaatoClient, type ConnectionStatus, type JaatoEvent, type TokenProvider } from "@jaato/sdk";
 import { useJaato } from "@/store/store";
 
 export interface ConnectOptions {
   url: string;
-  token?: string;
+  /**
+   * The daemon's shared token, or a provider the SDK calls before every
+   * connection attempt.  The provider form is how a single-use per-user
+   * ticket (#1074) survives reconnects — see ``app/tickets.ts``.
+   */
+  token?: string | TokenProvider;
 }
 
 let client: JaatoClient | null = null;

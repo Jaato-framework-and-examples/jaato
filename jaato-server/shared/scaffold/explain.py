@@ -142,7 +142,7 @@ def transports() -> Rendered:
         },
         "websocket": {
             "sdk": "jaato-sdk (Python) — jaato_sdk.WSClient / jaato.session(mode='ws'); "
-                   "also jaato-sdk-ts (TypeScript) / browser client jaato-web",
+                   "also jaato-sdk-ts (TypeScript) / browser client jaato-web-coder-ui",
             "scope": "remote / browser daemon",
             "daemon_flags": ["--web-socket [HOST:]PORT", "--ws-token TOKEN",
                              "--ws-token-file PATH", "--ws-unsafe-no-auth"],
@@ -161,7 +161,7 @@ def transports() -> Rendered:
         "  in_process            IPC (Unix socket)        WebSocket\n"
         "  - embedded, no daemon - local daemon           - remote daemon / browser\n"
         "  - InProcessClient     - IPCClient              - WSClient (Python)\n"
-        "                                                   + TS SDK / jaato-web\n"
+        "                                                   + TS SDK / jaato-web-coder-ui\n"
         "  - n/a (no wire)       - unauthenticated        - bearer-token authenticated\n"
         "                          (socket-mode 660)\n\n"
         "  Python ships a client for ALL THREE; the SAME Session.ask/.complete/\n"

@@ -147,3 +147,45 @@ test("subagents get their own tab", async ({ page }) => {
   await tab.click();
   await expect(page.getByRole("heading", { name: "Research notes" })).toBeVisible();
 });
+
+test("a launcher config.json pre-fills the form and connects on its own", async ({ page }) => {
+  // The Vite dev server answers /config.json with index.html; stand in for
+  // ``bin/jaato-web-coder-ui.js`` by serving what it would.
+  await page.route("**/config.json", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ daemon: WS, autoConnect: true }) }),
+  );
+  await page.goto("/");
+  await expect(page.getByRole("button", { name: /default/ })).toBeVisible();
+  await page.getByRole("button", { name: /default/ }).click();
+  await expect(page.getByText("Connected to the mock daemon")).toBeVisible();
+});
+
+test("a ticketUrl config mints a fresh ticket per connection and connects (#1074)", async ({ page }) => {
+  let minted = 0;
+  await page.route("**/config.json", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ daemon: WS, ticketUrl: "/api/ticket", autoConnect: true }) }),
+  );
+  await page.route("**/api/ticket", (route) => {
+    expect(route.request().method()).toBe("POST");
+    minted += 1;
+    return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ticket: `t-${minted}` }) });
+  });
+  await page.goto("/");
+  await expect(page.getByRole("button", { name: /default/ })).toBeVisible();
+  expect(minted).toBe(1);
+  // The token field is gone: the credential is the backend's to mint.
+  await expect(page.getByText(/per-user ticket issued by the sign-in backend/)).toHaveCount(0); // we are past the connect screen
+});
+
+test("a 401 from the ticket endpoint offers Sign in instead of an error", async ({ page }) => {
+  await page.route("**/config.json", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ daemon: WS, ticketUrl: "/api/ticket", loginUrl: "/auth/login", autoConnect: true }) }),
+  );
+  await page.route("**/api/ticket", (route) => route.fulfill({ status: 401, contentType: "application/json", body: "{}" }));
+  await page.goto("/");
+  const signIn = page.getByRole("link", { name: "Sign in" });
+  await expect(signIn).toBeVisible();
+  await expect(signIn).toHaveAttribute("href", "/auth/login");
+  await expect(page.getByText(/per-user ticket issued by the sign-in backend/)).toBeVisible();
+  await expect(page.getByLabel(/Bearer token/)).toHaveCount(0);
+});

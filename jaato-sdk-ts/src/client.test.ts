@@ -885,6 +885,80 @@ describe("JaatoClient reconnect", () => {
     await client.close();
   });
 
+  test("a TokenProvider is consulted afresh on every attempt (single-use tickets, #1074)", async () => {
+    // A ticket is consumed at accept, so the value that opened the last
+    // connection can never open the next one.  The provider must be
+    // called per ATTEMPT, and each attempt must present its own value.
+    let minted = 0;
+    const client = new JaatoClient({
+      url: "ws://localhost:8080",
+      token: async () => `ticket-${++minted}`,
+      recovery: {
+        autoReconnect: true,
+        initialBackoffSeconds: 0.01,
+        maxBackoffSeconds: 0.05,
+        jitterFactor: 0.0,
+        maxReconnectAttempts: 3,
+      },
+    });
+    await connectAndAck(client);
+    assert.equal(minted, 1);
+    assert.ok(lastInstance!.url.endsWith("?token=ticket-1"), lastInstance!.url);
+
+    const first = lastInstance!;
+    first.emitClose(1006, "lost");
+    await new Promise<void>((resolve) => setTimeout(resolve, 40));
+
+    assert.equal(minted, 2, "reconnect must mint a fresh ticket, not replay the consumed one");
+    assert.notEqual(lastInstance, first);
+    assert.ok(lastInstance!.url.endsWith("?token=ticket-2"), lastInstance!.url);
+    await client.close();
+  });
+
+  test("a TokenProvider that throws on connect() propagates to the caller", async () => {
+    const client = new JaatoClient({
+      url: "ws://localhost:8080",
+      token: async () => { throw new Error("backend says 401"); },
+      recovery: { autoReconnect: false },
+    });
+    await assert.rejects(client.connect(), /backend says 401/);
+    assert.equal(lastInstance, null, "no WebSocket may be opened without a credential");
+  });
+
+  test("a TokenProvider that throws during reconnect fails that attempt and schedules the next", async () => {
+    let calls = 0;
+    const client = new JaatoClient({
+      url: "ws://localhost:8080",
+      token: async () => {
+        calls += 1;
+        if (calls === 2) throw new Error("backend briefly down");
+        return `ticket-${calls}`;
+      },
+      recovery: {
+        autoReconnect: true,
+        initialBackoffSeconds: 0.01,
+        maxBackoffSeconds: 0.02,
+        jitterFactor: 0.0,
+        maxReconnectAttempts: 5,
+      },
+    });
+    await connectAndAck(client);
+    lastInstance!.emitClose(1006, "lost");
+    // attempt 2 throws inside the provider, attempt 3 opens a socket
+    await new Promise<void>((resolve) => setTimeout(resolve, 80));
+    assert.ok(calls >= 3, `expected the loop to continue past the throwing attempt, calls=${calls}`);
+    assert.ok(lastInstance!.url.endsWith("?token=ticket-3"), lastInstance!.url);
+    assert.equal(client.state, ConnectionState.RECONNECTING);
+    await client.close();
+  });
+
+  test("a TokenProvider returning undefined connects with no token", async () => {
+    const client = new JaatoClient({ url: "ws://localhost:8080", token: () => undefined });
+    await connectAndAck(client);
+    assert.ok(!lastInstance!.url.includes("token="), lastInstance!.url);
+    await client.close();
+  });
+
   test("close() transitions to CLOSED and rejects further sends", async () => {
     const client = new JaatoClient({ url: "ws://localhost:8080" });
     await connectAndAck(client);
