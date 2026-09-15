@@ -1766,6 +1766,29 @@ def _resolve_ws_token(args) -> Optional[str]:
     return token
 
 
+def _apply_peer_path_trust_flag(args) -> None:
+    """Publish ``--ipc-trust-peer-paths`` as the env var that carries it.
+
+    The peer-entitlement opt-out is read from the environment by
+    :func:`shared.peer_identity.path_checks_disabled`, which is where the
+    check itself lives — one definition, reachable from the transport
+    without threading a flag through four constructors that have no other
+    use for it.  So the flag SETS the variable rather than travelling as
+    an argument.
+
+    Set-only, never cleared: an operator who exported
+    ``JAATO_IPC_TRUST_PEER_PATHS`` and did not pass the flag keeps the
+    posture they chose.  Absence of a flag is not a request to re-arm
+    something the environment already disabled.
+
+    A separate function rather than two lines inside :func:`main` because
+    the complexity ratchet freezes that function at its recorded size and
+    says so: add new logic in a helper.
+    """
+    if getattr(args, "ipc_trust_peer_paths", False):
+        os.environ["JAATO_IPC_TRUST_PEER_PATHS"] = "1"
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Jaato Server - Multi-client AI assistant backend",
@@ -1839,6 +1862,19 @@ Examples:
              "any principal that can open the socket can fully drive the agent. "
              "Pass 666 to opt into world-accessible (e.g. cross-user containers "
              "on a trusted host).",
+    )
+    parser.add_argument(
+        "--ipc-trust-peer-paths",
+        action="store_true",
+        help="Disable the IPC peer-entitlement check: act on any workspace "
+             "or config_root a client names, without verifying the "
+             "connecting OS account could reach it. The check is per "
+             "CONNECTION, not per daemon -- it is skipped for a client "
+             "running as the daemon's own uid (which can already reach "
+             "anything the daemon can) and runs for every other account, "
+             "so it bites exactly on a socket several accounts share (see "
+             "--socket-mode). Logs a WARNING the first time it takes "
+             "effect. Equivalent to JAATO_IPC_TRUST_PEER_PATHS=1.",
     )
     parser.add_argument(
         "--dashboard-port",
@@ -2028,6 +2064,8 @@ Examples:
     # This ensures log files don't grow unbounded
     if args.daemon or os.environ.get("JAATO_DAEMONIZED"):
         configure_logging(log_file=args.log_file, verbose=args.verbose)
+
+    _apply_peer_path_trust_flag(args)
 
     # Resolve WS bearer token (only when --web-socket is configured).
     ws_token = _resolve_ws_token(args)

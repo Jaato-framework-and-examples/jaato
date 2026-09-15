@@ -193,9 +193,11 @@ def capture() -> Dict[str, str]:
     global _CAPTURED
     _CAPTURED = {
         ENV_REVIVE_PROFILE: _resolve(
-            ENV_REVIVE_PROFILE, os.environ.get(ENV_REVIVE_PROFILE)),
+            ENV_REVIVE_PROFILE,
+            os.environ.get(ENV_REVIVE_PROFILE)),  # env: a revived session's profile: persisted (default, frozen at creation) or disk (re-resolve now)
         ENV_REVIVE_PERSONA: _resolve(
-            ENV_REVIVE_PERSONA, os.environ.get(ENV_REVIVE_PERSONA)),
+            ENV_REVIVE_PERSONA,
+            os.environ.get(ENV_REVIVE_PERSONA)),  # env: a revived session's system prompt: persisted (default) or disk, which RE-RUNS prefetch scripts
     }
     non_default = {k: v for k, v in _CAPTURED.items() if v != PERSISTED}
     if non_default:
