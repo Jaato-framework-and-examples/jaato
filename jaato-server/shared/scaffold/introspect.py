@@ -1157,9 +1157,12 @@ def _key_of(node: ast.expr, const_map: Dict[str, str]) -> Optional[str]:
     return None
 
 
-# An ``# env: <one-line goal>`` comment on (or just above) an env-read line
-# documents that var.  Deliberately code-co-located so the description can't
-# drift from the reader; undocumented vars simply have ``description=None``.
+# An ``# env: <one-line goal>`` comment on an env-read line documents that
+# var.  TRAILING, on the read line itself: the match is
+# ``doc_comments.get(lineno)``, an exact line number, so a comment on the
+# line ABOVE documents nothing and renders as a bare name.  Deliberately
+# code-co-located so the description can't drift from the reader;
+# undocumented vars simply have ``description=None``.
 _ENV_DOC_RE = re.compile(r"#\s*env:\s*(.+?)\s*$")
 
 

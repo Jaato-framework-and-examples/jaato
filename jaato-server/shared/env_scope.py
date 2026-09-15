@@ -319,6 +319,13 @@ CATALOG: Dict[str, EnvClass] = {
     "JAATO_RUNNER_DISABLE_CONFINE": EnvClass(HOST, None,
         "disables runner self-confinement host-wide; deliberately NOT per "
         "session"),
+    "JAATO_IPC_TRUST_PEER_PATHS": EnvClass(HOST, None,
+        "switches OFF the IPC peer-entitlement check, so the daemon acts "
+        "on whatever workspace / config_root a client names.  A property "
+        "of the SOCKET -- one file, one set of principals reaching it -- "
+        "and deliberately not per session: a session cannot be allowed to "
+        "widen the transport's own trust posture, which is the reading "
+        "--ws-unsafe-no-auth and JAATO_APPARMOR_COMPLAIN already get"),
     "JAATO_IPC_EVENT_QUEUE_MAX": EnvClass(HOST, None,
         "how many events the daemon buffers per IPC client before it "
         "starts dropping lossy chunks; one bound per daemon, and a "

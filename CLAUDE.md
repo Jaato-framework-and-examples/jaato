@@ -59,7 +59,8 @@ The framework uses a server-first architecture where the server runs as a daemon
 - **`server/__main__.py`**: Entry point with daemon mode, PID management
   - `--ipc-socket PATH`: Unix domain socket for local clients
   - `--web-socket [HOST:]PORT`: WebSocket for remote clients
-  - `--socket-mode MODE`: Octal file permissions for the IPC socket (default: `660`, owner and group only). The IPC transport is unauthenticated, so any principal that can open the socket can fully drive the agent. Pass `666` to opt into world-accessible (e.g. cross-user containers on a trusted host).
+  - `--socket-mode MODE`: Octal file permissions for the IPC socket (default: `660`, owner and group only). Pass `666` to opt into world-accessible (e.g. cross-user containers on a trusted host). The socket's mode is still the only thing deciding WHO may connect; what the daemon does with a connection it accepted is bounded by the peer check below.
+  - `--ipc-trust-peer-paths`: opt out of that check (also `JAATO_IPC_TRUST_PEER_PATHS=1`). Announced at WARNING the first time it takes effect.
   - `--ws-token TOKEN` / `--ws-token-file PATH`: bearer token clients must present in the WS Upgrade. Token-file mode 0600 enforced. When neither flag is passed (and `--web-socket` is set), the daemon reads `~/.jaato/ws.token`; if the file doesn't exist, it generates a 32-byte token and persists it there with mode 0600. Local clients can read the same default path for zero-config auth. **Prefer `--ws-token-file`, or neither flag.** A token passed as `--ws-token TOKEN` sits in the daemon's `argv` and is therefore served by `/proc/<daemon_pid>/cmdline` to anything on the host that can read it. AppArmor template v30 denies that read from inside a confined session (#712), but the exposure to everything else on the box is a property of the flag, not of the profile.
   - `--ws-unsafe-no-auth`: explicit opt-out of WS bearer auth (legacy open-accept). Logs a startup WARNING. Required to keep the historical behaviour.
   - `--ws-app-credentials PATH`: opt into per-user **connect tickets** (#1074). A JSON object mapping an application id to that application's long-lived credential, mode 0600 enforced. Each entry authorises one WS connection to call `ticket.bind` / `ticket.revoke` and **nothing else** — it cannot open a session. Omit the flag and WS auth is byte-identical to what it has always been. See [Identity at Connect](#identity-at-connect-1074).
@@ -4001,6 +4002,180 @@ which stays readable for any pid because CPython's `close_fds` path
 enumerates it at every subprocess spawn and AppArmor has no rule form for
 "my own pid only".
 
+### Two Principals on One Socket
+
+`EventSink.get_client_user` returned a hardcoded `None` on IPC, with the
+comment *"IPC connections are local and unauthenticated — user identity is a
+WS/SSO concept."* True of a daemon serving one human, which is what
+`--socket-mode`'s `0o660` default encodes. False of the deployment the same
+flag documents — *"pass `666` to opt into world-accessible (e.g. cross-user
+containers on a trusted host)"* — where several OS accounts share one socket
+and the daemon could not tell them apart.
+
+**Two principals, and they are orthogonal.** The account the daemon RUNS as
+(owner of `~/.jaato`, the pooled provider credentials, `ws.token`) and the
+accounts that CONNECT are different axes, as they are for any shared Unix
+service. The framework already supports the second at the configuration
+layer: `resolve_config_search_path` puts a CLIENT-SUPPLIED `config_root` (or
+`<workspace>/.jaato`) at the primary tier and the daemon's `~/.jaato` only as
+a fallback, so each connecting user can bring their own profiles, agents —
+and their own `<provider>_auth.json`. State writes are anchored at
+`<workspace>/.jaato` by `workspace_state_path`, which never honours
+`config_root`, so session records and logs land in the user's own tree. Per
+user configuration and per user credentials were already expressible.
+
+**What was missing is the binding.** Nothing tied *which workspace or
+config_root you may name* to *who you are*. Both arrive as plain strings
+(`CommandRouter._handle_set_workspace` reads `args[0]`; `ClientConfigRequest`
+carries `working_dir` / `config_root` / `env_file`) and the only validation
+on the way down is that they be absolute — #742's anti-ambiguity guard, not
+an access check. The daemon then acts on them with ITS credential, and so
+does the runner: `RunnerSpawner._exec_runner` is `fork()` + `os.execvpe` with
+no `setuid` anywhere on the path, so a session runs in a different PROCESS
+under the same UID. A peer who cannot read another user's tree could have the
+agent read it for them — a confused deputy with the service account as the
+amplifier.
+
+**Every boundary below the transport is workspace-shaped**, so none of them
+could answer it: the AppArmor profile is keyed on `workspace_root` plus the
+rendered profile body (#1033), `check_path_with_jaato_containment` tests
+against the session's own root. Point a session at somebody else's tree and
+they all do their job perfectly — they lock the runner INTO that tree. The
+only place the question is answerable is before the path is accepted, where
+the peer credential exists and the session does not.
+
+`shared/peer_identity.py` is that place: stdlib-only, the shape
+`shared/apparmor_label.py` already has, so the transport can import it before
+plugin discovery and so the answer cannot be derived twice.
+
+| Half | What it does |
+|------|--------------|
+| attribution | `SO_PEERCRED` → `PeerCredentials`, rendered by `get_client_user`. `Session.created_by`, the ledger's `response` / `permission-check` `user_id` and the telemetry `user.id` populate on IPC for the first time — everything above `EventSink` is transport-agnostic, so #859's plumbing lights up with no further change |
+| entitlement | `unreachable_client_paths` refuses a `workspace_path` / `config_root` / `env_file` / trace path the connecting account could not reach, at `_handle_set_workspace` and `_reject_unentitled_client_paths` (beside #742's relative-path guard, and all-or-nothing for the same reason: a half-applied handshake is its own silent-wrong-directory bug) |
+
+**The reachability rule, and why each half is what it is.** An existing path
+needs `r-x` — deliberately NOT `w`, because an org-wide `config_root` of
+shared profiles under `/opt`, readable by everyone and writable by none of
+them, is a legitimate and desirable shape in exactly this deployment. A path
+that does not exist needs `-wx` on the nearest existing ancestor, since the
+daemon provisions workspaces and refusing every not-yet-created directory
+would refuse the normal case. Every ancestor needs `--x`, which is what makes
+a `0700` home directory protect what is under it. Symlinks are resolved
+first, so a link planted in a world-writable directory is judged by its
+target. ACLs and MAC labels are not consulted, so the answer can be stricter
+than the kernel and never looser — the safe direction, since the cost is a
+visible refusal naming the path rather than a silent grant.
+
+**It arms itself, per CONNECTION.** There is no mode to declare and nothing
+classifies a deployment: the check is skipped when `peer.uid == os.getuid()`
+and runs otherwise. So one daemon skips its owner's client and checks a
+colleague's, and a daemon under a dedicated service account checks every
+human connection there is. Skipping the daemon's own uid is not a
+single-user carve-out — that account can already `ptrace` the daemon, read
+its memory and read `~/.jaato`, so a refusal would deny nothing it cannot
+obtain more simply; what the skip buys is that the common single-login case
+pays no `stat`. A control nobody remembers to enable is a control nobody
+has, so there is no knob to switch it on — only
+`--ipc-trust-peer-paths` to switch it off, announced at WARNING.
+
+**Positive evidence only**, the posture #1014 and #1023 take about
+confinement labels — with the direction chosen per question. `None` from
+`peer_credentials` means *this transport cannot tell me* (a Windows pipe, a
+non-Linux socket, WS), and the guards read it as **not applicable**: that
+transport's own access control is what applies, and a denial there would
+break every deployment the check was never about. `None` from
+`path_reachable_by` means *I could not determine this*, and there the caller
+**refuses** — granting on ignorance is the failure being fixed.
+
+**What it is not.** An ENTITLEMENT check, not a sandbox. The session still
+runs as the daemon's uid, so within a tree the peer can read, the daemon's
+own rights still apply. Closing that residue means dropping privileges
+between `fork()` and `exec()`, which needs a privileged daemon and a
+uid-keyed slot pool — a uid is a property the next session cannot change, so
+`SlotKey` would have to carry it by that class's own stated rule. That is a
+decision about the process model; this is what makes the current one honest.
+
+Unchanged for everyone else, by construction: a WS deployment (no peer to
+read), a Windows pipe, and any connection from the daemon's own account.
+
+Tests: `shared/tests/test_peer_identity.py` (the rule) and
+`server/tests/test_ipc_peer_entitlement.py` (the wiring — the three places a
+correct mechanism could still be inert). Every deny case is paired with the
+same call one `chmod` apart, because a refusal that would have happened
+anyway proves nothing; the fixture roots at `/tmp` rather than using
+`tmp_path`, whose `0700` parent would make every refusal pass for a reason
+unrelated to the code. Verified non-vacuous: with the check neutralised,
+exactly the five enforcement cases fail and the not-applicable ones still
+pass.
+
+### A Workspace Name That Left the Workspace Root
+
+The section above is about a transport that could not tell its callers
+apart. This is the other transport's version of the same question, and it
+starts by saying what is NOT true of it: a WS client does not name a path
+on the normal path at all. `session.new` from a client with no workspace
+**auto-provisions** one under `{workspace_root}/sessions/{session_id}/`
+from a template, so the tenant serving those clients decides where they
+run. The `startswith(workspace_root + os.sep)` tests in `websocket.py` are
+not the boundary either — they are a ROUTING gate deciding which sessions
+get an AppArmor profile and a cgroup, and a session that fails one is
+skipped with a debug line so IPC and user-CWD sessions pass through the
+same hook.
+
+Reuse is the opt-in, `workspace.select <name>`, and there the name was
+joined onto the root with nothing in between. **A join contains nothing by
+itself**, which is the whole finding:
+
+| name | `workspace_root / name` |
+|---|---|
+| `../../etc` | `<root>/../../etc` — `..` is kept verbatim |
+| `/etc/passwd` | `/etc/passwd` — pathlib DISCARDS the left operand |
+| `..` | the root's PARENT, with no separator involved |
+
+`create_workspace` refused `/` and `\` and so was contained by accident;
+`select_workspace` validated nothing, checked `path.exists()`, and then
+`_analyze_workspace`'d whatever it found — reading that directory's `.env`
+and reporting its provider and model back to the client through
+`get_config_status`. So the escape was also an oracle, and
+`_save_registry` **persisted** the out-of-root row into
+`~/.jaato/workspaces.json`, where `get_workspace_path`'s registry branch
+would return it again across restarts.
+
+`WorkspaceManager._resolve_under_root` is the one rule, and every site that
+turns a NAME into a PATH goes through it — there were five, and containing
+`select_workspace` alone would have left the other four as the next
+route in. It resolves symlinks BEFORE comparing, which is not
+belt-and-braces: provisioned session workspaces live under this same root
+and the agent's own file tools write into them, so a link planted under the
+root is model-reachable.
+
+| Property | Why |
+|---|---|
+| **containment, not a separator check** | `..` carries no separator and resolves to the root's parent, so a character check misses exactly the cheapest escape — and misses symlinks entirely |
+| **checked BEFORE `exists()`** | a refusal must not double as an oracle for what exists outside the root; a present and an absent target answer alike |
+| **the verbs raise, the accessors answer** | `select`/`create` raise `WorkspaceContainmentError`, a `ValueError` **subclass** so the WS handlers' existing `except ValueError` reports it unchanged; `get_workspace_path` / `get_config_status` return their existing "no such workspace" answers, because an accessor that starts raising breaks callers that never expected it |
+| **the stored path is checked, not trusted** | one accepted selection used to persist, so the registry row is re-checked rather than read back as authority |
+| **`create` keeps BOTH checks** | they catch different things and neither masks the other: `".."` passes the naming check and containment refuses it, `"a/b"` passes containment and the naming check refuses it. That is not the duplicated-validation shape the reversion meta-guard flags |
+
+**Two costs, stated rather than hidden.** A workspace an operator
+deliberately symlinked into the root is now refused and must be moved or
+bind-mounted — and such a workspace was *already* running unconfined,
+because the AppArmor gate resolves both sides the same way and skipped it.
+And containment bounds the ROOT, not the tenant: every tenant's
+provisioned workspace is a sibling under one server-wide `workspace_root`,
+so this stops a name leaving the root and says nothing about which
+workspace inside it a client may select. Per-tenant roots are not
+expressible today, and are the same shape as the other WS singletons (one
+bearer-token digest, one `SSOAuth` realm, one cookie secret).
+
+Tests: `server/tests/test_workspace_name_containment.py`. Every deny case
+points at a directory that EXISTS, because the refusal has to come from the
+containment check rather than from the `exists()` test one line below it —
+against the unfixed code those selections SUCCEEDED, so a test using an
+absent target would pass either way. Verified non-vacuous: with
+`_resolve_under_root` reduced to the bare join, exactly the ten enforcement
+cases fail and all six controls still pass.
+
 ### A Refresh Token That Rotates, and Two Sessions Refreshing It (#683)
 
 An OAuth refresh token **rotates**: the response replaces the token that
@@ -6459,6 +6634,7 @@ covers it, where one exists. `jaato-scaffold explain env` renders the tags;
 | `JAATO_RUNNER_POOL_SIZE` | Number of **unreserved** pre-warm pool slots to keep idle (default: 2) — slots any arriving session may take.  Raise for cascades that fan out stages **concurrently** (each simultaneous stage needs its own warm slot).  Sequential/back-to-back stages do NOT need a larger pool — they reuse one warm slot via the `slot.settled` handoff (the next stage is spawned on slot-availability), so pool size >1 only helps parallel fan-out.  Cascade-affined idle slots (reservations) are **not** counted here (#898): they are capacity for one tenant only, and counting them as pool capacity starved everybody else. |
 | `JAATO_RUNNER_ACK_TIMEOUT` | Seconds a dispatched runner RPC may go with NO frame bearing its id before the daemon stops assuming and asks the runner what it actually has (default 120; `0` disables). **Not** a cap on how long an RPC may take — a turn legitimately runs for minutes, and a runner that claims the id buys another full window. What it bounds is an unbounded WAIT: before it, a request the daemon wrote and the runner does not have hung the caller forever with every thread idle (#856). Host-scoped, because it bounds the channel, which a pool slot shares across several sessions in turn. A negative or unparseable value falls back to the default — "unbounded" is the bug this exists to fix. |
 | `JAATO_RUNNER_POOL_MAX_SIZE` | Hard ceiling on **total** idle pool slots, reservations included (default: `2 x JAATO_RUNNER_POOL_SIZE`).  This is the memory bound — a slot is 129–187 MB — on the growth that per-tenant reservations imply.  Raise it when `pool_replenish_ceiling_blocked_total` is nonzero: some tenant is being served by cold-spawn while reservations hold the ceiling. |
+| `JAATO_IPC_TRUST_PEER_PATHS` | Switch OFF the IPC peer-entitlement check, so the daemon acts on whatever `workspace_path` / `config_root` a client names. Host-scoped: it is a property of the SOCKET, and a session must not be able to widen the transport's own trust posture. Announced at WARNING the first time it applies. See [Two Principals on One Socket](#two-principals-on-one-socket). |
 | `JAATO_IPC_EVENT_QUEUE_MAX` | Per-client IPC event-queue bound (default 2048). Beyond it, lossy tool-output chunks are evicted oldest-first (media before text); essential lifecycle events are queued past the bound rather than dropped, because losing one desynchronises the client permanently. A non-numeric or non-positive value falls back to the default — "unbounded" is the bug this exists to fix. See [Binary Media Chunks](docs/design/binary-media-chunks.md). |
 | `JAATO_CREDENTIAL_LOCK_TIMEOUT` | Seconds a caller waits for another process to finish refreshing a rotating OAuth credential before giving up (default 60). Host-scoped for the reason `JAATO_RUNNER_ACK_TIMEOUT` is: what is bounded is contention on a FILE, and the contenders — daemon, runner subprocesses, pool slots — serve sessions that have no say in each other's timeouts. A non-numeric or non-positive value falls back to the default; "unbounded" is the bug this exists to fix. See [A Refresh Token That Rotates](#a-refresh-token-that-rotates-and-two-sessions-refreshing-it-683). |
 | `JAATO_OAUTH_REFRESH_MARGIN` | Seconds before real expiry at which an OAuth access token is treated as stale and refreshed (default 300 — the value each provider previously hardcoded). Host-scoped because every process sharing one credential file must agree on when that file's token is stale. Note what it does **not** do: a fixed margin does not disperse a thundering herd (every process crosses it at the same instant), it makes the refresh happen while the old token is still valid — which is what lets a transient failure fall back on it instead of logging the user out. |

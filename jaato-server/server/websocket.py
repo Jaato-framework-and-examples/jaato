@@ -325,6 +325,17 @@ class WSEventSinkAdapter:
         """Associate a user identity with a WS client."""
         self._ws.set_client_user(client_id, user_id)
 
+    def get_client_peer(self, client_id: str) -> None:
+        """No peer credential on a WebSocket — always ``None``.
+
+        A WS client may be on another machine, so there is no local OS
+        account for the kernel to vouch for.  Identity on this transport is
+        the bearer token plus whatever an auth middleware attaches through
+        :meth:`set_client_user`, so the client-path entitlement guards are
+        inert here and this transport's own auth is what applies.
+        """
+        return None
+
     def remove_client(self, client_id: str) -> None:
         """Clean up tracking state when a client disconnects."""
         self._client_sessions.pop(client_id, None)

@@ -5760,7 +5760,76 @@ class SessionManager:
         ))
         return True
 
-    def _apply_client_config(self, client_id: str, event: 'ClientConfigRequest') -> None:
+    def _reject_unentitled_client_paths(
+        self, client_id: str, event: 'ClientConfigRequest', peer: Optional[Any],
+    ) -> bool:
+        """Refuse a handshake naming a path its own connection cannot reach.
+
+        The sibling of :meth:`_reject_relative_client_paths`, one question
+        further on.  That one asks whether a path MEANS the same thing on
+        both sides of the socket; this asks whether the account on the far
+        end was entitled to name it at all.
+
+        Both are needed because the daemon acts on these paths with ITS
+        credential, not the caller's -- and so does the runner, which is a
+        separate process under the same uid (``RunnerSpawner._exec_runner``
+        execs without ``setuid``).  On a shared IPC socket
+        (``--socket-mode 666``, the documented cross-user container case)
+        that makes the daemon a confused deputy: a client names another
+        user's workspace or ``config_root`` and the session reads their
+        profiles, their ``<provider>_auth.json`` and their files.  Every
+        boundary below this point is WORKSPACE-shaped -- the AppArmor
+        profile is keyed on ``workspace_root`` (#1033),
+        ``check_path_with_jaato_containment`` tests against the session's
+        own root -- so they confine the session to whatever tree it was
+        handed and cannot answer whether it should have been handed it.
+
+        The same four path fields are checked, for the same reason they are
+        checked for relativity: each is interpreted by the daemon's
+        filesystem.  All violations are reported in ONE error, and nothing
+        is applied when this returns True -- a half-applied handshake is its
+        own silent-wrong-directory bug.
+
+        Args:
+            client_id: The requesting client, which receives the error.
+            event: The client config event to validate.
+            peer: The connection's kernel-vouched credential, or ``None``.
+
+        Returns:
+            True when the config was REJECTED (caller must not apply it),
+            False when every path is reachable, when there is no peer to
+            evaluate against, or when the check does not apply -- see
+            :func:`shared.peer_identity.unreachable_client_paths` for the
+            three cases that answer "not applicable".
+        """
+        from shared.peer_identity import unreachable_client_paths
+
+        violations = unreachable_client_paths(
+            [
+                (field, getattr(event, field, None) or "")
+                for field in self._CLIENT_CONFIG_PATH_FIELDS
+            ],
+            peer,
+        )
+        if not violations:
+            return False
+
+        error = (
+            "client config rejected — the connecting account cannot reach "
+            "these paths:\n" + "\n".join(f"  - {m}" for m in violations)
+        )
+        logger.error("Client %s: %s", client_id, error)
+        self._emit_to_client(client_id, ErrorEvent(
+            error=error,
+            error_type="PeerPathNotReachable",
+            recoverable=True,
+        ))
+        return True
+
+    def _apply_client_config(
+        self, client_id: str, event: 'ClientConfigRequest',
+        *, peer: Optional[Any] = None,
+    ) -> None:
         """Apply client configuration settings.
 
         Updates environment and plugin settings based on client's config.
@@ -5768,7 +5837,9 @@ class SessionManager:
         even when connecting to a shared server.
 
         A handshake carrying a RELATIVE path is refused outright and
-        nothing is applied — see :meth:`_reject_relative_client_paths`.
+        nothing is applied — see :meth:`_reject_relative_client_paths` —
+        as is one naming a path the connecting account cannot itself
+        reach (:meth:`_reject_unentitled_client_paths`).
 
         Args:
             client_id: The requesting client.
@@ -5777,6 +5848,9 @@ class SessionManager:
         import os
 
         if self._reject_relative_client_paths(client_id, event):
+            return
+
+        if self._reject_unentitled_client_paths(client_id, event, peer):
             return
 
         # Apply trace log paths if provided
@@ -11923,6 +11997,7 @@ class SessionManager:
         event: Event,
         *,
         user_id: Optional[str] = None,
+        peer: Optional[Any] = None,
     ) -> None:
         """Route a request to the appropriate session.
 
@@ -11936,12 +12011,18 @@ class SessionManager:
                 headless dispatches.  Consumed by the permission response
                 path so the resolved event can name who answered (#859);
                 the transport layer supplies it, never the event body.
+            peer: The :class:`~shared.peer_identity.PeerCredentials` the
+                kernel vouched for on ``client_id``'s connection, or
+                ``None`` when the transport has none.  Consumed by the
+                client-config path, which accepts filesystem paths the
+                daemon then acts on; like ``user_id`` it comes from the
+                transport and never from the event body.
         """
         from jaato_sdk.events import ClientConfigRequest
 
         # Handle client config before session lookup (doesn't require session)
         if isinstance(event, ClientConfigRequest):
-            self._apply_client_config(client_id, event)
+            self._apply_client_config(client_id, event, peer=peer)
             return
 
         session = self.get_session(session_id)
