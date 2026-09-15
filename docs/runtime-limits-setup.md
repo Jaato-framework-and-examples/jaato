@@ -271,7 +271,7 @@ All fields are optional — set only the ones you want to enforce. Validation ru
 
 The kernel-enforced ceilings participate in profile inheritance with **scalar-override** semantics, same as `gc`: multiple parents must agree (or the child must override) to avoid a conflict error.
 
-`max_parallel_tools` is **most-restrictive-wins** instead — the minimum across every layer that declares it, like `max_turns`. A child may narrow the pool, never widen it, and two parents that differ only in the width are resolved by `min()` rather than reported as a conflict.
+`max_parallel_tools` is **most-restrictive-wins** instead — the minimum across every layer that declares it, like `budget_control.limits`. A child may narrow the pool, never widen it, and two parents that differ only in the width are resolved by `min()` rather than reported as a conflict.
 
 `jaato-scaffold explain runtime` prints the full block, each field's enforcement layer, and the value that applies when nothing declares one.
 

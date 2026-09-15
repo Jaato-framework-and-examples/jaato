@@ -12,7 +12,7 @@ This is the **lifecycle test**: it validates the daemon's
 schema-driven completion contract end-to-end against the GitHub
 Models endpoint.  Weak models may fail to produce a schema-valid
 payload on the first try; the framework returns a self-correction
-error and lets them retry within ``max_turns``.  Capable catalog
+error and lets them retry on a later turn.  Capable catalog
 models (``openai/gpt-4o``, ``anthropic/claude-3.5-sonnet``) are
 generally strong on structured tool output.
 

@@ -9,7 +9,6 @@ description: >
 model: openai/gpt-4o
 provider: github_models
 
-max_turns: 4
 
 suppress_base_instructions: true
 

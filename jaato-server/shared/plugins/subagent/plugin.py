@@ -174,16 +174,14 @@ class SubagentPlugin(DaemonForwardingMixin):
                 "code_assistant": {
                     "description": "Subagent for code analysis and generation",
                     "plugins": ["cli"],
-                    "system_instructions": "You are a code analysis assistant.",
-                    "max_turns": 5
+                    "system_instructions": "You are a code analysis assistant."
                 },
                 "research_agent": {
                     "description": "Subagent for MCP-based research",
                     "plugins": ["mcp"],
                     "plugin_configs": {
                         "mcp": {"config_path": ".mcp-research.json"}
-                    },
-                    "max_turns": 10
+                    }
                 }
             },
             "allow_inline": true,
@@ -746,7 +744,7 @@ class SubagentPlugin(DaemonForwardingMixin):
                         'created_at': session_data.get('created_at', datetime.now()),
                         'last_activity': session_data.get('last_activity', datetime.now()),
                         'turn_count': session_data.get('turn_count', 0),
-                        'max_turns': session_data.get('max_turns', profile.max_turns),
+
                     }
 
                 # Update per-owner counter to avoid ID collisions
@@ -967,10 +965,7 @@ class SubagentPlugin(DaemonForwardingMixin):
                         "type": "string",
                         "description": "Additional system instructions for the subagent"
                     },
-                    "max_turns": {
-                        "type": "integer",
-                        "description": "Maximum conversation turns (default: 10)"
-                    },
+
                     "gc": {
                         "type": "object",
                         "description": (
@@ -1179,8 +1174,11 @@ class SubagentPlugin(DaemonForwardingMixin):
                     '- If activity_phase is "waiting_for_llm", "streaming", or "executing_tool" - '
                     'the subagent is still working! Use cancel_subagent if you need to stop it.\n'
                     '- If you want to send more messages to the subagent later\n\n'
-                    'While sessions auto-close after max_turns, explicit closure is preferred '
-                    'to free resources immediately.'
+                    'A subagent session does NOT close itself after a fixed number '
+                    'of turns.  It ends when it signals completion, when you close or '
+                    'cancel it, or when its profile\'s budget_control crosses a rung '
+                    'whose action is "abort".  Closing explicitly is what frees '
+                    'resources immediately.'
                 ),
                 parameters={
                     "type": "object",
@@ -1239,7 +1237,7 @@ class SubagentPlugin(DaemonForwardingMixin):
                     '- profile: The subagent profile name\n'
                     '- activity_phase: Current activity (see below)\n'
                     '- phase_duration_sec: How long in current phase\n'
-                    '- turn_count / max_turns: Progress tracking\n\n'
+                    '- turn_count: Progress tracking\n\n'
                     'ACTIVITY PHASES:\n'
                     '- "idle": Waiting for input, ready to receive messages\n'
                     '- "waiting_for_llm": Request sent, awaiting cloud response (can take 60-120+ sec)\n'
@@ -1673,7 +1671,8 @@ class SubagentPlugin(DaemonForwardingMixin):
             "- When you receive COMPLETED + IDLE events, the subagent is ready for more work or cleanup\n"
             "- When you receive ERROR or CANCELLED, assess whether recovery is possible before closing\n"
             "- Use close_subagent to free resources when done with a subagent\n"
-            "- Sessions auto-close after max_turns, but explicit closure is preferred\n\n"
+            "- Sessions do NOT auto-close on a turn count: close them explicitly, and "
+            "bound a runaway in the profile with budget_control\n\n"
             "GC CONFIGURATION:\n"
             "Subagents can have their own garbage collection (GC) settings independent of the parent. "
             "This is useful for testing GC behavior or when subagents need different context management. "
@@ -2316,7 +2315,7 @@ class SubagentPlugin(DaemonForwardingMixin):
                 'name': name,
                 'description': profile.description,
                 'plugins': profile.plugins,
-                'max_turns': profile.max_turns,
+
             }
             # Surfaced so the model can tell a profile that arrives with a
             # persona from one it must pair with an ``agent`` itself.
@@ -2364,8 +2363,7 @@ class SubagentPlugin(DaemonForwardingMixin):
             ('      "profiles": {', "dim"),
             ('        "researcher": {', "dim"),
             ('          "description": "Research and analysis tasks",', "dim"),
-            ('          "plugins": ["web_search", "web_fetch"],', "dim"),
-            ('          "max_turns": 10', "dim"),
+            ('          "plugins": ["web_search", "web_fetch"]', "dim"),
             ('        }', "dim"),
             ('      }', "dim"),
             ('    }', "dim"),
@@ -2791,7 +2789,7 @@ class SubagentPlugin(DaemonForwardingMixin):
                     'created_at': info['created_at'].isoformat(),
                     'last_activity': info['last_activity'].isoformat(),
                     'turn_count': info['turn_count'],
-                    'max_turns': info['max_turns'],
+
                 })
 
         if not sessions:
@@ -3045,7 +3043,7 @@ class SubagentPlugin(DaemonForwardingMixin):
             "system_instructions": profile.system_instructions,
             "suppress_base_instructions": suppression_to_wire(
                 profile.suppress_base_instructions),
-            "max_turns": profile.max_turns,
+
             "env": dict(profile.env),
         }
         # Trace block (optional).  Rides the wire because the isolated
@@ -3656,7 +3654,6 @@ class SubagentPlugin(DaemonForwardingMixin):
             # inline_config can override specific properties, defaults come from parent
             plugins = self._parent_plugins
             system_instructions = None
-            max_turns = 10
             gc_config = None
 
             if inline_config:
@@ -3665,8 +3662,7 @@ class SubagentPlugin(DaemonForwardingMixin):
                     plugins = inline_config['plugins']
                 if 'system_instructions' in inline_config:
                     system_instructions = inline_config['system_instructions']
-                if 'max_turns' in inline_config:
-                    max_turns = inline_config['max_turns']
+
                 # Parse gc config from inline_config
                 if 'gc' in inline_config and inline_config['gc']:
                     gc_data = inline_config['gc']
@@ -3723,7 +3719,6 @@ class SubagentPlugin(DaemonForwardingMixin):
                 description='Subagent with inherited plugins',
                 plugins=plugins,
                 system_instructions=system_instructions,
-                max_turns=max_turns,
                 gc=gc_config,
             )
 
@@ -4233,7 +4228,7 @@ class SubagentPlugin(DaemonForwardingMixin):
                     'created_at': datetime.now(),
                     'last_activity': datetime.now(),
                     'turn_count': 0,
-                    'max_turns': profile.max_turns,
+
                 }
 
             # Wrap output callback for UI hooks (forwarding to parent is automatic now)

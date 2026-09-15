@@ -12,7 +12,7 @@ This is the **lifecycle test**: it validates the daemon's
 schema-driven completion contract end-to-end against the Anthropic
 Messages API.  Weak models may fail to produce a schema-valid
 payload on the first try; the framework returns a self-correction
-error and lets them retry within ``max_turns``.  Claude Sonnet /
+error and lets them retry on a later turn.  Claude Sonnet /
 Opus models are generally strong on structured tool output.
 
 Sibling smokes:

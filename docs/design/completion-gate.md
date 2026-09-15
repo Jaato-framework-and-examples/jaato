@@ -4,7 +4,7 @@
 Python whose `validate(payload, context)` runs when the agent calls `signal_completion`,
 after the payload has passed `completion_payload_schema`. A non-empty error return
 blocks the completion and hands the agent every string as a `validation_failed` result,
-so it fixes the underlying problem and signals again — inside its own `max_turns`.
+so it fixes the underlying problem and signals again.
 
 It is the output-side twin of the `{{!py:...}}` prefetch hook, and it was almost
 undocumented. `jaato-scaffold explain` had a `prefetch` scope and, for this,
@@ -32,13 +32,20 @@ the way this prose can.
 ## 1. The retry loop is the framework's — do not build a second one
 
 The first attempt at self-correction (#731) added a grader-feedback retry loop to the
-eval runner: a whole extra session round-trip, a second `--max-attempts` knob beside
-`max_turns`, and it worked only for `jaato_eval` callers. That PR was closed on finding
+eval runner: a whole extra session round-trip, a second `--max-attempts` knob, and it
+worked only for `jaato_eval` callers. That PR was closed on finding
 `completion_processors`, which is the same loop with no new framework code, no second
 budget, and it works for any driver.
 
-**`max_turns` IS the retry budget.** There is no second attempts knob and there should
-not be one.
+**`budget_control` IS the retry budget.** There is no second attempts knob and there
+should not be one. A blocked completion is retried until the processor's own
+`max_refusals` stops it blocking, or the profile's `budget_control` crosses a `degrade`
+rung whose `action` is `abort`. Declare neither and the loop is **unbounded** — `limits`
+alone are observed, never enforced (#947).
+
+> Until #1068 this paragraph named `max_turns`. That field was declared, validated,
+> inherited and advertised to the model, and compared against a turn counter in no path
+> of the tree, so the retry budget it named did not exist. It has been removed.
 
 ## 2. The loop does not terminate on its own
 

@@ -7,7 +7,7 @@ re-claims completion, the processor refuses again.  Observed 2026-09-01:
 reporting the same two errors, with no work in between.  The arm ended
 BLOCKED having spent its whole budget on the loop, where the run before
 it had reached a graded verdict.  Nothing upstream catches this —
-``max_turns`` bounds the session rather than this gate, and
+``budget_control`` bounds the session rather than this gate, and
 ``MAX_COMPLETION_NUDGES`` bounds the opposite direction (an agent that
 stops WITHOUT signalling).
 

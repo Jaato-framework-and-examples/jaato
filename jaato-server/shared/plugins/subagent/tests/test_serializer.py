@@ -26,7 +26,6 @@ class TestSerializeSubagentState:
             'created_at': datetime(2024, 1, 28, 10, 30, 0),
             'last_activity': datetime(2024, 1, 28, 10, 35, 0),
             'turn_count': 0,
-            'max_turns': 10,
         }
 
         result = serialize_subagent_state(session_info)
@@ -39,7 +38,6 @@ class TestSerializeSubagentState:
         assert result['created_at'] == '2024-01-28T10:30:00'
         assert result['last_activity'] == '2024-01-28T10:35:00'
         assert result['turn_count'] == 0
-        assert result['max_turns'] == 10
 
     def test_serialize_with_profile(self):
         """Test serialization with a full profile."""
@@ -51,7 +49,6 @@ class TestSerializeSubagentState:
             system_instructions='You are a researcher.',
             model='gemini-2.5-flash',
             provider='google_genai',
-            max_turns=5,
         )
 
         session_info = {
@@ -61,7 +58,6 @@ class TestSerializeSubagentState:
             'created_at': datetime(2024, 1, 28, 10, 30, 0),
             'last_activity': datetime(2024, 1, 28, 10, 35, 0),
             'turn_count': 3,
-            'max_turns': 5,
         }
 
         result = serialize_subagent_state(session_info)
@@ -73,7 +69,6 @@ class TestSerializeSubagentState:
         assert result['profile']['system_instructions'] == 'You are a researcher.'
         assert result['profile']['model'] == 'gemini-2.5-flash'
         assert result['profile']['provider'] == 'google_genai'
-        assert result['profile']['max_turns'] == 5
 
     def test_serialize_with_gc_config(self):
         """Test serialization with GC configuration."""
@@ -99,7 +94,6 @@ class TestSerializeSubagentState:
             'created_at': datetime.now(),
             'last_activity': datetime.now(),
             'turn_count': 0,
-            'max_turns': 10,
         }
 
         result = serialize_subagent_state(session_info)
@@ -133,7 +127,6 @@ class TestSerializeSubagentState:
             'created_at': datetime.now(),
             'last_activity': datetime.now(),
             'turn_count': 1,
-            'max_turns': 10,
         }
 
         result = serialize_subagent_state(session_info)
@@ -161,7 +154,6 @@ class TestDeserializeSubagentState:
             'created_at': '2024-01-28T10:30:00',
             'last_activity': '2024-01-28T10:35:00',
             'turn_count': 0,
-            'max_turns': 10,
         }
 
         result = deserialize_subagent_state(data)
@@ -173,7 +165,6 @@ class TestDeserializeSubagentState:
         assert result['created_at'] == datetime(2024, 1, 28, 10, 30, 0)
         assert result['last_activity'] == datetime(2024, 1, 28, 10, 35, 0)
         assert result['turn_count'] == 0
-        assert result['max_turns'] == 10
         assert result['session'] is None
 
     def test_deserialize_with_profile(self):
@@ -189,14 +180,12 @@ class TestDeserializeSubagentState:
                 'system_instructions': 'You are a researcher.',
                 'model': 'gemini-2.5-flash',
                 'provider': 'google_genai',
-                'max_turns': 5,
             },
             'history': [],
             'turn_accounting': [],
             'created_at': '2024-01-28T10:30:00',
             'last_activity': '2024-01-28T10:35:00',
             'turn_count': 3,
-            'max_turns': 5,
         }
 
         result = deserialize_subagent_state(data)
@@ -210,7 +199,6 @@ class TestDeserializeSubagentState:
         assert profile.system_instructions == 'You are a researcher.'
         assert profile.model == 'gemini-2.5-flash'
         assert profile.provider == 'google_genai'
-        assert profile.max_turns == 5
 
     def test_deserialize_with_gc_config(self):
         """Test deserialization with GC configuration."""
@@ -235,7 +223,6 @@ class TestDeserializeSubagentState:
             'created_at': '2024-01-28T10:30:00',
             'last_activity': '2024-01-28T10:35:00',
             'turn_count': 0,
-            'max_turns': 10,
         }
 
         result = deserialize_subagent_state(data)
@@ -266,7 +253,6 @@ class TestDeserializeSubagentState:
             'created_at': '2024-01-28T10:30:00',
             'last_activity': '2024-01-28T10:35:00',
             'turn_count': 1,
-            'max_turns': 10,
         }
 
         result = deserialize_subagent_state(data)
@@ -296,7 +282,6 @@ class TestDeserializeSubagentState:
             name='roundtrip_test',
             description='Testing roundtrip',
             plugins=['cli'],
-            max_turns=7,
             gc=GCProfileConfig(type='truncate', threshold_percent=85.0),
         )
 
@@ -307,7 +292,6 @@ class TestDeserializeSubagentState:
             'created_at': datetime(2024, 1, 28, 10, 30, 0),
             'last_activity': datetime(2024, 1, 28, 10, 35, 0),
             'turn_count': 2,
-            'max_turns': 7,
         }
 
         serialized = serialize_subagent_state(original)
@@ -315,7 +299,6 @@ class TestDeserializeSubagentState:
 
         assert deserialized['agent_id'] == original['agent_id']
         assert deserialized['turn_count'] == original['turn_count']
-        assert deserialized['max_turns'] == original['max_turns']
         assert deserialized['created_at'] == original['created_at']
         assert deserialized['last_activity'] == original['last_activity']
         assert deserialized['profile'].name == profile.name
@@ -351,7 +334,6 @@ class TestSerializeSubagentRegistry:
                 'created_at': datetime(2024, 1, 28, 10, 30, 0),
                 'last_activity': datetime(2024, 1, 28, 10, 35, 0),
                 'turn_count': 3,
-                'max_turns': 10,
             },
             'subagent_2': {
                 'session': mock_session_2,
@@ -360,7 +342,6 @@ class TestSerializeSubagentRegistry:
                 'created_at': datetime(2024, 1, 28, 11, 0, 0),
                 'last_activity': datetime(2024, 1, 28, 11, 5, 0),
                 'turn_count': 1,
-                'max_turns': 5,
             },
         }
 
@@ -376,14 +357,12 @@ class TestSerializeSubagentRegistry:
         assert agent_1['profile_name'] == 'researcher'
         assert agent_1['status'] == 'idle'
         assert agent_1['turn_count'] == 3
-        assert agent_1['max_turns'] == 10
         assert agent_1['created_at'] == '2024-01-28T10:30:00'
         assert agent_1['last_activity'] == '2024-01-28T10:35:00'
 
         assert agent_2['profile_name'] == 'coder'
         assert agent_2['status'] == 'running'
         assert agent_2['turn_count'] == 1
-        assert agent_2['max_turns'] == 5
 
 
 class TestDeserializeSubagentRegistry:
@@ -409,7 +388,6 @@ class TestDeserializeSubagentRegistry:
                     'created_at': '2024-01-28T10:30:00',
                     'last_activity': '2024-01-28T10:35:00',
                     'turn_count': 3,
-                    'max_turns': 10,
                 },
                 {
                     'agent_id': 'subagent_2',
@@ -418,7 +396,6 @@ class TestDeserializeSubagentRegistry:
                     'created_at': '2024-01-28T11:00:00',
                     'last_activity': '2024-01-28T11:05:00',
                     'turn_count': 1,
-                    'max_turns': 5,
                 },
             ],
         }
@@ -433,7 +410,6 @@ class TestDeserializeSubagentRegistry:
         assert result[0]['created_at'] == datetime(2024, 1, 28, 10, 30, 0)
         assert result[0]['last_activity'] == datetime(2024, 1, 28, 10, 35, 0)
         assert result[0]['turn_count'] == 3
-        assert result[0]['max_turns'] == 10
 
         assert result[1]['agent_id'] == 'subagent_2'
         assert result[1]['profile_name'] == 'coder'
@@ -462,7 +438,6 @@ class TestDeserializeSubagentRegistry:
                 'created_at': datetime(2024, 1, 28, 10, 30, 0),
                 'last_activity': datetime(2024, 1, 28, 10, 35, 0),
                 'turn_count': 5,
-                'max_turns': 10,
             },
         }
 
@@ -474,6 +449,5 @@ class TestDeserializeSubagentRegistry:
         assert deserialized[0]['profile_name'] == 'test_profile'
         assert deserialized[0]['status'] == 'idle'
         assert deserialized[0]['turn_count'] == 5
-        assert deserialized[0]['max_turns'] == 10
         assert deserialized[0]['created_at'] == datetime(2024, 1, 28, 10, 30, 0)
         assert deserialized[0]['last_activity'] == datetime(2024, 1, 28, 10, 35, 0)

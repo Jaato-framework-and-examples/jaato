@@ -59,7 +59,6 @@ Fields fall into two categories based on their type:
 | `model` | If multiple parents define it, values must agree or child must override. |
 | `provider` | Same as `model`. |
 | `system_instructions` | Concatenation in inheritance order (grandparent → parent → child), separated by `\n\n`. No conflict possible — all layers contribute. |
-| `max_turns` | Most restrictive (minimum) across parents. Child can override. |
 | `gc` | If multiple parents define it, values must agree (field-by-field) or child must override the entire `gc` block. |
 | `completion_payload_schema` | Same as `model`. An empty dict `{}` **is a value** and overrides; `null`/absent reads as unset and inherits. |
 | `spawn_payload_schema` | Same as `completion_payload_schema`, at the spawn boundary. |
@@ -77,7 +76,7 @@ Fields fall into two categories based on their type:
 with *no* way down at all (#791). `plugins` is additive too, but a stage scopes
 its tools down with `tool_scopes` or the permission whitelist; a stage that
 genuinely completes differently had only one move — stop inheriting — and that
-silently costs it `budget_control`, `max_turns`, `runtime_limits`, `env` and
+silently costs it `budget_control`, `runtime_limits`, `env` and
 `plugin_configs`. In the case that prompted this, an interrogation ran with no
 cost ceiling and nothing said so.
 
@@ -147,7 +146,6 @@ class SubagentProfile:
     system_instructions: Optional[str] = None
     model: Optional[str] = None
     provider: Optional[str] = None
-    max_turns: int = 10
     gc: Optional[GCProfileConfig] = None
     env: Dict[str, str] = field(default_factory=dict)
 ```

@@ -12,7 +12,7 @@ This is the **lifecycle test**: it validates the daemon's
 schema-driven completion contract end-to-end against the vLLM
 endpoint.  Weak models may fail to produce a schema-valid payload
 on the first try; the framework returns a self-correction error
-and lets them retry within ``max_turns``.
+and lets them retry on a later turn.
 
 Sibling smokes:
     smoke_chat.py             — pure text round-trip, no signal_completion

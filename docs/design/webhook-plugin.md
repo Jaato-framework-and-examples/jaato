@@ -595,7 +595,6 @@ instructs the model to subscribe and loop:
     }
   },
   "system_instructions": "You are a GitHub automation daemon. On startup, call webhook_subscribe with sources=['github']. Then loop forever calling webhook_poll. For each event, analyze it and take appropriate action:\n- push events: review the commits and summarize changes\n- pull_request events: review the PR diff and post feedback\n- issue events: triage and label the issue\nNever stop polling. After processing each batch of events, immediately call webhook_poll again.",
-  "max_turns": 0,
   "gc": {
     "type": "budget",
     "threshold_percent": 75.0,
@@ -608,7 +607,6 @@ instructs the model to subscribe and loop:
 
 | Setting | Value | Rationale |
 |---------|-------|-----------|
-| `max_turns` | `0` | Unlimited — daemon runs forever |
 | `webhook(preload)` | — | Load tools immediately, no discovery step |
 | `gc.type` | `"budget"` | Proactive GC keeps context window healthy |
 | `gc.preserve_recent_turns` | `3` | Keep recent event processing, discard old |
@@ -636,18 +634,16 @@ session.new github-daemon --profile github-watcher
 > Start watching for GitHub events.
 ```
 
-## Max Turns: `0` = Unlimited
+## Turn Limits
 
-The `SubagentProfile.max_turns` field currently defaults to `10`. For daemon
-sessions, we need unlimited turns. Convention:
+A daemon session needs unlimited turns, which is what it gets: nothing in the
+framework caps a session on a turn count. This section previously proposed a
+`max_turns: 0` convention for daemon mode; #1068 established that `max_turns`
+was enforced in no path — including the subagent loop this text claimed
+enforced it — and removed the field, so no convention is needed.
 
-- `max_turns: 0` → no turn limit (daemon mode)
-- `max_turns: N` (N > 0) → stop after N turns (current behavior)
-
-This requires a small change in the subagent plugin's turn-counting logic to
-skip the limit check when `max_turns == 0`. For main sessions created from
-profiles (via `session.new --profile`), the server already doesn't enforce
-`max_turns` — it's only enforced in the subagent execution loop.
+A daemon that should stop rather than run forever declares `budget_control`
+with a `degrade` rung whose `action` is `abort`.
 
 ## TaskEventType Extension
 

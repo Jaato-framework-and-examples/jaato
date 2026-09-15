@@ -36,7 +36,7 @@ def _profile(budget=None, **kw):
         tool_scopes={}, model_tiers={}, gc=None, runtime_limits=None,
         env={}, completion_payload_schema=None, spawn_payload_schema=None,
         completion_processors=[], budget_control=budget, quirks={},
-        apparmor=False, apparmor_fragments=None, max_turns=10,
+        apparmor=False, apparmor_fragments=None,
         system_instructions=None, agent_params={},
         suppress_base_instructions=False, config_root=None, inherits=None,
         icon=None, description_for_model=None,

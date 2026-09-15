@@ -39,7 +39,6 @@ def _make_profile(name="test_profile"):
     """Create a minimal SubagentProfile mock."""
     profile = MagicMock()
     profile.name = name
-    profile.max_turns = 10
     return profile
 
 
@@ -62,7 +61,6 @@ def _register_subagent(plugin, agent_id, owner_session, profile=None):
             'created_at': datetime.now(),
             'last_activity': datetime.now(),
             'turn_count': 0,
-            'max_turns': profile.max_turns,
         }
     return child_session
 

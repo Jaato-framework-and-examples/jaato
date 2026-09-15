@@ -109,7 +109,6 @@ Profiles are discovered from three sources in decreasing order of precedence:
   "system_instructions": "You are a code reviewer. Focus on bugs, security issues, and readability.",
   "model": "gemini-2.5-flash",
   "provider": "google_genai",
-  "max_turns": 5,
   "gc": {
     "type": "truncate",
     "threshold_percent": 80.0,
@@ -152,7 +151,6 @@ Profiles are discovered from three sources in decreasing order of precedence:
 | `system_instructions` | `string \| null` | No | `null` | **Deprecated.** Use `.jaato/agents/` instead. |
 | `model` | `string \| null` | No | `null` | Model override. `null` = inherit from parent. **Ignored** when `model_tiers` is non-empty (with warning). |
 | `provider` | `string \| null` | No | `null` | Provider override (e.g., `"anthropic"`, `"google_genai"`). `null` = inherit from parent. |
-| `max_turns` | `integer` | No | `10` | Maximum conversation turns before the subagent returns to the parent. Must be positive. |
 | `gc` | `object \| null` | No | `null` | GC configuration. See [Section 4](#4-gc-configuration-gc-sub-object). |
 | `env` | `object<string, string>` | No | `{}` | Session-scoped environment variables. Values support `${VAR}` expansion and secret URI resolution. |
 | `inherits` | `string \| string[]` | No | `null` | Parent profile names for inheritance. Resolved during `discover_profiles()`. |
@@ -168,7 +166,6 @@ Profiles are discovered from three sources in decreasing order of precedence:
 | `description` | Must be non-empty string |
 | `plugins` | Must be array of strings (if present) |
 | `plugin_configs` | Must be object of objects (if present) |
-| `max_turns` | Must be positive integer (not bool) |
 | `model` | Must be string or null |
 | `provider` | Must be string or null |
 | `env` | Must be object with string keys and string values (if present) |
@@ -281,7 +278,7 @@ If cgroup v2 is unavailable (cgroup v1 host, missing controllers, non-writable r
 
 The kernel-enforced ceilings follow the **scalar-override** rule (§9): parent profiles must agree, or the child must override. A cgroup controller file takes exactly one value, so interleaving a memory ceiling from one layer with a pids ceiling from another would produce a confinement neither author wrote.
 
-`max_parallel_tools` is the exception: it is **most-restrictive-wins** (minimum across every layer that declares it), the same direction as `max_turns` and `budget_control.limits`. A child may only ever narrow the pool it was spawned under — a parent that capped concurrency because its cgroup has a small `pids_max`, or because the service it calls is rate-limited, said something about the environment the child also runs in. Two parents that disagree only about the width are therefore **not** a conflict; the minimum is well-defined. The comparison that detects a genuine `runtime_limits` conflict is made with the width normalised out.
+`max_parallel_tools` is the exception: it is **most-restrictive-wins** (minimum across every layer that declares it), the same direction as `budget_control.limits`. A child may only ever narrow the pool it was spawned under — a parent that capped concurrency because its cgroup has a small `pids_max`, or because the service it calls is rate-limited, said something about the environment the child also runs in. Two parents that disagree only about the width are therefore **not** a conflict; the minimum is well-defined. The comparison that detects a genuine `runtime_limits` conflict is made with the width normalised out.
 
 `jaato-scaffold explain runtime` prints the whole block with the value that applies when no profile declares one.
 
@@ -1077,8 +1074,7 @@ Profiles can inherit from other profiles using the `inherits` field:
 {
   "name": "code_reviewer_security",
   "inherits": ["code_reviewer", "security_scanner"],
-  "plugins": ["web_search"],
-  "max_turns": 15
+  "plugins": ["web_search"]
 }
 ```
 
@@ -1088,15 +1084,11 @@ Profiles can inherit from other profiles using the `inherits` field:
 |---|---|---|
 | **Collection (union)** | `plugins`, `preloaded_plugins`, `env`, `plugin_configs` | Parents first (in order), then child. Deduplicated. |
 | **Scalar (agreement-or-override)** | `model`, `provider`, `gc`, `runtime_limits` (except `max_parallel_tools`), `completion_payload_schema` | Parents must agree. If they conflict, child MUST override. |
-| **Most restrictive wins** | `max_turns`, `budget_control.limits`, `runtime_limits.max_parallel_tools` | Minimum across every layer that declares it. A child may only TIGHTEN a ceiling. |
+| **Most restrictive wins** | `budget_control.limits`, `runtime_limits.max_parallel_tools` | Minimum across every layer that declares it. A child may only TIGHTEN a ceiling. |
 | **Concatenation** | `system_instructions` | Grandparent → parent → child, joined with double newlines. |
 | **Never inherited** | `name`, `description`, `model_tiers` | Always from the child profile. |
 
 > **Note**: `model_tiers` is **not** inherited across profiles. Each profile that needs per-turn switching must declare its own `model_tiers` dict. This is because tier configs are tightly coupled to the specific models available to a given provider setup, and merging tier dicts from different parent profiles would produce ambiguous or invalid configurations.
-
-### max_turns Special Case
-
-`max_turns` uses the **most restrictive** (minimum) value across parents, unless the child explicitly overrides.
 
 ---
 
@@ -1114,8 +1106,7 @@ delegate(profile="code_reviewer", task="Review the login module")
 delegate(
     task="Search for security vulnerabilities",
     plugins=["grep_content", "file_edit", "web_search"],
-    system_instructions="Focus on OWASP top 10 vulnerabilities",
-    max_turns=5
+    system_instructions="Focus on OWASP top 10 vulnerabilities"
 )
 ```
 

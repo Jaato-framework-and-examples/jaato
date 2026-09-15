@@ -27,7 +27,6 @@ class TestValidateProfile:
             "system_instructions": "Read the knowledge base first.",
             "model": "gemini-2.5-flash",
             "provider": "google_genai",
-            "max_turns": 15,
             "icon": ["╔══╗", "║CB║", "╚══╝"],
             "icon_name": "circuit_breaker",
             "gc": {
@@ -80,30 +79,18 @@ class TestValidateProfile:
         assert is_valid is False
         assert any("plugin_configs['cli'] must be an object" in e for e in errors)
 
-    def test_max_turns_not_int(self):
-        data = {"name": "test", "description": "test", "max_turns": "ten"}
-        is_valid, errors, warnings = validate_profile(data)
-        assert is_valid is False
-        assert any("'max_turns' must be an integer" in e for e in errors)
-
-    def test_max_turns_zero(self):
-        data = {"name": "test", "description": "test", "max_turns": 0}
-        is_valid, errors, warnings = validate_profile(data)
-        assert is_valid is False
-        assert any("'max_turns' must be a positive integer" in e for e in errors)
-
-    def test_max_turns_negative(self):
-        data = {"name": "test", "description": "test", "max_turns": -1}
-        is_valid, errors, warnings = validate_profile(data)
-        assert is_valid is False
-        assert any("'max_turns' must be a positive integer" in e for e in errors)
-
-    def test_max_turns_bool_rejected(self):
-        """bool is a subclass of int in Python, but should be rejected."""
-        data = {"name": "test", "description": "test", "max_turns": True}
-        is_valid, errors, warnings = validate_profile(data)
-        assert is_valid is False
-        assert any("'max_turns' must be an integer" in e for e in errors)
+    def test_max_turns_is_ignored_not_rejected(self):
+        """#1068 removed the field.  A profile file still carrying it must
+        LOAD — construction is keyword-explicit, so the key is simply not
+        read — and `jaato-scaffold validate` is what reports it, as
+        ``removed_profile_key`` (warn).  Erroring here would fail every
+        existing workspace over a line that has always been inert."""
+        for value in ("ten", 0, -1, True, 15):
+            data = {"name": "test", "description": "test",
+                    "max_turns": value}
+            is_valid, errors, warnings = validate_profile(data)
+            assert is_valid is True, (value, errors)
+            assert not any("max_turns" in e for e in errors), (value, errors)
 
     def test_model_not_string(self):
         data = {"name": "test", "description": "test", "model": 123}

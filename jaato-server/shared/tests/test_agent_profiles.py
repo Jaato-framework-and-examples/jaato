@@ -129,7 +129,6 @@ class TestProfileDiscoveryForSession:
                 "plugins": ["cli", "todo"],
                 "system_instructions": "You are a test agent.",
                 "model": "gemini-2.5-flash",
-                "max_turns": 5,
             }
             (profiles_dir / "test-agent.json").write_text(json.dumps(profile_data))
 

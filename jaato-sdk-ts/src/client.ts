@@ -665,7 +665,7 @@ export class JaatoClient {
      * ``.jaato/profiles/`` on the server, **or** an inline **spec**
      * record with the same shape — recognised keys include ``model``
      * (required), ``provider``, ``plugins``, ``plugin_configs``,
-     * ``system_instructions``, ``gc``, ``env``, ``max_turns``,
+     * ``system_instructions``, ``gc``, ``env``,
      * ``runtime_limits``, ``model_tiers``, ``completion_payload_schema``.
      * The two forms are mutually exclusive — pass one or the other.
      * The server validates the dict and rejects it with a clear

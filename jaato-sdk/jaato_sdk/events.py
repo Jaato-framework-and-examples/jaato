@@ -124,7 +124,33 @@ from pydantic import BaseModel, ConfigDict, Field
 # silent addition.  No SDK refusal: the direction is inverted from 1.5/1.6
 # (a NEW daemon emitting to an OLD client, which cannot opt out), so a
 # minimum to refuse below would fail the wrong party.
-PROTOCOL_VERSION = "1.8"
+#
+# 1.9 -- ``ProfileSummary.max_turns`` REMOVED.  The field carried a number
+# that bounded nothing: ``SubagentProfile.max_turns`` was declared,
+# validated, inherited most-restrictive-wins, serialised and advertised to
+# the model, and compared against a turn counter in no path of the tree
+# (#1068).  ``budget_control.limits.turns`` plus a ``degrade`` rung whose
+# action is ``abort`` is the bound that actually stops a session, and it is
+# now the only one.
+#
+# A REMOVAL is the fourth shape in this changelog, and it is the reason the
+# entry is a MINOR rather than a MAJOR.  ``ProfileSummary``'s own docstring
+# says breaking changes to its shape bump the MAJOR -- but the operational
+# meaning of the major, per ``_protocol_compatible``, is "shape changes the
+# client cannot parse, or fields the client expects to find but doesn't",
+# and NEITHER direction here fails to parse: an older client's model
+# declares ``max_turns: int = 10``, so an absent key fills the default
+# rather than raising, and a newer client's ``extra='ignore'`` drops an
+# older daemon's value.  A MAJOR bump would meanwhile refuse EVERY existing
+# client outright (``server_major != client_major`` is a hard refuse), for
+# a field whose removal cannot produce a parse failure.
+#
+# So the rule this entry establishes, recorded on ``ProfileSummary`` too:
+# removing a field that carries a DEFAULT is a MINOR; removing a required
+# one -- which an older client genuinely cannot fill -- is a MAJOR.  What
+# does break here is source-level, for code that reads
+# ``summary.max_turns``, and what it read was a number enforcing nothing.
+PROTOCOL_VERSION = "1.9"
 
 
 # =============================================================================
@@ -1621,7 +1647,12 @@ class ProfileSummary(BaseModel):
 
     Versioned by the global ``ConnectedEvent.protocol_version`` —
     breaking changes to this shape bump the protocol's MAJOR; additive
-    optional fields bump the MINOR.  Sensitive material is intentionally
+    optional fields bump the MINOR.  REMOVING a field splits that rule by
+    whether it carried a default: one that did is a MINOR (both directions
+    still parse — an older client fills its own default, a newer one's
+    ``extra='ignore'`` drops the value), one that did not is a MAJOR.
+    ``max_turns`` went under the first half at 1.9 (#1068).
+    Sensitive material is intentionally
     omitted: env *values* are summarised by name only;
     ``system_instructions``, ``icon_name`` and ``inherits`` are not
     exposed (deprecated or already resolved during discovery).
@@ -1644,7 +1675,6 @@ class ProfileSummary(BaseModel):
     # Runtime
     model: Optional[str] = None
     provider: Optional[str] = None
-    max_turns: int = 10
     model_tiers: Dict[str, Any] = Field(default_factory=dict)
     # Profile-declared budget_control, re-serialised (shared/budget_control.py).
     # None = unbudgeted.  Declared explicitly because pydantic SILENTLY DROPS

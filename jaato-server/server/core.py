@@ -5951,8 +5951,8 @@ class JaatoServer:
                 # The BUDGET is the profile's (#919).  It was a
                 # function-local ``= 2`` here and in two other files,
                 # which made it the one bound in this path a deployment
-                # could not express -- ``max_turns``, ``runtime_limits``
-                # and a processor's ``max_refusals`` all are.  The number
+                # could not express -- ``runtime_limits`` and a
+                # processor's ``max_refusals`` both are.  The number
                 # now lives once, in ``shared.completion_nudge``, and the
                 # resolver falls back to it for a session with no profile
                 # or a profile predating the field, so an unconfigured

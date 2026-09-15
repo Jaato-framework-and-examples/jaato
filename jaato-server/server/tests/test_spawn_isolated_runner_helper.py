@@ -45,7 +45,6 @@ def _valid_payload(**overrides):
         "plugins": ["cli", "web_search"],
         "plugin_configs": {},
         "system_instructions": "You are a researcher.",
-        "max_turns": 25,
     }
     base.update(overrides)
     return base

@@ -12,8 +12,8 @@ This is the **lifecycle test**: it validates the daemon's
 schema-driven completion contract end-to-end against the trtllm-serve
 endpoint.  Weak models — or trtllm engine builds without tool-calling
 support — may fail to produce a schema-valid payload; the framework
-returns a self-correction error and lets them retry within
-``max_turns``.
+returns a self-correction error and lets them retry on a later
+turn.
 
 Sibling smokes:
     smoke_chat.py             — pure text round-trip, no signal_completion

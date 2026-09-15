@@ -2352,7 +2352,7 @@ class SessionManager:
                 system_instructions, gc, env, runtime_limits,
                 completion_payload_schema, spawn_payload_schema,
                 completion_processors, model_tiers,
-                suppress_base_instructions, max_turns).
+                suppress_base_instructions).
             task: First-turn prompt for the isolated runner.  §4.3.3
                 does NOT consume this; §4.3.6's forwarding will.
             workspace_path: Inherited from parent (§4.3 invariant).
@@ -11503,7 +11503,7 @@ class SessionManager:
                 plugin_configs=profile.plugin_configs,
                 model=profile.model,
                 provider=profile.provider,
-                max_turns=profile.max_turns,
+
                 model_tiers=profile.model_tiers,
                 budget_control=(
                     profile.budget_control.to_dict()
@@ -12683,8 +12683,8 @@ class SessionManager:
 
         # Phase 3 §3.12 ephemeral migration: route through the unified
         # ``_construct_and_initialize_server`` sub-helper.  Compose the
-        # ephemeral inputs (model/provider/plugins/system_instructions
-        # /max_turns) into a single inline ``SubagentProfile`` so the
+        # ephemeral inputs (model/provider/plugins/system_instructions)
+        # into a single inline ``SubagentProfile`` so the
         # construction shape matches the IPC + disk-restore paths
         # (env_file-driven JaatoServer construction with a profile
         # override) rather than the pre-§3.12 broken

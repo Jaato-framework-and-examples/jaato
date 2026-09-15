@@ -259,7 +259,7 @@ knob delivered that way would be inert exactly where the default path runs.
 version of that reason — see below.
 
 Inheritance is **most-restrictive-wins** — the minimum across every layer that
-declares it, like `max_turns` and `budget_control.limits`, and unlike the rest
+declares it, like `budget_control.limits`, and unlike the rest
 of `runtime_limits`, which is child-REPLACES. A child may narrow the pool,
 never widen it; two parents differing only in the width are resolved by `min()`
 rather than reported as a conflict. `jaato-scaffold explain runtime` prints the
@@ -464,7 +464,8 @@ trace:
 #   OUTPUT-side script hook (the input-side one is the persona's
 #   `{{!py:...}}` prefetch).  A `validate` returning errors blocks the
 #   completion and hands the agent every string, so it fixes and signals
-#   again within max_turns, which IS the retry budget.
+#   again.  THE RETRY BUDGET IS `budget_control` (a degrade rung
+#   whose action is abort); there is no second attempts knob.
 #   `max_refusals:` bounds how many times THIS GATE may block — without it
 #   the loop does not terminate (the processor refuses, the agent
 #   re-claims, forever); `on_exhausted:` says what happens at the ceiling.
@@ -521,7 +522,7 @@ the completion path a deployment could not express:
 | bound | configurable? |
 |---|---|
 | completion-processor refusals | `max_refusals` + `on_exhausted`, per processor |
-| turns before the (sub)agent returns | `max_turns` |
+| turns a session may take | `budget_control.limits.turns` + an `abort` rung |
 | session resource caps | `runtime_limits` |
 | **completion nudges** | **`max_completion_nudges`** |
 
@@ -547,8 +548,8 @@ that model class, not something persona prose fixes.
   give-up predicate is `nudges_fired >= max`, so a budget of 0 would report
   `NudgeExhausted` on sessions that completed **cleanly**. A deployment that
   wants no nudging keeps `signal_completion` out of the surface.
-- **Inheritance follows `max_turns`**: child overrides outright, else the
-  minimum across the parents that declared one.
+- **Inheritance**: child overrides outright, else the minimum across the
+  parents that declared one.
 - **One definition.** `shared/completion_nudge.py` owns
   `DEFAULT_MAX_COMPLETION_NUDGES` and the resolver every site now calls, so the
   three paths cannot drift again. A profile predating the field — an older
@@ -2858,6 +2859,78 @@ Still true: a profile with `limits` and no `abort` rung crosses in silence
 except for that trace line; `finalize` remains advice, and the subagent
 that outlives its parent is bounded only by what its own profile declares.
 
+### A Bound That Was Declared Everywhere and Enforced Nowhere (#1068)
+
+`SubagentProfile.max_turns` was a complete field in every respect but the one
+that mattered. It was **declared** (`int = field(default=10)`), **validated**
+(non-int and `<= 0` refused), **inherited** most-restrictive-wins — the same
+treatment `budget_control.limits` and `max_parallel_tools` get — **serialized**
+into and out of session snapshots and the runner RPC payload, exposed on the
+wire as `ProfileSummary.max_turns`, rendered by `explain profile`, and
+**advertised to the model** by two tool descriptions:
+
+```
+'While sessions auto-close after max_turns, explicit closure is preferred
+ to free resources immediately.'
+```
+
+It was compared against a turn counter **nowhere**. `grep -c max_turns
+jaato-server/shared/jaato_session.py` returned **0** — the class that owns the
+turn loop had never heard of it — and the four `turns >= config.max_turns`
+comparisons in the tree are all `GCConfig.max_turns`, a garbage-collection
+trigger that happens to share the name. The four reads of
+`profile.max_turns` outside validation, inheritance and serialization were
+each stuffing it into a dict for `list_subagents` to report.
+
+So a parent agent that declined to `close_subagent` — reasoning, correctly per
+its own instructions, that the session would auto-close — leaked it; #947's
+`documentalista` retrying `writeNewFile` **127 times** had `max_turns`
+declared and it bounded nothing; and `explain completion` stated in capitals
+that **`max_turns` IS the retry budget** for a gate whose retry loop was in
+fact unbounded.
+
+**The field is removed rather than implemented**, which is the part worth
+recording. The obvious fix — compare `_turns_ran` against it in
+`JaatoSession._record_turn_ran` — builds a *second* mechanism beside one that
+already works: `budget_control.limits.turns` is fed `turns=1` per turn by
+`_budget_observe_turn` on every path, and a `degrade` rung whose `action` is
+`abort` reaches `request_stop()`. Two counters for one quantity is the "one
+check, one door" failure the reversion meta-guard caught twice while #688 and
+#1069 were being written, and it would have been worse here: a `max_turns`
+that finally enforced its **default of 10** would stop sessions that
+legitimately run longer — #732 measured 44 round-trips in a session declaring
+`max_turns: 15`, because nothing had ever stopped them.
+
+| | before | after |
+|---|---|---|
+| present on every profile | yes, defaulting to 10 | no — `budget_control` is opt-in |
+| enforced | **no** | yes, via an `abort` rung |
+| `limits` alone | — | observed, never enforced (#947's `budget_limits_without_abort`) |
+
+What replaces it in the docs is the truth: a session takes as many turns as it
+takes, and the way to bound one is `budget_control`. A profile that declares
+neither a ceiling nor `max_refusals` has an **unbounded** retry loop, which
+`jaato-scaffold validate` already warns about and which the removed field
+disguised.
+
+Three consequences handled rather than inherited:
+
+- **`removed_profile_key` is its own finding**, not a bare `unknown_profile_key`.
+  A profile on disk keeps loading — construction is keyword-explicit, so the key
+  is simply ignored — and the warning names the replacement, the posture
+  `deprecated_system_instructions` already takes.
+- **Protocol 1.9, not 2.0.** Removing `ProfileSummary.max_turns` is the first
+  field removal from a versioned wire shape. Both directions still parse (an
+  older client's model declares the field with a default, so an absent key fills
+  it; a newer client's `extra='ignore'` drops an older daemon's value), while a
+  MAJOR bump hard-refuses every client — `server_major != client_major` is an
+  unconditional refuse. The rule the entry establishes: removing a field that
+  carries a **default** is a MINOR, removing a required one is a MAJOR.
+- **The runner RPC allow-list drops the key outright.** `PROFILE_PAYLOAD_ALLOWED_KEYS`
+  rejects unknown fields by design, so tolerating a dead one would be a
+  permanently inert entry in a security allow-list; both ends of that wire ship in
+  the same package, so there is no version skew to tolerate.
+
 ### A Rung a Client Could See and Not Read (#1069)
 
 #955 made the ladder observable **in the trace**. This is the same argument
@@ -3044,7 +3117,7 @@ profile declared nothing — a bound you must remember to write would have left
 this session running exactly as long. `0` is the explicit opt-out, the
 0-disables spelling `gc.media_bytes_threshold` and the OpenRouter deadlines
 already use. Inheritance is **most-restrictive-wins** (`min()` across every
-declaring layer, like `max_parallel_tools` / `max_turns`), and `0` cannot win
+declaring layer, like `max_parallel_tools`), and `0` cannot win
 that `min()` — a child may disable a bound no ancestor set, and may not
 disable one an ancestor did.
 
@@ -6607,7 +6680,7 @@ This is not optional cleanup — treat missing or inaccurate docstrings as a def
 - [Daemon Extensions](docs/design/daemon-extensions.md) - Extension points for external packages (session hooks, WS interceptors, custom aspects, remote handlers)
 - [Application Identity](docs/design/app-identity.md) - Naming the application an integrator built, rather than reporting every SDK-based harness upstream as "jaato". `AppIdentity` + the four-tier precedence (provider knob → provider env → `JaatoRuntime(app_identity=)` → `JAATO_APP_*`), the `(powered by jaato)` suffix, header-safety sanitisation, and why the env vars are `host`-scoped.
 - [Env Vars vs Profile Keys](docs/design/env-vars-vs-profile-keys.md) - Which of the 186 env vars earned a typed profile/`plugin_configs` key, and which are correctly env-only. The tagged catalog lives in `shared/env_scope.py` (scope: `session` / `host` / `ambient` / `internal`, plus the typed key where one exists) and is enforced by `test_env_scope_catalog.py`; 38 session-scoped knobs with no typed key sit in a may-only-shrink ratchet, each carrying a tier and a **proposed** key (`explain env untyped` prints both). Includes the credential policy for the three providers whose peers expose an `api_key` knob and they don't.
-- [The Self-Bounding Completion Gate](docs/design/completion-gate.md) - What `completion_processors` is for and the seven rules a working one had to get right, each attached to the incident that produced it. Covers `max_refusals:` / `on_exhausted:` (the gate's own refusal ceiling, distinct from `max_turns`, which is and remains the retry budget), the `faults[]` channel that keeps an unfixable environment fault from burning the retry budget, why a broken gate must never read as a passing one, and the load-once-per-session caching the counter used to depend on as folklore. Start from `jaato-scaffold explain completion` and `jaato-scaffold new processor` — both are computed from the framework, so they cannot drift the way the prose can. §9 covers why the gate is three files rather than one: `jaato-scaffold new sweep` emits the checks (`acceptance.sh`, shared with the post-hoc graders), the processor, and the profile's `completion_processors:` + `completion_payload_schema:` as ONE set (`--no-gate` opts out), because a profile carrying processors and no schema has no lenient gate — `_should_hide_signal_completion` removes `signal_completion` entirely, so the agent cannot signal and the gate never runs. §11 covers why a session that completed is still drivable: `signal_completion` ends the TURN, and the continuation it skips was also the only writer of that batch's results into history, so a completed conversation used to end on a `tool_calls` block nothing answered and every later request — `send_message` and `session.wake` alike — was rejected by the provider (#913). `_record_terminal_tool_results` writes them without the round-trip, which is what makes "complete every turn to enforce a contract, then keep talking" usable.
+- [The Self-Bounding Completion Gate](docs/design/completion-gate.md) - What `completion_processors` is for and the seven rules a working one had to get right, each attached to the incident that produced it. Covers `max_refusals:` / `on_exhausted:` (the gate's own refusal ceiling, distinct from `budget_control`, which is the retry budget since #1068 removed the `max_turns` field that used to claim the role), the `faults[]` channel that keeps an unfixable environment fault from burning the retry budget, why a broken gate must never read as a passing one, and the load-once-per-session caching the counter used to depend on as folklore. Start from `jaato-scaffold explain completion` and `jaato-scaffold new processor` — both are computed from the framework, so they cannot drift the way the prose can. §9 covers why the gate is three files rather than one: `jaato-scaffold new sweep` emits the checks (`acceptance.sh`, shared with the post-hoc graders), the processor, and the profile's `completion_processors:` + `completion_payload_schema:` as ONE set (`--no-gate` opts out), because a profile carrying processors and no schema has no lenient gate — `_should_hide_signal_completion` removes `signal_completion` entirely, so the agent cannot signal and the gate never runs. §11 covers why a session that completed is still drivable: `signal_completion` ends the TURN, and the continuation it skips was also the only writer of that batch's results into history, so a completed conversation used to end on a `tool_calls` block nothing answered and every later request — `send_message` and `session.wake` alike — was rejected by the provider (#913). `_record_terminal_tool_results` writes them without the round-trip, which is what makes "complete every turn to enforce a contract, then keep talking" usable.
 - [Payload-Schema Conventions](docs/design/payload-schema-conventions.md) - Symmetric authoring guide for `spawn_payload_schema` (input boundary) and `completion_payload_schema` (output boundary) — symmetric in everything but the type system: a completion payload is JSON the model emitted, a spawn payload crosses the IPC wire as `key=value` argv tokens, so **every spawn property is a `string`** (`pattern` carries the shape, the consumer parses). #883 ratified that rather than reopening the transport, and both spawn boundaries now validate the same string view — the in-process `spawn_subagent` call used to accept a typed value the wire could never deliver, so one profile meant two things. A refusal caused by the schema names the profile; `jaato-scaffold validate` catches it before any spawn as `spawn_schema_type_unreachable`. Mirror prefetch required-keys; always carry `warnings[]` / `errors[]` escape hatches; persona ↔ schema consistency check; canonical-hash strip rules; `agent_params` interaction with agent-continuity (§6).
 - [Competitor Memory Systems](docs/design/competitor-memory-systems.md) - Survey of nine agent-memory products, sorted by what a *framework* owes: pattern (nothing) / seam (an extension point) / fidelity (a fix) / not ours. Records which items were already expressible as cascade patterns, which memory hot paths are not pluggable, and why the pattern corpus needs `certify/`-style contract tests run against `main`.
 - [Agent Continuity Pattern](docs/design/agent-continuity.md) - `{{continuity_scope}}` + memory plugin enrichment + raw/curated lifecycle: persona-level continuity across sessions composed from existing primitives, no new framework code. Reference impl in `jaato-knowledge-manager/.jaato.example/`.
