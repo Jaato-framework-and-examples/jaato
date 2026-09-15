@@ -1,4 +1,4 @@
-# jaato-web
+# jaato-web-coder-ui
 
 Browser client for a jaato daemon — the web counterpart of `jaato-tui`.
 It connects to `python -m server --web-socket …` over the daemon's
@@ -33,12 +33,12 @@ are a port of `jaato-tui/client_commands.py`.
 
 ## Run it
 
-The client is published on npm as `@jaato/web`; the package is the built
+The client is published on npm as `@jaato/web-coder-ui`; the package is the built
 bundle plus a dependency-free launcher, so `npx` fetches it in one go:
 
 ```bash
 .venv/bin/python -m server --web-socket :8080 --daemon   # the daemon, on this machine
-npx @jaato/web                                            # serves the client, opens the browser
+npx @jaato/web-coder-ui                                            # serves the client, opens the browser
 ```
 
 The launcher serves `dist/` on `http://127.0.0.1:5180/`, hands the page the
@@ -46,8 +46,8 @@ daemon URL and — for a local daemon — the token from `~/.jaato/ws.token`, an
 the page connects on its own. Against a daemon elsewhere:
 
 ```bash
-npx @jaato/web --daemon ws://build-box:8080 --token-file ./ws.token
-npx @jaato/web --daemon wss://jaato.example.org --no-token     # type the token in the form
+npx @jaato/web-coder-ui --daemon ws://build-box:8080 --token-file ./ws.token
+npx @jaato/web-coder-ui --daemon wss://jaato.example.org --no-token     # type the token in the form
 ```
 
 | Flag | Default | Meaning |
@@ -77,7 +77,7 @@ nginx, a CDN or a file server, and optionally publish a `config.json` next to
 
 `token` is also accepted there, but a token in a file every visitor can read
 is only right when the file server is as private as the daemon. Every
-publish run of the npm workflow uploads `jaato-web-dist-<version>.tar.gz`
+publish run of the npm workflow uploads `jaato-web-coder-ui-dist-<version>.tar.gz`
 (the contents of `dist/`) as a workflow artifact for this use; `npm run
 build` produces the same directory from a checkout.
 
@@ -118,7 +118,7 @@ npm run e2e              # Playwright, starts the mock daemon and Vite itself
 npm pack                 # the npm tarball (refuses without a dist/)
 ```
 
-Publishing is manual: the *Publish @jaato/web to npm* workflow
+Publishing is manual: the *Publish @jaato/web-coder-ui to npm* workflow
 (`.github/workflows/publish-npm-web.yml`) runs the same gates as CI, refuses a
 version already on the registry, builds, and publishes with the `@jaato` org
 token. Bump `version` in `package.json` first.
@@ -129,7 +129,7 @@ instead of Playwright's download.
 ## Layout
 
 ```
-bin/         jaato-web.js — the launcher shipped as the package's `bin` (static server + config.json + browser open), tested with node --test
+bin/         jaato-web-coder-ui.js — the launcher shipped as the package's `bin` (static server + config.json + browser open), tested with node --test
 src/
   app/         actions.ts (what a submitted line does), launcherConfig.ts (the page's side of config.json)
   protocol/    commands.ts (routing + completion), jmarkup.ts, markdown.ts, pygments.ts — pure, unit-tested

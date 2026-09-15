@@ -1,4 +1,4 @@
-# jaato-web-server: sign-in and ticket custody for the browser client
+# jaato-web-coder-server: sign-in and ticket custody for the browser client
 
 **Status:** design. The daemon half, #1074, is implemented in
 [PR #1075](https://github.com/Jaato-framework-and-examples/jaato/pull/1075)
@@ -7,14 +7,14 @@ implemented yet; §9 is the order.
 
 ## 1. What this is, and what it is not
 
-`jaato-web` (the browser client, `@jaato/web`) connects to a daemon started
+`jaato-web-coder-ui` (the browser client, `@jaato/web-coder-ui`) connects to a daemon started
 with `--web-socket` and presents whatever credential it was given. Today
 that credential is the daemon's single bearer token: it says *may drive this
 daemon* and nothing about who. That is the right credential for the
-single-user local case `npx @jaato/web` serves, and the wrong one for a
+single-user local case `npx @jaato/web-coder-ui` serves, and the wrong one for a
 deployment where several people share a daemon.
 
-`jaato-web-server` is the server-side counterpart of the browser client.
+`jaato-web-coder-server` is the server-side counterpart of the browser client.
 It is a **backend-for-frontend**: the application that authenticated the
 user, in the sense #1074 uses the word. It owns three things the browser
 must never own:
@@ -25,7 +25,7 @@ must never own:
 | **the app credential** | the long-lived secret that may call `ticket.bind`; it never reaches a page |
 | **ticket minting** | one short-lived, single-use ticket per connection, bound to the signed-in user |
 
-It also serves the static bundle, the way the `jaato-web` launcher does.
+It also serves the static bundle, the way the `jaato-web-coder-ui` launcher does.
 
 It is **not**:
 
@@ -43,8 +43,8 @@ It is **not**:
 
 ```mermaid
 sequenceDiagram
-    participant B as Browser (jaato-web)
-    participant S as jaato-web-server (BFF)
+    participant B as Browser (jaato-web-coder-ui)
+    participant S as jaato-web-coder-server (BFF)
     participant I as Identity provider
     participant D as jaato daemon
 
@@ -63,14 +63,14 @@ sequenceDiagram
 
     B->>S: POST /api/ticket  (cookie, Sec-Fetch-Site: same-origin)
     S->>D: ticket.bind {request_id, user: "alice", ttl_seconds: 60, single_use: true}
-    D-->>S: ticket.bind.result {status: bound, ticket, qualified: "jaato-web:alice", expires_at}
+    D-->>S: ticket.bind.result {status: bound, ticket, qualified: "jaato-web-coder:alice", expires_at}
     S-->>B: {ticket, daemon}
 
     B->>D: WS Upgrade ?token=<ticket>
-    D->>D: resolve ticket → BoundIdentity{app_id: "jaato-web", user: "alice"}, consume it
-    D-->>B: ConnectedEvent (connection attributed to jaato-web:alice)
+    D->>D: resolve ticket → BoundIdentity{app_id: "jaato-web-coder", user: "alice"}, consume it
+    D-->>B: ConnectedEvent (connection attributed to jaato-web-coder:alice)
 
-    Note over B,D: every session this connection creates carries created_by = "jaato-web:alice"
+    Note over B,D: every session this connection creates carries created_by = "jaato-web-coder:alice"
 
     B--xD: connection drops
     B->>S: POST /api/ticket  (fresh ticket; the old one was consumed)
@@ -87,8 +87,8 @@ Two properties the diagram is built around:
 ## 3. Components
 
 ```
-jaato-web-server/                  new package, @jaato/web-server on npm
-  bin/jaato-web-server.js          CLI entry: reads config, starts the server
+jaato-web-coder-server/                  new package, @jaato/web-coder-server on npm
+  bin/jaato-web-coder-server.js          CLI entry: reads config, starts the server
   src/
     config.ts                      typed config (§7), env + file, secrets from files
     bind-channel.ts                one JaatoClient to the daemon, app-credential auth,
@@ -98,16 +98,16 @@ jaato-web-server/                  new package, @jaato/web-server on npm
       local.ts                     users file (argon2 hashes) for deployments without an IdP
       session.ts                   cookie session store (in-memory; pluggable)
     routes.ts                      /auth/*, /api/session, /api/ticket, /api/logout
-    static.ts                      serves @jaato/web's dist/ (the launcher's static server, reused)
+    static.ts                      serves @jaato/web-coder-ui's dist/ (the launcher's static server, reused)
     proxy.ts                       optional WS relay (§6)
 ```
 
-Runtime dependencies are deliberately few: `@jaato/web` (the bundle and the
+Runtime dependencies are deliberately few: `@jaato/web-coder-ui` (the bundle and the
 static server), `@jaato/sdk` (the bind channel is an ordinary client), and
 `openid-client`. The local-user mode needs a password hash; `argon2` is
 optional and only loaded when that mode is configured.
 
-The static server is the one the launcher already ships. `@jaato/web` gains
+The static server is the one the launcher already ships. `@jaato/web-coder-ui` gains
 an `exports` entry so `createStaticServer` is importable, and the BFF passes
 it a `config` object whose `ticketUrl` replaces the launcher's `token`.
 
@@ -121,7 +121,7 @@ not assumed. Protocol **1.10**.
 
 | | BFF's use |
 |---|---|
-| **app credential** | one entry in the daemon's `--ws-app-credentials` JSON file, `{"jaato-web": "<credential>"}` (mode 0600 enforced, at least 16 characters, the key is the `app_id`). The BFF presents it once, on the bind channel's Upgrade, as `Authorization: Bearer` (Node can set the header; no query string). It is **bind-only**: the daemon refuses every frame on that connection other than the two ticket verbs, so it can never open or attach a session |
+| **app credential** | one entry in the daemon's `--ws-app-credentials` JSON file, `{"jaato-web-coder": "<credential>"}` (mode 0600 enforced, at least 16 characters, the key is the `app_id`). The BFF presents it once, on the bind channel's Upgrade, as `Authorization: Bearer` (Node can set the header; no query string). It is **bind-only**: the daemon refuses every frame on that connection other than the two ticket verbs, so it can never open or attach a session |
 | **user ticket** | minted per connect through `ticket.bind`, handed to the browser in a JSON response body (never a URL), presented by the browser as `?token=` on its own Upgrade, exactly where the shared token goes today. Consumed at accept when `single_use` (the default) |
 
 Configuring `--ws-app-credentials` turns WS auth **on**, and the flag is
@@ -149,7 +149,7 @@ Four events, declared in `events.py` and codegen'd into `@jaato/sdk`
 
 // daemon → BFF   (status: bound | denied | invalid | capacity)
 {"type": "ticket.bind.result", "request_id": "r1", "status": "bound",
- "ticket": "…", "qualified": "jaato-web:alice", "app_id": "jaato-web",
+ "ticket": "…", "qualified": "jaato-web-coder:alice", "app_id": "jaato-web-coder",
  "expires_at": "2026-09-15T20:01:00Z"}
 
 // BFF → daemon, on logout: exactly ONE of `ticket` / `user`
@@ -169,7 +169,7 @@ Four events, declared in `events.py` and codegen'd into `@jaato/sdk`
 - `user` is the claim the BFF is configured to use (`auth.oidc.subject_claim`,
   §7). Against Keycloak the default is `preferred_username`: unique within
   the realm, qualified by the daemon anyway, and readable in an audit
-  (`jaato-web:alice`, not `jaato-web:2f1c9e0a-…`). `sub` is available for a
+  (`jaato-web-coder:alice`, not `jaato-web-coder:2f1c9e0a-…`). `sub` is available for a
   deployment that renames users. The daemon refuses an empty, over-long or
   control-character `user` with `invalid`.
 - `ttl_seconds` is `1..3600` and a value outside is `invalid`, never
@@ -201,10 +201,10 @@ fast and the browser retries its connect, which re-mints.
 connection's identity, and PR #1075 makes `set_client_user` **refuse to
 overwrite** a ticket-established identity, so a later SSO hook cannot
 silently relabel the connection. The BFF relies on the qualified form
-(`jaato-web:alice`) being what those fields carry, so that:
+(`jaato-web-coder:alice`) being what those fields carry, so that:
 
 - two BFF deployments against one daemon, each with its own app credential
-  (`jaato-web-eu:alice`, `jaato-web-us:alice`), cannot collide;
+  (`jaato-web-coder-eu:alice`, `jaato-web-coder-us:alice`), cannot collide;
 - daemon-side ownership guards, when they exist in the free package, compare
   the right thing. Today the free daemon *records* identity and never
   compares it (`session.attach` checks id syntax and workspace mismatch only;
@@ -241,7 +241,7 @@ already has rather than into a dead connection. The Python SDK has no such
 need today (no browser presents tickets through it), but the same shape is
 harmless there.
 
-### 5.2 `@jaato/web` (jaato-web): a ticket URL beside the token
+### 5.2 `@jaato/web-coder-ui` (jaato-web-coder-ui): a ticket URL beside the token
 
 `config.json` gains one optional field; the launcher keeps writing `token`,
 the BFF writes `ticketUrl`:
@@ -260,7 +260,7 @@ the BFF writes `ticketUrl`:
 - Logout is a link to `./api/logout`, which clears the cookie, asks the
   daemon to revoke the user's tickets, and, when the IdP supports it,
   redirects through RP-initiated logout.
-- `@jaato/web` exports its static server (`exports` in `package.json`), so
+- `@jaato/web-coder-ui` exports its static server (`exports` in `package.json`), so
   the BFF does not copy it.
 
 None of this changes the launcher's behaviour: with `token` present and no
@@ -286,16 +286,16 @@ BFF does in this mode that it cannot in `direct` is cap connections per user.
 ## 7. Configuration
 
 ```yaml
-# jaato-web-server.yaml
+# jaato-web-coder-server.yaml
 listen: 0.0.0.0:8443
-tls: {cert: /etc/jaato-web/tls.crt, key: /etc/jaato-web/tls.key}   # or terminate in front
+tls: {cert: /etc/jaato-web-coder/tls.crt, key: /etc/jaato-web-coder/tls.key}   # or terminate in front
 public_url: https://jaato.example.org
 
 daemon:
   url: wss://jaato.example.org/daemon       # what the BROWSER connects to (direct mode)
   bind_url: ws://127.0.0.1:8080             # what the BFF connects to; defaults to url
-  app_id: jaato-web                         # the key of this BFF's entry in the daemon's --ws-app-credentials file
-  app_credential_file: /etc/jaato-web/app.credential   # its value; mode 0600 enforced on both sides
+  app_id: jaato-web-coder                       # the key of this BFF's entry in the daemon's --ws-app-credentials file
+  app_credential_file: /etc/jaato-web-coder/app.credential   # its value; mode 0600 enforced on both sides
 mode: direct                                 # direct | proxy
 
 auth:
@@ -303,18 +303,18 @@ auth:
   oidc:
     issuer: https://jaato.example.org/auth/realms/jaato-web-coder-shell   # the `iss` Keycloak puts in tokens
     backchannel_url: http://127.0.0.1:8180             # optional: discovery, token, JWKS over loopback (§11)
-    client_id: jaato-web
-    client_secret_file: /etc/jaato-web/oidc.secret
+    client_id: jaato-web-coder
+    client_secret_file: /etc/jaato-web-coder/oidc.secret
     scopes: [openid, profile]
     subject_claim: preferred_username        # what becomes ticket.bind's `user`
     required_role: jaato-user                # optional: realm or client role that gates sign-in (§11)
   local:
-    users_file: /etc/jaato-web/users.yaml    # {name: argon2 hash}
+    users_file: /etc/jaato-web-coder/users.yaml    # {name: argon2 hash}
 
 session:
-  secret_file: /etc/jaato-web/session.secret
+  secret_file: /etc/jaato-web-coder/session.secret
   ttl: 8h
-  cookie_name: jaato_web_session
+  cookie_name: jaato_web_coder_session
 
 ticket:
   ttl_seconds: 60
@@ -327,11 +327,11 @@ world-readable through `/proc`.
 The daemon side of the same pairing:
 
 ```bash
-# /etc/jaato/ws-apps.json, mode 0600:  {"jaato-web": "<the same credential>"}
+# /etc/jaato/ws-apps.json, mode 0600:  {"jaato-web-coder": "<the same credential>"}
 python -m server --web-socket 127.0.0.1:8080 --ws-app-credentials /etc/jaato/ws-apps.json --daemon
 ```
 
-`--ws-token-file` may stay beside it so the TUI and `npx @jaato/web` keep
+`--ws-token-file` may stay beside it so the TUI and `npx @jaato/web-coder-ui` keep
 working with the shared token on the same daemon.
 
 ## 8. Security properties, each with the attack it answers
@@ -355,9 +355,9 @@ between users. Every session still runs as the daemon's uid, as #1074's
 1. **#1074 lands** with the two verbs from §4.2 (or their agreed shape).
 2. **SDK token provider** (§5.1). Small, independently testable, and useful
    to any client that rotates credentials.
-3. **`jaato-web` ticket URL + sign-in screen** (§5.2), tested with a mock BFF
+3. **`jaato-web-coder-ui` ticket URL + sign-in screen** (§5.2), tested with a mock BFF
    in Playwright the way the launcher's `config.json` path is today.
-4. **`jaato-web-server` in `direct` mode, OIDC only.** Local users and proxy
+4. **`jaato-web-coder-server` in `direct` mode, OIDC only.** Local users and proxy
    mode follow once the identity plumbing is proven end to end against a real
    daemon.
 5. **Daemon-side ownership checks** keyed on the qualified identity, so a
@@ -387,7 +387,7 @@ exactly one of `ticket` / `user` rather than `user` alone.
 
 What remains this design's to build, in the order of §9: the SDK token
 provider (`jaato-sdk-ts` is outside #1074's scope), the `ticketUrl` path
-and sign-in screen in `jaato-web`, and the `jaato-web-server` package.
+and sign-in screen in `jaato-web-coder-ui`, and the `jaato-web-coder-server` package.
 
 ## 11. Deployment with Keycloak on the same host
 
@@ -449,7 +449,7 @@ one-to-one counterpart on the identity side. One confidential client in it:
 
 | Setting | Value |
 |---|---|
-| Client ID | `jaato-web` |
+| Client ID | `jaato-web-coder` |
 | Client authentication | on (confidential); the secret goes in `client_secret_file` |
 | Standard flow | on; direct access grants and implicit flow **off** |
 | PKCE code challenge method | `S256` (the BFF always sends PKCE; this makes Keycloak require it) |
@@ -461,7 +461,7 @@ one-to-one counterpart on the identity side. One confidential client in it:
 ### 11.4 Who may sign in at all
 
 Keycloak puts realm roles in `realm_access.roles` and client roles in
-`resource_access.jaato-web.roles` on the ID token. `auth.oidc.required_role`
+`resource_access.jaato-web-coder.roles` on the ID token. `auth.oidc.required_role`
 names one; a user whose token lacks it is refused at the callback with a
 page saying so, and no ticket is ever minted for them. This is the one piece
 of authorization the BFF does cheaply and correctly, because it is decided

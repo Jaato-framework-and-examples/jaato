@@ -4,7 +4,7 @@
  * ``npm run dev`` against ``python -m server --web-socket :8080`` needs
  * no configuration; ``VITE_WS_URL`` or the form override it.
  *
- * When the bundle was served by the ``jaato-web`` launcher (or any host
+ * When the bundle was served by the ``jaato-web-coder-ui`` launcher (or any host
  * publishing a ``config.json`` — see ``app/launcherConfig.ts``) the
  * daemon URL and token come pre-filled, and with ``autoConnect`` the
  * screen connects on its own; a failure drops back to the form with the

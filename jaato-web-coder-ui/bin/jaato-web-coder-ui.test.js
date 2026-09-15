@@ -8,7 +8,7 @@ import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { request } from "node:http";
-import { createStaticServer, isLoopbackHost, parseArgs, resolveToken } from "./jaato-web.js";
+import { createStaticServer, isLoopbackHost, parseArgs, resolveToken } from "./jaato-web-coder-ui.js";
 
 /** ``fetch`` refuses a caller-supplied ``Host``; plain ``http`` does not. */
 function getWithHost(port, path, host) {

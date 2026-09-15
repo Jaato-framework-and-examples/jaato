@@ -1,13 +1,13 @@
 {
-  "name": "@jaato/web",
+  "name": "@jaato/web-coder-ui",
   "version": "0.1.0",
-  "description": "Browser client for jaato-server — the web counterpart of jaato-tui. `npx @jaato/web` serves the bundle and opens it against a daemon started with --web-socket.",
+  "description": "Browser client for jaato-server — the web counterpart of jaato-tui. `npx @jaato/web-coder-ui` serves the bundle and opens it against a daemon started with --web-socket.",
   "license": "BUSL-1.1",
   "author": "apanoia",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Jaato-framework-and-examples/jaato.git",
-    "directory": "jaato-web"
+    "directory": "jaato-web-coder-ui"
   },
   "keywords": [
     "jaato",
@@ -19,11 +19,11 @@
   ],
   "type": "module",
   "bin": {
-    "jaato-web": "bin/jaato-web.js"
+    "jaato-web-coder-ui": "bin/jaato-web-coder-ui.js"
   },
   "files": [
     "dist",
-    "bin/jaato-web.js",
+    "bin/jaato-web-coder-ui.js",
     "README.md"
   ],
   "engines": {
@@ -34,10 +34,10 @@
     "sdk:build": "npm --prefix ../jaato-sdk-ts run build",
     "build": "npm run sdk:build && tsc -p tsconfig.json --noEmit && vite build",
     "preview": "vite preview",
-    "start": "node bin/jaato-web.js",
+    "start": "node bin/jaato-web-coder-ui.js",
     "typecheck": "npm run sdk:build && tsc -p tsconfig.json --noEmit",
     "test": "vitest run && npm run test:bin",
-    "test:bin": "node --test bin/jaato-web.test.js",
+    "test:bin": "node --test bin/jaato-web-coder-ui.test.js",
     "test:watch": "vitest",
     "mock-daemon": "node --import tsx mock/daemon.ts",
     "e2e": "playwright test",

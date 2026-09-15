@@ -5,7 +5,7 @@ import tailwindcss from "@tailwindcss/vite";
 import { fileURLToPath } from "node:url";
 
 // The SDK is consumed from its TypeScript source so the client never
-// depends on a prebuilt ``dist/`` — ``npm run build`` in jaato-web is
+// depends on a prebuilt ``dist/`` — ``npm run build`` in jaato-web-coder-ui is
 // self-sufficient, and a protocol change in jaato-sdk-ts is picked up
 // on the next HMR tick.
 const sdkSrc = fileURLToPath(new URL("../jaato-sdk-ts/src/index.ts", import.meta.url));
@@ -34,7 +34,7 @@ export default defineConfig({
     },
   },
   // Relative asset URLs: the bundle is served from a local port by the
-  // ``jaato-web`` launcher (``bin/jaato-web.js``) or from any path an
+  // ``jaato-web-coder-ui`` launcher (``bin/jaato-web-coder-ui.js``) or from any path an
   // operator mounts ``dist/`` under, so ``index.html`` must not assume it
   // sits at ``/``.
   base: "./",

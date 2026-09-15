@@ -1,7 +1,7 @@
 /**
  * The page's side of the per-user ticket flow (protocol 1.10, #1074).
  *
- * When the bundle is served by ``jaato-web-server`` (the sign-in and
+ * When the bundle is served by ``jaato-web-coder-server`` (the sign-in and
  * ticket-custody backend, ``docs/design/web-server-bff.md``), the daemon
  * credential is not a token the page holds but a **ticket** the backend
  * mints per connection: single-use, short-lived, bound to the signed-in

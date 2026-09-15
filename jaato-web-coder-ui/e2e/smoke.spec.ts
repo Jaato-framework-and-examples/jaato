@@ -150,7 +150,7 @@ test("subagents get their own tab", async ({ page }) => {
 
 test("a launcher config.json pre-fills the form and connects on its own", async ({ page }) => {
   // The Vite dev server answers /config.json with index.html; stand in for
-  // ``bin/jaato-web.js`` by serving what it would.
+  // ``bin/jaato-web-coder-ui.js`` by serving what it would.
   await page.route("**/config.json", (route) =>
     route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ daemon: WS, autoConnect: true }) }),
   );

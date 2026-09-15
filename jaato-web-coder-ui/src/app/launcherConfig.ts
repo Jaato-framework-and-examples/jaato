@@ -1,14 +1,14 @@
 /**
  * The bundle's one contact with whatever served it.
  *
- * ``bin/jaato-web.js`` (the ``@jaato/web`` launcher) and anyone hosting
+ * ``bin/jaato-web-coder-ui.js`` (the ``@jaato/web-coder-ui`` launcher) and anyone hosting
  * ``dist/`` by hand may publish a ``config.json`` next to ``index.html``:
  *
  *     {"daemon": "ws://127.0.0.1:8080", "token": "…", "autoConnect": true}
  *
  * ``daemon`` pre-fills the WebSocket URL, ``token`` the bearer token, and
  * ``autoConnect`` makes the connect screen connect without a click.  A
- * sign-in backend (``jaato-web-server``) writes ``ticketUrl`` instead of
+ * sign-in backend (``jaato-web-coder-server``) writes ``ticketUrl`` instead of
  * ``token``: the page then asks that URL for a fresh per-user ticket before
  * every connection attempt (``app/tickets.ts``), and ``loginUrl`` (default
  * ``./auth/login``) is where a 401 sends the person.  All fields are

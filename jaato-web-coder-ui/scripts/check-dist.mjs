@@ -8,6 +8,6 @@ import { fileURLToPath } from "node:url";
 
 const dist = join(dirname(fileURLToPath(import.meta.url)), "..", "dist", "index.html");
 if (!existsSync(dist)) {
-  console.error("jaato-web: dist/index.html is missing — run `npm run build` before packing");
+  console.error("jaato-web-coder-ui: dist/index.html is missing — run `npm run build` before packing");
   process.exit(1);
 }

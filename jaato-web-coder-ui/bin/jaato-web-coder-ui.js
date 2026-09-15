@@ -1,16 +1,16 @@
 #!/usr/bin/env node
 /**
- * ``jaato-web`` — the launcher that ships in the ``@jaato/web`` package.
+ * ``jaato-web-coder-ui`` — the launcher that ships in the ``@jaato/web-coder-ui`` package.
  *
  * The browser client is a static bundle (``dist/``, produced by
  * ``vite build``); all this script does is serve that bundle from a
  * local port, tell the page which daemon to talk to, and open a browser
  * on it.  It is deliberately dependency-free (Node's ``http`` and ``fs``
- * only) so ``npx @jaato/web`` installs nothing but the bundle itself.
+ * only) so ``npx @jaato/web-coder-ui`` installs nothing but the bundle itself.
  *
- *     npx @jaato/web                              # ws://127.0.0.1:8080, token from ~/.jaato/ws.token
- *     npx @jaato/web --daemon ws://build-box:8080 --token-file ./ws.token
- *     npx @jaato/web --port 9000 --no-open
+ *     npx @jaato/web-coder-ui                              # ws://127.0.0.1:8080, token from ~/.jaato/ws.token
+ *     npx @jaato/web-coder-ui --daemon ws://build-box:8080 --token-file ./ws.token
+ *     npx @jaato/web-coder-ui --port 9000 --no-open
  *
  * How the page learns about the daemon
  * ------------------------------------
@@ -60,7 +60,7 @@ const MIME = {
   ".txt": "text/plain; charset=utf-8",
 };
 
-const USAGE = `Usage: jaato-web [options]
+const USAGE = `Usage: jaato-web-coder-ui [options]
 
 Serve the jaato browser client and open it against a daemon started with
 \`python -m server --web-socket [HOST:]PORT\`.
@@ -256,7 +256,7 @@ export async function main(opts) {
   const wildcard = opts.host === "0.0.0.0" || opts.host === "::";
   const hostForUrl = wildcard ? "localhost" : opts.host.includes(":") ? `[${opts.host}]` : opts.host;
   const url = `http://${hostForUrl}:${port}/`;
-  const lines = [`jaato-web ${packageVersion()} serving ${opts.root}`, `  open      ${url}${wildcard ? "  (bound to all interfaces)" : ""}`, `  daemon    ${opts.daemon}`];
+  const lines = [`jaato-web-coder-ui ${packageVersion()} serving ${opts.root}`, `  open      ${url}${wildcard ? "  (bound to all interfaces)" : ""}`, `  daemon    ${opts.daemon}`];
   if (config.token) lines.push(`  token     from ${source}`);
   else if (token && !loopback) lines.push(`  token     NOT handed to the page: ${opts.host} is not a loopback bind; type it in the form`);
   else lines.push(`  token     none (${source}); type it in the form, or leave empty for --ws-unsafe-no-auth`);
@@ -276,14 +276,14 @@ const isMain = invokedDirectly();
 if (isMain) {
   let opts;
   try { opts = parseArgs(process.argv.slice(2)); }
-  catch (err) { process.stderr.write(`jaato-web: ${err.message}\n`); process.exit(2); }
+  catch (err) { process.stderr.write(`jaato-web-coder-ui: ${err.message}\n`); process.exit(2); }
   main(opts).then((server) => {
     if (!server) return;
     const stop = () => server.close(() => process.exit(0));
     process.on("SIGINT", stop);
     process.on("SIGTERM", stop);
   }).catch((err) => {
-    process.stderr.write(`jaato-web: ${err.message}\n`);
+    process.stderr.write(`jaato-web-coder-ui: ${err.message}\n`);
     process.exit(1);
   });
 }

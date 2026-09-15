@@ -159,7 +159,7 @@ jobs:
   # render path.
   # ---------------------------------------------------------------
   # ---------------------------------------------------------------
-  # Browser client (jaato-web). Type-checks against the TS SDK's built
+  # Browser client (jaato-web-coder-ui). Type-checks against the TS SDK's built
   # declarations, runs the framework-free protocol/store unit tests, and
   # drives the real UI end-to-end against the scripted mock daemon
   # (mock/daemon.ts speaks the wire protocol, so this exercises the same
@@ -177,23 +177,23 @@ jobs:
           cache: npm
           cache-dependency-path: |
             jaato-sdk-ts/package-lock.json
-            jaato-web/package-lock.json
+            jaato-web-coder-ui/package-lock.json
       - name: Install + build the TS SDK (declarations for the type-check)
         working-directory: jaato-sdk-ts
         run: |
           npm ci --no-audit --no-fund
           npm run build
-      - name: Install jaato-web
-        working-directory: jaato-web
+      - name: Install jaato-web-coder-ui
+        working-directory: jaato-web-coder-ui
         run: npm ci --no-audit --no-fund
       - name: Type-check
-        working-directory: jaato-web
+        working-directory: jaato-web-coder-ui
         run: npx tsc -p tsconfig.json --noEmit
       - name: Unit tests (protocol, store, launcher)
-        working-directory: jaato-web
+        working-directory: jaato-web-coder-ui
         run: npm test
       - name: Production build
-        working-directory: jaato-web
+        working-directory: jaato-web-coder-ui
         run: npx vite build
       # `--with-deps` shells out to apt-get update, so this job needs the
       # same drop as the suite job -- see the note there.
@@ -201,10 +201,10 @@ jobs:
         run: sudo rm -f /etc/apt/sources.list.d/google-chrome.list
                         /etc/apt/sources.list.d/google-chrome.sources
       - name: Install Playwright Chromium
-        working-directory: jaato-web
+        working-directory: jaato-web-coder-ui
         run: npx playwright install --with-deps chromium
       - name: End-to-end against the mock daemon
-        working-directory: jaato-web
+        working-directory: jaato-web-coder-ui
         run: npx playwright test
 
   suite:
