@@ -5,7 +5,7 @@ argument — its own docstring calls it a knob — but every caller passed a
 function-local ``MAX_COMPLETION_NUDGES = 2``.  Three of them, in three
 files nothing kept equal, and none reachable from a profile.  Meanwhile
 the bounds on either side of it in the same path are profile keys:
-``max_turns``, ``runtime_limits``, and a processor's ``max_refusals``,
+``runtime_limits`` and a processor's ``max_refusals``,
 which is the close analogue — a profile could say how many times a
 processor may BLOCK a completion, but not how many chances the model got
 to CALL ``signal_completion`` in the first place.

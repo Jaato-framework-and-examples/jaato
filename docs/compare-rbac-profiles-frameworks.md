@@ -41,7 +41,6 @@ Declarative JSON files in `.jaato/profiles/`:
       }
     }
   },
-  "max_turns": 10,
   "auto_approved": false,
   "gc": { "type": "budget", "threshold_percent": 80.0 },
   "env": { "GITHUB_TOKEN": "${VAULT_SECRET_ID}" }

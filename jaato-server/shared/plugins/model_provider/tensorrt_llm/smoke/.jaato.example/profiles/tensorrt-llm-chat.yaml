@@ -9,7 +9,6 @@ description: >
 model: Qwen/Qwen2.5-7B-Instruct
 provider: tensorrt_llm
 
-max_turns: 1
 
 suppress_base_instructions: true
 

@@ -226,7 +226,7 @@ await client.createSession({
     provider: "anthropic",
     plugins: ["cli", "web_search"],
     system_instructions: "You are an operations engineer.",
-    // plugin_configs, gc, env, max_turns, runtime_limits, model_tiers, ...
+    // plugin_configs, gc, env, runtime_limits, model_tiers, ...
   },
 });
 

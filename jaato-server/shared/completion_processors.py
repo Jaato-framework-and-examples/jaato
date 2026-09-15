@@ -49,13 +49,13 @@ the agent as a load error.
 All are bucketed per the processor's ``on_error`` policy
 (``fail_completion`` vs ``warn``).  When any ``fail_completion``
 error fires, the caller returns the ``validation_failed`` shape to
-the model so it retries within ``max_turns``.
+the model so it retries on a later turn.
 
 **The retry loop does not terminate on its own** (issue #768).  The
 processor refuses, the agent re-claims completion, the processor
 refuses again — an observed run spent seven refusals in 156 seconds
 on the same two errors and ended with its whole budget gone and no
-verdict.  ``max_turns`` bounds the SESSION, not this gate, and
+verdict.  ``budget_control`` bounds the SESSION, not this gate, and
 nothing upstream bounds the gate: ``MAX_COMPLETION_NUDGES`` bounds
 the opposite direction (an agent that stops WITHOUT signalling).  So
 a processor entry may declare ``max_refusals:`` with an

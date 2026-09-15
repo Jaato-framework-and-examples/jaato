@@ -273,7 +273,6 @@ A new profile: `.jaato/profiles/advisor-knowledge-curator.json`
     }
   },
   "system_instructions": "see section 3.5",
-  "max_turns": 20,
   "gc": {
     "type": "budget",
     "threshold_percent": 80.0

@@ -52,7 +52,7 @@ The subagent plugin uses the shared `JaatoRuntime` to create lightweight session
 - **Cross-Provider Support**: Subagents can use different AI providers than the parent (e.g., Anthropic parent → Google GenAI subagent)
 - **Plugin Inheritance**: Subagents automatically inherit the parent's plugin configuration by default
 - **Model/Provider Inheritance**: If not specified in profile, subagents inherit the parent's model and provider
-- **Optional Overrides**: Use `inline_config` to override specific properties (plugins, max_turns, system_instructions)
+- **Optional Overrides**: Use `inline_config` to override specific properties (plugins, system_instructions)
 - **Predefined Profiles**: Configure named profiles for common subagent configurations
 - **Profile Auto-Discovery**: Automatically discover profiles from `.jaato/profiles/` directory (JSON/YAML files)
 - **Connection Inheritance**: Subagents automatically inherit parent's GCP project, location, and model
@@ -98,12 +98,6 @@ spawn_subagent(task="Analyze the codebase structure and summarize it")
 Override specific properties while inheriting others:
 
 ```python
-# Override max_turns only (inherits parent's plugins)
-spawn_subagent(
-    task="Quick file check",
-    inline_config={"max_turns": 5}
-)
-
 # Override system_instructions only (inherits parent's plugins)
 spawn_subagent(
     task="Research this topic",
@@ -170,7 +164,6 @@ The subagent plugin automatically discovers profile definitions from `.jaato/pro
   "description": "Subagent for code analysis and review",
   "plugins": ["cli", "file_edit"],
   "system_instructions": "You are a code review specialist.",
-  "max_turns": 10,
   "auto_approved": false
 }
 ```
@@ -183,8 +176,7 @@ The subagent plugin automatically discovers profile definitions from `.jaato/pro
   "plugins": ["web_search", "references"],
   "model": "gemini-2.5-flash",
   "provider": "google_genai",
-  "system_instructions": "You are a research specialist.",
-  "max_turns": 15
+  "system_instructions": "You are a research specialist."
 }
 ```
 
@@ -202,8 +194,7 @@ The subagent plugin automatically discovers profile definitions from `.jaato/pro
       "exclude_tools": ["selectReferences"]
     }
   },
-  "system_instructions": "Implement retry pattern following the pre-selected references.",
-  "max_turns": 15
+  "system_instructions": "Implement retry pattern following the pre-selected references."
 }
 ```
 
@@ -219,8 +210,7 @@ The subagent plugin automatically discovers profile definitions from `.jaato/pro
     "preserve_recent_turns": 5,
     "notify_on_gc": true,
     "summarize_middle_turns": 10
-  },
-  "max_turns": 50
+  }
 }
 ```
 
@@ -272,7 +262,6 @@ plugin.initialize({
         'code_assistant': {
             'description': 'Subagent for code analysis',
             'plugins': ['cli'],
-            'max_turns': 10,
             # model/provider not set = inherits from parent
         },
         'gemini_research': {
@@ -280,7 +269,6 @@ plugin.initialize({
             'plugins': ['web_search'],
             'model': 'gemini-2.5-flash',     # Explicit model
             'provider': 'google_genai',      # Explicit provider (must match model)
-            'max_turns': 15,
         }
     },
     'allow_inline': False,                # Allow profile-less spawns (default: False, #944)
@@ -319,7 +307,6 @@ plugin.add_profile(SubagentProfile(
     description='Inherits parent model and provider',
     plugins=['cli', 'todo'],
     system_instructions='You are a specialized assistant.',
-    max_turns=20,
     auto_approved=False,
 ))
 
@@ -331,7 +318,6 @@ plugin.add_profile(SubagentProfile(
     model='gemini-2.5-flash',
     provider='google_genai',
     system_instructions='You are a code generation specialist.',
-    max_turns=15,
 ))
 ```
 
@@ -340,7 +326,6 @@ plugin.add_profile(SubagentProfile(
 | Scenario | Plugins Used | Other Settings |
 |----------|--------------|----------------|
 | `spawn_subagent(task="...")` | Inherited from parent | Defaults |
-| `spawn_subagent(task="...", inline_config={max_turns: 5})` | Inherited from parent | max_turns=5 |
 | `spawn_subagent(task="...", inline_config={plugins: ['cli']})` | ['cli'] | Defaults |
 | `spawn_subagent(task="...", profile="x")` | From profile | From profile |
 
@@ -540,7 +525,6 @@ response = client.send_message("Spawn a subagent to analyze the code")
 | `system_instructions` | string | `null` | **Deprecated.** Use agents (`.jaato/agents/<name>.md`) instead — they support param substitution and dynamic instructions |
 | `model` | string | `null` | Model name (e.g., `"gemini-2.5-flash"`, `"claude-sonnet-4-20250514"`). `null` = inherit from parent |
 | `provider` | string | `null` | Provider name (e.g., `"google_genai"`, `"anthropic"`). `null` = inherit from parent |
-| `max_turns` | int | `10` | Maximum conversation turns |
 | `auto_approved` | bool | `false` | Spawn without permission prompt |
 | `gc` | object | `null` | Garbage collection configuration |
 | `env` | object | `{}` | Per-session environment-variable overlay (`${VAULT_ID}` expansion supported) |

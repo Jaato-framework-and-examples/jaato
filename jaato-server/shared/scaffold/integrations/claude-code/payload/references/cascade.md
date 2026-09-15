@@ -21,7 +21,7 @@ when the shape itself must be decided at runtime.
 
 `InProcessClient` resolves a named profile to `model`, `provider`, `plugins`,
 `plugin_configs`, `system_instructions`, `completion_payload_schema` and
-`suppress_base_instructions` **only**. `completion_processors`, `max_turns`,
+`suppress_base_instructions` **only**. `completion_processors`,
 `spawn_payload_schema` and `budget_control` are not applied — so gates a
 pipeline depends on silently do not run. Over IPC the whole contract applies.
 

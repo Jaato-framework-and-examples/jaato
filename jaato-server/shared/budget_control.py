@@ -600,8 +600,8 @@ def merge_limits(
     Min-wins (rather than the child-replaces-parent used by most scalar
     profile fields) is the safety direction: a child profile must never
     be able to grant itself a larger ceiling than the parent that spawned
-    it.  Mirrors how ``max_turns`` already takes the most restrictive
-    value across parents.
+    it.  Mirrors how ``runtime_limits.max_parallel_tools`` already takes
+    the most restrictive value across parents.
     """
     merged: Dict[str, float] = dict(parent_limits)
     for dim, value in child_limits.items():

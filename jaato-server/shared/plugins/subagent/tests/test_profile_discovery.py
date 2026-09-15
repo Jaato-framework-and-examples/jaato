@@ -50,7 +50,6 @@ class TestDiscoverProfiles:
                 "name": "test_agent",
                 "description": "A test agent",
                 "plugins": ["cli", "todo"],
-                "max_turns": 5,
             }
             profile_path = Path(tmpdir) / "test_agent.json"
             profile_path.write_text(json.dumps(profile_data))
@@ -63,7 +62,6 @@ class TestDiscoverProfiles:
             assert profile.name == "test_agent"
             assert profile.description == "A test agent"
             assert profile.plugins == ["cli", "todo"]
-            assert profile.max_turns == 5
 
     def test_discover_profile_name_from_filename(self):
         """Test that profile name defaults to filename if not specified."""
@@ -254,7 +252,6 @@ class TestDiscoverProfiles:
                 "plugin_configs": {"cli": {"timeout": 30}},
                 "system_instructions": "You are a helpful assistant.",
                 "model": "gemini-2.5-pro",
-                "max_turns": 20,
             }
             profile_path = Path(tmpdir) / "full_agent.json"
             profile_path.write_text(json.dumps(profile_data))
@@ -268,7 +265,6 @@ class TestDiscoverProfiles:
             assert profile.plugin_configs == {"cli": {"timeout": 30}}
             assert profile.system_instructions == "You are a helpful assistant."
             assert profile.model == "gemini-2.5-pro"
-            assert profile.max_turns == 20
             # icon / icon_name dropped: removed from the profile schema in
             # 635b00ec, so "all fields" no longer includes them.
 
@@ -685,7 +681,9 @@ completion_processors:
   - script: scripts/processors/accept.py
     name: acceptance
   - script: scripts/processors/audit.py
-max_turns: 4
+budget_control:
+  limits:
+    usd: 1.5
 env:
   STAGE: worker
 """
@@ -710,7 +708,7 @@ suppress_inherited_processors:
             assert [p.script for p in child.completion_processors] == [
                 "scripts/processors/audit.py"]
             # ...and every ceiling the base declared survives
-            assert child.max_turns == 4
+            assert child.budget_control.limits == {"usd": 1.5}
             assert child.env == {"STAGE": "worker"}
 
     def test_empty_completion_processors_still_inherits(self):

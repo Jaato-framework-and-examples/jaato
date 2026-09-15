@@ -162,13 +162,13 @@ class TestEphemeralHeadlessShim:
         SessionManager._run_ephemeral_session_impl(
             fake,
             '{"model": "profile-model", "provider": "p"}',   # profile_json
-            '{"model": "inline-model", "max_turns": 5}',     # inline_config_json
+            '{"model": "inline-model", "plugins": ["cli"]}',  # inline_config_json
             "do it", "worker", None, None, None,
         )
         merged = cap["create_kwargs"]["inline_profile_data"]
         assert merged["model"] == "profile-model"  # profile wins collision
         assert merged["provider"] == "p"           # profile-only key
-        assert merged["max_turns"] == 5            # inline fills the gap
+        assert merged["plugins"] == ["cli"]        # inline fills the gap
 
     # ---- workspace handling (co-validation regression: no workspace ->
     #      no runner -> NoneType.session_send_message_threadsafe) ----

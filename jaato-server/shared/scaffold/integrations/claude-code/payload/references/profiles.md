@@ -25,7 +25,6 @@ enumerates what a workspace already has.
 - `completion_processors` **concatenate**; the only removal is naming an entry
   in `suppress_inherited_processors`, and an entry matching nothing is a load
   error.
-- `max_turns` is **most-restrictive-wins**.
 - Scalars are child-replaces.
 - `plugin_configs`, `env`, `quirks` are **per-key dict-merge — ONE level
   deep.**

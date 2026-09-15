@@ -312,7 +312,7 @@ await client.create_session(
         "plugins": ["cli", "web_search"],
         "system_instructions": "You are an operations engineer.",
         # Any other field a profile JSON accepts: plugin_configs, gc,
-        # env, max_turns, runtime_limits, model_tiers, ...
+        # env, runtime_limits, model_tiers, ...
     },
 )
 
@@ -338,7 +338,7 @@ event.parse_errors         # List[ProfileParseError] — broken files surface he
 |---|---|
 | `name`, `description` | identity |
 | `plugins`, `preloaded_plugins`, `plugin_configs` | capabilities |
-| `model`, `provider`, `max_turns`, `model_tiers` | runtime |
+| `model`, `provider`, `model_tiers` | runtime |
 | `gc`, `runtime_limits`, `completion_payload_schema` | structural config (dicts, expose as-is) |
 | `env_var_names` | **names only** — env values never leave the daemon |
 

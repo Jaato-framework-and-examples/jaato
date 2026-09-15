@@ -119,7 +119,6 @@ def _install_subagent(agent_id: str, session_id: Optional[str]) -> SubagentPlugi
         'created_at': None,
         'last_activity': None,
         'turn_count': 5,
-        'max_turns': 10,
     }
     return plugin
 

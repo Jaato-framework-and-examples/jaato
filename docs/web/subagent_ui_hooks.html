@@ -186,7 +186,6 @@
       },
       <span class="string">"system_instructions"</span>: <span class="string">"You are a code analysis specialist..."</span>,
       <span class="string">"model"</span>: <span class="string">"claude-sonnet-4-20250514"</span>,
-      <span class="string">"max_turns"</span>: 10,
       <span class="string">"auto_approved"</span>: <span class="keyword">false</span>,
       <span class="string">"icon_name"</span>: <span class="string">"code_assistant"</span>
     },
@@ -211,7 +210,7 @@
         <li><code>plugin_configs</code> <span class="param-type">(object)</span> - Per-plugin configuration overrides</li>
         <li><code>system_instructions</code> <span class="param-type">(string)</span> - Additional system instructions for the agent</li>
         <li><code>model</code> <span class="param-type">(string)</span> - Model override (uses parent's model if not specified)</li>
-        <li><code>max_turns</code> <span class="param-type">(integer)</span> - Maximum conversation turns before returning (default: 10)</li>
+        <li><code>budget_control</code> <span class="param-type">(object)</span> - Spend ceilings and the degrade ladder that enforces them, e.g. <code>{limits: {turns: 30}, degrade: [{at: 100, action: "abort"}]}</code>. Limits alone are observed, never enforced — an <code>abort</code> rung is what stops a session</li>
         <li><code>auto_approved</code> <span class="param-type">(boolean)</span> - Whether this agent can spawn without permission (default: false)</li>
         <li><code>icon</code> <span class="param-type">(array of 3 strings)</span> - Custom ASCII art icon (exactly 3 lines)</li>
         <li><code>icon_name</code> <span class="param-type">(string)</span> - Name of predefined icon to use</li>

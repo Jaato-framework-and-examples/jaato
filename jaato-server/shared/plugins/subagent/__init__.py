@@ -17,7 +17,6 @@ Example usage:
             'code_assistant': {
                 'description': 'Subagent for code tasks',
                 'plugins': ['cli'],
-                'max_turns': 5,
             }
         }
     })

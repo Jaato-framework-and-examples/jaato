@@ -61,7 +61,7 @@ PROFILE_PAYLOAD_ALLOWED_KEYS: FrozenSet[str] = frozenset({
     "plugin_configs",
     "system_instructions",
     "suppress_base_instructions",
-    "max_turns",
+
     "env",
     "gc",
     "trace",
@@ -82,8 +82,7 @@ _MAX_PLUGIN_NAME_LEN = 128
 _MAX_PLUGIN_CONFIGS_COUNT = 64
 _MAX_PLUGIN_CONFIG_KEY_LEN = 64
 _MAX_SYSTEM_INSTRUCTIONS_LEN = 65536
-_MIN_MAX_TURNS = 1
-_MAX_MAX_TURNS = 1000
+
 _MAX_ENV_COUNT = 128
 _MAX_ENV_KEY_LEN = 256
 _MAX_ENV_VALUE_LEN = 4096
@@ -163,21 +162,6 @@ def validate_profile_payload(payload: Any) -> None:
                 f"profile_payload.suppress_base_instructions invalid: {exc}"
             ) from exc
 
-    if "max_turns" in payload:
-        v = payload["max_turns"]
-        # Reject bool explicitly — bool is a subclass of int in
-        # Python.  ``max_turns=True`` would otherwise type-check as
-        # int(1), which is misleading.
-        if isinstance(v, bool) or not isinstance(v, int):
-            raise ValueError(
-                f"profile_payload.max_turns must be an int, "
-                f"got {type(v).__name__}"
-            )
-        if v < _MIN_MAX_TURNS or v > _MAX_MAX_TURNS:
-            raise ValueError(
-                f"profile_payload.max_turns out of range "
-                f"[{_MIN_MAX_TURNS}, {_MAX_MAX_TURNS}], got {v}"
-            )
 
     if "plugins" in payload:
         _check_plugins(payload["plugins"])

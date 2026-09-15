@@ -50,7 +50,6 @@ def _make_profile(**overrides):
         "plugins": ["cli", "web_search"],
         "plugin_configs": {"cli": {"timeout": 30}},
         "system_instructions": "You are a researcher.",
-        "max_turns": 25,
         "env": {"FOO": "bar"},
     }
     base.update(overrides)
@@ -191,7 +190,6 @@ class TestRpcOk:
         assert payload["plugins"] == ["cli", "web_search"]
         assert payload["plugin_configs"] == {"cli": {"timeout": 30}}
         assert payload["system_instructions"] == "You are a researcher."
-        assert payload["max_turns"] == 25
         assert payload["env"] == {"FOO": "bar"}
 
 

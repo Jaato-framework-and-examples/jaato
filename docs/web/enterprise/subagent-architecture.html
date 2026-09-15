@@ -173,7 +173,7 @@
             <tr><td><code>provider</code></td><td>Provider name (enables cross-provider delegation)</td></tr>
             <tr><td><code>plugins</code></td><td>List of tool plugin names to expose</td></tr>
             <tr><td><code>system_instructions</code></td><td>Custom instructions for the subagent's role</td></tr>
-            <tr><td><code>max_turns</code></td><td>Maximum agentic turns before forced completion</td></tr>
+            <tr><td><code>budget_control</code></td><td>Spend ceilings (usd, tokens, seconds, tool_calls, turns) plus the degrade ladder that enforces them — an <code>abort</code> rung is what stops a session</td></tr>
             <tr><td><code>auto_approved</code></td><td>List of tools that skip permission checks</td></tr>
             <tr><td><code>gc</code></td><td>GC plugin configuration (type, thresholds)</td></tr>
           </tbody>

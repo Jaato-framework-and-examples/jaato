@@ -9,7 +9,6 @@ description: >
 model: anthropic/claude-sonnet-4.5
 provider: openrouter
 
-max_turns: 1
 
 suppress_base_instructions: true
 

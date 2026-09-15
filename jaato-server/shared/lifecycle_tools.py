@@ -849,8 +849,8 @@ class LifecycleTools:
         # between completion_artifacts and completion_validators.
         # Runs AFTER ``jsonschema.validate`` passes; any
         # ``on_error: fail_completion`` failure returns the same
-        # ``validation_failed`` shape so the agent retries within
-        # ``max_turns``.  See ``shared/completion_processors.py`` for
+        # ``validation_failed`` shape so the agent retries on a
+        # later turn.  See ``shared/completion_processors.py`` for
         # the loader, ledger builder, and per-processor invocation.
         configured_processors = getattr(
             self._session, "_completion_processors", []

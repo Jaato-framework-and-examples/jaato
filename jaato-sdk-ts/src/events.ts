@@ -6610,7 +6610,6 @@ export type Plugins = string[];
 export type PreloadedPlugins = string[];
 export type Model = string | null;
 export type Provider = string | null;
-export type MaxTurns = number;
 export type BudgetControl = {
   [k: string]: unknown;
 } | null;
@@ -15580,7 +15579,12 @@ export interface SessionProfilesEvent {
  *
  * Versioned by the global ``ConnectedEvent.protocol_version`` —
  * breaking changes to this shape bump the protocol's MAJOR; additive
- * optional fields bump the MINOR.  Sensitive material is intentionally
+ * optional fields bump the MINOR.  REMOVING a field splits that rule by
+ * whether it carried a default: one that did is a MINOR (both directions
+ * still parse — an older client fills its own default, a newer one's
+ * ``extra='ignore'`` drops the value), one that did not is a MAJOR.
+ * ``max_turns`` went under the first half at 1.9 (#1068).
+ * Sensitive material is intentionally
  * omitted: env *values* are summarised by name only;
  * ``system_instructions``, ``icon_name`` and ``inherits`` are not
  * exposed (deprecated or already resolved during discovery).
@@ -15597,7 +15601,6 @@ export interface ProfileSummary {
   plugin_configs?: PluginConfigs;
   model?: Model;
   provider?: Provider;
-  max_turns?: MaxTurns;
   model_tiers?: ModelTiers;
   budget_control?: BudgetControl;
   gc?: Gc;

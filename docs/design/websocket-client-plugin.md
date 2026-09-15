@@ -1088,7 +1088,6 @@ plugin doesn't need to know about Slack's API.
     }
   },
   "system_instructions": "You are a Slack bot connected via RTM WebSocket.\n\nOn startup:\n1. Call subscribeToTasks(event_types=['external_event']) to receive events.\n2. Call ws_connect(name=\"slack\") to connect.\n3. If the initial_messages contain a hello, you're ready.\n4. Incoming Slack messages arrive as inline event notifications.\n5. Parse each message JSON and respond using ws_send.\n6. If you receive a disconnect event, wait — auto-reconnect is enabled.\n\nYou do not need to poll. Messages arrive as event notifications.",
-  "max_turns": 0,
   "gc": {
     "type": "budget",
     "threshold_percent": 75.0,
@@ -1120,7 +1119,6 @@ plugin doesn't need to know about Slack's API.
     }
   },
   "system_instructions": "You are a market data monitor.\n\nOn startup:\n1. subscribeToTasks(event_types=['external_event'])\n2. ws_connect(name=\"binance\")\n3. ws_send to subscribe: {\"method\":\"SUBSCRIBE\",\"params\":[\"btcusdt@trade\",\"ethusdt@trade\"],\"id\":1}\n4. Trade data arrives as event notifications — no polling needed.\n5. Analyze price movements and maintain a running summary.\n6. Alert on significant moves (>2% in 5 minutes).",
-  "max_turns": 0,
   "gc": {
     "type": "budget",
     "threshold_percent": 80.0,

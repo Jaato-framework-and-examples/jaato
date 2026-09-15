@@ -1521,7 +1521,7 @@ class IPCClient:
                 inline **spec dict** with the same shape — recognised
                 keys include ``model`` (required), ``provider``,
                 ``plugins``, ``plugin_configs``, ``system_instructions``,
-                ``gc``, ``env``, ``max_turns``, ``runtime_limits``,
+                ``gc``, ``env``, ``runtime_limits``,
                 ``model_tiers``, ``completion_payload_schema``.  The
                 server validates the dict and rejects it with a clear
                 ``ErrorEvent`` if ``model`` is missing.  The two forms

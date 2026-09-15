@@ -44,7 +44,6 @@ _FULL_SPEC = {
     "plugin_configs": {"anthropic": {"api_key": "pass://jaato/anthropic"}},
     "system_instructions": "you are a worker",
     "suppress_base_instructions": {"disk": True, "constants": True},
-    "max_turns": 7,
     "gc": {"type": "budget", "threshold_percent": 77.0},
     "cache": {"enabled": True, "ttl": "1h"},
     "trace": {"provider_log": ".jaato/logs/provider.jsonl"},
@@ -166,4 +165,4 @@ def test_an_empty_snapshot_still_builds():
     """
     profile = profile_from_snapshot({"plugins": [], "some_future_key": 1})
     assert profile.plugins == []
-    assert profile.max_turns == 10
+    assert profile.description == ""
