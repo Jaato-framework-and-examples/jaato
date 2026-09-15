@@ -2230,7 +2230,79 @@ unreported one (`TokenUsage` starts at all-zeros and is only overwritten when a
 frame arrives, so the two share a value), and asserting the stronger claim would
 be a statement the data does not support. Giving them separate representations,
 and deciding what `budget_control` should do with "unknown", is **#688 items 1
-and 2** and is not done here.
+and 2** — done in the section below, which is what lets that warning's wording
+finally be strengthened.
+
+### Unreported Usage Is Not Zero Spend (#688)
+
+`TokenUsage` started all-zero and was only overwritten when a usage block
+arrived, so **two different facts shared one value**: a provider that measured
+the call at zero, and a provider — or a proxy in front of it — that sent no
+`usage` at all. `budget_control` enforces its `usd` / `tokens` ceilings from
+exactly that data, so an unmetered upstream **silently disabled spend
+enforcement**: the tracker was fed zero, no dimension advanced, no rung fired,
+and a run that looked capped was uncapped. Failing open on a spend control is
+the wrong direction, and it failed open quietly.
+
+The exposure is wide by construction — `nim`, `nebius`, `ovhcloud`,
+`doubleword`, `lmstudio`, `tensorrt_llm`, `triton`, `vllm`, `zhipuai_openai`,
+plus `openrouter` fronting 300+ upstreams and any corporate gateway in front of
+those: precisely the "approximately OpenAI-compatible" endpoints where usage
+reporting is least reliable.
+
+**`TokenUsage.reported` is the distinction**, and the precedent was already in
+the same dataclass: `cache_read_tokens` documents `None` as *"provider reported
+nothing", distinct from a reported zero*.
+
+**It defaults `True`, deliberately.** A seam that has not been migrated — an
+out-of-tree provider, jaato-premium, a third-party adapter — behaves exactly as
+it did before the field existed, rather than being marked unknown and having a
+policy applied that its author never saw. The danger was never the default but
+a **half**-migration, so all 30 in-tree placeholders are migrated in the same
+change: the default protects strangers, not this repository. Each converter
+already had the right shape — construct, early-return on absent usage, fill —
+so the seam is `TokenUsage(reported=False)` at the top and `reported = True`
+after the guard. `anthropic` is the one provider whose `message_delta` route
+MUTATES the accumulator rather than replacing it, and it is marked on both
+routes; that is exactly the shape the issue cites two upstream fixes for.
+
+**What an unmeasured turn costs is the profile's choice** —
+`budget_control.on_unmetered`:
+
+| Policy | Effect |
+|--------|--------|
+| `estimate` (default) | charge `tokens` from a local estimate; leave `usd` **untouched** |
+| `halt` | stop the session, the same stop an `abort` rung uses |
+| `ignore` | the pre-#688 behaviour, chosen explicitly |
+
+The asymmetry is the house rule `_budget_observe_response`'s own docstring
+already stated — *a budget must never hard-stop on a number it invented*. The
+two dimensions are not alike: GC already estimates token counts for its own
+threshold, so that quantity is one the framework routinely computes, while a
+dollar figure derived from guessed tokens is a price nobody quoted. The
+estimator is deliberately the **same** one GC uses; a budget and a GC threshold
+disagreeing about the size of one turn is very hard to see from either side.
+
+**`halt` is opt-in, not the default.** As a default it would, on upgrade, take
+down every deployment sitting behind a usage-dropping proxy. Stated cost of
+that choice: a profile whose ONLY ceiling is `usd` is still unenforceable
+against an unmetered provider, because `usd` is never fed an estimate —
+`halt` is the answer there, and is why the knob exists. A test asserts that
+limitation rather than leaving it implied.
+
+**One check, one door.** The vocabulary is validated in `__post_init__` only.
+An earlier draft also validated inside the `from_dict` helper, and the
+meta-guard correctly reported **both** reversions as decorative: each copy
+caught what the other would have let through, so neither could be shown to do
+anything. Duplicated validation is not defence in depth when it makes every
+copy individually unreachable.
+
+Tests: `shared/tests/test_unreported_usage_is_not_zero_688.py` — 28 cases,
+six REVERSIONS. The wire-level cases drive the **real** streaming loop of three
+providers against a usage-omitting stream, which is what could not be exercised
+when this was first sized (`openai` was not installed then). The three-way
+assertion is the point: no usage, a genuine zero, and real numbers must produce
+three distinguishable results.
 
 ### What a Session Spent, and Which Model Spent It
 
@@ -2680,6 +2752,8 @@ is still unbounded. The pair only works together:
 ```yaml
 budget_control:
   limits: {tool_calls: 200, usd: 5.0}
+  on_unmetered: estimate   # estimate (default) | halt | ignore -- what to do
+                           # when the provider reports no usage at all (#688)
   degrade:
     - at: 95
       action: finalize     # advice

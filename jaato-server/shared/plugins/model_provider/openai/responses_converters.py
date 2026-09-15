@@ -353,7 +353,7 @@ def usage_from_responses(usage: Any) -> TokenUsage:
     see :func:`reported_cache_count`.
     """
     if usage is None:
-        return TokenUsage()
+        return TokenUsage(reported=False)   # nothing measured (#688)
     details = _get(usage, "input_tokens_details")
     cached = _get(details, "cached_tokens") if details is not None else None
     return normalize_inclusive_usage(TokenUsage(

@@ -558,13 +558,14 @@ def extract_usage_from_response(response) -> TokenUsage:
     (explicit ``CachedContent`` is billed at creation time, on its own
     call), so there is nothing else to remove.
     """
-    usage = TokenUsage()
+    usage = TokenUsage(reported=False)
 
     if not response:
         return usage
 
     metadata = getattr(response, 'usage_metadata', None)
     if metadata:
+        usage.reported = True
         usage.prompt_tokens = getattr(metadata, 'prompt_token_count', 0) or 0
         usage.output_tokens = getattr(metadata, 'candidates_token_count', 0) or 0
         usage.total_tokens = getattr(metadata, 'total_token_count', 0) or 0

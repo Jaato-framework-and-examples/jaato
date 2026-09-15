@@ -212,7 +212,7 @@ class GoogleGenAIProvider(ModalityCapabilityMixin):
         self._auth_method: GoogleAuthMethod = "auto"
 
         # Per-call token accounting (updated after each complete() call)
-        self._last_usage: TokenUsage = TokenUsage()
+        self._last_usage: TokenUsage = TokenUsage(reported=False)
 
         # Models cache: (timestamp, models_list)
         self._models_cache: Optional[Tuple[float, List[str]]] = None
@@ -1145,7 +1145,7 @@ class GoogleGenAIProvider(ModalityCapabilityMixin):
         # terminated turn (#687).
         terminal_seen = False
         function_calls: List = []
-        usage = TokenUsage()
+        usage = TokenUsage(reported=False)   # until a chunk reports it (#688)
         was_cancelled = False
 
         def flush_text_block():

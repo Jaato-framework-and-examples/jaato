@@ -524,11 +524,12 @@ def extract_usage(response: "ChatCompletion") -> TokenUsage:
     directly — the same accessor works on real ``CompletionUsage``
     objects and on the ``MagicMock`` doubles tests use.
     """
-    usage = TokenUsage()
+    usage = TokenUsage(reported=False)
 
     if not response or not response.usage:
         return usage
 
+    usage.reported = True
     raw_usage = response.usage
     usage.prompt_tokens = getattr(raw_usage, "prompt_tokens", 0) or 0
     usage.output_tokens = getattr(raw_usage, "completion_tokens", 0) or 0

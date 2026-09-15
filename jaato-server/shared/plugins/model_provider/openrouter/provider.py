@@ -540,7 +540,7 @@ class OpenRouterProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
         self._models_fallback: List[str] = []
 
         # Per-call accounting (NOT conversation state)
-        self._last_usage: TokenUsage = TokenUsage()
+        self._last_usage: TokenUsage = TokenUsage(reported=False)
         self._context_length: int = 0
         # Optional manual context-window override (framework escape hatch
         # or env var) — the FALLBACK tier; the catalog auto-detect wins.
@@ -1796,7 +1796,7 @@ class OpenRouterProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
         # ends instead of going quiet.
         terminal_seen = False
         function_calls: List[FunctionCall] = []
-        usage = TokenUsage()
+        usage = TokenUsage(reported=False)   # until a chunk reports it (#688)
         was_cancelled = False
 
         # Tool calls stream in pieces — accumulate by index.

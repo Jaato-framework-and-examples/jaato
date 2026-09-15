@@ -272,7 +272,7 @@ class GitHubModelsProvider(ModalityCapabilityMixin):
 
         # Session state
         self._system_instruction: Optional[str] = None
-        self._last_usage: TokenUsage = TokenUsage()
+        self._last_usage: TokenUsage = TokenUsage(reported=False)
 
         # Thinking/reasoning configuration
         self._enable_thinking: bool = True  # Extract reasoning by default when available
@@ -1553,7 +1553,7 @@ class GitHubModelsProvider(ModalityCapabilityMixin):
         # turn (#687).
         terminal_seen = False
         function_calls: List = []
-        usage = TokenUsage()
+        usage = TokenUsage(reported=False)   # until a chunk reports it (#688)
         was_cancelled = False
 
         def flush_text_block():
@@ -1819,7 +1819,7 @@ class GitHubModelsProvider(ModalityCapabilityMixin):
         # turn (#687).
         terminal_seen = False
         function_calls = []
-        usage = TokenUsage()
+        usage = TokenUsage(reported=False)   # until a chunk reports it (#688)
         was_cancelled = False
 
         # Track tool call accumulation (streaming sends tool calls in pieces)
@@ -2026,7 +2026,7 @@ class GitHubModelsProvider(ModalityCapabilityMixin):
         # the connection simply stopped mid-response (#687).
         terminal_seen = False
         function_calls = []
-        usage = TokenUsage()
+        usage = TokenUsage(reported=False)   # until a chunk reports it (#688)
         was_cancelled = False
 
         def flush_text_block():

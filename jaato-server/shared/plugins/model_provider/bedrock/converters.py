@@ -548,9 +548,10 @@ def usage_from_bedrock(raw_usage: Optional[Dict[str, Any]]) -> TokenUsage:
     which is also the one :class:`TokenUsage` documents -- so the three are
     carried across unchanged and ``total`` is their sum plus output.
     """
-    usage = TokenUsage()
+    usage = TokenUsage(reported=False)
     if not raw_usage:
         return usage
+    usage.reported = True
     usage.prompt_tokens = int(raw_usage.get("inputTokens") or 0)
     usage.output_tokens = int(raw_usage.get("outputTokens") or 0)
     cache_read = raw_usage.get("cacheReadInputTokens")
