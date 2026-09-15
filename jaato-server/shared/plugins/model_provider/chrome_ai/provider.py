@@ -72,6 +72,7 @@ from .env import (
     resolve_page_url,
     resolve_user_data_dir,
 )
+from shared.cdp import CDPConnectionError
 from .errors import (
     ChromeAIBinaryNotFoundError,
     ChromeAIConnectionError,
@@ -543,7 +544,10 @@ class ChromeAIProvider(ModalityCapabilityMixin):
         relaunches the browser.  Everything else defers to the global
         classifier.
         """
-        if isinstance(exc, ChromeAIConnectionError):
+        # Matches the SHARED base, so a raise from the transport
+        # (shared.cdp) is classified transient just like this package's own
+        # ChromeAIConnectionError, which subclasses it.
+        if isinstance(exc, CDPConnectionError):
             return {"transient": True, "rate_limit": False, "infra": True}
         return None
 

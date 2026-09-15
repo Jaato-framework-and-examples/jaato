@@ -102,6 +102,15 @@ The framework uses a server-first architecture where the server runs as a daemon
 
 - **token_accounting.py**: `TokenLedger` - Token usage tracking with rate-limit retries
 
+- **cdp.py**: Minimal Chrome DevTools Protocol client — browser launch with
+  race-free port discovery, attach-to-running-browser, thread-safe
+  request/response plus an event pump. Provider-neutral (raises
+  `CDPConnectionError`), no new dependencies: the transport reuses the core
+  `websockets` package, discovery is stdlib. The `chrome_ai` provider is its
+  first consumer, not its owner — it lived under that provider until the
+  [WebMCP assessment](docs/design/webmcp.md) found that reaching a browser
+  required importing from a model provider.
+
 ### Plugin System (`jaato-server/shared/plugins/`)
 
 Four plugin types:
@@ -942,6 +951,24 @@ MCP servers are configured in `.mcp.json`:
   }
 }
 ```
+
+**stdio is the only transport implemented.** `MCPClientManager` imports
+`mcp.client.stdio` and nothing else, and `ServerConfig` carries
+`command`/`args`/`env` with no URL field — so every server is launched as a
+subprocess. The `"type"` key above is accepted for compatibility but read by
+nothing. Remote servers (SSE / streamable HTTP) are **not** supported; a
+URL-based entry will not connect. (The `mcp` help text advertised an `sse`
+transport that never existed — corrected, since a user following it wrote
+config that could not work.)
+
+**A server's schema text is untrusted.** An MCP server authors its own tool
+names, descriptions, and parameter descriptions, and those land in the
+*trusted* region of the prompt — the schema block and the system
+instructions — where the model reads instructions as legitimate. The plugin
+therefore declares `TRAIT_UNTRUSTED_SCHEMA` and routes every schema through
+`sanitize_untrusted_schema()`, and fences its per-server listing in the
+system instructions with `wrap_untrusted_content()`. See the Tool Traits
+table above.
 
 ### Streaming & Cancellation
 
@@ -2438,6 +2465,8 @@ Tools can declare semantic **traits** on their `ToolSchema` via the `traits` fie
 |----------|-------|----------|
 | `TRAIT_FILE_WRITER` | `"file_writer"` | Tool writes/modifies files. Result must include `path` (str), `files_modified` (list), or `changes[].file`. Triggers full-JSON enrichment (LSP diagnostics, artifact tracking). |
 | `TRAIT_GREPPABLE_CONTENT` | `"greppable_content"` | Tool returns bulk content eligible for result-rewriting. Routes the tool's **full JSON result** through the same full-dict enrichment path as `TRAIT_FILE_WRITER`, so result-rewriter plugins (`result_grep`) can inspect/shrink structured payloads the text-field path never sees (e.g. `call_service.body`/`headers`). Marks eligibility only — filtering is performed by whichever rewriter is subscribed/active. |
+| `TRAIT_UNTRUSTED_CONTENT` | `"untrusted_content"` | Tool **result** carries content from the open internet or a third party (`web_fetch`, `web_search`, `subagent`, MCP servers). The session marks the result and the provider converter wraps the model-facing text in the `⟦UNTRUSTED-EXTERNAL-CONTENT⟧` boundary, so injected instructions in a payload read as data. Defense-in-depth, complementing egress allowlisting and permission gating. |
+| `TRAIT_UNTRUSTED_SCHEMA` | `"untrusted_schema"` | The tool's **own declaration** — name, description, and the `description` fields nested in `parameters` — was authored by a third party rather than the framework. Independent of the trait above: `web_fetch` returns untrusted content but its description is framework text, while an MCP server authors both. Matters because a description lands in the *trusted* region of the system prompt. A plugin declaring this **must** pass its schemas through `sanitize_untrusted_schema()` (wraps the description, defangs nested ones, forces the name onto `[A-Za-z0-9_-]{1,64}`). Enforced by `test_untrusted_schema_is_sanitized.py`. |
 
 **How it works:**
 1. Tool schemas declare traits: `traits=frozenset({TRAIT_FILE_WRITER})`
@@ -4754,6 +4783,51 @@ judged by its target. The plugin passes its own workspace root, so the check is
 a tautology on today's only caller — which is the point: the invariant holds at
 the seam that spawns, rather than being a property of one call site a later
 caller could drop.
+
+### WebMCP Plugin (`shared/plugins/webmcp/`)
+
+Invokes the tools a **web page** declares for agents via
+[WebMCP](https://github.com/webmachinelearning/webmcp)
+(`document.modelContext`) — so the model drives a web app through its own
+declared operations instead of scraping and clicking. WebMCP is *not* an MCP
+transport (no server, no JSON-RPC); it is an in-page JS API, so the plugin
+drives a browser over `shared/cdp.py`.
+
+**Not in the default plugin set** — it drives a browser. Enable it explicitly
+in a profile's `plugins:` list.
+
+| Tool | Purpose |
+|------|---------|
+| `webmcp_list_tools` | Harvest the open page's currently-declared tools (name, description, parsed `input_schema`, `origin`). Auto-approved (read-only). |
+| `webmcp_call` | Invoke one page tool by name. **Not** auto-approved — it runs the page's own code and can post, delete, or buy on the user's behalf. |
+
+**Why two tools and not one schema per page tool.** A page's toolset changes on
+navigation and with app state, while the registry exposes schemas once at
+configure time — so page tools are *discovered* through this pair rather than
+registered. The security consequence is the larger half: arriving as a tool
+**result** rather than as `ToolSchema` objects, page-authored names and
+descriptions never enter the trusted schema block, so the existing
+`TRAIT_UNTRUSTED_CONTENT` boundary covers them and neither
+`TRAIT_UNTRUSTED_SCHEMA` nor `sanitize_untrusted_schema` is needed. Each entry
+is labelled with the `origin` Chrome reports for it.
+
+**The shipped browser API differs from the published explainer in six places**
+(measured on Chrome for Testing 153): the API is on `document` not `navigator`;
+there is no `unregisterTool` or `provideContext` (unregistration is via
+`AbortSignal`); `inputSchema` and the call arguments and the result are all
+**JSON strings**; and `executeTool` requires a live `RegisteredTool`, not a
+name. Chrome also does **not validate arguments** — a missing `required`
+property reaches the page as `undefined`. See
+[the WebMCP assessment](docs/design/webmcp.md) §1.1 for the full table.
+
+| Config key (`plugin_configs.webmcp`) | Env | Purpose |
+|---|---|---|
+| `page_url` | `JAATO_WEBMCP_PAGE_URL` | Page to drive; an already-open tab with this URL is preferred over creating one |
+| `cdp_url` | `JAATO_WEBMCP_CDP_URL` | Attach to a running browser instead of launching (left running on shutdown) |
+| `binary` | `JAATO_WEBMCP_BINARY` | Browser binary when launching |
+| `user_data_dir`, `headless`, `extra_args`, `connect_timeout`, `call_timeout` | — | Launch and deadline knobs |
+
+Requires Chrome/Edge 149+ (origin trial), or `chrome://flags/#enable-webmcp-testing`.
 
 ### Webhook Plugin (`shared/plugins/webhook/`)
 
