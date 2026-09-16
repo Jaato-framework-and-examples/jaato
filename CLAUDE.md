@@ -4459,6 +4459,87 @@ checkout does not contain and were neither confirmed nor fixed. Neither was
 `gossip/ws_auth_proxy.py`, the cookie route, which needs its own answer to
 "which application is this".
 
+### Both Transports Authenticate, and One Path Threw It Away
+
+Two transports now learn who is calling — IPC from `SO_PEERCRED`, WS from a
+bound ticket — and each has a suite proving its own `get_client_user` returns
+the right string. A third family proves `created_by` round-trips once
+something has set it. **Nothing tested the joint**, and the joint is where the
+defect was.
+
+The chain is one spine with two heads, and `CommandRouter` is the single
+consumer that asks:
+
+```
+IPC  SO_PEERCRED ──▶ JaatoIPCServer.get_client_user()  ──┐
+WS   ticket bind ──▶ JaatoWSServer.get_client_user()   ──┤
+                                                         ▼
+                        CommandRouter (transport-agnostic)
+                 ├─ create_session(created_by=…)
+                 └─ handle_request(user_id=…)
+                                                         ▼
+      Session.created_by ─▶ record 2.9+ ─▶ envelope ─▶ set_client_user_id()
+                         ├─ ledger `response` / `permission-check` user_id
+                         ├─ the #951 DECISION line's `user_id=`
+                         └─ the OpenInference `user.id` span attribute
+```
+
+`session.default` did not ask. `CommandRouter._handle_session_default` →
+`SessionManager.get_or_create_default` → `create_session(client_id,
+workspace_path=…)`, with no `created_by` — while the two siblings twelve lines
+away in the same file both read the sink. `_create_session_impl` declares
+`created_by: Optional[str] = None`, so the omission was not a `TypeError`, not
+a warning, and invisible in the resulting session: the record simply carries no
+creator and every downstream consumer OMITS the key rather than reporting an
+absence. `IPCClient.get_default_session()` is its only caller and is a public
+SDK method, so a session opened that way was anonymous in all four artefacts on
+**both** transports, however well each had authenticated its client.
+
+**Attribution applies to the create branch only.** `get_or_create_default` has
+two attach branches, and they leave `created_by` alone: it records who brought
+a session into existence, so re-stamping someone else's session with whoever
+attached next replaces a true fact with a plausible one — the rule
+`_emit_to_client`'s session stamper already states one field over.
+
+**The identity is read at the router, never below it.** `SessionManager` holds
+an event *callback*, not an `EventSink`, so it cannot ask; and the event body
+must never be able to claim an identity the transport is the only thing that
+knows. That is why the new parameter is threaded down rather than resolved in
+place.
+
+Two guards, because they answer different questions:
+
+| Guard | Asks |
+|---|---|
+| `test_attribution_reaches_both_transports.py` | does the value survive the joint, on each transport, on each of the three consumer paths |
+| `test_every_session_creation_is_attributed.py` | is there a FOURTH path — an AST scan over every `SessionManager.create_session` call site |
+
+The first builds **real** sinks: a `JaatoIPCServer` holding a fabricated peer
+and a `JaatoWSServer` holding a ticket resolved through the real
+`_resolve_connection_auth`, so the string under assertion is the one each
+transport actually derives rather than one the test wrote down. What it fakes
+is `SessionManager`, which is the right half to fake — the record/ledger/trace
+end is already covered by the round-trip suites, and what was missing is
+whether the value ever ARRIVES. A behavioural test cannot cover the second
+question at all: it would have to know about a call site to exercise it, and
+the failure being guarded against is a call site nobody thought about.
+
+**The AST guard uses a receiver ALLOW-list, not a skip-list.**
+`create_session` is also a method of `JaatoRuntime` — a different call with no
+`created_by` parameter — so a guard that skipped receivers it did not recognise
+would silently stop covering the daemon the day someone renames
+`_session_manager`. An unrecognised receiver fails and must be classified.
+`create_headless_session` is the one exemption, with its reason recorded: its
+client is the synthetic `_HEADLESS_CLIENT_ID`, so no sink can answer and a
+value there would be invented rather than authenticated.
+
+**Open, and deliberately not decided here:** whether a reactor-spawned headless
+stage should INHERIT its cascade driver's creator, the idiom
+`_create_subagent_session` already uses (`created_by=self._creator_of(parent)`).
+It is a real question — a cascade stage does belong to whoever drove the
+cascade — and it changes attribution for every reactor-spawned session, so it
+wants its own change rather than riding this one.
+
 ### Approver Identity (#859)
 
 `PermissionResolvedEvent` said HOW a decision was reached (`method`) and
