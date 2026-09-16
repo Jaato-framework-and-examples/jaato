@@ -4882,6 +4882,47 @@ answers. With no `credentials:` block nothing changes, and the daemon's
 `~/.jaato/<provider>_auth.json` tiers stay as they are for mono-user
 installs. Design: [web-server-bff.md §12](docs/design/web-server-bff.md).
 
+### The Web Client on a Blueprint
+
+The web client was a faithful port of the terminal UI: rounded cards, one
+accent, panels that appear and disappear, a status bar that reads like a
+log line. The redesign (Claude Design, *Jaato Web UI Redesign*, proposal
+01c, the light face) keeps every behaviour and every word of the routing
+model and changes the structure it is drawn on: square hairline **plates**
+with registration marks (`components/layout/Plate.tsx`), Barlow Condensed
+for what the interface says and monospace for what the daemon said, and one
+**steel** interface accent while the theme's own colours shrink to state
+glyphs. It is one layer over the theme variables: `themes.ts` derives
+`--c-steel` from the theme's ground (full steel on a light one, a lighter
+steel on a dark one) and departs from a theme file in exactly one place
+(`WEB_OVERRIDES`: the light theme's ground is the design's paper, the dark
+theme's plates are `#202223`; state colours are never overridden), so
+`theme dark` and the other four still draw the same structure. `light` is
+the web client's default now; the store's and the loader's defaults agree.
+
+What each screen became: the connect plate in two columns; workspaces as a
+**table** (Open / Configure / Delete per row, the configure form a plate
+under it); new-session with resume and start side by side; the session with
+its identity in a 46px **header** (brand, agent tabs — always rendered,
+`main` included — and `ws` / `model` / `ctx` on the right), tool calls as
+**rows** (glyph, name in the chrome face, arguments in monospace, duration
+at the edge, the output in a ground plate under the name), user turns
+numbered `T<n>` in the gutter by the pane, one **persistent rail** whose
+Plan / Budget / Files sections open and close on the same `ui.show*` flags
+the shortcuts and the status bar toggle, and a 26px status bar; and the
+permission request as a full-width warning plate with the diff at full
+measure, the focused option solid, the refusals apart at the right edge.
+
+Two things the port turned up. The picker's silent `session.list` request
+fires twice under React's development double-effect, and
+`sessionListSilent` was a **flag** the first reply cleared — so the second
+printed a listing nobody typed. It is a count of replies owed now. And the
+e2e suite's one assertion on a button's text (`/^y yes$/`) encoded the old
+key-then-label order; the design puts the key after the label, and the
+test says so. Fonts are self-hosted from `@fontsource/barlow` and
+`@fontsource/barlow-condensed` (latin subsets in the bundle, ~180 KB of
+woff2), so a deployment behind a corporate proxy needs no font CDN.
+
 ### A Key the Web Files Panel Did Not Have
 
 The TUI's workspace panel (Ctrl+W) binds two keys to the entry under the

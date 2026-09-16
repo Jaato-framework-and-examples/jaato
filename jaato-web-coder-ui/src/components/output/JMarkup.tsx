@@ -3,6 +3,7 @@
  * ``text`` prop; memoised per block so a streaming append re-renders
  * only the block that grew.  Never uses ``innerHTML``.
  */
+import { Plate } from "@/components/layout/Plate";
 import { memo, useMemo } from "react";
 import { parseJMarkup, type CodeLine, type Segment } from "@/protocol/jmarkup";
 import { parseMarkdown, type Block, type Inline } from "@/protocol/markdown";
@@ -40,7 +41,7 @@ function MarkdownBlocks({ blocks }: { blocks: Block[] }) {
           }
           case "quote": return <blockquote key={i} className="whitespace-pre-wrap"><Inlines nodes={b.children} /></blockquote>;
           case "rule": return <hr key={i} />;
-          case "pre": return <pre key={i} className="code-block surface-1 rounded-md p-2 my-1 overflow-x-auto whitespace-pre">{b.text}</pre>;
+          case "pre": return <pre key={i} className="code-block plate plate-ground p-2.5 my-1.5 overflow-x-auto whitespace-pre">{b.text}</pre>;
         }
       })}
     </>
@@ -65,12 +66,12 @@ function CodeLines({ lines }: { lines: CodeLine[] }) {
 export function CodeSegment({ language, lines }: { language: string; lines: CodeLine[] }) {
   const text = lines.map((l) => l.tokens.map((t) => t.text).join("")).join("\n");
   return (
-    <div className="surface-1 rounded-md my-1.5 border hairline overflow-hidden">
-      <div className="flex items-center justify-between px-2 py-0.5 text-[11px] text-text-muted border-b hairline">
-        <span className="font-mono">{language || "text"}</span>
+    <Plate ground corners="two" className="my-2">
+      <div className="flex items-center justify-between px-2.5 py-1 border-b hairline">
+        <span className="kicker kicker-muted">{language || "text"}</span>
         <button
           type="button"
-          className="hover:text-text"
+          className="chrome-sm font-heading uppercase tracking-[0.1em] text-text-muted hover:text-steel"
           onClick={() => navigator.clipboard?.writeText(text).catch(() => undefined)}
           title="Copy code"
         >
@@ -78,7 +79,7 @@ export function CodeSegment({ language, lines }: { language: string; lines: Code
         </button>
       </div>
       <CodeLines lines={lines} />
-    </div>
+    </Plate>
   );
 }
 

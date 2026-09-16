@@ -218,12 +218,22 @@ describe("reduce — session list and history", () => {
     expect(last.kind === "system" && last.text).toContain("● s-1 - first");
   });
   it("a silent request keeps the list and prints nothing", () => {
-    useJaato.getState().setSessionListSilent(true);
+    useJaato.getState().setSessionListSilent(1);
     useJaato.getState().dispatch([ev({ type: "session.list", sessions: SESSIONS })]);
     const s = useJaato.getState();
     expect(s.sessions).toHaveLength(2);
     expect(s.blocks[MAIN_AGENT]).toHaveLength(0);
-    expect(s.sessionListSilent).toBe(false);
+    expect(s.sessionListSilent).toBe(0);
+  });
+  it("two silent requests swallow two replies; the third, typed, prints", () => {
+    // The picker asks twice under React's development double-effect; a flag
+    // cleared by the first reply let the second print a listing nobody typed.
+    useJaato.getState().setSessionListSilent(1);
+    useJaato.getState().setSessionListSilent(1);
+    useJaato.getState().dispatch([ev({ type: "session.list", sessions: SESSIONS }), ev({ type: "session.list", sessions: SESSIONS })]);
+    expect(useJaato.getState().blocks[MAIN_AGENT]).toHaveLength(0);
+    useJaato.getState().dispatch([ev({ type: "session.list", sessions: SESSIONS })]);
+    expect(useJaato.getState().blocks[MAIN_AGENT]).toHaveLength(1);
   });
   it("session.info's snapshot refreshes the listing without printing", () => {
     useJaato.getState().dispatch([ev({ type: "session.info", session_id: "s-1", sessions: SESSIONS })]);

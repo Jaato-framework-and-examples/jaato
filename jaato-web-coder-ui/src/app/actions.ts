@@ -134,11 +134,11 @@ function contextText(agentId: string): string {
 export async function ensureSessions(): Promise<void> {
   const st = useJaato.getState();
   if (!isConnected()) return;
-  st.setSessionListSilent(true);
+  st.setSessionListSilent(1);
   try {
     await getClient().listSessions();
   } catch {
-    st.setSessionListSilent(false);
+    st.setSessionListSilent(-1);
   }
 }
 

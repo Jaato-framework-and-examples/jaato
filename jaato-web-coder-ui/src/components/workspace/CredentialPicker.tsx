@@ -73,12 +73,12 @@ export function CredentialPicker({ credentialsUrl, provider, value, onChange, on
   const secret = value.kind === "new" ? value.secret : "";
   const label = value.kind === "new" ? value.label : "";
   const setNew = (patch: { secret?: string; label?: string }) => onChange({ kind: "new", secret: patch.secret ?? secret, label: patch.label ?? label });
-  const inputClass = "mt-1 w-full rounded-md border hairline bg-bg px-2 py-1.5 font-mono";
+  const inputClass = "input input-mono mt-1";
 
   // No store: the plain field the form always had.
   if (!api) {
     return (
-      <label className="block"><span className="text-text-muted text-xs">API key</span>
+      <label className="block"><span className="field-label">API key</span>
         <input aria-label="API key" value={secret} onChange={(e) => setNew({ secret: e.target.value })} type="password" autoComplete="off" className={inputClass} />
       </label>
     );
@@ -88,7 +88,7 @@ export function CredentialPicker({ credentialsUrl, provider, value, onChange, on
   const selected = value.kind === "stored" ? entries.find((e) => e.id === value.id) : undefined;
   return (
     <div className="block" data-testid="credential-picker">
-      <label className="block"><span className="text-text-muted text-xs">API key</span>
+      <label className="block"><span className="field-label">API key</span>
         <select
           aria-label="API key"
           value={selectValue}
@@ -99,7 +99,7 @@ export function CredentialPicker({ credentialsUrl, provider, value, onChange, on
             else if (v === NO_KEY) onChange({ kind: "none" });
             else onChange({ kind: "stored", id: v });
           }}
-          className="mt-1 w-full rounded-md border hairline bg-bg px-2 py-1.5"
+          className="input"
         >
           <option value={NO_KEY}>{loaded === provider && entries.length === 0 ? "— no stored key —" : "—"}</option>
           {entries.map((e) => <option key={e.id} value={e.id}>{describeCredential(e)}</option>)}
@@ -109,7 +109,7 @@ export function CredentialPicker({ credentialsUrl, provider, value, onChange, on
       {selected && (
         <div className="mt-1 flex items-center justify-between text-[11px] text-text-muted">
           <span>stored {new Date(selected.createdAt).toLocaleDateString()}</span>
-          <button type="button" disabled={busy} onClick={() => forget(selected.id)} className="underline hover:text-error" aria-label={`Forget stored key ${selected.label}`}>forget</button>
+          <button type="button" disabled={busy} onClick={() => forget(selected.id)} className="link hover:text-error" aria-label={`Forget stored key ${selected.label}`}>forget</button>
         </div>
       )}
       {value.kind === "new" && (

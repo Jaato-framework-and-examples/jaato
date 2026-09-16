@@ -14,7 +14,8 @@
  *   pair it with hide for that.
  *
  * Entry ids match the TUI's: a directory is its path with a trailing ``/``,
- * a file is its workspace-relative path.
+ * a file is its workspace-relative path.  The section header (``Files``
+ * and the count) is the rail's; this is the body.
  */
 import { useMemo } from "react";
 import { useJaato } from "@/store/store";
@@ -56,7 +57,7 @@ const CHANGE_CLS: Record<string, string> = { created: "text-success", added: "te
 
 function RowActions({ id, hidden, ignored }: { id: string; hidden: boolean; ignored: boolean | undefined }) {
   const toggleHidden = useJaato((s) => s.toggleWorkspaceHidden);
-  const cls = "text-[10px] px-1 rounded hover:bg-surface-2 text-text-muted hover:text-text opacity-0 group-hover:opacity-100 focus:opacity-100";
+  const cls = "font-heading uppercase tracking-[0.08em] text-[10px] px-1 text-text-muted hover:text-steel opacity-0 group-hover:opacity-100 focus:opacity-100";
   return (
     <span className="ml-auto shrink-0 flex gap-1">
       <button type="button" className={cls} onClick={() => toggleHidden(id)} aria-label={`${hidden ? "Unhide" : "Hide"} ${id}`} title={hidden ? "Show this entry again" : "Hide this entry from the panel (this session only)"}>
@@ -72,7 +73,7 @@ function RowActions({ id, hidden, ignored }: { id: string; hidden: boolean; igno
 function Tree({ node, depth, hidden, showHidden, ignored }: { node: Node; depth: number; hidden: readonly string[]; showHidden: boolean; ignored: Record<string, boolean> }) {
   const entries = [...node.children.values()].sort((a, b) => (a.children.size ? 0 : 1) - (b.children.size ? 0 : 1) || a.name.localeCompare(b.name));
   return (
-    <ul>
+    <ul className="list-none m-0 p-0">
       {entries.map((n) => {
         const id = entryId(n);
         const isDir = n.children.size > 0;
@@ -82,7 +83,7 @@ function Tree({ node, depth, hidden, showHidden, ignored }: { node: Node; depth:
           ? <span className="text-text-muted">▾ {n.name}/</span>
           : <span className={CHANGE_CLS[n.change ?? ""] ?? ""} title={n.change}>{n.change === "deleted" ? "−" : n.change === "created" || n.change === "added" ? "+" : "~"} {n.name}</span>;
         return (
-          <li key={n.path} className="font-mono text-xs leading-5">
+          <li key={n.path} className="font-mono text-[11.5px] leading-[1.8]">
             <div className={`group flex items-center gap-1 pr-1 ${hid ? "opacity-50" : ""}`} style={{ paddingLeft: depth * 12 }} data-hidden={hid || undefined}>
               {hid && <span className="text-text-muted" title="Hidden">H</span>}
               {label}
@@ -107,13 +108,8 @@ export function WorkspacePanel() {
   const tree = useMemo(() => build(files), [files]);
   const total = Object.keys(files).length;
   const hiddenCount = useMemo(() => countHiddenFiles(files, hidden), [files, hidden]);
-  const visible = total - hiddenCount;
   return (
-    <div className="p-3">
-      <div className="flex items-baseline justify-between mb-2 text-[13px]">
-        <span className="font-semibold">Workspace changes</span>
-        <span className="text-xs text-text-muted">{showHidden ? total : visible}</span>
-      </div>
+    <div className="px-3.5 py-3">
       {notice && (
         <div role="status" className={`text-[11px] mb-2 ${notice.error ? "text-error" : "text-text-muted"}`}>{notice.text}</div>
       )}
@@ -121,10 +117,10 @@ export function WorkspacePanel() {
       {hiddenCount > 0 && (
         <div className="mt-2 text-[11px] text-text-muted flex items-center gap-2">
           <span>{hiddenCount} hidden</span>
-          <button type="button" className="underline hover:text-text" onClick={toggleShowHidden}>{showHidden ? "hide hidden" : "show hidden"}</button>
+          <button type="button" className="link" onClick={toggleShowHidden}>{showHidden ? "hide hidden" : "show hidden"}</button>
         </div>
       )}
-      {total > 0 && <div className="mt-2 text-[10px] text-text-muted">Hover an entry: <b>hide</b> drops it from this view · <b>ignore</b> toggles its line in .gitignore.</div>}
+      {total > 0 && <div className="mt-2.5 text-xs text-text-muted">Hover an entry to hide it from the panel, or add it to <span className="font-mono">.gitignore</span>.</div>}
     </div>
   );
 }

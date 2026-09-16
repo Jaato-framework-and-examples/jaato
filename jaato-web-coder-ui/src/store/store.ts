@@ -83,11 +83,15 @@ export interface JaatoState {
    */
   sessions: SessionSummary[];
   /**
-   * The next ``SessionListEvent`` is wanted for the listing above and not
-   * for display — set by the completer / picker before they ask, so the
-   * reply does not print a listing the user did not type ``session list`` for.
+   * How many ``SessionListEvent`` replies are owed to silent requests —
+   * the completer's and the picker's, which want the listing above and not
+   * a printed one.  Each such request adds one before it asks and each
+   * reply consumes one, so a listing the user did not type ``session
+   * list`` for is never written to the output.  A COUNT, not a flag: the
+   * picker's request fires twice under React's development double-effect,
+   * and a flag cleared by the first reply let the second print.
    */
-  sessionListSilent: boolean;
+  sessionListSilent: number;
   /**
    * How the next ``HistoryEvent`` renders: ``listing`` (the ``history``
    * command's summary) or ``replay`` (the conversation rebuilt as blocks,
@@ -169,7 +173,8 @@ export interface JaatoState {
   toggleUi: (key: "showPlan" | "showBudget" | "showWorkspace" | "showTools") => void;
   /** The TUI's Ctrl+T: expand or collapse every tool block, and new ones follow. */
   setToolsExpanded: (expanded: boolean) => void;
-  setSessionListSilent: (silent: boolean) => void;
+  /** Add (``+1``, before a silent request) or give back (``-1``, when it failed to send) one silent reply. */
+  setSessionListSilent: (delta: 1 | -1) => void;
   setHistoryMode: (mode: JaatoState["historyMode"]) => void;
   toggleWorkspaceHidden: (entryId: string) => void;
   toggleWorkspaceShowHidden: () => void;
@@ -464,7 +469,7 @@ export function reduce(s: JaatoState, raw: JaatoEvent): JaatoState {
     case EventTypeValue.SESSION_LIST: {
       const list = normalizeSessionList(ev.sessions);
       s.sessions = list;
-      if (s.sessionListSilent) { s.sessionListSilent = false; break; }
+      if (s.sessionListSilent > 0) { s.sessionListSilent -= 1; break; }
       const id = s.selectedAgentId;
       setBlocks(s, id, [...(s.blocks[id] ?? []), { id: nextId(), kind: "system", agentId: id, text: formatSessionList(list), style: "help" }]);
       break;
@@ -779,11 +784,11 @@ export const useJaato = create<JaatoState>()((set, get) => ({
   workspace: { mode: "unknown", list: [] },
   profiles: [],
   sessions: [],
-  sessionListSilent: false,
+  sessionListSilent: 0,
   historyMode: "listing",
   commands: mergeCommandSpecs([]),
   ...emptySessionState(),
-  ui: { showPlan: false, showBudget: false, showWorkspace: false, showTools: false, theme: "dark", popupCallId: null },
+  ui: { showPlan: false, showBudget: false, showWorkspace: false, showTools: false, theme: "light", popupCallId: null },
 
   dispatch: (events) =>
     set((state) => {
@@ -827,7 +832,7 @@ export const useJaato = create<JaatoState>()((set, get) => ({
     ui: { ...st.ui, showTools: expanded },
     blocks: Object.fromEntries(Object.entries(st.blocks).map(([agentId, list]) => [agentId, list.map((b) => (b.kind === "tool" ? { ...b, expanded } : b))])),
   })),
-  setSessionListSilent: (silent) => set({ sessionListSilent: silent }),
+  setSessionListSilent: (delta) => set((st) => ({ sessionListSilent: Math.max(0, st.sessionListSilent + delta) })),
   setHistoryMode: (mode) => set({ historyMode: mode }),
   toggleWorkspaceHidden: (entryId) => set((st) => ({
     workspaceHidden: st.workspaceHidden.includes(entryId)

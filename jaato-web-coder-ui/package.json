@@ -1,7 +1,7 @@
 {
   "name": "@jaato/web-coder-ui",
-  "version": "0.1.4",
-  "description": "Browser client for jaato-server — the web counterpart of jaato-tui. `npx @jaato/web-coder-ui` serves the bundle and opens it against a daemon started with --web-socket.",
+  "version": "0.1.5",
+  "description": "Browser client for jaato-server \u2014 the web counterpart of jaato-tui. `npx @jaato/web-coder-ui` serves the bundle and opens it against a daemon started with --web-socket.",
   "license": "BUSL-1.1",
   "author": "apanoia",
   "repository": {
@@ -54,6 +54,8 @@
     "prepack": "node scripts/check-dist.mjs"
   },
   "devDependencies": {
+    "@fontsource/barlow": "^5.3.0",
+    "@fontsource/barlow-condensed": "^5.3.0",
     "@jaato/sdk": "file:../jaato-sdk-ts",
     "@playwright/test": "^1.63.0",
     "@tailwindcss/vite": "^4.1.0",

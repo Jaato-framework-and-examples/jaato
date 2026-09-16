@@ -24,11 +24,14 @@
  *   WebSocket URL (default ``/ws`` on this origin, the dev proxy path) and
  *   bearer token.
  *
- * In the first two cases the URL and token live behind a "Connection
- * details" disclosure: still reachable, since a wrong daemon address is
- * fixed by typing rather than by redeploying, but not the first thing a
- * person sees.  The build stamp is a footer for the person staring at a
- * connection failure, not part of the welcome.
+ * Drawn as one plate in two columns (design frame 01): the left half is
+ * what jaato is — brand, headline, the three things it does as a numbered
+ * list — and the right half is the one thing to do to get in.  In the
+ * first two cases the URL and token live behind a "Daemon settings"
+ * disclosure: still reachable, since a wrong daemon address is fixed by
+ * typing rather than by redeploying, but not the first thing a person
+ * sees.  The build stamp sits at the foot of the right column as a
+ * key/value grid, for the person staring at a connection failure.
  */
 import { useEffect, useRef, useState } from "react";
 import type { TokenProvider } from "@jaato/sdk";
@@ -38,7 +41,8 @@ import { consumeExited } from "@/app/exitIntent";
 import { loadLauncherConfig, type LauncherConfig } from "@/app/launcherConfig";
 import { SignInRequiredError, ticketProvider } from "@/app/tickets";
 import { fetchSignedInUser, siblingEndpoint } from "@/app/backendSession";
-import { buildLine } from "@/app/buildInfo";
+import { BUILD, buildLine } from "@/app/buildInfo";
+import { Plate } from "@/components/layout/Plate";
 
 function defaultUrl(): string {
   const env = (import.meta as unknown as { env: Record<string, string | undefined> }).env.VITE_WS_URL;
@@ -75,8 +79,6 @@ const FEATURES: Array<[string, string]> = [
   ["Tools you approve", "Shell, files and the web — each call asks before it runs."],
   ["Plans and subagents", "Watch the plan unfold; every subagent gets its own tab."],
 ];
-
-const inputClass = "mt-1 w-full rounded-md border hairline bg-bg px-2 py-1.5 font-mono text-[13px] outline-none focus:border-primary/60";
 
 export function ConnectScreen() {
   const [url, setUrl] = useState(defaultUrl);
@@ -158,94 +160,113 @@ export function ConnectScreen() {
   const hosted = !!launcher && !!(launcher.daemon || launcher.token || launcher.ticketUrl);
   const dev = (import.meta as unknown as { env: { DEV?: boolean } }).env.DEV === true;
 
+  // What the right column is for, in one line.
+  const kicker = launcher === null ? "Preparing" : signInUrl ? "Sign in to continue" : backend ? (who ? "Welcome back" : "Your environment") : hosted ? "Your environment" : "Where is your daemon?";
+
   return (
-    <div className="h-full flex flex-col items-center justify-center p-6 gap-6">
-      <div className="w-full max-w-lg text-center space-y-3">
-        <div className="inline-flex items-baseline gap-3">
-          <span className="text-4xl font-semibold tracking-tight text-primary">jaato</span>
-          <span className="text-xs uppercase tracking-widest text-text-muted">web coding environment</span>
+    <div className="h-full overflow-auto flex items-center justify-center p-6 sm:p-12">
+      <Plate className="w-full max-w-[860px] grid grid-cols-1 md:grid-cols-[1fr_1px_1fr]">
+        {/* What this is. */}
+        <div className="p-7 flex flex-col gap-4">
+          <div className="flex items-baseline gap-2.5">
+            <span className="display text-[40px] leading-none">jaato</span>
+            <span className="kicker tracking-[0.18em]">web coding environment</span>
+          </div>
+          <h1 className="display text-[26px] leading-[1.15] m-0">Your coding agent, in the browser.</h1>
+          <p className="m-0 text-sm text-text-muted max-w-[34ch]">
+            Everything the terminal client does — sessions, tools, plans, permissions — from a tab, on any machine.
+          </p>
+          <ol className="mt-auto pt-4 border-t hairline list-none m-0 p-0">
+            {FEATURES.map(([title, blurb], i) => (
+              <li key={title} className={`flex gap-3 py-2 ${i < FEATURES.length - 1 ? "border-b hairline" : ""}`}>
+                <span className="font-mono text-[11px] text-steel w-[22px] shrink-0 pt-0.5">{String(i + 1).padStart(2, "0")}</span>
+                <div>
+                  <div className="chrome text-[13px] font-medium">{title}</div>
+                  <div className="text-[13px] text-text-muted">{blurb}</div>
+                </div>
+              </li>
+            ))}
+          </ol>
         </div>
-        <h1 className="text-xl font-medium">Welcome. Your coding agent, in the browser.</h1>
-        <p className="text-sm text-text-muted">
-          Everything the terminal client does — sessions, tools, plans, permissions — from a tab, on any machine.
-        </p>
-      </div>
+        <div className="hidden md:block bg-divider" aria-hidden="true" />
 
-      <form onSubmit={go} className="w-full max-w-lg rounded-xl border hairline surface-1 p-6 space-y-4">
-        {launcher === null ? (
-          <div className="text-sm text-text-muted text-center">Preparing your environment…</div>
-        ) : signInUrl ? (
-          <div className="text-center space-y-3">
-            <div className="text-base">Sign in to open your coding environment.</div>
-            <a href={signInUrl} className="inline-block rounded-md bg-primary text-bg font-semibold px-6 py-2">Sign in</a>
-            <div className="text-xs text-text-muted">Your sign-in backend issues a per-user ticket for each connection; nothing to copy or paste.</div>
-          </div>
-        ) : (who || busy || (hosted && !error)) ? (
-          <div className="text-center space-y-1">
-            {who && <div className="text-base">Welcome back, <span className="font-semibold">{who}</span>.</div>}
-            {busy ? (
-              <div className="text-sm text-text-muted">{conn.detail ?? "Opening your coding environment…"}</div>
-            ) : hosted && !error ? (
-              <div className="text-sm text-text-muted">Ready when you are.</div>
-            ) : null}
-          </div>
-        ) : null}
+        {/* The one thing to do to get in. */}
+        <form onSubmit={go} className="p-7 flex flex-col gap-4 border-t md:border-t-0 hairline">
+          <div className="kicker tracking-[0.16em]">{kicker}</div>
 
-        {error && <div className="rounded-md border border-error/40 p-3 text-sm text-error whitespace-pre-wrap">{error}</div>}
-
-        {launcher !== null && !signInUrl && (
-          <details open={!hosted} className="group text-sm">
-            <summary className={`cursor-pointer select-none text-text-muted ${hosted ? "text-xs" : ""}`}>
-              {hosted ? "Connection details" : "Where is your daemon?"}
-            </summary>
-            <div className="mt-3 space-y-3">
-              {!hosted && (
-                <div className="text-xs text-text-muted">
-                  Point the page at a jaato daemon started with <code className="font-mono">--web-socket</code>.
-                </div>
-              )}
-              <label className="block">
-                <span className="text-text-muted">WebSocket URL</span>
-                <input value={url} onChange={(e) => setUrl(e.target.value)} className={inputClass} placeholder="ws://host:8080" autoFocus={!hosted} />
-              </label>
-              {!backend && (
-                <label className="block">
-                  <span className="text-text-muted">Bearer token <span className="opacity-70">(from <code className="font-mono">~/.jaato/ws.token</code>; leave empty for <code className="font-mono">--ws-unsafe-no-auth</code>)</span></span>
-                  <input value={token} onChange={(e) => setToken(e.target.value)} type="password" autoComplete="off" className={inputClass} />
-                </label>
-              )}
-              {dev && !hosted && (
-                <div className="text-[11px] text-text-muted">
-                  Dev tip: <code className="font-mono">npm run dev</code> proxies <code className="font-mono">/ws</code> to <code className="font-mono">ws://127.0.0.1:8080</code>; set <code className="font-mono">JAATO_WS_TARGET</code> to change it.
-                </div>
-              )}
+          {launcher === null ? (
+            <div className="text-sm text-text-muted">Preparing your environment…</div>
+          ) : signInUrl ? (
+            <>
+              <div className="text-sm text-text-muted max-w-[36ch]">Sign in to open your coding environment. Sign in with your usual account; nothing to copy or paste.</div>
+              <Plate edge="steel" className="p-0" style={{ "--corner-color": "color-mix(in srgb, var(--c-bg) 60%, transparent)" } as React.CSSProperties}>
+                <a href={signInUrl} className="btn btn-primary w-full text-[16px] py-2.5 no-underline border-0">Sign in</a>
+              </Plate>
+              <div className="text-xs text-text-muted">Your sign-in backend issues a per-user ticket for each connection.</div>
+            </>
+          ) : (who || busy || (hosted && !error)) ? (
+            <div className="space-y-1">
+              {who && <div className="text-base">Welcome back, <span className="font-semibold">{who}</span>.</div>}
+              {busy ? (
+                <div className="text-sm text-text-muted">{conn.detail ?? "Opening your coding environment…"}</div>
+              ) : hosted && !error ? (
+                <div className="text-sm text-text-muted">Ready when you are.</div>
+              ) : null}
             </div>
-          </details>
-        )}
+          ) : null}
 
-        {launcher !== null && !signInUrl && (
-          <button type="submit" disabled={busy || !url} className="w-full rounded-md bg-primary text-bg font-semibold py-2 disabled:opacity-50">
-            {busy ? "Connecting…" : error ? "Try again" : hosted ? "Open my environment" : "Connect"}
-          </button>
-        )}
+          {error && <div className="border border-error/40 p-3 text-sm text-error whitespace-pre-wrap" role="alert">{error}</div>}
 
-        {backend && who && (
-          <div className="text-center text-xs text-text-muted">
-            Not {who}? <a href={backend.logoutUrl} className="underline hover:text-text">Sign out</a>
-          </div>
-        )}
-      </form>
+          {launcher !== null && !signInUrl && (
+            <button type="submit" disabled={busy || !url} className="btn btn-primary text-[16px] py-2.5">
+              {busy ? "Connecting…" : error ? "Try again" : hosted ? "Open my environment" : "Connect"}
+            </button>
+          )}
 
-      <div className="w-full max-w-lg grid grid-cols-1 sm:grid-cols-3 gap-3 text-center">
-        {FEATURES.map(([title, blurb]) => (
-          <div key={title} className="rounded-lg border hairline p-3">
-            <div className="text-sm font-medium">{title}</div>
-            <div className="mt-1 text-xs text-text-muted">{blurb}</div>
-          </div>
-        ))}
-      </div>
+          {launcher !== null && !signInUrl && (
+            <details open={!hosted} className="group border-t hairline pt-3 text-sm">
+              <summary className="cursor-pointer select-none list-none flex items-baseline gap-2.5 [&::-webkit-details-marker]:hidden">
+                <span className="text-text-muted transition-transform group-open:rotate-90">▸</span>
+                <span>
+                  <span className="kicker kicker-muted tracking-[0.12em] text-[12px] block">Daemon settings</span>
+                  <span className="text-[13px] text-text-muted">{hosted ? "WebSocket URL and bearer token — only if the served target is wrong." : "Point the page at a jaato daemon started with --web-socket."}</span>
+                </span>
+              </summary>
+              <div className="mt-3 space-y-3">
+                <label className="block">
+                  <span className="field-label">WebSocket URL</span>
+                  <input value={url} onChange={(e) => setUrl(e.target.value)} className="input input-mono" placeholder="ws://host:8080" autoFocus={!hosted} />
+                </label>
+                {!backend && (
+                  <label className="block">
+                    <span className="field-label">Bearer token <span className="opacity-70">(from <code className="font-mono">~/.jaato/ws.token</code>; leave empty for <code className="font-mono">--ws-unsafe-no-auth</code>)</span></span>
+                    <input value={token} onChange={(e) => setToken(e.target.value)} type="password" autoComplete="off" className="input input-mono" />
+                  </label>
+                )}
+                {dev && !hosted && (
+                  <div className="text-[11px] text-text-muted">
+                    Dev tip: <code className="font-mono">npm run dev</code> proxies <code className="font-mono">/ws</code> to <code className="font-mono">ws://127.0.0.1:8080</code>; set <code className="font-mono">JAATO_WS_TARGET</code> to change it.
+                  </div>
+                )}
+              </div>
+            </details>
+          )}
 
-      <div className="text-[11px] text-text-muted font-mono" data-testid="build-info">{buildLine()}</div>
+          {backend && who && (
+            <div className="text-xs text-text-muted">
+              Not {who}? <a href={backend.logoutUrl} className="link">Sign out</a>
+            </div>
+          )}
+
+          {/* The build stamp: what this page speaks, for the person staring at a failure. */}
+          <dl className="kv mt-auto pt-3 border-t hairline text-[11px] m-0" data-testid="build-info" title={buildLine()}>
+            <dt>ui</dt><dd className="text-text m-0">{BUILD.ui}</dd>
+            <dt>sdk</dt><dd className="text-text m-0">@jaato/sdk {BUILD.sdk}</dd>
+            <dt>protocol</dt><dd className="text-text m-0">≥ {BUILD.protocolMin}</dd>
+            <dt>commit</dt><dd className="text-text m-0">{BUILD.commit}</dd>
+          </dl>
+        </form>
+      </Plate>
     </div>
   );
 }

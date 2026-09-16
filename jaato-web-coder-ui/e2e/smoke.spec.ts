@@ -210,7 +210,7 @@ test("a permission ASK with no prompt content falls back to the tool arguments",
   await expect(page.getByText("Permission requested for")).toBeVisible();
   await expect(page.getByRole("group", { name: /Permission request/ }).getByText("src/app.py")).toBeVisible();
   await expect(page.locator(".diff-add")).toHaveCount(0);
-  await page.getByRole("button", { name: /^y yes$/ }).click();
+  await page.getByRole("button", { name: /^yes y$/ }).click();
   await expect(page.getByText("Written (you answered")).toBeVisible();
 });
 

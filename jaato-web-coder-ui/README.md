@@ -15,9 +15,35 @@ Design notes, stack rationale and the input model live in
 | UI | React 19 + Vite 7 | largest widget ecosystem for the pieces a client like this needs (virtualised lists, docking, terminals) |
 | State | Zustand, one event-sourced reducer | the protocol is a stream of typed events; the store folds them, components subscribe to slices |
 | Protocol | `@jaato/sdk` (workspace `file:` dep, source-aliased) | codegen'd event types stay in lockstep with `events.py`; no hand-written event mirror |
-| Styling | Tailwind v4 + CSS variables | the eleven base colours of the TUI's `themes/*.json` become CSS custom properties, so both clients share one palette definition |
+| Styling | Tailwind v4 + CSS variables | the eleven base colours of the TUI's `themes/*.json` become CSS custom properties, so both clients share one palette definition; the redesign's plates, chrome type and interface accent are one layer on top of them (see [Look](#look)) |
 | Rendering | own `<j-*>` + markdown parsers, no `innerHTML` | the server emits neutral markup (`<j-code>`, `<j-table>`, Pygments token classes); the client only maps classes to theme colours |
 | Tests | Vitest (protocol, store) + Playwright (UI against a scripted mock daemon) | |
+
+## Look
+
+The client is drawn on a blueprint (Claude Design, *Jaato Web UI
+Redesign*, proposal 01c): square, hairline-bordered **plates** with
+registration marks at their corners, **Barlow Condensed** for what the
+interface says (kickers, buttons, tab names) and monospace reserved for
+what the daemon said (ids, paths, models, arguments), and one **steel**
+interface accent carrying the chrome while the theme's own colours shrink
+to state glyphs.  The light face (`theme light`, the default) is the
+design's paper ground; `theme dark` and the other four TUI themes draw the
+same structure on their own ground, because the structure is written in
+terms of the theme variables plus a derived `--c-steel`
+(`src/theme/themes.ts`).  Fonts are self-hosted from `@fontsource`, so a
+deployment behind a corporate proxy needs no font CDN.
+
+The five screens the design draws: the connect plate (what jaato is on the
+left, the one thing to do on the right, daemon settings behind a
+disclosure, the build stamp at the foot); workspaces as a table;
+new-session with resume and start side by side; the session with its
+identity in a 46px header (brand, agent tabs, workspace / model / context),
+tool calls as rows, user turns numbered in the gutter, one persistent rail
+whose Plan / Budget / Files sections open and close (same toggles as
+before: `Ctrl+P` / `Ctrl+B` / `Alt+W` and the status bar), and a 26px
+status bar; and the permission request as a full-width warning plate with
+the diff at full measure and one solid action.
 
 ## Commands are words, not `/verbs`
 
@@ -212,7 +238,8 @@ src/
                input/Composer.tsx   prompts/ (Permission, Clarification, ReferenceSelection)
                panels/ (Plan, Budget, Workspace, AgentTabs)   layout/StatusBar.tsx
   screens/     ConnectScreen, WorkspaceScreen, SessionScreen
-  theme/       themes.ts (imports ../jaato-tui/themes/*.json), theme.css
+  theme/       themes.ts (imports ../jaato-tui/themes/*.json, derives the steel accent), theme.css (tokens, plates, chrome type)
+  components/layout/Plate.tsx  the redesign's unit of surface: a square hairline plate with registration marks
 mock/daemon.ts scripted daemon speaking the wire protocol, for dev + e2e
 e2e/           Playwright smoke suite
 ```
