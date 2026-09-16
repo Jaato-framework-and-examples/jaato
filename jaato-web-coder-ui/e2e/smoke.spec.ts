@@ -126,6 +126,19 @@ test("permission prompt shows the diff and the typed key answers it", async ({ p
   await expect(page.getByText("~ app.py")).toBeVisible();
 });
 
+test("a permission ASK with no prompt content falls back to the tool arguments", async ({ page }) => {
+  // A tool whose plugin renders no display info: prompt_lines and warnings are
+  // null on the wire.  The card must still say what is being asked.
+  await openSession(page);
+  await composer(page).fill("permit-bare");
+  await composer(page).press("Enter");
+  await expect(page.getByText("Permission requested for")).toBeVisible();
+  await expect(page.getByRole("group", { name: /Permission request/ }).getByText("src/app.py")).toBeVisible();
+  await expect(page.locator(".diff-add")).toHaveCount(0);
+  await page.getByRole("button", { name: /^y yes$/ }).click();
+  await expect(page.getByText("Written (you answered")).toBeVisible();
+});
+
 test("batch clarification walks its questions and replies once", async ({ page }) => {
   await openSession(page);
   await composer(page).fill("ask");
@@ -173,8 +186,8 @@ test("a ticketUrl config mints a fresh ticket per connection and connects (#1074
   await page.goto("/");
   await expect(page.getByRole("button", { name: /default/ })).toBeVisible();
   expect(minted).toBe(1);
-  // The token field is gone: the credential is the backend's to mint.
-  await expect(page.getByText(/per-user ticket issued by the sign-in backend/)).toHaveCount(0); // we are past the connect screen
+  // We are past the welcome screen: the credential was the backend's to mint.
+  await expect(page.getByText(/Sign in to open your coding environment/)).toHaveCount(0);
 });
 
 test("a 401 from the ticket endpoint offers Sign in instead of an error", async ({ page }) => {
@@ -186,8 +199,10 @@ test("a 401 from the ticket endpoint offers Sign in instead of an error", async 
   const signIn = page.getByRole("link", { name: "Sign in" });
   await expect(signIn).toBeVisible();
   await expect(signIn).toHaveAttribute("href", "/auth/login");
-  await expect(page.getByText(/per-user ticket issued by the sign-in backend/)).toBeVisible();
+  await expect(page.getByText(/Sign in to open your coding environment/)).toBeVisible();
+  // Nothing to type: no token field, no daemon address in the way of the one thing to do.
   await expect(page.getByLabel(/Bearer token/)).toHaveCount(0);
+  await expect(page.getByPlaceholder("ws://host:8080")).toHaveCount(0);
 });
 
 // ── Sign in first, as the TUI allows ────────────────────────────────────

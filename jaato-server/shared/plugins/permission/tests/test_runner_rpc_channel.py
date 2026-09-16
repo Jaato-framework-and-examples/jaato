@@ -26,7 +26,11 @@ from shared.plugins.permission.channels import (
     PermissionResponseOption,
     get_default_permission_options,
 )
-from shared.plugins.permission.runner_rpc_channel import RunnerRPCChannel
+from shared.plugins.permission.runner_rpc_channel import (
+    RunnerRPCChannel,
+    prompt_fields_from_request,
+)
+from jaato_sdk.plugins.base import PermissionDisplayInfo
 from shared.plugins.permission.types import PromptPayload, PromptResponse
 
 
@@ -434,3 +438,73 @@ class TestFeedbackOptionLabels:
         from shared.plugins.permission.channels import ChannelDecision
         assert _RESPONSE_KEY_TO_DECISION["c"] is ChannelDecision.COMMENT
         assert _RESPONSE_KEY_TO_DECISION["yc"] is ChannelDecision.ALLOW_COMMENT
+
+
+# ----------------------------------------------------------------------
+# Prompt content: the diff and the warnings reach the payload
+# ----------------------------------------------------------------------
+
+
+def _ask(request: PermissionRequest) -> PromptPayload:
+    op = _StubOperator(next_response=PromptResponse(request_id="r-1", response="y"))
+    RunnerRPCChannel(op).request_permission(request)
+    return op.calls[0]
+
+
+def test_payload_carries_prompt_lines_and_warnings_from_display_info() -> None:
+    """The plugin parks a ``PermissionDisplayInfo`` in the request context
+    (summary, a unified diff, analyzer warnings).  The channel used to
+    forward tool name, args and options and drop it, so every
+    runner-served session reached the client with no diff and no
+    warning -- the web card showed a grid of raw arguments, the TUI a bare
+    "Permission required"."""
+    info = PermissionDisplayInfo(
+        summary="Update file: src/app.py",
+        details="--- a/src/app.py\n+++ b/src/app.py\n@@ -1 +1 @@\n-print('hello')\n+print('hi')",
+        format_hint="diff",
+        warnings="The path is outside the sandbox allowlist.",
+        warning_level="warning",
+    )
+    payload = _ask(_make_request(tool_name="updateFile", arguments={"path": "src/app.py"}, context={"display_info": info}))
+    assert payload.prompt_lines == [
+        "Update file: src/app.py",
+        "--- a/src/app.py", "+++ b/src/app.py", "@@ -1 +1 @@", "-print('hello')", "+print('hi')",
+    ]
+    assert payload.format_hint == "diff"
+    assert payload.warnings == "The path is outside the sandbox allowlist."
+    assert payload.warning_level == "warning"
+    # And it survives the wire encoding the daemon-side handler reads.
+    assert PromptPayload.from_dict(payload.to_dict()).prompt_lines == payload.prompt_lines
+
+
+def test_payload_prompt_lines_fall_back_to_tool_and_args() -> None:
+    """A tool whose plugin renders no display info still gets the
+    ``Tool:`` / ``Args:`` pair the daemon-local hook produced, so the
+    client has something to show under the header."""
+    payload = _ask(_make_request())
+    assert payload.prompt_lines is not None
+    assert payload.prompt_lines[0] == "Tool: cli_based_tool"
+    assert payload.prompt_lines[1].startswith("Args: ")
+    assert "rm -rf /" in payload.prompt_lines[1]
+    assert payload.format_hint is None
+    assert payload.warnings is None
+
+
+def test_prompt_fields_keep_code_details_on_this_path() -> None:
+    """The daemon-local hook withheld ``code`` details from the lines so
+    its output pipeline could highlight them separately.  There is no
+    pipeline on the runner path, so withholding them here would send a
+    summary and nothing else; the lines carry the details and the hint."""
+    info = PermissionDisplayInfo(summary="Run cell", details="import os\nprint(os.getcwd())", format_hint="code", language="python")
+    fields = prompt_fields_from_request(_make_request(context={"display_info": info}))
+    assert fields["prompt_lines"] == ["Run cell", "import os", "print(os.getcwd())"]
+    assert fields["format_hint"] == "code"
+
+
+def test_prompt_fields_are_none_not_empty_when_nothing_renders() -> None:
+    """An empty display info yields ``None`` fields, the value the event
+    declares for "nothing to show", not empty containers a client would
+    render as a blank prompt."""
+    info = PermissionDisplayInfo(summary="", details="", format_hint="")
+    fields = prompt_fields_from_request(_make_request(context={"display_info": info}))
+    assert fields == {"prompt_lines": None, "format_hint": None, "warnings": None, "warning_level": None}

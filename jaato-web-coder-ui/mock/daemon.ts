@@ -17,7 +17,10 @@
  *
  *   "code"      → a streamed answer with a <j-code> block and a <j-table>
  *   "tool"      → a tool call with streamed output, then success
- *   "permit"    → a tool call that asks permission (diff prompt_lines)
+ *   "permit"    → a tool call that asks permission (diff prompt_lines + a warning)
+ *   "permit-bare" → the same ASK from a tool whose plugin renders no display
+ *                 info: no prompt_lines, no warning -- the card falls back to
+ *                 the tool arguments
  *   "ask"       → a batch_only clarification with two questions
  *   "fail"      → a failing tool call
  *   "subagent"  → spawns a subagent that streams in its own tab
@@ -90,21 +93,30 @@ async function turn(c: Client, text: string, agentId = "main"): Promise<void> {
     send(c, { type: "agent.completed", agent_id: subId, summary: "done" });
     await stream(c, agentId, "\nThe subagent finished; see its tab.");
   } else if (lower.includes("permit")) {
+    // The runner-tier wire (the default path): the daemon's PromptOperatorHandler
+    // emits permission.requested from the runner's PromptPayload -- options are
+    // {key, label, description} (no `action` on this path), the prompt content
+    // rides prompt_lines / format_hint / warnings / warning_level -- then the
+    // input_mode control event with the same options and call_id.  "permit-bare"
+    // is the same ASK from a tool whose plugin renders no display info, so the
+    // content fields are null and the card must fall back to tool_args.
+    const bare = lower.includes("permit-bare");
     const callId = randomUUID();
     const reqId = randomUUID();
-    send(c, { type: "tool.call_start", agent_id: agentId, tool_name: "write_file", tool_args: { path: "src/app.py", content: "print('hi')\n" }, call_id: callId });
+    const toolArgs = { path: "src/app.py", content: "print('hi')\n" };
+    const options = [
+      { key: "y", label: "yes", description: "allow this call" }, { key: "n", label: "no", description: "deny this call" },
+      { key: "a", label: "always", description: "allow for the rest of the session" }, { key: "t", label: "this turn", description: "allow until the model finishes responding" },
+    ];
+    send(c, { type: "tool.call_start", agent_id: agentId, tool_name: "write_file", tool_args: toolArgs, call_id: callId });
     send(c, {
       type: "permission.requested", agent_id: agentId, request_id: reqId, tool_name: "write_file",
-      tool_args: { path: "src/app.py" },
-      response_options: [
-        { key: "y", label: "yes", action: "allow" }, { key: "n", label: "no", action: "deny" },
-        { key: "a", label: "always", action: "whitelist" }, { key: "t", label: "this turn", action: "allow_turn" },
-      ],
-      prompt_lines: ["--- a/src/app.py", "+++ b/src/app.py", "@@ -1,2 +1,2 @@", "-print('hello')", "+print('hi')", " # end"],
-      format_hint: "diff",
-      warnings: "The path is outside the sandbox allowlist.", warning_level: "warning",
+      tool_args: toolArgs, response_options: options,
+      prompt_lines: bare ? null : ["Update file: src/app.py", "--- a/src/app.py", "+++ b/src/app.py", "@@ -1,2 +1,2 @@", "-print('hello')", "+print('hi')", " # end"],
+      format_hint: bare ? null : "diff",
+      warnings: bare ? null : "The path is outside the sandbox allowlist.", warning_level: bare ? null : "warning",
     });
-    send(c, { type: "permission.input_mode", agent_id: agentId, request_id: reqId, tool_name: "write_file", call_id: callId, response_options: [{ key: "y", label: "yes" }, { key: "n", label: "no" }, { key: "a", label: "always" }, { key: "t", label: "this turn" }] });
+    send(c, { type: "permission.input_mode", agent_id: agentId, request_id: reqId, tool_name: "write_file", call_id: callId, response_options: options, tool_args: null, editable_metadata: null });
     const answer = String(await waitFor(c, `perm:${reqId}`));
     const granted = ["y", "a", "t", "i", "once", "all", "yes"].includes(answer.toLowerCase());
     send(c, { type: "permission.resolved", agent_id: agentId, request_id: reqId, tool_name: "write_file", granted, method: "user" });
@@ -116,9 +128,14 @@ async function turn(c: Client, text: string, agentId = "main"): Promise<void> {
     send(c, {
       type: "clarification.batch", agent_id: agentId, request_id: reqId, tool_name: "request_clarification", batch_only: true,
       context: "Before I start:",
+      // The shape question_payload() emits (shared/plugins/clarification/channels.py):
+      // text / question_type / required / choices[{text, default?}] -- NOT the
+      // per-question event's question_text / options.  The mock used to speak
+      // the card's vocabulary, which is how a card that could not render the
+      // daemon's passed every e2e test.
       questions: [
-        { question_text: "Which framework should the client use?", question_type: "choice", options: ["React 19", "Svelte 5", "Solid"] },
-        { question_text: "Anything else I should know?", question_type: "text", optional: true, default: "no" },
+        { index: 1, text: "Which framework should the client use?", question_type: "single_choice", required: true, choices: [{ text: "React 19" }, { text: "Svelte 5", default: true }, { text: "Solid" }] },
+        { index: 2, text: "Anything else I should know?", question_type: "free_text", required: false },
       ],
     });
     const answers = (await waitFor(c, `clar:${reqId}`)) as string[];

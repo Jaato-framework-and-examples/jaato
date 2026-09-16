@@ -11,6 +11,7 @@
 import { create } from "zustand";
 import { EventTypeValue, type JaatoEvent } from "@jaato/sdk";
 import { mergeCommandSpecs, type CommandSpec } from "@/protocol/commands";
+import { normalizeClarificationQuestion } from "@/protocol/clarification";
 import type {
   Agent,
   ConfigStatus,
@@ -392,7 +393,8 @@ export function reduce(s: JaatoState, raw: JaatoEvent): JaatoState {
         agentId: agentOf(ev),
         toolName: String(ev.tool_name ?? ""),
         context: (ev.context as string | null | undefined) ?? null,
-        questions: (ev.questions as PendingClarification["questions"] | undefined) ?? [],
+        // The batch wire spells a question ``text``/``choices``/``required`` (question_payload); normalize.
+        questions: (Array.isArray(ev.questions) ? ev.questions : []).map(normalizeClarificationQuestion),
         index: existing?.index ?? 0,
         answers: existing?.answers ?? [],
         batchOnly: ev.batch_only === true,
@@ -406,7 +408,7 @@ export function reduce(s: JaatoState, raw: JaatoEvent): JaatoState {
       const requestId = String(ev.request_id ?? "");
       if (!requestId) break;
       const idx = Number(ev.question_index ?? 0);
-      const q = { question_text: ev.question_text as string | undefined, question_type: ev.question_type as string | undefined, options: (ev.options as string[] | undefined) ?? [] };
+      const q = normalizeClarificationQuestion({ question_text: ev.question_text, question_type: ev.question_type, options: ev.options ?? [] });
       const existing = s.clarifications.find((c) => c.requestId === requestId);
       if (existing) {
         const questions = [...existing.questions];

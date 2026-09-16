@@ -84,21 +84,28 @@ describe("reduce — tool lifecycle", () => {
 describe("reduce — prompts", () => {
   it("merges permission.requested and permission.input_mode into one pending record and clears it on resolve", () => {
     const d = useJaato.getState().dispatch;
-    d([ev({ type: "permission.requested", agent_id: "main", request_id: "r1", tool_name: "write", response_options: [{ key: "y", label: "yes" }], prompt_lines: ["+x"], format_hint: "diff" })]);
+    d([ev({ type: "permission.requested", agent_id: "main", request_id: "r1", tool_name: "write", response_options: [{ key: "y", label: "yes", description: "allow this call" }], prompt_lines: ["+x"], format_hint: "diff", warnings: "careful", warning_level: "warning" })]);
     d([ev({ type: "permission.input_mode", agent_id: "main", request_id: "r1", tool_name: "write", call_id: "c9" })]);
     const p = useJaato.getState().permissions;
     expect(p).toHaveLength(1);
     expect(p[0]).toMatchObject({ requestId: "r1", inputMode: true, callId: "c9", formatHint: "diff" });
-    expect(p[0]!.options).toEqual([{ key: "y", label: "yes" }]);
+    expect(p[0]).toMatchObject({ warnings: "careful", warningLevel: "warning", promptLines: ["+x"] });
+    expect(p[0]!.options).toEqual([{ key: "y", label: "yes", description: "allow this call" }]);
     expect(useJaato.getState().agents[MAIN_AGENT]!.status).toBe("awaiting_permission");
     d([ev({ type: "permission.resolved", agent_id: "main", request_id: "r1", granted: true })]);
     expect(useJaato.getState().permissions).toHaveLength(0);
   });
   it("walks a batch_only clarification and reports completion", () => {
     const d = useJaato.getState().dispatch;
-    d([ev({ type: "clarification.batch", agent_id: "main", request_id: "q1", batch_only: true, questions: [{ question_text: "A?" }, { question_text: "B?" }] })]);
+    // The payload is what question_payload() emits, not the per-question vocabulary.
+    d([ev({ type: "clarification.batch", agent_id: "main", request_id: "q1", batch_only: true, context: "Before I start", questions: [
+      { index: 1, text: "A?", question_type: "single_choice", required: true, choices: [{ text: "yes", default: true }, { text: "no" }] },
+      { index: 2, text: "B?", question_type: "free_text", required: false },
+    ] })]);
     const st = useJaato.getState();
-    expect(st.clarifications[0]).toMatchObject({ inputMode: true, index: 0, batchOnly: true });
+    expect(st.clarifications[0]).toMatchObject({ inputMode: true, index: 0, batchOnly: true, context: "Before I start" });
+    expect(st.clarifications[0]!.questions[0]).toMatchObject({ question_text: "A?", options: ["yes", "no"], default: 1, optional: false });
+    expect(st.clarifications[0]!.questions[1]).toMatchObject({ question_text: "B?", options: [], optional: true });
     const n1 = st.answerClarification("q1", "one")!;
     expect(n1.index).toBe(1);
     const n2 = useJaato.getState().answerClarification("q1", "two")!;
@@ -107,7 +114,7 @@ describe("reduce — prompts", () => {
   });
   it("assembles the per-question clarification path from its two events", () => {
     const d = useJaato.getState().dispatch;
-    d([ev({ type: "clarification.question", agent_id: "main", request_id: "q2", question_index: 0, total_questions: 1, question_text: "Which?", options: ["a", "b"] })]);
+    d([ev({ type: "clarification.question", agent_id: "main", request_id: "q2", question_index: 0, total_questions: 1, question_text: "Which?", options: [{ text: "a" }, { text: "b" }] })]);
     d([ev({ type: "clarification.input_mode", agent_id: "main", request_id: "q2", question_index: 0 })]);
     const c = useJaato.getState().clarifications[0]!;
     expect(c.batchOnly).toBe(false);
