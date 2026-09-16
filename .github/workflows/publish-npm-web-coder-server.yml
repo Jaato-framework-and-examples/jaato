@@ -76,6 +76,22 @@ jobs:
           if [ "$status" != "404" ]; then echo "::error::Unexpected status ${status} from registry — refusing to publish"; exit 1; fi
           echo "Version ${version} is available"
 
+      - name: Verify NPM_TOKEN is accepted by the registry
+        # npm answers an unauthorised PUT on a scoped package with a bare
+        # 404 ("'@jaato/x@y' is not in this registry"), so an expired,
+        # revoked or read-only NPM_TOKEN otherwise surfaces at the very
+        # last step, after the build, looking like a missing package.
+        # `npm whoami` proves the token authenticates; it does not prove
+        # write access to @jaato, which only the publish itself can.
+        run: |
+          user=$(npm whoami 2>/dev/null) || {
+            echo "::error::the registry rejected NPM_TOKEN (npm whoami failed): expired, revoked, or not an npm token. Rotate the secret in the npm-sdk environment."
+            exit 1
+          }
+          echo "Token authenticates as npm user '${user}'"
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
       - name: Check both dependencies are on npm at the versions the checkout links
         # The published manifest will say ^<sdk> and ^<ui>. If either exact
         # version is not on the registry, an `npm install @jaato/web-coder-server`
@@ -85,7 +101,8 @@ jobs:
             name="${pair%%:*}"; version="${pair##*:}"
             status=$(curl -s -o /dev/null -w '%{http_code}' "https://registry.npmjs.org/@jaato/${name}/${version}")
             if [ "$status" != "200" ]; then
-              echo "::error::@jaato/${name} ${version} is not on npm (HTTP ${status}); publish it first (publish-npm-${name/web-coder-ui/web-coder-ui}${name/sdk/sdk-ts}.yml)"
+              case "$name" in sdk) wf=publish-npm-sdk-ts.yml ;; *) wf="publish-npm-${name}.yml" ;; esac
+              echo "::error::@jaato/${name} ${version} is not on npm (HTTP ${status}); publish it first (${wf})"
               exit 1
             fi
             echo "@jaato/${name} ${version} is on npm"

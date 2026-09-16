@@ -113,6 +113,22 @@ jobs:
           fi
           echo "Version ${version} is available for publishing"
 
+      - name: Verify NPM_TOKEN is accepted by the registry
+        # npm answers an unauthorised PUT on a scoped package with a bare
+        # 404 ("'@jaato/x@y' is not in this registry"), so an expired,
+        # revoked or read-only NPM_TOKEN otherwise surfaces at the very
+        # last step, after the build, looking like a missing package.
+        # `npm whoami` proves the token authenticates; it does not prove
+        # write access to @jaato, which only the publish itself can.
+        run: |
+          user=$(npm whoami 2>/dev/null) || {
+            echo "::error::the registry rejected NPM_TOKEN (npm whoami failed): expired, revoked, or not an npm token. Rotate the secret in the npm-sdk environment."
+            exit 1
+          }
+          echo "Token authenticates as npm user '${user}'"
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
       - name: Install dependencies
         run: |
           npm --prefix jaato-sdk-ts ci --no-audit --no-fund
