@@ -171,6 +171,9 @@ def test_demuxer_turns_plan_updated_into_the_event_the_in_process_path_emits():
     assert evs[0].plan_name == "Prueba"
     assert evs[0].steps[0]["content"] == "Crear el proyecto"
     assert evs[0].steps[0]["step_id"] == "s1"
+    # The snapshot carries the step's sequence too, so a client orders the
+    # full plan the way it orders the deltas.
+    assert evs[0].steps[0]["sequence"] == 1
     # Byte-for-byte the in-process builder's answer.
     direct = srv._plan_updated_event({"title": "Prueba", "steps": [{
         "step_id": "s1", "sequence": 1, "description": "Crear el proyecto",

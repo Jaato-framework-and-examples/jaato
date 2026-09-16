@@ -4741,6 +4741,7 @@ class JaatoServer:
                 'status': step.get('status', 'pending'),
                 'active_form': step.get('active_form'),
                 'step_id': step.get('step_id', ''),
+                'sequence': step.get('sequence'),
                 'result': step.get('result'),
                 'error': step.get('error'),
             }
