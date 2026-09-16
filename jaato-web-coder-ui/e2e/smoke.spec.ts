@@ -126,6 +126,19 @@ test("permission prompt shows the diff and the typed key answers it", async ({ p
   await expect(page.getByText("~ app.py")).toBeVisible();
 });
 
+test("a permission ASK with no prompt content falls back to the tool arguments", async ({ page }) => {
+  // A tool whose plugin renders no display info: prompt_lines and warnings are
+  // null on the wire.  The card must still say what is being asked.
+  await openSession(page);
+  await composer(page).fill("permit-bare");
+  await composer(page).press("Enter");
+  await expect(page.getByText("Permission requested for")).toBeVisible();
+  await expect(page.getByRole("group", { name: /Permission request/ }).getByText("src/app.py")).toBeVisible();
+  await expect(page.locator(".diff-add")).toHaveCount(0);
+  await page.getByRole("button", { name: /^y yes$/ }).click();
+  await expect(page.getByText("Written (you answered")).toBeVisible();
+});
+
 test("batch clarification walks its questions and replies once", async ({ page }) => {
   await openSession(page);
   await composer(page).fill("ask");

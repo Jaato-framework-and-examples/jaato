@@ -27,6 +27,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable, Dict, List, Optional
 
+from ...ui_utils import format_tool_args_summary
 from .channels import (
     Channel,
     ChannelDecision,
@@ -37,6 +38,64 @@ from .channels import (
 
 
 logger = logging.getLogger(__name__)
+
+
+def prompt_fields_from_request(request: PermissionRequest) -> Dict[str, Any]:
+    """Render the prompt CONTENT a client shows beside the options.
+
+    The permission plugin resolves a ``PermissionDisplayInfo`` from the
+    tool's own plugin (the summary, the unified diff for a file edit, the
+    analyzer warnings) and parks it in ``request.context["display_info"]``
+    before calling the channel.  On the daemon-local path the daemon's
+    ``on_permission_requested`` hook turned that into ``prompt_lines`` /
+    ``format_hint`` / ``warnings`` / ``warning_level``; on the runner path
+    nothing did -- this channel forwarded tool name, args and options and
+    dropped the display info on the floor, so every runner-served session
+    (the default) reached the client with ``prompt_lines=None`` and
+    ``warnings=None`` although the payload and the event both declare the
+    fields and the permission design doc promises the diff.  The web
+    client fell back to a grid of raw tool arguments (the whole new file
+    for a write, no diff, no warning); the TUI showed "Permission
+    required" and the options bar.
+
+    Mirrors ``PermissionPlugin._build_prompt_lines(include_options=False)``:
+    summary, then the details line by line; with no display info the
+    ``Tool:`` / ``Args:`` pair.  Details are included whatever the
+    ``format_hint`` -- the daemon-local hook excluded ``code`` details so
+    its output pipeline could highlight them, and there is no pipeline on
+    this path; a client renders ``prompt_lines`` under the hint it is
+    given.  Options are never part of the lines: both clients render them
+    from ``response_options``.
+
+    Returns the four keyword arguments ``PromptPayload`` takes for them.
+    """
+    display_info = None
+    if isinstance(request.context, dict):
+        display_info = request.context.get("display_info")
+    lines: List[str] = []
+    format_hint: Optional[str] = None
+    warnings: Optional[str] = None
+    warning_level: Optional[str] = None
+    if display_info is not None:
+        summary = getattr(display_info, "summary", "") or ""
+        if summary:
+            lines.append(str(summary))
+        details = getattr(display_info, "details", "") or ""
+        if details:
+            lines.extend(str(details).split("\n"))
+        format_hint = getattr(display_info, "format_hint", None) or None
+        warnings = getattr(display_info, "warnings", None) or None
+        warning_level = getattr(display_info, "warning_level", None) or None
+    else:
+        lines.append(f"Tool: {request.tool_name}")
+        if request.arguments:
+            lines.append(f"Args: {format_tool_args_summary(dict(request.arguments), max_length=100)}")
+    return {
+        "prompt_lines": lines or None,
+        "format_hint": format_hint,
+        "warnings": warnings,
+        "warning_level": warning_level,
+    }
 
 
 # Type alias for the prompt-operator callable.  The runner's
@@ -238,6 +297,10 @@ class RunnerRPCChannel(Channel):
             agent_id=agent_id,
             call_id=call_id,
             editable_metadata=editable_metadata,
+            # The prompt CONTENT -- diff, summary, warnings -- rendered
+            # from the display info the plugin parked in the context.
+            # Without it the client has options and no question.
+            **prompt_fields_from_request(request),
         )
 
         try:

@@ -84,12 +84,13 @@ describe("reduce — tool lifecycle", () => {
 describe("reduce — prompts", () => {
   it("merges permission.requested and permission.input_mode into one pending record and clears it on resolve", () => {
     const d = useJaato.getState().dispatch;
-    d([ev({ type: "permission.requested", agent_id: "main", request_id: "r1", tool_name: "write", response_options: [{ key: "y", label: "yes" }], prompt_lines: ["+x"], format_hint: "diff" })]);
+    d([ev({ type: "permission.requested", agent_id: "main", request_id: "r1", tool_name: "write", response_options: [{ key: "y", label: "yes", description: "allow this call" }], prompt_lines: ["+x"], format_hint: "diff", warnings: "careful", warning_level: "warning" })]);
     d([ev({ type: "permission.input_mode", agent_id: "main", request_id: "r1", tool_name: "write", call_id: "c9" })]);
     const p = useJaato.getState().permissions;
     expect(p).toHaveLength(1);
     expect(p[0]).toMatchObject({ requestId: "r1", inputMode: true, callId: "c9", formatHint: "diff" });
-    expect(p[0]!.options).toEqual([{ key: "y", label: "yes" }]);
+    expect(p[0]).toMatchObject({ warnings: "careful", warningLevel: "warning", promptLines: ["+x"] });
+    expect(p[0]!.options).toEqual([{ key: "y", label: "yes", description: "allow this call" }]);
     expect(useJaato.getState().agents[MAIN_AGENT]!.status).toBe("awaiting_permission");
     d([ev({ type: "permission.resolved", agent_id: "main", request_id: "r1", granted: true })]);
     expect(useJaato.getState().permissions).toHaveLength(0);

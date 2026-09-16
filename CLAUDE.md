@@ -4596,6 +4596,58 @@ hook emits two events (`PermissionResolvedEvent` plus the
 `PermissionStatusEvent` `emit_permission_status()` appends) and serialises
 both to every connected client. A trace line is cheap; an event is not.
 
+### A Prompt the Runner Rendered and Never Sent
+
+A permission ASK on a runner-served session (the default) reached every
+client with **options and no question**. The permission plugin resolves a
+`PermissionDisplayInfo` from the tool's own plugin — the summary, the
+unified diff for a file edit, the analyzer warnings — and parks it in
+`request.context["display_info"]` before calling the channel. On the
+daemon-local path the daemon's `on_permission_requested` hook rendered
+that into an `AgentOutputEvent(source="permission")`. On the runner path
+`RunnerRPCChannel.request_permission` forwarded tool name, args and
+options and dropped the display info, so `PermissionRequestedEvent`
+arrived with `prompt_lines=None` and `warnings=None` — although
+`PromptPayload` and the event both declare the fields, and
+`docs/jaato_permission_system.md` draws the diff on the event. The daemon
+hook that used to render it is registered on the daemon-side plugin, which
+is not in the loop for a runner session, and the runner never arms it.
+
+| Client | What it showed on the default path |
+|---|---|
+| web (`jaato-web-coder-ui`) | a grid of raw tool arguments — the whole new file for a write, no diff, no warning |
+| TUI | `🔒 Permission required` and the options bar, nothing between them |
+
+**Rendered once, at the seam that has the information.**
+`prompt_fields_from_request` (`runner_rpc_channel.py`) mirrors
+`_build_prompt_lines(include_options=False)` — summary, details line by
+line, `Tool:`/`Args:` when a plugin renders no display info — and the
+payload carries the four fields; the daemon-side `PromptOperatorHandler`
+already copied them onto the event. Details are included whatever the
+`format_hint`: the daemon-local hook withheld `code` details so its output
+pipeline could highlight them, and there is no pipeline on this path.
+
+**The TUI reads the event.** `jaato-tui/permission_prompt.py` renders a
+`PermissionRequestedEvent` into the same text the daemon-local hook emits
+— the `<security-warning level="…">` block the buffer already parses, then
+the lines — and appends it under the `permission` source, so
+`set_tool_awaiting_approval` attaches it to the tool exactly as before.
+Called **unconditionally** for every event rather than as a branch of
+`handle_events`' `isinstance` chain, which is frozen at the top of the
+complexity ratchet. No double render: a daemon-local session emits the
+output event and never the requested event; a runner session the reverse.
+
+**The mock spoke the card's vocabulary, again.** The web mock's `permit`
+scenario sent `prompt_lines` and a warning on `permission.requested` — a
+shape only the daemon-local path produced — so the e2e suite certified
+diff rendering the default path never exercised, the same pattern that hid
+the clarification defect (the card read `question_text`/`options` while
+the batch wire carried `text`/`choices`). Both mock scenarios now emit
+what the daemon emits on the runner path (options are
+`{key, label, description}` there — no `action`), and `permit-bare` is the
+same ASK from a plugin with no display info, pinning the tool-arguments
+fallback.
+
 ### A Boundary the Notebook Did Not Have (#710)
 
 `cli` contains the paths a model names: every path token in a command goes
