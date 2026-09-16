@@ -184,7 +184,28 @@ class WorkspaceManager:
         self._load_registry()
 
     def _load_registry(self) -> None:
-        """Load workspace registry from disk."""
+        """Load workspace registry from disk.
+
+        The registry is keyed by workspace NAME and lives in one file per
+        daemon user (``~/.jaato/workspaces.json``) whatever
+        ``--workspace-root`` the daemon was started with, so a row written
+        under one root outlives a move to another.  Such a row used to be
+        loaded verbatim: it sat in ``_workspaces`` and so in every
+        ``workspace.list``, while ``select`` and ``delete`` resolved the same
+        NAME under the CURRENT root and answered "does not exist" -- a
+        workspace nobody could open or remove.  The stale row is now the
+        deployment's own root directory listed as a workspace of itself
+        (root ``/srv/jaato`` -> ``/srv/jaato/workspaces``, then the root
+        moved down one level), which is exactly the shape that produced it.
+
+        So a row is loaded only when the path it records still resolves to
+        ``<root>/<name>``; anything else is dropped with a WARNING naming
+        the root it was written for, and is gone from the file at the next
+        save.  A row whose directory no longer EXISTS is still loaded here
+        -- it carries the owner and the last-opened time, which the
+        directory cannot -- and :meth:`discover_workspaces` is what prunes
+        it, since that is the point at which the daemon looks at the disk.
+        """
         if not self.registry_path.exists():
             logger.debug(f"No workspace registry at {self.registry_path}")
             return
@@ -193,23 +214,53 @@ class WorkspaceManager:
             with open(self.registry_path, "r") as f:
                 data = json.load(f)
 
+            recorded_root = data.get("root")
+            dropped = []
             for ws_data in data.get("workspaces", []):
                 name = ws_data.get("name")
-                if name:
-                    self._workspaces[name] = WorkspaceInfo(
-                        name=name,
-                        path=ws_data.get("path", ""),
-                        configured=ws_data.get("configured", False),
-                        provider=ws_data.get("provider"),
-                        model=ws_data.get("model"),
-                        last_accessed=ws_data.get("last_accessed"),
-                        owner=ws_data.get("owner"),
-                    )
+                if not name:
+                    continue
+                if not self._registry_row_is_current(name, ws_data.get("path", "")):
+                    dropped.append(name)
+                    continue
+                self._workspaces[name] = WorkspaceInfo(
+                    name=name,
+                    path=ws_data.get("path", ""),
+                    configured=ws_data.get("configured", False),
+                    provider=ws_data.get("provider"),
+                    model=ws_data.get("model"),
+                    last_accessed=ws_data.get("last_accessed"),
+                    owner=ws_data.get("owner"),
+                )
 
+            if dropped:
+                logger.warning(
+                    "Ignoring %d workspace registry row(s) not under the workspace "
+                    "root %s (registry written for root %s): %s",
+                    len(dropped), self.workspace_root, recorded_root or "?",
+                    ", ".join(sorted(dropped)),
+                )
             logger.debug(f"Loaded {len(self._workspaces)} workspaces from registry")
 
         except Exception as e:
             logger.warning(f"Failed to load workspace registry: {e}")
+
+    def _registry_row_is_current(self, name: str, path: str) -> bool:
+        """Whether a registry row still describes ``<root>/<name>``.
+
+        A row records the path it was analysed at.  It is current when that
+        path is exactly the one the NAME resolves to under the current root
+        -- the same resolution ``select`` and ``delete`` perform, so a row
+        this accepts is one those verbs can act on.  A row with no path (a
+        registry predating the field) is accepted on its name alone.
+        """
+        if not path:
+            return True
+        try:
+            recorded = Path(path).expanduser().resolve()
+            return recorded == (self.workspace_root / name).resolve()
+        except (OSError, ValueError):
+            return False
 
     def _save_registry(self) -> None:
         """Save workspace registry to disk."""
@@ -299,6 +350,20 @@ class WorkspaceManager:
         if not self.workspace_root.exists():
             logger.warning(f"Workspace root does not exist: {self.workspace_root}")
             return []
+
+        # A cached row whose directory is gone -- removed out of band, or
+        # carried over from a registry the daemon no longer has a directory
+        # for -- would otherwise be listed forever while ``select`` and
+        # ``delete`` refuse it by name.  This is the one point that looks at
+        # the disk, so it is where the cache is reconciled with it.
+        for name in list(self._workspaces):
+            try:
+                present = self._resolve_under_root(name).is_dir()
+            except WorkspaceContainmentError:
+                present = False
+            if not present:
+                logger.info("Forgetting workspace %r: no directory under %s", name, self.workspace_root)
+                self._workspaces.pop(name, None)
 
         discovered = []
 

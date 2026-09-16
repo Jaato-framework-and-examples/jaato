@@ -197,7 +197,7 @@ export function WorkspaceScreen() {
           <input value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="new-workspace-name" className="input input-mono flex-1" aria-label="New workspace name" />
           <button type="submit" className="btn">Create</button>
           <span className="flex-1" />
-          <button type="button" className="link text-[13px]" onClick={() => setScreen("session")}>Open a session without a workspace</button>
+          <button type="button" className="link text-[13px]" onClick={() => setScreen("session")} title="The daemon provisions a fresh workspace for the session under its workspace root">Open a session in a server-provisioned workspace</button>
         </form>
 
         {cfg && manual === cfg.workspace && (
