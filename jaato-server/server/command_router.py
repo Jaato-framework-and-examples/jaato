@@ -1027,6 +1027,8 @@ class CommandRouter:
         if paths is None:
             return sessions
         user = self._event_sink.get_client_user(client_id)
+        if not isinstance(user, str):
+            user = None
         roots = [os.path.normpath(p) for p in paths]
 
         def _inside(workspace_path: Optional[str]) -> bool:

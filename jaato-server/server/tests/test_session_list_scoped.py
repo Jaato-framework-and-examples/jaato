@@ -104,3 +104,15 @@ def test_attach_is_unguarded_without_a_boundary():
     router, sm, _ = _router(None)
     router._handle_session_attach("c1", None, ["in-bobs"], None)
     sm.attach_session.assert_called_once()
+
+
+def test_only_a_list_of_paths_is_a_boundary():
+    """A sink answering anything else -- a test double's auto-attribute, a
+    non-sequence -- contributes no scoping rather than an empty boundary
+    that would hide every session."""
+    from server.event_sink import client_visible_workspaces
+    assert client_visible_workspaces(MagicMock(), "c1") is None
+    assert client_visible_workspaces(SimpleNamespace(visible_workspace_paths=lambda c: "/root"), "c1") is None
+    assert client_visible_workspaces(SimpleNamespace(visible_workspace_paths=lambda c: [1, 2]), "c1") is None
+    assert client_visible_workspaces(SimpleNamespace(visible_workspace_paths=lambda c: ("/a",)), "c1") == ["/a"]
+    assert client_visible_workspaces(SimpleNamespace(visible_workspace_paths=lambda c: []), "c1") == []

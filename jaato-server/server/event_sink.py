@@ -115,7 +115,16 @@ def client_visible_workspaces(sink: Any, client_id: str) -> Optional[List[str]]:
     fn = getattr(sink, "visible_workspace_paths", None)
     if fn is None:
         return None
-    return fn(client_id)
+    paths = fn(client_id)
+    # Only positive evidence is a boundary: a list of paths.  Anything else a
+    # sink hands back -- ``None``, a test double's auto-attribute, an object
+    # that is not a sequence of strings -- is read as "no scoping", never as
+    # an empty boundary that would hide every session.
+    if not isinstance(paths, (list, tuple)):
+        return None
+    if not all(isinstance(p, str) for p in paths):
+        return None
+    return list(paths)
 
 
 def client_peer(sink: Any, client_id: str) -> Optional["PeerCredentials"]:
