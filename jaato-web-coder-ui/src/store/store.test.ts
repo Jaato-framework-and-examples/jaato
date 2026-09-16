@@ -304,3 +304,69 @@ describe("reduce — post-auth setup offer", () => {
     expect(useJaato.getState().postAuth).toBeNull();
   });
 });
+
+describe("reduce — workspace verbs", () => {
+  const LIST = [{ name: "a", configured: false }, { name: "b", configured: true, provider: "anthropic", model: "m" }];
+  it("workspace.created appends the row the daemon sent, and a reply naming nothing adds no row", () => {
+    // The daemon repeats name/path beside the whole row; an older daemon
+    // sent a dict its own model dropped, so the event arrived nameless and
+    // the table gained an unnamed entry a click then selected as "".
+    const d = useJaato.getState().dispatch;
+    d([ev({ type: "workspace.list_response", root: "/srv/ws", workspaces: LIST })]);
+    d([ev({ type: "workspace.created", name: "c", path: "/srv/ws/c", workspace: { name: "c", path: "/srv/ws/c", configured: false, owner: "app:me", last_accessed: "2026-09-16T10:00:00Z" } })]);
+    expect(useJaato.getState().workspace.list.map((w) => w.name)).toEqual(["a", "b", "c"]);
+    expect(useJaato.getState().workspace.list[2]).toMatchObject({ owner: "app:me", path: "/srv/ws/c", configured: false });
+    d([ev({ type: "workspace.created", name: "", path: "" })]);
+    expect(useJaato.getState().workspace.list.map((w) => w.name)).toEqual(["a", "b", "c"]);
+    expect(useJaato.getState().workspace.root).toBe("/srv/ws");
+  });
+  it("config.updated is merged over the status held: the saved provider is configured, the provider list survives", () => {
+    // ``config.updated`` carries what was written and no status field; read
+    // as a status it emptied the dropdown and reported the provider it had
+    // just saved as missing.
+    const d = useJaato.getState().dispatch;
+    d([ev({ type: "workspace.list_response", workspaces: LIST })]);
+    d([ev({ type: "config.status", workspace: "a", configured: false, provider: null, model: null, available_providers: ["anthropic", "zhipuai"], missing_fields: ["provider", "model"] })]);
+    d([ev({ type: "config.updated", workspace: "a", provider: "zhipuai", model: "glm-5.2", success: true })]);
+    const s = useJaato.getState();
+    expect(s.workspace.config).toEqual({ workspace: "a", configured: true, provider: "zhipuai", model: "glm-5.2", availableProviders: ["anthropic", "zhipuai"], missingFields: [] });
+    expect(s.workspace.list[0]).toMatchObject({ name: "a", configured: true, provider: "zhipuai", model: "glm-5.2" });
+    d([ev({ type: "config.updated", workspace: "a", provider: "zhipuai", model: null, success: true })]);
+    expect(useJaato.getState().workspace.config?.missingFields).toEqual(["model"]);
+  });
+  it("a refused config.updated leaves the status alone and reports the reason", () => {
+    const d = useJaato.getState().dispatch;
+    d([ev({ type: "config.status", workspace: "a", configured: false, available_providers: ["anthropic"], missing_fields: ["provider"] })]);
+    d([ev({ type: "config.updated", workspace: "a", provider: "nope", success: false, error: "Unknown provider 'nope'" })]);
+    const s = useJaato.getState();
+    expect(s.workspace.config?.configured).toBe(false);
+    expect(s.workspace.config?.availableProviders).toEqual(["anthropic"]);
+    expect(s.workspace.notice).toEqual({ text: "Unknown provider 'nope'", error: true });
+  });
+});
+
+describe("reduce — the daemon's prompt echo", () => {
+  it("confirms the bubble the composer drew instead of drawing the prompt again as agent text", () => {
+    // The daemon echoes every prompt as agent.output with source "user";
+    // rendered as a text block it showed each prompt twice, the second
+    // time under a "USER" header.
+    useJaato.getState().addUserBlock(MAIN_AGENT, "hola");
+    useJaato.getState().dispatch([ev({ type: "agent.output", agent_id: MAIN_AGENT, source: "user", text: "hola", mode: "write" })]);
+    const blocks = useJaato.getState().blocks[MAIN_AGENT]!;
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]).toMatchObject({ kind: "user", text: "hola", echoed: true });
+    // A second echo of the same text is a new prompt (someone sent it again), not this one's.
+    useJaato.getState().dispatch([ev({ type: "agent.output", agent_id: MAIN_AGENT, source: "user", text: "hola", mode: "write" })]);
+    expect(useJaato.getState().blocks[MAIN_AGENT]!.filter((b) => b.kind === "user")).toHaveLength(2);
+  });
+  it("an echo with no local bubble -- a replay after attach -- becomes a user bubble, never a text block", () => {
+    useJaato.getState().dispatch([
+      ev({ type: "agent.output", agent_id: MAIN_AGENT, source: "user", text: "first", mode: "write" }),
+      ev({ type: "agent.output", agent_id: MAIN_AGENT, source: "model", text: "answer", mode: "write" }),
+      ev({ type: "agent.output", agent_id: MAIN_AGENT, source: "user", text: "second", mode: "write" }),
+    ]);
+    const blocks = useJaato.getState().blocks[MAIN_AGENT]!;
+    expect(blocks.map((b) => b.kind)).toEqual(["user", "text", "user"]);
+    expect(blocks.some((b) => b.kind === "text" && b.source === "user")).toBe(false);
+  });
+});

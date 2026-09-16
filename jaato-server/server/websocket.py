@@ -2913,6 +2913,7 @@ class JaatoWSServer:
         await self._send_to_client(
             client_id,
             WorkspaceListEvent(
+                root=str(self._workspace_manager.workspace_root),
                 workspaces=[ws.to_dict() for ws in workspaces],
             )
         )
@@ -2926,9 +2927,16 @@ class JaatoWSServer:
         try:
             ws_info = self._workspace_manager.create_workspace(
                 name, owner=self.get_client_user(client_id))
+            # name/path are the event's declared identity fields; the dict is
+            # the whole row.  Sending the dict ALONE reached clients as an
+            # event with no name (the model dropped the undeclared key).
             await self._send_to_client(
                 client_id,
-                WorkspaceCreatedEvent(workspace=ws_info.to_dict())
+                WorkspaceCreatedEvent(
+                    name=ws_info.name,
+                    path=ws_info.path,
+                    workspace=ws_info.to_dict(),
+                )
             )
         except ValueError as e:
             await self._send_error(client_id, str(e))

@@ -4923,6 +4923,48 @@ test says so. Fonts are self-hosted from `@fontsource/barlow` and
 `@fontsource/barlow-condensed` (latin subsets in the bundle, ~180 KB of
 woff2), so a deployment behind a corporate proxy needs no font CDN.
 
+### Three Rows the Web Client Drew That Nobody Sent
+
+Reported from a live daemon in one evening: every `workspace.create` added
+a row named after the workspace ROOT's own directory (`workspaces`) that
+`select` and `delete` then refused; saving a provider left the configure
+form saying `missing: provider` over an empty dropdown; and every prompt
+appeared twice, the second time as agent output under a `USER` header.
+Three defects of the shape this file already names — **the mock spoke the
+client's vocabulary, not the daemon's** — and one daemon defect the first
+of them exposed.
+
+| Wire | The daemon sends | The client read |
+|---|---|---|
+| `workspace.created` | `WorkspaceCreatedEvent(workspace=...)` — a field the SDK model **did not declare**, dropped on ingest by `extra='ignore'`, so the event arrived as `{name: "", path: ""}` | a row named `""`; clicking it selected `""` |
+| `config.updated` | `workspace`, `provider`, `model`, `success` — what was WRITTEN, no status field | as a `config.status`: `configured=false`, an empty `available_providers`, and `missing: provider` for the provider it had just saved |
+| `agent.output` | every prompt echoed with `source: "user"` (on send, and again on a replay to an attaching client) | a text block, rendered as agent output |
+
+`WorkspaceCreatedEvent` now carries `workspace` (the row, as the list
+renders it) beside `name` / `path`; `WorkspaceListEvent.root` is finally
+sent. The store merges `config.updated` over the status it holds and
+updates the table row; and a `user`- (or `parent`-) sourced output line is
+the user's turn — it confirms the bubble the composer already drew when
+the texts match, and becomes a user bubble of its own otherwise (a replay
+after attach). The mock now emits all three in the daemon's shape.
+
+**And the root is not a workspace.** Selecting `""` reached
+`_resolve_under_root("")`, which is the root itself, and `_is_under_root`
+accepted it (`path == root or ...`). `_analyze_workspace` named the root by
+its basename, the cache held it under the key `""`, and the registry got a
+row nothing could act on — recreated on every click, which is why the
+stale-row prune one section up did not catch it (the root IS a directory).
+`_is_under_root` is strictly beneath now, so an empty name, `.` and
+`mine/..` are refused as `WorkspaceContainmentError` wherever a NAME is
+resolved — `select`, `delete`, `get_config_status`, and the registry-path
+branch of `get_workspace_path`. The naming rule `create` always applied
+(`_check_name`: one flat component) binds `select` and `delete` too, and a
+verb that resolved a name passes it to `_analyze_workspace`, so the cache
+key and `WorkspaceInfo.name` cannot disagree for a symlinked entry either.
+Containment is still checked first, so a traversal is refused as one and
+before existence. Tests:
+`server/tests/test_workspace_root_is_not_a_workspace.py`.
+
 ### A Key the Web Files Panel Did Not Have
 
 The TUI's workspace panel (Ctrl+W) binds two keys to the entry under the

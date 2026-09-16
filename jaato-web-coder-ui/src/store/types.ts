@@ -31,6 +31,15 @@ export interface UserBlock {
   kind: "user";
   agentId: string;
   text: string;
+  /**
+   * The daemon has echoed this prompt back (``agent.output`` with
+   * ``source: "user"``).  The composer adds the bubble locally when the
+   * message is sent; the daemon then echoes it to every attached client,
+   * and the echo matches the pending local bubble instead of being drawn
+   * a second time.  A block created FROM an echo (a replay after attach,
+   * another client's prompt) starts echoed.
+   */
+  echoed?: boolean;
 }
 
 /** Client-side notices (connection, command results, help). */

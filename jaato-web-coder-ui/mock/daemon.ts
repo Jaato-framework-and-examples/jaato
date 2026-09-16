@@ -105,6 +105,9 @@ And a comparison:
 
 async function turn(c: Client, text: string, agentId = "main"): Promise<void> {
   const lower = text.toLowerCase();
+  // The daemon echoes the prompt to every attached client before the model
+  // speaks -- the same ``agent.output`` shape, with source ``user``.
+  send(c, { type: "agent.output", agent_id: agentId, source: "user", text, mode: "write" });
   send(c, { type: "agent.status_changed", agent_id: agentId, status: "processing" });
   await sleep(50);
 
@@ -226,7 +229,8 @@ wss.on("connection", (ws, req) => {
         send(c, { type: "config.status", workspace: String(ev.name), configured: ev.name === "project-a", provider: ev.name === "project-a" ? "anthropic" : null, model: ev.name === "project-a" ? "claude-sonnet-4" : null, available_providers: ["anthropic", "google_genai", "openrouter"], missing_fields: ev.name === "project-a" ? [] : ["provider", "api_key"] });
         break;
       case "workspace.create":
-        send(c, { type: "workspace.created", workspace: { name: String(ev.name), configured: false, owner: "mock:tester" } });
+        // The daemon's shape: name/path beside the whole row.
+        send(c, { type: "workspace.created", name: String(ev.name), path: `/srv/workspaces/${String(ev.name)}`, workspace: { name: String(ev.name), path: `/srv/workspaces/${String(ev.name)}`, configured: false, owner: "mock:tester", last_accessed: ts() } });
         break;
       case "workspace.delete":
         // The daemon refuses a workspace with loaded sessions; project-a has one.
@@ -234,7 +238,9 @@ wss.on("connection", (ws, req) => {
         else send(c, { type: "workspace.deleted", name: String(ev.name), ok: true });
         break;
       case "config.update":
-        send(c, { type: "config.updated", workspace: "project-b", configured: true, provider: ev.provider, model: ev.model, available_providers: [], missing_fields: [] });
+        // The daemon's ``ConfigUpdatedEvent`` carries what was written and
+        // no status field; the UI derives the status from it.
+        send(c, { type: "config.updated", workspace: "project-b", provider: ev.provider, model: ev.model ?? null, success: true });
         break;
       case "command.execute": {
         const cmd = String(ev.command);

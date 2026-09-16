@@ -1852,10 +1852,20 @@ class WorkspaceDeletedEvent(Event):
 
 
 class WorkspaceCreatedEvent(Event):
-    """Response to workspace.create - new workspace created."""
+    """Response to workspace.create - new workspace created.
+
+    ``workspace`` is the created entry as ``workspace.list`` would render it
+    (name, path, ``configured``, ``owner``, ``last_accessed``), so a client
+    can add the row without a second listing.  ``name`` and ``path`` repeat
+    its two identifying fields for readers predating the dict.  The WS
+    server used to send ONLY ``workspace=`` -- a field this model did not
+    declare, dropped on ingest by ``extra='ignore'`` -- so every client
+    learned of a created workspace as one with no name.
+    """
     type: EventType = Field(default=EventType.WORKSPACE_CREATED)
     name: str = ""  # Relative path from workspace root
     path: str = ""  # Absolute path
+    workspace: Dict[str, Any] = Field(default_factory=dict)  # WorkspaceInfo as a dict
 
 
 class ConfigStatusEvent(Event):

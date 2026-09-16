@@ -16,6 +16,7 @@ import { summarizeToolCalls } from "@/protocol/turnStats";
 import { formatSessionList, normalizeSessionList, type SessionSummary } from "@/protocol/sessions";
 import { formatHistoryListing, historyBlocks } from "@/protocol/history";
 import type {
+  UserBlock,
   Agent,
   ConfigStatus,
   ConnectionPhase,
@@ -316,6 +317,26 @@ export function reduce(s: JaatoState, raw: JaatoEvent): JaatoState {
       const source = String(ev.source ?? "model");
       const list = [...(s.blocks[agentId] ?? [])];
       const last = list[list.length - 1];
+      if (source === "user" || source === "parent") {
+        // The daemon echoes every prompt as output with source ``user`` --
+        // on send, and again when a conversation is replayed to a client
+        // that attached; ``parent`` is the same thing for a subagent, whose
+        // prompt came from its parent.  It is the user's turn, not the agent's: it
+        // confirms the bubble the composer already drew when the texts
+        // match, and otherwise becomes a user bubble of its own.  Rendered
+        // as agent text it showed each prompt twice, once under "USER".
+        if (ev.mode === "append" && last && last.kind === "user" && last.echoed) {
+          list[list.length - 1] = { ...last, text: last.text + text };
+        } else {
+          let i = list.length - 1;
+          while (i >= 0 && list[i]!.kind !== "user") i -= 1;
+          const pending = i >= 0 ? (list[i] as UserBlock) : undefined;
+          if (pending && !pending.echoed && pending.text === text) list[i] = { ...pending, echoed: true };
+          else list.push({ id: nextId(), kind: "user", agentId, text, echoed: true });
+        }
+        setBlocks(s, agentId, list);
+        break;
+      }
       if (ev.mode === "append" && last && last.kind === "text" && last.source === source) {
         list[list.length - 1] = { ...last, text: last.text + text };
       } else {
@@ -698,8 +719,15 @@ export function reduce(s: JaatoState, raw: JaatoEvent): JaatoState {
       s.workspace = { ...s.workspace, mode: "enabled", root: ev.root as string | undefined, list: ((ev.workspaces as WorkspaceInfo[] | undefined) ?? []).map((w) => ({ ...w, name: String(w.name ?? ""), configured: w.configured === true })) };
       break;
     case EventTypeValue.WORKSPACE_CREATED: {
-      const w = (ev.workspace as WorkspaceInfo | undefined) ?? { name: String(ev.name ?? ""), configured: false };
-      s.workspace = { ...s.workspace, list: [...s.workspace.list.filter((x) => x.name !== w.name), { ...w, configured: w.configured === true }] };
+      // The daemon answers with the row as ``workspace`` and repeats its
+      // name/path beside it.  A reply naming nothing is not a row: an older
+      // daemon dropped the dict, and appending ``{name: ""}`` put an unnamed
+      // entry in the table that a click then turned into a select of "".
+      const raw = (ev.workspace as Partial<WorkspaceInfo> | undefined) ?? {};
+      const name = String(raw.name ?? ev.name ?? "");
+      if (!name) break;
+      const w: WorkspaceInfo = { ...raw, name, path: raw.path ?? (ev.path as string | undefined) ?? null, configured: raw.configured === true };
+      s.workspace = { ...s.workspace, list: [...s.workspace.list.filter((x) => x.name !== name), w] };
       break;
     }
     case EventTypeValue.WORKSPACE_DELETED: {
@@ -717,8 +745,37 @@ export function reduce(s: JaatoState, raw: JaatoEvent): JaatoState {
       };
       break;
     }
-    case EventTypeValue.CONFIG_STATUS:
     case EventTypeValue.CONFIG_UPDATED: {
+      // ``config.updated`` says what was WRITTEN -- workspace, provider,
+      // model, success -- and carries none of the status fields.  Read as a
+      // ``config.status`` it emptied the provider list and reported the
+      // provider it had just saved as missing.  So it is merged over the
+      // status held, and the table row follows.
+      const name = String(ev.workspace ?? s.workspace.selected ?? "");
+      if (ev.success === false) {
+        s.workspace = { ...s.workspace, notice: { text: String(ev.error || `Could not save the configuration of ${name}`), error: true } };
+        break;
+      }
+      const provider = (ev.provider as string | null | undefined) || null;
+      const model = (ev.model as string | null | undefined) || null;
+      const prev = s.workspace.config;
+      const cfg: ConfigStatus = {
+        workspace: name,
+        configured: provider !== null,
+        provider,
+        model,
+        availableProviders: prev?.availableProviders ?? [],
+        missingFields: [...(provider ? [] : ["provider"]), ...(model ? [] : ["model"])],
+      };
+      s.workspace = {
+        ...s.workspace,
+        config: cfg,
+        selected: name || s.workspace.selected,
+        list: s.workspace.list.map((w) => (w.name === name ? { ...w, configured: cfg.configured, provider, model } : w)),
+      };
+      break;
+    }
+    case EventTypeValue.CONFIG_STATUS: {
       const cfg: ConfigStatus = {
         workspace: String(ev.workspace ?? s.workspace.selected ?? ""),
         configured: ev.configured === true,
