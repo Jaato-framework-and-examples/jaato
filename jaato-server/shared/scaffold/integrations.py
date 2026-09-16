@@ -40,7 +40,7 @@ import hashlib
 import json
 import shutil
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 STAMP = ".jaato-integration"
 """Filename of the provenance stamp written beside an installed integration.
@@ -112,17 +112,157 @@ def payload_dir(name: str) -> Path:
     return _source_root() / name / "payload"
 
 
+class IntegrationManifestError(ValueError):
+    """An integration's ``integration.json`` cannot be acted on.
+
+    Raised rather than defaulted.  The previous code resolved a missing
+    ``target`` to ``.jaato-integration-<name>`` and said the caller would
+    report it; no caller did, and the string appeared exactly once in the
+    tree — at the site that built it.  So a manifest that forgot the key
+    installed a real payload to a plausible-looking wrong path, silently.
+    """
+
+
+def resolve_targets(name: str) -> Tuple[str, str]:
+    """``(user_target, workspace_target)`` as declared by ``name``.
+
+    ``target`` is a string when a harness uses one relative path at both
+    scopes, or ``{"user": ..., "workspace": ...}`` when they differ::
+
+        "target": ".claude/skills/jaato-sdk"
+
+        "target": {"user":      ".pi/agent/skills/jaato-sdk",
+                   "workspace": ".pi/skills/jaato-sdk"}
+
+    ONE key with two self-describing forms, rather than a ``target`` key
+    plus ``user_target``/``workspace_target`` companions: with three keys a
+    reader has to know which are alternatives and which are siblings, every
+    row of ``listing()`` carries two nulls, and an author who declares one
+    scope and forgets the other gets a silently wrong path for the missing
+    one instead of an error.
+
+    Raises `IntegrationManifestError` for anything it cannot act on — a
+    missing ``target``, an object missing a scope, a non-string path, or an
+    absolute one (targets are joined onto `$HOME` or the workspace, so an
+    absolute path would escape the scope it was asked for).
+    """
+    target = manifest(name).get("target")
+    if target is None:
+        raise IntegrationManifestError(
+            f"integration '{name}' declares no 'target' in integration.json")
+
+    if isinstance(target, str):
+        pair = (target, target)
+    elif isinstance(target, dict):
+        missing = [k for k in ("user", "workspace") if not target.get(k)]
+        if missing:
+            raise IntegrationManifestError(
+                f"integration '{name}' declares target.{' and target.'.join(missing)}"
+                f" nowhere; an object target must name both scopes")
+        pair = (target["user"], target["workspace"])
+    else:
+        raise IntegrationManifestError(
+            f"integration '{name}' declares a target of type "
+            f"{type(target).__name__}; expected a string or "
+            f"{{'user': ..., 'workspace': ...}}")
+
+    for scope, value in zip(("user", "workspace"), pair):
+        if not isinstance(value, str):
+            raise IntegrationManifestError(
+                f"integration '{name}' declares a non-string {scope} target")
+        if Path(value).is_absolute():
+            raise IntegrationManifestError(
+                f"integration '{name}' declares an absolute {scope} target "
+                f"({value!r}); targets are relative to $HOME or the workspace")
+    return pair
+
+
 def target_dir(name: str, *, user: bool, workspace: Optional[str]) -> Path:
     """Where ``name`` installs, per its own manifest.
 
-    Relative to `$HOME` for user scope, to the workspace otherwise.  An
-    integration with no declared target is a packaging error rather than
-    something to guess at, so it resolves under its own name and the caller
-    reports it.
+    Relative to `$HOME` for user scope, to the workspace otherwise.  Raises
+    `IntegrationManifestError` when the manifest cannot say — see
+    `resolve_targets`.
     """
     base = Path.home() if user else Path(workspace or ".").resolve()
-    target = manifest(name).get("target") or f".jaato-integration-{name}"
-    return base / target
+    user_target, workspace_target = resolve_targets(name)
+    return base / (user_target if user else workspace_target)
+
+
+def harness_present(name: str) -> Optional[bool]:
+    """Is the tool ``name`` integrates WITH actually on this machine?
+
+    ``None`` means the manifest declares no ``detect`` and we therefore do
+    not know — which is NOT ``False``.  Only an author who is certain
+    declares it, so a caller may act on ``False`` and must not act on
+    ``None``; an integration that says nothing behaves exactly as it did
+    before this key existed.
+
+    ``detect`` is a fact about the OTHER tool, so only its author can write
+    it::
+
+        "detect": {"commands": ["claude"],
+                   "paths": ["~/.claude/projects"],
+                   "why": "Claude Code writes ~/.claude/projects on first
+                           run; jaato never creates it."}
+
+    The trap, and why ``why`` is part of the contract: a path that is an
+    ANCESTOR of this integration's own target is created by our installer,
+    so it answers "the harness is here" on a machine that has never had it.
+    Measured: on a host with neither harness, installing only our skills
+    brings ``~/.claude``, ``~/.claude/skills``, ``~/.pi`` and ``~/.pi/agent``
+    into existence.  `manifest_detect_problems` refuses that shape; nothing
+    can check whether a path is *truly* harness-owned, which is what the
+    author is asserting and a reviewer reads ``why`` to judge.
+
+    ``commands`` cannot be contaminated that way — we never put a binary on
+    ``PATH`` — but it is not absolute either: a harness installed outside
+    this process's ``PATH`` reads as absent.  That direction loses a nudge
+    rather than inventing noise, which is the safer way to be wrong.
+    """
+    detect = manifest(name).get("detect")
+    if not isinstance(detect, dict):
+        return None
+    paths = detect.get("paths") or []
+    commands = detect.get("commands") or []
+    if not paths and not commands:
+        return None
+    if any(Path(p).expanduser().exists() for p in paths if isinstance(p, str)):
+        return True
+    return any(shutil.which(c) for c in commands if isinstance(c, str))
+
+
+def manifest_detect_problems(name: str) -> List[str]:
+    """Why ``name``'s ``detect`` block cannot mean what it says, if so.
+
+    The one error in a `detect` that is mechanically checkable: a path our
+    own installer creates cannot be evidence of the harness.  Everything
+    else about a detect signal rests on the author's knowledge of their own
+    tool and is reviewed by reading ``why``, not by running code.
+    """
+    detect = manifest(name).get("detect")
+    if not isinstance(detect, dict):
+        return []
+    try:
+        targets = resolve_targets(name)
+    except IntegrationManifestError:
+        return []      # the target itself is broken; that is reported already
+
+    problems = []
+    owned = {Path("~", t).expanduser().resolve() for t in targets}
+    for raw in detect.get("paths") or []:
+        if not isinstance(raw, str):
+            problems.append(f"detect.paths entry is not a string: {raw!r}")
+            continue
+        p = Path(raw).expanduser().resolve()
+        for target in owned:
+            if p == target or p in target.parents:
+                problems.append(
+                    f"detect.paths entry {raw!r} is this integration's own "
+                    f"install location or an ancestor of it, so jaato creates "
+                    f"it — it cannot be evidence that the harness is present")
+                break
+    return problems
 
 
 def read_stamp(installed: Path) -> Dict[str, str]:
@@ -241,12 +381,23 @@ def listing() -> Tuple[Dict[str, Any], str]:
     rows = []
     for name in available():
         m = manifest(name)
+        row = {"name": name, "tool": m.get("tool", name),
+               "summary": m.get("summary", ""), "why": m.get("why", "")}
+        try:
+            user_target, workspace_target = resolve_targets(name)
+        except IntegrationManifestError as exc:
+            # One unusable manifest must not take down the listing: this verb
+            # is how an operator finds out something is wrong.
+            rows.append({**row, "user_target": None, "workspace_target": None,
+                         "user_path": None, "state": "invalid",
+                         "detail": str(exc)})
+            continue
         user = target_dir(name, user=True, workspace=None)
         state, detail = compare(name, user)
-        rows.append({"name": name, "tool": m.get("tool", name),
-                     "summary": m.get("summary", ""), "why": m.get("why", ""),
-                     "target": m.get("target"), "user_path": str(user),
-                     "state": state, "detail": detail})
+        rows.append({**row,
+                     "user_target": user_target,
+                     "workspace_target": workspace_target,
+                     "user_path": str(user), "state": state, "detail": detail})
     data = {"integrations": rows, "framework": framework_version()}
     if not rows:
         return data, "this build ships no integrations"
@@ -254,11 +405,13 @@ def listing() -> Tuple[Dict[str, Any], str]:
     lines = ["integrations — jaato's side of a contract with another tool", ""]
     for r in rows:
         mark = {"current": "✔", "absent": "·", "stale": "!", "outdated": "!",
-                "edited": "~", "diverged": "~", "unstamped": "?"}.get(r["state"], "?")
+                "edited": "~", "diverged": "~", "unstamped": "?",
+                "invalid": "✖"}.get(r["state"], "?")
         lines.append(f"  {mark} {r['name']:14} {r['tool']}")
         if r["summary"]:
             lines.append(f"    {'':14} {r['summary']}")
-        lines.append(f"    {'':14} user scope: {r['user_path']}")
+        if r["user_path"]:
+            lines.append(f"    {'':14} user scope: {r['user_path']}")
         lines.append(f"    {'':14} state: {r['state']}"
                      + (f" — {r['detail']}" if r["detail"] else ""))
         lines.append("")

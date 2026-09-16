@@ -382,8 +382,30 @@ def check_integrations() -> List[Check]:
 
     out: List[Check] = []
     for name in names:
-        user = _install.target_dir(name, user=True, workspace=None)
+        try:
+            user = _install.target_dir(name, user=True, workspace=None)
+        except Exception as exc:      # noqa: BLE001 — an unusable manifest
+            out.append(Check(f"integration ({name})", WARN,
+                             f"cannot check: {exc}"))
+            continue
         state, detail = _install.compare(name, user)
+        if state == "absent" and _install.harness_present(name) is False:
+            # This build ships an integration for a tool that is not on this
+            # machine, and its author declared how to know that for certain.
+            # Warning here is noise nobody can clear: the only way to satisfy
+            # it is to install a skill for a harness you do not use, and it
+            # grows with every integration added.
+            #
+            # `is False` on purpose.  `None` means the manifest declares no
+            # `detect`, which is NOT evidence of absence — those still warn,
+            # exactly as before this branch existed.
+            #
+            # Gated on `absent` on purpose too.  Detection is a heuristic, so
+            # the most it may ever do is withhold an optional suggestion; a
+            # copy that EXISTS is reported whatever detection says, which is
+            # what keeps stale/edited/diverged drift visible on a machine
+            # where the harness has since been removed.
+            continue
         if state == "current":
             out.append(Check(f"integration ({name})", PASS,
                              f"{user} — from jaato-server {detail}"))
