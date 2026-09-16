@@ -93,6 +93,26 @@ curl -s https://pypi.org/pypi/jaato-server/0.14.0/json | \
     print(d["info"]["description"].split("\n---\n")[0])'
 ```
 
+## A cancelled run published nothing
+
+`jaato-server`'s workflow gates the upload on a `test` job, and that job has a
+`timeout-minutes`.  When it expires GitHub records the job — and the run — as
+**cancelled**, not failed, and `build-and-publish` is *skipped*.  So a release
+that nobody cancelled can sit there reading as though somebody did, with the
+index unchanged and no failed step to notice.  Two `0.15.0` attempts were lost
+that way before the budget was raised.
+
+Check the step, not the conclusion:
+
+```bash
+gh run view <run-id> --json jobs \
+  -q '.jobs[] | "\(.name) \(.conclusion)  " + ([.steps[] | "\(.name)=\(.conclusion)"] | join(" "))'
+```
+
+`Run tests=cancelled` at exactly the job's timeout is an overrun; re-dispatch
+after raising it, since re-running the same commit will spend the same time.
+The version is still free — nothing was uploaded.
+
 ## A version can be uploaded to an index once, ever
 
 Deleting a release does not free its version number. The two indexes are
@@ -162,6 +182,21 @@ git tag jaato-server-0.15.0 <the published sha> && git push origin jaato-server-
 
 With no tag for a package, the script falls back to walking `pyproject.toml`
 history for the previous version-set point, exactly as it did before.
+
+**A tag only anchors while it is reachable from `main`.** `build_readme.py`
+asks for `git tag --list --merged HEAD`, so a tag on a commit that never
+reached `main` is invisible to the next release and the script falls back to
+the tag before it — re-listing everything the unreachable one already shipped.
+Publishing from a release branch is legitimate (both `0.15.0` attempts did it),
+but the branch then has to land:
+
+```bash
+git merge-base --is-ancestor "$(git rev-list -n1 jaato-server-0.15.0)" origin/main \
+  && echo reachable || echo "NOT on main — the next changelog will repeat this release"
+```
+
+`jaato-server-0.15.0` was tagged at `9bedb5c8` on the publish branch, and until
+that branch merged, `0.16.0`'s changelog measured 33 entries instead of 16.
 
 ## Trusted publishers
 
