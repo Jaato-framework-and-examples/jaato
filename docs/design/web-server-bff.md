@@ -369,10 +369,18 @@ All three workflows **stage** rather than publish: the `@jaato` token is
 a "Read and write (stage only)" granular token, because npm is retiring
 direct publish by token in January 2027, and `npm stage publish` uploads
 the version non-public until a maintainer with 2FA approves it (`npm stage
-approve <stage-id> --otp <code>`, or on npmjs.com). A staged version does
+approve <stage-id>`, or on npmjs.com). A staged version does
 not answer the "is it on npm" probe, so the order above now includes the
 approvals: stage the SDK, approve, stage the UI, approve, stage the server,
 approve.
+
+One exception, measured on the UI's first run: npm refuses to stage a
+package it has never seen (`404 Not Found - POST /-/stage/package/<name>`).
+The **first** version of each new package is therefore published directly
+by a maintainer with 2FA from a checkout at the release commit (each
+package's README has the exact commands), and the workflows refuse by name
+while the registry does not know the package. From the second version on,
+everything stages.
 
 **The guard checks that a version exists, not what it contains.** A sibling
 whose source changed since its last publish must have its version bumped

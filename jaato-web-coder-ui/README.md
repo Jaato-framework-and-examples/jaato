@@ -135,9 +135,24 @@ Publishing is manual: the *Publish @jaato/web-coder-ui to npm* workflow
 (`.github/workflows/publish-npm-web-coder-ui.yml`) runs the same gates as CI,
 refuses a version already on the registry, builds, and **stages** the version
 with the `@jaato` org's stage-only token; a maintainer with 2FA promotes it
-(`npm stage list @jaato/web-coder-ui`, then `npm stage approve <stage-id>
---otp <code>`). It needs `@jaato/sdk` published first only at build time, from
+(`npm stage list @jaato/web-coder-ui`, then `npm stage approve <stage-id>`;
+the 2FA step opens the browser for a passkey, or takes `--otp <code>`). It needs `@jaato/sdk` published first only at build time, from
 the sibling checkout. Bump `version` in `package.json` first.
+
+npm cannot stage a package it has never seen (`404` on the stage endpoint,
+measured on this package's first run), so the **first** version was published
+directly by a maintainer with 2FA from a checkout at the release commit:
+
+```bash
+cd jaato-web-coder-ui
+npm --prefix ../jaato-sdk-ts ci && npm ci
+npm run build                                # builds the SDK, type-checks, vite build
+npm publish --access public     # after `npm login`; the 2FA step opens
+                                #   the browser (passkey) or asks for a code
+```
+
+The workflow refuses by name while the package is unknown to the registry;
+every later version stages.
 
 Set `PLAYWRIGHT_CHROMIUM=/path/to/chrome` to use a pre-installed browser
 instead of Playwright's download.

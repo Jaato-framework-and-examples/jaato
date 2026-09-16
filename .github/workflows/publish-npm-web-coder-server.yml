@@ -89,6 +89,24 @@ jobs:
           if [ "$status" != "404" ]; then echo "::error::Unexpected status ${status} from registry — refusing to publish"; exit 1; fi
           echo "Version ${version} is available"
 
+      - name: Check @jaato/web-coder-server exists on npm (a first version cannot be staged)
+        # `npm stage publish` is refused for a name the registry has never
+        # seen — measured on this package's first run: `404 Not Found -
+        # POST /-/stage/package/<name>`.  So a brand-new package's FIRST
+        # version has to be published directly by a maintainer with 2FA,
+        # from a checkout at this commit; every later version stages.
+        run: |
+          status=$(curl -s -o /dev/null -w '%{http_code}' "https://registry.npmjs.org/@jaato/web-coder-server")
+          if [ "$status" = "404" ]; then
+            echo "::error::@jaato/web-coder-server has never been published, and npm cannot STAGE a first version. Publish it directly ONCE as a maintainer with 2FA, from a checkout at this commit: cd jaato-web-coder-server && npm --prefix ../jaato-sdk-ts ci && npm --prefix ../jaato-sdk-ts run build && npm --prefix ../jaato-web-coder-ui ci && npm ci && npm run build && node scripts/prepare-publish.mjs && npm publish --access public. Later versions stage."
+            exit 1
+          fi
+          if [ "$status" != "200" ]; then
+            echo "::error::Unexpected status ${status} from registry for @jaato/web-coder-server — refusing to continue"
+            exit 1
+          fi
+          echo "@jaato/web-coder-server exists on npm; staging a new version is possible"
+
       - name: Verify NPM_TOKEN is accepted by the registry
         # npm answers an unauthorised PUT on a scoped package with a bare
         # 404 ("'@jaato/x@y' is not in this registry"), so an expired,
@@ -149,6 +167,6 @@ jobs:
         run: |
           npm stage publish --access public
           version="${{ steps.version.outputs.version }}"
-          echo "::notice::@jaato/web-coder-server@${version} is STAGED, not live. Promote it with 2FA: npm stage list @jaato/web-coder-server  then  npm stage approve <stage-id> --otp <code>  (or reject it with npm stage reject <stage-id>)."
+          echo "::notice::@jaato/web-coder-server@${version} is STAGED, not live. Promote it with 2FA: npm stage list @jaato/web-coder-server  then  npm stage approve <stage-id>  (or reject it with npm stage reject <stage-id>)."
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
