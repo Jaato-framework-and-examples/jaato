@@ -42,6 +42,7 @@ import {
   type SendMessageRequest,
   type StopRequest,
   type PermissionResponseRequest,
+  type PostAuthSetupResponse,
   type ClarificationResponseRequest,
   type ClarificationBatchResponseEvent,
   type ReferenceSelectionResponseRequest,
@@ -546,6 +547,28 @@ export class JaatoClient {
       response,
       edited_arguments: editedArguments ?? null,
     } as PermissionResponseRequest);
+  }
+
+  /**
+   * Answer the daemon's post-auth setup offer (``auth.setup``).
+   *
+   * After a daemon-level auth command succeeds with no session open
+   * (``anthropic-auth login`` and friends), the daemon offers to create
+   * one: pick a model, optionally persist ``JAATO_PROVIDER`` /
+   * ``MODEL_NAME`` to the workspace ``.env``.  ``connect: false``
+   * declines.  Mirrors the Python SDK's ``respond_to_post_auth_setup``.
+   */
+  async respondToPostAuthSetup(
+    requestId: string,
+    options: { connect: boolean; modelName?: string; persistEnv?: boolean },
+  ): Promise<void> {
+    await this._sendEvent({
+      type: EventTypeValue.POST_AUTH_SETUP_RESPONSE,
+      request_id: requestId,
+      connect: options.connect,
+      model_name: options.modelName ?? "",
+      persist_env: options.persistEnv ?? false,
+    } as PostAuthSetupResponse);
   }
 
   async respondToClarification(
