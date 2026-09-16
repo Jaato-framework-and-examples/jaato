@@ -619,6 +619,28 @@ def _apply_envelope_session_env(envelope: SessionInitEnvelope) -> Dict[str, str]
     # The snapshot is taken ONCE, before the first session's env is applied,
     # so it is the slot's pristine inherited environment -- not session A's.
     # Taking it per-session would snapshot A's leak and faithfully restore it.
+    return apply_session_env(envelope.session_env)
+
+
+def apply_session_env(session_env: Optional[Dict[str, str]]) -> Dict[str, str]:
+    """Restore the slot's pristine environment, then lay *session_env* over it.
+
+    The one writer of the runner's session-scoped environment, shared by
+    bootstrap (:func:`_apply_envelope_session_env`) and by the
+    ``session.reload_env`` RPC, so the two cannot disagree about what a
+    re-application means: it is a REPLACEMENT of the previous session env,
+    never a merge onto it.  A key the previous dict set and the new one
+    does not is gone afterwards, which is what lets a reload retract a
+    credential as well as supply one.
+
+    Args:
+        session_env: The daemon-resolved dict (workspace ``.env`` + profile
+            ``env:`` + overrides, secret URIs already decoded).  ``None`` or
+            empty restores the pristine environment and applies nothing.
+
+    Returns:
+        A copy of what was applied (empty when nothing was).
+    """
     global _PRISTINE_ENVIRON
     if _PRISTINE_ENVIRON is None:
         _PRISTINE_ENVIRON = dict(os.environ)
@@ -630,9 +652,9 @@ def _apply_envelope_session_env(envelope: SessionInitEnvelope) -> Dict[str, str]
         os.environ.clear()
         os.environ.update(_PRISTINE_ENVIRON)
 
-    if not envelope.session_env:
+    if not session_env:
         return {}
-    applied: Dict[str, str] = dict(envelope.session_env)
+    applied: Dict[str, str] = dict(session_env)
     for key, value in applied.items():
         if value is not None:
             os.environ[key] = value

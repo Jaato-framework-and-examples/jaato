@@ -15,6 +15,7 @@ import { afterEach, beforeEach, describe, test } from "node:test";
 import {
   JaatoClient,
   MIN_ATTACHMENT_RESUME_PROTOCOL,
+  MIN_SESSION_RELOAD_ENV_PROTOCOL,
   MIN_PROTOCOL_VERSION,
 } from "./client.js";
 import {
@@ -611,6 +612,25 @@ describe("JaatoClient session management", () => {
     assert.equal(ev.type, EventTypeValue.COMMAND);
     assert.equal((ev as { command?: string }).command, "session.end");
     assert.deepEqual((ev as { args?: string[] }).args, []);
+  });
+
+  test("reloadSessionEnv sends session.reload_env for the attached session", async () => {
+    await client.close();
+    installMockWebSocket();
+    client = new JaatoClient({ url: "ws://localhost:8080" });
+    await connectAndAck(client, MIN_SESSION_RELOAD_ENV_PROTOCOL);
+    if (lastInstance) lastInstance.sent = [];
+    await client.reloadSessionEnv();
+    const [ev] = getSent();
+    assert.equal((ev as { command?: string }).command, "session.reload_env");
+    assert.deepEqual((ev as { args?: string[] }).args, []);
+    await client.reloadSessionEnv("sess_9");
+    assert.deepEqual((getSent()[1] as { args?: string[] }).args, ["sess_9"]);
+  });
+
+  test("reloadSessionEnv is refused below protocol 1.11", async () => {
+    await assert.rejects(() => client.reloadSessionEnv(), /session\.reload_env/);
+    assert.equal(getSent().length, 0);
   });
 
   test("deleteSession carries the session id as the first arg", async () => {

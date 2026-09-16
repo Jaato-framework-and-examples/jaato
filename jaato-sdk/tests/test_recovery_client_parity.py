@@ -71,6 +71,11 @@ INTENTIONALLY_ABSENT = {
         "METHOD and the inner client raises when the daemon is too old to "
         "carry the bytes -- same reasoning as MIN_ATTACHMENT_RESUME_PROTOCOL "
         "above",
+    "MIN_SESSION_RELOAD_ENV_PROTOCOL":
+        "implementation detail of the INNER IPCClient's session.reload_env "
+        "guard; recovery forwards the METHOD and the inner client raises when "
+        "the daemon is too old to serve the verb -- same reasoning as "
+        "MIN_SESSION_STOP_PROTOCOL above",
 }
 
 

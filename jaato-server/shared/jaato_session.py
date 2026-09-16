@@ -3472,6 +3472,79 @@ class JaatoSession:
             self._provider_lazy_pending = None
             return self._provider
 
+    def reload_provider(self) -> Dict[str, Any]:
+        """Drop the cached provider and build it again from the CURRENT environment.
+
+        The provider resolves its credential once, inside ``initialize()``
+        (config knob, then the process environment, then the stored
+        credential file), and caches the client.  Nothing re-reads any of
+        those after bootstrap, so a key stored with ``<provider>-auth key``
+        or written into the workspace ``.env`` while a session is open never
+        reaches that session: a fresh session would resolve it, the running
+        one keeps whatever it found at startup.  This is the seam
+        ``session.reload_env`` uses after the runner has re-applied the
+        session's environment.
+
+        What it does, in order: refuses while a turn is running (a provider
+        swap under a streaming turn is not safe); under the provider lock,
+        forgets the live provider and the per-provider tier cache and
+        re-arms the lazy-creation config from the binding the session is
+        CURRENTLY on (``_active_provider_name`` / ``_model_name``, so a
+        session that entered a tier reloads that tier's binding, not the
+        initial one); shuts the old provider down best-effort; then creates
+        the new one eagerly through :meth:`_ensure_provider`, so a credential
+        that does not resolve fails HERE, in the reload's answer, rather than
+        on the next turn.
+
+        Returns:
+            ``{"provider": name, "model": name, "auth_info": str}`` --
+            ``auth_info`` is the provider's own account of which credential
+            source won (``"API key from <path>"``, ``"API key (env ...)"``),
+            the line an operator compares against what they just stored.
+
+        Raises:
+            RuntimeError: When a turn is running, or when ``configure()``
+                has not run (nothing to rebuild from).
+        """
+        if self._is_running:
+            raise RuntimeError(
+                "reload_provider: a turn is running; wait for it to finish"
+            )
+        base = self._tier_provider_base
+        if base is None:
+            raise RuntimeError(
+                "reload_provider: session is not configured; nothing to rebuild"
+            )
+        with self._provider_init_lock:
+            old = self._provider
+            self._provider = None
+            self._provider_cache.clear()
+            self._provider_lazy_pending = {
+                'model_name': self._model_name,
+                'provider_name': (
+                    self._active_provider_name or self._provider_name_override
+                ),
+                'skip_model_test': base.get('skip_model_test', True),
+                'plugin_configs': base.get('plugin_configs'),
+            }
+        if old is not None:
+            try:
+                old.shutdown()
+            except Exception as exc:  # noqa: BLE001 -- best-effort teardown
+                logger.debug("reload_provider: old provider shutdown raised: %s", exc)
+        provider = self._ensure_provider()
+        auth_info = ""
+        if provider is not None and hasattr(provider, "get_auth_info"):
+            try:
+                auth_info = provider.get_auth_info() or ""
+            except Exception:  # noqa: BLE001 -- a description, never load-bearing
+                auth_info = ""
+        return {
+            "provider": self._active_provider_name,
+            "model": self._model_name,
+            "auth_info": auth_info,
+        }
+
     def _cache_plugin_config(self) -> Dict[str, Any]:
         """The config dict handed to this session's cache plugin.
 

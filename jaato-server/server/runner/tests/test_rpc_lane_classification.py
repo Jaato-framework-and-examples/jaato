@@ -20,15 +20,26 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from server.runner.rpc import MAIN_THREAD_METHODS, WORK_LANE_METHODS
+from server.runner.rpc import (
+    MAIN_THREAD_METHODS,
+    NAMED_METHOD_HANDLERS,
+    WORK_LANE_METHODS,
+)
 
 _RPC_SOURCE = Path(__file__).resolve().parents[1] / "rpc.py"
 
 
 def _served_methods() -> set[str]:
-    """Every method string the dispatcher branches on."""
+    """Every method string the dispatcher serves.
+
+    Two routes: the flat ``if env.method == ...`` chain, read from the
+    source, and the table-driven tail (``NAMED_METHOD_HANDLERS``), read from
+    the module -- a verb added to the table is served exactly as one added
+    to the chain, and must be classified exactly the same way.
+    """
     text = _RPC_SOURCE.read_text(encoding="utf-8")
-    return set(re.findall(r'env\.method == "([a-z_.]+)"', text))
+    chain = set(re.findall(r'env\.method == "([a-z_.]+)"', text))
+    return chain | set(NAMED_METHOD_HANDLERS)
 
 
 def test_the_dispatcher_serves_something():
@@ -115,6 +126,7 @@ _CONTROL_PLANE = frozenset({
     "session.is_running",
     "session.offer_message",
     "session.register_client_tools",
+    "session.reload_env",
     "session.request_stop",
     "session.reset",
     "session.resolve_fork_point",

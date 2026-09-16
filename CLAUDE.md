@@ -504,6 +504,7 @@ await client.create_session(profile="researcher")
 - `session.orphans` — list LOADED sessions with no client attached
   (→ `SessionListEvent`; see [A Session Nobody Was Watching](#a-session-nobody-was-watching-812))
 - `session.stop <id>` — stop ANY loaded session by id, not just the caller's own
+- `session.reload_env [id]` — re-resolve a LIVE session's `.env` and credentials and rebuild its provider (see [A Credential Stored After the Runner Booted](#a-credential-stored-after-the-runner-booted))
 
 **Flow:** Client sends `session.new --profile researcher` → server discovers profiles from `.jaato/profiles/` → resolves `SubagentProfile` → `JaatoServer` applies profile overrides (model, provider, plugins, plugin_configs, GC) during `initialize()`.
 
@@ -731,6 +732,54 @@ so they already reach the model in its system prompt — and the rendered
 persona is now a persisted artifact. Secrets belong in the profile's `env:`
 as a `pass://` / `vault://` URI, which stays unresolved on disk and is
 resolved daemon-side at spawn.
+
+### A Credential Stored After the Runner Booted
+
+A session's environment is resolved ONCE. `JaatoServer._resolve_session_env`
+reads the workspace `.env`, the profile's `env:` map, the typed `trace:`
+block and the post-auth overrides, decodes secret URIs (the daemon is the
+only process that can exec `pass` / `vault`), and ships the dict on the
+bootstrap envelope; the runner applies it to `os.environ` once, and the
+provider resolves its credential once, in `initialize()`, and caches the
+client. Every one of those is right for a session whose configuration is
+settled, and together they close the door on the one being configured from
+the prompt: `zhipuai-auth key <k>` stores the key in
+`<workspace>/.jaato/zhipuai_auth.json` and the post-auth flow writes
+`JAATO_PROVIDER` / `MODEL_NAME` to the `.env`, both **after** the runner
+booted, so the open session keeps whatever it resolved at startup — a
+daemon-wide variable inherited from the service environment, or nothing —
+and every turn fails on it until a new session is created. Measured on a
+live daemon: `Found Zhipu AI API key (env ZHIPUAI_API_KEY)` on a session
+whose workspace held a valid stored key, 401 on every completion.
+
+**`session.reload_env` is the refresh.** The daemon drops the
+once-only flag, resolves again from the same four sources in the same
+order, and calls the runner's `session.reload_env` with the WHOLE dict; the
+runner runs it through `apply_session_env` — the one writer of the slot's
+session-scoped environment, shared with bootstrap, so a re-application is a
+REPLACEMENT (a key the previous dict set and the new one does not is gone,
+which is what lets a reload retract a credential as well as supply one) —
+and then `JaatoSession.reload_provider()` forgets the live provider and the
+per-provider tier cache, re-arms the lazy-creation config from the binding
+the session is currently on, and creates the new provider eagerly, so a
+credential that does not resolve fails in the reload's answer rather than on
+the next turn.
+
+| Property | Why |
+|---|---|
+| **refused mid-turn, with nothing changed** (`stage="busy"`) | swapping the environment under a streaming provider call is a race; the daemon checks `is_processing` before paying the RPC, the runner checks `is_running` again |
+| **env applied BEFORE the provider rebuild, and left applied when it fails** (`stage="provider"`) | the answer names the provider failure; the next `send_message`'s lazy creation still sees the new environment |
+| **the answer names the credential source** | `auth_info` is the provider's own account (`API key from …/zhipuai_auth.json`), the line an operator compares against what they just stored |
+| **the daemon fires it itself** after `<provider>-auth login\|key` | gated three ways: only those two actions (never `status`), only when the caller has a live session, only when that session runs the plugin's provider |
+
+Precedence is **unchanged**: a provider still resolves config knob, then
+environment, then the stored file, so a daemon-wide `JAATO_<P>_API_KEY` in
+the service environment outranks a workspace's stored key however often it
+is reloaded — the fix for that is removing the variable. Protocol **1.11**;
+both SDKs refuse the verb below it (the 1.7 rule: a missing verb is ignored
+silently, and "reloaded" would be reported about a session still on its
+old credential). `IPCClient.reload_session_env()` / `reloadSessionEnv()`;
+from a prompt, `session reload_env`.
 
 ### Subagent Architecture
 

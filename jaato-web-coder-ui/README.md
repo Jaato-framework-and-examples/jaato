@@ -77,6 +77,11 @@ offer, which the page renders as one card: which model, whether to save
 the provider and model to the workspace `.env`, open the session or not.
 Accepting makes the daemon create the session itself.
 
+A session that is already open resolved its credentials when its runner
+booted. Storing a key afterwards (`zhipuai-auth key …`) refreshes that
+session automatically when it runs the same provider; after editing a
+workspace `.env` by hand, type `session reload_env` to do the same.
+
 On a daemon with `--workspace-root`, the workspace list comes first; picking
 a workspace goes straight to that card whether or not the workspace already
 names a provider. The daemon's manual provider / model / API-key form is one

@@ -2040,6 +2040,59 @@ class IPCClient:
             args=[session_id],
         ))
 
+    #: Protocol floor for :meth:`reload_session_env`.  Same rule as
+    #: :attr:`MIN_SESSION_STOP_PROTOCOL`: a daemon that does not know the verb
+    #: ignores it silently, and "reloaded" would then be reported about a
+    #: session still running on its old credential.
+    MIN_SESSION_RELOAD_ENV_PROTOCOL = "1.11"
+
+    async def reload_session_env(self, session_id: Optional[str] = None) -> None:
+        """Re-read a live session's ``.env`` and credentials and rebuild its provider.
+
+        A session resolves its environment (workspace ``.env``, profile
+        ``env:``, post-auth overrides) and its provider credential ONCE, when
+        its runner boots.  Store a key with ``<provider>-auth key`` or write
+        a ``.env`` line afterwards and the open session keeps what it had --
+        a daemon-wide default, or nothing -- until a new session is created.
+        This verb is the refresh: the daemon re-resolves (decoding secret
+        URIs, which only it can) and the runner re-applies the whole dict
+        and re-creates the provider, so the next turn runs on the credential
+        now on disk.  Refused, with nothing changed, while a turn is running.
+
+        The daemon confirms with a ``SystemMessageEvent`` naming the outcome
+        and the credential source the rebuilt provider resolved
+        (``"API key from .../zhipuai_auth.json"``), which is the line to
+        compare against what you just stored.
+
+        The daemon also runs this by itself after a successful
+        ``<provider>-auth login|key`` when the caller's live session is on
+        that provider; call it explicitly after editing a ``.env`` by hand.
+
+        Args:
+            session_id: The session to reload.  ``None`` means the session
+                this client is attached to.
+
+        Raises:
+            ValueError: Against a daemon below
+                :attr:`MIN_SESSION_RELOAD_ENV_PROTOCOL`, which would ignore
+                the command silently.
+        """
+        if not _protocol_compatible(
+                self.server_protocol_version,
+                self.MIN_SESSION_RELOAD_ENV_PROTOCOL):
+            spoken = self.server_protocol_version or "unknown (not connected)"
+            raise ValueError(
+                f"reload_session_env: this daemon speaks protocol {spoken} and "
+                f"does not serve session.reload_env (needs >= "
+                f"{self.MIN_SESSION_RELOAD_ENV_PROTOCOL}).  It would ignore the "
+                f"command silently, which reads like success.  Upgrade the "
+                f"daemon, or start a new session to pick up the credential."
+            )
+        await self._send_event(CommandRequest(
+            command="session.reload_env",
+            args=[session_id] if session_id else [],
+        ))
+
     async def list_profiles(self) -> None:
         """Request list of available agent profiles.
 

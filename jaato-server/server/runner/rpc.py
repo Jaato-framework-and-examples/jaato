@@ -254,6 +254,19 @@ WORK_LANE_METHODS = frozenset({
 #: "every method is classified" guard can account for it.
 MAIN_THREAD_METHODS = frozenset({"session.bootstrap"})
 
+#: Methods served by :meth:`RunnerRPC._dispatch_named_or_unknown` -- the
+#: table-driven tail of the dispatcher -- mapped to the handler attribute
+#: that takes ``env.args``.  New control-plane verbs go here rather than as
+#: another ``if`` arm in ``_dispatch_method``, which is frozen at its
+#: complexity baseline.  The lane guard reads this table as served methods.
+NAMED_METHOD_HANDLERS: Dict[str, str] = {
+    # A credential stored or a ``.env`` line written AFTER bootstrap never
+    # reached the running session: env is applied once, the provider caches
+    # its key in ``initialize()``.  The daemon re-resolves and pushes the
+    # whole dict; the runner re-applies it and rebuilds the provider.
+    "session.reload_env": "_handle_session_reload_env",
+}
+
 #: How many recently-registered request ids the reader thread remembers,
 #: for the reconciliation payload on ``session.health_check`` (#856).
 #:
@@ -1343,7 +1356,26 @@ class RunnerRPC:
             # cancel surface, no streaming.
             return self._handle_session_resolve_fork_point(env.args)
 
-        return False, {"error": f"unknown method: {env.method!r}"}
+        return self._dispatch_named_or_unknown(env)
+
+    def _dispatch_named_or_unknown(self, env: RequestEnvelope) -> "tuple[bool, Any]":
+        """Table-driven tail of :meth:`_dispatch_method`.
+
+        That method is a flat chain of ``if env.method == ...`` arms frozen
+        at its cyclomatic-complexity baseline, so a verb added there costs a
+        decision point the ratchet refuses.  Methods in
+        :data:`NAMED_METHOD_HANDLERS` are routed here by name instead: one
+        dict lookup, then the handler, then the unknown-method refusal the
+        chain always ended in.  Every entry takes ``env.args`` (an empty dict
+        when the request carried none) and answers the ``(ok, payload)``
+        pair every other handler does.  The lane guard
+        (``test_rpc_lane_classification.py``) reads this table beside the
+        chain, so a method served from here is classified like any other.
+        """
+        handler_name = NAMED_METHOD_HANDLERS.get(env.method)
+        if handler_name is None:
+            return False, {"error": f"unknown method: {env.method!r}"}
+        return getattr(self, handler_name)(env.args or {})
 
     def _dispatch_via_session_executor(
         self,
@@ -1738,6 +1770,73 @@ class RunnerRPC:
             "tool_count": tool_count,
             **transport,
         }
+
+    def _handle_session_reload_env(self, args: Dict[str, Any]) -> "tuple[bool, Any]":
+        """``session.reload_env`` -- re-apply the session env and rebuild the provider.
+
+        Bootstrap applies ``envelope.session_env`` to ``os.environ`` once and
+        the provider reads its credential once, in ``initialize()``.  So a
+        key stored with ``<provider>-auth key``, or a line written into the
+        workspace ``.env``, while the session is live is invisible to it
+        until a new session is created.  The daemon owns resolution (it is
+        the only process that can decode ``pass://`` / ``vault://``), so it
+        re-resolves and ships the FULL dict here, exactly as bootstrap did;
+        the runner does not read the ``.env`` itself.
+
+        ``args = {"session_env": {name: value, ...}}``.  Two orderings are
+        the contract:
+
+        - the environment is applied BEFORE the provider is rebuilt, and is
+          left applied when the rebuild fails -- the answer then names the
+          provider failure (``stage="provider"``) while a later
+          ``send_message``'s lazy creation sees the new environment;
+        - a running turn is refused up front (``stage="busy"``) with
+          nothing changed, because swapping the environment under a
+          streaming provider call is a race nobody asked for.
+
+        Returns:
+            ``(True, {"applied": int, "provider": str, "model": str,
+            "auth_info": str})`` on success.  ``(False, {"error", "stage"})``
+            with ``stage`` in ``no_host`` / ``no_session`` / ``busy`` /
+            ``provider`` otherwise.
+        """
+        from .session import apply_session_env
+
+        ready, err, session = self._require_ready_session()
+        if not ready:
+            return err
+        if bool(getattr(session, "is_running", False)):
+            return False, {
+                "error": (
+                    "session.reload_env: a turn is running on this session; "
+                    "retry once it is idle"
+                ),
+                "stage": "busy",
+            }
+        session_env = args.get("session_env") or {}
+        applied = apply_session_env(dict(session_env))
+        try:
+            session._session_env = dict(applied)
+        except Exception:  # noqa: BLE001 -- best-effort attribute set
+            logger.debug("session.reload_env: could not attach _session_env")
+        try:
+            info = session.reload_provider()
+        except Exception as exc:  # noqa: BLE001 -- reported, not raised
+            logger.warning(
+                "session.reload_env: env re-applied (%d keys) but the provider "
+                "did not rebuild: %s", len(applied), exc,
+            )
+            return False, {
+                "error": f"session.reload_env: provider rebuild failed: {exc}",
+                "stage": "provider",
+                "applied": len(applied),
+            }
+        logger.info(
+            "session.reload_env: applied %d env keys; provider=%s model=%s (%s)",
+            len(applied), info.get("provider"), info.get("model"),
+            info.get("auth_info") or "credential source unknown",
+        )
+        return True, {"applied": len(applied), **info}
 
     def _handle_session_end(self) -> "tuple[bool, Any]":
         """Cascade-sharing session boundary — reset per-session plugin state.
