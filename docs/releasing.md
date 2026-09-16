@@ -183,6 +183,21 @@ git tag jaato-server-0.15.0 <the published sha> && git push origin jaato-server-
 With no tag for a package, the script falls back to walking `pyproject.toml`
 history for the previous version-set point, exactly as it did before.
 
+**A tag only anchors while it is reachable from `main`.** `build_readme.py`
+asks for `git tag --list --merged HEAD`, so a tag on a commit that never
+reached `main` is invisible to the next release and the script falls back to
+the tag before it — re-listing everything the unreachable one already shipped.
+Publishing from a release branch is legitimate (both `0.15.0` attempts did it),
+but the branch then has to land:
+
+```bash
+git merge-base --is-ancestor "$(git rev-list -n1 jaato-server-0.15.0)" origin/main \
+  && echo reachable || echo "NOT on main — the next changelog will repeat this release"
+```
+
+`jaato-server-0.15.0` was tagged at `9bedb5c8` on the publish branch, and until
+that branch merged, `0.16.0`'s changelog measured 33 entries instead of 16.
+
 ## Trusted publishers
 
 Both indexes use PyPI trusted publishing (OIDC), so there are no tokens. A
