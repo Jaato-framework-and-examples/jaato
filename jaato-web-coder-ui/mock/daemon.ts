@@ -116,9 +116,14 @@ async function turn(c: Client, text: string, agentId = "main"): Promise<void> {
     send(c, {
       type: "clarification.batch", agent_id: agentId, request_id: reqId, tool_name: "request_clarification", batch_only: true,
       context: "Before I start:",
+      // The shape question_payload() emits (shared/plugins/clarification/channels.py):
+      // text / question_type / required / choices[{text, default?}] -- NOT the
+      // per-question event's question_text / options.  The mock used to speak
+      // the card's vocabulary, which is how a card that could not render the
+      // daemon's passed every e2e test.
       questions: [
-        { question_text: "Which framework should the client use?", question_type: "choice", options: ["React 19", "Svelte 5", "Solid"] },
-        { question_text: "Anything else I should know?", question_type: "text", optional: true, default: "no" },
+        { index: 1, text: "Which framework should the client use?", question_type: "single_choice", required: true, choices: [{ text: "React 19" }, { text: "Svelte 5", default: true }, { text: "Solid" }] },
+        { index: 2, text: "Anything else I should know?", question_type: "free_text", required: false },
       ],
     });
     const answers = (await waitFor(c, `clar:${reqId}`)) as string[];

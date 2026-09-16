@@ -108,12 +108,25 @@ export interface PendingPermission {
   inputMode: boolean;
 }
 
+/**
+ * One clarification question, as the card reads it.  The daemon spells a
+ * question two ways (``text``/``choices``/``required`` on the batch wire,
+ * ``question_text``/``options`` on the per-question wire); the store runs
+ * both through ``protocol/clarification.normalizeClarificationQuestion``
+ * so this shape is the only one rendered.
+ */
 export interface ClarificationQuestion {
   question_text?: string;
-  question_type?: string; // "choice" | "text" | "confirm" | ...
+  /** ``single_choice`` | ``multiple_choice`` | ``free_text`` (the daemon's ``QuestionType``). */
+  question_type?: string;
+  /** Choice texts, in wire order; answers are their 1-based positions. */
   options?: string[];
-  default?: string | null;
+  /** A 1-based choice position (choice questions) or a literal (free text); Enter on empty submits it. */
+  default?: string | number | null;
+  /** ``required: false`` on the wire — an empty answer skips it. */
   optional?: boolean;
+  /** Per-choice: this branch expects the user to attach a file (#989). Absent when no choice does. */
+  expects_attachment?: boolean[];
   [k: string]: unknown;
 }
 

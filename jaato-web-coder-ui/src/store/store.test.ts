@@ -96,9 +96,15 @@ describe("reduce — prompts", () => {
   });
   it("walks a batch_only clarification and reports completion", () => {
     const d = useJaato.getState().dispatch;
-    d([ev({ type: "clarification.batch", agent_id: "main", request_id: "q1", batch_only: true, questions: [{ question_text: "A?" }, { question_text: "B?" }] })]);
+    // The payload is what question_payload() emits, not the per-question vocabulary.
+    d([ev({ type: "clarification.batch", agent_id: "main", request_id: "q1", batch_only: true, context: "Before I start", questions: [
+      { index: 1, text: "A?", question_type: "single_choice", required: true, choices: [{ text: "yes", default: true }, { text: "no" }] },
+      { index: 2, text: "B?", question_type: "free_text", required: false },
+    ] })]);
     const st = useJaato.getState();
-    expect(st.clarifications[0]).toMatchObject({ inputMode: true, index: 0, batchOnly: true });
+    expect(st.clarifications[0]).toMatchObject({ inputMode: true, index: 0, batchOnly: true, context: "Before I start" });
+    expect(st.clarifications[0]!.questions[0]).toMatchObject({ question_text: "A?", options: ["yes", "no"], default: 1, optional: false });
+    expect(st.clarifications[0]!.questions[1]).toMatchObject({ question_text: "B?", options: [], optional: true });
     const n1 = st.answerClarification("q1", "one")!;
     expect(n1.index).toBe(1);
     const n2 = useJaato.getState().answerClarification("q1", "two")!;
@@ -107,7 +113,7 @@ describe("reduce — prompts", () => {
   });
   it("assembles the per-question clarification path from its two events", () => {
     const d = useJaato.getState().dispatch;
-    d([ev({ type: "clarification.question", agent_id: "main", request_id: "q2", question_index: 0, total_questions: 1, question_text: "Which?", options: ["a", "b"] })]);
+    d([ev({ type: "clarification.question", agent_id: "main", request_id: "q2", question_index: 0, total_questions: 1, question_text: "Which?", options: [{ text: "a" }, { text: "b" }] })]);
     d([ev({ type: "clarification.input_mode", agent_id: "main", request_id: "q2", question_index: 0 })]);
     const c = useJaato.getState().clarifications[0]!;
     expect(c.batchOnly).toBe(false);
