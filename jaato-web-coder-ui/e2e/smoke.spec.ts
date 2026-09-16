@@ -471,3 +471,50 @@ test("without a key store the configure form keeps its plain key field", async (
   await expect(form.getByLabel("API key")).toHaveAttribute("type", "password");
   await expect(form.getByTestId("credential-picker")).toHaveCount(0);
 });
+
+// ── Leaving: Exit in the chat, Sign out on the workspace list ─────────
+
+test("the status bar's Exit detaches like the exit command, and an autoConnect page does not connect straight back", async ({ page }) => {
+  await page.route("**/config.json", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ daemon: WS, autoConnect: true }) }),
+  );
+  await page.goto("/");
+  await page.getByRole("button", { name: /default/ }).click();
+  await expect(page.getByText("Connected to the mock daemon")).toBeVisible();
+  await page.getByRole("button", { name: "Exit (detach from the session)" }).click();
+  // Back on the connect screen, and staying there: the page waits for a click.
+  const open = page.getByRole("button", { name: "Open my environment" });
+  await expect(open).toBeVisible();
+  await page.waitForTimeout(700);
+  await expect(open).toBeVisible();
+  await expect(page.getByRole("button", { name: /default/ })).toHaveCount(0);
+  // The click reconnects (the mark was spent); a fresh load would have connected on its own again.
+  await open.click();
+  await expect(open).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Exit (detach from the session)" }).or(page.getByTestId("session-picker"))).toBeVisible();
+});
+
+test("the workspace list says who is signed in and offers the backend's Sign out", async ({ page }) => {
+  await page.route("**/config.json", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ daemon: WS_WORKSPACES, ticketUrl: "/api/ticket", autoConnect: true }) }),
+  );
+  await page.route("**/api/ticket", (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ticket: "t-1" }) }));
+  await page.route("**/api/session", (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ user: "alice" }) }));
+  await page.goto("/");
+  await expect(page.getByText("Workspaces", { exact: true })).toBeVisible();
+  await expect(page.getByText("Signed in as")).toBeVisible();
+  await expect(page.getByText("alice", { exact: true })).toBeVisible();
+  const signOut = page.getByRole("link", { name: "Sign out" });
+  await expect(signOut).toHaveAttribute("href", "/api/logout");
+  // No backend: nothing to sign out of, so the way out is the connection itself.
+  await expect(page.getByRole("button", { name: "Disconnect" })).toHaveCount(0);
+});
+
+test("without a backend the workspace list offers Disconnect, which is the exit command", async ({ page }) => {
+  await page.goto("/");
+  await page.getByPlaceholder("ws://host:8080").fill(WS_WORKSPACES);
+  await page.getByRole("button", { name: "Connect" }).click();
+  await expect(page.getByRole("link", { name: "Sign out" })).toHaveCount(0);
+  await page.getByRole("button", { name: "Disconnect" }).click();
+  await expect(page.getByRole("button", { name: "Connect" })).toBeVisible();
+});

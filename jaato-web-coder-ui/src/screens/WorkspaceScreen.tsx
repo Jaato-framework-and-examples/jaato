@@ -13,6 +13,7 @@
  * who prefer it; the list the daemon sends for it is what it names.
  */
 import { useEffect, useState } from "react";
+import { exitToConnect } from "@/app/actions";
 import { credentialsApi } from "@/app/credentials";
 import { CredentialPicker, type KeyChoice } from "@/components/workspace/CredentialPicker";
 import { createWorkspace, deleteWorkspace, requestWorkspaceList, selectWorkspace, updateConfig } from "@/sdk/connection";
@@ -23,6 +24,7 @@ export function WorkspaceScreen() {
   const setScreen = useJaato((s) => s.setScreen);
   const setWorkspaceNotice = useJaato((s) => s.setWorkspaceListNotice);
   const credentialsUrl = useJaato((s) => s.credentialsUrl);
+  const backend = useJaato((s) => s.backend);
   const [newName, setNewName] = useState("");
   const [provider, setProvider] = useState("");
   const [model, setModel] = useState("");
@@ -95,9 +97,22 @@ export function WorkspaceScreen() {
   return (
     <div className="h-full overflow-auto p-6 flex justify-center">
       <div className="w-full max-w-2xl space-y-6">
-        <div>
-          <div className="text-xl font-semibold">Workspaces</div>
-          <div className="text-sm text-text-muted">{ws.root ? <span className="font-mono">{ws.root}</span> : "Pick the workspace this session should run in."}</div>
+        <div className="flex items-start gap-4">
+          <div className="flex-1">
+            <div className="text-xl font-semibold">Workspaces</div>
+            <div className="text-sm text-text-muted">{ws.root ? <span className="font-mono">{ws.root}</span> : "Pick the workspace this session should run in."}</div>
+          </div>
+          {/* Who this list belongs to, and the way out.  "Sign out" is the backend's
+              logout (it also revokes the daemon tickets); without a backend the
+              only thing to leave is the connection, which the exit command does. */}
+          <div className="text-xs text-text-muted text-right space-y-0.5">
+            {backend?.user && <div>Signed in as <span className="font-semibold text-text">{backend.user}</span></div>}
+            {backend ? (
+              <a href={backend.logoutUrl} className="underline hover:text-text">Sign out</a>
+            ) : (
+              <button type="button" onClick={() => { exitToConnect().catch(() => undefined); }} className="underline hover:text-text">Disconnect</button>
+            )}
+          </div>
         </div>
         {ws.notice && <div role="status" className={`text-xs ${ws.notice.error ? "text-error" : "text-text-muted"}`}>{ws.notice.text}</div>}
         <ul className="rounded-xl border hairline surface-1 divide-y divide-[color-mix(in_srgb,var(--c-muted)_35%,transparent)]">

@@ -53,6 +53,14 @@ export interface JaatoState {
    * offer previously used keys instead of asking for the key again.
    */
   credentialsUrl: string | null;
+  /**
+   * The sign-in backend behind this page, when ``config.json`` named a
+   * ticket URL: where "Sign out" goes and who the backend says is signed
+   * in (``null`` until answered, or when there is no backend).  Read by the
+   * workspace screen's header; the connect screen sets it from the launcher
+   * config (``app/backendSession.ts``).
+   */
+  backend: { logoutUrl: string; user: string | null } | null;
 
   workspace: {
     mode: "unknown" | "enabled" | "disabled";
@@ -143,6 +151,7 @@ export interface JaatoState {
   setUrl: (url: string) => void;
   setScreen: (s: Screen) => void;
   setCredentialsUrl: (url: string | null) => void;
+  setBackend: (b: { logoutUrl: string; user: string | null } | null) => void;
   setWorkspaceMode: (m: JaatoState["workspace"]["mode"]) => void;
   selectWorkspace: (name: string | undefined) => void;
   selectAgent: (id: string) => void;
@@ -766,6 +775,7 @@ export const useJaato = create<JaatoState>()((set, get) => ({
   url: "",
   screen: "connect",
   credentialsUrl: null,
+  backend: null,
   workspace: { mode: "unknown", list: [] },
   profiles: [],
   sessions: [],
@@ -785,6 +795,7 @@ export const useJaato = create<JaatoState>()((set, get) => ({
   setUrl: (url) => set({ url }),
   setScreen: (screen) => set({ screen }),
   setCredentialsUrl: (credentialsUrl) => set({ credentialsUrl }),
+  setBackend: (backend) => set({ backend }),
   setWorkspaceMode: (mode) => set((st) => ({ workspace: { ...st.workspace, mode } })),
   selectWorkspace: (name) => set((st) => ({ workspace: { ...st.workspace, selected: name } })),
   selectAgent: (id) => set({ selectedAgentId: id }),

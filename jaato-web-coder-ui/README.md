@@ -97,6 +97,14 @@ you save and forwarded to the daemon exactly as a typed one is. A
 daemon knows nothing of the store: it is the backend's, keyed by who signed
 in (`src/app/credentials.ts`, `src/components/workspace/CredentialPicker.tsx`).
 
+Two ways out, as buttons. The workspace list's header says who is signed in
+and offers the backend's **Sign out** (which also revokes that user's
+daemon tickets); without a backend it offers **Disconnect** instead. The
+status bar's **exit** is the `exit` command: detach from the daemon and
+return to the connect screen, leaving the session on the daemon for
+`session attach` later. A page served with `autoConnect` does not connect
+straight back after an exit; the next click does (`src/app/exitIntent.ts`).
+
 ### Hosting the bundle yourself
 
 `dist/` is static (assets are referenced relatively, so it can sit under any

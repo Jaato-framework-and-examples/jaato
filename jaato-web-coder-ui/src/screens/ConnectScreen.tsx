@@ -34,6 +34,7 @@ import { useEffect, useRef, useState } from "react";
 import type { TokenProvider } from "@jaato/sdk";
 import { connect, probeWorkspaceMode } from "@/sdk/connection";
 import { useJaato } from "@/store/store";
+import { consumeExited } from "@/app/exitIntent";
 import { loadLauncherConfig, type LauncherConfig } from "@/app/launcherConfig";
 import { SignInRequiredError, ticketProvider } from "@/app/tickets";
 import { fetchSignedInUser, siblingEndpoint } from "@/app/backendSession";
@@ -133,12 +134,20 @@ export function ConnectScreen() {
       if (b) {
         setBackend(b);
         credential = b.provider;
+        // The workspace screen's "Sign out" reads this; who is signed in follows once known.
+        useJaato.getState().setBackend({ logoutUrl: b.logoutUrl, user: null });
         // A courtesy, not a gate: the ticket decides whether we get in.
-        void fetchSignedInUser(b.sessionUrl).then((s) => { if (!cancelled && s) setWho(s.user); });
+        void fetchSignedInUser(b.sessionUrl).then((s) => {
+          if (cancelled || !s) return;
+          setWho(s.user);
+          useJaato.getState().setBackend({ logoutUrl: b.logoutUrl, user: s.user });
+        });
       } else if (cfg.token) {
         setToken(cfg.token);
       }
-      if (cfg.autoConnect && nextUrl) void go(undefined, { url: nextUrl, token: credential });
+      // A deliberate ``exit`` brought us here: everything above still applies,
+      // but connecting again on our own would undo what the person just did.
+      if (cfg.autoConnect && nextUrl && !consumeExited()) void go(undefined, { url: nextUrl, token: credential });
     });
     return () => { cancelled = true; };
     // Runs once: the launcher config is a property of the page load, not of the form.

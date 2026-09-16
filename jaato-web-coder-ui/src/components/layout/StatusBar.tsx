@@ -1,3 +1,4 @@
+import { exitToConnect } from "@/app/actions";
 import { BUILD, buildLine } from "@/app/buildInfo";
 import { useJaato } from "@/store/store";
 
@@ -39,6 +40,8 @@ export function StatusBar() {
       <button type="button" onClick={() => toggle("showBudget")} className={ui.showBudget ? "text-primary" : "text-text-muted hover:text-text"} title="Toggle budget (Ctrl+B)" aria-label="Toggle budget (Ctrl+B)">budget</button>
       <button type="button" onClick={() => toggle("showWorkspace")} className={ui.showWorkspace ? "text-primary" : "text-text-muted hover:text-text"} title="Toggle workspace changes (Alt+W)" aria-label="Toggle workspace changes (Alt+W)">files</button>
       <button type="button" onClick={() => setToolsExpanded(!ui.showTools)} className={ui.showTools ? "text-primary" : "text-text-muted hover:text-text"} title={ui.showTools ? "Tool call boxes expanded — click to collapse them (Ctrl+T)" : "Tool call boxes collapsed — click to expand them (Ctrl+T)"} aria-label="Toggle tool call boxes (Ctrl+T)">tools</button>
+      {/* The ``exit`` command as a button: detach, back to the connect screen; the session stays on the daemon. */}
+      <button type="button" onClick={() => { exitToConnect().catch(() => undefined); }} className="text-text-muted hover:text-error" title="Detach from the session and return to the connect screen (the exit command)" aria-label="Exit (detach from the session)">exit</button>
     </div>
   );
 }

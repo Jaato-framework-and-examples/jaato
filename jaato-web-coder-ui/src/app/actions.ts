@@ -20,6 +20,7 @@ import type { PendingClarification } from "@/store/types";
 import { THEME_NAMES, applyTheme, saveThemePreference } from "@/theme/themes";
 import { disconnect, getClient, isConnected } from "@/sdk/connection";
 import { noteAuthKeyCommand } from "./authKeyCapture";
+import { markExited } from "./exitIntent";
 
 export const inputHistory: string[] = [];
 
@@ -163,6 +164,20 @@ export async function attachSession(sessionId: string): Promise<void> {
 }
 
 /** Handle a submitted line. Returns after the request is on the wire. */
+/**
+ * The ``exit`` command: detach from the daemon and show the connect screen.
+ * Also what the status bar's Exit button runs -- directly, not by
+ * submitting the word, because a submitted line answers a pending
+ * permission prompt first (``submitInput``), and "exit" typed there would
+ * be read as a permission key.  The exit mark keeps a page served with
+ * ``autoConnect`` from connecting straight back (``app/exitIntent.ts``).
+ */
+export async function exitToConnect(): Promise<void> {
+  markExited();
+  await disconnect();
+  useJaato.getState().setScreen("connect");
+}
+
 export async function submitInput(text: string, verbatim: boolean): Promise<void> {
   const st = useJaato.getState();
   const agentId = st.selectedAgentId || MAIN_AGENT;
@@ -195,8 +210,7 @@ export async function submitInput(text: string, verbatim: boolean): Promise<void
   const client = getClient();
   switch (parsed.action) {
     case "exit":
-      await disconnect();
-      useJaato.getState().setScreen("connect");
+      await exitToConnect();
       return;
     case "stop":
       await client.stop();
