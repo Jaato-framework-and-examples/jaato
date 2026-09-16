@@ -77,11 +77,7 @@ REVERSIONS = [
             "discards -- the caller then waits out its full timeout and is "
             "told the session may exist (#882)"
         ),
-        test=(
-            "jaato-server/server/tests/"
-            "test_session_new_answers_exactly_once.py::"
-            "test_create_path_answers_only_through_the_funnel"
-        ),
+        test="test_create_path_answers_only_through_the_funnel",
     ),
 ]
 

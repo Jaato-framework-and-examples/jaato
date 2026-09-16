@@ -57,7 +57,7 @@ REVERSIONS = [
         target="jaato-server/shared/plugins/nebius_auth/plugin.py",
         find='COMMAND = "nebius-auth"',
         replace='COMMAND = "nebius-auth-unregistered"',
-        test="test_every_declared_stored_command_is_provided",
+        test="TestDeclaredCommandsExist::test_every_declared_stored_command_is_provided",
         because="a provider naming a stored-credential command nothing registers",
     ),
 ]

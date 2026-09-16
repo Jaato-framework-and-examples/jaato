@@ -44,7 +44,7 @@ REVERSIONS = [
             "\n"
             "    lines: List[str] = []"
         ),
-        test="test_store_memory_is_enriched",
+        test="TestSessionDispatch::test_store_memory_is_enriched",
         because="a dict result whose text lives outside the six well-known "
                 "field names never reaching the enrichment chain at all",
     ),
@@ -58,7 +58,7 @@ REVERSIONS = [
             "        header, body, anchor = _tool_result_text_view_impl(enriched_dict)\n"
             '        text_view = header + body if len(body) >= 100 else ""\n'
         ),
-        test="test_a_short_result_is_still_enriched",
+        test="TestSessionDispatch::test_a_short_result_is_still_enriched",
         because="the 100-character floor that excluded the 83-character "
                 "store_memory message the defect was found on",
     ),

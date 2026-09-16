@@ -46,7 +46,7 @@ REVERSIONS = [
                 + response.usage.cache_read_tokens)""",
         replace="""            turn_tokens['spend_cache_read'] = (
                 response.usage.cache_read_tokens)""",
-        test="test_cache_reads_accumulate_across_a_turns_responses",
+        test="TestCacheSpendAccumulates::test_cache_reads_accumulate_across_a_turns_responses",
         because="a turn reporting only its final response's cache traffic",
     ),
     # The other half of the same measurement.  Accumulating a number the
@@ -62,7 +62,7 @@ REVERSIONS = [
                 "/converters.py"),
         find='    creation = _read_details(details, "cache_write_tokens")',
         replace='    creation = None',
-        test="test_the_provider_reports_the_write_count_at_all",
+        test="TestTheParseFeedsTheChain::test_the_provider_reports_the_write_count_at_all",
         because="cache writes billed but never reported (#699)",
     ),
 ]

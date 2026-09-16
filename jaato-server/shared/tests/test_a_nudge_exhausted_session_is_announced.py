@@ -51,7 +51,7 @@ REVERSIONS = [
                         error_summary=nudge_exhaust_summary,
                     )""",
         replace="""                    pass  # terminal removed""",
-        test="test_the_nudge_exhaust_branch_emits_a_terminal",
+        test="TestTheTerminalIsReal::test_the_nudge_exhaust_branch_emits_a_terminal",
         because="the terminal the docstring now tells consumers to watch",
     ),
     Reversion(
@@ -64,7 +64,7 @@ REVERSIONS = [
             "    #: This is the only signal a consumer gets in that state. "
             "No\n    #: ``SessionTerminatedEvent`` fires."
         ),
-        test="test_the_field_docstring_does_not_claim_it_is_the_only_signal",
+        test="TestTheDocstringSaysWhatIsTrue::test_the_field_docstring_does_not_claim_it_is_the_only_signal",
         because="the docstring claiming delivery it does not get",
     ),
 ]

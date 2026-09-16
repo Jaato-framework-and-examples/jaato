@@ -6985,6 +6985,29 @@ Consequences worth knowing:
   unexplained red rather than as *a guard stopped detecting its own
   reversion*. Alone, it gets a cap sized for its own variance and the
   required `contract-guards` check is seconds again.
+- **Only pytest's `TESTS_FAILED` counts as detection (#1065).** The verdict
+  was `assert code != 0`, so *every* non-zero exit read as "the guard noticed
+  its defect" — including `USAGE_ERROR` (4), which is what pytest returns for
+  a nodeid it cannot resolve, having run no test body at all. A typo in a
+  `test` field therefore certified a guard that was exercising nothing,
+  silently and permanently, and it failed in the unsafe direction: there is no
+  output on a passing case, so a malformed nodeid looks exactly like a working
+  guard. **23 of the 227 in-tree reversions were in that state** when this was
+  fixed — 22 naming a class-nested test without its class, and one carrying
+  the whole repo-relative path in `test`. Now `1` is detection, `0` is
+  decorative, and anything else is `BLOCKED` naming the exit code and quoting
+  pytest's own complaint, which `_run_guard` no longer discards. A pre-flight
+  (`test_every_reversion_names_a_test_that_exists`) resolves every `test`
+  against one collection pass **before** anything is sabotaged, so the whole
+  corpus is answered at once at the point an author can act on it.
+- **Discovery no longer drops a guard in silence.** `_guard_modules` swallows
+  an `ImportError` and moves on, which is right for a module's own test run
+  and wrong here — its reversions vanish while this suite still reports
+  success. It now records the failure when the module's *source* declares
+  `REVERSIONS`, and a test surfaces it. The source is read rather than the
+  module imported because the question is only asked about a module that
+  already failed to import; and it is narrowed to declaring modules because
+  these two packages hold 384 test modules and only 82 contribute cases.
 - **An `--ignore` binds to the invocation that carries it.**
   `test_ci_runs_every_test_file.py` used to union `covered` and `ignored`
   across every invocation in every workflow and let the union of ignores win,

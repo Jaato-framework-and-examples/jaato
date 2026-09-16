@@ -63,7 +63,7 @@ REVERSIONS = [
         replace="""        if not provider.supports_modality(kind):
             return "model"
         return None""",
-        test="test_the_speaking_tier_does_not_receive_the_audio",
+        test="TestTheReportedFailure::test_the_speaking_tier_does_not_receive_the_audio",
         because="a tier declaring audio OUTBOUND still being handed the "
                 "caller's recorded utterance, because the gate asked the "
                 "model's catalog and never the tier's declared role",
@@ -76,7 +76,7 @@ REVERSIONS = [
         replace="""        if not entry.declares_any_modality:
             return None
         return entry.inbound_modalities""",
-        test="test_an_implicit_vision_tier_still_receives_other_content",
+        test="TestUndeclaredSessionsAreUnchanged::test_an_implicit_vision_tier_still_receives_other_content",
         because="a tier named 'vision' that declared no modalities of its "
                 "own arming the gate off its IMPLICIT image role, so the "
                 "back-compat shim starts withholding content instead of "
