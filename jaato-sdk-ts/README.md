@@ -590,6 +590,16 @@ caveats remain.
    gh workflow run publish-npm-sdk-ts.yml --ref main
    gh run watch --exit-status   # optional, follow the run
    ```
+4. Approve the deployment when the `publish` job pauses on the
+   `npm-sdk` environment's required-reviewer rule.
+5. The run **stages** the version; it is not on the registry until a
+   maintainer with 2FA promotes it:
+   ```bash
+   npm stage list @jaato/sdk               # find the stage id
+   npm stage view <stage-id>               # optional: inspect what was uploaded
+   npm stage approve <stage-id> --otp <code>   # or: npm stage reject <stage-id>
+   ```
+   (or the same buttons on npmjs.com).  `npm stage` needs npm 11.15+.
 
 The workflow (`.github/workflows/publish-npm-sdk-ts.yml`) does the
 gates in order:
@@ -601,12 +611,19 @@ gates in order:
 3. Version-already-on-registry check — `https://registry.npmjs.org/@jaato/sdk/<version>`
    returns 404 (free), 200 (already published — fail), anything else
    (transient — fail loudly rather than guess).
-4. `npm publish --access public` — scoped packages default to
-   restricted on npm; the flag makes the package installable
-   without auth.
+4. `npm whoami` with the token — an expired or revoked token fails here
+   by name, before the build, instead of surfacing at the last step as
+   npm's bare `404 Not Found - PUT`, which is what the registry answers
+   an unauthorised write with.
+5. `npm stage publish --access public` — scoped packages default to
+   restricted on npm; the flag makes the package installable without
+   auth.  *Staged*, not published: see step 5 above.
 
 Authentication uses an `NPM_TOKEN` secret in the GitHub `npm-sdk`
-environment (granular access token with read+write on `@jaato/*`).
+environment: a granular access token with **Read and write (stage
+only)** on `@jaato/*`.  npm is retiring direct publish by token in
+January 2027, and a stage-only token answers `npm publish` with
+`E_STAGE_REQUIRED`, so the workflow stages and a human promotes.
 Migrating to npm Trusted Publishing (OIDC, no token) is a one-step
 change once the package is on the registry — see the workflow file
 header for the migration note.

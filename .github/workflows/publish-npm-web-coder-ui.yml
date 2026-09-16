@@ -2,7 +2,9 @@ name: "Publish @jaato/web-coder-ui to npm"
 
 # Mirror of publish-npm-sdk-ts.yml for the browser client — manual
 # trigger, the same gates the `web-client` CI job runs, a
-# version-already-on-registry check, then publish.
+# version-already-on-registry check, then a STAGED publish (see the
+# sdk workflow's header for why a stage-only token, and how a maintainer
+# promotes the staged version with 2FA).
 #
 # What ships: `dist/` (the Vite bundle, with @jaato/sdk compiled in) and
 # `bin/jaato-web-coder-ui.js`, the dependency-free launcher behind
@@ -11,13 +13,15 @@ name: "Publish @jaato/web-coder-ui to npm"
 #
 # Byproduct for people who host the bundle themselves: the same run
 # uploads `jaato-web-coder-ui-dist-<version>.tar.gz` (the contents of `dist/`)
-# as a workflow artifact AND, once npm publish succeeded, attaches it to a
-# GitHub Release tagged `web-coder-ui-v<version>` — artifacts expire after
-# 90 days, a release is a stable URL an operator can pin.
+# as a workflow artifact AND, once the staged publish was accepted by the
+# registry, attaches it to a GitHub Release tagged `web-coder-ui-v<version>`
+# — artifacts expire after 90 days, a release is a stable URL an operator
+# can pin.  The release is the self-hosting bundle and is complete on its
+# own; the npm version it names goes live when the stage is approved.
 #
-# Setup once on the npm side: the same @jaato org token that publishes
-# @jaato/sdk (granular, read+write on @jaato/*) lives in the repo's
-# `npm-sdk` environment as NPM_TOKEN, so this workflow reuses it.
+# Setup once on the npm side: the same @jaato org token that stages
+# @jaato/sdk ("Read and write (stage only)" on @jaato/*) lives in the
+# repo's `npm-sdk` environment as NPM_TOKEN, so this workflow reuses it.
 
 on:
   workflow_dispatch:
@@ -87,6 +91,17 @@ jobs:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
 
+      - name: Use an npm that knows `npm stage` (11.15+)
+        # setup-node's Node ships npm 10; staged publishing arrived in npm
+        # 11.15.0.  Newest npm, not a pin: its `stage` surface is the one
+        # the registry currently speaks.  The registry .npmrc setup-node
+        # wrote is honoured with its placeholder token, as `npm install`
+        # always was here.
+        run: |
+          npm install -g npm@latest --no-audit --no-fund
+          npm --version
+          npm stage publish --help >/dev/null
+
       - name: Read package version
         id: version
         working-directory: jaato-web-coder-ui
@@ -150,18 +165,28 @@ jobs:
           path: jaato-web-coder-ui/jaato-web-coder-ui-dist-${{ steps.version.outputs.version }}.tar.gz
           if-no-files-found: error
 
-      - name: Publish to npm
-        # --access public: scoped packages default to restricted on npm;
-        # we want @jaato/web-coder-ui to be installable without auth.
+      - name: Stage the publish on npm (a maintainer with 2FA promotes it)
+        # NPM_TOKEN is a "Read and write (stage only)" granular token: npm
+        # is retiring direct publish by token (January 2027), and a
+        # stage-only token gets E_STAGE_REQUIRED from `npm publish`.  So
+        # the version is STAGED — uploaded, not public — and goes live only
+        # when a maintainer approves it with a 2FA code, from the CLI or
+        # npmjs.com.  --access public: scoped packages default to
+        # restricted; the flag makes @jaato/web-coder-ui installable without auth.
         working-directory: jaato-web-coder-ui
-        run: npm publish --access public
+        run: |
+          npm stage publish --access public
+          version="${{ steps.version.outputs.version }}"
+          echo "::notice::@jaato/web-coder-ui@${version} is STAGED, not live. Promote it with 2FA: npm stage list @jaato/web-coder-ui  then  npm stage approve <stage-id> --otp <code>  (or reject it with npm stage reject <stage-id>)."
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Attach the self-hosting tarball to a GitHub Release
-        # After publish, so a failed publish never leaves a release that
-        # names a version npm does not have.  The tag is prefixed because
-        # this repository publishes several packages.
+        # After the stage, so a refused upload never leaves a release that
+        # names a version npm will never have.  The tarball is the
+        # self-hosting bundle and complete on its own; the npm version the
+        # notes name goes live when the stage is approved.  The tag is
+        # prefixed because this repository publishes several packages.
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -171,4 +196,4 @@ jobs:
             "jaato-web-coder-ui/jaato-web-coder-ui-dist-${version}.tar.gz" \
             --target "$GITHUB_SHA" \
             --title "@jaato/web-coder-ui ${version}" \
-            --notes "Self-hosting bundle for @jaato/web-coder-ui ${version} (the contents of dist/). Also on npm: npx @jaato/web-coder-ui@${version}. Serve it behind any static host and publish a config.json next to index.html to pre-fill the daemon URL — see jaato-web-coder-ui/README.md."
+            --notes "Self-hosting bundle for @jaato/web-coder-ui ${version} (the contents of dist/). On npm once the staged publish is approved: npx @jaato/web-coder-ui@${version}. Serve it behind any static host and publish a config.json next to index.html to pre-fill the daemon URL — see jaato-web-coder-ui/README.md."

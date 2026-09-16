@@ -365,6 +365,15 @@ publish workflow enforces the order: its checkout links the siblings with
 caret ranges at publish time, and the workflow refuses to publish unless
 both exact versions are already on the registry.
 
+All three workflows **stage** rather than publish: the `@jaato` token is
+a "Read and write (stage only)" granular token, because npm is retiring
+direct publish by token in January 2027, and `npm stage publish` uploads
+the version non-public until a maintainer with 2FA approves it (`npm stage
+approve <stage-id> --otp <code>`, or on npmjs.com). A staged version does
+not answer the "is it on npm" probe, so the order above now includes the
+approvals: stage the SDK, approve, stage the UI, approve, stage the server,
+approve.
+
 **The guard checks that a version exists, not what it contains.** A sibling
 whose source changed since its last publish must have its version bumped
 first, or the range the server publishes with resolves to a build missing

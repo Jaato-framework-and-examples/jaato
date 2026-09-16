@@ -132,9 +132,12 @@ npm pack                 # the npm tarball (refuses without a dist/)
 ```
 
 Publishing is manual: the *Publish @jaato/web-coder-ui to npm* workflow
-(`.github/workflows/publish-npm-web.yml`) runs the same gates as CI, refuses a
-version already on the registry, builds, and publishes with the `@jaato` org
-token. Bump `version` in `package.json` first.
+(`.github/workflows/publish-npm-web-coder-ui.yml`) runs the same gates as CI,
+refuses a version already on the registry, builds, and **stages** the version
+with the `@jaato` org's stage-only token; a maintainer with 2FA promotes it
+(`npm stage list @jaato/web-coder-ui`, then `npm stage approve <stage-id>
+--otp <code>`). It needs `@jaato/sdk` published first only at build time, from
+the sibling checkout. Bump `version` in `package.json` first.
 
 Set `PLAYWRIGHT_CHROMIUM=/path/to/chrome` to use a pre-installed browser
 instead of Playwright's download.
