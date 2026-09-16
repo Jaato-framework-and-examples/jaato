@@ -46,9 +46,12 @@ with nothing on npm; neither may reach the registry. The *Publish
 (`.github/workflows/publish-npm-web-coder-server.yml`) builds against
 those links, then runs `scripts/prepare-publish.mjs`, which rewrites the
 two dependencies to the caret range of the version each sibling checkout
-declares and drops `private`, and publishes. It **refuses** unless both of
-those exact versions are already on npm, so the order SDK → UI → server
-is enforced rather than remembered. `npm pack` on the development manifest
+declares and drops `private`, and **stages** the version (`npm stage
+publish`; the `@jaato` token is stage-only, so a maintainer with 2FA
+promotes it with `npm stage approve <stage-id> --otp <code>`). It
+**refuses** unless both of those exact versions are already on npm — a
+staged-but-unapproved sibling is not — so the order SDK → UI → server is
+enforced rather than remembered, approval included. `npm pack` on the development manifest
 fails by design (`prepack` runs `scripts/check-publishable.mjs`);
 `node scripts/prepare-publish.mjs --dry-run` shows what would ship.
 

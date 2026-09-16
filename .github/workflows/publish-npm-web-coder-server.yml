@@ -7,10 +7,12 @@ name: "Publish @jaato/web-coder-server to npm"
 # ranges (scripts/prepare-publish.mjs) and REFUSES to publish unless both
 # of those versions are already on npm — so the order is SDK, then UI,
 # then this (docs/design/web-server-bff.md §9), enforced rather than
-# remembered.
+# remembered.  A STAGED sibling is not on npm yet: each one has to be
+# approved by a maintainer before the next workflow's gate opens.
 #
-# Same npm-side setup as the others: the @jaato org token in the repo's
-# `npm-sdk` environment as NPM_TOKEN.
+# Same npm-side setup as the others: the stage-only @jaato org token in
+# the repo's `npm-sdk` environment as NPM_TOKEN; this run stages too, and
+# a maintainer with 2FA promotes (see the sdk workflow's header).
 
 on:
   workflow_dispatch:
@@ -59,6 +61,17 @@ jobs:
           node-version: "22"
           registry-url: "https://registry.npmjs.org"
 
+      - name: Use an npm that knows `npm stage` (11.15+)
+        # setup-node's Node ships npm 10; staged publishing arrived in npm
+        # 11.15.0.  Newest npm, not a pin: its `stage` surface is the one
+        # the registry currently speaks.  The registry .npmrc setup-node
+        # wrote is honoured with its placeholder token, as `npm install`
+        # always was here.
+        run: |
+          npm install -g npm@latest --no-audit --no-fund
+          npm --version
+          npm stage publish --help >/dev/null
+
       - name: Read versions
         id: version
         run: |
@@ -76,6 +89,22 @@ jobs:
           if [ "$status" != "404" ]; then echo "::error::Unexpected status ${status} from registry — refusing to publish"; exit 1; fi
           echo "Version ${version} is available"
 
+      - name: Verify NPM_TOKEN is accepted by the registry
+        # npm answers an unauthorised PUT on a scoped package with a bare
+        # 404 ("'@jaato/x@y' is not in this registry"), so an expired,
+        # revoked or read-only NPM_TOKEN otherwise surfaces at the very
+        # last step, after the build, looking like a missing package.
+        # `npm whoami` proves the token authenticates; it does not prove
+        # write access to @jaato, which only the publish itself can.
+        run: |
+          user=$(npm whoami 2>/dev/null) || {
+            echo "::error::the registry rejected NPM_TOKEN (npm whoami failed): expired, revoked, or not an npm token. Rotate the secret in the npm-sdk environment."
+            exit 1
+          }
+          echo "Token authenticates as npm user '${user}'"
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
       - name: Check both dependencies are on npm at the versions the checkout links
         # The published manifest will say ^<sdk> and ^<ui>. If either exact
         # version is not on the registry, an `npm install @jaato/web-coder-server`
@@ -85,7 +114,8 @@ jobs:
             name="${pair%%:*}"; version="${pair##*:}"
             status=$(curl -s -o /dev/null -w '%{http_code}' "https://registry.npmjs.org/@jaato/${name}/${version}")
             if [ "$status" != "200" ]; then
-              echo "::error::@jaato/${name} ${version} is not on npm (HTTP ${status}); publish it first (publish-npm-${name/web-coder-ui/web-coder-ui}${name/sdk/sdk-ts}.yml)"
+              case "$name" in sdk) wf=publish-npm-sdk-ts.yml ;; *) wf="publish-npm-${name}.yml" ;; esac
+              echo "::error::@jaato/${name} ${version} is not on npm (HTTP ${status}); publish it first (${wf})"
               exit 1
             fi
             echo "@jaato/${name} ${version} is on npm"
@@ -105,8 +135,20 @@ jobs:
           node scripts/prepare-publish.mjs
           node -p "JSON.stringify(require('./package.json').dependencies, null, 2)"
 
-      - name: Publish to npm
+      - name: Stage the publish on npm (a maintainer with 2FA promotes it)
+        # NPM_TOKEN is a "Read and write (stage only)" granular token: npm
+        # is retiring direct publish by token (January 2027), and a
+        # stage-only token gets E_STAGE_REQUIRED from `npm publish`.  So
+        # the version is STAGED — uploaded, not public — and goes live only
+        # when a maintainer approves it with a 2FA code, from the CLI or
+        # npmjs.com.  --access public: scoped packages default to
+        # restricted; the flag makes @jaato/web-coder-server installable without auth.
+        # prepare-publish.mjs dropped `private`, which `npm stage publish`
+        # refuses exactly as `npm publish` does.
         working-directory: jaato-web-coder-server
-        run: npm publish --access public
+        run: |
+          npm stage publish --access public
+          version="${{ steps.version.outputs.version }}"
+          echo "::notice::@jaato/web-coder-server@${version} is STAGED, not live. Promote it with 2FA: npm stage list @jaato/web-coder-server  then  npm stage approve <stage-id> --otp <code>  (or reject it with npm stage reject <stage-id>)."
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
