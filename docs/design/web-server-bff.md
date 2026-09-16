@@ -365,6 +365,16 @@ publish workflow enforces the order: its checkout links the siblings with
 caret ranges at publish time, and the workflow refuses to publish unless
 both exact versions are already on the registry.
 
+**The guard checks that a version exists, not what it contains.** A sibling
+whose source changed since its last publish must have its version bumped
+first, or the range the server publishes with resolves to a build missing
+what the server needs. That is the state the registry was in when the
+server package landed: `@jaato/sdk` 0.6.0 had been published four months
+earlier and predates both the token provider (§5.1) and the transport fix
+that puts custom headers where Node's WebSocket reads them, so a server
+published against `^0.6.0` would have had its bind channel refused as
+anonymous. The SDK's first usable version for this package is **0.7.0**.
+
 1. **#1074 lands** (PR #1075) with the two verbs from §4.2.
 2. **SDK token provider** (§5.1). Small, independently testable, and useful
    to any client that rotates credentials.
