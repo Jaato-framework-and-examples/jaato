@@ -9,7 +9,6 @@ and the historical failure was that all four looked identical on disk.
 import json
 
 import pytest
-
 from shared.scaffold import integrations as I
 
 
@@ -18,8 +17,21 @@ def dest(tmp_path):
     return tmp_path / ".claude" / "skills" / "claude-code"
 
 
-def test_the_build_ships_the_claude_code_integration():
-    assert "claude-code" in I.available()
+def test_the_build_ships_the_agent_harness_integrations():
+    assert {"claude-code", "pi"} <= set(I.available())
+
+
+def test_pi_reuses_the_agent_skill_payload():
+    assert I.payload_dir("pi") == I.payload_dir("claude-code")
+
+
+def test_pi_install_stamps_pi(tmp_path):
+    dest = tmp_path / ".pi" / "skills" / "jaato-sdk"
+    changed, _ = I.install("pi", dest)
+    assert changed
+    assert (dest / "SKILL.md").is_file()
+    stamp = json.loads((dest / I.STAMP).read_text())
+    assert stamp["integration"] == "pi"
 
 
 def test_install_writes_the_tree_and_a_stamp(dest):
@@ -36,14 +48,14 @@ def test_dry_run_writes_nothing(dest):
     changed, lines = I.install("claude-code", dest, dry_run=True)
     assert not changed
     assert not dest.exists()
-    assert any("SKILL.md" in l for l in lines)
+    assert any("SKILL.md" in line for line in lines)
 
 
 def test_a_second_install_refuses_without_force(dest):
     I.install("claude-code", dest)
     changed, lines = I.install("claude-code", dest)
     assert not changed
-    assert any("--force" in l for l in lines)
+    assert any("--force" in line for line in lines)
     changed, _ = I.install("claude-code", dest, force=True)
     assert changed
 
@@ -68,7 +80,9 @@ def test_current(dest):
 def test_stale_when_the_stamp_names_another_build(dest):
     I.install("claude-code", dest)
     f = dest / I.STAMP
-    d = json.loads(f.read_text()); d["version"] = "0.0.1-old"; f.write_text(json.dumps(d))
+    d = json.loads(f.read_text())
+    d["version"] = "0.0.1-old"
+    f.write_text(json.dumps(d))
     state, detail = I.compare("claude-code", dest)
     assert state == "stale" and "0.0.1-old" in detail
 
@@ -91,7 +105,8 @@ def test_outdated_when_the_PAYLOAD_changed_upstream(dest, monkeypatch, tmp_path)
     made and warning them off the `--force` that was in fact correct.
     """
     I.install("claude-code", dest)
-    fake_src = tmp_path / "moved"; fake_src.mkdir()
+    fake_src = tmp_path / "moved"
+    fake_src.mkdir()
     for f in I.payload_dir("claude-code").rglob("*"):
         if f.is_file():
             t = fake_src / f.relative_to(I.payload_dir("claude-code"))
@@ -112,7 +127,8 @@ def test_outdated_when_the_PAYLOAD_changed_upstream(dest, monkeypatch, tmp_path)
 def test_diverged_when_both_sides_moved(dest, monkeypatch, tmp_path):
     I.install("claude-code", dest)
     (dest / "SKILL.md").write_text("edited locally\n")
-    fake_src = tmp_path / "moved"; fake_src.mkdir()
+    fake_src = tmp_path / "moved"
+    fake_src.mkdir()
     for f in I.payload_dir("claude-code").rglob("*"):
         if f.is_file():
             t = fake_src / f.relative_to(I.payload_dir("claude-code"))
@@ -140,7 +156,9 @@ def test_a_stamp_without_a_digest_does_not_guess(dest):
     import json
     I.install("claude-code", dest)
     f = dest / I.STAMP
-    d = json.loads(f.read_text()); d.pop("digest"); f.write_text(json.dumps(d))
+    d = json.loads(f.read_text())
+    d.pop("digest")
+    f.write_text(json.dumps(d))
     assert I.compare("claude-code", dest)[0] == "current"      # content still matches
     (dest / "SKILL.md").write_text("something else\n")
     state, detail = I.compare("claude-code", dest)
@@ -158,21 +176,27 @@ def test_unstamped_is_reported_not_treated_as_absent(dest):
     assert I.compare("claude-code", dest)[0] == "unstamped"
 
 
-def test_the_target_comes_from_the_manifest_not_from_code():
-    """A Cursor integration would not write into .claude/skills — so the path
-    is the integration's to declare, not this module's to assume."""
+def test_the_target_comes_from_the_manifest_not_from_code(tmp_path):
+    """Each harness owns its user and workspace skill locations."""
     from pathlib import Path
+
     m = I.manifest("claude-code")
     assert m["target"] == ".claude/skills/jaato-sdk"
     assert I.target_dir("claude-code", user=True, workspace=None) == \
         Path.home() / ".claude" / "skills" / "jaato-sdk"
 
+    assert I.target_dir("pi", user=True, workspace=None) == \
+        Path.home() / ".pi" / "agent" / "skills" / "jaato-sdk"
+    assert I.target_dir("pi", user=False, workspace=str(tmp_path)) == \
+        tmp_path / ".pi" / "skills" / "jaato-sdk"
+
 
 def test_listing_reports_every_shipped_integration():
     data, text = I.listing()
     names = [r["name"] for r in data["integrations"]]
-    assert "claude-code" in names
+    assert {"claude-code", "pi"} <= set(names)
     assert "Claude Code" in text
+    assert "Pi" in text
 
 
 # --- the CLI's promises must parse ------------------------------------------
@@ -181,9 +205,11 @@ def test_listing_reports_every_shipped_integration():
     ["integration"],
     ["integration", "claude-code"],
     ["integration", "claude-code", "--user"],
-    ["integration", "claude-code", "--workspace", "/tmp/x"],
+    ["integration", "claude-code", "--workspace", "workspace"],
     ["integration", "claude-code", "--user", "--dry-run"],
     ["integration", "claude-code", "--force", "--json"],
+    ["integration", "pi"],
+    ["integration", "pi", "--workspace", "workspace"],
 ])
 def test_every_advertised_invocation_parses(argv):
     """Help text that promises a flag the parser rejects is worse than none.
@@ -192,7 +218,6 @@ def test_every_advertised_invocation_parses(argv):
     only understood `--workspace`, so the documented way to say "user scope"
     exited 2.  These are the forms the listing and the docstrings promise.
     """
-    import argparse
     from shared.scaffold.__main__ import main
     try:
         main(argv + ["--dry-run"] if "--dry-run" not in argv else argv)
@@ -203,5 +228,5 @@ def test_every_advertised_invocation_parses(argv):
 def test_user_and_workspace_are_mutually_exclusive():
     from shared.scaffold.__main__ import main
     with pytest.raises(SystemExit) as exc:
-        main(["integration", "claude-code", "--user", "--workspace", "/tmp/x"])
+        main(["integration", "claude-code", "--user", "--workspace", "workspace"])
     assert exc.value.code == 2

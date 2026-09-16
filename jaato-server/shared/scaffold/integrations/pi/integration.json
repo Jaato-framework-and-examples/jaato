@@ -1,0 +1,8 @@
+{
+  "tool": "Pi",
+  "user_target": ".pi/agent/skills/jaato-sdk",
+  "workspace_target": ".pi/skills/jaato-sdk",
+  "payload_from": "claude-code",
+  "summary": "the jaato-sdk skill — how to build on this SDK, for an agent working in Pi",
+  "why": "Pi loads Agent Skills from ~/.pi/agent/skills (all repos) or <project>/.pi/skills (one project). Installing from here rather than copying by hand keeps the guide and the framework on the same version."
+}

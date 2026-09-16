@@ -33,13 +33,13 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Optional, Tuple
+from typing import Any
 
 from . import explain as _explain
 from . import validate as _validate
-
 
 # --------------------------------------------------------------- explain
 #
@@ -86,7 +86,7 @@ class ExplainScope:
     render: Callable[..., Any]
     kind: str = "simple"
     arg: str = ""
-    render_named: Optional[Callable[..., Any]] = None
+    render_named: Callable[..., Any] | None = None
     blurb: str = ""
 
 
@@ -335,7 +335,7 @@ def _cmd_explain(args) -> int:
 
 # -------------------------------------------------------------- validate
 
-def _resolve_target(target: str) -> Tuple[str, Optional[str], Optional[str]]:
+def _resolve_target(target: str) -> tuple[str, str | None, str | None]:
     """Map a workspace dir OR a profile file to (workspace, set, profile_name).
 
     A profile file at ``<ws>/.jaato/profiles/<set>/<name>.yaml`` yields the
@@ -363,9 +363,8 @@ def _is_canonical_profile_layout(p: Path) -> bool:
     par = p.parent
     if par.name == "profiles" and par.parent.name == ".jaato":
         return True  # <ws>/.jaato/profiles/<name>.yaml
-    if par.parent.name == "profiles" and par.parent.parent.name == ".jaato":
-        return True  # <ws>/.jaato/profiles/<set>/<name>.yaml
-    return False
+    # <ws>/.jaato/profiles/<set>/<name>.yaml
+    return par.parent.name == "profiles" and par.parent.parent.name == ".jaato"
 
 
 def _cmd_validate(args) -> int:
@@ -490,10 +489,7 @@ def _discover_external_verbs() -> list:
     log = logging.getLogger(__name__)
     from .api import VERB_ENTRY_POINT_GROUP
 
-    try:  # entry_points(group=) is 3.10+; guard for older interpreters.
-        eps = entry_points(group=VERB_ENTRY_POINT_GROUP)
-    except TypeError:  # pragma: no cover - py<3.10
-        eps = entry_points().get(VERB_ENTRY_POINT_GROUP, [])
+    eps = entry_points(group=VERB_ENTRY_POINT_GROUP)
 
     verbs = []
     for ep in eps:
@@ -615,11 +611,11 @@ def main(argv=None) -> int:
     pi = sub.add_parser(
         "integration", help="wire jaato into a tool you work in (bare: list them)",
         description="An integration is jaato's side of a contract with another "
-                    "tool — today `claude-code`, which installs the jaato-sdk "
-                    "skill where Claude Code looks for skills.  Each copy is "
-                    "stamped with the build it came from, so `jaato-doctor` can "
-                    "say when one has gone stale.  With no name, lists what this "
-                    "build ships and where each one stands.")
+                    "tool. The `claude-code` and `pi` integrations install the "
+                    "shared jaato-sdk skill where each harness looks for skills. "
+                    "Each copy is stamped with the build it came from, so "
+                    "`jaato-doctor` can say when one has gone stale. With no "
+                    "name, lists what this build ships and where each stands.")
     pi.add_argument("name", nargs="?", default=None,
                     help="integration name (omit to list)")
     scope = pi.add_mutually_exclusive_group()

@@ -1,8 +1,8 @@
 """``jaato-scaffold integration`` — wire jaato into the tool you work in.
 
 An integration is not a jaato asset; it is jaato's side of a contract with
-ANOTHER tool.  Today there is one — ``claude-code``, which installs the
-``jaato-sdk`` skill where Claude Code looks for skills — and the shape
+ANOTHER tool.  The ``claude-code`` and ``pi`` integrations install the same
+``jaato-sdk`` skill where each harness looks for skills, and the shape
 generalises to whatever comes next (an editor plugin, shell completion, a CI
 action), because each is defined by the tool it integrates WITH.
 
@@ -40,7 +40,7 @@ import hashlib
 import json
 import shutil
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any
 
 STAMP = ".jaato-integration"
 """Filename of the provenance stamp written beside an installed integration.
@@ -88,7 +88,7 @@ def _source_root() -> Path:
     return Path(__file__).resolve().parent / "integrations"
 
 
-def manifest(name: str) -> Dict[str, Any]:
+def manifest(name: str) -> dict[str, Any]:
     """What an integration declares about itself, or ``{}`` if it has none."""
     f = _source_root() / name / "integration.json"
     if not f.is_file():
@@ -99,7 +99,7 @@ def manifest(name: str) -> Dict[str, Any]:
         return {}
 
 
-def available() -> List[str]:
+def available() -> list[str]:
     """Integrations this build ships."""
     root = _source_root()
     if not root.is_dir():
@@ -109,23 +109,28 @@ def available() -> List[str]:
 
 
 def payload_dir(name: str) -> Path:
-    return _source_root() / name / "payload"
+    """Payload for ``name``, optionally shared with another integration."""
+    source = manifest(name).get("payload_from", name)
+    return _source_root() / source / "payload"
 
 
-def target_dir(name: str, *, user: bool, workspace: Optional[str]) -> Path:
-    """Where ``name`` installs, per its own manifest.
+def target_dir(name: str, *, user: bool, workspace: str | None) -> Path:
+    """Where ``name`` installs, per its own manifest and requested scope.
 
-    Relative to `$HOME` for user scope, to the workspace otherwise.  An
-    integration with no declared target is a packaging error rather than
+    Relative to `$HOME` for user scope, to the workspace otherwise.  Most
+    harnesses use the same relative path at both scopes and declare ``target``;
+    harnesses whose conventions differ can declare ``user_target`` and
+    ``workspace_target``.  A missing target is a packaging error rather than
     something to guess at, so it resolves under its own name and the caller
     reports it.
     """
     base = Path.home() if user else Path(workspace or ".").resolve()
-    target = manifest(name).get("target") or f".jaato-integration-{name}"
-    return base / target
+    m = manifest(name)
+    target = m.get("user_target" if user else "workspace_target", m.get("target"))
+    return base / (target or f".jaato-integration-{name}")
 
 
-def read_stamp(installed: Path) -> Dict[str, str]:
+def read_stamp(installed: Path) -> dict[str, str]:
     """The provenance of an installed copy, or ``{}`` when it has none.
 
     A copy with no stamp predates this verb — it was hand-copied — which is
@@ -140,7 +145,7 @@ def read_stamp(installed: Path) -> Dict[str, str]:
         return {}
 
 
-def compare(name: str, installed: Path) -> Tuple[str, str]:
+def compare(name: str, installed: Path) -> tuple[str, str]:
     """``(state, detail)`` for an installed copy against what this build ships.
 
     States:
@@ -198,7 +203,7 @@ def compare(name: str, installed: Path) -> Tuple[str, str]:
 
 
 def install(name: str, dest: Path, *, force: bool = False,
-            dry_run: bool = False) -> Tuple[bool, List[str]]:
+            dry_run: bool = False) -> tuple[bool, list[str]]:
     """Copy ``name`` to ``dest``; return ``(changed, lines)``.
 
     Refuses to overwrite an existing copy without ``--force``, and says which
@@ -207,8 +212,10 @@ def install(name: str, dest: Path, *, force: bool = False,
     """
     src = payload_dir(name)
     if not src.is_dir():
-        return False, [f"unknown integration '{name}' — this build ships: "
-                       f"{', '.join(available()) or '(none)'}"]
+        available_names = ", ".join(available()) or "(none)"
+        return False, [
+            f"unknown integration '{name}' — this build ships: {available_names}"
+        ]
 
     state, detail = compare(name, dest)
     if state != "absent" and not force:
@@ -221,7 +228,10 @@ def install(name: str, dest: Path, *, force: bool = False,
         return False, [f"would write {dest}/"] + [f"  + {f}" for f in files]
 
     if dest.exists():
-        shutil.rmtree(dest)
+        try:
+            shutil.rmtree(dest)
+        except OSError as exc:
+            return False, [f"could not replace {dest}: {exc}"]
     shutil.copytree(src, dest)
     (dest / STAMP).write_text(json.dumps(
         {"integration": name, "tool": manifest(name).get("tool", name),
@@ -232,7 +242,7 @@ def install(name: str, dest: Path, *, force: bool = False,
         + [f"  + {f}" for f in files]
 
 
-def listing() -> Tuple[Dict[str, Any], str]:
+def listing() -> tuple[dict[str, Any], str]:
     """What this build can integrate with, and where each one currently stands.
 
     Backs both the bare ``integration`` verb and ``explain integrations`` — one
@@ -245,8 +255,10 @@ def listing() -> Tuple[Dict[str, Any], str]:
         state, detail = compare(name, user)
         rows.append({"name": name, "tool": m.get("tool", name),
                      "summary": m.get("summary", ""), "why": m.get("why", ""),
-                     "target": m.get("target"), "user_path": str(user),
-                     "state": state, "detail": detail})
+                     "target": m.get("target"),
+                     "user_target": m.get("user_target"),
+                     "workspace_target": m.get("workspace_target"),
+                     "user_path": str(user), "state": state, "detail": detail})
     data = {"integrations": rows, "framework": framework_version()}
     if not rows:
         return data, "this build ships no integrations"

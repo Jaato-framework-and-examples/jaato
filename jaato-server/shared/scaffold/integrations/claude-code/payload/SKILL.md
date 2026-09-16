@@ -225,15 +225,17 @@ seeing it means you are running an older one, which `jaato-doctor` will say.
 
 ## Keeping this file honest
 
-This skill is the payload of the `claude-code` integration, shipped as package
+This skill is shared by jaato's agent-harness integrations and ships as package
 data of the framework it describes — so the copy you are reading came from a
 specific build and says which:
 
 ```
-cat ~/.claude/skills/jaato-sdk/.jaato-integration    # the build this copy came from
-jaato-scaffold integration claude-code --force       # replace it with the current one
+jaato-scaffold integration                           # list integrations + state
+jaato-scaffold integration <harness> --force         # refresh claude-code or pi
 jaato-doctor                                         # reports absent / stale / edited
 ```
+
+The provenance stamp lives beside this file as `.jaato-integration`.
 
 If something here contradicts `explain`, **`explain` is right** — it reads the
 installed framework, this file was written against one. Fix the file, and if
