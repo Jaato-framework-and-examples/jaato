@@ -13,16 +13,23 @@
  * who prefer it; the list the daemon sends for it is what it names.
  */
 import { useEffect, useState } from "react";
+import { credentialsApi } from "@/app/credentials";
+import { CredentialPicker, type KeyChoice } from "@/components/workspace/CredentialPicker";
 import { createWorkspace, deleteWorkspace, requestWorkspaceList, selectWorkspace, updateConfig } from "@/sdk/connection";
 import { useJaato } from "@/store/store";
 
 export function WorkspaceScreen() {
   const ws = useJaato((s) => s.workspace);
   const setScreen = useJaato((s) => s.setScreen);
+  const setWorkspaceNotice = useJaato((s) => s.setWorkspaceListNotice);
+  const credentialsUrl = useJaato((s) => s.credentialsUrl);
   const [newName, setNewName] = useState("");
   const [provider, setProvider] = useState("");
   const [model, setModel] = useState("");
-  const [apiKey, setApiKey] = useState("");
+  // The key to apply: a stored entry (revealed at save), a new one (stored
+  // at save when a store exists, then applied), or none.
+  const [keyChoice, setKeyChoice] = useState<KeyChoice>({ kind: "none" });
+  const [keyListVersion, setKeyListVersion] = useState(0); // bumped when a key was just stored, so the picker relists
   const [busy, setBusy] = useState(false);
   const [manual, setManual] = useState<string | null>(null); // workspace whose manual form is open
   const [confirming, setConfirming] = useState<string | null>(null); // workspace whose delete is awaiting confirmation
@@ -50,7 +57,39 @@ export function WorkspaceScreen() {
     try { await deleteWorkspace(name); } finally { setBusy(false); setConfirming(null); }
   };
   const create = async (e: React.FormEvent) => { e.preventDefault(); if (!newName.trim()) return; await createWorkspace(newName.trim()); setNewName(""); };
-  const saveConfig = async (e: React.FormEvent) => { e.preventDefault(); setBusy(true); try { await updateConfig({ provider: provider || undefined, model: model || undefined, api_key: apiKey || undefined }); setApiKey(""); } finally { setBusy(false); } };
+  // The key reaches the daemon the one way it always has -- as ``api_key``
+  // on ``config.update`` -- whether it was typed now or picked from the
+  // store; the daemon knows nothing of the store.
+  const resolveApiKey = async (): Promise<{ apiKey?: string; storedId?: string }> => {
+    const api = credentialsUrl ? credentialsApi(credentialsUrl) : null;
+    if (keyChoice.kind === "stored") return { apiKey: api ? await api.reveal(keyChoice.id) : undefined };
+    if (keyChoice.kind === "new" && keyChoice.secret.trim()) {
+      const secret = keyChoice.secret.trim();
+      let storedId: string | undefined;
+      if (api && provider) {
+        // Remembered for the next workspace; a failure to remember must not stop this one.
+        try { storedId = (await api.add(provider, secret, keyChoice.label.trim() || undefined)).id; }
+        catch (err) { setWorkspaceNotice({ text: `Key applied, but not stored for later: ${err instanceof Error ? err.message : String(err)}`, error: true }); }
+      }
+      return { apiKey: secret, storedId };
+    }
+    return {};
+  };
+  const saveConfig = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    try {
+      const { apiKey, storedId } = await resolveApiKey();
+      await updateConfig({ provider: provider || undefined, model: model || undefined, api_key: apiKey });
+      if (keyChoice.kind === "new") {
+        // The typed key is now a stored one: the picker relists and selects it.
+        setKeyChoice(storedId ? { kind: "stored", id: storedId } : { kind: "none" });
+        setKeyListVersion((v) => v + 1);
+      }
+    } catch (err) {
+      setWorkspaceNotice({ text: err instanceof Error ? err.message : String(err), error: true });
+    } finally { setBusy(false); }
+  };
 
   const cfg = ws.config;
   return (
@@ -103,7 +142,7 @@ export function WorkspaceScreen() {
                 </select>
               </label>
               <label className="block"><span className="text-text-muted text-xs">Model</span><input value={model} onChange={(e) => setModel(e.target.value)} className="mt-1 w-full rounded-md border hairline bg-bg px-2 py-1.5 font-mono" /></label>
-              <label className="block"><span className="text-text-muted text-xs">API key</span><input value={apiKey} onChange={(e) => setApiKey(e.target.value)} type="password" autoComplete="off" className="mt-1 w-full rounded-md border hairline bg-bg px-2 py-1.5 font-mono" /></label>
+              <CredentialPicker credentialsUrl={credentialsUrl} provider={provider} value={keyChoice} onChange={setKeyChoice} reloadKey={keyListVersion} onError={(text) => setWorkspaceNotice({ text, error: true })} />
               <div className="md:col-span-3 flex justify-end gap-2">
                 <button type="button" onClick={() => setManual(null)} className="rounded-md px-3 py-1.5 text-xs border hairline hover:bg-surface">Close</button>
                 <button type="submit" disabled={busy} className="rounded-md px-3 py-1.5 bg-surface hover:text-primary">Save configuration</button>

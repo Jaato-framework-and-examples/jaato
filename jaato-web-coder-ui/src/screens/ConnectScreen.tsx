@@ -122,6 +122,9 @@ export function ConnectScreen() {
       if (cancelled || launched.current) return;
       launched.current = true;
       setLauncher(cfg);
+      // A property of the page load, like the rest of the launcher config;
+      // the configure form reads it from the store.
+      useJaato.getState().setCredentialsUrl(cfg.credentialsUrl ?? null);
       if (!cfg.daemon && !cfg.token && !cfg.ticketUrl) return;
       const nextUrl = cfg.daemon ?? url;
       setUrl(nextUrl);

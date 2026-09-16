@@ -4863,6 +4863,25 @@ confirms inline before sending.
 Stated cost, unchanged in kind: the session still runs as the daemon's uid,
 so this is an entitlement boundary at the verbs, not a filesystem one.
 
+### A Key Typed Once Per Workspace
+
+The web client's configure form asked for the provider's API key on every
+new workspace, because the daemon keeps it where `config.update` puts it:
+in that workspace's `.env`. The fix is **application state in the BFF**
+(`jaato-web-coder-server/src/credentials.ts`), deliberately not a daemon
+vault and not an SDK verb — the daemon knows users only as `app:user`, an
+application's concept, and the TUI would carry a verb it never calls. The
+signed-in user's keys are stored per OIDC `sub`, encrypted at rest
+(AES-256-GCM, key from a 0600 file, owner bound into the AAD), listed by
+label and hint, revealed on a same-origin `POST`, and forwarded by the page
+as `config.update`'s `api_key` exactly as a typed key travels. `pass` was
+rejected for the unattended path: the daemon resolves `pass://` as its own
+uid against its own GnuPG store, and gpg-agent's `max-cache-ttl` is
+absolute, so an unattended store eventually blocks on a pinentry nobody
+answers. With no `credentials:` block nothing changes, and the daemon's
+`~/.jaato/<provider>_auth.json` tiers stay as they are for mono-user
+installs. Design: [web-server-bff.md §12](docs/design/web-server-bff.md).
+
 ### A Key the Web Files Panel Did Not Have
 
 The TUI's workspace panel (Ctrl+W) binds two keys to the entry under the

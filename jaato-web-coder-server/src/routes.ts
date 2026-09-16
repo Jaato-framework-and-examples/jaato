@@ -10,7 +10,16 @@
  * | ``/api/session`` | GET | 200 ``{user}`` or 401 |
  * | ``/api/ticket`` | POST | mints one single-use ticket for the signed-in user (same-origin only) |
  * | ``/api/logout`` | GET | ends the session, revokes tickets, redirects through the issuer's logout |
+ * | ``/api/credentials[?provider=]`` | GET | the signed-in user's stored provider keys: labels and hints, never secrets |
+ * | ``/api/credentials`` | POST | store one ``{provider, secret, label?}`` (same-origin only) |
+ * | ``/api/credentials/<id>/reveal`` | POST | the secret behind one entry, for the page to forward to the daemon (same-origin only) |
+ * | ``/api/credentials/<id>`` | DELETE | forget one entry (same-origin only) |
  * | anything else | GET | the bundle (``@jaato/web-coder-ui``'s static handler) |
+ *
+ * The four credential routes exist only when the config carries a
+ * ``credentials:`` block (``src/credentials.ts``); otherwise they are 404
+ * like any other unknown ``/api/`` path and ``config.json`` names no
+ * ``credentialsUrl``.
  *
  * Every route is relative to the mount point: the bundle asks for
  * ``./config.json`` and ``./api/ticket`` relative to itself, so serving the
@@ -20,6 +29,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { createStaticHandler, DIST_DIR } from "@jaato/web-coder-ui";
 import type { ServerConfig } from "./config.js";
 import { BindChannel, BindRefusedError, BindUnavailableError } from "./bind-channel.js";
+import { CredentialError, type CredentialStore, validateProvider } from "./credentials.js";
 import { type IdentityProvider, SignInRefusedError } from "./auth/identity.js";
 import { parseCookies, sessionCookie, SessionStore } from "./session.js";
 
@@ -28,6 +38,8 @@ export interface RouterDeps {
   idp: IdentityProvider;
   sessions: SessionStore;
   bind: BindChannel;
+  /** The per-user key store; absent = the credential routes do not exist. */
+  credentials?: CredentialStore;
   /** Serve the bundle from here; defaults to the installed @jaato/web-coder-ui dist. */
   distDir?: string;
   log?: (msg: string) => void;
@@ -82,7 +94,7 @@ async function readBody(req: IncomingMessage, limit = 64 * 1024): Promise<string
 }
 
 export function createRouter(deps: RouterDeps): Handler {
-  const { config, idp, sessions, bind } = deps;
+  const { config, idp, sessions, bind, credentials } = deps;
   const log = deps.log ?? (() => undefined);
   const secure = config.publicUrl.startsWith("https://");
   const pendingLogins = new Map<string, PendingLogin>();
@@ -91,9 +103,63 @@ export function createRouter(deps: RouterDeps): Handler {
 
   const staticHandler = createStaticHandler({
     root: deps.distDir ?? DIST_DIR,
-    config: { daemon: config.daemon.url, ticketUrl: "./api/ticket", loginUrl: "./auth/login", autoConnect: true },
+    config: {
+      daemon: config.daemon.url, ticketUrl: "./api/ticket", loginUrl: "./auth/login", autoConnect: true,
+      // Named only when the store exists: the bundle shows the combobox iff this key is present.
+      ...(credentials ? { credentialsUrl: "./api/credentials" } : {}),
+    },
     allowedHosts: null,
   }) as Handler;
+
+  /**
+   * ``/api/credentials`` and below.  Every route needs the cookie; the
+   * mutating ones and ``reveal`` need same-origin too, so a cross-site page
+   * cannot read a secret or plant one.  Owner is the session's OIDC ``sub``.
+   */
+  const handleCredentials = async (req: IncomingMessage, res: ServerResponse, url: URL, method: string, rest: string[]): Promise<void> => {
+    if (!credentials) return text(res, 404, "not found");
+    const s = sessions.resolve(parseCookies(req.headers.cookie).get(cookieName));
+    if (!s) return json(res, 401, { error: "not signed in", loginUrl: "./auth/login" });
+    const sameOrigin = () => isSameOrigin(req, config.publicUrl);
+    try {
+      if (rest.length === 0) {
+        if (method === "GET") {
+          const provider = url.searchParams.get("provider");
+          return json(res, 200, { entries: credentials.list(s.sub, provider === null ? undefined : validateProvider(provider)) });
+        }
+        if (method === "POST") {
+          if (!sameOrigin()) return json(res, 403, { error: "cross-site request refused" });
+          let body: Record<string, unknown>;
+          try { body = JSON.parse(await readBody(req)) as Record<string, unknown>; }
+          catch { return json(res, 400, { error: "body must be JSON" }); }
+          if (!body || typeof body !== "object") return json(res, 400, { error: "body must be a JSON object" });
+          const entry = credentials.add(s.sub, validateProvider(body.provider), body.secret as string, body.label as string | undefined);
+          log(`credential stored for ${s.user}: provider=${entry.provider} id=${entry.id}`);
+          return json(res, 201, { entry });
+        }
+        return text(res, 405, "GET or POST", { Allow: "GET, POST" });
+      }
+      const id = rest[0]!;
+      if (rest.length === 1 && method === "DELETE") {
+        if (!sameOrigin()) return json(res, 403, { error: "cross-site request refused" });
+        if (!credentials.remove(s.sub, id)) return json(res, 404, { error: "no such credential" });
+        log(`credential deleted for ${s.user}: id=${id}`);
+        res.writeHead(204, { "Cache-Control": "no-store" }); res.end();
+        return;
+      }
+      if (rest.length === 2 && rest[1] === "reveal" && method === "POST") {
+        if (!sameOrigin()) return json(res, 403, { error: "cross-site request refused" });
+        const secret = credentials.reveal(s.sub, id);
+        if (secret === null) return json(res, 404, { error: "no such credential" });
+        log(`credential revealed to ${s.user}: id=${id}`);
+        return json(res, 200, { secret });
+      }
+      return text(res, 404, "not found");
+    } catch (e) {
+      if (e instanceof CredentialError) return json(res, e.status, { error: e.message });
+      throw e;
+    }
+  };
 
   const currentSession = (req: IncomingMessage) => sessions.resolve(parseCookies(req.headers.cookie).get(cookieName));
   const clearCookie = () => sessionCookie(cookieName, "", { secure, maxAgeSeconds: 0 });
@@ -184,6 +250,10 @@ export function createRouter(deps: RouterDeps): Handler {
         }
         const end = idp.endSessionUrl(s?.idToken, `${config.publicUrl}/`);
         return redirect(res, end ?? `${config.publicUrl}/`, { "Set-Cookie": clearCookie() });
+      }
+
+      if (path === "/api/credentials" || path.startsWith("/api/credentials/")) {
+        return await handleCredentials(req, res, url, method, path.slice("/api/credentials".length).split("/").filter(Boolean));
       }
 
       if (path.startsWith("/api/") || path.startsWith("/auth/")) return text(res, 404, "not found");

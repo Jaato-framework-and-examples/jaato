@@ -14,6 +14,8 @@ describe("parseLauncherConfig", () => {
     expect(parseLauncherConfig({ daemon: "ws://d:1", token: "t", autoConnect: true, extra: 1 })).toEqual({ daemon: "ws://d:1", token: "t", autoConnect: true });
     expect(parseLauncherConfig({ daemon: "wss://d", ticketUrl: "./api/ticket", loginUrl: "./auth/login" })).toEqual({ daemon: "wss://d", ticketUrl: "./api/ticket", loginUrl: "./auth/login" });
     expect(parseLauncherConfig({ ticketUrl: "./api/ticket", sessionUrl: "./who", logoutUrl: "./bye" })).toEqual({ ticketUrl: "./api/ticket", sessionUrl: "./who", logoutUrl: "./bye" });
+    expect(parseLauncherConfig({ ticketUrl: "./api/ticket", credentialsUrl: "./api/credentials" })).toEqual({ ticketUrl: "./api/ticket", credentialsUrl: "./api/credentials" });
+    expect(parseLauncherConfig({ credentialsUrl: "" })).toEqual({});
     expect(parseLauncherConfig({ daemon: 5, token: "", autoConnect: "yes" })).toEqual({});
     expect(parseLauncherConfig(null)).toEqual({});
     expect(parseLauncherConfig("x")).toEqual({});

@@ -19,6 +19,7 @@ import { MAIN_AGENT, useJaato } from "@/store/store";
 import type { PendingClarification } from "@/store/types";
 import { THEME_NAMES, applyTheme, saveThemePreference } from "@/theme/themes";
 import { disconnect, getClient, isConnected } from "@/sdk/connection";
+import { noteAuthKeyCommand } from "./authKeyCapture";
 
 export const inputHistory: string[] = [];
 
@@ -228,6 +229,9 @@ export async function submitInput(text: string, verbatim: boolean): Promise<void
         await attachSession(parsed.args[0]);
         return;
       }
+      // A ``<provider>-auth key <secret>`` is also a key worth remembering
+      // for the next workspace; filed once the daemon's offer names the provider.
+      noteAuthKeyCommand(parsed.command, parsed.args);
       st.addUserBlock(agentId, text);
       await client.executeCommand(parsed.command ?? "", parsed.args ?? []);
       return;

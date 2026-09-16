@@ -46,6 +46,13 @@ export interface JaatoState {
   connection: { phase: ConnectionPhase; detail?: string; attempt?: number; serverVersion?: string | null; protocolVersion?: string | null };
   url: string;
   screen: Screen;
+  /**
+   * The sign-in backend's per-user key store (``config.json``'s
+   * ``credentialsUrl``, see ``app/credentials.ts``), or ``null`` when the
+   * page was served without one.  Read by the workspace configure form to
+   * offer previously used keys instead of asking for the key again.
+   */
+  credentialsUrl: string | null;
 
   workspace: {
     mode: "unknown" | "enabled" | "disabled";
@@ -135,6 +142,7 @@ export interface JaatoState {
   setConnection: (c: Partial<JaatoState["connection"]>) => void;
   setUrl: (url: string) => void;
   setScreen: (s: Screen) => void;
+  setCredentialsUrl: (url: string | null) => void;
   setWorkspaceMode: (m: JaatoState["workspace"]["mode"]) => void;
   selectWorkspace: (name: string | undefined) => void;
   selectAgent: (id: string) => void;
@@ -157,6 +165,8 @@ export interface JaatoState {
   toggleWorkspaceHidden: (entryId: string) => void;
   toggleWorkspaceShowHidden: () => void;
   setWorkspaceNotice: (n: JaatoState["workspaceNotice"]) => void;
+  /** The workspace SCREEN's status line (``workspace.notice``), as opposed to the Files panel's above. */
+  setWorkspaceListNotice: (n: JaatoState["workspace"]["notice"]) => void;
   setTheme: (t: string) => void;
   setPopup: (callId: string | null) => void;
   resetSessionState: () => void;
@@ -755,6 +765,7 @@ export const useJaato = create<JaatoState>()((set, get) => ({
   connection: { phase: "disconnected" },
   url: "",
   screen: "connect",
+  credentialsUrl: null,
   workspace: { mode: "unknown", list: [] },
   profiles: [],
   sessions: [],
@@ -773,6 +784,7 @@ export const useJaato = create<JaatoState>()((set, get) => ({
   setConnection: (c) => set((st) => ({ connection: { ...st.connection, ...c } })),
   setUrl: (url) => set({ url }),
   setScreen: (screen) => set({ screen }),
+  setCredentialsUrl: (credentialsUrl) => set({ credentialsUrl }),
   setWorkspaceMode: (mode) => set((st) => ({ workspace: { ...st.workspace, mode } })),
   selectWorkspace: (name) => set((st) => ({ workspace: { ...st.workspace, selected: name } })),
   selectAgent: (id) => set({ selectedAgentId: id }),
@@ -813,6 +825,7 @@ export const useJaato = create<JaatoState>()((set, get) => ({
   })),
   toggleWorkspaceShowHidden: () => set((st) => ({ workspaceShowHidden: !st.workspaceShowHidden })),
   setWorkspaceNotice: (n) => set(() => ({ workspaceNotice: n })),
+  setWorkspaceListNotice: (n) => set((st) => ({ workspace: { ...st.workspace, notice: n } })),
   setTheme: (theme) => set((st) => ({ ui: { ...st.ui, theme } })),
   setPopup: (callId) => set((st) => ({ ui: { ...st.ui, popupCallId: callId } })),
   resetSessionState: () => set(() => ({ ...emptySessionState() })),

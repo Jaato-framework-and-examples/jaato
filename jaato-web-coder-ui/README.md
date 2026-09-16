@@ -87,6 +87,16 @@ a workspace goes straight to that card whether or not the workspace already
 names a provider. The daemon's manual provider / model / API-key form is one
 click away behind `configure` on each row, never a gate.
 
+Served by `jaato-web-coder-server` with its key store enabled (`config.json`
+names `credentialsUrl`), that form's API-key field is a combobox of the keys
+you stored before for the selected provider — label and a masked hint, never
+the secret — plus "New key…". The newest one is preselected, so a second
+workspace on the same provider is one click; the key is revealed once when
+you save and forwarded to the daemon exactly as a typed one is. A
+`<provider>-auth key …` typed at the prompt is remembered the same way. The
+daemon knows nothing of the store: it is the backend's, keyed by who signed
+in (`src/app/credentials.ts`, `src/components/workspace/CredentialPicker.tsx`).
+
 ### Hosting the bundle yourself
 
 `dist/` is static (assets are referenced relatively, so it can sit under any

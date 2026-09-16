@@ -320,6 +320,10 @@ session:
 
 ticket:
   ttl_seconds: 60
+
+credentials:                                 # optional; see §12
+  file: /var/lib/jaato-web-coder/credentials.json
+  key_file: /etc/jaato-web-coder/credentials.key
 ```
 
 Secrets are files, never inline values or argv, for the reason
@@ -347,6 +351,7 @@ working with the shared token on the same daemon.
 | per-user and per-IP rate limits on `/api/ticket` | a script minting tickets in a loop |
 | logout revokes the user's outstanding tickets at the daemon | a ticket minted just before logout cannot open a connection after it |
 | the BFF holds no daemon token in `direct` mode beyond the bind channel | compromising the BFF's process yields the ability to mint tickets, not a session on every user's behalf — still serious, and why the app credential should be rotatable |
+| stored provider keys (§12) are listed by label and hint, revealed only on a same-origin `POST`, and encrypted at rest under a key from a 0600 file with the owner bound into the AAD | a cross-site page cannot read or plant a key with the victim's cookie; a copied store file is ciphertext; editing an entry's owner in the file makes it undecryptable rather than somebody else's |
 
 What it does **not** give, stated so nobody reads it in: OS-level separation
 between users. Every session still runs as the daemon's uid, as #1074's
@@ -566,3 +571,47 @@ These ship in a `deploy/` directory of the server package — the unit
 files, a Caddyfile and an nginx equivalent, and the `init` command — as
 part of phase 4 (§9). They are the deployment mechanism; nothing here needs
 a container, and the repository has no Dockerfile for these components.
+
+## 12. Provider keys a user has used before
+
+The daemon keeps an API key where `config.update` puts it: in the selected
+workspace's `.env`, under the provider's first credential variable. Right
+for a session to read from, wrong as a memory for the person — so every new
+workspace asked for the same Zhipu key again, and the only thing that knew
+the person across workspaces was this server.
+
+Three shapes were weighed and the first two rejected:
+
+| Shape | Why not |
+|---|---|
+| a daemon-side vault with a new `credentials.list` verb in the protocol | the daemon's identity is `app:user`, an application's concept; this is a need of one client application, not of the SDK. Every other client (TUI, `jaato_sdk`) would carry a verb it never calls |
+| `pass://` references written into the workspace `.env`, resolved daemon-side | the daemon resolves them as **its** uid against **its** GnuPG store; the BFF runs as another user. And gpg-agent's `max-cache-ttl` is absolute, so an unattended daemon eventually blocks on a pinentry nobody can answer, while a passphrase-less key protects exactly what a 0600 file protects |
+| **application state in the BFF**, forwarded by the page as `config.update`'s `api_key` | no daemon change, no protocol change, the key travels the one path it already travels when typed |
+
+`src/credentials.ts` is that store. Entries are keyed by the OIDC `sub`
+(stable where the display claim is configurable), encrypted with
+AES-256-GCM under a key HKDF-derived from `credentials.key_file`, with
+`owner\0provider\0id` as the AAD so re-attributing an entry by editing the
+plaintext metadata makes it undecryptable. The listing carries label and a
+four-character hint; `reveal` is the one route that returns a secret, and
+it is a same-origin `POST` like `/api/ticket`. The same secret stored
+twice for one owner and provider is one entry, so the combobox does not
+grow a row per workspace it was used in.
+
+Two ways a key enters the store, both on the page's side:
+
+- the configure form's "New key…" is stored (label optional) and then
+  applied; the picker relists and selects it;
+- a `<provider>-auth key <secret>` typed at the prompt is parked, and filed
+  when the daemon's `auth.setup` offer arrives naming the provider — the
+  command prefix alone cannot say it (`github-auth` serves
+  `github_models`). A refused key produces no offer and is never stored.
+
+Trust posture, so nobody reads more in: the server can decrypt every entry
+(it must, to answer `reveal`), which is the same posture as the workspace
+`.env` the daemon writes and not per-user cryptographic isolation. With the
+feature off (`credentials:` absent) `config.json` names no
+`credentialsUrl`, the routes are 404 and the bundle shows the plain key
+field it always had. The daemon's own `~/.jaato/<provider>_auth.json` tiers
+are untouched: they serve the mono-user installs this client is not
+intended for.
