@@ -1,6 +1,11 @@
 {
   "tool": "Claude Code",
   "target": ".claude/skills/jaato-sdk",
+  "detect": {
+    "commands": ["claude"],
+    "paths": ["~/.claude/projects", "~/.claude/sessions", "~/.claude.json"],
+    "why": "Claude Code writes ~/.claude/projects and ~/.claude/sessions as it runs, and ~/.claude.json at setup. jaato creates only ~/.claude/skills/jaato-sdk, so none of these can be produced by installing this integration."
+  },
   "summary": "the jaato-sdk skill — how to build on this SDK, for an agent working in Claude Code",
   "why": "Claude Code loads skills from ~/.claude/skills (all repos) or <project>/.claude/skills (one project). Installing from here rather than copying by hand is what keeps the guide and the framework the same version."
 }

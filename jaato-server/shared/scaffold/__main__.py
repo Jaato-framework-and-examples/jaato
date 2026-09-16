@@ -458,8 +458,14 @@ def _cmd_integration(args) -> int:
     name = args.name
     # --user and --workspace are mutually exclusive, so "not --workspace" IS
     # user scope; --user is accepted so the default can be stated out loud.
-    dest = _install.target_dir(name, user=not args.workspace,
-                               workspace=args.workspace)
+    try:
+        dest = _install.target_dir(name, user=not args.workspace,
+                                   workspace=args.workspace)
+    except _install.IntegrationManifestError as exc:
+        # A packaging error in what we shipped, not a mistake the operator
+        # made.  Say so instead of installing to a guessed path.
+        print(f"{exc}", file=sys.stderr)
+        return 1
     changed, lines = _install.install(name, dest, force=args.force, dry_run=args.dry_run)
     if args.json:
         state, detail = _install.compare(name, dest)

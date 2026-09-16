@@ -2617,6 +2617,81 @@ capability rather than a lifetime.
 1. Add a `TRAIT_*` constant in `shared/plugins/base.py` with a docstring documenting the contract
 2. Update consumers (server, daemon) to query `getattr(plugin, 'plugin_traits', frozenset())`
 
+### An Integration Declares Its Own Paths, and Its Own Harness
+
+`jaato-scaffold integration <name>` installs the `jaato-sdk` skill where
+another tool looks for skills. Everything tool-specific lives in that
+integration's `integration.json` — there is no `if name == "claude-code"`
+anywhere in the code, which is what lets a new harness be added without
+touching the generic module.
+
+**`target` is one key with two forms.** A string when a harness uses the same
+relative path at both scopes; an object when they differ:
+
+```json
+"target": ".claude/skills/jaato-sdk"
+
+"target": {"user":      ".pi/agent/skills/jaato-sdk",
+           "workspace": ".pi/skills/jaato-sdk"}
+```
+
+The rejected alternative was `target` **plus** `user_target` /
+`workspace_target` companions. Three keys cost a reader the question of which
+are alternatives and which are siblings, put two nulls in every `listing()`
+row (and flipped *which* two per integration, so every consumer handled both
+shapes), and — the sharp one — let an author declare one scope, forget the
+other, and get a **silently wrong path** for the missing one.
+
+**A manifest that cannot say raises.** The old code resolved a missing
+`target` to `.jaato-integration-<name>` and its docstring said the caller
+reported it. No caller did: the string occurred exactly once in the tree, at
+the site that built it, with no reader anywhere — so a forgotten key installed
+a real payload to a plausible-looking wrong path. `IntegrationManifestError`
+now covers a missing target, an object missing a scope, a non-string path, and
+an absolute one (targets are joined onto `$HOME` or the workspace, so absolute
+would escape the scope asked for). `listing()` reports such an integration as
+`invalid` rather than raising — the bare verb is how an operator finds out
+something is wrong, so it must survive the thing being wrong.
+
+**`detect` says how to know the harness is installed, and only its author
+knows.** `jaato-doctor` warned once per shipped-but-unapplied integration with
+no test of whether that tool exists on the machine. With one integration
+shipped that was invisible; with two, every user of the first gets a warning
+they cannot clear — the only way to satisfy it is to install a skill for a
+harness they do not use, and the noise grows with every integration added.
+
+```json
+"detect": {
+  "commands": ["claude"],
+  "paths": ["~/.claude/projects", "~/.claude/sessions", "~/.claude.json"],
+  "why": "Claude Code writes these as it runs; jaato creates only
+          ~/.claude/skills/jaato-sdk, so none can come from installing us."
+}
+```
+
+| Property | Why it is load-bearing |
+|---|---|
+| **`None` is not `False`** | an integration declaring no `detect` asserted nothing, and still warns exactly as before. Suppression follows an *assertion*, never an inference — absence of evidence is not evidence of absence |
+| **the skip is gated on `state == "absent"`** | detection is a heuristic, so the most it may ever do is withhold an optional suggestion. A copy that EXISTS is reported whatever detection says, which keeps `stale` / `edited` / `diverged` drift visible on a machine whose harness was removed after the skill was applied |
+| **a `detect.paths` entry may not be an ancestor of the integration's own target** | jaato creates those. Measured: on a host with *neither* harness, installing only our skills brings `~/.claude`, `~/.claude/skills`, `~/.pi` and `~/.pi/agent` into existence — so `~/.pi` would answer "Pi is here" on a machine that has never had Pi, silently restoring the noise the key exists to remove |
+
+That last row is the one error a machine can check
+(`manifest_detect_problems`). Whether a path is *truly* harness-owned cannot
+be checked here — it is what the author asserts, and `why` is how a reviewer
+who does not use that harness judges the claim. `commands` cannot be
+contaminated that way (we never put a binary on `PATH`) but is not absolute
+either: a harness outside this process's `PATH` reads as absent, which loses a
+nudge rather than inventing noise — the safer direction to be wrong in.
+
+**A guard with `REVERSIONS` lives in `jaato-server/shared/tests/`**, whatever
+package its subject is in — the meta-suite walks only `shared/tests` and
+`server/tests`, so a reversion declared elsewhere is silently unexercised.
+`test_doctor_detects_checkout_skew_823.py` is the precedent: it sits there and
+targets `jaato-sdk/jaato_sdk/doctor.py`. Widening that walk is not a
+mechanical change — `_collect_nodeids` keys by BASENAME and a collision
+already exists across the wider set (`test_completion_processors.py`), so
+widening would reintroduce the ambiguity #1084 fixed.
+
 ### Entry-point Plugin Trust
 
 Out-of-tree plugins are installed as distributions declaring
