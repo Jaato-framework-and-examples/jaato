@@ -337,6 +337,24 @@ describe("JaatoClient typed methods", () => {
     assert.deepEqual((ev as { edited_arguments?: unknown }).edited_arguments, { foo: "bar" });
   });
 
+  test("respondToPostAuthSetup mirrors the Python SDK's PostAuthSetupResponse", async () => {
+    await client.respondToPostAuthSetup("req_7", { connect: true, modelName: "claude-sonnet-4", persistEnv: true });
+    const [ev] = getSent();
+    assert.equal(ev.type, EventTypeValue.POST_AUTH_SETUP_RESPONSE);
+    assert.equal((ev as { request_id?: string }).request_id, "req_7");
+    assert.equal((ev as { connect?: boolean }).connect, true);
+    assert.equal((ev as { model_name?: string }).model_name, "claude-sonnet-4");
+    assert.equal((ev as { persist_env?: boolean }).persist_env, true);
+  });
+
+  test("respondToPostAuthSetup declining sends connect=false with the Python defaults", async () => {
+    await client.respondToPostAuthSetup("req_8", { connect: false });
+    const [ev] = getSent();
+    assert.equal((ev as { connect?: boolean }).connect, false);
+    assert.equal((ev as { model_name?: string }).model_name, "");
+    assert.equal((ev as { persist_env?: boolean }).persist_env, false);
+  });
+
   test("executeCommand sends CommandRequest", async () => {
     await client.executeCommand("permissions", ["whitelist", "tool1"]);
     const [ev] = getSent();

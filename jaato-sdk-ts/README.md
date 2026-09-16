@@ -468,6 +468,7 @@ The server strips the `c:` / `yc:` prefix and forwards the comment to the model 
 |---|---|
 | `respondToClarification(requestId, response, questionIndex?)` | `clarification.response` |
 | `respondToReferenceSelection(requestId, response)` | `reference_selection.response` |
+| `respondToPostAuthSetup(requestId, {connect, modelName?, persistEnv?})` | `auth.setup_response` — answers the daemon's `auth.setup` offer that follows a successful daemon-level auth command (`<provider>-auth login`) with no session open: pick a model, optionally persist `JAATO_PROVIDER` / `MODEL_NAME` to the workspace `.env`, or decline |
 
 ## Consuming this SDK before it's published to npm
 

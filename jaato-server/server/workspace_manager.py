@@ -11,6 +11,7 @@ The manager persists workspace metadata to ~/.jaato/workspaces.json
 """
 
 import json
+import functools
 import logging
 import os
 from dataclasses import dataclass, asdict
@@ -25,25 +26,81 @@ logger = logging.getLogger(__name__)
 # Default registry path
 DEFAULT_REGISTRY_PATH = Path.home() / ".jaato" / "workspaces.json"
 
-# Known providers and their required env vars
-PROVIDER_ENV_VARS = {
-    "anthropic": ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"],
-    "google": ["PROJECT_ID", "GOOGLE_APPLICATION_CREDENTIALS"],
-    "github": ["GITHUB_TOKEN"],
-    "antigravity": [],  # Uses OAuth, checked differently
-    "ollama": ["OLLAMA_HOST", "OLLAMA_MODEL"],
-    "claude_cli": [],  # Uses CLI auth
-}
+# ---------------------------------------------------------------------------
+# Provider catalog: derived from the providers' own contracts, never listed.
+#
+# This used to be a six-entry table (``anthropic``, ``google``, ``github``,
+# ``antigravity``, ``ollama``, ``claude_cli``) written when those were the
+# providers -- so the workspace picker offered six of the twenty-odd
+# providers in the tree, and two of the six under names the runtime does
+# not know (the modules are ``google_genai`` and ``github_models``; a
+# ``.env`` written with ``JAATO_PROVIDER=google`` fails at ``load_provider``).
+# Every provider already declares ``PROVIDER_AUTH_RESOLUTION`` -- the
+# ordered credential chain ``explain provider`` renders -- and its ``env``
+# steps ARE the env vars this module used to hardcode.  Reading them means
+# a new provider appears here with no edit, the same way ``explain
+# dependencies`` stopped hardcoding the distribution list (#966).
+#
+# The scan is AST-only (``shared.scaffold.introspect``), so it imports no
+# provider SDK; the ``echo`` test double is excluded there too.
+# ---------------------------------------------------------------------------
 
-# Provider detection order (check these env vars to determine provider)
-PROVIDER_DETECTION = [
-    ("JAATO_PROVIDER", None),  # Explicit override
-    ("ANTHROPIC_API_KEY", "anthropic"),
-    ("ANTHROPIC_AUTH_TOKEN", "anthropic"),
-    ("GITHUB_TOKEN", "github"),
-    ("PROJECT_ID", "google"),
-    ("OLLAMA_HOST", "ollama"),
-]
+#: A provider with no ``env`` credential step still needs a way to be
+#: DETECTED from a workspace ``.env`` that configures it without a secret.
+#: Vertex AI is the one such case in the tree: it authenticates through
+#: Application Default Credentials and is configured by ``PROJECT_ID``.
+_DETECTION_HINTS: Dict[str, str] = {"PROJECT_ID": "google_genai"}
+
+
+@functools.lru_cache(maxsize=1)
+def provider_catalog() -> Dict[str, List[str]]:
+    """Every model provider in the tree -> the env vars that carry its credential.
+
+    Keys are the provider directory names, which are what a profile's
+    ``provider:`` field and ``JAATO_PROVIDER`` name.  Values are the
+    ``kind == "env"`` steps of ``PROVIDER_AUTH_RESOLUTION``, in resolution
+    order; a provider whose credential is OAuth, ADC, an external CLI or
+    nothing at all (``ollama``) has an empty list -- it can still be
+    selected, and a key cannot be written for it (see ``update_config``).
+    Cached for the daemon's lifetime: the contracts are source constants.
+    """
+    from shared.scaffold.introspect import providers
+
+    out: Dict[str, List[str]] = {}
+    for name, info in providers().items():
+        out[name] = [a.name for a in info.auth if getattr(a, "kind", "") == "env" and a.name]
+    return dict(sorted(out.items()))
+
+
+def available_providers() -> List[str]:
+    """The provider names the workspace picker may offer, sorted."""
+    return list(provider_catalog().keys())
+
+
+def credential_env_var(provider: str) -> Optional[str]:
+    """The env var an API key for ``provider`` is written under, or ``None``.
+
+    The FIRST ``env`` step of the provider's own chain -- the one its
+    ``resolve_api_key`` consults first, so the key written here is the one
+    it reads back.
+    """
+    vars_ = provider_catalog().get(provider) or []
+    return vars_[0] if vars_ else None
+
+
+def _detection_order() -> List[tuple]:
+    """``(env_var, provider)`` pairs consulted by :meth:`_detect_provider`.
+
+    ``JAATO_PROVIDER`` is explicit and wins.  Then every provider's declared
+    credential vars, in sorted provider order so the answer does not
+    depend on directory iteration order, then the detection hints.
+    """
+    order: List[tuple] = [("JAATO_PROVIDER", None)]
+    for name, vars_ in provider_catalog().items():
+        for v in vars_:
+            order.append((v, name))
+    order.extend(_DETECTION_HINTS.items())
+    return order
 
 
 class WorkspaceContainmentError(ValueError):
@@ -297,7 +354,7 @@ class WorkspaceManager:
         Returns:
             Provider name or None if not detected.
         """
-        for env_var, provider in PROVIDER_DETECTION:
+        for env_var, provider in _detection_order():
             if env_var in env_vars and env_vars[env_var]:
                 if provider is None:
                     # JAATO_PROVIDER is explicit
@@ -506,7 +563,7 @@ class WorkspaceManager:
             return {
                 "workspace": None,
                 "configured": False,
-                "available_providers": list(PROVIDER_ENV_VARS.keys()),
+                "available_providers": available_providers(),
                 "missing_fields": ["workspace"],
             }
 
@@ -521,7 +578,7 @@ class WorkspaceManager:
                 return {
                     "workspace": target,
                     "configured": False,
-                    "available_providers": list(PROVIDER_ENV_VARS.keys()),
+                    "available_providers": available_providers(),
                     "missing_fields": ["workspace is outside the workspace root"],
                 }
             if ws_path.exists():
@@ -530,7 +587,7 @@ class WorkspaceManager:
                 return {
                     "workspace": target,
                     "configured": False,
-                    "available_providers": list(PROVIDER_ENV_VARS.keys()),
+                    "available_providers": available_providers(),
                     "missing_fields": ["workspace does not exist"],
                 }
 
@@ -545,7 +602,7 @@ class WorkspaceManager:
             "configured": ws_info.configured,
             "provider": ws_info.provider,
             "model": ws_info.model,
-            "available_providers": list(PROVIDER_ENV_VARS.keys()),
+            "available_providers": available_providers(),
             "missing_fields": missing,
         }
 
@@ -576,6 +633,16 @@ class WorkspaceManager:
         if not target:
             raise ValueError("No workspace selected")
 
+        # The docstring always promised this refusal; nothing enforced it,
+        # so a picker could write a JAATO_PROVIDER the runtime rejects at
+        # load_provider() -- the failure then surfaced at session.new,
+        # several steps from the form that caused it.
+        if provider not in provider_catalog():
+            raise ValueError(
+                f"Unknown provider {provider!r}. Available: "
+                f"{', '.join(available_providers())}"
+            )
+
         env_file = self.get_env_file(target)
         if not env_file:
             raise ValueError(f"Cannot find .env for workspace: {target}")
@@ -592,14 +659,16 @@ class WorkspaceManager:
             existing["MODEL_NAME"] = model
 
         if api_key:
-            # Determine which env var to use based on provider
-            if provider == "anthropic":
-                existing["ANTHROPIC_API_KEY"] = api_key
-            elif provider == "github":
-                existing["GITHUB_TOKEN"] = api_key
-            elif provider == "google":
-                # For Google, API key isn't typically used, but store it anyway
-                existing["GOOGLE_API_KEY"] = api_key
+            # Written under the FIRST env step of the provider's own
+            # credential chain -- the var its resolve_api_key reads first.
+            var = credential_env_var(provider)
+            if not var:
+                raise ValueError(
+                    f"Provider {provider!r} takes no API key from the environment "
+                    f"(its credential is OAuth, ADC, an external CLI, or none); "
+                    f"sign in with its auth command instead."
+                )
+            existing[var] = api_key
 
         # Write back to .env file
         self._write_env_file(env_file, existing)

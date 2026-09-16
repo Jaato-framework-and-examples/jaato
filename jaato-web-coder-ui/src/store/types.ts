@@ -147,6 +147,25 @@ export interface PendingReferenceSelection {
   options: string[];
 }
 
+/**
+ * The daemon's ``auth.setup`` offer: a daemon-level auth command
+ * (``<provider>-auth login``) succeeded with no session open, so the
+ * daemon asks whether to open one with that provider, which model, and
+ * whether to persist ``JAATO_PROVIDER`` / ``MODEL_NAME`` to the workspace
+ * ``.env``.  One pending offer at a time; answered with
+ * ``respondToPostAuthSetup``.  The TUI walks the same three questions.
+ */
+export interface PendingPostAuthSetup {
+  requestId: string;
+  providerName: string;
+  providerDisplayName: string;
+  models: { name: string; description?: string }[];
+  hasActiveSession: boolean;
+  currentProvider?: string;
+  currentModel?: string;
+  workspacePath?: string;
+}
+
 export interface Agent {
   id: string;
   name: string;

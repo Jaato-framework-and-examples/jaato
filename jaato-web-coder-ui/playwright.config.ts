@@ -23,6 +23,9 @@ export default defineConfig({
   },
   webServer: [
     { command: "MOCK_PORT=8097 MOCK_HOST=127.0.0.1 MOCK_SPEED=0 node --import tsx mock/daemon.ts", port: 8097, reuseExistingServer: false, timeout: 30_000 },
+    // The same mock in workspace mode (``--workspace-root`` daemons), for the
+    // workspace-screen tests; the page picks the daemon by URL.
+    { command: "MOCK_PORT=8098 MOCK_HOST=127.0.0.1 MOCK_SPEED=0 MOCK_WORKSPACES=1 node --import tsx mock/daemon.ts", port: 8098, reuseExistingServer: false, timeout: 30_000 },
     // ``--host 127.0.0.1``: Vite's default ``localhost`` resolves to ::1 first
     // on Node 17+, so on a runner the port wait (which tries both) passed while
     // the browser, sent to 127.0.0.1 by ``baseURL``, was refused.  Bind the

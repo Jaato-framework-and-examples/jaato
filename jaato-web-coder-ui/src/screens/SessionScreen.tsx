@@ -12,6 +12,7 @@ import { OutputPane } from "@/components/output/OutputPane";
 import { ToolOutputPopup } from "@/components/output/ToolOutputPopup";
 import { Composer } from "@/components/input/Composer";
 import { PermissionPrompt } from "@/components/prompts/PermissionPrompt";
+import { PostAuthSetupPrompt } from "@/components/prompts/PostAuthSetupPrompt";
 import { ClarificationPrompt } from "@/components/prompts/ClarificationPrompt";
 import { ReferenceSelectionPrompt } from "@/components/prompts/ReferenceSelectionPrompt";
 import { PlanPanel } from "@/components/panels/PlanPanel";
@@ -19,7 +20,7 @@ import { BudgetPanel } from "@/components/panels/BudgetPanel";
 import { WorkspacePanel } from "@/components/panels/WorkspacePanel";
 import { AgentTabs } from "@/components/panels/AgentTabs";
 import { StatusBar } from "@/components/layout/StatusBar";
-import { answerClarification, cancelClarification, inputHistory, respondPermission, respondReference, submitInput } from "@/app/actions";
+import { answerClarification, cancelClarification, inputHistory, respondPermission, respondPostAuth, respondReference, submitInput } from "@/app/actions";
 import { useKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 
 function SidePanel({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
@@ -34,10 +35,32 @@ function SidePanel({ title, onClose, children }: { title: string; onClose: () =>
   );
 }
 
-function ProfilePicker({ onPick }: { onPick: (profile: string | null) => void }) {
+/**
+ * A daemon-level auth command as the command list advertises it:
+ * ``anthropic-auth``, ``openrouter-auth``, ``mock-auth`` -- the top-level
+ * name only (the list also carries ``<name> login`` sub-entries).
+ */
+function authCommands(commands: { name: string; description?: string }[]): { name: string; description?: string }[] {
+  return commands.filter((c) => /-auth$/.test(c.name) && !c.name.includes(" "));
+}
+
+/**
+ * What the TUI lets you do before any session exists, in one card:
+ * start with a profile or the workspace defaults, or sign in to a
+ * provider first.  Nothing here is required -- ``skip`` drops to the
+ * prompt, where any daemon command (``<provider>-auth login``,
+ * ``help``) runs with no session, exactly as in the TUI.
+ */
+function ProfilePicker({ onPick, onAuth, onSkip }: {
+  onPick: (profile: string | null) => void;
+  onAuth: (command: string) => void;
+  onSkip: () => void;
+}) {
   const profiles = useJaato((s) => s.profiles);
+  const commands = useJaato((s) => s.commands);
+  const auth = authCommands(commands);
   return (
-    <div className="h-full flex items-center justify-center p-6">
+    <div className="h-full flex items-center justify-center p-6 overflow-auto">
       <div className="w-full max-w-lg rounded-xl border hairline surface-1 p-5 space-y-3">
         <div className="text-lg font-semibold">New session</div>
         <div className="text-sm text-text-muted">Pick an agent profile, or start with the workspace defaults.</div>
@@ -49,6 +72,19 @@ function ProfilePicker({ onPick }: { onPick: (profile: string | null) => void })
             </button></li>
           ))}
         </ul>
+        {auth.length > 0 && (
+          <div className="space-y-1.5" aria-label="Sign in to a provider">
+            <div className="text-sm text-text-muted">No provider configured yet? Sign in first; the daemon then offers to open the session for you.</div>
+            <div className="flex flex-wrap gap-2">
+              {auth.map((c) => (
+                <button key={c.name} type="button" onClick={() => onAuth(`${c.name} login`)} className="px-2.5 py-1 rounded-md text-xs border hairline hover:bg-surface font-mono" title={c.description}>{c.name} login</button>
+              ))}
+            </div>
+          </div>
+        )}
+        <div className="text-right">
+          <button type="button" onClick={onSkip} className="text-xs text-text-muted underline">Skip — go to the prompt without a session</button>
+        </div>
       </div>
     </div>
   );
@@ -65,6 +101,7 @@ export function SessionScreen() {
   const permissions = useJaato((s) => s.permissions);
   const clarifications = useJaato((s) => s.clarifications);
   const references = useJaato((s) => s.referenceSelections);
+  const postAuth = useJaato((s) => s.postAuth);
   const processing = useJaato((s) => s.processing[selected] ?? false);
   const [picking, setPicking] = useState(true);
   const [creating, setCreating] = useState(false);
@@ -104,7 +141,26 @@ export function SessionScreen() {
     return null;
   }, [agentPerms, agentClars, agentRefs]);
 
-  if (picking && !sessionId) return <ProfilePicker onPick={startSession} />;
+  const runAuth = (command: string) => {
+    // Leave the picker so the daemon's replies (the login URL, the
+    // ``auth.setup`` offer) land on a visible prompt, then run the command
+    // exactly as if it had been typed.
+    setPicking(false);
+    submitInput(command, false).catch((err) => useJaato.getState().addSystemBlock(selected, String(err), "error"));
+  };
+
+  const postAuthCard = postAuth ? (
+    <div className="px-4"><PostAuthSetupPrompt p={postAuth} onRespond={(a) => { respondPostAuth(postAuth.requestId, a).catch((err) => useJaato.getState().addSystemBlock(selected, String(err), "error")); }} /></div>
+  ) : null;
+
+  if (picking && !sessionId) {
+    return (
+      <div className="h-full flex flex-col">
+        {postAuthCard}
+        <div className="flex-1 min-h-0"><ProfilePicker onPick={startSession} onAuth={runAuth} onSkip={() => setPicking(false)} /></div>
+      </div>
+    );
+  }
 
   return (
     <div className="h-full flex flex-col">
@@ -122,6 +178,7 @@ export function SessionScreen() {
             {agentPerms.map((p) => <PermissionPrompt key={p.requestId} p={p} onRespond={(k) => respondPermission(p.requestId, k)} />)}
             {agentClars.map((c) => <ClarificationPrompt key={c.requestId} c={c} onAnswer={(a) => answerClarification(c, a)} onCancel={() => cancelClarification(c)} />)}
             {agentRefs.map((r) => <ReferenceSelectionPrompt key={r.requestId} r={r} onRespond={(v) => respondReference(r.requestId, v)} />)}
+            {postAuth && selected === "main" && <PostAuthSetupPrompt p={postAuth} onRespond={(a) => { respondPostAuth(postAuth.requestId, a).catch((err) => useJaato.getState().addSystemBlock(selected, String(err), "error")); }} />}
           </div>
           <div className="px-4 pb-2 pt-1">
             {processing && !captureMode && (

@@ -59,6 +59,20 @@ export async function cancelClarification(c: PendingClarification): Promise<void
   else await getClient().respondToClarification(c.requestId, "cancel", c.index);
 }
 
+/**
+ * Answer the daemon's post-auth setup offer.  ``connect`` with a model
+ * makes the daemon create the session itself (its ``session.info``
+ * arrives like any other); declining just clears the card.
+ */
+export async function respondPostAuth(
+  requestId: string,
+  answer: { connect: boolean; modelName?: string; persistEnv?: boolean },
+): Promise<void> {
+  const st = useJaato.getState();
+  st.dismissPostAuth();
+  await getClient().respondToPostAuthSetup(requestId, answer);
+}
+
 export async function respondReference(requestId: string, value: string): Promise<void> {
   useJaato.getState().dismissReferenceSelection(requestId);
   await getClient().respondToReferenceSelection(requestId, value);

@@ -20,7 +20,7 @@ import type {
   OutputBlock,
   PendingClarification,
   PendingPermission,
-  PendingReferenceSelection,
+  PendingReferenceSelection, PendingPostAuthSetup,
   PlanState,
   ProfileInfo,
   Screen,
@@ -67,6 +67,8 @@ export interface JaatoState {
   permissions: PendingPermission[];
   clarifications: PendingClarification[];
   referenceSelections: PendingReferenceSelection[];
+  /** The daemon's pending ``auth.setup`` offer, if any (see PendingPostAuthSetup). */
+  postAuth: PendingPostAuthSetup | null;
 
   plan: Record<string, PlanState>;
   context: Record<string, ContextState>;
@@ -103,6 +105,7 @@ export interface JaatoState {
   answerClarification: (requestId: string, answer: string) => PendingClarification | undefined;
   dismissClarification: (requestId: string) => void;
   dismissReferenceSelection: (requestId: string) => void;
+  dismissPostAuth: () => void;
   toggleUi: (key: "showPlan" | "showBudget" | "showWorkspace" | "showTools") => void;
   setTheme: (t: string) => void;
   setPopup: (callId: string | null) => void;
@@ -121,6 +124,7 @@ const emptySessionState = () => ({
   permissions: [] as PendingPermission[],
   clarifications: [] as PendingClarification[],
   referenceSelections: [] as PendingReferenceSelection[],
+  postAuth: null as PendingPostAuthSetup | null,
   plan: {} as Record<string, PlanState>,
   context: {} as Record<string, ContextState>,
   workspaceFiles: {} as Record<string, string>,
@@ -443,6 +447,26 @@ export function reduce(s: JaatoState, raw: JaatoEvent): JaatoState {
     case EventTypeValue.REFERENCE_SELECTION_RESOLVED:
       s.referenceSelections = s.referenceSelections.filter((r) => r.requestId !== String(ev.request_id ?? ""));
       break;
+    case EventTypeValue.POST_AUTH_SETUP: {
+      // The daemon offers a session after a daemon-level auth command
+      // succeeded (``<provider>-auth login`` with no session open).  Kept
+      // out of the output stream: it is a question with a typed answer,
+      // like a permission prompt, not a line the agent said.
+      const models = ((ev.available_models as { name?: string; description?: string }[] | undefined) ?? [])
+        .filter((m) => m && m.name)
+        .map((m) => ({ name: String(m.name), description: m.description ? String(m.description) : undefined }));
+      s.postAuth = {
+        requestId: String(ev.request_id ?? ""),
+        providerName: String(ev.provider_name ?? ""),
+        providerDisplayName: String(ev.provider_display_name ?? ev.provider_name ?? ""),
+        models,
+        hasActiveSession: ev.has_active_session === true,
+        currentProvider: (ev.current_provider as string | undefined) || undefined,
+        currentModel: (ev.current_model as string | undefined) || undefined,
+        workspacePath: (ev.workspace_path as string | undefined) || undefined,
+      };
+      break;
+    }
     case EventTypeValue.PLAN_UPDATED: {
       const id = agentOf(ev);
       s.plan = { ...s.plan, [id]: { name: String(ev.plan_name ?? "Plan"), steps: (ev.steps as PlanState["steps"] | undefined) ?? [] } };
@@ -660,6 +684,7 @@ export const useJaato = create<JaatoState>()((set, get) => ({
   },
   dismissClarification: (requestId) => set((st) => ({ clarifications: st.clarifications.filter((c) => c.requestId !== requestId) })),
   dismissReferenceSelection: (requestId) => set((st) => ({ referenceSelections: st.referenceSelections.filter((r) => r.requestId !== requestId) })),
+  dismissPostAuth: () => set({ postAuth: null }),
   toggleUi: (key) => set((st) => ({ ui: { ...st.ui, [key]: !st.ui[key] } })),
   setTheme: (theme) => set((st) => ({ ui: { ...st.ui, theme } })),
   setPopup: (callId) => set((st) => ({ ui: { ...st.ui, popupCallId: callId } })),
