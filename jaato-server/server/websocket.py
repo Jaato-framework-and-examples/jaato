@@ -21,7 +21,7 @@ import ssl
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set
 from urllib.parse import parse_qs, urlsplit
 import threading
 
