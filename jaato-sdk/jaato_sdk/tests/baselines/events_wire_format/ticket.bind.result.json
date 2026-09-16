@@ -1,0 +1,12 @@
+{
+  "type": "ticket.bind.result",
+  "timestamp": "<TIMESTAMP>",
+  "session_id": "",
+  "request_id": "",
+  "status": "",
+  "ticket": "",
+  "qualified": "",
+  "app_id": "",
+  "expires_at": "",
+  "detail": null
+}

@@ -63,10 +63,11 @@ The framework uses a server-first architecture where the server runs as a daemon
   - `--ipc-trust-peer-paths`: opt out of that check (also `JAATO_IPC_TRUST_PEER_PATHS=1`). Announced at WARNING the first time it takes effect.
   - `--ws-token TOKEN` / `--ws-token-file PATH`: bearer token clients must present in the WS Upgrade. Token-file mode 0600 enforced. When neither flag is passed (and `--web-socket` is set), the daemon reads `~/.jaato/ws.token`; if the file doesn't exist, it generates a 32-byte token and persists it there with mode 0600. Local clients can read the same default path for zero-config auth. **Prefer `--ws-token-file`, or neither flag.** A token passed as `--ws-token TOKEN` sits in the daemon's `argv` and is therefore served by `/proc/<daemon_pid>/cmdline` to anything on the host that can read it. AppArmor template v30 denies that read from inside a confined session (#712), but the exposure to everything else on the box is a property of the flag, not of the profile.
   - `--ws-unsafe-no-auth`: explicit opt-out of WS bearer auth (legacy open-accept). Logs a startup WARNING. Required to keep the historical behaviour.
+  - `--ws-app-credentials PATH`: opt into per-user **connect tickets** (#1074). A JSON object mapping an application id to that application's long-lived credential, mode 0600 enforced. Each entry authorises one WS connection to call `ticket.bind` / `ticket.revoke` and **nothing else** — it cannot open a session. Omit the flag and WS auth is byte-identical to what it has always been. See [Identity at Connect](#identity-at-connect-1074).
   - `--daemon`: Run as background process
   - `--status`/`--stop`: Server management
 
-  **WS auth contract:** clients send `Authorization: Bearer <token>` on the Upgrade request (Python/curl/proxies) or pass `?token=<token>` as a query parameter (browsers, which can't set custom headers from `new WebSocket()`). The server stores only the SHA-256 digest and compares with `hmac.compare_digest`. Auth runs after connection-interceptors but before any session work, so a bad token is closed with WS code 1008 immediately. The `set_client_user()` hook for jaato-premium SSO is unchanged — premium can still attach an identity after the bearer check passes.
+  **WS auth contract:** clients send `Authorization: Bearer <token>` on the Upgrade request (Python/curl/proxies) or pass `?token=<token>` as a query parameter (browsers, which can't set custom headers from `new WebSocket()`). The server stores only the SHA-256 digest and compares with `hmac.compare_digest`. Auth runs after connection-interceptors but before any session work, so a bad token is closed with WS code 1008 immediately. The `set_client_user()` hook for jaato-premium SSO is unchanged — premium can still attach an identity after the bearer check passes. Since #1074 the same check also resolves an **application credential** and a **user ticket**, in that order, from the same presented value; with neither configured it is the one digest comparison it always was.
 
 - **`server/core.py`**: `JaatoServer` - UI-agnostic core logic
   - Wraps `JaatoClient` with event emission instead of callbacks
@@ -4273,6 +4274,141 @@ process just refreshed. Not fixed here, and worth knowing: the remaining
 `_rotate_account_on_rate_limit` are still whole-file last-write-wins
 across accounts. That is a merge problem, not a locking one, and wants
 its own change.
+
+### Identity at Connect (#1074)
+
+A WS client was attributed to a user by a **message** — the `auth.token`
+frame jaato-premium's `session_reconnect` extension validates against the one
+`auth.issuer` in `~/.jaato/servers.json` — and two things follow that need
+not:
+
+1. **one daemon serves one realm.** A second application with its own
+   userbase cannot share it: its users' tokens fail signature validation
+   against the configured realm's JWKS.
+2. **identity is opt-in, so declining to present one is the permissive
+   path.** `client.user_id` is `None` until `auth.token` succeeds, and the
+   ownership guards read `if user_id and journal.created_by and ...` — so a
+   client that completes the bearer handshake and never sends `auth.token`
+   short-circuits all three.
+
+> The premium half of that second claim is asserted by the issue and was
+> **not verifiable here**: `jaato_premium` is not in this checkout. What this
+> change does is make the shape unreachable on its own route, not patch
+> premium's.
+
+**"Teach the daemon about realms" is the wrong repair.** A `tenants:` block,
+one `SSOAuth` per realm, per-tenant JWKS — it puts an identity provider's
+domain model inside the transport, and identity still arrives as a message
+that can be omitted. The application already authenticated the user; it is
+the authority on who they are, and the daemon re-deriving that from a JWT is
+second-guessing the party that already knew.
+
+So there are **two credential kinds**, both presented exactly where the
+bearer token is presented today (`Authorization: Bearer` on the Upgrade, or
+`?token=` for browsers, which cannot set headers from `new WebSocket()`):
+
+| | held by | lifetime | authorises |
+|---|---|---|---|
+| **app credential** | the application's backend | long-lived, configured | `ticket.bind` / `ticket.revoke` |
+| **user ticket** | one user's browser | minted per login, short, single-use | opening ONE attributed connection |
+
+The user authenticates in the application's own realm (Keycloak, Auth0, SAML,
+LDAP, an internal session store — the daemon never learns which); the
+backend calls `ticket.bind`, gets a ticket, hands it to that user's client;
+the client connects with it; the daemon resolves it **during the Upgrade**
+and stamps the identity on the `ClientConnection`. No JWKS, no `aud`/`iss`
+validation, no per-tenant `SSOAuth` — the realm never enters the daemon, and
+`server/ws_tickets.py` is stdlib-only with no realm vocabulary in it.
+
+**`_check_ws_token` becomes a lookup, and costs nothing extra.** It already
+computed `sha256(presented)`; `_resolve_connection_auth` hashes once and asks
+three tiers in order — the shared digest (`hmac.compare_digest`, byte-identical
+to before), the app-credential store, the ticket registry — returning an
+identity instead of a bool. Neither store holds a plaintext credential: `bind`
+hands the ticket to its caller and keeps the digest, and the credentials file
+is hashed at load. A dict lookup is not constant-time and is the right
+primitive anyway: what it compares is a **digest**, and a timing signal about
+one is not a timing signal about the credential that produced it.
+
+**The daemon qualifies the identity itself.** `app_id` comes from the
+credential that called `bind` — there is deliberately no such field on the
+request — and what reaches `Session.created_by` is `BoundIdentity.qualified`,
+`f"{app_id}:{user}"`. `preferred_username` is unique only within a realm, so
+two applications each holding an `alice` would otherwise collide and the
+ownership guards would silently pass *across* the boundary. An `app_id`
+containing `:` is refused at load for the same reason: the qualified form is
+a concatenation, so `a:b` + `c` and `a` + `b:c` are one string for two
+identities.
+
+**Both verbs are request/result PAIRS carrying a `request_id`** — the
+protocol-1.3 shape — because one long-lived bind connection serves many
+concurrent logins, and a result that cannot be attributed to a request is
+useless to the backend that sent it. Protocol **1.10**.
+
+Four properties, each attached to a way it could go wrong:
+
+- **The ticket is spent at connect.** A single-use ticket peeked at rather
+  than consumed opens any number of connections, which is the difference
+  between a connect credential and a short bearer token. `_check_ws_token`
+  survives as the **non-consuming** predicate, because a bool-returning
+  helper that silently spent a credential would be a trap for its second
+  caller.
+- **An app credential binds and nothing else.** It authorises minting
+  identities; letting it also drive a session would make it a super-user of
+  every workspace on the daemon, attributed to no person. Enforced in
+  `_dispatch_client_message` on the connection KIND rather than on a list of
+  verbs, so a verb added later is covered whether or not its author
+  remembers. The privilege is not transitive either — a ticket connection is
+  a user, and its `ticket.bind` is denied.
+- **Revocation is scoped to the binding application**, on both routes
+  (one ticket, or every ticket of one user — the logout path). One
+  application must not be able to log out another's `alice`. A ticket
+  belonging to another application answers `not_found`, the **same** answer
+  an unknown ticket gives, so the verb is not an existence oracle across the
+  boundary.
+- **A user the daemon would read as unauthenticated is refused at the door.**
+  `created_by=""` is falsy, so an empty `user` reproduces the very fail-open
+  this mechanism exists to close, arriving through the front door. Control
+  characters are refused too: the value is logged and persisted.
+
+**With no app credentials configured, behaviour is byte-identical to
+before** — a hard requirement, not a preference. `_app_credentials` falsy
+means no connection can ever be an app-credential connection, so no ticket
+can be bound, so the ticket tier is unreachable; `_resolve_connection_auth`
+collapses to the single shared-digest comparison, and both verbs answer
+`denied` naming the flag. `--ws-app-credentials` without `--web-socket`, or
+with `--ws-unsafe-no-auth`, is refused at startup rather than accepted into a
+posture where it authorises nothing.
+
+**Four open decisions, left open deliberately:**
+
+| Decision | What the code does today | How to change it |
+|---|---|---|
+| may an app credential open a session? | **no** — the issue's own "fail-closed suggests no" | one predicate, `_dispatch_client_message`'s `AUTH_KIND_APP` gate |
+| where bindings live | **in memory**, one `TicketRegistry` per daemon. A restart invalidates outstanding tickets (users re-login); a ticket bound on one node does not resolve on another, which matters where premium's gossip clustering is in play | `TicketRegistry` is the whole persistence surface — a shared store substitutes there and nowhere else |
+| the config surface | a JSON object mapping `app_id` to credential, one shape | `load_app_credentials` is the whole format surface; a richer per-application form (`workspace_root`, `config_root`) is additive to it alone |
+| degradation | opt-in, byte-identical when absent | — (the hard requirement) |
+
+**What it does not do.** Every session still runs as the daemon's uid. This
+segregates identity, attribution and — with per-app `workspace_root` /
+`config_root` — configuration and filesystem confinement; not the OS
+principal. Separating *that* needs a privileged daemon and a uid-keyed slot
+pool, and is a decision about the process model rather than about the
+transport. [Two Principals on One Socket](#two-principals-on-one-socket)
+reaches the same line from the other transport: `SO_PEERCRED` tells the daemon
+which OS account opened the socket and binds the paths that account may name,
+and the session still runs as the daemon's uid. Two transports, two ways of
+learning who is calling, one process model neither of them changes — and the
+two identities are not interchangeable, which is why `get_client_peer` answers
+`None` on WS however firmly a ticket has established a user.
+
+**Not addressed here:** premium's JWT route keeps working unchanged and is
+not on the critical path any more, but the three defects the issue attributes
+to it (`claims.validate()` with no `claims_options`, `verify=False` on the
+discovery and JWKS fetches, an unchecked OIDC `nonce`) are in a package this
+checkout does not contain and were neither confirmed nor fixed. Neither was
+`gossip/ws_auth_proxy.py`, the cookie route, which needs its own answer to
+"which application is this".
 
 ### Approver Identity (#859)
 
