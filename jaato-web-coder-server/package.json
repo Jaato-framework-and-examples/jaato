@@ -1,0 +1,53 @@
+{
+  "name": "@jaato/web-coder-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Sign-in and ticket-custody backend for the jaato-web-coder browser client.",
+  "license": "BUSL-1.1",
+  "author": "apanoia",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Jaato-framework-and-examples/jaato.git",
+    "directory": "jaato-web-coder-server"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "jaato-web-coder-server": "bin/jaato-web-coder-server.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "bin",
+    "deploy",
+    "README.md"
+  ],
+  "scripts": {
+    "deps:build": "npm --prefix ../jaato-sdk-ts run build",
+    "build": "npm run deps:build && tsc -p tsconfig.json",
+    "typecheck": "npm run deps:build && tsc -p tsconfig.json --noEmit",
+    "test": "node --import tsx --test --test-force-exit test/*.test.ts",
+    "test:daemon": "node --import tsx --test --test-force-exit test/daemon.e2e.test.ts",
+    "start": "node bin/jaato-web-coder-server.js serve"
+  },
+  "dependencies": {
+    "@jaato/sdk": "file:../jaato-sdk-ts",
+    "@jaato/web-coder-ui": "file:../jaato-web-coder-ui",
+    "openid-client": "^6.8.0",
+    "yaml": "^2.8.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.0",
+    "ws": "^8.21.3"
+  }
+}

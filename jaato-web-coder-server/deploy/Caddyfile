@@ -1,0 +1,34 @@
+# One public origin for the three services on the jaato-web-coder host.
+#
+#   /auth/*   → Keycloak (native install, listening on 8180)
+#   /daemon   → the jaato daemon's WebSocket (loopback 8080)
+#   /*        → jaato-web-coder-server (loopback 8443), which serves the bundle
+#
+# Caddy terminates TLS (automatic certificates) and forwards WebSocket
+# upgrades on /daemon without extra configuration.
+#
+# Keycloak must be started with its public hostname so tokens carry this
+# origin as `iss`:
+#   kc.sh start --hostname https://jaato.example.org/auth --http-port 8180 \
+#               --proxy-headers xforwarded --hostname-backchannel-dynamic=true
+
+jaato.example.org {
+    encode zstd gzip
+
+    handle_path /daemon* {
+        reverse_proxy 127.0.0.1:8080
+    }
+
+    handle /auth/* {
+        reverse_proxy 127.0.0.1:8180 {
+            header_up X-Forwarded-Proto {scheme}
+            header_up X-Forwarded-Host {host}
+        }
+    }
+
+    handle {
+        reverse_proxy 127.0.0.1:8443 {
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+}

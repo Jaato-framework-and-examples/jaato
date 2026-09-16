@@ -1,9 +1,11 @@
 # jaato-web-coder-server: sign-in and ticket custody for the browser client
 
-**Status:** design. The daemon half, #1074, is implemented in
-[PR #1075](https://github.com/Jaato-framework-and-examples/jaato/pull/1075)
-(protocol 1.10) and §4 is read from that branch. Nothing on the BFF side is
-implemented yet; §9 is the order.
+**Status:** implemented. The daemon half is #1074 (PR #1075, protocol
+1.10, merged); the server is `jaato-web-coder-server/` in this repository
+(`direct` mode, OIDC; local users and `proxy` mode are not built), with
+its deployment artifacts in `jaato-web-coder-server/deploy/`. This
+document remains the rationale; the package README is the operator's
+reference.
 
 ## 1. What this is, and what it is not
 
@@ -364,9 +366,12 @@ fetch), and the server can only be built from a checkout.
    to any client that rotates credentials.
 3. **`jaato-web-coder-ui` ticket URL + sign-in screen** (§5.2), tested with a mock BFF
    in Playwright the way the launcher's `config.json` path is today.
-4. **`jaato-web-coder-server` in `direct` mode, OIDC only.** Local users and proxy
-   mode follow once the identity plumbing is proven end to end against a real
-   daemon.
+4. **`jaato-web-coder-server` in `direct` mode, OIDC only.** Done: the
+   package, its `init` command and `deploy/` (systemd units, Caddy and nginx
+   configs). Verified against the real daemon (`npm run test:daemon`): bind
+   → ticket → an attributed connection, the ticket refused on replay, a
+   wrong app credential refused at the Upgrade, revoke-after-login honestly
+   `not_found`. Local users and `proxy` mode are still not built.
 5. **Daemon-side ownership checks** keyed on the qualified identity, so a
    multi-user deployment is isolated and not merely attributed. Separate
    issue; not a BFF change.

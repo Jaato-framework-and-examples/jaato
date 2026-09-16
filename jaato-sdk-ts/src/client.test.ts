@@ -44,11 +44,13 @@ interface MockInstance {
 }
 
 let lastInstance: MockInstance | null = null;
+let lastCtorArgs: unknown[] = [];
 const realWebSocket = (globalThis as Record<string, unknown>).WebSocket;
 
 function installMockWebSocket(): void {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  (globalThis as any).WebSocket = function (url: string): MockInstance {
+  (globalThis as any).WebSocket = function (url: string, ...rest: unknown[]): MockInstance {
+    lastCtorArgs = [url, ...rest];
     const instance: MockInstance = {
       url,
       sent: [],
@@ -152,6 +154,18 @@ describe("JaatoClient handshake", () => {
     assert.equal(client.serverProtocolVersion, MIN_PROTOCOL_VERSION);
     assert.equal(client.serverVersion, "0.7.1");
     assert.equal(client.clientId, "client_1");
+    await client.close();
+  });
+
+  test("custom headers travel as the SECOND constructor argument (Node's built-in WebSocket ignores a third)", async () => {
+    const client = new JaatoClient({
+      url: "ws://localhost:8080",
+      headers: { Authorization: "Bearer app-credential" },
+    });
+    await connectAndAck(client);
+    assert.equal(lastCtorArgs.length, 2, `expected (url, options), got ${lastCtorArgs.length} args`);
+    assert.deepEqual(lastCtorArgs[1], { headers: { Authorization: "Bearer app-credential" } });
+    assert.ok(!lastInstance!.url.includes("token="), "headers must not also leak into the query string");
     await client.close();
   });
 

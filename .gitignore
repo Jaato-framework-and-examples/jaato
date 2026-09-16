@@ -74,6 +74,7 @@ tests_enablement_2.0/
 generated-tests/
 src/
 !jaato-web-coder-ui/src/
+!jaato-web-coder-server/src/
 !jaato-sdk-ts/src/
 **/target/
 

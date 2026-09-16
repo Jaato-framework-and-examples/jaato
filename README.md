@@ -182,11 +182,12 @@ For the complete reference, see the **[Plugin Documentation](https://jaato-frame
 
 ### Installation
 
-jaato is structured as four packages:
+jaato is structured as five packages:
 - **jaato-sdk** - Lightweight client library and event protocol for building custom clients
 - **jaato-server** - Runtime daemon with all plugins, providers, and core logic
 - **jaato-tui** - Feature-rich terminal user interface client
 - **jaato-web-coder-ui** (`@jaato/web-coder-ui` on npm) - Browser client; `npx @jaato/web-coder-ui` serves it against a daemon started with `--web-socket`
+- **jaato-web-coder-server** - Sign-in (OpenID Connect / Keycloak) and per-user ticket custody for the browser client in multi-user deployments (#1074); systemd units and proxy configs in its `deploy/`
 
 ```bash
 git clone https://github.com/Jaato-framework-and-examples/jaato.git
