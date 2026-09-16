@@ -21,14 +21,19 @@
   "bin": {
     "jaato-web-coder-ui": "bin/jaato-web-coder-ui.js"
   },
+  "types": "./bin/jaato-web-coder-ui.d.ts",
   "exports": {
-    ".": "./bin/jaato-web-coder-ui.js",
+    ".": {
+      "types": "./bin/jaato-web-coder-ui.d.ts",
+      "default": "./bin/jaato-web-coder-ui.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
     "dist",
     "!dist/**/*.map",
     "bin/jaato-web-coder-ui.js",
+    "bin/jaato-web-coder-ui.d.ts",
     "README.md"
   ],
   "engines": {

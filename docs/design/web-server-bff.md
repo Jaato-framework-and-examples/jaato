@@ -1,9 +1,11 @@
 # jaato-web-coder-server: sign-in and ticket custody for the browser client
 
-**Status:** design. The daemon half, #1074, is implemented in
-[PR #1075](https://github.com/Jaato-framework-and-examples/jaato/pull/1075)
-(protocol 1.10) and §4 is read from that branch. Nothing on the BFF side is
-implemented yet; §9 is the order.
+**Status:** implemented. The daemon half is #1074 (PR #1075, protocol
+1.10, merged); the server is `jaato-web-coder-server/` in this repository
+(`direct` mode, OIDC; local users and `proxy` mode are not built), with
+its deployment artifacts in `jaato-web-coder-server/deploy/`. This
+document remains the rationale; the package README is the operator's
+reference.
 
 ## 1. What this is, and what it is not
 
@@ -352,21 +354,28 @@ between users. Every session still runs as the daemon's uid, as #1074's
 
 ## 9. Phasing and publishing order
 
-The server package will depend on `@jaato/sdk` (protocol 1.10 events and
+The server package depends on `@jaato/sdk` (protocol 1.10 events and
 the token provider) and on `@jaato/web-coder-ui` (the bundle and its static
 server) **from npm**, so the first publish of each has to happen in this
 order: **SDK, then UI, then server**. Until the SDK's first publish,
 `npx @jaato/web-coder-ui` cannot work at all (its `npx` has nothing to
-fetch), and the server can only be built from a checkout.
+fetch), and the server can only be built from a checkout. The server's
+publish workflow enforces the order: its checkout links the siblings with
+`file:` for development, `scripts/prepare-publish.mjs` rewrites them to
+caret ranges at publish time, and the workflow refuses to publish unless
+both exact versions are already on the registry.
 
 1. **#1074 lands** (PR #1075) with the two verbs from §4.2.
 2. **SDK token provider** (§5.1). Small, independently testable, and useful
    to any client that rotates credentials.
 3. **`jaato-web-coder-ui` ticket URL + sign-in screen** (§5.2), tested with a mock BFF
    in Playwright the way the launcher's `config.json` path is today.
-4. **`jaato-web-coder-server` in `direct` mode, OIDC only.** Local users and proxy
-   mode follow once the identity plumbing is proven end to end against a real
-   daemon.
+4. **`jaato-web-coder-server` in `direct` mode, OIDC only.** Done: the
+   package, its `init` command and `deploy/` (systemd units, Caddy and nginx
+   configs). Verified against the real daemon (`npm run test:daemon`): bind
+   → ticket → an attributed connection, the ticket refused on replay, a
+   wrong app credential refused at the Upgrade, revoke-after-login honestly
+   `not_found`. Local users and `proxy` mode are still not built.
 5. **Daemon-side ownership checks** keyed on the qualified identity, so a
    multi-user deployment is isolated and not merely attributed. Separate
    issue; not a BFF change.

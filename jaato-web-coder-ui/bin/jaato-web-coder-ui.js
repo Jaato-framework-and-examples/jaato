@@ -24,7 +24,8 @@
  * Importing this module
  * ---------------------
  * It is also the package's ``exports`` entry: ``createStaticServer``,
- * ``parseArgs``, ``resolveToken``, ``readBuildInfo`` and ``DIST_DIR`` are
+ * ``createStaticHandler``, ``parseArgs``, ``resolveToken``, ``readBuildInfo``
+ * and ``DIST_DIR`` are
  * what a host that serves the bundle itself (``jaato-web-coder-server``)
  * reuses, and importing has no side effects — the CLI runs only when this
  * file is the entry point.
@@ -183,6 +184,17 @@ function send(res, status, body, headers = {}) {
  * accepts any host.  A request naming another host is refused with 421.
  */
 export function createStaticServer({ root, config, allowedHosts }) {
+  return createServer(createStaticHandler({ root, config, allowedHosts }));
+}
+
+/**
+ * The request listener behind :func:`createStaticServer`, for a host that
+ * answers its own routes first and falls through to the bundle
+ * (jaato-web-coder-server mounts it after ``/auth/*`` and ``/api/*``).
+ * Same contract: ``config`` answers ``GET /config.json``, ``allowedHosts``
+ * ``null`` accepts any ``Host``.
+ */
+export function createStaticHandler({ root, config, allowedHosts }) {
   const rootAbs = resolve(root);
   const configBody = JSON.stringify(config);
   const hostOk = (req) => {
@@ -191,7 +203,7 @@ export function createStaticServer({ root, config, allowedHosts }) {
     return allowedHosts.has(h);
   };
 
-  return createServer(async (req, res) => {
+  return async (req, res) => {
     if (!hostOk(req)) return send(res, 421, "Misdirected Request\n", { "Content-Type": "text/plain" });
     if (req.method !== "GET" && req.method !== "HEAD") {
       return send(res, 405, "Method Not Allowed\n", { "Content-Type": "text/plain", Allow: "GET, HEAD" });
@@ -222,7 +234,7 @@ export function createStaticServer({ root, config, allowedHosts }) {
     };
     if (req.method === "HEAD") return send(res, 200, undefined, headers);
     send(res, 200, await fs.readFile(file), headers);
-  });
+  };
 }
 
 function openBrowser(url) {

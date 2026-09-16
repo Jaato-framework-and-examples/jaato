@@ -260,6 +260,41 @@ jobs:
         working-directory: jaato-web-coder-ui
         run: npx playwright test
 
+  # Sign-in + ticket-custody backend for the browser client
+  # (jaato-web-coder-server). Node-only: its suite runs against a mock
+  # daemon and a fake identity provider; the real-daemon check
+  # (`npm run test:daemon`) needs Python and skips itself here.
+  web-coder-server:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: |
+            jaato-sdk-ts/package-lock.json
+            jaato-web-coder-ui/package-lock.json
+            jaato-web-coder-server/package-lock.json
+      - name: Install + build the TS SDK
+        working-directory: jaato-sdk-ts
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+      - name: Install the UI package (the server imports its static handler)
+        working-directory: jaato-web-coder-ui
+        run: npm ci --no-audit --no-fund
+      - name: Install jaato-web-coder-server
+        working-directory: jaato-web-coder-server
+        run: npm ci --no-audit --no-fund
+      - name: Type-check + build
+        working-directory: jaato-web-coder-server
+        run: npx tsc -p tsconfig.json
+      - name: Tests (mock daemon + fake IdP)
+        working-directory: jaato-web-coder-server
+        run: npm test
+
   suite:
     name: suite (${{ matrix.leg.name }})
     runs-on: ubuntu-latest

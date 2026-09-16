@@ -1,0 +1,37 @@
+# systemd unit for the jaato daemon on the jaato-web-coder host.
+#
+# Foreground under systemd: NO --daemon flag (it double-forks, which
+# fights systemd's process tracking). The daemon binds loopback only; the
+# reverse proxy (Caddyfile / nginx.conf beside this file) exposes its
+# WebSocket at /daemon. --ws-app-credentials turns WS auth on and names the
+# application(s) allowed to mint per-user tickets (#1074); --ws-token-file
+# may stay beside it so the TUI and `npx @jaato/web-coder-ui` keep working
+# with the shared token on the same daemon.
+#
+# Install:  cp jaato-server.service /etc/systemd/system/ && systemctl daemon-reload
+#           systemctl enable --now jaato-server
+[Unit]
+Description=jaato daemon (WebSocket transport, loopback)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=jaato
+Group=jaato
+WorkingDirectory=/srv/jaato
+Environment=PYTHONUNBUFFERED=1
+# The venv with `pip install jaato-server[...]`; adjust the path.
+ExecStart=/srv/jaato/.venv/bin/python -m server \
+    --web-socket 127.0.0.1:8080 \
+    --ws-app-credentials /etc/jaato/ws-apps.json \
+    --ws-token-file /etc/jaato/ws.token
+Restart=on-failure
+RestartSec=3
+# Hardening. The daemon spawns tools; relax as your workspace needs.
+NoNewPrivileges=true
+ProtectSystem=full
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
