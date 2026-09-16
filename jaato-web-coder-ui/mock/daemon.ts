@@ -171,7 +171,7 @@ async function turn(c: Client, text: string, agentId = "main"): Promise<void> {
   }
 
   send(c, { type: "context.updated", agent_id: agentId, usage: { prompt_tokens: 1200, output_tokens: 340, total_tokens: 1540, cache_read_tokens: 800 }, context_limit: 200000, percent_used: 0.77, tokens_remaining: 198460, turns: 1 });
-  send(c, { type: "turn.completed", agent_id: agentId, turn_number: 1, duration_seconds: 1.2, function_calls: lower.includes("tool") ? 1 : 0, finish_reason: "stop", usage: { prompt_tokens: 1200, output_tokens: 340, total_tokens: 1540 } });
+  send(c, { type: "turn.completed", agent_id: agentId, turn_number: 1, duration_seconds: 1.2, function_calls: lower.includes("tool") ? [{ name: "run_command", start_time: ts(), end_time: ts(), duration_seconds: 0.31 }] : [], finish_reason: "stop", usage: { prompt_tokens: 1200, output_tokens: 340, total_tokens: 1540 } });
   send(c, { type: "agent.status_changed", agent_id: agentId, status: "idle" });
 }
 

@@ -123,6 +123,22 @@ describe("reduce — prompts", () => {
   });
 });
 
+describe("reduce — turn accounting", () => {
+  it("reads turn.completed's function_calls as the list of records it is, not a count", () => {
+    const d = useJaato.getState().dispatch;
+    d([ev({ type: "turn.completed", agent_id: "main", turn_number: 1, duration_seconds: 2.5, finish_reason: "stop",
+      function_calls: [
+        { name: "readFile", start_time: "t0", end_time: "t1", duration_seconds: 0.2 },
+        { name: "readFile", start_time: "t1", end_time: "t2", duration_seconds: 0.1 },
+        { name: "cli_based_tool", start_time: "t2", end_time: "t3", duration_seconds: 1.4 },
+      ],
+      usage: { prompt_tokens: 10, output_tokens: 5, total_tokens: 15 } })]);
+    const last = useJaato.getState().context[MAIN_AGENT]!.lastTurn!;
+    expect(last.toolCalls).toEqual({ count: 3, byName: [["readFile", 2], ["cli_based_tool", 1]] });
+    expect(last.finishReason).toBe("stop");
+  });
+});
+
 describe("reduce — session metadata", () => {
   it("captures plan, context, commands, workspace files and session info", () => {
     const d = useJaato.getState().dispatch;

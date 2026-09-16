@@ -12,6 +12,7 @@ import { create } from "zustand";
 import { EventTypeValue, type JaatoEvent } from "@jaato/sdk";
 import { mergeCommandSpecs, type CommandSpec } from "@/protocol/commands";
 import { normalizeClarificationQuestion } from "@/protocol/clarification";
+import { summarizeToolCalls } from "@/protocol/turnStats";
 import type {
   Agent,
   ConfigStatus,
@@ -519,7 +520,8 @@ export function reduce(s: JaatoState, raw: JaatoEvent): JaatoState {
           lastTurn: {
             turnNumber: ev.turn_number as number | null | undefined,
             durationSeconds: ev.duration_seconds as number | null | undefined,
-            functionCalls: ev.function_calls as number | null | undefined,
+            // A LIST of per-call records on the wire, never a count.
+            toolCalls: summarizeToolCalls(ev.function_calls),
             finishReason: ev.finish_reason as string | null | undefined,
             usage: ev.usage as ContextState["usage"] | undefined,
           },

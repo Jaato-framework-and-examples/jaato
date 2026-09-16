@@ -5,6 +5,7 @@
  * (``OutputLine`` / ``ToolBlock`` / ``ActiveToolCall``) so the two
  * clients present the same session the same way.
  */
+import type { ToolCallSummary } from "@/protocol/turnStats";
 
 export interface MediaItem {
   mimeType: string;
@@ -215,7 +216,12 @@ export interface ContextState {
   lastTurn?: {
     turnNumber?: number | null;
     durationSeconds?: number | null;
-    functionCalls?: number | null;
+    /**
+     * The turn's tool calls, reduced from ``TurnCompletedEvent.function_calls``
+     * -- a LIST of ``{name, start_time, end_time, duration_seconds}`` records,
+     * not a count (``protocol/turnStats.ts``).
+     */
+    toolCalls?: ToolCallSummary | null;
     finishReason?: string | null;
     usage?: Record<string, number | null | undefined>;
   };
