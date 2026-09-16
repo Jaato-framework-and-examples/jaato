@@ -76,6 +76,11 @@ INTENTIONALLY_ABSENT = {
         "guard; recovery forwards the METHOD and the inner client raises when "
         "the daemon is too old to serve the verb -- same reasoning as "
         "MIN_SESSION_STOP_PROTOCOL above",
+    "MIN_WORKSPACE_IGNORE_PROTOCOL":
+        "class constant on IPCClient gating toggle_workspace_ignore; the "
+        "recovery wrapper forwards the METHOD and lets the inner client "
+        "refuse a daemon too old to serve it -- same reasoning as "
+        "MIN_SESSION_STOP_PROTOCOL above",
 }
 
 

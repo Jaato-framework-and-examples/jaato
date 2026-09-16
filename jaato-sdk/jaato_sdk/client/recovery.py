@@ -832,6 +832,18 @@ class IPCRecoveryClient:
         if self._client:
             await self._client.reload_session_env(session_id)
 
+    async def toggle_workspace_ignore(self, path: str) -> None:
+        """Add an entry to the session workspace's ``.gitignore``, or remove it again.
+
+        See :meth:`IPCClient.toggle_workspace_ignore` for full docs.  The
+        inner client raises against a daemon too old to serve the verb,
+        which would otherwise ignore it while the caller believed the entry
+        was ignored.
+        """
+        self._check_can_send()
+        if self._client:
+            await self._client.toggle_workspace_ignore(path)
+
     async def respond_to_post_auth_setup(
         self,
         request_id: str,
