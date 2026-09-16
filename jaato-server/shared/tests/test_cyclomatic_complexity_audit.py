@@ -119,18 +119,22 @@ BASELINE: Dict[str, int] = {
     "jaato-server/server/core.py::JaatoServer._check_auth_completion": 17,
     "jaato-server/server/core.py::JaatoServer._emit_conversation_replay": 19,
     "jaato-server/server/core.py::JaatoServer._setup_permission_hooks.on_permission_requested": 35,
-    # Raised 36 -> 41 by #654, which added the completion-gap give-up
-    # predicate to the model loop.  Called out rather than re-frozen: the
-    # loop is a single long function by construction and splitting it is a
-    # real refactor, not a tidy-up to bundle into a CI change.  It is the
-    # one entry in this file that moved the ratchet the wrong way.
+    # ``_start_model_thread.model_thread`` was here at 40 (36 -> 41 by #654's
+    # completion-gap predicate, 41 -> 40 by #877 lifting the continuation
+    # merge out).  #1077 took it to 15 -- at the ceiling, so the entry is
+    # GONE rather than lowered, and the function is now held to the bar like
+    # any un-baselined one.  Nothing was rewritten to get there: the turn's
+    # wind-down moved out of the ``finally`` verbatim, because four
+    # ``return``s inside a ``finally`` discard whatever exception is in
+    # flight (PEP 765 / SyntaxWarning on 3.14).  The complexity went with the
+    # code, which is the entry below.
     #
-    # 41 -> 40 by #877, which had to carry attachments through the
-    # wind-down stash and lifted the merge out into the module-level
-    # ``merge_pending_continuations``.  A net improvement rather than the
-    # +3 the inline version cost -- and the lifted rule is now reachable
-    # from a test, which is what #877 needed it to be.
-    "jaato-server/server/core.py::JaatoServer._start_model_thread.model_thread": 40,
+    # 26, and irreducible HERE by construction: it is the old ``finally``
+    # body unchanged, and #1077 is a correctness-of-diagnostics fix, not a
+    # refactor -- rewriting ~300 lines of wind-down in the same change would
+    # have made the one behavioural difference (which exceptions survive)
+    # unreviewable.  Splitting it is worth doing on its own.
+    "jaato-server/server/core.py::JaatoServer._start_model_thread.model_thread._finish_turn": 26,
     "jaato-server/server/core.py::JaatoServer.execute_command": 28,
     "jaato-server/server/core.py::JaatoServer.initialize": 44,
     "jaato-server/server/core.py::JaatoServer.initialize._run_load_plugins": 17,

@@ -4914,6 +4914,63 @@ gated call, so the cancelled call is provably still queued; wire ordering is
 established by a control-lane probe rather than by polling. It fails
 `unknown=1, tripped=0` against the old registration site, deterministically.
 
+### A Failure While Reporting a Failure, Discarded (#1077)
+
+The daemon's model thread wound its turn down inside a `finally` holding
+**four `return` statements**. A `return` in a `finally` discards whatever
+exception is in flight, so the wind-down could complete having thrown away
+the thing that explained the failure. Python 3.14 makes the shape a
+`SyntaxWarning` (PEP 765), which is how it was found — four warnings on
+import.
+
+**Most of what PEP 765 warns about was already handled here**, and saying
+so is what locates the real exposure: the two `except` clauses below catch
+`Exception` and `KeyboardInterrupt`, and the thread target's return value
+is read by nobody. Two cases genuinely lost information:
+
+| | |
+|---|---|
+| a `BaseException` that is neither of the two caught | `SystemExit`, `GeneratorExit`, an injected `CancelledError` |
+| **an exception raised INSIDE either `except` handler** | a failure while reporting a failure — in the daemon's model thread |
+
+It is narrower still than that table: the swallow only happens when the
+wind-down actually *reaches* one of its four exits, so both cases
+additionally need a terminal error, a stashed continuation, a drained user
+send, or a pending nudge. A wind-down that fell off the end always
+propagated.
+
+**The fix moves the body, not the logic.** The 355-line wind-down is lifted
+**verbatim** into a nested `_finish_turn()` declared before the `try`; the
+`finally` is one call. Its four exits are now returns from `_finish_turn`,
+which is exactly what they meant — the `try` is the last statement in
+`model_thread`, so falling off the end and returning were already the same
+thing. `try` body and both handlers are byte-identical. A nested closure
+rather than a method because the body reads six enclosing names, and
+threading them through would have meant editing it.
+
+**`terminal_error` is read through the closure deliberately.** The handlers
+assign it, a cell resolves at call time, and it is bound to `None` before
+the `try` — so the wind-down cannot be handed a stale value, and the
+handler-raises case leaves it `None` (the two cannot co-occur).
+
+**Stated cost:** on the paths that previously swallowed, an in-flight
+exception now escapes the thread target and is reported by
+`threading.excepthook`. That is the intent, and it is new output on those
+paths.
+
+Complexity: `model_thread` 40 → **15**, so its ratchet entry is *removed*
+rather than lowered and the function is held to the ceiling like any
+un-baselined one; `_finish_turn` enters at 26, irreducible here by
+construction — rewriting 300 lines of wind-down in the same change would
+have made the one behavioural difference unreviewable.
+
+Guard: `server/tests/test_no_return_in_finally_1077.py`. Its AST scan needs
+two exclusions to be satisfiable, and both are pinned by a discrimination
+test: a `return` inside a function *declared in* the `finally` is the shape
+of the fix, and a `break` bound to a loop inside the `finally` transfers
+control within it (PEP 765 does not warn about that either). An AST sweep
+found these four were the only such sites in the tree, and none after.
+
 ### A Turn That Ended the Session, Handed Back as a Turn (#1007)
 
 #988 and #856 are a call that never returns. This is the other half of the
