@@ -11485,6 +11485,7 @@ class SessionManager:
         self,
         client_id: str,
         workspace_path: Optional[str] = None,
+        created_by: Optional[str] = None,
     ) -> str:
         """Get the default session for a workspace, or create a new one.
 
@@ -11494,9 +11495,30 @@ class SessionManager:
         Args:
             client_id: The requesting client.
             workspace_path: Client's working directory for file operations.
+            created_by: The transport-authenticated identity of the
+                requesting client, read from the ``EventSink`` by the
+                caller (``CommandRouter``) because this class holds an
+                event CALLBACK rather than a sink and cannot ask.  Applied
+                only on the CREATE branch -- see below.
 
         Returns:
             The session ID.
+
+        ATTRIBUTION APPLIES TO THE CREATE BRANCH ONLY, and that is the
+        whole of the asymmetry.  ``created_by`` records who brought a
+        session into existence, so the two ATTACH branches leave it alone:
+        re-stamping a session someone else created with the identity of
+        whoever attached next would replace a true fact with a plausible
+        one -- the rule ``_emit_to_client``'s session stamper already
+        states one field over.
+
+        This path omitted ``created_by`` entirely until the cross-transport
+        audit, while its two siblings in ``CommandRouter`` twelve lines
+        apart both read the sink.  ``_create_session_impl`` defaults the
+        parameter to ``None``, so the omission was silent: a session
+        opened through ``IPCClient.get_default_session()`` was anonymous
+        in the record, the ledger and the permission DECISION line on BOTH
+        transports, however well each had authenticated its client.
         """
         logger.debug(f"get_or_create_default called for client {client_id}, workspace={workspace_path}")
 
@@ -11545,7 +11567,10 @@ class SessionManager:
 
         # No matching sessions exist - create a new one for this workspace
         logger.debug(f"  creating new session for workspace...")
-        return self.create_session(client_id, workspace_path=workspace_path)
+        return self.create_session(
+            client_id, workspace_path=workspace_path,
+            created_by=created_by,
+        )
 
     # =========================================================================
     # Session Queries

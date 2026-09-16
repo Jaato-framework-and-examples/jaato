@@ -945,7 +945,12 @@ class CommandRouter:
     ) -> None:
         """Handle ``session.default`` command."""
         default_session_id = self._session_manager.get_or_create_default(
-            client_id, workspace_path=workspace_path
+            client_id, workspace_path=workspace_path,
+            # The transport's authenticated user, read HERE for the same
+            # reason ``session.new`` and the post-auth create read it here:
+            # the sink is the only thing that knows, and the event body
+            # must never be able to claim it (#859).
+            created_by=self._event_sink.get_client_user(client_id),
         )
         if default_session_id:
             # Update context now that session exists
