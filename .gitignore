@@ -108,3 +108,7 @@ knowledge/skills/code/soi/skill-020-microservice-java-spring/examples/example-01
 # 341 MB of worktrees into the framework repo — is never one ``git add -A``
 # from being committed.
 .jaato-eval-workspaces/
+
+# Playwright run artifacts (jaato-web-coder-ui e2e)
+jaato-web-coder-ui/test-results/
+jaato-web-coder-ui/playwright-report/
