@@ -505,6 +505,7 @@ await client.create_session(profile="researcher")
   (→ `SessionListEvent`; see [A Session Nobody Was Watching](#a-session-nobody-was-watching-812))
 - `session.stop <id>` — stop ANY loaded session by id, not just the caller's own
 - `session.reload_env [id]` — re-resolve a LIVE session's `.env` and credentials and rebuild its provider (see [A Credential Stored After the Runner Booted](#a-credential-stored-after-the-runner-booted))
+- `workspace.ignore <path>` — toggle one exact entry in the caller's workspace `.gitignore` (→ `WorkspaceIgnoreResultEvent`; protocol 1.12, see [A Key the Web Files Panel Did Not Have](#a-key-the-web-files-panel-did-not-have))
 
 **Flow:** Client sends `session.new --profile researcher` → server discovers profiles from `.jaato/profiles/` → resolves `SubagentProfile` → `JaatoServer` applies profile overrides (model, provider, plugins, plugin_configs, GC) during `initialize()`.
 
@@ -4728,6 +4729,42 @@ what the daemon emits on the runner path (options are
 `{key, label, description}` there — no `action`), and `permit-bare` is the
 same ASK from a plugin with no display info, pinning the tool-arguments
 fallback.
+
+### A Key the Web Files Panel Did Not Have
+
+The TUI's workspace panel (Ctrl+W) binds two keys to the entry under the
+cursor: `h` **hides** it — a per-session, client-side set, with a
+show-hidden toggle that brings the set back dimmed with an `H` marker so an
+entry can be unhidden — and `i` **toggles its line in the workspace's
+`.gitignore`**, which the TUI does by writing the file itself, because it
+runs on the host. The web Files panel had neither, and could not have had
+the second: a browser client has no file to write.
+
+Hide is client state and is reproduced as such (`workspaceHidden`, the same
+entry ids — a directory carries its trailing `/` and hides its subtree). The
+`.gitignore` half becomes a daemon verb, **`workspace.ignore <path>`**
+(protocol **1.12**), answered by one `WorkspaceIgnoreResultEvent` whatever
+happened — a panel has to render *something* for the press. Three
+properties:
+
+| Property | Why |
+|---|---|
+| **one text transform, in `jaato_sdk.gitignore_toggle`** | the TUI's key and the daemon's verb both call it, so one press means one edit whichever client made it: exact-match toggle of ONE line, a glob already covering the path neither matched nor touched |
+| **the SESSION's workspace, then the client's declared one** | the session's tree is what `WorkspaceMonitor` watches — and it reloads its parser on this very write, so the pattern binds every later file event. Entries already shown are **not** pruned; that is what hide is for |
+| **the path is a pattern, not a path the daemon resolves** | so #742's relative-path rule does not apply; what is refused is anything that is not a workspace entry — empty, a line break, absolute (the panel's sandbox-monitored entries lie outside the tree `.gitignore` covers, the TUI's own no-op), or a leading `#` / `!`, which git would read as a comment or a negation and the toggle would then report a state the file does not have |
+
+A missing VERB again (the 1.7 rule): an older daemon ignores the command and
+"added to .gitignore" would describe a file nobody changed, so both SDKs
+refuse below `MIN_WORKSPACE_IGNORE_PROTOCOL` (`toggle_workspace_ignore` /
+`toggleWorkspaceIgnore`). The result event is client-initiated, the 1.10
+shape, so an old client never receives it unprompted.
+
+**And the panel read the wrong key.** `WorkspaceFilesChangedEvent.changes`
+is `[{path, status}]`; the web store read `change`, so on a real daemon every
+entry rendered `~` and a deleted file was never removed — while the mock sent
+`change` and the e2e suite was green. The same shape as the clarification,
+permission and budget-panel defects before it: the mock spoke the client's
+vocabulary, not the daemon's. The mock now sends `status`.
 
 ### A Boundary the Notebook Did Not Have (#710)
 

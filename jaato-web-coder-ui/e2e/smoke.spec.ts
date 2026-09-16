@@ -124,6 +124,44 @@ test("permission prompt shows the diff and the typed key answers it", async ({ p
   await expect(page.getByText("Written (you answered")).toBeVisible();
   await page.getByRole("button", { name: "Toggle workspace changes (Alt+W)" }).click();
   await expect(page.getByText("~ app.py")).toBeVisible();
+  // The daemon's key is ``status``: a created file renders as ``+``.
+  await expect(page.getByText("+ session.log")).toBeVisible();
+});
+
+test("files panel: hide drops an entry from the view, show-hidden brings it back, ignore toggles .gitignore", async ({ page }) => {
+  await openSession(page);
+  await composer(page).fill("permit");
+  await composer(page).press("Enter");
+  await expect(page.getByText("Permission requested for")).toBeVisible();
+  await composer(page).fill("y");
+  await composer(page).press("Enter");
+  await expect(page.getByText("Written (you answered")).toBeVisible();
+  await page.getByRole("button", { name: "Toggle workspace changes (Alt+W)" }).click();
+  const panel = page.getByRole("region", { name: "Files" });
+  await expect(panel.getByText("~ app.py")).toBeVisible();
+
+  // hide (the TUI's ``h``): client-side, the entry leaves the view.
+  await panel.getByRole("button", { name: "Hide src/app.py", exact: true }).click();
+  await expect(panel.getByText("~ app.py")).toHaveCount(0);
+  await expect(panel.getByText("1 hidden")).toBeVisible();
+  // a whole directory hides everything under it
+  await panel.getByRole("button", { name: "Hide .jaato/", exact: true }).click();
+  await expect(panel.getByText("+ session.log")).toHaveCount(0);
+  await expect(panel.getByText("2 hidden")).toBeVisible();
+
+  // show hidden: back, dimmed, with the H marker, and unhide works.
+  await panel.getByRole("button", { name: "show hidden" }).click();
+  await expect(panel.getByText("~ app.py")).toBeVisible();
+  await expect(panel.locator("[data-hidden]")).toHaveCount(4); // .jaato/, logs/, session.log, app.py
+  await panel.getByRole("button", { name: "Unhide src/app.py", exact: true }).click();
+  await panel.getByRole("button", { name: "hide hidden" }).click();
+  await expect(panel.getByText("~ app.py")).toBeVisible();
+
+  // ignore (the TUI's ``i``): through the daemon, whose answer is the notice.
+  await panel.getByRole("button", { name: "Add src/app.py to .gitignore" }).click();
+  await expect(panel.getByRole("status")).toHaveText("src/app.py added to .gitignore");
+  await panel.getByRole("button", { name: "Remove src/app.py from .gitignore" }).click();
+  await expect(panel.getByRole("status")).toHaveText("src/app.py removed from .gitignore");
 });
 
 test("a permission ASK with no prompt content falls back to the tool arguments", async ({ page }) => {

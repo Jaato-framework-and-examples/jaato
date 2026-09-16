@@ -41,7 +41,7 @@ const SPEED = Number(process.env.MOCK_SPEED ?? 1); // multiplier; 0 = no delays
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, SPEED ? ms * SPEED : 0));
 const ts = () => new Date().toISOString();
 
-interface Client { ws: WebSocket; sessionId: string | null; pending: Map<string, (v: unknown) => void>; }
+interface Client { ws: WebSocket; sessionId: string | null; pending: Map<string, (v: unknown) => void>; ignored: Set<string>; }
 
 function send(c: Client, ev: Record<string, unknown>): void {
   if (c.ws.readyState !== c.ws.OPEN) return;
@@ -121,7 +121,8 @@ async function turn(c: Client, text: string, agentId = "main"): Promise<void> {
     const granted = ["y", "a", "t", "i", "once", "all", "yes"].includes(answer.toLowerCase());
     send(c, { type: "permission.resolved", agent_id: agentId, request_id: reqId, tool_name: "write_file", granted, method: "user" });
     send(c, { type: "tool.call_end", agent_id: agentId, tool_name: "write_file", call_id: callId, success: granted, duration_seconds: 0.21, error_message: granted ? null : "Permission denied by user", show_output: false });
-    if (granted) send(c, { type: "workspace.files_changed", changes: [{ path: "src/app.py", change: "modified" }] });
+    // WorkspaceFilesChangedEvent.changes carries {path, status} — the daemon's key.
+    if (granted) send(c, { type: "workspace.files_changed", changes: [{ path: "src/app.py", status: "modified" }, { path: ".jaato/logs/session.log", status: "created" }] });
     await stream(c, agentId, granted ? `Written (you answered \`${answer}\`).` : "Understood, not writing the file.");
   } else if (lower.includes("ask")) {
     const reqId = randomUUID();
@@ -182,8 +183,8 @@ wss.on("connection", (ws, req) => {
   const presented = url.searchParams.get("token") ?? (auth.startsWith("Bearer ") ? auth.slice(7) : "");
   if (TOKEN && presented !== TOKEN) { ws.close(1008, "unauthorized"); return; }
 
-  const c: Client = { ws, sessionId: null, pending: new Map() };
-  send(c, { type: "connected", protocol_version: "1.0.0", server_info: { server_version: "mock-0.0.1", client_id: randomUUID() } });
+  const c: Client = { ws, sessionId: null, pending: new Map(), ignored: new Set() };
+  send(c, { type: "connected", protocol_version: "1.12", server_info: { server_version: "mock-0.0.1", client_id: randomUUID() } });
 
   ws.on("message", async (raw) => {
     let ev: Record<string, unknown>;
@@ -237,6 +238,17 @@ wss.on("connection", (ws, req) => {
           }
         } else if (cmd === "session.profiles") {
           send(c, { type: "session.profiles", profiles: [{ name: "researcher", description: "Deep research", provider: "anthropic", model: "claude-sonnet-4" }, { name: "coder", description: "Coding agent", provider: "openrouter", model: "openai/gpt-5" }] });
+        } else if (cmd === "workspace.ignore") {
+          // The daemon toggles one exact line in <workspace>/.gitignore and
+          // answers with the entry's state AFTER the toggle (protocol 1.12).
+          const p = args[0] ?? "";
+          if (!p || p.startsWith("/")) {
+            send(c, { type: "workspace.ignore.result", path: p, ok: false, error: `workspace.ignore: ${p ? "absolute paths are not addressable via the workspace .gitignore" : "empty pattern"}` });
+          } else {
+            const ignored = !c.ignored.has(p);
+            if (ignored) c.ignored.add(p); else c.ignored.delete(p);
+            send(c, { type: "workspace.ignore.result", path: p, ok: true, ignored, gitignore_path: "/work/.gitignore" });
+          }
         } else if (cmd === "session.stop") {
           send(c, { type: "system.message", message: "Stopped.", style: "warning" });
         } else if (cmd === "model") {

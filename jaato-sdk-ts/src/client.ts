@@ -133,6 +133,14 @@ export const MIN_CLARIFICATION_ATTACHMENT_PROTOCOL = "1.6";
 export const MIN_SESSION_RELOAD_ENV_PROTOCOL = "1.11";
 
 /**
+ * Protocol floor for {@link JaatoClient.toggleWorkspaceIgnore}.  Same rule
+ * as {@link MIN_SESSION_RELOAD_ENV_PROTOCOL}: an older daemon ignores the
+ * verb, and a client that then reported the entry as ignored would be
+ * describing a ``.gitignore`` nobody changed.
+ */
+export const MIN_WORKSPACE_IGNORE_PROTOCOL = "1.12";
+
+/**
  * Parse ``"MAJOR.MINOR"`` into ``[major, minor]``.  Extra components
  * are tolerated and dropped (e.g. ``"1.0.5"`` → ``[1, 0]``).  Returns
  * ``null`` on malformed input rather than throwing — the compat check
@@ -926,6 +934,41 @@ export class JaatoClient {
       type: EventTypeValue.COMMAND,
       command: "session.reload_env",
       args: sessionId ? [sessionId] : [],
+    } as CommandRequest);
+  }
+
+  /**
+   * Add an entry to the session workspace's ``.gitignore``, or remove it
+   * again — the TUI workspace panel's ``i`` key, served daemon-side
+   * (protocol 1.12) so a browser client can make the same edit.  Exact-match
+   * toggle of ONE line: a directory entry keeps its trailing ``/``.  The
+   * daemon answers with one ``workspace.ignore.result`` whatever happened —
+   * ``ok`` / ``ignored`` on success, ``ok: false`` with the reason otherwise.
+   * Mirror of Python ``IPCClient.toggle_workspace_ignore``.
+   *
+   * @param path The workspace-relative entry, as the workspace panel shows it.
+   * @throws Error against a daemon below {@link MIN_WORKSPACE_IGNORE_PROTOCOL}.
+   */
+  async toggleWorkspaceIgnore(path: string): Promise<void> {
+    if (
+      this._serverProtocolVersion === null ||
+      !isProtocolCompatible(
+        this._serverProtocolVersion,
+        MIN_WORKSPACE_IGNORE_PROTOCOL,
+      )
+    ) {
+      throw new Error(
+        `toggleWorkspaceIgnore: this daemon speaks protocol ` +
+          `${this._serverProtocolVersion ?? "unknown"} and does not serve ` +
+          `workspace.ignore (needs >= ${MIN_WORKSPACE_IGNORE_PROTOCOL}).  ` +
+          `It would ignore the command silently.  Upgrade the daemon, or ` +
+          `edit the workspace's .gitignore directly.`,
+      );
+    }
+    await this._sendEvent({
+      type: EventTypeValue.COMMAND,
+      command: "workspace.ignore",
+      args: [path],
     } as CommandRequest);
   }
 

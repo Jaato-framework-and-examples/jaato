@@ -407,6 +407,7 @@ event stream and are correlated by `request_id` where applicable.
 | `listProfiles()` | `command.execute` `session.profiles` — response is a `SessionProfilesEvent` with `schema_version: "1.0"`, a typed `profiles: ProfileSummary[]` array, and a separate `parse_errors: ProfileParseError[]` for files that failed discovery. `ProfileSummary` is the safe-to-display subset (name, description, plugins, model, provider, plugin_configs, gc, model_tiers, runtime_limits, completion_payload_schema, env_var_names — values never exposed). |
 | `endSession()` | `command.execute` `session.end` (terminate current attached session) |
 | `reloadSessionEnv(sessionId?)` | `command.execute` `session.reload_env` — re-read a live session's workspace `.env` and stored credentials and rebuild its provider, so a key stored with `<provider>-auth key` after the session opened is used on the next turn; refused below protocol 1.11 |
+| `toggleWorkspaceIgnore(path)` | `command.execute` `workspace.ignore` — add one entry to the session workspace's `.gitignore` or remove it again (the TUI Files panel's `i` key, served daemon-side); the daemon answers with `workspace.ignore.result`; refused below protocol 1.12 |
 | `deleteSession(sessionId)` | `command.execute` `session.delete` (purge from disk + memory) |
 
 **Tools (model-callable + client-registered)**

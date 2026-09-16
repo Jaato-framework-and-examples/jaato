@@ -330,10 +330,9 @@ class CommandRouter:
                 self._handle_session_unbind_wake(client_id, event.args, event.payload)
                 return
 
-            elif cmd.startswith("cascade."):
-                if self._dispatch_cascade_command(
-                        cmd, client_id, event.args, event.payload):
-                    return
+            elif self._dispatch_prefixed_command(
+                    cmd, client_id, event.args, event.payload, workspace_path):
+                return
 
             # Tools commands - handled per-session
             elif cmd.startswith("tools."):
@@ -409,6 +408,101 @@ class CommandRouter:
             self._handle_session_reload_env(client_id, session_id, args)
         else:
             self._handle_session_stop(client_id, args)
+
+    def _dispatch_prefixed_command(
+        self, cmd: str, client_id: str, args: list, payload: Any,
+        workspace_path: Optional[str],
+    ) -> bool:
+        """Route the ``cascade.*`` family and ``workspace.ignore`` from ONE branch.
+
+        :meth:`_dispatch` is frozen at its complexity baseline, so the
+        ``cascade.`` arm it already paid for is widened into a table rather
+        than joined by a sibling: the two families share the property that
+        the verb is daemon-level (no session round-trip) and answers on the
+        caller's own channel.
+
+        Returns:
+            True when the command was handled; False when ``cmd`` belongs to
+            neither family, so the caller keeps dispatching.
+        """
+        if cmd.startswith("cascade."):
+            return self._dispatch_cascade_command(cmd, client_id, args, payload)
+        if cmd == "workspace.ignore":
+            self._handle_workspace_ignore(client_id, args, workspace_path)
+            return True
+        return False
+
+    def _handle_workspace_ignore(
+        self, client_id: str, args: list, client_workspace: Optional[str],
+    ) -> None:
+        """Handle ``workspace.ignore <path>`` (protocol 1.12).
+
+        Toggles one exact entry in the caller's workspace ``.gitignore`` —
+        the TUI workspace panel's ``i`` key, served daemon-side so a remote
+        client (the web coding UI) can do what the TUI does by writing the
+        file itself.  The edit is
+        :func:`jaato_sdk.gitignore_toggle.toggle_gitignore_pattern` on both
+        routes, so one press means one thing whichever client made it.
+
+        Which ``.gitignore``: the SESSION's workspace when the caller is
+        attached to one, else the workspace the client declared at connect.
+        The session's is the tree ``WorkspaceMonitor`` watches — and the
+        monitor reloads its parser on this very write, so the pattern binds
+        every later file event.  Entries the panel already shows are NOT
+        pruned; the client's own hide is for that.
+
+        The path is a PATTERN written into a file inside the workspace, never
+        a path the daemon resolves, so #742's relative-path rule does not
+        apply; what is refused instead is anything that is not a workspace
+        entry (:func:`validate_ignore_pattern`).  Every outcome — including
+        a refusal — answers with one ``WorkspaceIgnoreResultEvent``, because
+        the caller is a panel that has to render *something* for the press.
+        """
+        import os
+
+        from jaato_sdk.events import WorkspaceIgnoreResultEvent
+        from jaato_sdk.gitignore_toggle import (
+            toggle_gitignore_pattern, validate_ignore_pattern,
+        )
+
+        pattern = args[0] if args else ""
+
+        def answer(**fields: Any) -> None:
+            self._event_sink.send_event(
+                client_id, WorkspaceIgnoreResultEvent(path=pattern, **fields))
+
+        reason = validate_ignore_pattern(pattern)
+        if reason:
+            answer(ok=False, error=f"workspace.ignore: {reason}")
+            return
+
+        session = self._session_manager.get_client_session(client_id)
+        workspace = (getattr(session, "workspace_path", None) if session else None) \
+            or client_workspace
+        if not workspace:
+            answer(ok=False, error="workspace.ignore: the caller has no workspace")
+            return
+
+        gitignore_path = os.path.join(workspace, ".gitignore")
+        try:
+            existing = ""
+            if os.path.exists(gitignore_path):
+                with open(gitignore_path, "r", encoding="utf-8") as fh:
+                    existing = fh.read()
+            new_content, ignored = toggle_gitignore_pattern(existing, pattern)
+            with open(gitignore_path, "w", encoding="utf-8") as fh:
+                fh.write(new_content)
+        except OSError as exc:
+            logger.warning("workspace.ignore: client=%s could not write %s: %s",
+                           client_id, gitignore_path, exc)
+            answer(ok=False, error=f"workspace.ignore: could not write "
+                                   f"{gitignore_path}: {exc}",
+                   gitignore_path=gitignore_path)
+            return
+
+        logger.info("workspace.ignore: client=%s %s %r in %s", client_id,
+                    "added" if ignored else "removed", pattern, gitignore_path)
+        answer(ok=True, ignored=ignored, gitignore_path=gitignore_path)
 
     def _dispatch_cascade_command(
         self, cmd: str, client_id: str, args: list, payload: Any = None,

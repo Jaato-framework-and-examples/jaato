@@ -73,6 +73,22 @@ export async function respondPostAuth(
   await getClient().respondToPostAuthSetup(requestId, answer);
 }
 
+/**
+ * Toggle an entry's line in the session workspace's ``.gitignore`` through
+ * the daemon (``workspace.ignore``, protocol 1.12).  The daemon's answer
+ * lands in the store as the Files panel's notice; a daemon too old to serve
+ * the verb is refused by the SDK before anything is sent, and that refusal
+ * is shown in the same place.
+ */
+export async function toggleWorkspaceIgnore(entryId: string): Promise<void> {
+  const st = useJaato.getState();
+  try {
+    await getClient().toggleWorkspaceIgnore(entryId);
+  } catch (err) {
+    st.setWorkspaceNotice({ text: String(err instanceof Error ? err.message : err), error: true });
+  }
+}
+
 export async function respondReference(requestId: string, value: string): Promise<void> {
   useJaato.getState().dismissReferenceSelection(requestId);
   await getClient().respondToReferenceSelection(requestId, value);

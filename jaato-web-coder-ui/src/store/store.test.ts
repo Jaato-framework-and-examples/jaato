@@ -147,7 +147,7 @@ describe("reduce — session metadata", () => {
       ev({ type: "plan.step_updated", agent_id: "main", step_id: "1", status: "completed", result: "ok" }),
       ev({ type: "context.updated", agent_id: "main", usage: { total_tokens: 10 }, context_limit: 100, percent_used: 10 }),
       ev({ type: "command.list", commands: [{ name: "waypoint list", description: "w" }] }),
-      ev({ type: "workspace.files_changed", changes: [{ path: "a/b.py", change: "created" }, { path: "c.py", change: "deleted" }] }),
+      ev({ type: "workspace.files_changed", changes: [{ path: "a/b.py", status: "created" }, { path: "c.py", status: "deleted" }] }),
       ev({ type: "session.info", session_id: "S1", model_provider: "anthropic", model_name: "m" }),
     ]);
     const s = useJaato.getState();
@@ -158,6 +158,43 @@ describe("reduce — session metadata", () => {
     expect(s.workspaceFiles).toEqual({ "a/b.py": "created" });
     expect(s.sessionId).toBe("S1");
     expect(s.session.provider).toBe("anthropic");
+  });
+});
+
+describe("reduce — workspace files", () => {
+  it("reads the daemon's status key, so a created file is not shown as modified", () => {
+    const d = useJaato.getState().dispatch;
+    d([ev({ type: "workspace.files_snapshot", files: [{ path: "x.py", status: "created" }, { path: "gone.py", status: "deleted" }, { path: "y.py", status: "modified" }] })]);
+    expect(useJaato.getState().workspaceFiles).toEqual({ "x.py": "created", "y.py": "modified" });
+    d([ev({ type: "workspace.files_changed", changes: [{ path: "y.py", status: "deleted" }, { path: "z.py", change: "created" }] })]);
+    expect(useJaato.getState().workspaceFiles).toEqual({ "x.py": "created", "z.py": "created" });
+  });
+
+  it("hide is a per-session client-side set; a directory id hides its subtree", () => {
+    const st = useJaato.getState();
+    st.toggleWorkspaceHidden("src/app.py");
+    st.toggleWorkspaceHidden(".jaato/");
+    expect(useJaato.getState().workspaceHidden).toEqual(["src/app.py", ".jaato/"]);
+    useJaato.getState().toggleWorkspaceHidden("src/app.py");
+    expect(useJaato.getState().workspaceHidden).toEqual([".jaato/"]);
+    useJaato.getState().toggleWorkspaceShowHidden();
+    expect(useJaato.getState().workspaceShowHidden).toBe(true);
+    useJaato.getState().resetSessionState();
+    expect(useJaato.getState().workspaceHidden).toEqual([]);
+    expect(useJaato.getState().workspaceShowHidden).toBe(false);
+  });
+
+  it("a workspace.ignore.result records the entry's state and one notice; a refusal is an error notice", () => {
+    const d = useJaato.getState().dispatch;
+    d([ev({ type: "workspace.ignore.result", path: "build/", ok: true, ignored: true, gitignore_path: "/w/.gitignore" })]);
+    expect(useJaato.getState().workspaceIgnored).toEqual({ "build/": true });
+    expect(useJaato.getState().workspaceNotice).toEqual({ text: "build/ added to .gitignore" });
+    d([ev({ type: "workspace.ignore.result", path: "build/", ok: true, ignored: false })]);
+    expect(useJaato.getState().workspaceIgnored).toEqual({ "build/": false });
+    expect(useJaato.getState().workspaceNotice?.text).toBe("build/ removed from .gitignore");
+    d([ev({ type: "workspace.ignore.result", path: "/etc", ok: false, error: "workspace.ignore: absolute paths are not addressable via the workspace .gitignore" })]);
+    expect(useJaato.getState().workspaceNotice).toMatchObject({ error: true });
+    expect(useJaato.getState().workspaceIgnored).toEqual({ "build/": false });
   });
 });
 

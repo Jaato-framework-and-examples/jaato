@@ -195,7 +195,20 @@ from pydantic import BaseModel, ConfigDict, Field
 # A missing VERB again (the 1.7 rule): an older daemon ignores the command,
 # and "reloaded" would be reported about a session still on its old
 # credential.  The SDKs refuse below ``MIN_SESSION_RELOAD_ENV_PROTOCOL``.
-PROTOCOL_VERSION = "1.11"
+#
+# 1.12 -- ``workspace.ignore <path>`` / ``workspace.ignore.result``: toggle
+# one exact entry in the caller's workspace ``.gitignore``, daemon-side.  The
+# TUI's workspace panel has done this with its ``i`` key by writing the file
+# itself; a remote client has no file to write, so the same edit (one shared
+# text transform, ``jaato_sdk.gitignore_toggle``) becomes a verb.  The
+# daemon's ``WorkspaceMonitor`` already reloads its parser on that write.
+#
+# A missing VERB (the 1.7 rule): an older daemon ignores the command, and a
+# client that then reported "ignored" would be describing a file it did not
+# change.  The SDKs refuse below ``MIN_WORKSPACE_IGNORE_PROTOCOL``.  The
+# result event is client-initiated (the 1.10 shape), so an old client never
+# receives it unprompted.
+PROTOCOL_VERSION = "1.12"
 
 
 # =============================================================================
@@ -383,6 +396,7 @@ class EventType(str, Enum):
     # Workspace file monitoring (Server -> Client)
     WORKSPACE_FILES_CHANGED = "workspace.files_changed"  # Incremental delta
     WORKSPACE_FILES_SNAPSHOT = "workspace.files_snapshot"  # Full state on reconnect
+    WORKSPACE_IGNORE_RESULT = "workspace.ignore.result"  # Answer to `workspace.ignore <path>` (1.12)
 
     # External events (Client -> Server, from web components)
     EVENT_EXTERNAL = "event.external"
@@ -1864,6 +1878,42 @@ class WorkspaceFilesSnapshotEvent(Event):
     # ^ List of {"path": str, "status": "created"|"modified"|"deleted"}
     total: int = 0
     # ^ Convenience: count of non-deleted entries
+
+
+class WorkspaceIgnoreResultEvent(Event):
+    """Answer to ``workspace.ignore <path>`` (protocol 1.12).
+
+    The TUI's workspace panel adds the entry under the cursor to the
+    workspace's ``.gitignore`` — and removes it again with the same key —
+    by writing the file itself, which it can because it runs on the host.
+    A remote client (the web coding UI) cannot, so the daemon serves the
+    same toggle as a command and answers with this event.  The edit is
+    ``jaato_sdk.gitignore_toggle.toggle_gitignore_pattern`` on both routes,
+    so the two clients cannot disagree about what one press does.
+
+    The daemon's ``WorkspaceMonitor`` watches ``.gitignore`` and reloads its
+    parser on the write, so the pattern applies to every LATER file event;
+    an entry the panel already shows is not retroactively removed — that is
+    what the client-side hide is for.
+
+    Fields:
+        path: The entry as the caller sent it (a directory keeps its
+            trailing ``/``).
+        ignored: The entry's state AFTER the toggle — ``True`` when the line
+            was added, ``False`` when it was removed.  Meaningful only when
+            ``ok``.
+        ok: Whether the file was written.
+        error: Why not, when ``ok`` is ``False`` — the pattern was refused
+            (empty, absolute, a line break, a leading ``#`` / ``!``), the
+            caller has no workspace, or the write failed.
+        gitignore_path: The file that was edited, so a client can name it.
+    """
+    type: EventType = Field(default=EventType.WORKSPACE_IGNORE_RESULT)
+    path: str = ""
+    ignored: bool = False
+    ok: bool = True
+    error: str = ""
+    gitignore_path: str = ""
 
 
 # =============================================================================
@@ -3440,6 +3490,7 @@ _EVENT_CLASSES: Dict[str, type] = {
     # Workspace file monitoring
     EventType.WORKSPACE_FILES_CHANGED.value: WorkspaceFilesChangedEvent,
     EventType.WORKSPACE_FILES_SNAPSHOT.value: WorkspaceFilesSnapshotEvent,
+    EventType.WORKSPACE_IGNORE_RESULT.value: WorkspaceIgnoreResultEvent,
     # Workspace file staging (multi-frame: TEXT request + N BINARY blobs)
     EventType.WORKSPACE_FILES_STAGE_REQUEST.value: StageFilesRequest,
     EventType.WORKSPACE_FILES_STAGED.value: StageFilesEvent,

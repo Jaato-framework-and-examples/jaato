@@ -76,6 +76,23 @@ export interface JaatoState {
   context: Record<string, ContextState>;
   commands: CommandSpec[];
   workspaceFiles: Record<string, string>;
+  /**
+   * Entries hidden from the Files panel this session — the TUI panel's
+   * ``h`` key.  A directory is stored with its trailing ``/`` and hides
+   * everything under it.  Client-side only: nothing on the daemon changes,
+   * and the set is dropped with the session.
+   */
+  workspaceHidden: string[];
+  /** Show hidden entries (dimmed, with an ``H`` marker) so they can be unhidden. */
+  workspaceShowHidden: boolean;
+  /**
+   * What the daemon last said about an entry's ``.gitignore`` line, from
+   * ``workspace.ignore.result`` — learned, not derived: the client never
+   * reads the file, so an entry absent here has unknown state.
+   */
+  workspaceIgnored: Record<string, boolean>;
+  /** One-line outcome of the last ``.gitignore`` toggle, shown in the panel. */
+  workspaceNotice: { text: string; error?: boolean } | null;
   permissionStatus?: string | null;
   processing: Record<string, boolean>;
 
@@ -109,6 +126,9 @@ export interface JaatoState {
   dismissReferenceSelection: (requestId: string) => void;
   dismissPostAuth: () => void;
   toggleUi: (key: "showPlan" | "showBudget" | "showWorkspace" | "showTools") => void;
+  toggleWorkspaceHidden: (entryId: string) => void;
+  toggleWorkspaceShowHidden: () => void;
+  setWorkspaceNotice: (n: JaatoState["workspaceNotice"]) => void;
   setTheme: (t: string) => void;
   setPopup: (callId: string | null) => void;
   resetSessionState: () => void;
@@ -130,6 +150,10 @@ const emptySessionState = () => ({
   plan: {} as Record<string, PlanState>,
   context: {} as Record<string, ContextState>,
   workspaceFiles: {} as Record<string, string>,
+  workspaceHidden: [] as string[],
+  workspaceShowHidden: false,
+  workspaceIgnored: {} as Record<string, boolean>,
+  workspaceNotice: null as { text: string; error?: boolean } | null,
   permissionStatus: null,
   processing: {} as Record<string, boolean>,
 });
@@ -616,11 +640,14 @@ export function reduce(s: JaatoState, raw: JaatoEvent): JaatoState {
     }
     case EventTypeValue.WORKSPACE_FILES_CHANGED: {
       const next = { ...s.workspaceFiles };
+      // WorkspaceFilesChangedEvent.changes is [{path, status}] — ``status`` is
+      // the daemon's key; ``change`` / ``type`` are tolerated for older feeds.
       for (const ch of (ev.changes as Record<string, string>[] | undefined) ?? []) {
         const p = ch.path ?? ch.file;
         if (!p) continue;
-        if (ch.change === "deleted" || ch.type === "deleted") delete next[p];
-        else next[p] = ch.change ?? ch.type ?? "modified";
+        const status = ch.status ?? ch.change ?? ch.type ?? "modified";
+        if (status === "deleted") delete next[p];
+        else next[p] = status;
       }
       s.workspaceFiles = next;
       break;
@@ -632,10 +659,22 @@ export function reduce(s: JaatoState, raw: JaatoEvent): JaatoState {
         else if (f && typeof f === "object") {
           const o = f as Record<string, string>;
           const p = o.path ?? o.file;
-          if (p) next[p] = o.change ?? o.type ?? "modified";
+          const status = o.status ?? o.change ?? o.type ?? "modified";
+          if (p && status !== "deleted") next[p] = status;
         }
       }
       s.workspaceFiles = next;
+      break;
+    }
+    case EventTypeValue.WORKSPACE_IGNORE_RESULT: {
+      const path = String(ev.path ?? "");
+      if (ev.ok === false) {
+        s.workspaceNotice = { text: String(ev.error || `Could not update .gitignore for ${path}`), error: true };
+        break;
+      }
+      const ignored = ev.ignored === true;
+      s.workspaceIgnored = { ...s.workspaceIgnored, [path]: ignored };
+      s.workspaceNotice = { text: `${path} ${ignored ? "added to" : "removed from"} .gitignore` };
       break;
     }
     default:
@@ -690,6 +729,13 @@ export const useJaato = create<JaatoState>()((set, get) => ({
   dismissReferenceSelection: (requestId) => set((st) => ({ referenceSelections: st.referenceSelections.filter((r) => r.requestId !== requestId) })),
   dismissPostAuth: () => set({ postAuth: null }),
   toggleUi: (key) => set((st) => ({ ui: { ...st.ui, [key]: !st.ui[key] } })),
+  toggleWorkspaceHidden: (entryId) => set((st) => ({
+    workspaceHidden: st.workspaceHidden.includes(entryId)
+      ? st.workspaceHidden.filter((h) => h !== entryId)
+      : [...st.workspaceHidden, entryId],
+  })),
+  toggleWorkspaceShowHidden: () => set((st) => ({ workspaceShowHidden: !st.workspaceShowHidden })),
+  setWorkspaceNotice: (n) => set(() => ({ workspaceNotice: n })),
   setTheme: (theme) => set((st) => ({ ui: { ...st.ui, theme } })),
   setPopup: (callId) => set((st) => ({ ui: { ...st.ui, popupCallId: callId } })),
   resetSessionState: () => set(() => ({ ...emptySessionState() })),
