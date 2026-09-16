@@ -192,7 +192,9 @@ import { JaatoClient, EventType } from "@jaato/sdk";
 
 const client = new JaatoClient({
   url: "ws://localhost:8080",
-  token: "<bearer-token>",  // omit when behind a proxy that injects it
+  token: "<bearer-token>",  // omit when behind a proxy that injects it;
+                            // or a function returning a fresh per-user
+                            // ticket per attempt (protocol 1.10, #1074)
   recovery: {
     autoReconnect: true,
     autoReattachSessionId: true,  // re-attach session automatically after a reconnect

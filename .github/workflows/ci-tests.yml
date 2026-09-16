@@ -57,6 +57,12 @@ jobs:
     # `suite` legs below and leaves room for the next guard.  Measured
     # 2026-09-13 at 12-15 min as the guard set grew; 30 keeps the same
     # proportional headroom the original 20 was chosen for.
+    #
+    # Since #1080 moved the reversion meta-guard to its own job, this
+    # one's other fifteen files measure at 30-38s.  30 min is now enormous
+    # rather than tight, and is left alone deliberately: it costs
+    # nothing on a job that finishes in under a minute, and the next
+    # guard added here should not have to argue for a cap.
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
@@ -88,7 +94,54 @@ jobs:
             jaato-server/shared/tests/test_a_dead_stream_is_not_a_finished_turn.py \
             jaato-server/shared/tests/test_env_scope_catalog.py \
             jaato-server/shared/tests/test_docs_do_not_contradict_the_tree.py \
-            jaato-server/shared/tests/test_ci_runs_every_test_file.py \
+            jaato-server/shared/tests/test_ci_runs_every_test_file.py
+
+  # ---------------------------------------------------------------
+  # The reversion meta-guard, alone, because it is not like the guards
+  # above.  Each of its ~226 cases spawns a pytest SUBPROCESS against a
+  # sandboxed copy of the checkout (#995), so it is an I/O and
+  # process-creation workload where everything else here is CPU: the
+  # other fifteen files in `contract-guards` measure at 30-38s together
+  # (two machines), and this one file was 20m38s of that job's 21m16s
+  # -- 97% of a required check, spent on one file.
+  #
+  # It used to run TWICE, here and again inside `suite (shared/tests)`,
+  # which runs that directory (#1080).  Same cases, same sandbox, in the
+  # two jobs with the least headroom -- and the second run cannot fail
+  # when the first passed.
+  #
+  # Its own job because the cost is not the only problem.  Being I/O
+  # bound is also what makes it the most VARIABLE suite in the tree:
+  # timestamping two runs' logs put the same block at 1320s and 1896s, a
+  # 1.43x swing with no code difference to explain it.  Wedged inside
+  # another job, that variance is charged to whatever else that job
+  # gates, and a timeout reads as an unexplained red rather than as
+  # "a guard stopped detecting its own reversion".  Alone, it gets a cap
+  # sized for its own variance, and the required `contract-guards` check
+  # goes back to being seconds.
+  #
+  # 45 min: the slower observation (1628s) plus the measured swing,
+  # still bounding a genuinely hung run.
+  # ---------------------------------------------------------------
+  reversion-guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            jaato-sdk/pyproject.toml
+            jaato-server/pyproject.toml
+      - name: Install (editable + interactive backend)
+        run: |
+          pip install -e jaato-sdk/
+          pip install -e "jaato-server/.[dev,interactive]"
+      - name: Every guard detects its own reversion
+        run: |
+          pytest -q \
             jaato-server/shared/tests/test_every_guard_detects_its_own_reversion.py
 
   # ---------------------------------------------------------------
@@ -159,7 +212,7 @@ jobs:
   # render path.
   # ---------------------------------------------------------------
   # ---------------------------------------------------------------
-  # Browser client (jaato-web). Type-checks against the TS SDK's built
+  # Browser client (jaato-web-coder-ui). Type-checks against the TS SDK's built
   # declarations, runs the framework-free protocol/store unit tests, and
   # drives the real UI end-to-end against the scripted mock daemon
   # (mock/daemon.ts speaks the wire protocol, so this exercises the same
@@ -177,23 +230,23 @@ jobs:
           cache: npm
           cache-dependency-path: |
             jaato-sdk-ts/package-lock.json
-            jaato-web/package-lock.json
+            jaato-web-coder-ui/package-lock.json
       - name: Install + build the TS SDK (declarations for the type-check)
         working-directory: jaato-sdk-ts
         run: |
           npm ci --no-audit --no-fund
           npm run build
-      - name: Install jaato-web
-        working-directory: jaato-web
+      - name: Install jaato-web-coder-ui
+        working-directory: jaato-web-coder-ui
         run: npm ci --no-audit --no-fund
       - name: Type-check
-        working-directory: jaato-web
+        working-directory: jaato-web-coder-ui
         run: npx tsc -p tsconfig.json --noEmit
-      - name: Unit tests (protocol, store)
-        working-directory: jaato-web
-        run: npx vitest run
+      - name: Unit tests (protocol, store, launcher)
+        working-directory: jaato-web-coder-ui
+        run: npm test
       - name: Production build
-        working-directory: jaato-web
+        working-directory: jaato-web-coder-ui
         run: npx vite build
       # `--with-deps` shells out to apt-get update, so this job needs the
       # same drop as the suite job -- see the note there.
@@ -201,10 +254,10 @@ jobs:
         run: sudo rm -f /etc/apt/sources.list.d/google-chrome.list
                         /etc/apt/sources.list.d/google-chrome.sources
       - name: Install Playwright Chromium
-        working-directory: jaato-web
+        working-directory: jaato-web-coder-ui
         run: npx playwright install --with-deps chromium
       - name: End-to-end against the mock daemon
-        working-directory: jaato-web
+        working-directory: jaato-web-coder-ui
         run: npx playwright test
 
   suite:
@@ -226,9 +279,18 @@ jobs:
           # The single largest step, at ~6 min. `introspect.env_vars()` is
           # memoized as of this change, which took it to ~2 min: the scaffold
           # tests here called that un-memoized whole-tree AST scan ~37 times.
+          #
+          # The reversion meta-guard is IGNORED here: the `reversion-guard`
+          # job above runs it, and a directory-scoped run named it a second
+          # time -- the same 226 cases for no added coverage (#1080).  It
+          # dominated this leg: the block measured 1320s on one run and 1896s
+          # on another, against a whole budget of 2100s, and this leg has been
+          # cancelled at the cap on branches whose tests all passed.  Without
+          # it, the leg is the few hundred seconds its own tests cost.
           - name: shared/tests
             run: |
               pytest -q --continue-on-collection-errors \
+                --ignore=jaato-server/shared/tests/test_every_guard_detects_its_own_reversion.py \
                 jaato-server/shared/tests/
 
           # Until recently NO workflow ran server/tests or shared/plugins, so their
