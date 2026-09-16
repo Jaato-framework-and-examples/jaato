@@ -5587,195 +5587,47 @@ class JaatoServer:
             # "error" (read at the SlotSettledEvent emit).  Reset here so warm
             # slot reuse can't leak a prior session's terminal reason.
             server._terminal_reason = None
-            try:
-                # A fresh attach to a restored session may still be (re)spawning
-                # its runner asynchronously (attach has no synchronous ready-gate
-                # like session.new).  Await readiness rather than deref a None
-                # ``_runner_rpc`` — the reported NoneType crash.  Bounded; raise a
-                # clean error on timeout (caught below as a terminal error)
-                # instead of a hard AttributeError.
-                # Readiness is now bootstrap-complete (mark_runner_ready), not
-                # rpc-handle-live — so wait whenever it's unset.  Covers BOTH the
-                # attach re-spawn (rpc None) AND a reused warm pool slot whose
-                # handle is live but whose bootstrap for this session hasn't
-                # finished yet (same window the client-tool-push stall hit).
-                if not server._runner_ready.is_set():
-                    server._runner_ready.wait(timeout=30.0)
-                _rpc = server._runner_rpc
-                if _rpc is None or not server._runner_ready.is_set():
-                    raise RuntimeError(
-                        "session runner not ready: (re)spawn + bootstrap did not "
-                        "complete within 30s"
-                    )
-                # Run in workspace context so file operations use client's CWD
-                # Also apply session env so provider/tools can access session-specific config
-                with server._with_session_env(), server._in_workspace():
-                    # The runner puts a TYPED budget signal on the send result
-                    # (rpc.py).  Capture it: a budget refusal short-circuits
-                    # before any turn runs, so no turn-completion notification
-                    # fires and a driver waiting on a terminal event would sit
-                    # out its whole timeout and then report a generic failure.
-                    _send_result: Dict[str, Any] = {}
-                    _rpc.session_send_message_threadsafe(
-                        prompt,
-                        on_output=output_callback,
-                        on_notification=notification_handler,
-                        attachments=attachments,
-                        on_result=_send_result.update,
-                    )
-                    server._emit_budget_refusal_if_exhausted(_send_result)
+            # The turn's WIND-DOWN.  This used to be the body of the
+            # ``finally`` below, and its four early exits were ``return``
+            # statements sitting inside that ``finally`` -- which discards any
+            # exception in flight (PEP 765 makes it a SyntaxWarning on 3.14;
+            # #1077).  Most of what that warns about was already covered here:
+            # the two handlers below catch ``Exception`` and
+            # ``KeyboardInterrupt``, and a thread target's return value is read
+            # by nobody.  Two cases genuinely lost information, and the second
+            # is the expensive one:
+            #
+            #   * a ``BaseException`` that is neither of the two caught --
+            #     ``SystemExit``, ``GeneratorExit``, an injected
+            #     ``asyncio.CancelledError``;
+            #   * an exception raised INSIDE either ``except`` handler.  The
+            #     ``except Exception`` handler runs ~100 lines of failure
+            #     reporting (event emission, teardown, logging); a failure
+            #     while reporting a failure vanished along with the provider
+            #     error it was in the middle of reporting, on the daemon's
+            #     model thread.
+            #
+            # Lifting the body out is what fixes it: the four exits are now
+            # ordinary returns from an ordinary function, the ``finally`` is
+            # one call that falls off its end, and an in-flight exception
+            # survives to ``threading.excepthook``.  Control flow is otherwise
+            # unchanged -- falling off the end of this function is exactly what
+            # falling off the end of the old ``finally`` was, because the
+            # ``try`` is the last statement in ``model_thread``.
+            #
+            # ``terminal_error`` is read through the closure rather than passed
+            # in: the ``except`` handlers below assign it, and a cell resolves
+            # at call time, so the ``finally`` cannot hand over a stale value.
+            def _finish_turn() -> None:
+                """Wind the turn down: teardown, continuation drain, nudge
+                guard, terminal status.
 
-                    # Auto-continuation for formatter feedback
-                    # When formatters detect errors in model text output (syntax errors,
-                    # validation failures), the model needs to see the feedback eagerly —
-                    # not wait for the next user prompt. Loop here to inject feedback
-                    # as a hidden prompt and let the model self-correct.
-                    max_feedback_continuations = 2
-                    for _attempt in range(max_feedback_continuations):
-                        main_agent = server._agents.get(server._main_agent_id)
-                        if not main_agent or not main_agent.pending_formatter_feedback:
-                            break
-                        feedback = main_agent.pending_formatter_feedback
-                        main_agent.pending_formatter_feedback = None
-                        server._trace(f"FORMATTER_FEEDBACK_CONTINUATION: attempt {_attempt + 1}, {len(feedback)} chars")
-                        feedback_prompt = (
-                            f"<hidden>[Formatter Feedback]\n{feedback}</hidden>"
-                        )
-                        server._runner_rpc.session_send_message_threadsafe(
-                            feedback_prompt,
-                            on_output=output_callback,
-                            on_notification=notification_handler,
-                        )
-
-                    # Update context usage
-                    # Phase 3 §7c step 6.6.4.5b: route through runner-RPC.
-                    if server._runner_rpc is not None:
-                        usage = server._runner_rpc.session_get_context_usage_threadsafe()
-                        context_limit = (
-                            server._runner_rpc.session_get_context_limit_threadsafe()
-                        )
-                        server.emit(ContextUpdatedEvent(
-                            agent_id=server._main_agent_id,
-                            usage=server._build_usage(
-                                prompt_tokens=usage.get('prompt_tokens', 0),
-                                output_tokens=usage.get('output_tokens', 0),
-                                total_tokens=usage.get('total_tokens', 0),
-                            ),
-                            context_limit=context_limit,
-                            percent_used=usage.get('percent_used', 0),
-                            tokens_remaining=usage.get('tokens_remaining', 0),
-                            turns=usage.get('turns', 0),
-                        ))
-
-            except KeyboardInterrupt as e:
-                server.emit(SystemMessageEvent(
-                    message="Interrupted",
-                    style="warning",
-                ))
-                terminal_error = e
-            except Exception as e:
-                # Permanent INFO-level log of the wrapped error text at
-                # emit time.  Lets consumers verify end-to-end that the
-                # client-facing ErrorEvent payload carries the
-                # vendor-correct message (Fix #1a in PR #118) without
-                # needing to parse the binary IPC frame separately.
-                # Greppable token: MODEL_THREAD_TERMINAL_ERROR.
-                #
-                # RUNNER-SIDE FRAMES, when the failure came from across the
-                # RPC boundary.  The runner sanitizes and ships them in
-                # ``ErrorPayload.traceback``; ``RunnerCallError`` now carries
-                # them here.  Without this the crash reached every consumer
-                # as ONE SANITIZED LINE -- exception type and message intact,
-                # frames gone -- and the line reads like a finished error, so
-                # a reader assumes they have the wrong log rather than that
-                # the frames were dropped.
-                #
-                # They go to BOTH witnesses on purpose: the log for whoever
-                # is on the machine, ``details`` for a client that is not.
-                # OUR PLUMBING FAILING IS NOT THE AGENT FAILING.
-                #
-                # This handler terminates the session for anything it catches.
-                # A ``RunnerRPCTimeout`` is the daemon's own transport --
-                # typically its event loop not scheduling a coroutine -- and
-                # the session behind it is healthy.  Terminating for one
-                # killed a cascade half mid-run, twice on two builds: the
-                # cascade policy unloads on reason=error, the session goes
-                # cold, and a cold sibling is not woken by a sibling message,
-                # so the surviving half sent into a corpse for the rest of the
-                # run.
-                #
-                # Enumerating what must NOT terminate, rather than what must:
-                # a framework-internal type nobody listed here still dies (the
-                # status quo), whereas listing what must terminate would let
-                # an unlisted PROVIDER error survive and COMPLETION_NUDGE
-                # cycle on it -- the bug this terminal path exists to stop.
-                from server.runner_rpc_client import RunnerRPCTimeout
-
-                if isinstance(e, RunnerRPCTimeout):
-                    logger.warning(
-                        "MODEL_THREAD_TRANSPORT_ERROR error_type=%s error=%s "
-                        "-- the TURN failed; the SESSION stays loaded. This "
-                        "is daemon-side plumbing, not the agent.",
-                        type(e).__name__, str(e),
-                    )
-                    # #856: a lost dispatch carries whether the work MAY
-                    # ALREADY HAVE RUN, and that decides whether sending
-                    # the turn again is safe or duplicates side effects
-                    # that already happened.  It rides ``details``, which
-                    # is the field documented as "what a driver branches
-                    # on" while ``error`` stays the human sentence -- the
-                    # same shape ``SessionRefused.may_exist`` takes, and
-                    # for the same reason.
-                    #
-                    # NOT ``recoverable``.  In this tree that flag means
-                    # "this session can continue" (every recoverable=False
-                    # site is a config or provider-connect failure that
-                    # ends initialisation), and the whole point of sparing
-                    # a RunnerRPCTimeout here is that the session DOES
-                    # continue.  Flipping it to encode retry-safety would
-                    # assert something false about session viability to
-                    # every existing consumer.
-                    server.emit(ErrorEvent(
-                        error=str(e),
-                        error_type=type(e).__name__,
-                        recoverable=True,
-                        details=_transport_error_details(e),
-                    ))
-                    # RETURN.  Without it the terminal path below runs anyway:
-                    # ``terminal_error = e`` is reached unconditionally and the
-                    # finally takes the termination branch, so the session dies
-                    # exactly as before with a better log line above it.  #628
-                    # shipped that way -- the comment described the control
-                    # flow and nothing implemented it -- and a cascade half
-                    # still died 3.5 minutes in, WARNING and INFO one
-                    # millisecond apart on the same exception.
-                    #
-                    # ``return`` from inside ``except`` still runs the
-                    # ``finally``, which is the point: the turn winds down its
-                    # ordinary way (pending continuation, status) with
-                    # ``terminal_error`` left None, so the session stays
-                    # loaded.  Re-raising instead would run the finally and
-                    # then escape the thread target unhandled.
-                    return
-
-                _runner_tb = getattr(e, "traceback_text", None)
-                logger.info(
-                    "MODEL_THREAD_TERMINAL_ERROR error_type=%s error=%s",
-                    type(e).__name__, str(e),
-                )
-                if _runner_tb:
-                    logger.error(
-                        "MODEL_THREAD_TERMINAL_ERROR runner traceback:\n%s",
-                        _runner_tb,
-                    )
-                server.emit(ErrorEvent(
-                    error=str(e),
-                    error_type=type(e).__name__,
-                    details=({"runner_traceback": _runner_tb}
-                             if _runner_tb else None),
-                ))
-                terminal_error = e
-            finally:
+                Returns early exactly where the old ``finally`` did -- a
+                terminal error, a stashed continuation, a drained user send, a
+                completion nudge -- each of which hands the rest of the turn to
+                a freshly started model thread.  The return value is not read;
+                what the returns choose is which of the branches below runs.
+                """
                 server._model_running = False
                 server._model_thread = None
 
@@ -6131,6 +5983,199 @@ class JaatoServer:
                     status=status,
                 ))
                 clear_logging_context()
+
+            try:
+                # A fresh attach to a restored session may still be (re)spawning
+                # its runner asynchronously (attach has no synchronous ready-gate
+                # like session.new).  Await readiness rather than deref a None
+                # ``_runner_rpc`` — the reported NoneType crash.  Bounded; raise a
+                # clean error on timeout (caught below as a terminal error)
+                # instead of a hard AttributeError.
+                # Readiness is now bootstrap-complete (mark_runner_ready), not
+                # rpc-handle-live — so wait whenever it's unset.  Covers BOTH the
+                # attach re-spawn (rpc None) AND a reused warm pool slot whose
+                # handle is live but whose bootstrap for this session hasn't
+                # finished yet (same window the client-tool-push stall hit).
+                if not server._runner_ready.is_set():
+                    server._runner_ready.wait(timeout=30.0)
+                _rpc = server._runner_rpc
+                if _rpc is None or not server._runner_ready.is_set():
+                    raise RuntimeError(
+                        "session runner not ready: (re)spawn + bootstrap did not "
+                        "complete within 30s"
+                    )
+                # Run in workspace context so file operations use client's CWD
+                # Also apply session env so provider/tools can access session-specific config
+                with server._with_session_env(), server._in_workspace():
+                    # The runner puts a TYPED budget signal on the send result
+                    # (rpc.py).  Capture it: a budget refusal short-circuits
+                    # before any turn runs, so no turn-completion notification
+                    # fires and a driver waiting on a terminal event would sit
+                    # out its whole timeout and then report a generic failure.
+                    _send_result: Dict[str, Any] = {}
+                    _rpc.session_send_message_threadsafe(
+                        prompt,
+                        on_output=output_callback,
+                        on_notification=notification_handler,
+                        attachments=attachments,
+                        on_result=_send_result.update,
+                    )
+                    server._emit_budget_refusal_if_exhausted(_send_result)
+
+                    # Auto-continuation for formatter feedback
+                    # When formatters detect errors in model text output (syntax errors,
+                    # validation failures), the model needs to see the feedback eagerly —
+                    # not wait for the next user prompt. Loop here to inject feedback
+                    # as a hidden prompt and let the model self-correct.
+                    max_feedback_continuations = 2
+                    for _attempt in range(max_feedback_continuations):
+                        main_agent = server._agents.get(server._main_agent_id)
+                        if not main_agent or not main_agent.pending_formatter_feedback:
+                            break
+                        feedback = main_agent.pending_formatter_feedback
+                        main_agent.pending_formatter_feedback = None
+                        server._trace(f"FORMATTER_FEEDBACK_CONTINUATION: attempt {_attempt + 1}, {len(feedback)} chars")
+                        feedback_prompt = (
+                            f"<hidden>[Formatter Feedback]\n{feedback}</hidden>"
+                        )
+                        server._runner_rpc.session_send_message_threadsafe(
+                            feedback_prompt,
+                            on_output=output_callback,
+                            on_notification=notification_handler,
+                        )
+
+                    # Update context usage
+                    # Phase 3 §7c step 6.6.4.5b: route through runner-RPC.
+                    if server._runner_rpc is not None:
+                        usage = server._runner_rpc.session_get_context_usage_threadsafe()
+                        context_limit = (
+                            server._runner_rpc.session_get_context_limit_threadsafe()
+                        )
+                        server.emit(ContextUpdatedEvent(
+                            agent_id=server._main_agent_id,
+                            usage=server._build_usage(
+                                prompt_tokens=usage.get('prompt_tokens', 0),
+                                output_tokens=usage.get('output_tokens', 0),
+                                total_tokens=usage.get('total_tokens', 0),
+                            ),
+                            context_limit=context_limit,
+                            percent_used=usage.get('percent_used', 0),
+                            tokens_remaining=usage.get('tokens_remaining', 0),
+                            turns=usage.get('turns', 0),
+                        ))
+
+            except KeyboardInterrupt as e:
+                server.emit(SystemMessageEvent(
+                    message="Interrupted",
+                    style="warning",
+                ))
+                terminal_error = e
+            except Exception as e:
+                # Permanent INFO-level log of the wrapped error text at
+                # emit time.  Lets consumers verify end-to-end that the
+                # client-facing ErrorEvent payload carries the
+                # vendor-correct message (Fix #1a in PR #118) without
+                # needing to parse the binary IPC frame separately.
+                # Greppable token: MODEL_THREAD_TERMINAL_ERROR.
+                #
+                # RUNNER-SIDE FRAMES, when the failure came from across the
+                # RPC boundary.  The runner sanitizes and ships them in
+                # ``ErrorPayload.traceback``; ``RunnerCallError`` now carries
+                # them here.  Without this the crash reached every consumer
+                # as ONE SANITIZED LINE -- exception type and message intact,
+                # frames gone -- and the line reads like a finished error, so
+                # a reader assumes they have the wrong log rather than that
+                # the frames were dropped.
+                #
+                # They go to BOTH witnesses on purpose: the log for whoever
+                # is on the machine, ``details`` for a client that is not.
+                # OUR PLUMBING FAILING IS NOT THE AGENT FAILING.
+                #
+                # This handler terminates the session for anything it catches.
+                # A ``RunnerRPCTimeout`` is the daemon's own transport --
+                # typically its event loop not scheduling a coroutine -- and
+                # the session behind it is healthy.  Terminating for one
+                # killed a cascade half mid-run, twice on two builds: the
+                # cascade policy unloads on reason=error, the session goes
+                # cold, and a cold sibling is not woken by a sibling message,
+                # so the surviving half sent into a corpse for the rest of the
+                # run.
+                #
+                # Enumerating what must NOT terminate, rather than what must:
+                # a framework-internal type nobody listed here still dies (the
+                # status quo), whereas listing what must terminate would let
+                # an unlisted PROVIDER error survive and COMPLETION_NUDGE
+                # cycle on it -- the bug this terminal path exists to stop.
+                from server.runner_rpc_client import RunnerRPCTimeout
+
+                if isinstance(e, RunnerRPCTimeout):
+                    logger.warning(
+                        "MODEL_THREAD_TRANSPORT_ERROR error_type=%s error=%s "
+                        "-- the TURN failed; the SESSION stays loaded. This "
+                        "is daemon-side plumbing, not the agent.",
+                        type(e).__name__, str(e),
+                    )
+                    # #856: a lost dispatch carries whether the work MAY
+                    # ALREADY HAVE RUN, and that decides whether sending
+                    # the turn again is safe or duplicates side effects
+                    # that already happened.  It rides ``details``, which
+                    # is the field documented as "what a driver branches
+                    # on" while ``error`` stays the human sentence -- the
+                    # same shape ``SessionRefused.may_exist`` takes, and
+                    # for the same reason.
+                    #
+                    # NOT ``recoverable``.  In this tree that flag means
+                    # "this session can continue" (every recoverable=False
+                    # site is a config or provider-connect failure that
+                    # ends initialisation), and the whole point of sparing
+                    # a RunnerRPCTimeout here is that the session DOES
+                    # continue.  Flipping it to encode retry-safety would
+                    # assert something false about session viability to
+                    # every existing consumer.
+                    server.emit(ErrorEvent(
+                        error=str(e),
+                        error_type=type(e).__name__,
+                        recoverable=True,
+                        details=_transport_error_details(e),
+                    ))
+                    # RETURN.  Without it the terminal path below runs anyway:
+                    # ``terminal_error = e`` is reached unconditionally and the
+                    # finally takes the termination branch, so the session dies
+                    # exactly as before with a better log line above it.  #628
+                    # shipped that way -- the comment described the control
+                    # flow and nothing implemented it -- and a cascade half
+                    # still died 3.5 minutes in, WARNING and INFO one
+                    # millisecond apart on the same exception.
+                    #
+                    # ``return`` from inside ``except`` still runs the
+                    # ``finally``, which is the point: the turn winds down its
+                    # ordinary way (pending continuation, status) with
+                    # ``terminal_error`` left None, so the session stays
+                    # loaded.  Re-raising instead would run the finally and
+                    # then escape the thread target unhandled.
+                    return
+
+                _runner_tb = getattr(e, "traceback_text", None)
+                logger.info(
+                    "MODEL_THREAD_TERMINAL_ERROR error_type=%s error=%s",
+                    type(e).__name__, str(e),
+                )
+                if _runner_tb:
+                    logger.error(
+                        "MODEL_THREAD_TERMINAL_ERROR runner traceback:\n%s",
+                        _runner_tb,
+                    )
+                server.emit(ErrorEvent(
+                    error=str(e),
+                    error_type=type(e).__name__,
+                    details=({"runner_traceback": _runner_tb}
+                             if _runner_tb else None),
+                ))
+                terminal_error = e
+            finally:
+                # No ``return`` may live in here -- see ``_finish_turn``
+                # above and #1077.  Anything in flight propagates.
+                _finish_turn()
 
         self._model_thread = threading.Thread(target=model_thread, daemon=True)
         self._model_thread.start()
