@@ -6833,6 +6833,29 @@ Consequences worth knowing:
 - Cost is one copy of ~2.4k files plus a `compileall` pass — a couple of
   seconds once per session, against ~5s per case. A case runs marginally
   *faster* in the sandbox than in the checkout.
+- **It has its own CI job**, `reversion-guard`, and runs in no other (#1080).
+  It used to run **twice** — named by `contract-guards` and again by the
+  `suite (shared/tests)` leg, which runs that whole directory — so that leg
+  now `--ignore`s it. The duplication was expensive rather than merely
+  wasteful because this is not a CPU-bound suite: each case spawns a pytest
+  **subprocess** against the sandboxed copy, so its cost is process creation
+  and I/O. Measured: the other fifteen files in `contract-guards` take
+  **30-38s together**, while this one file was **20m38s of that job's 21m16s
+  — 97%**.
+  Being I/O-bound also makes it the most *variable* suite in the tree — the
+  same block timed at **1320s and 1896s**, a 1.43x swing with no code
+  difference to explain it — and wedged inside another job that variance was
+  charged to whatever else that job gated, with a timeout reading as an
+  unexplained red rather than as *a guard stopped detecting its own
+  reversion*. Alone, it gets a cap sized for its own variance and the
+  required `contract-guards` check is seconds again.
+- **An `--ignore` binds to the invocation that carries it.**
+  `test_ci_runs_every_test_file.py` used to union `covered` and `ignored`
+  across every invocation in every workflow and let the union of ignores win,
+  so the ignore above would have made the meta-guard read as *unrun* although
+  `contract-guards` names it — the coverage guard failing a repository that
+  had just stopped running a file twice. Coverage is existential: one leg
+  running a file is coverage, however many other legs exclude it.
 
 ### Docstring Maintenance
 
