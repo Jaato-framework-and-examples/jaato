@@ -37,6 +37,21 @@ client registration) is in [`deploy/`](deploy/README.md).
 Until `@jaato/web-coder-server` is on npm, install from a checkout:
 `npm ci && npm run build` here, then run `bin/jaato-web-coder-server.js`.
 
+## Publishing
+
+The checkout's `package.json` is `private` and links `@jaato/sdk` and
+`@jaato/web-coder-ui` with `file:` so one `npm install` wires a checkout
+with nothing on npm; neither may reach the registry. The *Publish
+@jaato/web-coder-server to npm* workflow
+(`.github/workflows/publish-npm-web-coder-server.yml`) builds against
+those links, then runs `scripts/prepare-publish.mjs`, which rewrites the
+two dependencies to the caret range of the version each sibling checkout
+declares and drops `private`, and publishes. It **refuses** unless both of
+those exact versions are already on npm, so the order SDK → UI → server
+is enforced rather than remembered. `npm pack` on the development manifest
+fails by design (`prepack` runs `scripts/check-publishable.mjs`);
+`node scripts/prepare-publish.mjs --dry-run` shows what would ship.
+
 ## Configuration
 
 `server.yaml`; every secret is a file beside it, mode 0600 (looser is

@@ -354,12 +354,16 @@ between users. Every session still runs as the daemon's uid, as #1074's
 
 ## 9. Phasing and publishing order
 
-The server package will depend on `@jaato/sdk` (protocol 1.10 events and
+The server package depends on `@jaato/sdk` (protocol 1.10 events and
 the token provider) and on `@jaato/web-coder-ui` (the bundle and its static
 server) **from npm**, so the first publish of each has to happen in this
 order: **SDK, then UI, then server**. Until the SDK's first publish,
 `npx @jaato/web-coder-ui` cannot work at all (its `npx` has nothing to
-fetch), and the server can only be built from a checkout.
+fetch), and the server can only be built from a checkout. The server's
+publish workflow enforces the order: its checkout links the siblings with
+`file:` for development, `scripts/prepare-publish.mjs` rewrites them to
+caret ranges at publish time, and the workflow refuses to publish unless
+both exact versions are already on the registry.
 
 1. **#1074 lands** (PR #1075) with the two verbs from §4.2.
 2. **SDK token provider** (§5.1). Small, independently testable, and useful

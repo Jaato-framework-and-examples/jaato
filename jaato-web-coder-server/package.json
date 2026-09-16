@@ -35,7 +35,9 @@
     "typecheck": "npm run deps:build && tsc -p tsconfig.json --noEmit",
     "test": "node --import tsx --test --test-force-exit test/*.test.ts",
     "test:daemon": "node --import tsx --test --test-force-exit test/daemon.e2e.test.ts",
-    "start": "node bin/jaato-web-coder-server.js serve"
+    "start": "node bin/jaato-web-coder-server.js serve",
+    "prepack": "node scripts/check-publishable.mjs",
+    "prepare-publish": "node scripts/prepare-publish.mjs"
   },
   "dependencies": {
     "@jaato/sdk": "file:../jaato-sdk-ts",
