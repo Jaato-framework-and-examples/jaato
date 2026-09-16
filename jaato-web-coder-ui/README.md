@@ -64,6 +64,24 @@ The token is only ever handed to the page on a loopback bind: with
 person at the browser types the token. On loopback the `Host` header must
 name the bound address, so a DNS-rebinding page cannot fetch it either.
 
+### Signing in from the prompt
+
+Nothing has to be configured before the first session, exactly as in the
+TUI. Connect, and the "New session" card offers three ways in: an agent
+profile, the workspace defaults (`JAATO_PROVIDER` / `MODEL_NAME` from its
+`.env`), or **sign in to a provider first** -- every daemon-level auth
+command the daemon advertises (`anthropic-auth login`, `openrouter-auth
+key …`, …) is a button, and any of them also runs from the prompt with no
+session open. After a successful login the daemon sends its `auth.setup`
+offer, which the page renders as one card: which model, whether to save
+the provider and model to the workspace `.env`, open the session or not.
+Accepting makes the daemon create the session itself.
+
+On a daemon with `--workspace-root`, the workspace list comes first; picking
+a workspace goes straight to that card whether or not the workspace already
+names a provider. The daemon's manual provider / model / API-key form is one
+click away behind `configure` on each row, never a gate.
+
 ### Hosting the bundle yourself
 
 `dist/` is static (assets are referenced relatively, so it can sit under any

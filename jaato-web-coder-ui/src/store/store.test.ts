@@ -148,3 +148,29 @@ describe("reduce — errors", () => {
     expect(useJaato.getState().blocks[MAIN_AGENT]![0]).toMatchObject({ kind: "system", style: "error", text: "[ProviderError] boom" });
   });
 });
+
+describe("reduce — post-auth setup offer", () => {
+  it("keeps the daemon's auth.setup offer as a pending prompt, not as an output line", () => {
+    useJaato.getState().dispatch([ev({
+      type: "auth.setup", request_id: "r1", provider_name: "mock", provider_display_name: "Mock Provider",
+      available_models: [{ name: "mock-1", description: "fast" }, { name: "mock-2" }, { description: "nameless — dropped" }],
+      has_active_session: false, current_provider: "", current_model: "", workspace_path: "/srv/ws/p",
+    })]);
+    const s = useJaato.getState();
+    expect(s.postAuth).toEqual({
+      requestId: "r1", providerName: "mock", providerDisplayName: "Mock Provider",
+      models: [{ name: "mock-1", description: "fast" }, { name: "mock-2", description: undefined }],
+      hasActiveSession: false, currentProvider: undefined, currentModel: undefined, workspacePath: "/srv/ws/p",
+    });
+    expect(s.blocks[MAIN_AGENT] ?? []).toHaveLength(0);
+  });
+
+  it("dismissPostAuth clears the offer; a new offer replaces the old one", () => {
+    useJaato.getState().dispatch([ev({ type: "auth.setup", request_id: "r1", provider_name: "a" })]);
+    useJaato.getState().dispatch([ev({ type: "auth.setup", request_id: "r2", provider_name: "b", has_active_session: true, current_provider: "a", current_model: "m" })]);
+    expect(useJaato.getState().postAuth?.requestId).toBe("r2");
+    expect(useJaato.getState().postAuth?.hasActiveSession).toBe(true);
+    useJaato.getState().dismissPostAuth();
+    expect(useJaato.getState().postAuth).toBeNull();
+  });
+});

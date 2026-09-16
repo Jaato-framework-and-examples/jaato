@@ -8,6 +8,9 @@
  * ``MOCK_WORKSPACES``), ``session.new`` / ``session.profiles`` /
  * ``command.list_request`` / ``message.send`` / ``permission.response``
  * / ``clarification.*`` / ``session.stop`` / ``history.request``.
+ * ``mock-auth login`` is a daemon-level auth command that works with no
+ * session and is followed by the ``auth.setup`` offer, answered with
+ * ``auth.setup_response`` -- the TUI's sign-in-first flow.
  *
  * Prompts drive a small scenario language so tests can request the
  * behaviour they need:
@@ -198,6 +201,23 @@ wss.on("connection", (ws, req) => {
           send(c, { type: "agent.created", agent_id: "main", agent_name: "main", agent_type: "main", profile_name: args.includes("--profile") ? args[args.indexOf("--profile") + 1] : null });
           send(c, { type: "session.info", session_name: "mock session", model_provider: "mock", model_name: "mock-1", profile_name: args.includes("--profile") ? args[args.indexOf("--profile") + 1] : null, models: ["mock-1", "mock-2"] });
           send(c, { type: "system.message", message: "Connected to the mock daemon. Try: code, tool, permit, ask, fail, subagent.", style: "info" });
+        } else if (cmd === "mock-auth") {
+          // A daemon-level auth plugin command: works with NO session, like
+          // ``anthropic-auth login`` on the real daemon.  A successful login
+          // is followed by the daemon's ``auth.setup`` offer.
+          if (args[0] === "login") {
+            send(c, { type: "system.message", message: "Opening the browser for Mock Provider…\nAuthenticated as tester@example.com.", style: "info" });
+            const reqId = randomUUID();
+            c.pending.set(`auth:${reqId}`, () => undefined);
+            send(c, {
+              type: "auth.setup", request_id: reqId, provider_name: "mock", provider_display_name: "Mock Provider",
+              available_models: [{ name: "mock-1", description: "fast" }, { name: "mock-2", description: "smart" }],
+              has_active_session: c.sessionId !== null, current_provider: c.sessionId ? "mock" : "", current_model: c.sessionId ? "mock-1" : "",
+              workspace_path: WORKSPACES ? "/srv/workspaces/project-b" : "",
+            });
+          } else {
+            send(c, { type: "system.message", message: "mock-auth: login | logout | status", style: "info" });
+          }
         } else if (cmd === "session.profiles") {
           send(c, { type: "session.profiles", profiles: [{ name: "researcher", description: "Deep research", provider: "anthropic", model: "claude-sonnet-4" }, { name: "coder", description: "Coding agent", provider: "openrouter", model: "openai/gpt-5" }] });
         } else if (cmd === "session.stop") {
@@ -217,6 +237,7 @@ wss.on("connection", (ws, req) => {
       case "command.list_request":
         send(c, { type: "command.list", commands: [
           { name: "model", description: "Switch model (mock)" }, { name: "waypoint", description: "Manage waypoints" },
+          { name: "mock-auth", description: "Mock Provider authentication" }, { name: "mock-auth login", description: "Sign in to Mock Provider" },
           { name: "waypoint list", description: "List waypoints" }, { name: "permissions status", description: "Show permission status" },
         ] });
         break;
@@ -230,6 +251,18 @@ wss.on("connection", (ws, req) => {
       case "message.send":
         turn(c, String(ev.text ?? "")).catch(() => undefined);
         break;
+      case "auth.setup_response": {
+        if (!c.pending.has(`auth:${String(ev.request_id)}`)) break;
+        c.pending.delete(`auth:${String(ev.request_id)}`);
+        if (ev.connect !== true) { send(c, { type: "system.message", message: "No model selected, skipping session setup.", style: "dim" }); break; }
+        const model = String(ev.model_name ?? "mock-1");
+        if (ev.persist_env === true) send(c, { type: "system.message", message: `Saved JAATO_PROVIDER=mock and MODEL_NAME=${model} to .env`, style: "info" });
+        c.sessionId = `sess-${randomUUID().slice(0, 8)}`;
+        send(c, { type: "agent.created", agent_id: "main", agent_name: "main", agent_type: "main", profile_name: null });
+        send(c, { type: "session.info", session_name: "mock session", model_provider: "mock", model_name: model, profile_name: null, models: ["mock-1", "mock-2"] });
+        send(c, { type: "system.message", message: `Session created with mock / ${model}`, style: "info" });
+        break;
+      }
       case "permission.response":
         c.pending.get(`perm:${String(ev.request_id)}`)?.(ev.response);
         break;

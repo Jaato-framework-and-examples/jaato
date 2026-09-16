@@ -189,3 +189,70 @@ test("a 401 from the ticket endpoint offers Sign in instead of an error", async 
   await expect(page.getByText(/per-user ticket issued by the sign-in backend/)).toBeVisible();
   await expect(page.getByLabel(/Bearer token/)).toHaveCount(0);
 });
+
+// ── Sign in first, as the TUI allows ────────────────────────────────────
+
+test("sign in from the picker with no session: the daemon's auth.setup offer opens the session", async ({ page }) => {
+  await page.goto("/");
+  await page.getByPlaceholder("ws://host:8080").fill(WS);
+  await page.getByRole("button", { name: "Connect" }).click();
+  // The picker lists the daemon's auth commands beside the profiles.
+  await page.getByRole("button", { name: "mock-auth login" }).click();
+  await expect(page.getByText("Authenticated as tester@example.com")).toBeVisible();
+  const card = page.getByRole("group", { name: "Post-auth setup" });
+  await expect(card.getByText("Signed in to Mock Provider. Open a session with it?")).toBeVisible();
+  // No workspace on this daemon → nothing to persist to, so no checkbox.
+  await expect(card.getByRole("checkbox")).toHaveCount(0);
+  await card.getByLabel("Model").selectOption("mock-2");
+  await card.getByRole("button", { name: "Open session" }).click();
+  await expect(page.getByText("Session created with mock / mock-2")).toBeVisible();
+  // And the session is live: the prompt works.
+  await composer(page).fill("code");
+  await composer(page).press("Enter");
+  await expect(page.locator("table.j-table th", { hasText: "Latency" })).toBeVisible();
+});
+
+test("declining the auth.setup offer leaves the prompt usable with no session", async ({ page }) => {
+  await page.goto("/");
+  await page.getByPlaceholder("ws://host:8080").fill(WS);
+  await page.getByRole("button", { name: "Connect" }).click();
+  await page.getByRole("button", { name: "mock-auth login" }).click();
+  const card = page.getByRole("group", { name: "Post-auth setup" });
+  await card.getByRole("button", { name: "Not now" }).click();
+  await expect(card).toHaveCount(0);
+  await expect(page.getByText("No model selected, skipping session setup.")).toBeVisible();
+  // Daemon commands still run with no session, as in the TUI.
+  await composer(page).fill("mock-auth status");
+  await composer(page).press("Enter");
+  await expect(page.getByText("mock-auth: login | logout | status")).toBeVisible();
+});
+
+test("workspace mode: an unconfigured workspace opens straight into the session picker", async ({ page }) => {
+  await page.goto("/");
+  await page.getByPlaceholder("ws://host:8080").fill("ws://127.0.0.1:8098");
+  await page.getByRole("button", { name: "Connect" }).click();
+  await expect(page.getByText("Workspaces", { exact: true })).toBeVisible();
+  await expect(page.getByText("no provider in .env")).toBeVisible();
+  // Not a provider form: the picker, exactly as for a configured one.
+  await page.getByRole("button", { name: "Open workspace project-b" }).click();
+  await expect(page.getByText("New session")).toBeVisible();
+  await page.getByRole("button", { name: "mock-auth login" }).click();
+  const card = page.getByRole("group", { name: "Post-auth setup" });
+  // A workspace exists here, so the offer can persist to its .env, on by default.
+  await expect(card.getByRole("checkbox")).toBeChecked();
+  await card.getByRole("button", { name: "Open session" }).click();
+  await expect(page.getByText("Saved JAATO_PROVIDER=mock and MODEL_NAME=mock-1 to .env")).toBeVisible();
+  await expect(page.getByText("Session created with mock / mock-1")).toBeVisible();
+});
+
+test("workspace mode: the manual provider form is a disclosure, not a gate", async ({ page }) => {
+  await page.goto("/");
+  await page.getByPlaceholder("ws://host:8080").fill("ws://127.0.0.1:8098");
+  await page.getByRole("button", { name: "Connect" }).click();
+  await page.getByRole("button", { name: "Configure workspace project-b" }).click();
+  const form = page.getByRole("group", { name: "Manual provider configuration" }).or(page.getByLabel("Manual provider configuration"));
+  await expect(form.getByText("missing: provider, api_key")).toBeVisible();
+  await expect(form.locator("select option")).toHaveCount(4); // — + the daemon's three
+  await form.getByRole("button", { name: "Open session →" }).click();
+  await expect(page.getByText("New session")).toBeVisible();
+});
