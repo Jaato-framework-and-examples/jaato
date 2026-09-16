@@ -91,7 +91,7 @@ jobs:
             echo "@jaato/${name} ${version} is on npm"
           done
 
-      - name: Install + build (against the file: links)
+      - name: "Install + build (against the file: links)"
         run: |
           npm --prefix jaato-sdk-ts ci --no-audit --no-fund
           npm --prefix jaato-sdk-ts run build
