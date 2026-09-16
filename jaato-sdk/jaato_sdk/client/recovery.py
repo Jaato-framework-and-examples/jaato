@@ -820,6 +820,18 @@ class IPCRecoveryClient:
         if self._client:
             await self._client.stop_session(session_id)
 
+    async def reload_session_env(self, session_id: Optional[str] = None) -> None:
+        """Re-read a live session's ``.env`` and credentials and rebuild its provider.
+
+        See :meth:`IPCClient.reload_session_env` for full docs.  The inner
+        client raises against a daemon too old to serve the verb, which
+        would otherwise ignore it and leave the session on its old
+        credential while the caller believed it reloaded.
+        """
+        self._check_can_send()
+        if self._client:
+            await self._client.reload_session_env(session_id)
+
     async def respond_to_post_auth_setup(
         self,
         request_id: str,
