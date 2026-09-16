@@ -137,7 +137,7 @@ jobs:
         run: |
           status=$(curl -s -o /dev/null -w '%{http_code}' "https://registry.npmjs.org/@jaato/web-coder-ui")
           if [ "$status" = "404" ]; then
-            echo "::error::@jaato/web-coder-ui has never been published, and npm cannot STAGE a first version. Publish it directly ONCE as a maintainer with 2FA, from a checkout at this commit: cd jaato-web-coder-ui && npm --prefix ../jaato-sdk-ts ci && npm ci && npm run build && npm publish --access public --otp <code>. Later versions stage."
+            echo "::error::@jaato/web-coder-ui has never been published, and npm cannot STAGE a first version. Publish it directly ONCE as a maintainer with 2FA, from a checkout at this commit: cd jaato-web-coder-ui && npm --prefix ../jaato-sdk-ts ci && npm ci && npm run build && npm publish --access public. Later versions stage."
             exit 1
           fi
           if [ "$status" != "200" ]; then
@@ -195,7 +195,7 @@ jobs:
         run: |
           npm stage publish --access public
           version="${{ steps.version.outputs.version }}"
-          echo "::notice::@jaato/web-coder-ui@${version} is STAGED, not live. Promote it with 2FA: npm stage list @jaato/web-coder-ui  then  npm stage approve <stage-id> --otp <code>  (or reject it with npm stage reject <stage-id>)."
+          echo "::notice::@jaato/web-coder-ui@${version} is STAGED, not live. Promote it with 2FA: npm stage list @jaato/web-coder-ui  then  npm stage approve <stage-id>  (or reject it with npm stage reject <stage-id>)."
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 

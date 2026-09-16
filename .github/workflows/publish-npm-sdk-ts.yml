@@ -10,7 +10,7 @@ name: "Publish @jaato/sdk to npm"
 #     npm is retiring direct publish by token (January 2027), so the
 #     token can only STAGE a version: the run uploads it non-public and a
 #     maintainer with 2FA promotes it — `npm stage list @jaato/sdk`, then
-#     `npm stage approve <stage-id> --otp <code>` — or on npmjs.com.
+#     `npm stage approve <stage-id>` — or on npmjs.com.
 #     Until then the version is not on the registry, which is also what
 #     the dependent packages' "is it on npm" gates measure.
 #
@@ -116,7 +116,7 @@ jobs:
         run: |
           status=$(curl -s -o /dev/null -w '%{http_code}' "https://registry.npmjs.org/@jaato/sdk")
           if [ "$status" = "404" ]; then
-            echo "::error::@jaato/sdk has never been published, and npm cannot STAGE a first version. Publish it directly ONCE as a maintainer with 2FA, from a checkout at this commit: cd jaato-sdk-ts && npm ci && npm run build && npm publish --access public --otp <code>. Later versions stage."
+            echo "::error::@jaato/sdk has never been published, and npm cannot STAGE a first version. Publish it directly ONCE as a maintainer with 2FA, from a checkout at this commit: cd jaato-sdk-ts && npm ci && npm run build && npm publish --access public. Later versions stage."
             exit 1
           fi
           if [ "$status" != "200" ]; then
@@ -161,6 +161,6 @@ jobs:
         run: |
           npm stage publish --access public
           version="${{ steps.version.outputs.version }}"
-          echo "::notice::@jaato/sdk@${version} is STAGED, not live. Promote it with 2FA: npm stage list @jaato/sdk  then  npm stage approve <stage-id> --otp <code>  (or reject it with npm stage reject <stage-id>)."
+          echo "::notice::@jaato/sdk@${version} is STAGED, not live. Promote it with 2FA: npm stage list @jaato/sdk  then  npm stage approve <stage-id>  (or reject it with npm stage reject <stage-id>)."
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

@@ -597,9 +597,13 @@ caveats remain.
    ```bash
    npm stage list @jaato/sdk               # find the stage id
    npm stage view <stage-id>               # optional: inspect what was uploaded
-   npm stage approve <stage-id> --otp <code>   # or: npm stage reject <stage-id>
+   npm stage approve <stage-id>   # or: npm stage reject <stage-id>
    ```
    (or the same buttons on npmjs.com).  `npm stage` needs npm 11.15+.
+   The second factor is whatever the account uses: a passkey is answered
+   in the browser the CLI opens; an authenticator code can be passed
+   with `--otp <code>`.  Nothing has to be typed on the command line
+   for a passkey account.
 
 The workflow (`.github/workflows/publish-npm-sdk-ts.yml`) does the
 gates in order:

@@ -369,7 +369,7 @@ All three workflows **stage** rather than publish: the `@jaato` token is
 a "Read and write (stage only)" granular token, because npm is retiring
 direct publish by token in January 2027, and `npm stage publish` uploads
 the version non-public until a maintainer with 2FA approves it (`npm stage
-approve <stage-id> --otp <code>`, or on npmjs.com). A staged version does
+approve <stage-id>`, or on npmjs.com). A staged version does
 not answer the "is it on npm" probe, so the order above now includes the
 approvals: stage the SDK, approve, stage the UI, approve, stage the server,
 approve.
