@@ -41,7 +41,7 @@ REVERSIONS = [
             '            f"You are currently operating in the "\n'
             '            f"`{self._active_tier}` tier."'
         ),
-        test="test_the_system_instruction_does_not_change_across_a_switch",
+        test="TestJaatoSessionTierMode::test_the_system_instruction_does_not_change_across_a_switch",
         because="mutable state at the head of every cached prefix",
     ),
 ]

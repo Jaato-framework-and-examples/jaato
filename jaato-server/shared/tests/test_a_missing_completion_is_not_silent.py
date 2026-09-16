@@ -49,7 +49,7 @@ REVERSIONS = [
         replace="""                if (
                     not should_nudge
                 ):""",
-        test="test_the_gap_is_not_set_on_a_bare_should_nudge_false",
+        test="TestGiveUpPredicate::test_the_gap_is_not_set_on_a_bare_should_nudge_false",
         because="a predicate that cannot tell 'budget spent' from 'agent signalled'",
     ),
 ]

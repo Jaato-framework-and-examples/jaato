@@ -39,11 +39,18 @@ REVERSIONS = [
         # failure counter was added inside the handler, while the bare call
         # matches twice (``_ensure_provider`` makes the same call at the
         # same indent).  The ``try:`` is what distinguishes the tier path.
+        # The replacement must still COMPILE.  A previous version swapped
+        # the `try:` for `if False:`, which orphaned the `except Exception`
+        # below it -- the module then failed to import with a SyntaxError,
+        # pytest exited non-zero, and `assert code != 0` read that as the
+        # guard detecting its defect.  It never ran a test (#1065).  Keeping
+        # the `try:` and neutering only the call removes the behaviour under
+        # test and leaves the handler syntactically attached.
         find="""        try:
             self._wire_cache_plugin()""",
-        replace="""        if False:
-            self._wire_cache_plugin()""",
-        test="test_a_cross_provider_tier_gets_a_cache_plugin",
+        replace="""        try:
+            pass  # self._wire_cache_plugin()""",
+        test="TestCrossProviderTier::test_a_cross_provider_tier_gets_a_cache_plugin",
         because="a cross-provider tier running with no cache plugin at all",
     ),
 ]

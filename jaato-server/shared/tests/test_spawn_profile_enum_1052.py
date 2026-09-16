@@ -38,17 +38,19 @@ from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
 REVERSIONS = [
     Reversion(
         target="jaato-server/shared/plugins/subagent/plugin.py",
+        # Removes the ENUM SPREAD, which is what #1052 added.  The
+        # previous version of this reversion added two keys beside it
+        # and left `**self._spawn_profile_enum()` in place, so the enum
+        # survived, the named test passed, and the case certified
+        # nothing (#1065).
         find=(
-            '                        "profile": {\n'
-            '                            "type": "string",\n'
+            "                            **self._spawn_profile_enum(),\n"
+            '                            "description": self._spawn_profile_param_text(),\n'
         ),
         replace=(
-            '                        "profile": {\n'
-            '                            "type": "string",\n'
             '                            "description": self._spawn_profile_param_text(),\n'
-            '                            "UNUSED": None,\n'
         ),
-        test="test_the_enum_lists_the_discovered_profiles",
+        test="TestTheEnumNamesWhatExists::test_the_enum_lists_the_discovered_profiles",
         because="the pre-#1052 unconstrained string, which let a model name "
                 "a profile that exists nowhere and retry the not-found "
                 "result forever",
@@ -65,7 +67,7 @@ REVERSIONS = [
             "        names = self._available_profile_names()\n"
             '        return {"enum": sorted(names)}'
         ),
-        test="test_no_enum_when_nothing_is_available",
+        test="TestWhenTheEnumIsWithheld::test_no_enum_when_nothing_is_available",
         because="emitting ``enum: []``, which makes every value invalid and "
                 "is rejected outright by some providers",
     ),
@@ -79,7 +81,7 @@ REVERSIONS = [
         replace=(
             "        names = self._available_profile_names()"
         ),
-        test="test_no_enum_when_inline_spawning_is_allowed",
+        test="TestWhenTheEnumIsWithheld::test_no_enum_when_inline_spawning_is_allowed",
         because="the enum drifting off the predicate ``required`` and "
                 "``inline_config`` already read, so the schema's surfaces "
                 "could disagree about ``allow_inline``",
@@ -88,7 +90,7 @@ REVERSIONS = [
         target="jaato-server/shared/plugins/subagent/plugin.py",
         find='        return {"enum": sorted(names)}',
         replace='        return {"enum": names}',
-        test="test_the_enum_is_sorted_not_in_discovery_order",
+        test="TestTheEnumNamesWhatExists::test_the_enum_is_sorted_not_in_discovery_order",
         because="an enum ordered by an unsorted ``iterdir()``, which varies "
                 "per host and churns the prompt-cache prefix the tool "
                 "schema sits in",

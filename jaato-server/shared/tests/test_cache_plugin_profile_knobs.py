@@ -42,7 +42,7 @@ REVERSIONS = [
             base_extra, pending.get('plugin_configs'), profile_key)
         return config""",
         replace="""        return dict(base_extra)""",
-        test="test_profile_knobs_reach_the_plugin_config",
+        test="TestCachePluginConfig::test_profile_knobs_reach_the_plugin_config",
         because="a profile's cache knobs never reaching the cache plugin",
     ),
 ]

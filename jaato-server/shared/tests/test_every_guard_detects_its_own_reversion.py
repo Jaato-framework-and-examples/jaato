@@ -111,12 +111,13 @@ import importlib
 import importlib.util
 import os
 import pkgutil
+import re
 import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator, List, Optional, Tuple
+from typing import Dict, Iterator, List, NamedTuple, Optional, Set, Tuple
 
 import pytest
 
@@ -178,6 +179,16 @@ _NOT_COPIED = (
 )
 
 
+def _tail(text: str, limit: int = 1200) -> str:
+    """The last of *text*, for a BLOCKED message.
+
+    Bounded because a failing guard's output can be a whole traceback
+    and the useful part -- pytest's verdict line -- is at the end.
+    """
+    text = (text or "").strip()
+    return text if len(text) <= limit else "..." + text[-limit:]
+
+
 def _module_path(module_name: str) -> str:
     for pkg in _PACKAGES:
         cand = ROOT / pkg / f"{module_name}.py"
@@ -188,6 +199,34 @@ def _module_path(module_name: str) -> str:
         f"cannot be found cannot be run, and an unrun guard must not read "
         f"as a working one."
     )
+
+
+#: Modules discovery could not import THAT DECLARE REVERSIONS, as
+#: ``(name, reason)``.  Populated by :func:`_guard_modules`, asserted
+#: empty below.
+_IMPORT_FAILURES: List[Tuple[str, str]] = []
+
+#: A module-level ``REVERSIONS`` binding, read from SOURCE.  Text, not
+#: an import: the question is only asked about a module that already
+#: failed to import, so importing it to find out is not available.
+_DECLARES_REVERSIONS = re.compile(r"^REVERSIONS\s*[:=]", re.MULTILINE)
+
+
+def _source_declares_reversions(finder, name: str) -> bool:
+    """Does *name*'s source bind ``REVERSIONS`` at module level?
+
+    Best effort: a source that cannot be read answers ``True``, because
+    "I could not tell" must not quietly become "it does not matter".
+    """
+    for package in _PACKAGES:
+        candidate = ROOT / package / f"{name}.py"
+        if candidate.is_file():
+            try:
+                return bool(_DECLARES_REVERSIONS.search(
+                    candidate.read_text(encoding="utf-8", errors="replace")))
+            except OSError:
+                return True
+    return True
 
 
 def _guard_modules() -> List[Tuple[str, object]]:
@@ -204,9 +243,19 @@ def _guard_modules() -> List[Tuple[str, object]]:
                                       f"{mod.name}.py").is_file()
                    else "server.tests")
             m = importlib.import_module(f"{pkg}.{mod.name}")
-        except Exception:
+        except Exception as exc:
             # A module that will not import is a problem for its OWN test
-            # run, which will say so far more usefully than a name here.
+            # run, which will say so far more usefully than a name here --
+            # UNLESS it declares REVERSIONS, in which case every one of
+            # them is now silently unexercised while this suite still
+            # reports success.  That distinction is why the source is
+            # read rather than the failure simply recorded: these two
+            # packages hold 384 test modules and 82 declare reversions,
+            # so flagging every import failure would fail this suite for
+            # modules that contribute nothing to it (#1065).
+            if _source_declares_reversions(mod.module_finder, mod.name):
+                _IMPORT_FAILURES.append(
+                    (mod.name, f"{type(exc).__name__}: {exc}"))
             continue
         if getattr(m, "REVERSIONS", None):
             found.append((mod.name, m))
@@ -396,8 +445,43 @@ def _apply(rev: Reversion, sandbox: Path) -> Tuple[str, str]:
     return PASS, ""
 
 
-def _run_guard(module_name: str, test_name: str, sandbox: Path) -> int:
-    """Run ONE test of a guard module in a SUBPROCESS; return its exit code.
+#: pytest's own exit codes, and what each one is evidence OF.  Only
+#: TESTS_FAILED is evidence that the guard noticed its defect: the run
+#: reached the test body and the test rejected the sabotaged source.
+#:
+#: The others are why this exists (#1065).  ``assert code != 0`` read
+#: every one of them as detection, so a ``test`` naming a nodeid pytest
+#: could not resolve -- exit 4, no test body run at all -- certified the
+#: guard forever.  23 in-tree reversions were in that state when this
+#: was written, and none of them produced any signal.
+_OK, _TESTS_FAILED, _INTERRUPTED = 0, 1, 2
+_INTERNAL_ERROR, _USAGE_ERROR, _NO_TESTS = 3, 4, 5
+
+_EXIT_MEANING = {
+    _OK: "the test PASSED with the defect present",
+    _TESTS_FAILED: "the test failed",
+    _INTERRUPTED: "the run was interrupted",
+    _INTERNAL_ERROR: "pytest hit an internal error",
+    _USAGE_ERROR: "pytest could not be invoked as asked -- usually a "
+                  "`test` naming a nodeid that does not resolve",
+    _NO_TESTS: "the nodeid matched no test",
+}
+
+
+class _GuardRun(NamedTuple):
+    """What one guard subprocess did.
+
+    ``output`` is kept because #1065's whole difficulty was that it was
+    not: the five outcomes are indistinguishable after the fact from an
+    exit code alone, and pytest's own complaint names the bad nodeid.
+    """
+
+    code: int
+    output: str
+
+
+def _run_guard(module_name: str, test_name: str, sandbox: Path) -> _GuardRun:
+    """Run ONE test of a guard module in a SUBPROCESS; report code + output.
 
     A subprocess because this process has already imported the module
     under test and the code it inspects; re-running in-process would
@@ -425,7 +509,8 @@ def _run_guard(module_name: str, test_name: str, sandbox: Path) -> int:
         cwd=str(sandbox), env=env, capture_output=True, text=True,
         timeout=600,
     )
-    return proc.returncode
+    return _GuardRun(proc.returncode,
+                     _tail(proc.stdout) or _tail(proc.stderr))
 
 
 _CASES = [
@@ -601,6 +686,181 @@ def test_a_sabotage_never_reaches_the_working_tree(worktree_sandbox):
         _invalidate_bytecode(copied)
 
 
+def test_a_nodeid_that_resolves_to_nothing_is_not_detection(worktree_sandbox):
+    """#1065, driven through the real run path rather than asserted.
+
+    Runs a nodeid that exists nowhere and checks what comes back.  The
+    old rule was ``assert code != 0``, and this exit satisfies it -- so
+    every assertion here is one the previous version passed.
+
+    The point is the pair: the exit is non-zero AND it is not
+    ``TESTS_FAILED``.  Reading only the first is what certified 23
+    reversions that ran no test at all.
+    """
+    name, _mod, _rev = _CASES[0]
+    run = _run_guard(name, "test_a_name_no_module_in_this_tree_defines",
+                     worktree_sandbox)
+
+    assert run.code != _OK, (
+        "a nodeid matching nothing should not report success; if it does, "
+        "this probe cannot distinguish the two failures it exists for"
+    )
+    assert run.code != _TESTS_FAILED, (
+        f"pytest exited {run.code} for a nodeid that resolves to nothing, "
+        f"but TESTS_FAILED means a test body ran and rejected the source. "
+        f"If these ever coincide the verdict below cannot tell "
+        f"'the guard noticed' from 'there was no guard'."
+    )
+    assert run.code in (_USAGE_ERROR, _NO_TESTS), (
+        f"expected USAGE_ERROR or NO_TESTS for an unresolvable nodeid, "
+        f"got {run.code}. The classification would then send this to the "
+        f"wrong branch:\n{run.output}"
+    )
+    assert run.output, (
+        "pytest's own complaint was discarded, so a BLOCKED message "
+        "cannot name the bad nodeid -- which is what made this class "
+        "invisible to its authors"
+    )
+
+
+def test_the_resolution_rule_matches_pytests_own_selection():
+    """``_resolves`` accepts what ``pytest path::name`` accepts.
+
+    Too strict and every parametrised or class-nested reversion reports
+    as broken; too loose and the check passes the typos it exists to
+    catch.  Both directions are asserted, because the first draft of
+    this rule was too strict in exactly the way the last case covers.
+    """
+    collected = {
+        "test_plain",
+        "test_parametrised[alpha]",
+        "test_parametrised[beta]",
+        "TestClass::test_nested",
+    }
+    assert _resolves("test_plain", collected)
+    assert _resolves("test_parametrised", collected), (
+        "a bare name must select all of its parametrisations, as pytest does"
+    )
+    assert _resolves("test_parametrised[beta]", collected)
+    assert _resolves("TestClass::test_nested", collected)
+    assert _resolves("TestClass", collected), (
+        "a class name must select its tests, as pytest does"
+    )
+
+    # The control.  Without these the rule could return True always.
+    assert not _resolves("test_nested", collected), (
+        "a class-nested test named WITHOUT its class resolves to nothing "
+        "-- 22 of the 23 reversions #1065 found were this exact shape, so "
+        "a rule that accepts it catches none of them"
+    )
+    assert not _resolves("test_absent", collected)
+    assert not _resolves("test_pla", collected), (
+        "a bare prefix is not a selector; accepting one would make the "
+        "boundary check meaningless"
+    )
+
+
+def test_discovery_imported_every_module_it_walked():
+    """A module discovery could not import contributes no cases, silently.
+
+    ``_guard_modules`` swallows the ImportError and moves on, which is
+    right for the module's own test run and wrong here: its REVERSIONS
+    vanish from this suite while the suite still reports success -- the
+    exact "green while exercising nothing" shape it exists to stop.
+
+    Measured while writing this: an ad-hoc probe with one wrong
+    ``PYTHONPATH`` entry discovered 227 cases instead of 235 and said
+    nothing, and the eight it dropped were never audited.
+    """
+    assert not _IMPORT_FAILURES, (
+        "discovery could not import these test modules, so any REVERSIONS "
+        "they declare are silently unexercised:\n"
+        + "\n".join(f"  {n}: {why}" for n, why in _IMPORT_FAILURES)
+    )
+
+
+def _collect_nodeids(modules: List[str], sandbox: Path) -> Dict[str, Set[str]]:
+    """Every nodeid pytest can see in *modules*, keyed by BASENAME.
+
+    Basename, not path: pytest reports collected nodeids relative to its
+    own rootdir (``jaato-server``), while this suite spells module paths
+    relative to the repo root.  Keying on the spelling this module uses
+    makes every lookup miss and every reversion look broken -- which is
+    what a first draft of this check did, reporting all 227 as
+    unresolvable.  Basenames are unique across the guard corpus.
+    """
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(sandbox / name) for name in _IMPORT_ROOTS]
+        + [env.get("PYTHONPATH", "")]).strip(os.pathsep)
+    proc = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "--collect-only", *modules],
+        cwd=str(sandbox), env=env, capture_output=True, text=True,
+        timeout=600,
+    )
+    out: Dict[str, Set[str]] = {}
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if "::" not in line or line.startswith("<"):
+            continue
+        path, _, nodeid = line.partition("::")
+        out.setdefault(path.rsplit("/", 1)[-1], set()).add(nodeid)
+    return out
+
+
+def _resolves(candidate: str, collected: Set[str]) -> bool:
+    """Does *candidate* select anything, by pytest's own rules?
+
+    Exact, or a prefix at a ``[`` (one parametrisation of many) or a
+    ``::`` (a class, selecting its tests) boundary -- which is what
+    ``pytest path::name`` accepts.
+    """
+    return any(c == candidate
+               or c.startswith(candidate + "[")
+               or c.startswith(candidate + "::")
+               for c in collected)
+
+
+def test_every_reversion_names_a_test_that_exists(worktree_sandbox):
+    """Each ``rev.test`` resolves BEFORE anything is sabotaged.
+
+    One collection pass over the whole corpus, and the cheap half of
+    #1065: a nodeid that resolves to nothing makes pytest exit 4, which
+    the old run-side read as "the guard detected its reversion". The
+    verdict below now refuses that exit -- but it refuses it once per
+    case, mid-run, after a sabotage. This says it up front, for every
+    case at once, at the point an author can act on it.
+
+    It found 23 in-tree reversions certifying nothing when it was added:
+    22 naming a class-nested test without its class, and one carrying the
+    whole repo-relative path in ``test`` -- the doubled nodeid the issue
+    was filed about.
+    """
+    modules = sorted({_module_path(name) for name, _m, _r in _CASES})
+    collected = _collect_nodeids(modules, worktree_sandbox)
+    assert collected, (
+        "collection produced no nodeids at all, so this check would "
+        "pass every reversion vacuously"
+    )
+
+    broken = []
+    for name, _mod, rev in _CASES:
+        base = _module_path(name).rsplit("/", 1)[-1]
+        if base not in collected:
+            broken.append(f"  {name} :: {rev.test!r}  (module collected nothing)")
+        elif not _resolves(rev.test, collected[base]):
+            broken.append(f"  {name} :: {rev.test!r}")
+
+    assert not broken, (
+        f"{len(broken)} reversion(s) name a `test` that resolves to no "
+        f"test. pytest exits USAGE_ERROR on each, no test body runs, and "
+        f"the guard is certified by nothing:\n" + "\n".join(broken)
+        + "\n\n`test` is the nodeid WITHIN the module -- 'test_x', or "
+        "'TestClass::test_x' for a class-nested test. Not a path, and "
+        "not a bare name when the test lives in a class."
+    )
+
+
 @pytest.mark.parametrize(
     "module_name,rev",
     [(n, r) for n, _m, r in _CASES],
@@ -623,7 +883,7 @@ def test_the_guard_fails_when_its_defect_is_put_back(
             f"guard: {module_name}\nshould notice: {rev.because}"
         )
     try:
-        code = _run_guard(module_name, rev.test, worktree_sandbox)
+        run = _run_guard(module_name, rev.test, worktree_sandbox)
     finally:
         if original is not None:
             path.write_bytes(original)
@@ -631,10 +891,29 @@ def test_the_guard_fails_when_its_defect_is_put_back(
 
     _assert_working_tree_untouched(real, real_before, rev)
 
-    assert code != 0, (
-        f"{module_name}::{rev.test} PASSED with its defect put back.\n\n"
-        f"  reverted : {rev.target}\n"
+    if run.code == _TESTS_FAILED:
+        return                       # the guard noticed.  The only pass.
+
+    if run.code == _OK:
+        pytest.fail(
+            f"{module_name}::{rev.test} PASSED with its defect put back.\n\n"
+            f"  reverted : {rev.target}\n"
+            f"  should notice: {rev.because}\n\n"
+            f"The guard is decorative: it reports success whether or not "
+            f"the thing it guards is true."
+        )
+
+    # Anything else means no test body ran, so nothing was certified --
+    # the same state a failed sabotage produces, and reported the same
+    # way rather than as a pass (#1065).
+    pytest.fail(
+        f"BLOCKED (this is NOT a pass): pytest exited "
+        f"{run.code} -- {_EXIT_MEANING.get(run.code, 'unrecognised exit')}."
+        f"\n\nNo test body ran, so it is NOT known whether "
+        f"{module_name}::{rev.test} detects its reversion.\n"
+        f"  guard: {module_name}\n"
+        f"  test : {rev.test!r}   <- must be the nodeid WITHIN the module "
+        f"(a class-nested test needs its class, e.g. 'TestX::test_y')\n"
         f"  should notice: {rev.because}\n\n"
-        f"The guard is decorative: it reports success whether or not the "
-        f"thing it guards is true."
+        f"pytest said:\n{run.output}"
     )

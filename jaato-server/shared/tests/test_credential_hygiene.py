@@ -349,7 +349,7 @@ REVERSIONS = [
 
 ''',
         replace="",
-        test="test_secret_never_appears_in_repr[auth.OpenRouterCredentials]",
+        test="TestCredentialsCannotBePrinted::test_secret_never_appears_in_repr[auth.OpenRouterCredentials]",
         because="the credential dataclass from #721 printing its own key "
                 "again, which is how a live sk-or-v1-… reached terminal "
                 "scrollback and would reach any CI log capturing pytest "
@@ -359,7 +359,7 @@ REVERSIONS = [
         target="jaato-server/conftest.py",
         find='    "HOME": str(_ISOLATED_HOME),',
         replace='    "HOME": str(REAL_HOME),',
-        test="test_home_points_at_the_isolated_tree",
+        test="TestNoTestReadsTheRealHome::test_home_points_at_the_isolated_tree",
         because="tests resolving ~/.jaato against the developer's real "
                 "home, so every 'no credential is configured' assertion "
                 "reads their installed credentials instead of the case it "
@@ -374,7 +374,7 @@ REVERSIONS = [
         # rather than exercise anything.
         find="            if fields & SECRET_" + "FIELD_NAMES:",
         replace="            if False:  # scan finds nothing",
-        test="test_the_scan_found_the_known_credential_types",
+        test="TestCredentialsCannotBePrinted::test_the_scan_found_the_known_credential_types",
         because="the dataclass scan finding nothing, which collects zero "
                 "parametrised cases and reports the disclosure guard as "
                 "green while exercising it on no types at all",

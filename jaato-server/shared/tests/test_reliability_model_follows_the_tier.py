@@ -33,7 +33,7 @@ REVERSIONS = [
         find="""        if self._pattern_detector:
             self._pattern_detector.set_model_name(current_model)""",
         replace="""        pass""",
-        test="test_the_plugin_forwards_the_model_to_its_detector",
+        test="TestThePluginForwards::test_the_plugin_forwards_the_model_to_its_detector",
         because="patterns filed under the model that started the session",
     ),
 ]

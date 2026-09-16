@@ -35,7 +35,7 @@ REVERSIONS = [
         target="jaato-server/shared/jaato_runtime.py",
         find="    extra = _layer_onto(dict(base_extra), cache_extra or {})",
         replace="    extra = dict(base_extra)",
-        test="test_the_common_field_reaches_the_provider_extras",
+        test="TestPrecedence::test_the_common_field_reaches_the_provider_extras",
         because="a declared cache: field that changes nothing",
     ),
 ]
