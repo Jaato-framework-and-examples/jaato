@@ -4710,6 +4710,46 @@ class SessionManager:
             })
         return rows
 
+    def reload_session_env(self, session_id: str) -> Dict[str, Any]:
+        """Re-resolve a loaded session's environment and rebuild its provider.
+
+        The daemon-side half of ``session.reload_env``.  Refuses a session
+        that is mid-turn BEFORE asking the runner, so the common case never
+        pays the RPC, and reports the outcome as data rather than raising:
+        the command router turns each shape into one confirmation line.
+
+        Returns:
+            ``{"session_id", "found", "ok", "was_processing", "error",
+            "result"}`` -- ``found`` False when no such session is loaded;
+            ``ok`` True only when the runner applied the env AND rebuilt the
+            provider; ``result`` is the runner's own dict on success
+            (``provider`` / ``model`` / ``auth_info``).
+        """
+        with self._lock:
+            session = self._sessions.get(session_id)
+        if session is None:
+            return {"session_id": session_id, "found": False, "ok": False,
+                    "was_processing": False, "error": None, "result": None}
+        server = session.server
+        if bool(getattr(server, "is_processing", False)):
+            return {"session_id": session_id, "found": True, "ok": False,
+                    "was_processing": True, "error": None, "result": None}
+        try:
+            result = server.reload_session_env()
+        except Exception as exc:  # noqa: BLE001 -- reported to the caller
+            logger.warning(
+                "reload_session_env: session=%s failed: %s", session_id, exc,
+            )
+            return {"session_id": session_id, "found": True, "ok": False,
+                    "was_processing": False, "error": str(exc), "result": None}
+        logger.info(
+            "reload_session_env: session=%s applied=%s provider=%s model=%s (%s)",
+            session_id, result.get("applied"), result.get("provider"),
+            result.get("model"), result.get("auth_info") or "credential source unknown",
+        )
+        return {"session_id": session_id, "found": True, "ok": True,
+                "was_processing": False, "error": None, "result": result}
+
     def stop_session(
         self,
         session_id: str,

@@ -1488,6 +1488,50 @@ class JaatoServer:
 
         self._session_env_resolved = True
 
+    def reload_session_env(self) -> Dict[str, Any]:
+        """Re-resolve this session's environment and push it to its runner.
+
+        ``_resolve_session_env`` runs ONCE per server (its idempotency flag
+        exists so the daemon's pre-spawn resolution is not redone by the
+        runner-side ``initialize()``), and the runner applies the result
+        once, at bootstrap.  Both are right for a session whose
+        configuration is settled -- and wrong for the one that is being
+        configured from the prompt: ``<provider>-auth key`` stores a
+        credential, or the post-auth flow writes the workspace ``.env``,
+        AFTER the runner booted, and the live session keeps the credential
+        it resolved at startup (a daemon-wide one, or none) until a new
+        session is created.
+
+        This drops the flag, resolves again from the same four sources in
+        the same order (workspace ``.env``, profile ``env:``, typed
+        ``trace:``, post-auth overrides -- secret URIs decoded here, where
+        ``pass`` / ``vault`` can be exec'd), and hands the WHOLE dict to
+        the runner's ``session.reload_env``, which replaces its session env
+        and rebuilds the provider.  The daemon-side per-turn overlay
+        (:meth:`_with_session_env`) reads ``self._session_env`` and so picks
+        the new values up on the next turn with no further step.
+
+        Returns:
+            The runner's answer -- ``{"applied", "provider", "model",
+            "auth_info"}`` -- or, for a server with no runner attached,
+            ``{"applied": n, "runner": False}``: the env was re-resolved
+            and nothing else could be done from here.
+
+        Raises:
+            RuntimeError: When the runner refuses (a turn is running) or the
+                provider does not rebuild; the message carries the runner's
+                ``stage`` so the caller can say which.
+        """
+        self._session_env_resolved = False
+        self._resolve_session_env()
+        rpc = self._runner_rpc
+        if rpc is None:
+            return {"applied": len(self._session_env), "runner": False}
+        reload = getattr(rpc, "session_reload_env_threadsafe", None)
+        if not callable(reload):
+            return {"applied": len(self._session_env), "runner": False}
+        return reload(dict(self._session_env), timeout=90.0)
+
     @contextlib.contextmanager
     def _with_session_env(self):
         """Context manager to apply session environment variables.

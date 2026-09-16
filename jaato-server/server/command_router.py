@@ -297,8 +297,9 @@ class CommandRouter:
                 self._handle_session_delete(client_id, event.args)
                 return
 
-            elif cmd in ("session.orphans", "session.stop"):
-                self._dispatch_orphan_command(cmd, client_id, event.args)
+            elif cmd in ("session.orphans", "session.stop", "session.reload_env"):
+                self._dispatch_orphan_command(
+                    cmd, client_id, event.args, session_id=session_id)
                 return
 
             elif cmd == "session.help":
@@ -383,20 +384,29 @@ class CommandRouter:
 
     def _dispatch_orphan_command(
         self, cmd: str, client_id: str, args: list,
+        session_id: Optional[str] = None,
     ) -> None:
-        """Route the two orphan-management verbs (#812).
+        """Route the session-administration verbs that share one branch.
 
-        One branch in :meth:`_dispatch` for both, rather than two: that
-        method sits at its cyclomatic-complexity baseline and may not grow,
-        and the pair is one feature — you list orphans in order to stop one.
+        One branch in :meth:`_dispatch` for all of them, rather than one
+        each: that method sits at its cyclomatic-complexity baseline and may
+        not grow.  The two orphan verbs (#812) are one feature — you list
+        orphans in order to stop one — and ``session.reload_env`` rides the
+        same branch because it is the same shape: an operator verb about a
+        loaded session's runtime state, answered with one confirmation line.
 
         Args:
-            cmd: ``"session.orphans"`` or ``"session.stop"``.
+            cmd: ``"session.orphans"``, ``"session.stop"`` or
+                ``"session.reload_env"``.
             client_id: The requesting client.
             args: The command's argv tail.
+            session_id: The caller's own session, which ``reload_env``
+                targets when no id is given.
         """
         if cmd == "session.orphans":
             self._handle_session_orphans(client_id)
+        elif cmd == "session.reload_env":
+            self._handle_session_reload_env(client_id, session_id, args)
         else:
             self._handle_session_stop(client_id, args)
 
@@ -1325,6 +1335,90 @@ class CommandRouter:
             client_id, target, result["found"], result["was_processing"],
         )
 
+    def _handle_session_reload_env(
+        self, client_id: str, session_id: Optional[str], args: list,
+    ) -> None:
+        """Handle ``session.reload_env [session_id]``.
+
+        Re-resolves the session's workspace ``.env`` (plus profile ``env:``
+        and overrides) and has the runner re-apply it and rebuild the
+        provider -- the way a credential stored with ``<provider>-auth key``
+        or a ``.env`` line written after the runner booted reaches a session
+        that is already open.  Defaults to the CALLER's session; an explicit
+        id targets any loaded one, the way ``session.stop`` does.
+
+        Confirms with one line naming the outcome, because the four answers
+        call for different next moves: rebuilt (and on which credential
+        source), busy mid-turn (retry when idle), not loaded, or a provider
+        that would not rebuild on the new environment (the reason, verbatim).
+        """
+        from jaato_sdk.events import ErrorEvent, SystemMessageEvent
+
+        target = args[0] if args else session_id
+        if not target:
+            self._event_sink.send_event(client_id, ErrorEvent(
+                error=("session.reload_env: no session -- attach to one or pass "
+                       "its id as the first argument"),
+                error_type="UsageError",
+                recoverable=True,
+            ))
+            return
+
+        outcome = self._session_manager.reload_session_env(target)
+        if not outcome["found"]:
+            msg = f"session.reload_env: {target} is not loaded -- nothing to reload"
+        elif outcome["was_processing"]:
+            msg = (f"session.reload_env: {target} is mid-turn; retry once it is "
+                   f"idle (nothing was changed)")
+        elif not outcome["ok"]:
+            msg = (f"session.reload_env: {target}: environment re-resolved but "
+                   f"the provider did not rebuild -- {outcome['error']}")
+        else:
+            result = outcome["result"] or {}
+            source = result.get("auth_info") or "credential source not reported"
+            msg = (f"session.reload_env: {target} reloaded {result.get('applied', 0)} "
+                   f"env keys; provider {result.get('provider')} / "
+                   f"{result.get('model')} rebuilt ({source})")
+        style = "system" if outcome["ok"] else "warning"
+        self._event_sink.send_event(client_id, SystemMessageEvent(
+            message=msg, style=style,
+        ))
+        logger.info(
+            "session.reload_env: client=%s target=%s found=%s ok=%s was_processing=%s",
+            client_id, target, outcome["found"], outcome["ok"],
+            outcome["was_processing"],
+        )
+
+    def _maybe_reload_live_session_after_auth(
+        self, client_id: str, plugin, args: list,
+    ) -> None:
+        """After ``<provider>-auth key|login`` succeeds, refresh the caller's live session.
+
+        The credential the command just stored is on disk; the session this
+        client is attached to resolved its credential at bootstrap and will
+        not look again (see :meth:`_handle_session_reload_env`).  When that
+        session runs the SAME provider the plugin authenticates, reload it
+        now, so the very next turn uses the new credential instead of failing
+        on the old one and sending the user to ``session.new``.
+
+        Gated three ways so it never fires as a surprise: only for the
+        actions that establish a credential (``login`` / ``key``, never
+        ``status``); only when the client has a live session; only when that
+        session's provider is the plugin's.  A session on another provider
+        is left alone -- its credentials did not change.
+        """
+        action = str(args[0]).lower() if args else ""
+        if action not in ("login", "key"):
+            return
+        session = self._session_manager.get_client_session(client_id)
+        if session is None or session.server is None:
+            return
+        provider = getattr(plugin, "provider_name", None)
+        active = getattr(session.server, "model_provider", None)
+        if not provider or provider != active:
+            return
+        self._handle_session_reload_env(client_id, session.session_id, [])
+
     def _handle_session_end(self, client_id: str, session_id: str) -> None:
         """Handle ``session.end`` command.
 
@@ -1792,6 +1886,9 @@ class CommandRouter:
             # After auth command execution, check if credentials are now valid
             # and offer to set up a session with the provider.
             if hasattr(plugin, 'verify_credentials') and plugin.verify_credentials():
+                # A live session on this provider resolved its credential at
+                # bootstrap and would keep the stale one; refresh it first.
+                self._maybe_reload_live_session_after_auth(client_id, plugin, args)
                 self._offer_post_auth_setup(client_id, plugin)
 
         except Exception as e:
@@ -2022,6 +2119,7 @@ class CommandRouter:
             {"name": "session bind_wake", "description": "Declare a wake binding (wake_ref + trust keys) for this session"},
             {"name": "session unbind_wake", "description": "Remove a wake binding for this session"},
             {"name": "session delete", "description": "Delete a session"},
+            {"name": "session reload_env", "description": "Re-read this session's workspace .env and credentials and rebuild its provider"},
             {"name": "session help", "description": "Show detailed help for session command"},
         ]
         commands.extend(session_commands)

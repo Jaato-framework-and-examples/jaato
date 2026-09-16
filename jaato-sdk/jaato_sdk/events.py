@@ -183,7 +183,19 @@ from pydantic import BaseModel, ConfigDict, Field
 # byte-identical to 1.9 (one shared digest compared with
 # ``hmac.compare_digest``, or ``--ws-unsafe-no-auth``), no connection can
 # ever be an app-credential connection, and both verbs answer ``"denied"``.
-PROTOCOL_VERSION = "1.10"
+# 1.11 -- ``session.reload_env``: re-resolve a LIVE session's environment
+# (workspace ``.env``, profile ``env:``, post-auth overrides) and have its
+# runner re-apply it and rebuild the provider.  A session resolved both once,
+# at bootstrap; a credential stored with ``<provider>-auth key`` or a ``.env``
+# line written while the session was open was invisible to it until a new
+# session was created, and the open one kept failing on the stale value.
+# The daemon also fires it on its own after a successful auth command when
+# the caller's live session is on that provider.
+#
+# A missing VERB again (the 1.7 rule): an older daemon ignores the command,
+# and "reloaded" would be reported about a session still on its old
+# credential.  The SDKs refuse below ``MIN_SESSION_RELOAD_ENV_PROTOCOL``.
+PROTOCOL_VERSION = "1.11"
 
 
 # =============================================================================
