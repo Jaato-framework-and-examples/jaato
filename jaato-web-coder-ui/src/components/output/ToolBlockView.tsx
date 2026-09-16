@@ -36,7 +36,7 @@ export const ToolBlockView = memo(function ToolBlockView({ block }: { block: Too
   const setPopup = useJaato((s) => s.setPopup);
   const hasBody = block.output.length > 0 || block.media.length > 0 || !!block.errorMessage;
   return (
-    <div className={`my-1 rounded-md border hairline ${block.status === "error" ? "border-error/50" : ""} surface-1`}>
+    <div data-testid="tool-block" className={`my-1 rounded-md border hairline ${block.status === "error" ? "border-error/50" : ""} surface-1`}>
       <button
         type="button"
         onClick={() => toggle(block.agentId, block.id)}

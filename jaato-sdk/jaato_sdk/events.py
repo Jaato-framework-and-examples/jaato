@@ -208,7 +208,19 @@ from pydantic import BaseModel, ConfigDict, Field
 # change.  The SDKs refuse below ``MIN_WORKSPACE_IGNORE_PROTOCOL``.  The
 # result event is client-initiated (the 1.10 shape), so an old client never
 # receives it unprompted.
-PROTOCOL_VERSION = "1.12"
+#
+# 1.13 -- ``workspace.delete`` / ``workspace.deleted``, and workspace
+# OWNERSHIP.  ``WorkspaceInfo`` gains ``owner`` (the authenticated user who
+# created it; absent = unowned) and ``path``; ``workspace.list`` shows a user
+# their own and the unowned workspaces, ``workspace.select`` / ``.delete``
+# refuse another user's, and ``session.list`` / ``session.attach`` are
+# scoped to the sessions running in visible workspaces or created by the
+# user.  A connection with no identity sees what it always saw.  Additive
+# fields and a client-initiated request/result pair (the 1.10 shape): an
+# older client ignores the fields and never sends the verb; an older daemon
+# answers the verb with ``ErrorEvent("Unknown message type")``, a visible
+# failure, so there is no SDK minimum to refuse below.
+PROTOCOL_VERSION = "1.13"
 
 
 # =============================================================================
@@ -378,6 +390,8 @@ class EventType(str, Enum):
     WORKSPACE_CREATE_REQUEST = "workspace.create"  # Client -> Server
     WORKSPACE_CREATED = "workspace.created"  # Server -> Client
     WORKSPACE_SELECT_REQUEST = "workspace.select"  # Client -> Server
+    WORKSPACE_DELETE_REQUEST = "workspace.delete"  # Client -> Server (1.13)
+    WORKSPACE_DELETED = "workspace.deleted"  # Server -> Client: the answer to workspace.delete (1.13)
     CONFIG_STATUS = "config.status"  # Server -> Client (response to workspace.select)
     CONFIG_UPDATE_REQUEST = "config.update"  # Client -> Server
     CONFIG_UPDATED = "config.updated"  # Server -> Client
@@ -1806,6 +1820,10 @@ class WorkspaceInfo(BaseModel):
     provider: Optional[str] = None  # Provider if configured
     model: Optional[str] = None  # Model if configured
     last_accessed: Optional[str] = None  # ISO timestamp
+    path: Optional[str] = None  # Absolute path on the daemon host
+    # The authenticated user who created it; None = unowned (visible to all).
+    # A user sees their own and the unowned workspaces, never another user's.
+    owner: Optional[str] = None
 
 
 class WorkspaceListEvent(Event):
@@ -1814,6 +1832,23 @@ class WorkspaceListEvent(Event):
     root: str = ""  # Absolute path to workspace root
     workspaces: List[Dict[str, Any]] = Field(default_factory=list)
     # ^ List of WorkspaceInfo as dicts
+
+
+class WorkspaceDeletedEvent(Event):
+    """Answer to ``workspace.delete`` (protocol 1.13).
+
+    One event whatever happened, because the client is a list that has to
+    render *something* for the press: ``ok`` with the name on success;
+    ``ok=False`` and the reason when the daemon refused -- the workspace
+    belongs to another user, does not exist, still has loaded sessions or
+    other clients selecting it, or the name left the root.  On success the
+    directory and everything under it (persisted sessions included) is
+    gone and the deleting client's selection of it is cleared.
+    """
+    type: EventType = Field(default=EventType.WORKSPACE_DELETED)
+    name: str = ""
+    ok: bool = True
+    error: str = ""
 
 
 class WorkspaceCreatedEvent(Event):
@@ -2669,6 +2704,16 @@ class WorkspaceSelectRequest(Event):
     name: str = ""  # Workspace name (relative path from root)
 
 
+class WorkspaceDeleteRequest(Event):
+    """Client asks the daemon to delete a workspace it may see (protocol 1.13).
+
+    Destructive: the client confirms before sending.  Answered by
+    ``WorkspaceDeletedEvent``.
+    """
+    type: EventType = Field(default=EventType.WORKSPACE_DELETE_REQUEST)
+    name: str = ""  # Workspace name (relative path from root)
+
+
 class ConfigUpdateRequest(Event):
     """Client updates workspace configuration (provider, model, API key)."""
     type: EventType = Field(default=EventType.CONFIG_UPDATE_REQUEST)
@@ -3483,6 +3528,8 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.WORKSPACE_LIST.value: WorkspaceListEvent,
     EventType.WORKSPACE_CREATE_REQUEST.value: WorkspaceCreateRequest,
     EventType.WORKSPACE_CREATED.value: WorkspaceCreatedEvent,
+    EventType.WORKSPACE_DELETE_REQUEST.value: WorkspaceDeleteRequest,
+    EventType.WORKSPACE_DELETED.value: WorkspaceDeletedEvent,
     EventType.WORKSPACE_SELECT_REQUEST.value: WorkspaceSelectRequest,
     EventType.CONFIG_STATUS.value: ConfigStatusEvent,
     EventType.CONFIG_UPDATE_REQUEST.value: ConfigUpdateRequest,

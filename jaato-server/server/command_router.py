@@ -714,6 +714,8 @@ class CommandRouter:
                 recoverable=True,
             ))
             return
+        if self._refuse_foreign_session(client_id, target_session_id):
+            return
         # Check for workspace mismatch
         mismatch = self._session_manager.check_workspace_mismatch(
             target_session_id, workspace_path
@@ -1005,9 +1007,62 @@ class CommandRouter:
             wake_ref=wake_ref or "", outcome=outcome.value,
             detail=f"unbind_wake: {outcome.value}"))
 
+    def _sessions_visible_to(self, client_id: str) -> list:
+        """The daemon's sessions, scoped to what this client's user may see.
+
+        The boundary is the one the transport reports through
+        ``visible_workspace_paths`` (protocol 1.13): ``None`` -- IPC, or a
+        WS connection carrying no identity -- means the unscoped listing
+        every client always got.  A list means a session is shown when it
+        runs in one of those workspaces, or when this user created it
+        (``created_by``, #859), and hidden otherwise -- another user's
+        session in a shared workspace included.  ``session.list`` renders
+        this set and ``session.attach`` admits only members of it, so the
+        listing is never wider or narrower than what the verb accepts.
+        """
+        from server.event_sink import client_visible_workspaces
+
+        sessions = self._session_manager.list_sessions()
+        paths = client_visible_workspaces(self._event_sink, client_id)
+        if paths is None:
+            return sessions
+        user = self._event_sink.get_client_user(client_id)
+        roots = [os.path.normpath(p) for p in paths]
+
+        def _inside(workspace_path: Optional[str]) -> bool:
+            if not workspace_path:
+                return False
+            wp = os.path.normpath(workspace_path)
+            return any(wp == r or wp.startswith(r + os.sep) for r in roots)
+
+        return [s for s in sessions
+                if (user is not None and s.created_by == user) or _inside(s.workspace_path)]
+
+    def _refuse_foreign_session(self, client_id: str, target_session_id: str) -> bool:
+        """Refuse ``session.attach`` to a session outside the caller's boundary.
+
+        Returns True (and has answered the client) when the attach must not
+        proceed.  Unscoped transports never refuse here.
+        """
+        from server.event_sink import client_visible_workspaces
+        if client_visible_workspaces(self._event_sink, client_id) is None:
+            return False
+        if any(s.session_id == target_session_id
+               for s in self._sessions_visible_to(client_id)):
+            return False
+        from jaato_sdk.events import ErrorEvent
+        self._event_sink.send_event(client_id, ErrorEvent(
+            error=f"session.attach: {target_session_id} is not one of your sessions",
+            error_type="SessionError",
+            recoverable=True,
+        ))
+        logger.info("session.attach: client=%s refused foreign session %s",
+                    client_id, target_session_id)
+        return True
+
     def _handle_session_list(self, client_id: str, session_id: str) -> None:
         """Handle ``session.list`` command."""
-        sessions = self._session_manager.list_sessions()
+        sessions = self._sessions_visible_to(client_id)
         from jaato_sdk.events import SessionListEvent
 
         # Get client's current session to mark it in the list

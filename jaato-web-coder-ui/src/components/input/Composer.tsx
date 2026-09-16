@@ -27,6 +27,9 @@
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { commandCompletions, wouldRouteAsCommand, type CommandSpec, type Completion } from "@/protocol/commands";
+import { sessionIdCompletions, wantsSessionIds } from "@/protocol/sessions";
+import { ensureSessions } from "@/app/actions";
+import { useJaato } from "@/store/store";
 
 export interface ComposerProps {
   commands: CommandSpec[];
@@ -53,11 +56,28 @@ export function Composer({ commands, disabled, captureMode, history, onSubmit, o
   const verbatimWord = useRef<string>("");
 
   const before = text.slice(0, caret);
+  const sessions = useJaato((s) => s.sessions);
   const completions: Completion[] = useMemo(() => {
     if (captureMode || verbatim || dismissed) return [];
     if (!text.trim() && !before.length) return [];
+    // Third level: ``session attach ␣`` proposes the daemon's session ids
+    // (the TUI's SessionIdCompleter) rather than falling silent.
+    const ids = sessionIdCompletions(before, sessions);
+    if (ids !== null) return ids.slice(0, 12);
     return commandCompletions(before, commands).slice(0, 12);
-  }, [before, text, commands, captureMode, verbatim, dismissed]);
+  }, [before, text, commands, sessions, captureMode, verbatim, dismissed]);
+
+  // The listing is fetched the moment the caret reaches the id position, so
+  // the proposals are the daemon's current sessions rather than a stale
+  // snapshot — once per visit to that position.
+  const askedForSessions = useRef(false);
+  useEffect(() => {
+    if (captureMode) return;
+    if (!wantsSessionIds(before)) { askedForSessions.current = false; return; }
+    if (askedForSessions.current) return;
+    askedForSessions.current = true;
+    ensureSessions().catch(() => undefined);
+  }, [before, captureMode]);
   const popupOpen = completions.length > 0;
 
   useEffect(() => { setSelected(0); }, [completions.length, before]);

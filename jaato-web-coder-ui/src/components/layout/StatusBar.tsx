@@ -10,6 +10,7 @@ export function StatusBar() {
   const ctx = useJaato((s) => s.context[selected]);
   const permStatus = useJaato((s) => s.permissionStatus);
   const toggle = useJaato((s) => s.toggleUi);
+  const setToolsExpanded = useJaato((s) => s.setToolsExpanded);
   const ui = useJaato((s) => s.ui);
   const dot = conn.phase === "connected" ? "bg-success" : conn.phase === "reconnecting" || conn.phase === "connecting" ? "bg-warning pulse" : "bg-error";
   const pct = ctx?.percentUsed;
@@ -23,12 +24,21 @@ export function StatusBar() {
       {(session.provider || session.model) && <span>{[session.provider, session.model].filter(Boolean).join(" / ")}</span>}
       {session.profile && <span className="text-text-muted">profile {session.profile}</span>}
       {pct != null && <span className={pct > 80 ? "text-error" : pct > 60 ? "text-warning" : ""}>ctx {pct.toFixed(0)}%</span>}
-      {permStatus && <span className="text-warning">{permStatus}</span>}
+      {permStatus && (
+        <span title="Permission default policy (permissions default allow|deny|ask)" data-testid="permission-status">
+          <span className="text-text-muted">permissions </span>
+          {permStatus.suspensionScope ? (
+            <span className="text-success">allow <span className="text-text-muted">({permStatus.suspensionScope})</span></span>
+          ) : (
+            <span className={permStatus.effectiveDefault === "deny" ? "text-warning" : permStatus.effectiveDefault === "allow" ? "text-success" : ""}>{permStatus.effectiveDefault}</span>
+          )}
+        </span>
+      )}
       <span className="flex-1" />
       <button type="button" onClick={() => toggle("showPlan")} className={ui.showPlan ? "text-primary" : "text-text-muted hover:text-text"} title="Toggle plan (Ctrl+P)" aria-label="Toggle plan (Ctrl+P)">plan</button>
       <button type="button" onClick={() => toggle("showBudget")} className={ui.showBudget ? "text-primary" : "text-text-muted hover:text-text"} title="Toggle budget (Ctrl+B)" aria-label="Toggle budget (Ctrl+B)">budget</button>
       <button type="button" onClick={() => toggle("showWorkspace")} className={ui.showWorkspace ? "text-primary" : "text-text-muted hover:text-text"} title="Toggle workspace changes (Alt+W)" aria-label="Toggle workspace changes (Alt+W)">files</button>
-      <button type="button" onClick={() => toggle("showTools")} className={ui.showTools ? "text-primary" : "text-text-muted hover:text-text"} title="Expand/collapse tool output (Ctrl+T)" aria-label="Expand/collapse tool output (Ctrl+T)">tools</button>
+      <button type="button" onClick={() => setToolsExpanded(!ui.showTools)} className={ui.showTools ? "text-primary" : "text-text-muted hover:text-text"} title={ui.showTools ? "Tool call boxes expanded — click to collapse them (Ctrl+T)" : "Tool call boxes collapsed — click to expand them (Ctrl+T)"} aria-label="Toggle tool call boxes (Ctrl+T)">tools</button>
     </div>
   );
 }

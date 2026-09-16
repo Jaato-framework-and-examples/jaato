@@ -77,6 +77,17 @@ class EventSink(Protocol):
         """Associate an authenticated user identity with a client."""
         ...
 
+    def visible_workspace_paths(self, client_id: str) -> Optional[List[str]]:
+        """The workspace paths this client's authenticated user may see.
+
+        ``None`` means "no scoping applies": the transport has no workspace
+        manager (IPC), or the connection carries no identity.  A list --
+        even an empty one -- is a boundary, and ``session.list`` /
+        ``session.attach`` keep a session inside it only when it runs in one
+        of these workspaces or was created by this user.
+        """
+        ...
+
     def get_client_peer(self, client_id: str) -> Optional["PeerCredentials"]:
         """The OS account that opened this client's connection.
 
@@ -92,6 +103,19 @@ class EventSink(Protocol):
         as a denial.
         """
         ...
+
+
+def client_visible_workspaces(sink: Any, client_id: str) -> Optional[List[str]]:
+    """``sink.visible_workspace_paths(client_id)``, tolerating a sink without it.
+
+    Same shape as :func:`client_peer`: a transport predating the method (an
+    out-of-tree sink) contributes "no scoping" rather than raising, because
+    an unscoped listing is the answer every transport gave before.
+    """
+    fn = getattr(sink, "visible_workspace_paths", None)
+    if fn is None:
+        return None
+    return fn(client_id)
 
 
 def client_peer(sink: Any, client_id: str) -> Optional["PeerCredentials"]:
@@ -178,6 +202,14 @@ class CompositeEventSink:
         """Fan-out to all registered sinks."""
         for sink in self._sinks:
             sink.set_client_user(client_id, user_id)
+
+    def visible_workspace_paths(self, client_id: str) -> Optional[List[str]]:
+        """Return the first sink's answer that scopes this client, else ``None``."""
+        for sink in self._sinks:
+            paths = client_visible_workspaces(sink, client_id)
+            if paths is not None:
+                return paths
+        return None
 
     def get_client_peer(self, client_id: str) -> Optional["PeerCredentials"]:
         """Return the first non-None peer credential from any sink.

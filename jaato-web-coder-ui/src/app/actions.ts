@@ -18,7 +18,7 @@ import { parseUserInput } from "@/protocol/commands";
 import { MAIN_AGENT, useJaato } from "@/store/store";
 import type { PendingClarification } from "@/store/types";
 import { THEME_NAMES, applyTheme, saveThemePreference } from "@/theme/themes";
-import { disconnect, getClient } from "@/sdk/connection";
+import { disconnect, getClient, isConnected } from "@/sdk/connection";
 
 export const inputHistory: string[] = [];
 
@@ -123,6 +123,44 @@ function contextText(agentId: string): string {
   ].join("\n");
 }
 
+/**
+ * Ask the daemon for its session listing without printing it — for the
+ * ``session attach <id>`` completer and the picker's resume list.  The
+ * reply lands in ``sessions``; a listing the user did not ask for is not
+ * written to the output.
+ */
+export async function ensureSessions(): Promise<void> {
+  const st = useJaato.getState();
+  if (!isConnected()) return;
+  st.setSessionListSilent(true);
+  try {
+    await getClient().listSessions();
+  } catch {
+    st.setSessionListSilent(false);
+  }
+}
+
+/**
+ * Switch this client to another session — the TUI's ``session attach``.
+ * The output of the session being left is dropped, the daemon attaches
+ * and answers with its ``session.info``, and the conversation is rebuilt
+ * from the history the daemon replays, so the screen shows what was said
+ * there rather than a blank pane with an old session's tail.
+ */
+export async function attachSession(sessionId: string): Promise<void> {
+  const st = useJaato.getState();
+  st.resetSessionState();
+  st.setHistoryMode("replay");
+  const client = getClient();
+  try {
+    await client.attachSession(sessionId);
+    await client.requestHistory(MAIN_AGENT);
+  } catch (err) {
+    useJaato.getState().setHistoryMode("listing");
+    throw err;
+  }
+}
+
 /** Handle a submitted line. Returns after the request is on the wire. */
 export async function submitInput(text: string, verbatim: boolean): Promise<void> {
   const st = useJaato.getState();
@@ -172,6 +210,7 @@ export async function submitInput(text: string, verbatim: boolean): Promise<void
       st.addSystemBlock(agentId, contextText(agentId), "help");
       return;
     case "history":
+      st.setHistoryMode("listing");
       await client.requestHistory(agentId);
       return;
     case "server": {
@@ -181,6 +220,12 @@ export async function submitInput(text: string, verbatim: boolean): Promise<void
           applyTheme(name); saveThemePreference(name); st.setTheme(name);
           st.addSystemBlock(agentId, `Theme: ${name}`, "info");
         } else st.addSystemBlock(agentId, `Themes: ${THEME_NAMES.join(", ")}`, "info");
+        return;
+      }
+      if (parsed.command === "session.attach" && parsed.args?.[0]) {
+        // Switching sessions is a client-side transition as well as a
+        // daemon command: the pane is reset and the conversation replayed.
+        await attachSession(parsed.args[0]);
         return;
       }
       st.addUserBlock(agentId, text);

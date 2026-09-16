@@ -233,6 +233,10 @@ export interface WorkspaceInfo {
   provider?: string | null;
   model?: string | null;
   last_accessed?: string | null;
+  /** Absolute path on the daemon host, when the daemon sends it. */
+  path?: string | null;
+  /** The authenticated user who created it; unset for a pre-existing or unowned workspace. */
+  owner?: string | null;
 }
 
 export interface ConfigStatus {

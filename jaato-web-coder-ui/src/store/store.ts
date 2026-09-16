@@ -13,6 +13,8 @@ import { EventTypeValue, type JaatoEvent } from "@jaato/sdk";
 import { mergeCommandSpecs, type CommandSpec } from "@/protocol/commands";
 import { normalizeClarificationQuestion } from "@/protocol/clarification";
 import { summarizeToolCalls } from "@/protocol/turnStats";
+import { formatSessionList, normalizeSessionList, type SessionSummary } from "@/protocol/sessions";
+import { formatHistoryListing, historyBlocks } from "@/protocol/history";
 import type {
   Agent,
   ConfigStatus,
@@ -51,11 +53,32 @@ export interface JaatoState {
     list: WorkspaceInfo[];
     selected?: string;
     config?: ConfigStatus;
+    /** The daemon's answer to the last ``workspace.delete``, for the workspace screen. */
+    notice?: { text: string; error?: boolean } | null;
   };
 
   sessionId?: string | null;
   session: { name?: string | null; provider?: string | null; model?: string | null; profile?: string | null; models?: string[] };
   profiles: ProfileInfo[];
+  /**
+   * The daemon's session listing — every session it knows, whichever
+   * workspace.  Refreshed by ``SessionListEvent`` (the answer to ``session
+   * list``) and by the snapshot every ``SessionInfoEvent`` carries.  Feeds
+   * the ``session attach <id>`` completion and the picker's resume list.
+   */
+  sessions: SessionSummary[];
+  /**
+   * The next ``SessionListEvent`` is wanted for the listing above and not
+   * for display — set by the completer / picker before they ask, so the
+   * reply does not print a listing the user did not type ``session list`` for.
+   */
+  sessionListSilent: boolean;
+  /**
+   * How the next ``HistoryEvent`` renders: ``listing`` (the ``history``
+   * command's summary) or ``replay`` (the conversation rebuilt as blocks,
+   * after ``session attach``).
+   */
+  historyMode: "listing" | "replay";
   initProgress?: InitProgress | null;
 
   agents: Record<string, Agent>;
@@ -93,7 +116,8 @@ export interface JaatoState {
   workspaceIgnored: Record<string, boolean>;
   /** One-line outcome of the last ``.gitignore`` toggle, shown in the panel. */
   workspaceNotice: { text: string; error?: boolean } | null;
-  permissionStatus?: string | null;
+  /** ``PermissionStatusEvent``: the effective default policy and, when suspended, the scope. */
+  permissionStatus?: { effectiveDefault: string; suspensionScope: string | null } | null;
   processing: Record<string, boolean>;
 
   ui: {
@@ -126,6 +150,10 @@ export interface JaatoState {
   dismissReferenceSelection: (requestId: string) => void;
   dismissPostAuth: () => void;
   toggleUi: (key: "showPlan" | "showBudget" | "showWorkspace" | "showTools") => void;
+  /** The TUI's Ctrl+T: expand or collapse every tool block, and new ones follow. */
+  setToolsExpanded: (expanded: boolean) => void;
+  setSessionListSilent: (silent: boolean) => void;
+  setHistoryMode: (mode: JaatoState["historyMode"]) => void;
   toggleWorkspaceHidden: (entryId: string) => void;
   toggleWorkspaceShowHidden: () => void;
   setWorkspaceNotice: (n: JaatoState["workspaceNotice"]) => void;
@@ -311,7 +339,7 @@ export function reduce(s: JaatoState, raw: JaatoEvent): JaatoState {
         startedAt: Date.now(),
         output: "",
         media: [],
-        expanded: false,
+        expanded: s.ui.showTools,
       };
       setBlocks(s, agentId, [...(s.blocks[agentId] ?? []), block]);
       s.toolOwner = { ...s.toolOwner, [callId]: agentId };
@@ -407,8 +435,32 @@ export function reduce(s: JaatoState, raw: JaatoEvent): JaatoState {
       break;
     }
     case EventTypeValue.PERMISSION_STATUS:
-      s.permissionStatus = (ev.status as string | null | undefined) ?? (ev.message as string | null | undefined) ?? null;
+      // PermissionStatusEvent carries effective_default ("allow" | "deny" |
+      // "ask") and suspension_scope ("turn" | "idle" | "session" | null).
+      s.permissionStatus = {
+        effectiveDefault: String(ev.effective_default ?? "ask"),
+        suspensionScope: (ev.suspension_scope as string | null | undefined) ?? null,
+      };
       break;
+    case EventTypeValue.SESSION_LIST: {
+      const list = normalizeSessionList(ev.sessions);
+      s.sessions = list;
+      if (s.sessionListSilent) { s.sessionListSilent = false; break; }
+      const id = s.selectedAgentId;
+      setBlocks(s, id, [...(s.blocks[id] ?? []), { id: nextId(), kind: "system", agentId: id, text: formatSessionList(list), style: "help" }]);
+      break;
+    }
+    case EventTypeValue.HISTORY: {
+      const id = String(ev.agent_id ?? s.selectedAgentId);
+      ensureAgent(s, id);
+      if (s.historyMode === "replay") {
+        s.historyMode = "listing";
+        setBlocks(s, id, [...(s.blocks[id] ?? []), ...historyBlocks(ev.history, id, nextId, s.ui.showTools)]);
+      } else {
+        setBlocks(s, id, [...(s.blocks[id] ?? []), { id: nextId(), kind: "system", agentId: id, text: formatHistoryListing(ev.history, ev.turn_accounting), style: "help" }]);
+      }
+      break;
+    }
     case EventTypeValue.CLARIFICATION_BATCH: {
       const requestId = String(ev.request_id ?? "");
       if (!requestId) break;
@@ -595,6 +647,7 @@ export function reduce(s: JaatoState, raw: JaatoEvent): JaatoState {
     case EventTypeValue.SESSION_INFO: {
       const sid = ev.session_id as string | undefined;
       if (sid) s.sessionId = sid;
+      if (Array.isArray(ev.sessions)) s.sessions = normalizeSessionList(ev.sessions);
       s.session = {
         ...s.session,
         name: (ev.session_name as string | null | undefined) ?? s.session.name ?? null,
@@ -623,6 +676,21 @@ export function reduce(s: JaatoState, raw: JaatoEvent): JaatoState {
     case EventTypeValue.WORKSPACE_CREATED: {
       const w = (ev.workspace as WorkspaceInfo | undefined) ?? { name: String(ev.name ?? ""), configured: false };
       s.workspace = { ...s.workspace, list: [...s.workspace.list.filter((x) => x.name !== w.name), { ...w, configured: w.configured === true }] };
+      break;
+    }
+    case EventTypeValue.WORKSPACE_DELETED: {
+      const name = String(ev.name ?? "");
+      if (ev.ok === false) {
+        s.workspace = { ...s.workspace, notice: { text: String(ev.error || `Could not delete workspace ${name}`), error: true } };
+        break;
+      }
+      s.workspace = {
+        ...s.workspace,
+        list: s.workspace.list.filter((w) => w.name !== name),
+        selected: s.workspace.selected === name ? undefined : s.workspace.selected,
+        config: s.workspace.config?.workspace === name ? undefined : s.workspace.config,
+        notice: { text: `Workspace ${name} deleted` },
+      };
       break;
     }
     case EventTypeValue.CONFIG_STATUS:
@@ -689,9 +757,12 @@ export const useJaato = create<JaatoState>()((set, get) => ({
   screen: "connect",
   workspace: { mode: "unknown", list: [] },
   profiles: [],
+  sessions: [],
+  sessionListSilent: false,
+  historyMode: "listing",
   commands: mergeCommandSpecs([]),
   ...emptySessionState(),
-  ui: { showPlan: false, showBudget: false, showWorkspace: false, showTools: true, theme: "dark", popupCallId: null },
+  ui: { showPlan: false, showBudget: false, showWorkspace: false, showTools: false, theme: "dark", popupCallId: null },
 
   dispatch: (events) =>
     set((state) => {
@@ -729,6 +800,12 @@ export const useJaato = create<JaatoState>()((set, get) => ({
   dismissReferenceSelection: (requestId) => set((st) => ({ referenceSelections: st.referenceSelections.filter((r) => r.requestId !== requestId) })),
   dismissPostAuth: () => set({ postAuth: null }),
   toggleUi: (key) => set((st) => ({ ui: { ...st.ui, [key]: !st.ui[key] } })),
+  setToolsExpanded: (expanded) => set((st) => ({
+    ui: { ...st.ui, showTools: expanded },
+    blocks: Object.fromEntries(Object.entries(st.blocks).map(([agentId, list]) => [agentId, list.map((b) => (b.kind === "tool" ? { ...b, expanded } : b))])),
+  })),
+  setSessionListSilent: (silent) => set({ sessionListSilent: silent }),
+  setHistoryMode: (mode) => set({ historyMode: mode }),
   toggleWorkspaceHidden: (entryId) => set((st) => ({
     workspaceHidden: st.workspaceHidden.includes(entryId)
       ? st.workspaceHidden.filter((h) => h !== entryId)

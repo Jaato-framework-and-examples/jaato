@@ -43,6 +43,29 @@ const ts = () => new Date().toISOString();
 
 interface Client { ws: WebSocket; sessionId: string | null; pending: Map<string, (v: unknown) => void>; ignored: Set<string>; }
 
+/** What ``session.list`` answers: the daemon's free-form per-session dicts. */
+function sessionListing(c: Client): Record<string, unknown>[] {
+  return [
+    { id: "20260916_090000", name: "", description: "fix the budget panel", model_provider: "anthropic", model_name: "claude-sonnet-4", is_loaded: true, is_current: c.sessionId === "20260916_090000", client_count: 1, turn_count: 3, workspace_path: "/srv/workspaces/project-a" },
+    { id: "20260915_170000", name: "old notes", description: "", model_provider: "", model_name: "", is_loaded: false, is_current: false, client_count: 0, turn_count: 1, workspace_path: "/srv/workspaces/project-b" },
+    ...(c.sessionId && !c.sessionId.startsWith("2026") ? [{ id: c.sessionId, name: "mock session", description: "", model_provider: "mock", model_name: "mock-1", is_loaded: true, is_current: true, client_count: 1, turn_count: 0, workspace_path: "/work" }] : []),
+  ];
+}
+
+/** The conversation ``history.request`` replays for the sessions above. */
+const HISTORIES: Record<string, Record<string, unknown>[]> = {
+  "20260916_090000": [
+    { role: "user", parts: [{ type: "text", text: "what are those [object Object] in the budget panel?" }] },
+    { role: "model", parts: [{ type: "text", text: "Let me look." }, { type: "function_call", id: "h1", name: "readFile", args: { path: "src/components/panels/BudgetPanel.tsx" } }] },
+    { role: "tool", parts: [{ type: "function_response", call_id: "h1", name: "readFile", result: { lines: 45 } }] },
+    { role: "model", parts: [{ type: "text", text: "The panel reads function_calls as a number; it is a list of records." }] },
+  ],
+  "20260915_170000": [
+    { role: "user", parts: [{ type: "text", text: "remember: notes live in docs/" }] },
+    { role: "model", parts: [{ type: "text", text: "Noted." }] },
+  ],
+};
+
 function send(c: Client, ev: Record<string, unknown>): void {
   if (c.ws.readyState !== c.ws.OPEN) return;
   c.ws.send(JSON.stringify({ timestamp: ts(), session_id: c.sessionId ?? "", ...ev }));
@@ -195,15 +218,20 @@ wss.on("connection", (ws, req) => {
       case "workspace.list":
         if (!WORKSPACES) send(c, { type: "error", error: "Workspace mode not enabled", error_type: "WorkspaceModeDisabled", recoverable: true });
         else send(c, { type: "workspace.list_response", root: "/srv/workspaces", workspaces: [
-          { name: "project-a", configured: true, provider: "anthropic", model: "claude-sonnet-4", last_accessed: ts() },
-          { name: "project-b", configured: false },
+          { name: "project-a", path: "/srv/workspaces/project-a", owner: "mock:tester", configured: true, provider: "anthropic", model: "claude-sonnet-4", last_accessed: ts() },
+          { name: "project-b", path: "/srv/workspaces/project-b", configured: false },
         ] });
         break;
       case "workspace.select":
         send(c, { type: "config.status", workspace: String(ev.name), configured: ev.name === "project-a", provider: ev.name === "project-a" ? "anthropic" : null, model: ev.name === "project-a" ? "claude-sonnet-4" : null, available_providers: ["anthropic", "google_genai", "openrouter"], missing_fields: ev.name === "project-a" ? [] : ["provider", "api_key"] });
         break;
       case "workspace.create":
-        send(c, { type: "workspace.created", workspace: { name: String(ev.name), configured: false } });
+        send(c, { type: "workspace.created", workspace: { name: String(ev.name), configured: false, owner: "mock:tester" } });
+        break;
+      case "workspace.delete":
+        // The daemon refuses a workspace with loaded sessions; project-a has one.
+        if (ev.name === "project-a") send(c, { type: "workspace.deleted", name: "project-a", ok: false, error: "Workspace 'project-a' has 1 loaded session(s): 20260916_090000 -- stop them first" });
+        else send(c, { type: "workspace.deleted", name: String(ev.name), ok: true });
         break;
       case "config.update":
         send(c, { type: "config.updated", workspace: "project-b", configured: true, provider: ev.provider, model: ev.model, available_providers: [], missing_fields: [] });
@@ -217,7 +245,9 @@ wss.on("connection", (ws, req) => {
           await sleep(120);
           send(c, { type: "init.progress", step: "provider", status: "complete", message: "Ready", step_number: 2, total_steps: 2 });
           send(c, { type: "agent.created", agent_id: "main", agent_name: "main", agent_type: "main", profile_name: args.includes("--profile") ? args[args.indexOf("--profile") + 1] : null });
-          send(c, { type: "session.info", session_name: "mock session", model_provider: "mock", model_name: "mock-1", profile_name: args.includes("--profile") ? args[args.indexOf("--profile") + 1] : null, models: ["mock-1", "mock-2"] });
+          send(c, { type: "session.info", session_name: "mock session", model_provider: "mock", model_name: "mock-1", profile_name: args.includes("--profile") ? args[args.indexOf("--profile") + 1] : null, models: ["mock-1", "mock-2"], sessions: sessionListing(c) });
+          // PermissionStatusEvent, emitted by the daemon at init: effective_default + suspension_scope.
+          send(c, { type: "permission.status", effective_default: "ask", suspension_scope: null });
           send(c, { type: "system.message", message: "Connected to the mock daemon. Try: code, tool, permit, ask, fail, subagent.", style: "info" });
         } else if (cmd === "mock-auth") {
           // A daemon-level auth plugin command: works with NO session, like
@@ -236,6 +266,15 @@ wss.on("connection", (ws, req) => {
           } else {
             send(c, { type: "system.message", message: "mock-auth: login | logout | status", style: "info" });
           }
+        } else if (cmd === "session.list") {
+          send(c, { type: "session.list", sessions: sessionListing(c) });
+        } else if (cmd === "session.attach") {
+          const target = String(args[0] ?? "");
+          if (!HISTORIES[target]) { send(c, { type: "error", error: `Session not found: ${target}`, error_type: "SessionError", recoverable: true }); break; }
+          c.sessionId = target;
+          send(c, { type: "agent.created", agent_id: "main", agent_name: "main", agent_type: "main", profile_name: null });
+          send(c, { type: "session.info", session_id: target, session_name: target === "20260916_090000" ? "fix the budget panel" : "old notes", model_provider: target === "20260916_090000" ? "anthropic" : "mock", model_name: target === "20260916_090000" ? "claude-sonnet-4" : "mock-1", profile_name: null, models: ["mock-1"], sessions: sessionListing(c) });
+          send(c, { type: "permission.status", effective_default: "allow", suspension_scope: null });
         } else if (cmd === "session.profiles") {
           send(c, { type: "session.profiles", profiles: [{ name: "researcher", description: "Deep research", provider: "anthropic", model: "claude-sonnet-4" }, { name: "coder", description: "Coding agent", provider: "openrouter", model: "openai/gpt-5" }] });
         } else if (cmd === "workspace.ignore") {
@@ -273,10 +312,11 @@ wss.on("connection", (ws, req) => {
       case "session.stop":
         send(c, { type: "system.message", message: "Stopped.", style: "warning" });
         break;
-      case "history.request":
-        send(c, { type: "history", agent_id: "main", history: [] });
-        send(c, { type: "system.message", message: "(mock) history is empty", style: "hint" });
+      case "history.request": {
+        const history = (c.sessionId && HISTORIES[c.sessionId]) || [];
+        send(c, { type: "history", agent_id: "main", history, turn_accounting: history.length ? [{ prompt: 120, output: 40, total: 160 }] : [] });
         break;
+      }
       case "message.send":
         turn(c, String(ev.text ?? "")).catch(() => undefined);
         break;

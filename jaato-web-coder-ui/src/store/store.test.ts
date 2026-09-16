@@ -198,6 +198,66 @@ describe("reduce — workspace files", () => {
   });
 });
 
+describe("reduce — permission status", () => {
+  it("reads effective_default and suspension_scope, the daemon's keys", () => {
+    const d = useJaato.getState().dispatch;
+    d([ev({ type: "permission.status", effective_default: "deny", suspension_scope: null })]);
+    expect(useJaato.getState().permissionStatus).toEqual({ effectiveDefault: "deny", suspensionScope: null });
+    d([ev({ type: "permission.status", effective_default: "ask", suspension_scope: "turn" })]);
+    expect(useJaato.getState().permissionStatus).toEqual({ effectiveDefault: "ask", suspensionScope: "turn" });
+  });
+});
+
+describe("reduce — session list and history", () => {
+  const SESSIONS = [{ id: "s-1", description: "first", is_loaded: true, workspace_path: "/w/a" }, { id: "s-2", is_loaded: false }];
+  it("a session.list reply is kept for completion and printed as the TUI listing", () => {
+    useJaato.getState().dispatch([ev({ type: "session.list", sessions: SESSIONS })]);
+    const s = useJaato.getState();
+    expect(s.sessions.map((x) => x.id)).toEqual(["s-1", "s-2"]);
+    const last = s.blocks[MAIN_AGENT]!.at(-1)!;
+    expect(last.kind === "system" && last.text).toContain("● s-1 - first");
+  });
+  it("a silent request keeps the list and prints nothing", () => {
+    useJaato.getState().setSessionListSilent(true);
+    useJaato.getState().dispatch([ev({ type: "session.list", sessions: SESSIONS })]);
+    const s = useJaato.getState();
+    expect(s.sessions).toHaveLength(2);
+    expect(s.blocks[MAIN_AGENT]).toHaveLength(0);
+    expect(s.sessionListSilent).toBe(false);
+  });
+  it("session.info's snapshot refreshes the listing without printing", () => {
+    useJaato.getState().dispatch([ev({ type: "session.info", session_id: "s-1", sessions: SESSIONS })]);
+    expect(useJaato.getState().sessions).toHaveLength(2);
+    expect(useJaato.getState().blocks[MAIN_AGENT]).toHaveLength(0);
+  });
+  const HISTORY = [{ role: "user", parts: [{ type: "text", text: "hi" }] }, { role: "model", parts: [{ type: "text", text: "hello" }] }];
+  it("history replays as blocks after an attach, and lists otherwise", () => {
+    useJaato.getState().setHistoryMode("replay");
+    useJaato.getState().dispatch([ev({ type: "history", agent_id: "main", history: HISTORY })]);
+    let blocks = useJaato.getState().blocks[MAIN_AGENT]!;
+    expect(blocks.map((b) => b.kind)).toEqual(["user", "text"]);
+    expect(useJaato.getState().historyMode).toBe("listing");
+    useJaato.getState().dispatch([ev({ type: "history", agent_id: "main", history: HISTORY, turn_accounting: [{ prompt: 1, output: 2 }] })]);
+    blocks = useJaato.getState().blocks[MAIN_AGENT]!;
+    expect(blocks).toHaveLength(3);
+    expect(blocks[2]!.kind === "system" && blocks[2]!.text).toContain("Conversation History (2 messages, 1 turns)");
+  });
+});
+
+describe("tools toggle", () => {
+  it("expands or collapses every tool block, and new blocks follow the setting", () => {
+    const st = useJaato.getState();
+    st.dispatch([ev({ type: "tool.call_start", agent_id: "main", tool_name: "run", tool_args: {}, call_id: "c1" })]);
+    expect(useJaato.getState().blocks[MAIN_AGENT]![0]!.kind === "tool" && (useJaato.getState().blocks[MAIN_AGENT]![0] as { expanded: boolean }).expanded).toBe(false);
+    useJaato.getState().setToolsExpanded(true);
+    expect((useJaato.getState().blocks[MAIN_AGENT]![0] as { expanded: boolean }).expanded).toBe(true);
+    useJaato.getState().dispatch([ev({ type: "tool.call_start", agent_id: "main", tool_name: "run", tool_args: {}, call_id: "c2" })]);
+    expect((useJaato.getState().blocks[MAIN_AGENT]![1] as { expanded: boolean }).expanded).toBe(true);
+    useJaato.getState().setToolsExpanded(false);
+    expect(useJaato.getState().blocks[MAIN_AGENT]!.every((b) => b.kind === "tool" && !b.expanded)).toBe(true);
+  });
+});
+
 describe("reduce — errors", () => {
   it("treats the workspace-mode probe reply as state, not as an error line", () => {
     useJaato.getState().dispatch([ev({ type: "error", error: "Workspace mode not enabled", error_type: "WorkspaceModeDisabled" })]);
