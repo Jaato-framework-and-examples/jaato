@@ -162,6 +162,17 @@ export function isProtocolCompatible(
 }
 
 /**
+ * Supplies the credential for one connection attempt.
+ *
+ * Called by {@link JaatoClient} immediately before each WebSocket open,
+ * never cached: the value it returns is presented on that attempt and
+ * on no other.  May return the credential directly or as a promise.
+ * Returning ``undefined`` connects with no token, the
+ * ``--ws-unsafe-no-auth`` posture.
+ */
+export type TokenProvider = () => string | undefined | Promise<string | undefined>;
+
+/**
  * Constructor options for {@link JaatoClient}.
  */
 export interface JaatoClientOptions {
@@ -170,8 +181,27 @@ export interface JaatoClientOptions {
   /**
    * Bearer token presented as ``?token=<token>`` query parameter.
    * Omit when the daemon is started with ``--ws-unsafe-no-auth``.
+   *
+   * A **string** is presented as-is on every connection attempt — right
+   * for the daemon's shared token (``--ws-token-file``), which is valid
+   * until the operator rotates it.
+   *
+   * A **function** (a {@link TokenProvider}) is called before *each*
+   * attempt, the initial ``connect()`` and every automatic reconnect,
+   * and its result is presented once.  This is the shape a per-user
+   * ticket needs (protocol 1.10, #1074): a ticket is single-use and
+   * consumed at accept, so replaying the value that opened the last
+   * connection can never open the next one.  A browser client behind a
+   * backend-for-frontend passes a provider that asks that backend for a
+   * fresh ticket; see ``docs/design/web-server-bff.md``.
+   *
+   * A provider that throws fails that attempt only: on ``connect()`` the
+   * error propagates to the caller; during reconnect the attempt is
+   * counted and the next one is scheduled with the usual backoff, so a
+   * backend that is briefly down degrades into the reconnect loop rather
+   * than into a dead connection.
    */
-  token?: string;
+  token?: string | TokenProvider;
   /**
    * Custom request headers (Node only).  Mutually exclusive with
    * {@link token}.  See {@link openTransport} for caveats.
@@ -665,7 +695,7 @@ export class JaatoClient {
      * ``.jaato/profiles/`` on the server, **or** an inline **spec**
      * record with the same shape — recognised keys include ``model``
      * (required), ``provider``, ``plugins``, ``plugin_configs``,
-     * ``system_instructions``, ``gc``, ``env``, ``max_turns``,
+     * ``system_instructions``, ``gc``, ``env``,
      * ``runtime_limits``, ``model_tiers``, ``completion_payload_schema``.
      * The two forms are mutually exclusive — pass one or the other.
      * The server validates the dict and rejects it with a clear
@@ -1248,10 +1278,28 @@ export class JaatoClient {
     this._transport.sendEvent(event);
   }
 
+  /**
+   * Resolve the credential for the attempt about to be made.
+   *
+   * A string option is returned as-is; a {@link TokenProvider} is
+   * called now, so a single-use ticket is minted per attempt rather
+   * than once per client.  Errors propagate to the caller
+   * (``connect()`` or ``_attemptReconnect()``), each of which already
+   * decides what a failed attempt means.
+   */
+  private async _resolveToken(): Promise<string | undefined> {
+    const t = this._options.token;
+    if (typeof t === "function") {
+      return await t();
+    }
+    return t;
+  }
+
   private async _openOnce(): Promise<void> {
+    const token = await this._resolveToken();
     const transport = await openTransport({
       url: this._options.url,
-      token: this._options.token,
+      token,
       headers: this._options.headers,
       openTimeoutMs: this._options.openTimeoutMs,
     });

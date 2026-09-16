@@ -1,0 +1,112 @@
+name: "Publish @jaato/web-coder-server to npm"
+
+# Mirror of publish-npm-web-coder-ui.yml, with one extra gate this package
+# needs: it depends on @jaato/sdk and @jaato/web-coder-ui, which the
+# checkout links with `file:` for development. The publish job builds
+# against those links, then rewrites the manifest to the siblings' caret
+# ranges (scripts/prepare-publish.mjs) and REFUSES to publish unless both
+# of those versions are already on npm — so the order is SDK, then UI,
+# then this (docs/design/web-server-bff.md §9), enforced rather than
+# remembered.
+#
+# Same npm-side setup as the others: the @jaato org token in the repo's
+# `npm-sdk` environment as NPM_TOKEN.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: |
+            jaato-sdk-ts/package-lock.json
+            jaato-web-coder-ui/package-lock.json
+            jaato-web-coder-server/package-lock.json
+      - name: Install + build the TS SDK
+        working-directory: jaato-sdk-ts
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+      - name: Install the UI package
+        working-directory: jaato-web-coder-ui
+        run: npm ci --no-audit --no-fund
+      - name: Install jaato-web-coder-server
+        working-directory: jaato-web-coder-server
+        run: npm ci --no-audit --no-fund
+      - name: Type-check + build
+        working-directory: jaato-web-coder-server
+        run: npx tsc -p tsconfig.json
+      - name: Tests
+        working-directory: jaato-web-coder-server
+        run: npm test
+
+  publish:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: npm-sdk
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Read versions
+        id: version
+        run: |
+          v() { node -p "require('./$1/package.json').version"; }
+          echo "version=$(v jaato-web-coder-server)" >> "$GITHUB_OUTPUT"
+          echo "sdk=$(v jaato-sdk-ts)" >> "$GITHUB_OUTPUT"
+          echo "ui=$(v jaato-web-coder-ui)" >> "$GITHUB_OUTPUT"
+          echo "server $(v jaato-web-coder-server); depends on sdk $(v jaato-sdk-ts), ui $(v jaato-web-coder-ui)"
+
+      - name: Check version not already on npm
+        run: |
+          version="${{ steps.version.outputs.version }}"
+          status=$(curl -s -o /dev/null -w '%{http_code}' "https://registry.npmjs.org/@jaato/web-coder-server/${version}")
+          if [ "$status" = "200" ]; then echo "::error::@jaato/web-coder-server ${version} already exists on npm"; exit 1; fi
+          if [ "$status" != "404" ]; then echo "::error::Unexpected status ${status} from registry — refusing to publish"; exit 1; fi
+          echo "Version ${version} is available"
+
+      - name: Check both dependencies are on npm at the versions the checkout links
+        # The published manifest will say ^<sdk> and ^<ui>. If either exact
+        # version is not on the registry, an `npm install @jaato/web-coder-server`
+        # would fail for everyone — so refuse here, and say which to publish first.
+        run: |
+          for pair in "sdk:${{ steps.version.outputs.sdk }}" "web-coder-ui:${{ steps.version.outputs.ui }}"; do
+            name="${pair%%:*}"; version="${pair##*:}"
+            status=$(curl -s -o /dev/null -w '%{http_code}' "https://registry.npmjs.org/@jaato/${name}/${version}")
+            if [ "$status" != "200" ]; then
+              echo "::error::@jaato/${name} ${version} is not on npm (HTTP ${status}); publish it first (publish-npm-${name/web-coder-ui/web-coder-ui}${name/sdk/sdk-ts}.yml)"
+              exit 1
+            fi
+            echo "@jaato/${name} ${version} is on npm"
+          done
+
+      - name: "Install + build (against the file: links)"
+        run: |
+          npm --prefix jaato-sdk-ts ci --no-audit --no-fund
+          npm --prefix jaato-sdk-ts run build
+          npm --prefix jaato-web-coder-ui ci --no-audit --no-fund
+          npm --prefix jaato-web-coder-server ci --no-audit --no-fund
+          npm --prefix jaato-web-coder-server run build
+
+      - name: Prepare the publishable manifest
+        working-directory: jaato-web-coder-server
+        run: |
+          node scripts/prepare-publish.mjs
+          node -p "JSON.stringify(require('./package.json').dependencies, null, 2)"
+
+      - name: Publish to npm
+        working-directory: jaato-web-coder-server
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

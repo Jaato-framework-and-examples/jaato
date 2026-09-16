@@ -1,0 +1,9 @@
+{
+  "type": "ticket.revoke.result",
+  "timestamp": "<TIMESTAMP>",
+  "session_id": "",
+  "request_id": "",
+  "status": "",
+  "revoked": 0,
+  "detail": null
+}

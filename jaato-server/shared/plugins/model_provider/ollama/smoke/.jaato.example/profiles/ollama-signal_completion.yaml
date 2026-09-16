@@ -9,7 +9,6 @@ description: >
 model: qwen3:8b
 provider: ollama
 
-max_turns: 3
 
 suppress_base_instructions: true
 

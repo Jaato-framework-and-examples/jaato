@@ -24,7 +24,6 @@ def test_profile_summary_minimal():
     assert p.plugin_configs == {}
     assert p.model is None
     assert p.provider is None
-    assert p.max_turns == 10
     assert p.model_tiers == {}
     assert p.gc is None
     assert p.runtime_limits is None
@@ -72,7 +71,6 @@ def test_session_profiles_event_round_trip_full_shape():
         plugin_configs={"cli": {"timeout": 30}},
         model="claude-sonnet-4-5",
         provider="anthropic",
-        max_turns=25,
         model_tiers={"initial": "fast", "fast": "claude-haiku"},
         gc={"type": "budget", "threshold_percent": 80.0},
         runtime_limits={"memory_limit_bytes": 1_000_000_000},

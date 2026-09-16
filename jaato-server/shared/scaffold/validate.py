@@ -2129,14 +2129,22 @@ def _profile_key_findings(data: Any, name: str) -> List[Diagnostic]:
     a wrong belief baked into the workspace, and nothing in the framework
     would ever contradict it.
 
-    Two findings, because two mistakes with the same symptom want different
-    fixes:
+    Three findings, because three mistakes with the same symptom want
+    different fixes:
 
     ``unknown_profile_key`` (**warn**)
         the key is read by nobody.  A near-miss from the accepted set is
         named when there is one, since the overwhelmingly common case is a
         typo (``plugins_configs``) or a key borrowed from a neighbouring
         surface (``config_root``, ``tools``).
+
+    ``removed_profile_key`` (**warn**)
+        the key used to be read and is not any more, so the author mistyped
+        nothing — the field was withdrawn under them.  The message names the
+        successor instead of guessing at a near-miss, which is what an
+        ``unknown_profile_key`` would have done here (``max_turns`` has no
+        close match in the accepted set, so it would have offered no fix at
+        all).  See ``PROFILE_REMOVED_FIELDS``.
 
     ``derived_profile_key`` (**warn**)
         the key IS a ``SubagentProfile`` field — so it appears in ``explain
@@ -2153,7 +2161,7 @@ def _profile_key_findings(data: Any, name: str) -> List[Diagnostic]:
     trade than saying so.
     """
     from shared.plugins.subagent.config import (
-        PROFILE_DERIVED_FIELDS, PROFILE_FILE_KEYS,
+        PROFILE_DERIVED_FIELDS, PROFILE_FILE_KEYS, PROFILE_REMOVED_FIELDS,
     )
 
     if not isinstance(data, dict):
@@ -2161,6 +2169,14 @@ def _profile_key_findings(data: Any, name: str) -> List[Diagnostic]:
     out: List[Diagnostic] = []
     for key in data:
         if not isinstance(key, str) or key in PROFILE_FILE_KEYS:
+            continue
+        if key in PROFILE_REMOVED_FIELDS:
+            out.append(Diagnostic(
+                "warn", "removed_profile_key",
+                f"'{key}' is no longer a profile key — "
+                f"{PROFILE_REMOVED_FIELDS[key]}.  The line loads without "
+                f"error and is read by nobody",
+                profile=name, where=key))
             continue
         if key in PROFILE_DERIVED_FIELDS:
             out.append(Diagnostic(

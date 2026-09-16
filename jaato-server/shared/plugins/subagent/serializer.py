@@ -23,7 +23,7 @@ def serialize_subagent_state(session_info: Dict[str, Any]) -> Dict[str, Any]:
     Args:
         session_info: The session info dict from SubagentPlugin._active_sessions.
             Expected keys: session, profile, agent_id, created_at, last_activity,
-            turn_count, max_turns
+            turn_count
 
     Returns:
         JSON-serializable dict with full subagent state.
@@ -49,7 +49,7 @@ def serialize_subagent_state(session_info: Dict[str, Any]) -> Dict[str, Any]:
             'system_instructions': profile.system_instructions,
             'model': profile.model,
             'provider': profile.provider,
-            'max_turns': profile.max_turns,
+
         }
         if profile.inherits:
             profile_data['inherits'] = profile.inherits
@@ -91,7 +91,7 @@ def serialize_subagent_state(session_info: Dict[str, Any]) -> Dict[str, Any]:
         'created_at': created_at,
         'last_activity': last_activity,
         'turn_count': session_info.get('turn_count', 0),
-        'max_turns': session_info.get('max_turns', 10),
+
         'metadata': {},  # Reserved for future use
     }
 
@@ -144,7 +144,7 @@ def deserialize_subagent_state(data: Dict[str, Any]) -> Dict[str, Any]:
             system_instructions=profile_data.get('system_instructions'),
             model=profile_data.get('model'),
             provider=profile_data.get('provider'),
-            max_turns=profile_data.get('max_turns', 10),
+
             inherits=profile_data.get('inherits'),
             gc=gc_config,
         )
@@ -166,7 +166,7 @@ def deserialize_subagent_state(data: Dict[str, Any]) -> Dict[str, Any]:
         'created_at': created_at,
         'last_activity': last_activity,
         'turn_count': data.get('turn_count', 0),
-        'max_turns': data.get('max_turns', 10),
+
         'session': None,  # Must be recreated by caller
     }
 
@@ -212,7 +212,7 @@ def serialize_subagent_registry(
             'created_at': created_at,
             'last_activity': last_activity,
             'turn_count': info.get('turn_count', 0),
-            'max_turns': info.get('max_turns', 10),
+
         })
 
     return {
@@ -230,7 +230,7 @@ def deserialize_subagent_registry(data: Dict[str, Any]) -> List[Dict[str, Any]]:
     Returns:
         List of agent info dicts with parsed datetimes.
         Each dict has: agent_id, profile_name, status, created_at, last_activity,
-        turn_count, max_turns.
+        turn_count.
 
     Raises:
         ValueError: If version is incompatible.
@@ -257,7 +257,7 @@ def deserialize_subagent_registry(data: Dict[str, Any]) -> List[Dict[str, Any]]:
             'created_at': created_at,
             'last_activity': last_activity,
             'turn_count': agent.get('turn_count', 0),
-            'max_turns': agent.get('max_turns', 10),
+
         })
 
     return result

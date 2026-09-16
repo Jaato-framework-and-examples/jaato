@@ -7,7 +7,7 @@ re-derive it from config.py.
 the ones a profile author could only learn by reading ``_merge_profiles``, and
 getting them wrong cost an "interrogate" profile its budget ceiling: it stopped
 inheriting in order to drop one processor and silently lost ``budget_control``,
-``max_turns``, ``runtime_limits``, ``env`` and ``plugin_configs`` with it."""
+``runtime_limits``, ``env`` and ``plugin_configs`` with it."""
 from shared.scaffold import explain
 
 
@@ -45,5 +45,5 @@ def test_profile_warns_against_dropping_inherits_to_lose_a_processor():
     profile from scratch, and losing every safety ceiling with it."""
     _data, text = explain.profile()
     assert "Don't stop inheriting just to drop a processor" in text
-    for lost in ("budget_control", "max_turns", "runtime_limits"):
+    for lost in ("budget_control", "runtime_limits"):
         assert lost in text

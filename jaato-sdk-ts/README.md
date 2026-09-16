@@ -192,7 +192,9 @@ import { JaatoClient, EventType } from "@jaato/sdk";
 
 const client = new JaatoClient({
   url: "ws://localhost:8080",
-  token: "<bearer-token>",  // omit when behind a proxy that injects it
+  token: "<bearer-token>",  // omit when behind a proxy that injects it;
+                            // or a function returning a fresh per-user
+                            // ticket per attempt (protocol 1.10, #1074)
   recovery: {
     autoReconnect: true,
     autoReattachSessionId: true,  // re-attach session automatically after a reconnect
@@ -226,7 +228,7 @@ await client.createSession({
     provider: "anthropic",
     plugins: ["cli", "web_search"],
     system_instructions: "You are an operations engineer.",
-    // plugin_configs, gc, env, max_turns, runtime_limits, model_tiers, ...
+    // plugin_configs, gc, env, runtime_limits, model_tiers, ...
   },
 });
 

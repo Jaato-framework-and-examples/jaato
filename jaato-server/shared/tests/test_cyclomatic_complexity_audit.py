@@ -106,7 +106,16 @@ BASELINE: Dict[str, int] = {
     "jaato-server/server/command_router.py::CommandRouter._handle_session_new": 18,
     "jaato-server/server/command_router.py::CommandRouter.get_command_list": 52,
     "jaato-server/server/core.py::JaatoServer._build_profile_session_kwargs": 17,
-    "jaato-server/server/core.py::JaatoServer._build_send_message_notification_handler._handle": 92,
+    # 92 -> 91 by #1069.  The budget-rung notification needed a branch in
+    # this chain, and a baselined function may not grow -- so the two arms
+    # whose whole body was "build an event, emit it, return"
+    # (``prompt_injected`` and the new one) moved into the module-level
+    # ``_PURE_NOTIFICATION_EVENTS`` table, which pays for the addition and
+    # leaves the chain one shorter than it was.  Arms with a side effect
+    # (``continuation_needed`` starting a model thread, the GC phases
+    # mutating server state) stay explicit: a table of builders cannot
+    # express those.
+    "jaato-server/server/core.py::JaatoServer._build_send_message_notification_handler._handle": 91,
     "jaato-server/server/core.py::JaatoServer._check_auth_completion": 17,
     "jaato-server/server/core.py::JaatoServer._emit_conversation_replay": 19,
     "jaato-server/server/core.py::JaatoServer._setup_permission_hooks.on_permission_requested": 35,
@@ -150,7 +159,6 @@ BASELINE: Dict[str, int] = {
     "jaato-server/server/runner/tests/test_session_dispatch_lifecycle_e2e.py::test_full_session_lifecycle_through_dispatch_surface": 21,
     "jaato-server/server/runner/tests/test_session_send_message_rpc.py::test_send_message_fires_post_turn_notifications_in_order": 26,
     "jaato-server/server/runner_rpc_client.py::RunnerRPCClient._read_loop": 23,
-    "jaato-server/server/runner_rpc_handlers/profile_payload_schema.py::validate_profile_payload": 16,
     "jaato-server/server/runner_rpc_handlers/spawn_isolated_runner.py::SpawnIsolatedRunnerHandler.handle": 26,
     "jaato-server/server/runner_spawn.py::build_session_envelope": 37,
     "jaato-server/server/runner_spawn.py::spawn_session_runner": 16,
@@ -445,16 +453,15 @@ BASELINE: Dict[str, int] = {
     "jaato-server/shared/plugins/service_connector/plugin.py::ServiceConnectorPlugin._execute_list_endpoints": 19,
     "jaato-server/shared/plugins/service_connector/validation.py::_validate_schema": 44,
     "jaato-server/shared/plugins/subagent/config.py::_discover_premium_profiles": 26,
-    "jaato-server/shared/plugins/subagent/config.py::_merge_profiles": 44,
+    "jaato-server/shared/plugins/subagent/config.py::_merge_profiles": 40,
     "jaato-server/shared/plugins/subagent/config.py::_scan_profiles_dir": 33,
     "jaato-server/shared/plugins/subagent/config.py::resolve_agent": 16,
-    "jaato-server/shared/plugins/subagent/config.py::validate_profile": 53,
+    "jaato-server/shared/plugins/subagent/config.py::validate_profile": 49,
     "jaato-server/shared/plugins/subagent/plugin.py::SubagentPlugin._dispatch_isolated_spawn": 22,
-    "jaato-server/shared/plugins/subagent/plugin.py::SubagentPlugin._execute_spawn_subagent": 48,
+    "jaato-server/shared/plugins/subagent/plugin.py::SubagentPlugin._execute_spawn_subagent": 47,
     "jaato-server/shared/plugins/subagent/plugin.py::SubagentPlugin._run_subagent_async": 75,
     "jaato-server/shared/plugins/subagent/plugin.py::SubagentPlugin.initialize": 17,
     "jaato-server/shared/plugins/subagent/plugin.py::SubagentPlugin.restore_persistence_state": 29,
-    "jaato-server/shared/plugins/subagent/tests/test_serializer.py::TestSerializeSubagentRegistry.test_serialize_registry_with_agents": 17,
     "jaato-server/shared/plugins/table_formatter/plugin.py::TableFormatterPlugin.process_chunk": 16,
     "jaato-server/shared/plugins/template/plugin.py::TemplatePlugin._check_item_against_item_keys": 30,
     "jaato-server/shared/plugins/template/plugin.py::TemplatePlugin._discover_standalone_templates": 16,

@@ -10,7 +10,6 @@ description: >
 model: openai/gpt-oss-20b
 provider: lmstudio
 
-max_turns: 1
 
 suppress_base_instructions: true
 

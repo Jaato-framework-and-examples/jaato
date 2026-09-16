@@ -82,7 +82,6 @@ Subagents are defined through **profiles** -- named configurations that specify 
 │  │  plugins: ["file_edit", "cli", "grep"]                       │    │
 │  │  model: "gemini-2.5-flash"        ◄── Optional override     │    │
 │  │  provider: "google_genai"          ◄── Optional override     │    │
-│  │  max_turns: 10                                               │    │
 │  │  auto_approved: false                                        │    │
 │  │  system_instructions: "You are..."                           │    │
 │  │  plugin_configs: {...}             ◄── Per-plugin overrides  │    │
@@ -116,7 +115,6 @@ discover_profiles(".jaato/profiles")
   "description": "Reviews code for quality, security, and best practices",
   "plugins": ["file_edit", "cli", "grep_content"],
   "model": "gemini-2.5-flash",
-  "max_turns": 5,
   "auto_approved": true,
   "system_instructions": "You are a code reviewer. Focus on bugs, security issues, and readability.",
   "gc": {
@@ -188,8 +186,8 @@ When the parent model calls the `delegate` tool, the subagent plugin orchestrate
 │       │    on_agent_created(agent_id, profile, icon)                 │
 │       │                                                              │
 │       ├──► 8. RUN CHAT LOOP                                         │
-│       │    session.send_message(task, on_output=..., max_turns=...)  │
-│       │    Iterates until model stops or max_turns reached           │
+│       │    session.send_message(task, on_output=...)                │
+│       │    Iterates until the model stops calling tools              │
 │       │                                                              │
 │       ├──► 9. EMIT COMPLETION                                        │
 │       │    on_agent_completed(agent_id, result, token_usage)         │
@@ -398,7 +396,6 @@ delegate(
     task="Search for security vulnerabilities",
     plugins=["grep_content", "file_edit", "web_search"],
     system_instructions="Focus on OWASP top 10 vulnerabilities",
-    max_turns=5
 )
 ```
 
@@ -422,7 +419,9 @@ Creates a one-off subagent with tools from the `inline_allowed_plugins` list. **
 
 ### Turn Limits
 
-Each subagent has a `max_turns` limit (default: 10). When reached, the subagent returns its accumulated response to the parent. This prevents runaway agents.
+A subagent has **no turn limit by default**. It returns when the model stops calling tools, when it signals completion, or when the parent closes or cancels it. To bound a runaway, declare `budget_control` in its profile with a `limits.turns` ceiling and a `degrade` rung whose `action` is `abort` — `limits` alone are observed, never enforced (#947).
+
+> Until #1068 this section described a `max_turns` field. It was declared, validated, inherited and advertised to the model, and compared against a turn counter nowhere, so it never prevented a runaway agent. It has been removed.
 
 ### Tool Subset Enforcement
 

@@ -217,7 +217,7 @@ class AnthropicProvider(ModalityCapabilityMixin):
         self._max_tokens_override: Optional[int] = None
 
         # Per-call accounting (updated after each complete() call)
-        self._last_usage: TokenUsage = TokenUsage()
+        self._last_usage: TokenUsage = TokenUsage(reported=False)
 
         # Cache plugin (optional, for delegated cache control)
         self._cache_plugin: Optional[Any] = None  # CachePlugin protocol
@@ -1437,7 +1437,12 @@ class AnthropicProvider(ModalityCapabilityMixin):
         # (Z.AI, Ollama) send the reason and close without a separate
         # ``message_stop``.  Absent both, the stream was cut (#687).
         terminal_seen = False
-        usage = TokenUsage()
+        # Unreported until ``message_start`` or ``message_delta`` carries a
+        # usage block.  BOTH routes mark it: a proxy that drops usage from
+        # one and keeps it on the other is the shape #688 cites, and this
+        # is the one provider whose delta route MUTATES the accumulator
+        # rather than replacing it.
+        usage = TokenUsage(reported=False)
         was_cancelled = False
 
         def flush_text_block():
@@ -1595,6 +1600,9 @@ class AnthropicProvider(ModalityCapabilityMixin):
                                 usage.cache_creation_tokens = delta_usage.cache_creation_tokens
                             usage.output_tokens = delta_usage.output_tokens
                             usage.total_tokens = usage.prompt_tokens + usage.output_tokens
+                            # Mutated in place, so the flag is set here
+                            # rather than inherited from a replacement.
+                            usage.reported = True
                             self._trace(f"STREAM_USAGE prompt={usage.prompt_tokens} output={usage.output_tokens} total={usage.total_tokens}")
                             if on_usage_update and usage.total_tokens > 0:
                                 on_usage_update(usage)

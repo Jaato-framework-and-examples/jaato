@@ -71,8 +71,10 @@ and five rediscoveries.
 
 HOW IT WORKS.  Walk the tree for ``test_*.py`` / ``*_test.py``; parse
 the pytest invocations out of ``.github/workflows/*.y*ml``; a file is
-covered when some commit-triggered step names it, or names a directory
-above it, and no ``--ignore`` on that step excludes it.
+covered when some commit-triggered pytest INVOCATION names it, or names
+a directory above it, and that same invocation does not ``--ignore`` it.
+Existential: one leg running a file is coverage, however many other legs
+exclude it.
 
 RATCHET, NOT THRESHOLD.  ``UNCOVERED`` is an allowlist of deliberate
 exclusions with a reason beside each, following
@@ -90,7 +92,7 @@ import fnmatch
 import glob as _glob
 import shlex
 from pathlib import Path
-from typing import Dict, List, Sequence, Set, Tuple
+from typing import Dict, List, NamedTuple, Sequence, Set
 
 import pytest
 import yaml
@@ -105,7 +107,7 @@ _SKIP_DIRS = frozenset({
 })
 
 #: Flags that consume the NEXT token, so that token is a value and not a
-#: path.  ``-m`` is the interesting one -- see ``_pytest_paths``.
+#: path.  ``-m`` is the interesting one -- see ``_pytest_invocations``.
 _VALUE_FLAGS = frozenset({
     "-m", "-k", "-p", "-n", "-o", "-c", "-r", "--deselect", "--rootdir",
     "--override-ini", "--maxfail", "--tb", "--junitxml", "--cov",
@@ -252,11 +254,33 @@ def _resolve(token: str) -> List[str]:
     return out
 
 
-def _pytest_paths(command: str) -> Tuple[Set[str], Set[str]]:
-    """``(covered_roots, ignored_roots)`` from one shell snippet."""
-    covered: Set[str] = set()
-    ignored: Set[str] = set()
+class _Invocation(NamedTuple):
+    """One ``pytest`` command line: what it runs, and what it excludes.
+
+    The pair is kept TOGETHER because ``--ignore`` binds to the
+    invocation that carries it and to nothing else.  Unioning the
+    ignores across invocations -- which this scan used to do -- makes one
+    leg's exclusion silently cancel another leg's coverage, so a file
+    named explicitly by ``contract-guards`` read as uncovered the moment
+    any other leg ignored it.  That is the opposite of what a coverage
+    guard is for: it fails a repository that improved its CI.
+    """
+
+    covered: Set[str]
+    ignored: Set[str]
+
+
+def _pytest_invocations(command: str) -> List[_Invocation]:
+    """One ``_Invocation`` per pytest command line in a shell snippet.
+
+    Per LINE rather than per step, because a step legitimately holds
+    several invocations -- the `server (daemon tier)` leg runs one pytest
+    per tree -- and an ``--ignore`` on the third must not reach the first.
+    """
+    out: List[_Invocation] = []
     for line in command.replace("\\\n", " ").splitlines():
+        covered: Set[str] = set()
+        ignored: Set[str] = set()
         if "pytest" not in line:
             continue
         try:
@@ -295,13 +319,14 @@ def _pytest_paths(command: str) -> Tuple[Set[str], Set[str]]:
             if tok.startswith("-"):
                 continue
             covered.update(_resolve(tok))
-    return covered, ignored
+        if covered or ignored:
+            out.append(_Invocation(covered, ignored))
+    return out
 
 
-def _covered_roots() -> Tuple[Set[str], Set[str]]:
-    """Union of pytest paths over every commit-triggered workflow."""
-    covered: Set[str] = set()
-    ignored: Set[str] = set()
+def _covered_invocations() -> List[_Invocation]:
+    """Every pytest invocation across every commit-triggered workflow."""
+    out: List[_Invocation] = []
     for wf in sorted(WORKFLOWS.glob("*.y*ml")):
         try:
             doc = yaml.safe_load(wf.read_text())
@@ -310,10 +335,18 @@ def _covered_roots() -> Tuple[Set[str], Set[str]]:
         if not isinstance(doc, dict) or not _is_commit_triggered(doc):
             continue
         for scalar in _scalars(doc):
-            c, i = _pytest_paths(scalar)
-            covered |= c
-            ignored |= i
-    return covered, ignored
+            out.extend(_pytest_invocations(scalar))
+    return out
+
+
+def _all_covered_roots(invocations: List[_Invocation]) -> Set[str]:
+    """Every path any invocation names, ignores aside.
+
+    For the self-probe that asks whether the scan resolved anything at
+    all -- a question about the PARSER, not about coverage.
+    """
+    return set().union(*(inv.covered for inv in invocations)) \
+        if invocations else set()
 
 
 def _under(path: str, root: str) -> bool:
@@ -321,10 +354,17 @@ def _under(path: str, root: str) -> bool:
     return path == root or (root.endswith("/") and path.startswith(root))
 
 
-def _is_covered(path: str, covered: Set[str], ignored: Set[str]) -> bool:
-    if any(_under(path, r) for r in ignored):
-        return False
-    return any(_under(path, r) for r in covered)
+def _is_covered(path: str, invocations: List[_Invocation]) -> bool:
+    """Does SOME invocation run ``path`` without ignoring it?
+
+    Existential, not universal: one leg naming the file is coverage,
+    however many other legs exclude it.
+    """
+    return any(
+        any(_under(path, r) for r in inv.covered)
+        and not any(_under(path, r) for r in inv.ignored)
+        for inv in invocations
+    )
 
 
 def _allowlisted(path: str) -> bool:
@@ -366,7 +406,8 @@ def test_the_scan_sees_the_workflow_it_is_supposed_to_see() -> None:
         "that says otherwise collects no steps at all"
     )
 
-    covered, _ = _covered_roots()
+    invocations = _covered_invocations()
+    covered = _all_covered_roots(invocations)
     assert covered, (
         "no pytest path was resolved out of any workflow. Every test file "
         "would then read as uncovered -- or, with one comparison flipped, "
@@ -381,8 +422,7 @@ def test_the_scan_sees_the_workflow_it_is_supposed_to_see() -> None:
 
     known = "jaato-server/shared/tests/test_ci_runs_every_test_file.py"
     assert Path(ROOT / known).is_file(), "this file moved; update the probe"
-    ignored: Set[str] = _covered_roots()[1]
-    assert _is_covered(known, covered, ignored), (
+    assert _is_covered(known, invocations), (
         f"{known} is named by the contract-guards job and must read as "
         "covered; if it does not, path spellings are not comparable and "
         "every verdict below is noise"
@@ -400,10 +440,10 @@ def test_no_uncovered_test_files_outside_the_allowlist() -> None:
     files = _discover_test_files()
     assert files, "no test files discovered at all; the walk is broken"
 
-    covered, ignored = _covered_roots()
+    invocations = _covered_invocations()
     uncovered = sorted(
         f for f in files
-        if not _is_covered(f, covered, ignored) and not _allowlisted(f)
+        if not _is_covered(f, invocations) and not _allowlisted(f)
     )
     if uncovered:
         by_dir: Dict[str, int] = {}
@@ -437,7 +477,7 @@ def test_allowlist_has_no_stale_entries() -> None:
     BASELINE.
     """
     files = _discover_test_files()
-    covered, ignored = _covered_roots()
+    invocations = _covered_invocations()
 
     stale: List[str] = []
     for entry in sorted(UNCOVERED):
@@ -454,7 +494,7 @@ def test_allowlist_has_no_stale_entries() -> None:
             )
             continue
         still_uncovered = [
-            f for f in matched if not _is_covered(f, covered, ignored)
+            f for f in matched if not _is_covered(f, invocations)
         ]
         if not still_uncovered:
             stale.append(
@@ -465,6 +505,65 @@ def test_allowlist_has_no_stale_entries() -> None:
         "UNCOVERED has stale entries. It may only shrink -- an entry that "
         "outlives its reason turns the allowlist into decoration:\n"
         + "\n".join(stale)
+    )
+
+
+def test_an_ignore_binds_to_the_invocation_that_carries_it() -> None:
+    """One leg's ``--ignore`` must not cancel another leg's coverage.
+
+    The scan used to union ``covered`` and ``ignored`` across every
+    invocation in every workflow and let the union of ignores win.  With
+    a single set of each, "some leg runs this file" and "some leg
+    excludes this file" cannot both be represented, and the second
+    silently beat the first -- so a file named explicitly by one job read
+    as UNCOVERED the moment any other job ignored it.
+
+    That is failure in the expensive direction: the guard exists to catch
+    a test file going unrun, and the union rule instead failed a
+    repository whose CI had just stopped running one file TWICE.  It was
+    reachable the first time anyone wrote an ``--ignore`` for a file
+    named elsewhere, which is #1080's fix to the duplicated meta-guard.
+
+    Asserted twice over: on synthetic invocations, which pin the rule
+    whatever the workflows say, and on the real workflows for the file
+    that made it reachable.
+    """
+    only = "jaato-server/shared/tests/test_only_here.py"
+    runs_it = _Invocation(covered={only}, ignored=set())
+    excludes_it = _Invocation(
+        covered={"jaato-server/shared/tests/"}, ignored={only},
+    )
+
+    assert _is_covered(only, [runs_it, excludes_it]), (
+        "a file one invocation names and another ignores must read as "
+        "covered; it runs, in the first one"
+    )
+    assert _is_covered(only, [excludes_it, runs_it]), (
+        "the verdict must not depend on the order invocations were "
+        "parsed in -- workflow files are read in sorted name order"
+    )
+    assert not _is_covered(only, [excludes_it]), (
+        "with nothing left running the file, it is uncovered -- "
+        "otherwise the rule accepts every file and asserts nothing"
+    )
+
+    # And live, on the file #1080 moved: the `reversion-guard` job names
+    # it, the `shared/tests` leg ignores it.  If this ever reads False
+    # the meta-guard runs nowhere and the de-duplication went too far.
+    meta = ("jaato-server/shared/tests/"
+            "test_every_guard_detects_its_own_reversion.py")
+    invocations = _covered_invocations()
+    assert Path(ROOT / meta).is_file(), "the meta-guard moved; update this"
+    assert any(any(_under(meta, r) for r in inv.ignored)
+               for inv in invocations), (
+        f"{meta} is no longer ignored anywhere, so this probe has stopped "
+        "exercising the per-invocation rule -- point it at whatever file "
+        "carries an --ignore now, or drop it"
+    )
+    assert _is_covered(meta, invocations), (
+        f"{meta} reads as uncovered. Some job must still RUN it: it is "
+        "the suite that proves every other guard detects its own "
+        "reversion, and nothing else would notice it going unrun"
     )
 
 
@@ -503,6 +602,30 @@ REVERSIONS = [
         ),
         test="test_the_scan_sees_the_workflow_it_is_supposed_to_see",
     ),
+    Reversion(
+        target="jaato-server/shared/tests/test_ci_runs_every_test_file.py",
+        find="""however many other legs exclude it.
+    \"\"\"
+    return any(
+        any(_under(path, r) for r in inv.covered)
+        and not any(_under(path, r) for r in inv.ignored)
+        for inv in invocations
+    )""",
+        replace="""however many other legs exclude it.
+    \"\"\"
+    if any(any(_under(path, r) for r in inv.ignored)
+           for inv in invocations):
+        return False
+    return any(any(_under(path, r) for r in inv.covered)
+               for inv in invocations)""",
+        because=(
+            "the global-union rule this replaced: one leg's --ignore "
+            "cancelling every other leg's coverage, so a file named "
+            "explicitly by contract-guards read as unrun the moment the "
+            "shared/tests leg stopped duplicating it"
+        ),
+        test="test_an_ignore_binds_to_the_invocation_that_carries_it",
+    ),
 ]
 
 
@@ -511,8 +634,8 @@ if __name__ == "__main__":                       # pragma: no cover
     # re-freeze of UNCOVERED is one command -- the same affordance
     # test_cyclomatic_complexity_audit.py offers for its BASELINE.
     _files = _discover_test_files()
-    _cov, _ign = _covered_roots()
-    _unc = sorted(f for f in _files if not _is_covered(f, _cov, _ign))
+    _inv = _covered_invocations()
+    _unc = sorted(f for f in _files if not _is_covered(f, _inv))
     print(f"{len(_files)} test files, "
           f"{len(_files) - len(_unc)} covered, {len(_unc)} UNCOVERED")
     _by: Dict[str, int] = {}

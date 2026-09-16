@@ -347,8 +347,8 @@ def test_a_gate_that_always_refuses_stops_refusing_at_its_ceiling(daemon):
     """The refusal ceiling must have an effect on a REAL session loop.
 
     ``completion_processors`` is the framework's fix-until-it-passes loop, and
-    ``max_refusals`` is what bounds it. Nothing upstream does: ``max_turns``
-    bounds the session rather than this gate, and ``MAX_COMPLETION_NUDGES``
+    ``max_refusals`` is what bounds it. Nothing upstream does:
+    ``budget_control`` bounds the session rather than this gate, and ``MAX_COMPLETION_NUDGES``
     bounds the opposite direction (an agent that stops WITHOUT signalling).
     Unbounded, the shape is stable and does not terminate — the gate refuses,
     the agent re-claims completion, the gate refuses again. Measured in

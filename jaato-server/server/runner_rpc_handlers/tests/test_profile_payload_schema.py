@@ -70,7 +70,6 @@ class TestHappyPath:
             "plugin_configs": {"cli": {"timeout": 30}},
             "system_instructions": "You are a research analyst...",
             "suppress_base_instructions": False,
-            "max_turns": 10,
             "env": {"KEY1": "value1", "KEY2": "value2"},
             "gc": {"type": "summarize", "config": {"threshold": 0.8}},
             "trace": {"provider_log": ".jaato/logs/provider_trace.jsonl"},
@@ -99,7 +98,7 @@ class TestProducerRoundTrip:
         producer_keys = {
             "name", "description", "model", "provider",
             "plugins", "plugin_configs", "system_instructions",
-            "suppress_base_instructions", "max_turns", "env",
+            "suppress_base_instructions", "env",
             "gc", "trace", "runtime_limits",
         }
         # Every producer-side key is allow-listed:
@@ -229,32 +228,14 @@ class TestTopLevelTypes:
                 _valid_payload(suppress_base_instructions="yes"),
             )
 
-    def test_max_turns_non_int_rejected(self):
+    def test_max_turns_is_no_longer_accepted(self):
+        """#1068 removed the field, and this allow-list rejects unknown
+        keys by design — so a dead entry here would be a permanently inert
+        line in a security allow-list.  Both ends of this wire ship in the
+        same package, so there is no version skew to tolerate."""
+        assert "max_turns" not in PROFILE_PAYLOAD_ALLOWED_KEYS
         with pytest.raises(ValueError, match="max_turns"):
-            validate_profile_payload(
-                _valid_payload(max_turns="10"),
-            )
-
-    def test_max_turns_bool_rejected_despite_subclass(self):
-        """Pin: bool is a subclass of int in Python, but
-        ``max_turns=True`` is misleading — explicit reject."""
-        with pytest.raises(ValueError, match="max_turns"):
-            validate_profile_payload(_valid_payload(max_turns=True))
-
-    def test_max_turns_zero_rejected(self):
-        with pytest.raises(ValueError, match="out of range"):
-            validate_profile_payload(_valid_payload(max_turns=0))
-
-    def test_max_turns_too_large_rejected(self):
-        with pytest.raises(ValueError, match="out of range"):
-            validate_profile_payload(
-                _valid_payload(max_turns=1_000_000),
-            )
-
-    def test_max_turns_valid_range(self):
-        # boundary values
-        validate_profile_payload(_valid_payload(max_turns=1))
-        validate_profile_payload(_valid_payload(max_turns=1000))
+            validate_profile_payload(_valid_payload(max_turns=10))
 
 
 # ──────────────────────────────────────────────────────────────────

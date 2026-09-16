@@ -38,7 +38,6 @@ class TestBuildInlineProfile:
             "plugins": ["cli", "web_search"],
             "plugin_configs": {"cli": {"timeout": 30}},
             "system_instructions": "You are a researcher.",
-            "max_turns": 25,
             "env": {"FOO": "bar"},
         })
         assert p.model == "claude-sonnet-4-5"
@@ -46,7 +45,6 @@ class TestBuildInlineProfile:
         assert p.plugins == ["cli", "web_search"]
         assert p.plugin_configs == {"cli": {"timeout": 30}}
         assert p.system_instructions == "You are a researcher."
-        assert p.max_turns == 25
         assert p.env == {"FOO": "bar"}
 
     def test_spec_name_is_honored(self):

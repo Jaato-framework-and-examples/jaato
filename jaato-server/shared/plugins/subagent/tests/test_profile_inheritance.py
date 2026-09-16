@@ -428,25 +428,6 @@ class TestResolveMultipleInheritance:
         assert not errors
         assert resolved["child"].env["KEY"] == "val_child"
 
-    def test_max_turns_uses_minimum(self):
-        profiles = {
-            "a": SubagentProfile(
-                name="a", description="A",
-                max_turns=5,
-            ),
-            "b": SubagentProfile(
-                name="b", description="B",
-                max_turns=20,
-            ),
-            "child": SubagentProfile(
-                name="child", description="Child",
-                inherits=["a", "b"],
-            ),
-        }
-        resolved, errors = resolve_profiles(profiles)
-        assert not errors
-        assert resolved["child"].max_turns == 5
-
 
 class TestResolveDeepChain:
     """Tests for multi-level inheritance chains."""
@@ -933,7 +914,7 @@ class TestCompletionProcessorsInheritance:
 
     Before the opt-out existed, a child whose stage genuinely completed
     differently had to stop inheriting altogether — and silently lost
-    ``budget_control`` / ``max_turns`` / ``runtime_limits`` / ``env`` /
+    ``budget_control`` / ``runtime_limits`` / ``env`` /
     ``plugin_configs`` in the process.  ``test_the_wrong_turn_...`` below
     pins the cost that made this worth a field.
     """
@@ -1009,7 +990,6 @@ class TestCompletionProcessorsInheritance:
         from shared.budget_control import BudgetControlConfig
         profiles = {
             "base": self._base(
-                max_turns=4,
                 env={"STAGE": "worker"},
                 budget_control=BudgetControlConfig(limits={"usd": 1.5}),
             ),
@@ -1022,7 +1002,6 @@ class TestCompletionProcessorsInheritance:
         assert not errors
         child = resolved["child"]
         assert child.completion_processors == [self.AUDIT]
-        assert child.max_turns == 4
         assert child.env == {"STAGE": "worker"}
         assert child.budget_control.limits == {"usd": 1.5}
 
@@ -1031,7 +1010,6 @@ class TestCompletionProcessorsInheritance:
         from shared.budget_control import BudgetControlConfig
         profiles = {
             "base": self._base(
-                max_turns=4,
                 env={"STAGE": "worker"},
                 budget_control=BudgetControlConfig(limits={"usd": 1.5}),
             ),
@@ -1044,7 +1022,6 @@ class TestCompletionProcessorsInheritance:
         child = resolved["child"]
         assert child.completion_processors == []
         assert child.budget_control is None      # no cost ceiling
-        assert child.max_turns == 10             # and the default is LOOSER
         assert child.env == {}
 
     def test_suppression_does_not_touch_the_childs_own_processors(self):

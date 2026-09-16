@@ -198,7 +198,7 @@ class OpenAICompatProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
         self._base_url: str = ""
 
         # Per-call accounting (NOT conversation state)
-        self._last_usage: TokenUsage = TokenUsage()
+        self._last_usage: TokenUsage = TokenUsage(reported=False)
         self._context_length: int = 0
 
         # OpenAI Chat Completions body fields from
@@ -774,7 +774,10 @@ class OpenAICompatProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
         # that terminated the turn (#687).
         terminal_seen = False
         function_calls: List[FunctionCall] = []
-        usage = TokenUsage()
+        # Unreported until a chunk actually carries a ``usage`` block.  A
+        # stream that never sends one leaves this all-zero AND honest,
+        # instead of claiming the turn measurably cost nothing (#688).
+        usage = TokenUsage(reported=False)
         was_cancelled = False
 
         # Track tool call accumulation (streaming sends tool calls in pieces)

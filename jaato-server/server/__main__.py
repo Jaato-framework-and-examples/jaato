@@ -43,7 +43,13 @@ import stat
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
+
+if TYPE_CHECKING:  # pragma: no cover - annotations only
+    # Imported lazily at runtime (inside _resolve_ws_app_credentials)
+    # so a daemon started without --ws-app-credentials never imports
+    # the module, matching how server.websocket is reached here.
+    from server.ws_tickets import AppCredentialStore
 
 # Add project root to path
 ROOT = Path(__file__).resolve().parents[1]
@@ -307,6 +313,8 @@ class JaatoDaemon:
         ws_token: Optional[str] = None,
         ws_token_file: Optional[str] = None,
         ws_unsafe_no_auth: bool = False,
+        ws_app_credentials: 'Optional[AppCredentialStore]' = None,
+        ws_app_credentials_file: Optional[str] = None,
     ):
         """Initialize the daemon.
 
@@ -326,6 +334,14 @@ class JaatoDaemon:
                 request. ``None`` means WS auth is disabled (open accept
                 — only acceptable on a trusted network or behind a
                 terminating reverse proxy that does its own auth).
+            ws_app_credentials: Optional
+                :class:`~server.ws_tickets.AppCredentialStore` (#1074). Each
+                entry authorises one connection to mint per-user connect
+                tickets and to do nothing else. ``None`` is the default and
+                leaves WS auth exactly as it was.
+            ws_app_credentials_file: The path the store was loaded from,
+                persisted for ``--restart``. A path, never a credential —
+                the same rule ``ws_token_file`` follows.
         """
         self.ipc_socket = ipc_socket
         self.web_socket = web_socket
@@ -340,6 +356,8 @@ class JaatoDaemon:
         # --restart. The plaintext _ws_token is never serialised.
         self._ws_token_file = ws_token_file
         self._ws_unsafe_no_auth = ws_unsafe_no_auth
+        self._ws_app_credentials = ws_app_credentials
+        self._ws_app_credentials_file = ws_app_credentials_file
 
         # Components
         self._session_manager: Optional[SessionManager] = None
@@ -537,6 +555,7 @@ class JaatoDaemon:
                 workspace_root=_default_ws_root,
                 ssl_context=ws_ssl_ctx,
                 required_token=self._ws_token,
+                app_credentials=self._ws_app_credentials,
             )
             _cgroups_root_env = os.environ.get("JAATO_CGROUPS_ROOT", "").strip()
             if _cgroups_root_env:
@@ -854,6 +873,7 @@ class JaatoDaemon:
             "server_name": self._server_name,
             "ws_token_file": self._ws_token_file,
             "ws_unsafe_no_auth": self._ws_unsafe_no_auth,
+            "ws_app_credentials": self._ws_app_credentials_file,
         }
         try:
             with open(self.config_file, 'w') as f:
@@ -1766,6 +1786,78 @@ def _resolve_ws_token(args) -> Optional[str]:
     return token
 
 
+def _resolve_ws_app_credentials(args) -> 'Optional[AppCredentialStore]':
+    """Load the application-credentials file, or return ``None`` (#1074).
+
+    ``None`` -- the default, and what every deployment predating #1074 gets
+    -- means no connection can ever be an application-credential connection,
+    so no ticket can be bound and the WS auth path is byte-identical to the
+    single-shared-token check it has always been.
+
+    Loading is fail-CLOSED and exits rather than degrading, matching
+    :func:`_load_token_file`: a credentials file that could not be read is a
+    security configuration that did not take effect, and starting anyway
+    would serve the old posture while the operator believes otherwise.
+    Mode 0600-or-stricter is enforced by the loader, because an app
+    credential is a credential for every identity that application can
+    assert.
+
+    Refused rather than accepted:
+
+    * the flag without ``--web-socket`` -- there is no WS server to carry the
+      bind channel, so the file would authorise nothing;
+    * the flag with ``--ws-unsafe-no-auth`` -- the point of app credentials is
+      to distinguish callers, and open accept distinguishes nobody. Accepting
+      both would leave the operator believing identities were being checked.
+    """
+    if not args.ws_app_credentials:
+        return None
+    if not args.web_socket:
+        print(
+            "Error: --ws-app-credentials requires --web-socket",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    if args.ws_unsafe_no_auth:
+        print(
+            "Error: --ws-app-credentials cannot be combined with "
+            "--ws-unsafe-no-auth (open accept authenticates nobody, so no "
+            "connection could be identified as an application)",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    from server.ws_tickets import AppCredentialsError, load_app_credentials
+    try:
+        store = load_app_credentials(args.ws_app_credentials)
+    except AppCredentialsError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(2)
+    return store
+
+
+def _apply_peer_path_trust_flag(args) -> None:
+    """Publish ``--ipc-trust-peer-paths`` as the env var that carries it.
+
+    The peer-entitlement opt-out is read from the environment by
+    :func:`shared.peer_identity.path_checks_disabled`, which is where the
+    check itself lives — one definition, reachable from the transport
+    without threading a flag through four constructors that have no other
+    use for it.  So the flag SETS the variable rather than travelling as
+    an argument.
+
+    Set-only, never cleared: an operator who exported
+    ``JAATO_IPC_TRUST_PEER_PATHS`` and did not pass the flag keeps the
+    posture they chose.  Absence of a flag is not a request to re-arm
+    something the environment already disabled.
+
+    A separate function rather than two lines inside :func:`main` because
+    the complexity ratchet freezes that function at its recorded size and
+    says so: add new logic in a helper.
+    """
+    if getattr(args, "ipc_trust_peer_paths", False):
+        os.environ["JAATO_IPC_TRUST_PEER_PATHS"] = "1"
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Jaato Server - Multi-client AI assistant backend",
@@ -1825,6 +1917,20 @@ Examples:
              f"on first WS-bound daemon start if it does not exist.",
     )
     parser.add_argument(
+        "--ws-app-credentials",
+        metavar="PATH",
+        default=None,
+        help="Path to a JSON file of APPLICATION credentials, mapping an "
+             "app id to that application's long-lived credential. Each "
+             "authorises one WS connection to call ticket.bind / "
+             "ticket.revoke -- minting a short-lived, single-use ticket for "
+             "one of that application's already-authenticated users -- and "
+             "authorises nothing else: such a connection cannot open a "
+             "session. File must be mode 0600 or stricter. Omit it and the "
+             "daemon behaves exactly as before: one shared token, or "
+             "--ws-unsafe-no-auth.",
+    )
+    parser.add_argument(
         "--ws-unsafe-no-auth",
         action="store_true",
         help="Disable WS bearer auth entirely. Required to keep the legacy "
@@ -1839,6 +1945,19 @@ Examples:
              "any principal that can open the socket can fully drive the agent. "
              "Pass 666 to opt into world-accessible (e.g. cross-user containers "
              "on a trusted host).",
+    )
+    parser.add_argument(
+        "--ipc-trust-peer-paths",
+        action="store_true",
+        help="Disable the IPC peer-entitlement check: act on any workspace "
+             "or config_root a client names, without verifying the "
+             "connecting OS account could reach it. The check is per "
+             "CONNECTION, not per daemon -- it is skipped for a client "
+             "running as the daemon's own uid (which can already reach "
+             "anything the daemon can) and runs for every other account, "
+             "so it bites exactly on a socket several accounts share (see "
+             "--socket-mode). Logs a WARNING the first time it takes "
+             "effect. Equivalent to JAATO_IPC_TRUST_PEER_PATHS=1.",
     )
     parser.add_argument(
         "--dashboard-port",
@@ -1961,6 +2080,9 @@ Examples:
         args.ws_token_file = config.get("ws_token_file")
         args.ws_token = None
         args.ws_unsafe_no_auth = bool(config.get("ws_unsafe_no_auth", False))
+        # A PATH, never a credential -- the file is re-read (and its mode
+        # re-checked) on the restarted daemon.
+        args.ws_app_credentials = config.get("ws_app_credentials")
 
         # Always restart as daemon
         args.daemon = True
@@ -2029,8 +2151,13 @@ Examples:
     if args.daemon or os.environ.get("JAATO_DAEMONIZED"):
         configure_logging(log_file=args.log_file, verbose=args.verbose)
 
+    _apply_peer_path_trust_flag(args)
+
     # Resolve WS bearer token (only when --web-socket is configured).
     ws_token = _resolve_ws_token(args)
+    # Resolve application credentials (#1074).  ``None`` when the flag is
+    # absent, which is the pre-#1074 posture exactly.
+    ws_app_credentials = _resolve_ws_app_credentials(args)
 
     # Create and run daemon
     socket_mode = int(args.socket_mode, 8)
@@ -2045,6 +2172,8 @@ Examples:
         ws_token=ws_token,
         ws_token_file=args.ws_token_file,
         ws_unsafe_no_auth=args.ws_unsafe_no_auth,
+        ws_app_credentials=ws_app_credentials,
+        ws_app_credentials_file=args.ws_app_credentials,
     )
 
     try:

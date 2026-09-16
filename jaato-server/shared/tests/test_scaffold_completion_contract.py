@@ -150,13 +150,18 @@ def test_it_points_at_its_input_side_sibling(rendered):
     first; the symmetry is the fastest way to understand this hook."""
     _data, text = rendered
     assert "prefetch" in text
-    assert "max_turns" in text, (
-        "the retry budget IS max_turns and there is no second knob — an "
-        "author who does not learn that here builds the second one")
-    assert any(f.name == "max_turns"
+    assert "budget_control" in text, (
+        "the retry budget IS budget_control and there is no second knob — "
+        "an author who does not learn that here builds the second one")
+    assert any(f.name == "budget_control"
                for f in dataclasses.fields(_cfg.SubagentProfile)), (
-        "the doc names max_turns as the retry budget; it must be a real "
-        "profile key")
+        "the doc names budget_control as the retry budget; it must be a "
+        "real profile key")
+    assert not any(f.name == "max_turns"
+                   for f in dataclasses.fields(_cfg.SubagentProfile)), (
+        "#1068 removed max_turns because it was enforced nowhere.  This "
+        "assertion used to be its mirror image — it checked the field was "
+        "REAL, which it was, and could not see that it bounded nothing")
 
 
 # ----------------------------- 2. the generator emits the declarative form

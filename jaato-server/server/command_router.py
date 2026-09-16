@@ -15,11 +15,12 @@ import uuid
 from typing import Any, Dict, List, Optional
 
 from jaato_sdk.events import Event
-from server.event_sink import EventSink
+from server.event_sink import EventSink, client_peer
 from server.session_manager import SessionManager
 from server.session_logging import set_logging_context, clear_logging_context
 from shared.path_utils import describe_relative_path
 from shared.session_id import is_safe_session_id
+from shared.peer_identity import unreachable_client_paths
 
 logger = logging.getLogger(__name__)
 
@@ -203,6 +204,27 @@ class CommandRouter:
                 recoverable=True,
             ))
             return
+        refusals = unreachable_client_paths(
+            [("workspace", workspace_path)],
+            # Through the shared tolerance, not a direct attribute read: a
+            # sink predating ``get_client_peer`` must contribute "no peer"
+            # rather than raise, exactly as it does inside the composite.
+            client_peer(self._event_sink, client_id),
+        )
+        if refusals:
+            error = (
+                "set_workspace refused — the connecting account cannot "
+                "reach that path:\n" + "\n".join(f"  - {m}" for m in refusals)
+            )
+            logger.error("Client %s: %s", client_id, error)
+            from jaato_sdk.events import ErrorEvent
+            self._event_sink.send_event(client_id, ErrorEvent(
+                error=error,
+                error_type="PeerPathNotReachable",
+                recoverable=True,
+            ))
+            return
+
         self._event_sink.set_client_workspace(client_id, workspace_path)
         logger.debug(f"Client {client_id} workspace set to: {workspace_path}")
 
@@ -349,6 +371,10 @@ class CommandRouter:
         self._session_manager.handle_request(
             client_id, session_id, event,
             user_id=self._event_sink.get_client_user(client_id),
+            # The kernel-vouched account on the far end of this connection.
+            # Read here for the same reason ``user_id`` is: the transport
+            # owns it and the event body must never be able to claim it.
+            peer=self._event_sink.get_client_peer(client_id),
         )
 
     # ------------------------------------------------------------------

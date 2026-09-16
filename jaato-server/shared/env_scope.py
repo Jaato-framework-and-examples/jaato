@@ -319,6 +319,13 @@ CATALOG: Dict[str, EnvClass] = {
     "JAATO_RUNNER_DISABLE_CONFINE": EnvClass(HOST, None,
         "disables runner self-confinement host-wide; deliberately NOT per "
         "session"),
+    "JAATO_IPC_TRUST_PEER_PATHS": EnvClass(HOST, None,
+        "switches OFF the IPC peer-entitlement check, so the daemon acts "
+        "on whatever workspace / config_root a client names.  A property "
+        "of the SOCKET -- one file, one set of principals reaching it -- "
+        "and deliberately not per session: a session cannot be allowed to "
+        "widen the transport's own trust posture, which is the reading "
+        "--ws-unsafe-no-auth and JAATO_APPARMOR_COMPLAIN already get"),
     "JAATO_IPC_EVENT_QUEUE_MAX": EnvClass(HOST, None,
         "how many events the daemon buffers per IPC client before it "
         "starts dropping lossy chunks; one bound per daemon, and a "
@@ -807,6 +814,21 @@ CATALOG: Dict[str, EnvClass] = {
         "the profile's own `model` field selects the model"),
     "ZHIPUAI_THINKING_BUDGET": EnvClass(SESSION, "plugin_configs.zhipuai.api_params.thinking_budget",
         "zhipuai exposes the knob; the env var is its fallback"),
+
+    # ---- webmcp (driving a page's own declared tools) -----------------
+    # All three have typed homes under ``plugin_configs.webmcp``: which page
+    # to drive and which browser to drive it with are per-session choices --
+    # two sessions in one daemon may legitimately be pointed at different
+    # web apps, which is the definition of ``session`` scope.  None is a
+    # credential (the browser holds the user's own auth, and this plugin
+    # never sees it), so none needs the credential policy.
+    "JAATO_WEBMCP_PAGE_URL": EnvClass(SESSION, "plugin_configs.webmcp.page_url",
+        "which page to drive; a per-session target, not a deployment fact"),
+    "JAATO_WEBMCP_CDP_URL": EnvClass(SESSION, "plugin_configs.webmcp.cdp_url",
+        "attach to an already-running browser instead of launching one"),
+    "JAATO_WEBMCP_BINARY": EnvClass(SESSION, "plugin_configs.webmcp.binary",
+        "browser binary used when launching"),
+
 }
 
 #: THE RATCHET.  Session-scoped vars that have no typed key yet, with the

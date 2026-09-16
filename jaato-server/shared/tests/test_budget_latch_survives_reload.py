@@ -46,6 +46,9 @@ def _session(usage=None, reason=None):
     s._budget_tracker = _tracker()
     s._budget_exhausted_reason = None
     s._budget_terminal_action = None
+    # #1069.  ``__init__`` always sets this; the shell must too, or the
+    # rung path raises on an attribute production never lacks.
+    s._on_budget_rung = None
     s._budget_applied_rung_pct = -1.0
     s._budget_notice_sink = []
     s._tier_config = None

@@ -59,7 +59,7 @@ semantic tier labels (see §4).
 |---|---|
 | Token usage + context % | `TokenLedger` (`shared/token_accounting.py`); `turn.progress` payload carries `percent_used`; `context.updated` carries `total_tokens` / `percent_used`. |
 | Dollar cost | `UsageBreakdown.cost_usd`, resolved provider-reported → `pricing.json` estimate → `None` (`server/core.py:_build_usage_breakdown` / `shared/pricing.py`). Same precedence the telemetry span cost uses. |
-| Wall-clock, tool-calls, turns | `turn.completed` (`duration_seconds`, `function_calls`), `tool.call_completed` (`duration_seconds`), turn counter (`max_turns` is today's only hard cap). |
+| Wall-clock, tool-calls, turns | `turn.completed` (`duration_seconds`, `function_calls`), `tool.call_completed` (`duration_seconds`), turn counter (a `degrade` rung whose `action` is `abort` is the only hard cap). |
 | Threshold-crossing reactions | The reactor engine already dispatches actions on bus events with JMESPath `where` clauses (see [`reactor-implementation.md`](../reactor-implementation.md)). |
 | Model vocabulary + per-turn switch | `model_tiers` profile field + `ModelTierConfig` (`shared/model_tiers.py`); the model moves between tiers via the `enter_tier` lifecycle tool. |
 | Runtime model swap (incl. cross-provider) | `JaatoSession.switch_tier` (`jaato_session.py:9357`) → `provider.connect(model, skip_model_test=True)`, with a per-provider instance cache (`_provider_for_tier`, `jaato_session.py:9326`) keyed by `provider_name`. History is provider-neutral (`Message`/`Part`), so it flows across a swap. |
@@ -88,7 +88,7 @@ budget_control:
     tokens:     300000         # ← total tokens (the one dim GC already enforces)
     seconds:    480            # ← summed turn.completed / tool.call_completed durations
     tool_calls: 40             # ← counted from tool.call_completed
-    turns:      30             # ← turn counter (max_turns is the hard cap)
+    turns:      30             # ← turn counter (an abort rung is the hard cap)
 
   degrade:                     # ordered; each rung fires ONCE, latched, cumulative
     - at: 70%
@@ -106,7 +106,7 @@ budget_control:
                                # in-flight turn AND refuses further turns,
                                # §5.1).  Only `abort` stops a run; a ladder
                                # without one is a brownout, not a ceiling
-                               # (trap 5 below).  `escalate` (hand to the
+                               # (trap 4 below).  `escalate` (hand to the
                                # cascade owner) is the third terminal.
 ```
 
@@ -131,23 +131,18 @@ budget_control:
 
 ### 3.0 Authoring a budgeted profile — four traps
 
-Found while authoring the first budgeted profiles.  Traps 1-4 are not
+Found while authoring the first budgeted profiles.  Traps 1-3 are not
 caught by `jaato-scaffold validate`, so they are documented rather than
-enforced; trap 5 is, since #947.
+enforced; trap 4 is, since #947.
 
-1. **`max_turns` must exceed `limits.turns`.** If both are `4` the run
-   stops at turn 4 either way and the abort is *unattributable* — a
-   budget stop is indistinguishable from the turn cap. Set `max_turns`
-   comfortably above the turn ceiling so stopping is attributable only
-   to the budget.
-2. **Preload the tools the demo depends on.** Most tool plugins are
+1. **Preload the tools the demo depends on.** Most tool plugins are
    discovery-gated (`cli` included): the model must call
    `list_tools` / `get_tool_schemas` before it can use them. Under a
    turn budget that discovery *burns the budget*, so rungs fire during
    discovery instead of during the work, and the run stops being
    reproducible. Use `cli(preload)` (the validator emits an
    informational `discovery_gated_tools` line listing what is deferred).
-3. **Every model in a ladder must support what the agent actually does.**
+2. **Every model in a ladder must support what the agent actually does.**
    A rung that degrades to a model which cannot make tool calls does not
    degrade the agent, it kills it — and it fails at the worst moment,
    mid-run, on a rung that only fires under pressure. Worse than a bad id,
@@ -158,7 +153,7 @@ enforced; trap 5 is, since #947.
    provider you are routed to will. A gateway can advertise `tools: true`
    and still route to an upstream that rejects them. Prefer models already
    exercised in the same deployment over cheaper unproven ones.
-4. **Model ids are not validated.** The validator checks tier names and
+3. **Model ids are not validated.** The validator checks tier names and
    that a named provider is installed — it does NOT check that the model
    id exists on that provider. A typo validates clean and fails at
    `connect`. Check the provider's catalog (for OpenRouter,
@@ -167,8 +162,8 @@ enforced; trap 5 is, since #947.
    spelling is `claude-haiku-4-5-20251001`. This bites hardest on a
    `fallback` tier, which may not be entered until late in a run.
 
-5. **`limits` are OBSERVED, not enforced — only an `abort` rung stops a
-   run.** The most expensive trap of the five, and the least visible,
+4. **`limits` are OBSERVED, not enforced — only an `abort` rung stops a
+   run.** The most expensive trap of the four, and the least visible,
    because the profile looks protected. `BudgetTracker` accumulates
    against `limits` and turns them into a percentage, and the `degrade`
    ladder is the *only* consumer of that percentage: a profile declaring

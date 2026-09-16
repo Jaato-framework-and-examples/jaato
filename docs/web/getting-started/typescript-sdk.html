@@ -590,8 +590,8 @@ console.log(person?.name, person?.age); // "Alice" 30</code></pre>
           <p>
             A <code>lead</code> agent can delegate to subagents through the
             <code>subagent</code> plugin: <code>agent: "lead"</code>,
-            <code>plugins: ["subagent"]</code>, and a <code>max_turns</code> bound so
-            the session always terminates. Delegation spans many turns, so this is
+            <code>plugins: ["subagent"]</code>, and a <code>budget_control</code>
+            ladder with an <code>abort</code> rung so the session always terminates. Delegation spans many turns, so this is
             where you drop from the facade to the event API via
             <code>s.client.subscribe(EventTypeValue.AGENT_OUTPUT, ...)</code> to
             collect streamed output as it is produced.
@@ -627,7 +627,10 @@ await using s = await JaatoClient.session({
     model: "google/gemini-2.5-flash",
     provider: "openrouter",
     plugins: ["subagent"],
-    max_turns: 8,
+    budget_control: {
+      limits: { turns: 8 },
+      degrade: [{ at: 100, action: "abort" }],
+    },
     completion_payload_schema: {
       type: "object",
       additionalProperties: false,

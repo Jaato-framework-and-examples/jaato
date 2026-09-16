@@ -103,7 +103,87 @@ from pydantic import BaseModel, ConfigDict, Field
 # runaway session has been stopped.  That is the #845 verdict (refuse, don't
 # degrade) applied to a command rather than a payload, so the SDK raises
 # below ``MIN_SESSION_STOP_PROTOCOL``.
-PROTOCOL_VERSION = "1.7"
+#
+# 1.8 -- ``BudgetRungFiredEvent``: a new Server -> Client event, emitted once
+# per APPLIED ``budget_control`` degrade rung (#1069).  A fired rung already
+# reached the client, as bracketed PROSE on the agent output stream
+# (``AgentOutputEvent(source="system")``, via
+# ``JaatoSession._surface_budget_event``) -- renderable, not branchable, and
+# interleaved with what the agent itself said, so a client wanting to
+# decorate "switched to a cheaper model" had to string-match ``[budget[``.
+# That prose channel is unchanged and still fires; this is its typed sibling.
+#
+# A new EVENT is the third shape in this changelog, and it degrades
+# differently from both an additive field and a missing verb.
+# ``deserialize_event`` RAISES on an unrecognised ``type``, but the SDK's
+# reader (``IPCClient._drain_loop``) wraps it, logs one error and continues
+# -- so an older client attached to a 1.8 daemon with a degrade ladder
+# configured loses this event and logs a line per rung, rather than dropping
+# the connection.  Bounded, and noisy in exactly the deployment that
+# configured a ladder, which is why it is a version bump rather than a
+# silent addition.  No SDK refusal: the direction is inverted from 1.5/1.6
+# (a NEW daemon emitting to an OLD client, which cannot opt out), so a
+# minimum to refuse below would fail the wrong party.
+#
+# 1.9 -- ``ProfileSummary.max_turns`` REMOVED.  The field carried a number
+# that bounded nothing: ``SubagentProfile.max_turns`` was declared,
+# validated, inherited most-restrictive-wins, serialised and advertised to
+# the model, and compared against a turn counter in no path of the tree
+# (#1068).  ``budget_control.limits.turns`` plus a ``degrade`` rung whose
+# action is ``abort`` is the bound that actually stops a session, and it is
+# now the only one.
+#
+# A REMOVAL is the fourth shape in this changelog, and it is the reason the
+# entry is a MINOR rather than a MAJOR.  ``ProfileSummary``'s own docstring
+# says breaking changes to its shape bump the MAJOR -- but the operational
+# meaning of the major, per ``_protocol_compatible``, is "shape changes the
+# client cannot parse, or fields the client expects to find but doesn't",
+# and NEITHER direction here fails to parse: an older client's model
+# declares ``max_turns: int = 10``, so an absent key fills the default
+# rather than raising, and a newer client's ``extra='ignore'`` drops an
+# older daemon's value.  A MAJOR bump would meanwhile refuse EVERY existing
+# client outright (``server_major != client_major`` is a hard refuse), for
+# a field whose removal cannot produce a parse failure.
+#
+# So the rule this entry establishes, recorded on ``ProfileSummary`` too:
+# removing a field that carries a DEFAULT is a MINOR; removing a required
+# one -- which an older client genuinely cannot fill -- is a MAJOR.  What
+# does break here is source-level, for code that reads
+# ``summary.max_turns``, and what it read was a number enforcing nothing.
+#
+# 1.10 -- the ticket bind channel: ``ticket.bind`` / ``ticket.bind.result``
+# and ``ticket.revoke`` / ``ticket.revoke.result`` (#1074).  An application
+# that has already authenticated a user in its own realm binds a short-lived,
+# single-use ticket to that user; the user's client presents it where the
+# shared bearer token is presented today, and the daemon resolves it AT
+# CONNECTION ESTABLISHMENT and stamps the identity on the connection.  Before
+# it, identity arrived as a MESSAGE after the handshake -- so a client could
+# decline to present one, and ownership guards written ``if user_id and ...``
+# short-circuited for exactly the client that never said who it was.
+#
+# Four new EVENTS, the shape 1.8 established, but arriving in BOTH directions
+# rather than only server -> client, so the degradation argument runs twice:
+#
+#   - a NEW client against an OLD daemon: the daemon does not recognise
+#     ``ticket.bind``, answers ``ErrorEvent("Unknown message type")`` and the
+#     bind is a visible failure rather than a silent one.  So there is no SDK
+#     minimum to refuse below -- unlike 1.5 / 1.6, where the old daemon
+#     ACCEPTED the call and dropped the payload that WAS the message.  The
+#     application learns it cannot bind before it has issued any ticket, and
+#     the remedy (upgrade the daemon, or keep using the shared token) is the
+#     one it would have been told anyway.
+#   - an OLD client against a NEW daemon: unaffected.  These verbs are
+#     client-initiated, so a client that never sends them never receives the
+#     results, and ``deserialize_event``'s raise-on-unknown-type is never
+#     reached.  This is the inverse of 1.8, where the daemon emitted
+#     unprompted.
+#
+# The whole mechanism is OPT-IN and adds nothing to a daemon that configures
+# no application credentials: with none configured, connection auth is
+# byte-identical to 1.9 (one shared digest compared with
+# ``hmac.compare_digest``, or ``--ws-unsafe-no-auth``), no connection can
+# ever be an app-credential connection, and both verbs answer ``"denied"``.
+PROTOCOL_VERSION = "1.10"
 
 
 # =============================================================================
@@ -195,6 +275,10 @@ class EventType(str, Enum):
     TURN_COMPLETED = "turn.completed"
     TURN_PROGRESS = "turn.progress"
     INSTRUCTION_BUDGET_UPDATED = "instruction_budget.updated"
+    # The COST budget (``budget_control``), not the context/instruction one
+    # above.  The two are one keyword apart and the wrong one was already on
+    # the wire, so the names are kept deliberately unalike (#1069).
+    BUDGET_RUNG_FIRED = "budget.rung_fired"
     GC_CONFIG = "gc.config"
     GC = "gc"                       # GC lifecycle (phase-switched)
 
@@ -321,6 +405,17 @@ class EventType(str, Enum):
     PERMISSION_SET_DEFAULT_REQUEST = "permission.set_default"
     PERMISSION_POLICY_SNAPSHOT_REQUEST = "permission.policy_snapshot.request"  # Client -> Server
     PERMISSION_POLICY_SNAPSHOT = "permission.policy_snapshot"                  # Server -> Client
+
+    # Identity at connect (#1074) — an application binds a per-user ticket
+    # that its user's client then presents on the WS Upgrade, so the daemon
+    # establishes identity BEFORE the first frame instead of waiting for a
+    # message the client may simply never send.  Request/result PAIRS
+    # carrying a ``request_id``, the protocol-1.3 shape, so ONE bind channel
+    # can serve many browsers concurrently.
+    TICKET_BIND_REQUEST = "ticket.bind"                # Client -> Server
+    TICKET_BIND_RESULT = "ticket.bind.result"          # Server -> Client
+    TICKET_REVOKE_REQUEST = "ticket.revoke"            # Client -> Server
+    TICKET_REVOKE_RESULT = "ticket.revoke.result"      # Server -> Client
 
     # Event subscription notifications (Server -> Client)
     EVENTS_SUBSCRIBED = "events.subscribed"
@@ -1596,7 +1691,12 @@ class ProfileSummary(BaseModel):
 
     Versioned by the global ``ConnectedEvent.protocol_version`` —
     breaking changes to this shape bump the protocol's MAJOR; additive
-    optional fields bump the MINOR.  Sensitive material is intentionally
+    optional fields bump the MINOR.  REMOVING a field splits that rule by
+    whether it carried a default: one that did is a MINOR (both directions
+    still parse — an older client fills its own default, a newer one's
+    ``extra='ignore'`` drops the value), one that did not is a MAJOR.
+    ``max_turns`` went under the first half at 1.9 (#1068).
+    Sensitive material is intentionally
     omitted: env *values* are summarised by name only;
     ``system_instructions``, ``icon_name`` and ``inherits`` are not
     exposed (deprecated or already resolved during discovery).
@@ -1619,7 +1719,6 @@ class ProfileSummary(BaseModel):
     # Runtime
     model: Optional[str] = None
     provider: Optional[str] = None
-    max_turns: int = 10
     model_tiers: Dict[str, Any] = Field(default_factory=dict)
     # Profile-declared budget_control, re-serialised (shared/budget_control.py).
     # None = unbudgeted.  Declared explicitly because pydantic SILENTLY DROPS
@@ -2308,6 +2407,186 @@ class PermissionPolicySnapshotEvent(Event):
 
 
 # =============================================================================
+# Identity at connect — the ticket bind channel (Client <-> Server)
+#
+# An application that has ALREADY authenticated a user in its own realm
+# (Keycloak, Auth0, SAML, LDAP, an internal session store — the daemon never
+# learns which) mints a short-lived, single-use ticket bound to that user,
+# hands it to that user's client, and the client presents it exactly where
+# the shared bearer token is presented today: ``Authorization: Bearer`` on
+# the Upgrade, or ``?token=`` for browsers.  The daemon resolves it at
+# CONNECTION ESTABLISHMENT and stamps the identity on the connection, so
+# declining to present an identity is not representable rather than being
+# the permissive path.
+#
+# Both verbs are REQUEST/RESULT pairs correlated by ``request_id``, which is
+# what lets one long-lived bind connection serve many concurrent logins —
+# the shape protocol 1.3 established for ``inject_prompt``.  Neither carries
+# an ``app_id``: the daemon takes that from the credential that
+# authenticated the bind connection, so it is an authenticated fact rather
+# than a caller's assertion about itself.  See ``server/ws_tickets.py``.
+# =============================================================================
+
+class TicketBindRequest(Event):
+    """Ask the daemon to mint a connect ticket for one of this app's users.
+
+    Sent on a connection authenticated by an **application credential**
+    (``--ws-app-credentials``).  Any other connection — the shared bearer
+    token, a ticket-authenticated user connection, or an unauthenticated
+    one under ``--ws-unsafe-no-auth`` — is answered ``status="denied"``:
+    minting identities is the app credential's one privilege, and holding a
+    ticket must never let a user mint more.
+
+    There is deliberately **no** ``app_id`` field.  ``preferred_username`` is
+    unique only within a realm, so two applications each holding an ``alice``
+    would collide in ``Session.created_by`` and every ownership guard would
+    silently pass across the application boundary.  The daemon qualifies the
+    identity itself (``BoundIdentity.qualified``, ``"<app_id>:<user>"``) from
+    the credential that called this verb, so no integrator can forget to.
+
+    Attributes:
+        request_id: Correlates this bind with the
+            :class:`TicketBindResultEvent` that answers it.  Required in
+            practice — one bind channel serves many concurrent logins, and
+            without it a result cannot be attributed to a request.
+        user: The identity this application asserts, in whatever spelling its
+            own realm uses.  Never validated by the daemon — that is the
+            point — but refused when empty (``created_by=""`` is falsy, so
+            every ``if user_id and ...`` guard would short-circuit exactly as
+            it does for an unauthenticated client), over-long, or carrying
+            control characters (the value is logged and persisted).
+        ttl_seconds: Ticket lifetime, ``1..3600``.  A value outside the range
+            is REFUSED rather than clamped: silently issuing something other
+            than what was asked for is how an integrator comes to believe a
+            ticket lasts a day.
+        single_use: When ``True`` (the default) the first connection that
+            presents the ticket consumes it, so a captured ticket cannot open
+            a second connection.  ``False`` lets one ticket open several
+            connections until it expires — for a client that opens a second
+            socket for a side channel, and a weaker posture either way.
+    """
+    type: EventType = Field(default=EventType.TICKET_BIND_REQUEST)
+    request_id: str = ""
+    user: str = ""
+    ttl_seconds: int = 300
+    single_use: bool = True
+
+
+class TicketBindResultEvent(Event):
+    """Server's response to :class:`TicketBindRequest`.
+
+    ``status`` is one of:
+
+    * ``"bound"``    — a ticket was minted; ``ticket``, ``qualified``,
+      ``app_id`` and ``expires_at`` are populated.
+    * ``"denied"``   — this connection may not bind.  It is not an app
+      credential connection, or no app credentials are configured on this
+      daemon at all (in which case the feature is simply off and the
+      deployment behaves exactly as it did before protocol 1.10).
+    * ``"invalid"``  — the request was malformed: an empty or unusable
+      ``user``, or a ``ttl_seconds`` outside ``1..3600``.  Nothing was
+      minted.
+    * ``"capacity"`` — the daemon is holding its ceiling of outstanding
+      tickets.  Nothing was minted, and retrying after some expire is the
+      remedy.  Refusing beats evicting somebody else's valid ticket, which
+      would turn one misbehaving application into failed logins for another.
+
+    Only ``"bound"`` carries a credential.  A caller that branches on
+    anything else must not read ``ticket``, which is ``""`` in every other
+    case — never a placeholder, so absence stays checkable.
+
+    Attributes:
+        ticket: The plaintext credential to hand to that user's client.  The
+            daemon retains only its SHA-256 digest, so this value cannot be
+            recovered from the daemon afterwards — losing it means binding
+            again.
+        qualified: ``"<app_id>:<user>"`` — the identity this connection will
+            be attributed to, and the exact string that will appear in
+            ``Session.created_by``.  Returned so the application can record
+            the attribution it will later have to reconcile against, rather
+            than re-deriving a concatenation the daemon owns.
+        app_id: The binding application, as the daemon authenticated it.
+            Echoed because an application holding several credentials would
+            otherwise have to infer which one it used.
+        expires_at: ISO-8601 UTC instant the ticket stops resolving.  For the
+            binder's own scheduling; the daemon enforces the deadline from a
+            monotonic clock, so an NTP step cannot extend or curtail it.
+        detail: Human-readable elaboration, omitted when there is nothing to
+            say — a reader of ``"unknown"`` is back where they started.
+    """
+    type: EventType = Field(default=EventType.TICKET_BIND_RESULT)
+    request_id: str = ""
+    status: str = ""
+    ticket: str = ""
+    qualified: str = ""
+    app_id: str = ""
+    expires_at: str = ""
+    detail: Optional[str] = None
+
+
+class TicketRevokeRequest(Event):
+    """Revoke one outstanding ticket, or every ticket of one user.
+
+    The logout path: the application ends a session in its own realm and
+    tells the daemon that anything it minted for that user is void.  Exactly
+    one of ``ticket`` / ``user`` must be supplied — both, or neither, is
+    ``status="invalid"``, because a request that names both has two
+    incompatible readings and guessing between them is how the wrong thing
+    gets revoked.
+
+    **Scoped to the calling application.**  The daemon knows ``app_id`` from
+    the bind connection's credential and revokes only tickets bound under it;
+    one application cannot revoke — or log out — another's ``alice``.  A
+    ticket belonging to another application answers ``"not_found"``, the same
+    answer an unknown ticket gives, so this verb is not an existence oracle
+    across the application boundary.
+
+    Revoking an already-consumed ticket is the ordinary case for a logout
+    that follows a completed login, and is reported honestly as
+    ``"not_found"`` with ``revoked=0`` rather than as a failure.
+
+    Attributes:
+        request_id: Correlates with :class:`TicketRevokeResultEvent`.
+        ticket: The plaintext ticket to revoke, as returned by
+            :class:`TicketBindResultEvent`.
+        user: Revoke every outstanding ticket for this user of this
+            application instead.
+    """
+    type: EventType = Field(default=EventType.TICKET_REVOKE_REQUEST)
+    request_id: str = ""
+    ticket: str = ""
+    user: str = ""
+
+
+class TicketRevokeResultEvent(Event):
+    """Server's response to :class:`TicketRevokeRequest`.
+
+    ``status`` is one of:
+
+    * ``"revoked"``   — at least one ticket was removed; ``revoked`` says how
+      many.
+    * ``"not_found"`` — nothing matched.  Covers an unknown ticket, one
+      already consumed or expired, and one belonging to a different
+      application: deliberately indistinguishable, so the verb reveals
+      nothing about tickets the caller did not mint.
+    * ``"denied"``    — this connection may not revoke (not an app
+      credential connection).
+    * ``"invalid"``   — neither or both of ``ticket`` / ``user`` supplied.
+
+    Attributes:
+        revoked: How many tickets were removed.  ``0`` whenever ``status`` is
+            not ``"revoked"``.
+        detail: Human-readable elaboration, omitted when there is nothing to
+            say.
+    """
+    type: EventType = Field(default=EventType.TICKET_REVOKE_RESULT)
+    request_id: str = ""
+    status: str = ""
+    revoked: int = 0
+    detail: Optional[str] = None
+
+
+# =============================================================================
 # Workspace Management Requests (Client -> Server)
 # =============================================================================
 
@@ -2767,6 +3046,63 @@ class MidTurnPromptInjectedEvent(Event):
     text: str = ""
 
 
+class BudgetRungFiredEvent(Event):
+    """A ``budget_control`` degrade rung was APPLIED (#1069).
+
+    Emitted once per rung that actually takes effect — a brownout that
+    rebound tiers, a terminal ``finalize`` / ``abort`` / ``escalate``, or a
+    pure ``notify`` checkpoint.  A rung SKIPPED by the backwards-rebind
+    guard emits nothing: it changed nothing, and telling a user the model was
+    downgraded when it was not is worse than silence.
+
+    This is the branchable form of a signal that already reaches clients as
+    prose (``AgentOutputEvent(source="system")``, ``[budget[...] ...]``).
+    Both fire; the prose has consumers.
+
+    Attributes:
+        at_percent: The rung's declared threshold, 0-100.
+        action: ``finalize`` / ``abort`` / ``escalate`` / ``notify``, or
+            ``None`` for a rung that only carries an overlay.
+        origin: The MECHANISM, not whose ladder it was — ``self-enforced``
+            (this session's tracker crossed its own limit, possibly on a
+            ladder inherited from a parent) or ``cascade-pushed`` (the
+            shared pool crossed and the rung was pushed down).  The
+            distinction a consumer needs: *I hit my own ceiling* invites a
+            narrower retry, *the shared pot ran out* means the run is
+            winding down.
+        pressure: Human-readable "which ceiling is driving this", e.g.
+            ``"tokens 85%, usd 41%"``.  Always present.
+        usage: Declared dimension -> ``used / limit`` fraction, unclamped.
+            **Present only when ``origin == "self-enforced"``** — a
+            cascade-pushed rung was crossed by the POOL, and reporting this
+            session's own fractions beside the pool's pressure would publish
+            a contradiction ("degrading at 50% (tokens 32%)").  Absent means
+            "not measured here", not "zero".
+        driving_dimension: The dimension with the highest fraction; same
+            presence rule as ``usage``.
+        tier_changes: Tier name -> ``"old-model -> new-model"``, the shape
+            ``shared.budget_control.overlay_tier_table`` returns and whose
+            own docstring names this event as a consumer.  It carries BOTH
+            ends deliberately: a client showing "planner: opus -> flash" has
+            what it needs, and deriving the old model afterwards is not
+            possible once the table has been mutated in place.
+
+            What the overlay actually DID, which is not the rung's declared
+            ``model_tiers``: a tier already bound to the overlay's model
+            yields no change, and a session with no tier config yields none.
+            Empty for a rung that rebound nothing — including every
+            ``notify`` checkpoint and every action-only rung.
+    """
+    type: EventType = Field(default=EventType.BUDGET_RUNG_FIRED)
+    at_percent: float = 0.0
+    action: Optional[str] = None
+    origin: str = "self-enforced"
+    pressure: str = ""
+    usage: Optional[Dict[str, float]] = None
+    driving_dimension: Optional[str] = None
+    tier_changes: Dict[str, str] = Field(default_factory=dict)
+
+
 class MidTurnInterruptEvent(Event):
     """Sent when streaming is interrupted to process a mid-turn user prompt.
 
@@ -3077,6 +3413,7 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.CLIENT_CONFIG.value: ClientConfigRequest,
     EventType.MID_TURN_PROMPT_QUEUED.value: MidTurnPromptQueuedEvent,
     EventType.MID_TURN_PROMPT_INJECTED.value: MidTurnPromptInjectedEvent,
+    EventType.BUDGET_RUNG_FIRED.value: BudgetRungFiredEvent,
     EventType.MID_TURN_INTERRUPT.value: MidTurnInterruptEvent,
     EventType.INTERRUPTED_TURN_RECOVERED.value: InterruptedTurnRecoveredEvent,
     # Workspace management
@@ -3124,6 +3461,11 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.PERMISSION_SET_DEFAULT_REQUEST.value: PermissionSetDefaultRequest,
     EventType.PERMISSION_POLICY_SNAPSHOT_REQUEST.value: PermissionPolicySnapshotRequest,
     EventType.PERMISSION_POLICY_SNAPSHOT.value: PermissionPolicySnapshotEvent,
+    # Identity at connect — the ticket bind channel (#1074)
+    EventType.TICKET_BIND_REQUEST.value: TicketBindRequest,
+    EventType.TICKET_BIND_RESULT.value: TicketBindResultEvent,
+    EventType.TICKET_REVOKE_REQUEST.value: TicketRevokeRequest,
+    EventType.TICKET_REVOKE_RESULT.value: TicketRevokeResultEvent,
 }
 
 

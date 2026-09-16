@@ -54,8 +54,10 @@ Then: jaato-scaffold explain completion
 WHAT RUNS WHEN.  The agent calls signal_completion; the framework validates
 the payload against completion_payload_schema; then this module's `validate`
 runs.  A non-empty `errors` blocks the completion and hands the agent every
-string, so it fixes and signals again — inside the session's own max_turns,
-which IS the retry budget.  There is no second attempts knob.
+string, so it fixes and signals again.  THE RETRY BUDGET IS the profile's
+budget_control — a degrade rung whose action is abort.  There is no second
+attempts knob, and a profile declaring neither that nor max_refusals has an
+unbounded retry loop.
 
 THE FOUR CHANNELS of the return, and the reason there are four:
 

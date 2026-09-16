@@ -72,6 +72,7 @@ from .env import (
     resolve_page_url,
     resolve_user_data_dir,
 )
+from shared.cdp import CDPConnectionError
 from .errors import (
     ChromeAIBinaryNotFoundError,
     ChromeAIConnectionError,
@@ -134,7 +135,7 @@ class ChromeAIProvider(ModalityCapabilityMixin):
         self._model_name: Optional[str] = None
         self._connected = False
         self._context_limit: int = 0
-        self._last_usage = TokenUsage()
+        self._last_usage = TokenUsage(reported=False)   # no turn yet (#688)
         self._agent_id = "main"
 
         # Knobs (populated in initialize()).
@@ -313,7 +314,7 @@ class ChromeAIProvider(ModalityCapabilityMixin):
                            "cold-start cost will fall on the first turn)",
                            exc_info=True)
         finally:
-            self._last_usage = TokenUsage()
+            self._last_usage = TokenUsage(reported=False)   # warmup is not a turn (#688)
 
     @property
     def is_connected(self) -> bool:
@@ -543,7 +544,10 @@ class ChromeAIProvider(ModalityCapabilityMixin):
         relaunches the browser.  Everything else defers to the global
         classifier.
         """
-        if isinstance(exc, ChromeAIConnectionError):
+        # Matches the SHARED base, so a raise from the transport
+        # (shared.cdp) is classified transient just like this package's own
+        # ChromeAIConnectionError, which subclasses it.
+        if isinstance(exc, CDPConnectionError):
             return {"transient": True, "rate_limit": False, "infra": True}
         return None
 

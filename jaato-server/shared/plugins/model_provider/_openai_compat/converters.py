@@ -447,11 +447,12 @@ def extract_usage(response: "ChatCompletion") -> TokenUsage:
     Returns:
         TokenUsage with counts.
     """
-    usage = TokenUsage()
+    usage = TokenUsage(reported=False)
 
     if not response or not response.usage:
         return usage
 
+    usage.reported = True
     usage.prompt_tokens = response.usage.prompt_tokens or 0
     usage.output_tokens = response.usage.completion_tokens or 0
     usage.total_tokens = response.usage.total_tokens or 0

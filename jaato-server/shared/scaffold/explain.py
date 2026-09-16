@@ -142,10 +142,11 @@ def transports() -> Rendered:
         },
         "websocket": {
             "sdk": "jaato-sdk (Python) — jaato_sdk.WSClient / jaato.session(mode='ws'); "
-                   "also jaato-sdk-ts (TypeScript) / browser client jaato-web",
+                   "also jaato-sdk-ts (TypeScript) / browser client jaato-web-coder-ui",
             "scope": "remote / browser daemon",
             "daemon_flags": ["--web-socket [HOST:]PORT", "--ws-token TOKEN",
-                             "--ws-token-file PATH", "--ws-unsafe-no-auth"],
+                             "--ws-token-file PATH", "--ws-unsafe-no-auth",
+                             "--ws-app-credentials PATH"],
             "token_default": "~/.jaato/ws.token (auto-generated, 0600, on first WS start)",
             "auth": "bearer token (required unless --ws-unsafe-no-auth)",
             "client_auth": ["Authorization: Bearer <token>  (header)",
@@ -161,7 +162,7 @@ def transports() -> Rendered:
         "  in_process            IPC (Unix socket)        WebSocket\n"
         "  - embedded, no daemon - local daemon           - remote daemon / browser\n"
         "  - InProcessClient     - IPCClient              - WSClient (Python)\n"
-        "                                                   + TS SDK / jaato-web\n"
+        "                                                   + TS SDK / jaato-web-coder-ui\n"
         "  - n/a (no wire)       - unauthenticated        - bearer-token authenticated\n"
         "                          (socket-mode 660)\n\n"
         "  Python ships a client for ALL THREE; the SAME Session.ask/.complete/\n"
@@ -177,6 +178,17 @@ def transports() -> Rendered:
         "                                   new WebSocket())\n"
         "  bad token → WS close 1008.  Daemon stores only the SHA-256 digest and\n"
         "  compares with hmac.compare_digest.\n\n"
+        "identity at connect — per-user tickets (opt-in, --ws-app-credentials):\n"
+        "  an application that already authenticated a user in ITS OWN realm\n"
+        "  binds a short-lived single-use ticket to that user (ticket.bind, on a\n"
+        "  connection authenticated by an application credential), hands it to\n"
+        "  that user's client, and the client presents it in the SAME two places\n"
+        "  as the shared token above.  The daemon resolves it during the Upgrade\n"
+        "  and stamps '<app_id>:<user>' on the connection, so identity exists\n"
+        "  before the first frame instead of arriving as a message a client can\n"
+        "  simply not send.  An application credential binds and revokes; it\n"
+        "  cannot open a session.  With the flag absent, none of this exists and\n"
+        "  WS auth is the single shared token above.\n\n"
         "preflight the WS daemon side (port + token file + auth mode):\n"
         "  jaato-doctor --web-socket [host:]port\n\n"
         "scaffold any transport:\n"
@@ -2461,10 +2473,10 @@ def profile() -> Rendered:
         "    apparmor_fragments,          For the two payload schemas an empty dict `{}` IS a\n"
         "    completion_payload_schema,   value and overrides; `null`/absent reads as unset and\n"
         "    spawn_payload_schema         inherits.\n"
-        "    max_turns,                   MOST RESTRICTIVE wins — a child may only TIGHTEN a\n"
-        "    budget_control.limits,       ceiling, never raise the one it was spawned under.\n"
-        "    runtime_limits.              (budget_control.degrade is child-REPLACES, and so are\n"
-        "      max_parallel_tools         runtime_limits' other, kernel-enforced ceilings.)\n"
+        "    budget_control.limits,       MOST RESTRICTIVE wins — a child may only TIGHTEN a\n"
+        "    runtime_limits.              ceiling, never raise the one it was spawned under.\n"
+        "      max_parallel_tools         (budget_control.degrade is child-REPLACES, and so are\n"
+        "                                 runtime_limits' other, kernel-enforced ceilings.)\n"
         "    suppress_base_instructions,  UNION / OR — STICKY: a piece any layer drops stays\n"
         "    apparmor                     dropped, and a confined parent can't be un-confined.\n"
         "\n  empty vs listed `plugins` (a REQUIRED key — authors must pick).  WITH NO PARENT\n"
@@ -2492,7 +2504,7 @@ def profile() -> Rendered:
         "      - acceptance              a parent entry's `name:`, or its `script:` path\n"
         "    Everything else scopes down by REPLACING a value, never by removing an entry.\n"
         "    Don't stop inheriting just to drop a processor: you lose budget_control,\n"
-        "    max_turns, runtime_limits, env and plugin_configs with it, silently.")
+        "    runtime_limits, env and plugin_configs with it, silently.")
     return data, "\n".join(lines)
 
 
@@ -2815,11 +2827,14 @@ def completion() -> Rendered:
         "validate_channels": S["channels"],
         "render_entry": "def render(payload, context) -> str | bytes",
         "validate_entry": "def validate(payload, context) -> ProcessorResult",
-        "retry_budget_is_max_turns": (
-            "a blocked signal_completion is retried inside the session's "
-            "own max_turns; there is no second attempts knob.  What "
-            "max_refusals bounds is how many times THIS GATE may block, "
-            "which is a different thing and did not exist before #768."
+        "retry_budget_is_budget_control": (
+            "a blocked signal_completion is retried until either the "
+            "processor's own max_refusals stops it blocking or the "
+            "profile's budget_control crosses a degrade rung whose action "
+            "is abort; there is no second attempts knob, and adding one to "
+            "a driver is the wrong fix.  Declare NEITHER and the retry "
+            "loop is unbounded (#947).  What max_refusals bounds is how "
+            "many times THIS GATE may block, which is a different thing."
         ),
         "does_not_terminate_on_its_own": (
             "without max_refusals the processor refuses, the agent "
@@ -2934,13 +2949,17 @@ def completion() -> Rendered:
         "        workspace_path and reject one that escapes (`..`, an absolute",
         "        path) — a processor runs with the session's own file access.",
         "      - report the miss as `errors` (retryable — the agent can still",
-        "        write the file within max_turns), NOT as `faults`, which is for",
+        "        write the file on a later turn), NOT as `faults`, which is for",
         "        an environment the agent cannot fix.",
         "",
-        "  THE RETRY BUDGET IS max_turns.  A blocked completion is retried",
-        "  inside the session's own max_turns; there is no second attempts",
-        "  knob, and adding one to a driver is the wrong fix (that PR was",
-        "  closed on finding this mechanism).",
+        "  THE RETRY BUDGET IS budget_control.  A blocked completion is",
+        "  retried until the processor's own max_refusals stops it blocking,",
+        "  or the profile's budget_control crosses a degrade rung whose",
+        "  action is abort.  There is no second attempts knob, and adding",
+        "  one to a driver is the wrong fix (that PR was closed on finding",
+        "  this mechanism).  Declare NEITHER and the retry loop is",
+        "  UNBOUNDED — `limits` alone are observed, never enforced, so a",
+        "  ladder with an abort rung is what actually stops it (#947).",
         "",
         "  THE TERMINUS A DRIVER WAITS ON IS NOT AGENT_COMPLETED.  An accepted",
         "  signal_completion emits AgentCompletedEvent with the payload, but",
@@ -3014,7 +3033,7 @@ def completion() -> Rendered:
         "  inheriting what an earlier turn spent (#934).  Positive integer",
         "  (0 is refused — the give-up test is `fired >= max`, so a budget",
         "  of 0 would report NudgeExhausted on sessions that completed",
-        "  cleanly).  Inherits like max_turns: child overrides, else the",
+        "  cleanly).  Inherits child-override, else the",
         "  minimum across parents.",
         "",
         "  SEPARATE A WRONG ANSWER FROM AN ENVIRONMENT FAULT.  A missing",

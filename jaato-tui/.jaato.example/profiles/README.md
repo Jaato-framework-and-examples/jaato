@@ -24,7 +24,6 @@ permissions, token ledger) but gets its own session with the profile's settings.
     }
   },
   "system_instructions": "Custom instructions for the subagent.",
-  "max_turns": 15,
   "auto_approved": false,
   "icon_name": "document",
   "gc": {
@@ -49,10 +48,9 @@ permissions, token ledger) but gets its own session with the profile's settings.
 | `system_instructions` | No | `null` (inherit) | Custom system prompt |
 | `model` | No | `null` (inherit) | Override model name |
 | `provider` | No | `null` (inherit) | Override provider name |
-| `max_turns` | No | `10` | Maximum agentic turns |
 | `auto_approved` | No | `false` | Skip permission prompts |
 | `icon_name` | No | `null` | Predefined icon identifier |
-| `gc` | No | `null` | GC config (recommended for max_turns > 15) |
+| `gc` | No | `null` | GC config (recommended for long-running sessions) |
 
 ## Provider and Model Overrides
 

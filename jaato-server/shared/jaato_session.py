@@ -666,7 +666,20 @@ class JaatoSession:
         # apply.  ``_budget_terminal_action`` latches the last terminal action
         # a rung asked for, so a caller can see WHY a session wound down.
         self._budget_tracker: Optional['BudgetTracker'] = None
+        self._budget_control: Optional['BudgetControlConfig'] = None
+        # One warning per session when a provider reports no usage (#688).
+        # An unmetered provider is unmetered on EVERY turn, so a per-response
+        # line would bury the run's real output -- the same reason #881's
+        # no-token warning is latched.
+        self._budget_unmetered_warned: bool = False
         self._budget_terminal_action: Optional[str] = None
+        # Typed per-rung notification (#1069).  A fired rung has always
+        # reached the client through ``_surface_budget_event`` — as bracketed
+        # PROSE on the agent output stream, source ``"system"`` — which a
+        # client can render but cannot branch on, and which arrives mixed
+        # into what the agent itself said.  This is the machine-readable
+        # sibling; both fire, because the prose channel has consumers.
+        self._on_budget_rung: Optional[Callable[[Dict[str, Any]], None]] = None
         # Set once an ``abort`` rung fires.  Gates EVERY subsequent turn —
         # see ``_refuse_if_budget_exhausted``.  Distinct from
         # ``_budget_terminal_action`` (which also latches finalize/escalate,
@@ -1690,6 +1703,31 @@ class JaatoSession:
             callback: Function called with the prompt text when injected.
         """
         self._on_prompt_injected = callback
+
+    def set_budget_rung_callback(
+        self, callback: Optional[Callable[[Dict[str, Any]], None]],
+    ) -> None:
+        """Set callback for when a ``budget_control`` degrade rung is APPLIED.
+
+        Invoked once per rung that actually takes effect, with a payload
+        carrying the threshold, the action, the ``origin`` mechanism, the
+        pressure that drove it and any tier rebinding performed.  The server
+        uses this to emit ``BudgetRungFiredEvent`` (#1069).
+
+        Two rungs deliberately do NOT reach it:
+
+        * one skipped by the backwards-rebind guard — it changed nothing, and
+          reporting it would tell a user the model was downgraded when it was
+          not;
+        * one that fired before any callback was installed — this is wired
+          per-send like its siblings.
+
+        Args:
+            callback: Function called with the payload dict.  Exceptions
+                raised by it are swallowed: a client-notification failure
+                must never fail the turn that triggered it.
+        """
+        self._on_budget_rung = callback
 
     def set_continuation_callback(self, callback: Optional[Callable[[str], None]]) -> None:
         """Set callback for when continuation is needed after child messages.
@@ -2803,9 +2841,14 @@ class JaatoSession:
         if budget_control is not None:
             from .budget_control import BudgetTracker
             self._budget_tracker = BudgetTracker(budget_control)
+            # Kept beside the tracker because ``on_unmetered`` is read per
+            # response, on a path that has the session but not the profile.
+            self._budget_control = budget_control
             logger.info(
-                "Budget control active: limits=%s, %d degrade rung(s)",
+                "Budget control active: limits=%s, %d degrade rung(s), "
+                "on_unmetered=%s",
                 dict(budget_control.limits), len(budget_control.degrade),
+                budget_control.on_unmetered,
             )
 
         # Tool-pool width (#862), from whichever of the two vehicles
@@ -11084,6 +11127,24 @@ NOTES
         (``_resolve_span_cost``: provider-reported -> pricing table -> None).
         A ``None`` cost leaves the ``usd`` dimension untouched — a budget
         must never hard-stop on a number it invented.
+
+        UNREPORTED USAGE IS NOT ZERO SPEND (#688).  ``TokenUsage.reported``
+        is ``False`` when the provider — or a proxy in front of it — sent no
+        usage block at all.  Before that flag existed the two were the same
+        all-zero value, so an unmetered upstream advanced no dimension, no
+        rung ever fired, and a run that looked capped was uncapped.  What
+        happens instead is the profile's to choose
+        (``budget_control.on_unmetered``):
+
+        * ``estimate`` (default) — charge ``tokens`` from a local estimate
+          and leave ``usd`` untouched.  The asymmetry is the docstring rule
+          above: GC already estimates token counts for its own threshold, so
+          that quantity is one the framework routinely computes, while a
+          dollar figure derived from guessed tokens is a price nobody quoted.
+        * ``halt`` — trip the session's cancel token, the same stop an
+          ``abort`` rung uses.  Opt-in: as a default it would take down every
+          deployment behind a usage-dropping proxy on upgrade.
+        * ``ignore`` — the pre-#688 behaviour, chosen explicitly.
         """
         if self._budget_tracker is None:
             return
@@ -11091,15 +11152,98 @@ NOTES
         if usage is None:
             return
         try:
-            fired = self._budget_tracker.observe(
-                tokens=int(getattr(usage, "total_tokens", 0) or 0),
-                usd=self._resolve_span_cost(usage),
-            )
+            if getattr(usage, "reported", True):
+                fired = self._budget_tracker.observe(
+                    tokens=int(getattr(usage, "total_tokens", 0) or 0),
+                    usd=self._resolve_span_cost(usage),
+                )
+            else:
+                fired = self._budget_observe_unmetered(response)
+                if fired is None:
+                    return
             self._apply_budget_rungs(fired)
         except Exception as exc:  # noqa: BLE001
             # Budgeting is a guardrail, not part of the turn's contract —
             # never let it break a live turn.
             logger.warning("budget: response observation failed: %s", exc)
+
+    def _budget_observe_unmetered(self, response: ProviderResponse):
+        """Apply ``on_unmetered`` for a response that measured nothing.
+
+        Returns the fired rungs to apply, or ``None`` when there is nothing
+        to apply (``ignore``, or a ``halt`` that has already stopped the
+        session — re-entering the ladder after a stop would double-report).
+
+        The warning is emitted ONCE per session, keyed the same way #881's
+        no-token warning is: an unmetered provider is unmetered for every
+        turn, and a per-response line would bury the run's real output.
+        """
+        cfg = getattr(self, "_budget_control", None)
+        policy = getattr(cfg, "on_unmetered", None) or "estimate"
+
+        if not self._budget_unmetered_warned:
+            self._budget_unmetered_warned = True
+            logger.warning(
+                "budget: provider reported no usage (provider=%s model=%s); "
+                "budget_control.on_unmetered=%s. A ceiling on 'usd' is fed "
+                "nothing whatever the policy, because a cost computed from "
+                "unmeasured tokens is invented; 'tokens' is %s.",
+                self._provider_name_override or "?", self._model_name or "?",
+                policy,
+                {"estimate": "charged from a local estimate",
+                 "halt": "not charged — the session is being stopped",
+                 "ignore": "not charged at all"}.get(policy, policy),
+            )
+
+        if policy == "ignore":
+            return None
+
+        if policy == "halt":
+            logger.error(
+                "budget: halting — provider reported no usage and "
+                "budget_control.on_unmetered='halt'. The ceiling cannot be "
+                "enforced on unmeasured spend, so the session stops rather "
+                "than continuing uncapped.",
+            )
+            self._budget_terminal_action = "abort"
+            self.request_stop()
+            return None
+
+        # estimate: tokens only, never usd.
+        return self._budget_tracker.observe(
+            tokens=self._estimate_response_tokens(response),
+        )
+
+    def _estimate_response_tokens(self, response: ProviderResponse) -> int:
+        """Rough token count for a response the provider did not measure.
+
+        Deliberately the SAME estimator GC uses for its own threshold
+        (``instruction_budget.estimate_tokens``, 4 chars/token) rather than a
+        second approximation with its own error: a budget and a GC threshold
+        disagreeing about the size of one turn is a defect that is very hard
+        to see from either side.
+
+        Counts the request side too — the history replayed on this call is
+        input the upstream charged for, and a ceiling fed only the reply
+        would under-count by roughly the whole conversation.
+        """
+        from .instruction_budget import estimate_tokens
+        from .plugins.gc.utils import estimate_message_tokens
+
+        total = 0
+        for part in (getattr(response, "parts", None) or ()):
+            text = getattr(part, "text", None)
+            if text:
+                total += estimate_tokens(text)
+        text = getattr(response, "text", None)
+        if text and not total:
+            total += estimate_tokens(text)
+        try:
+            for message in self._history.messages:
+                total += estimate_message_tokens(message)
+        except Exception:  # noqa: BLE001 — estimation must not break a turn
+            pass
+        return max(1, total)
 
     def _budget_observe_turn(self, turn_data: Dict[str, Any]) -> None:
         """Feed one completed turn: its turn count, plus whatever the
@@ -11263,6 +11407,55 @@ NOTES
             f"overlay={overlay} pressure='{detail}'"
         )
 
+    def _notify_budget_rung(
+        self, rung: 'DegradeRung', origin: str, detail: str,
+        tier_changes: Dict[str, str],
+    ) -> None:
+        """Hand one APPLIED rung to the typed client callback (#1069).
+
+        A fired rung has always reached the client through
+        ``_surface_budget_event`` — bracketed prose on the agent output
+        stream, source ``"system"``.  That is renderable and not
+        branchable, and it arrives interleaved with what the agent itself
+        said, so a client wanting to decorate "switched to a cheaper model"
+        had to string-match ``[budget[``.  This is the machine-readable
+        sibling; the prose still fires, because it has consumers.
+
+        ``origin`` is carried rather than dropped at the boundary because
+        :meth:`_apply_budget_rungs` argues it is the distinction a consumer
+        actually needs — *I hit my own ceiling* invites a narrower retry,
+        *the shared pot ran out* means the run is winding down.
+
+        **Structured usage is reported only for a rung this session's own
+        tracker fired.** On a ``cascade-pushed`` rung the threshold was
+        crossed by the POOL, and ``detail`` is the pool's pressure; adding
+        this child's own fractions beside it would publish the exact
+        contradiction the caller already avoids for the prose line
+        ("degrading at 50% (tokens 32%)").  Absent means "not measured
+        here", which a client can render as the pool's prose alone.
+        """
+        callback = self._on_budget_rung
+        if callback is None:
+            return
+        payload: Dict[str, Any] = {
+            "at_percent": float(rung.at_percent),
+            "action": rung.action,
+            "origin": origin,
+            "pressure": detail,
+            "tier_changes": dict(tier_changes),
+        }
+        if origin == "self-enforced" and self._budget_tracker is not None:
+            try:
+                payload["usage"] = self._budget_tracker.pressure_by_dimension()
+                payload["driving_dimension"] = (
+                    self._budget_tracker.driving_dimension())
+            except Exception:  # noqa: BLE001 — a report never fails a turn
+                pass
+        try:
+            callback(payload)
+        except Exception:  # noqa: BLE001
+            logger.debug("budget rung callback raised", exc_info=True)
+
     def _budget_trace(self, msg: str) -> None:
         """Record a budget decision on BOTH trace channels (#955).
 
@@ -11328,7 +11521,9 @@ NOTES
         """
         if not fired:
             return
-        from .budget_control import ACTION_ABORT, overlay_tier_table
+        from .budget_control import (
+            ACTION_ABORT, ACTION_NOTIFY, TERMINAL_ACTIONS, overlay_tier_table,
+        )
 
         for rung in fired:
             # Rungs apply at most once and IN ORDER, per ladder — not per
@@ -11371,6 +11566,12 @@ NOTES
             # (#955): the ladder must be visibly EVALUATED, not only
             # visible when it rebinds or aborts.
             self._budget_trace_rung(rung, origin, detail)
+            # What the overlay ACTUALLY rebound, for the #1069 event.  The
+            # rung's declared ``model_tiers`` is not the same thing: a tier
+            # already bound to the overlay's model yields no change, and a
+            # session with no tier config yields none at all.  A client is
+            # told what happened, not what was asked for.
+            changes: Dict[str, str] = {}
             if rung.model_tiers:
                 if self._tier_config is None:
                     # Rejected by the profile validator, but a session can be
@@ -11394,8 +11595,33 @@ NOTES
                             f"{tag} {detail}: degraded "
                             + "; ".join(f"{k} {v}" for k, v in changes.items())
                         )
-            if rung.action:
+            # ONE latch decision, hoisted out of the branches below so
+            # exactly one thing decides it.  An earlier draft also relied on
+            # the ``notify`` branch short-circuiting before the latch, and
+            # the reversion meta-guard correctly called both copies
+            # decorative: each masked the other, so neither could be shown
+            # to do anything (#688's "one check, one door", same lesson).
+            # Membership is the right test rather than "not notify" — a
+            # future non-terminal action is excluded by default instead of
+            # being latched until someone remembers to add a branch.
+            if rung.action in TERMINAL_ACTIONS:
                 self._budget_terminal_action = rung.action
+
+            if rung.action == ACTION_NOTIFY:
+                # A pure observability checkpoint (#1069): no rebind, no
+                # latch, nothing about the session changes.  It still
+                # surfaces on the PROSE channel, because that is what every
+                # client reads today — a checkpoint visible only to
+                # consumers of an event type shipped in this same change
+                # would be invisible in exactly the deployments asking for
+                # it.  Opt-in by construction: you get this line only by
+                # writing ``action: notify``.
+                logger.info(
+                    "budget[%s]: checkpoint at %.0f%% (%s)",
+                    origin, rung.at_percent, detail,
+                )
+                self._surface_budget_event(f"{tag} {detail}: checkpoint")
+            elif rung.action:
                 logger.info(
                     "budget[%s]: terminal action '%s' at %.0f%% (%s)",
                     origin, rung.action, rung.at_percent, detail,
@@ -11417,6 +11643,10 @@ NOTES
                         "— in-flight turn cancelled, later turns refused"
                     )
                     self.request_stop(self._budget_exhausted_reason)
+            # LAST in the iteration, deliberately: the payload reports what
+            # the rung DID (which tiers actually rebound), which is not known
+            # until the overlay and the action have both been handled.
+            self._notify_budget_rung(rung, origin, detail, changes)
 
     def apply_cascade_degrade(
         self, rungs: List[Dict[str, Any]],

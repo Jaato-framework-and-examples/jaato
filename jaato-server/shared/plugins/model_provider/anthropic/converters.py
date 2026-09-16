@@ -516,11 +516,12 @@ def extract_usage_from_response(response: Any) -> TokenUsage:
     own seam via ``normalize_inclusive_usage``; see issue #758 for what
     it cost when they did not.
     """
-    usage = TokenUsage()
+    usage = TokenUsage(reported=False)
 
     if not response or not hasattr(response, "usage"):
         return usage
 
+    usage.reported = True
     resp_usage = response.usage
     usage.prompt_tokens = getattr(resp_usage, "input_tokens", 0)
     usage.output_tokens = getattr(resp_usage, "output_tokens", 0)

@@ -13,8 +13,8 @@ top-level guard), ``jaato_embedded/client.py`` (the in-process lead) and
 ``shared/plugins/subagent/plugin.py`` (the subagent loop).  Nothing kept the
 three equal, and none of them was reachable from a profile, which made the
 nudge budget the one bound in the completion path a deployment could not
-express: ``max_turns``, ``runtime_limits`` and a processor's ``max_refusals``
-all are (#919).
+express: ``runtime_limits`` and a processor's ``max_refusals`` both
+are (#919).
 
 Two is a good default and stays one — for a strong tool-caller it is right,
 and raising it globally would make weak models loop longer for everyone.

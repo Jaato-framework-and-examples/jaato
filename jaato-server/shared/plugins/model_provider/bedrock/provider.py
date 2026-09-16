@@ -208,7 +208,7 @@ class BedrockProvider(ModalityCapabilityMixin):
         self._enable_thinking: bool = False
         self._thinking_budget: int = 4096
 
-        self._last_usage: TokenUsage = TokenUsage()
+        self._last_usage: TokenUsage = TokenUsage(reported=False)
 
         # Agent context for tracing.
         self._agent_type: str = "main"
@@ -1013,7 +1013,7 @@ class _StreamState:
         self.reasoning: List[str] = []
         self.thinking_emitted: bool = False
         self.tool_calls: Dict[int, Dict[str, Any]] = {}
-        self.usage: TokenUsage = TokenUsage()
+        self.usage: TokenUsage = TokenUsage(reported=False)   # until the wire reports (#688)
         self.finish_reason: FinishReason = FinishReason.UNKNOWN
         self.terminal_seen: bool = False
         self.was_cancelled: bool = False

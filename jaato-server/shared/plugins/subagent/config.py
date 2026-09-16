@@ -1551,7 +1551,7 @@ class SubagentProfile:
         model: Optional model override (uses parent's model if not specified).
         provider: Optional provider override (e.g., 'anthropic', 'google_genai').
                   Allows subagents to use a different provider than the parent.
-        max_turns: Maximum conversation turns before returning (default: 10).
+
         max_completion_nudges: How many times the framework re-prompts a
             session that settled without calling ``signal_completion``
             before giving up and emitting ``NudgeExhausted`` (#919).
@@ -1559,8 +1559,8 @@ class SubagentProfile:
             allowance rather than inheriting what an earlier one spent
             (#934).  ``None`` means the framework default of 2
             (:data:`shared.completion_nudge.DEFAULT_MAX_COMPLETION_NUDGES`).
-            Inheritance follows ``max_turns``: child-override, else the
-            minimum across parents that declared one.
+            Inheritance: child-override, else the minimum across
+            parents that declared one.
         gc: Optional garbage collection configuration for this subagent.
         trace: Optional diagnostic trace-log paths (``session_log`` /
             ``provider_log``).  The typed, validated sibling of
@@ -1703,8 +1703,7 @@ class SubagentProfile:
     provider: Optional[str] = field(default=None, metadata={
         "description": "Provider override (e.g. anthropic, nebius, vllm). A "
         "profile binds exactly one provider + model."})
-    max_turns: int = field(default=10, metadata={
-        "description": "Max conversation turns before the (sub)agent returns."})
+
     # The completion-nudge budget (#919).  How many times the framework
     # re-prompts a session that settled without calling
     # ``signal_completion`` before giving up and producing the
@@ -1716,7 +1715,7 @@ class SubagentProfile:
     # tool-caller, and raising it globally would make weak models loop
     # longer for everyone.  What this field adds is the ability for a
     # deployment that KNOWS its model needs more attempts to say so --
-    # the sibling of ``max_turns`` and of a processor's ``max_refusals``,
+    # the sibling of a processor's ``max_refusals``,
     # and previously the one bound in the completion path that was a
     # function-local constant in three files rather than a profile knob.
     #
@@ -1733,8 +1732,8 @@ class SubagentProfile:
     # completion_state`` for how a nudge's own re-prompt is kept from
     # refunding itself (#934).
     #
-    # Inheritance is child-override / min-across-parents, exactly like
-    # ``max_turns`` -- see :func:`_merge_profiles`.
+    # Inheritance is child-override / min-across-parents -- see
+    # :func:`_merge_profiles`.
     max_completion_nudges: Optional[int] = field(default=None, metadata={
         "description": "How many times the framework re-prompts a session "
         "that ended without calling signal_completion before giving up "
@@ -1742,8 +1741,7 @@ class SubagentProfile:
         "Raise it for a "
         "model that reliably does the work and unreliably reports it done "
         "(audio models routinely burn a nudge on a redundant enter_tier). "
-        "Positive integer; the sibling of max_turns and a processor's "
-        "max_refusals."})
+        "Positive integer; the sibling of a processor's max_refusals."})
     cache: Optional['CacheProfileConfig'] = field(default=None, metadata={
         "description": "Prompt-cache defaults, cross-provider. "
         "{enabled: auto|true|false, ttl: 5m|1h, history: bool}. "
@@ -1816,7 +1814,7 @@ class SubagentProfile:
     # child somehow — a scalar by replacing it, a dict per key — but
     # concatenation only ever grows, so a child whose stage genuinely
     # completes differently had no move except to stop inheriting, and
-    # silently lose ``budget_control`` / ``max_turns`` /
+    # silently lose ``budget_control`` /
     # ``runtime_limits`` / ``env`` / ``plugin_configs`` with it.
     #
     # Scoped deliberately narrow:
@@ -2550,7 +2548,7 @@ def build_inline_profile(
     Args:
         data: The dict carried in ``CommandRequest.payload['spec']``.
             Recognized keys: ``model``, ``provider``, ``plugins``,
-            ``plugin_configs``, ``system_instructions``, ``max_turns``,
+            ``plugin_configs``, ``system_instructions``,
             ``gc``, ``env``, ``completion_payload_schema``,
             ``completion_processors``,
             ``runtime_limits``, ``budget_control``, ``model_tiers``.
@@ -2638,7 +2636,7 @@ def build_inline_profile(
         suppress_base_instructions=data.get('suppress_base_instructions', False),
         model=data.get('model'),
         provider=data.get('provider'),
-        max_turns=data.get('max_turns', 10),
+
         max_completion_nudges=data.get('max_completion_nudges'),
         gc=gc_config,
             cache=cache_config,
@@ -2797,7 +2795,7 @@ def profile_to_snapshot(profile: 'SubagentProfile') -> Dict[str, Any]:
         ),
         "model": profile.model,
         "provider": profile.provider,
-        "max_turns": profile.max_turns,
+
         "max_completion_nudges": getattr(
             profile, "max_completion_nudges", None),
         "cache": _block(getattr(profile, "cache", None)),
@@ -2921,7 +2919,7 @@ def profile_from_snapshot(data: Dict[str, Any]) -> 'SubagentProfile':
         ),
         model=data.get("model"),
         provider=data.get("provider"),
-        max_turns=data.get("max_turns", 10),
+
         max_completion_nudges=data.get("max_completion_nudges"),
         cache=blocks["cache"],
         trace=blocks["trace"],
@@ -2960,7 +2958,7 @@ def resolve_profiles(
     - **Collection fields** (union): ``plugins``, ``preloaded_plugins``,
       ``env``, ``plugin_configs``
     - **Scalar fields** (agreement-or-override): ``model``, ``provider``,
-      ``max_turns``, ``gc``
+      ``gc``
     - **Concatenation**: ``system_instructions`` (grandparent → parent → child)
     - **Never inherited**: ``name``, ``description``
 
@@ -3048,8 +3046,8 @@ def resolve_profiles(
 #:
 #: ``max_parallel_tools`` (#862) and the two wall-clock bounds (#812) are all
 #: statements about how much of a shared environment one session may take,
-#: which is the same safety direction ``max_turns`` and
-#: ``budget_control.limits`` already resolve in: a child may TIGHTEN what an
+#: which is the same safety direction ``budget_control.limits``
+#: already resolves in: a child may TIGHTEN what an
 #: ancestor declared and may never widen it.  Every other field in the block
 #: is a cgroup controller value, where interleaving layers would produce a
 #: confinement nobody wrote — hence child-REPLACES for those.
@@ -3191,7 +3189,7 @@ def _merge_budget_control(
       dimension (:func:`shared.budget_control.merge_limits`).  A child
       may only ever TIGHTEN a ceiling; it must never grant itself a
       bigger budget than the profile that spawned it.  This is the same
-      safety direction ``max_turns`` already takes (most restrictive
+      safety direction ``max_parallel_tools`` already takes (most restrictive
       value across parents), and it deliberately differs from the
       child-replaces-parent rule used by most scalar fields — for a
       resource ceiling, "child wins" would be an escape hatch.
@@ -3357,9 +3355,8 @@ def _merge_completion_processors(
 def _merge_max_completion_nudges(child, parents) -> Optional[int]:
     """Resolve ``max_completion_nudges`` across an inheritance chain (#919).
 
-    The same rule :func:`_merge_profiles` applies to ``max_turns``, spelled
-    against ``None`` rather than a sentinel value: the child overrides
-    outright, else the minimum across the parents that declared one, else
+    Spelled against ``None`` rather than a sentinel value: the child
+    overrides outright, else the minimum across the parents that declared one, else
     ``None`` — left unresolved deliberately, so
     :func:`shared.completion_nudge.resolve_max_completion_nudges` and not
     this merge owns what the framework default IS.
@@ -3367,7 +3364,7 @@ def _merge_max_completion_nudges(child, parents) -> Optional[int]:
     Min-across-parents rather than max because two bases disagreeing about
     a retry budget is not a conflict worth refusing a profile over, and the
     safer reading of that disagreement is the one that loops less — the
-    direction ``max_turns`` and ``budget_control.limits`` already take.  A
+    direction ``budget_control.limits`` already takes.  A
     child that wants the looser budget says so, which is the whole point of
     the knob.
 
@@ -3524,14 +3521,6 @@ def _merge_profiles(
     merged_model = _resolve_scalar('model', child.model)
     merged_provider = _resolve_scalar('provider', child.provider)
 
-    # max_turns: most restrictive (minimum) across parents, child can override
-    parent_max_turns = [p.max_turns for p in parents if p.max_turns != 10]
-    if child.max_turns != 10:
-        merged_max_turns = child.max_turns
-    elif parent_max_turns:
-        merged_max_turns = min(parent_max_turns)
-    else:
-        merged_max_turns = 10
 
     merged_max_completion_nudges = _merge_max_completion_nudges(child, parents)
 
@@ -3572,7 +3561,7 @@ def _merge_profiles(
     # budget_control: NOT a plain scalar-override.  ``limits`` merge
     # MIN-WINS across parents + child (a child may only TIGHTEN a
     # ceiling — it must never grant itself a bigger budget than the
-    # profile that spawned it, the same safety direction as max_turns
+    # profile that spawned it, the same safety direction as max_parallel_tools
     # above), while ``degrade`` is scalar-override (the child's whole
     # ladder wins, matching model_tiers).
     merged_budget_control = _merge_budget_control(parents, child)
@@ -3708,7 +3697,7 @@ def _merge_profiles(
         suppress_base_instructions=merged_suppress_base,
         model=merged_model,
         provider=merged_provider,
-        max_turns=merged_max_turns,
+
         max_completion_nudges=merged_max_completion_nudges,
         gc=merged_gc,
         cache=merged_cache,
@@ -3826,7 +3815,7 @@ PROFILE_FILE_KEYS = frozenset({
     'suppress_base_instructions',
     'model',
     'provider',
-    'max_turns',
+
     'max_completion_nudges',
     'gc',
     'cache',
@@ -3852,6 +3841,21 @@ PROFILE_FILE_KEYS = frozenset({
 PROFILE_DERIVED_FIELDS = {
     'preloaded_plugins': "derived from plugins: — write `todo(preload)`",
     'tool_scopes': "derived from plugins: — write `memory(tools:[a,b])`",
+}
+
+#: Keys a profile file may still CARRY and that the loader no longer reads,
+#: mapped to what replaces them.  Distinct from an unknown key: the author
+#: did not mistype anything, the field was withdrawn under them, so the
+#: message names the successor rather than guessing at a near-miss.  The
+#: posture ``deprecated_system_instructions`` already takes.
+PROFILE_REMOVED_FIELDS = {
+    'max_turns': (
+        "removed in #1068 — it was declared, validated, inherited and "
+        "advertised to the model, and compared against a turn counter in "
+        "no path of the tree.  Bound a session with `budget_control` "
+        "instead: `limits.turns` plus a `degrade` rung whose `action` is "
+        "`abort` (limits alone are observed, never enforced)"
+    ),
 }
 
 
@@ -4016,7 +4020,7 @@ def _scan_profiles_dir(
             suppress_base_instructions=data.get('suppress_base_instructions', False),
             model=data.get('model'),
             provider=data.get('provider'),
-            max_turns=data.get('max_turns', 10),
+
             max_completion_nudges=data.get('max_completion_nudges'),
             gc=gc_config,
             cache=cache_config,
@@ -4493,7 +4497,7 @@ def _discover_premium_profiles() -> Dict[str, 'SubagentProfile']:
             suppress_base_instructions=data.get('suppress_base_instructions', False),
             model=data.get('model'),
             provider=data.get('provider'),
-            max_turns=data.get('max_turns', 10),
+
             max_completion_nudges=data.get('max_completion_nudges'),
             gc=gc_config,
             cache=cache_config,
@@ -4598,13 +4602,6 @@ def validate_profile(data: Any) -> Tuple[bool, List[str], List[str]]:
     # scrub_secret_env (#863): profile-level + per-surface shape
     errors.extend(_scrub_secret_env_errors(data))
 
-    # max_turns: positive int
-    max_turns = data.get("max_turns")
-    if max_turns is not None:
-        if not isinstance(max_turns, int) or isinstance(max_turns, bool):
-            errors.append("'max_turns' must be an integer")
-        elif max_turns <= 0:
-            errors.append("'max_turns' must be a positive integer")
 
     errors.extend(_max_completion_nudges_errors(data))
 
@@ -4830,7 +4827,7 @@ class SubagentConfig:
                 suppress_base_instructions=profile_data.get('suppress_base_instructions', False),
                 model=profile_data.get('model'),
                 provider=profile_data.get('provider'),
-                max_turns=profile_data.get('max_turns', 10),
+
                 max_completion_nudges=profile_data.get('max_completion_nudges'),
                 gc=gc_config,
             cache=cache_config,

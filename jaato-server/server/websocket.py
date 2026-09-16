@@ -36,6 +36,13 @@ except ImportError:
 
 from shared.apparmor_label import SANDBOX_MODE_SOFT, sandbox_mode_for_profile
 from .core import JaatoServer
+from .ws_tickets import (
+    AppCredentialStore,
+    BoundIdentity,
+    TicketCapacityError,
+    TicketRegistry,
+    credential_digest,
+)
 from .workspace_provisioner import WorkspaceProvisioner, ProvisionedWorkspace
 from .apparmor import AppArmorManager
 from .cgroups import CgroupsManager
@@ -65,6 +72,11 @@ from jaato_sdk.events import (
     ConfigStatusEvent,
     ConfigUpdateRequest,
     ConfigUpdatedEvent,
+    # Identity at connect — the ticket bind channel (#1074)
+    TicketBindRequest,
+    TicketBindResultEvent,
+    TicketRevokeRequest,
+    TicketRevokeResultEvent,
 )
 from .workspace_manager import WorkspaceManager
 from .event_sink import EventSink
@@ -313,6 +325,21 @@ class WSEventSinkAdapter:
         """Associate a user identity with a WS client."""
         self._ws.set_client_user(client_id, user_id)
 
+    def get_client_peer(self, client_id: str) -> None:
+        """No peer credential on a WebSocket — always ``None``.
+
+        A WS client may be on another machine, so there is no local OS
+        account for the kernel to vouch for.  Identity on this transport is
+        the bearer token, a bound user ticket (#1074), or whatever an auth
+        middleware attaches through :meth:`set_client_user` -- none of which
+        is a peer CREDENTIAL.  A ticket says which person an application
+        vouched for; it does not name an OS account, and every session runs
+        as the daemon's uid either way.  So the client-path entitlement
+        guards stay inert here and this transport's own auth is what
+        applies.
+        """
+        return None
+
     def remove_client(self, client_id: str) -> None:
         """Clean up tracking state when a client disconnects."""
         self._client_sessions.pop(client_id, None)
@@ -325,14 +352,111 @@ def _get_server_version() -> str:
     return pkg_version("jaato-server")
 
 
+def _peek_message_type(message: str) -> str:
+    """Read the ``type`` field of a raw client frame without committing to it.
+
+    Cheaper than a decision it cannot make: :meth:`~JaatoWSServer._dispatch_client_message`
+    has to know whether a frame is a ``ticket.*`` verb before it knows
+    whether the connection may send anything else, and the typed
+    deserialisation that follows belongs to whichever branch wins.
+
+    Returns ``""`` for anything unparseable, so the frame falls through to
+    the ordinary dispatcher and produces the ``Invalid JSON`` error it always
+    did — the peek never becomes a second place that reports malformed input.
+    """
+    try:
+        raw = json.loads(message)
+    except (json.JSONDecodeError, TypeError):
+        return ""
+    if not isinstance(raw, dict):
+        return ""
+    value = raw.get("type", "")
+    return value if isinstance(value, str) else ""
+
+
+def _peek_request_id(message: str) -> str:
+    """Read ``request_id`` off a frame that may not survive typed parsing.
+
+    A refusal must still be correlatable: one bind channel serves many
+    concurrent logins, so a ``denied`` result with no ``request_id`` cannot
+    be attributed to the login it refused. Returns ``""`` when the frame does
+    not carry one, which is the same thing a caller that sent none gets.
+    """
+    try:
+        raw = json.loads(message)
+    except (json.JSONDecodeError, TypeError):
+        return ""
+    if not isinstance(raw, dict):
+        return ""
+    value = raw.get("request_id", "")
+    return value if isinstance(value, str) else ""
+
+
+#: Connection kinds a WS client can be accepted as.  ``AUTH_KIND_APP`` is the
+#: only one that may call the ``ticket.*`` verbs, and the only one that may
+#: NOT drive a session — see :meth:`JaatoWSServer._dispatch_client_message`.
+AUTH_KIND_OPEN = "open"      #: no auth configured (``--ws-unsafe-no-auth``)
+AUTH_KIND_SHARED = "shared"  #: the daemon-wide bearer token
+AUTH_KIND_APP = "app"        #: an application credential — bind-only
+AUTH_KIND_TICKET = "ticket"  #: a per-user ticket — carries an identity
+
+#: The verbs an app-credential connection may send.  Everything else is
+#: refused, which is what makes "bind-only" a property of the transport
+#: rather than an instruction in documentation.
+TICKET_VERBS = frozenset({
+    EventType.TICKET_BIND_REQUEST.value,
+    EventType.TICKET_REVOKE_REQUEST.value,
+})
+
+
+@dataclass(frozen=True)
+class ConnectionAuth:
+    """How one accepted connection authenticated, and as whom.
+
+    Produced by :meth:`JaatoWSServer._resolve_connection_auth` during the
+    Upgrade, **before** any frame is read, and copied onto the
+    :class:`ClientConnection`.  It is decided once: nothing a client sends
+    later can change its kind or its identity, which is the whole point of
+    #1074 — identity established at connect cannot be declined by omission.
+
+    Attributes:
+        kind: One of the ``AUTH_KIND_*`` constants above.
+        app_id: The application, for ``app`` and ``ticket`` connections;
+            ``None`` otherwise.
+        user: The QUALIFIED identity (``"<app_id>:<user>"``) for a ``ticket``
+            connection; ``None`` otherwise, including for an ``app``
+            connection — an app credential names an application, never a
+            person, so attributing a session to it would invent a user.
+    """
+
+    kind: str
+    app_id: Optional[str] = None
+    user: Optional[str] = None
+
+
 @dataclass
 class ClientConnection:
-    """Represents a connected client."""
+    """Represents a connected client.
+
+    ``user_id`` / ``app_id`` / ``auth_kind`` are the identity the connection
+    was ACCEPTED with.  Two ways they get populated, and the difference is
+    #1074's subject:
+
+    * At connect, from :class:`ConnectionAuth` — a user ticket resolves to a
+      qualified identity before the first frame, so a client cannot decline
+      to present one.
+    * After connect, by :meth:`JaatoWSServer.set_client_user` — the
+      jaato-premium SSO route, where the client sends a JWT as a message and
+      an extension validates it.  Unchanged, and still opt-in by nature: a
+      client on that route that never sends the message stays unattributed.
+    """
     websocket: ServerConnection
     client_id: str
     connected_at: str
     subscriptions: Set[str]  # Event types to receive (empty = all)
     user_id: Optional[str] = None  # Authenticated user identity (set by auth middleware)
+    app_id: Optional[str] = None   # Binding application (#1074), when known
+    auth_kind: str = AUTH_KIND_OPEN  # One of the AUTH_KIND_* constants
 
 
 class JaatoWSServer:
@@ -368,6 +492,7 @@ class JaatoWSServer:
         workspace_max_age: int = 86400,
         ssl_context: Optional[ssl.SSLContext] = None,
         required_token: Optional[str] = None,
+        app_credentials: Optional[AppCredentialStore] = None,
     ):
         """Initialize the WebSocket server.
 
@@ -412,6 +537,15 @@ class JaatoWSServer:
                 stored value is the SHA-256 digest only — the plaintext is
                 discarded after construction. Tokens are compared with
                 :func:`hmac.compare_digest`.
+            app_credentials: Optional :class:`~server.ws_tickets.AppCredentialStore`
+                of long-lived **application** credentials (#1074). Each
+                authorises one connection to call ``ticket.bind`` /
+                ``ticket.revoke`` and nothing else — it cannot open a
+                session. ``None`` or an empty store is the default and the
+                pre-#1074 posture exactly: no connection can be an
+                app-credential connection, no ticket can exist, and
+                :meth:`_resolve_connection_auth` collapses to the single
+                shared-digest comparison it has always been.
         """
         if not HAS_WEBSOCKETS:
             raise ImportError(
@@ -430,6 +564,26 @@ class JaatoWSServer:
             if required_token
             else None
         )
+
+        # Application credentials and the tickets they mint (#1074).
+        # The store holds digests only; the registry holds digests and
+        # never a plaintext ticket. Both are empty on a daemon that
+        # configured no app credentials, which is what makes the feature
+        # opt-in: `_app_credentials` falsy means no connection can ever
+        # be an app-credential connection, so no ticket can ever be
+        # bound, so the ticket tier of the auth resolver is unreachable.
+        self._app_credentials: AppCredentialStore = (
+            app_credentials or AppCredentialStore({})
+        )
+        self._ticket_registry = TicketRegistry()
+        if self._app_credentials:
+            logger.info(
+                "WS app credentials loaded for %d application(s): %s — "
+                "these may call ticket.bind/ticket.revoke and may NOT open "
+                "a session",
+                len(self._app_credentials.app_ids()),
+                ", ".join(self._app_credentials.app_ids()),
+            )
 
         # Connection interceptors registered by daemon extensions.
         # See ``set_connection_interceptor()`` for the protocol.
@@ -928,13 +1082,32 @@ class JaatoWSServer:
         creates (``Session.created_by``) and to extension message handler
         callbacks.
 
+        **A connect-established identity is not overwritten.** When the
+        connection presented a user ticket (#1074), its identity was resolved
+        from a credential the application minted, before the first frame, and
+        a later message asserting a different one is refused with a WARNING.
+        The two routes are alternatives rather than layers: allowing the
+        message to win would reintroduce, as a *replacement*, precisely the
+        assertion-over-a-message shape the ticket route exists to remove.
+        Every other connection kind behaves exactly as before.
+
         Args:
             client_id: The WS client ID.
             user_id: Authenticated user identifier (username, email, or sub claim).
         """
         client = self._clients.get(client_id)
-        if client:
-            client.user_id = user_id
+        if not client:
+            return
+        if client.auth_kind == AUTH_KIND_TICKET:
+            if user_id != client.user_id:
+                logger.warning(
+                    "Refusing to re-attribute client %s: its identity was "
+                    "established at connect from a bound ticket (%s); a "
+                    "message asserting %r does not override it",
+                    client_id, client.user_id, user_id,
+                )
+            return
+        client.user_id = user_id
 
     def get_client_user(self, client_id: str) -> Optional[str]:
         """Get the authenticated user identity for a WS client.
@@ -1324,19 +1497,98 @@ class JaatoWSServer:
 
         return None
 
-    def _check_ws_token(self, websocket: ServerConnection) -> bool:
-        """Validate the presented bearer token against the configured digest.
+    def _resolve_connection_auth(
+        self,
+        websocket: ServerConnection,
+        *,
+        consume: bool = True,
+    ) -> Optional[ConnectionAuth]:
+        """Decide whether to accept this Upgrade, and as whom (#1074).
 
-        Returns ``True`` if auth is disabled or the presented token
-        matches; ``False`` otherwise. Comparison is timing-safe.
+        The one door. Three tiers are consulted in order, and the presented
+        credential is hashed exactly once however many it falls through:
+
+        1. **The shared bearer token** — one digest, daemon-wide, compared
+           with :func:`hmac.compare_digest`. This tier is byte-identical to
+           the pre-#1074 check and is consulted first, so a deployment that
+           configures nothing else behaves exactly as it did.
+        2. **An application credential** — a dict lookup keyed by the digest,
+           returning the ``app_id``. Accepted as ``AUTH_KIND_APP``:
+           bind-only, refused every other verb.
+        3. **A user ticket** — the same lookup against the
+           :class:`~server.ws_tickets.TicketRegistry`, returning a
+           :class:`~server.ws_tickets.BoundIdentity`. Accepted as
+           ``AUTH_KIND_TICKET`` and, crucially, **carrying an identity before
+           the first frame** — which is what makes declining to present one
+           unrepresentable rather than merely discouraged.
+
+        A dict lookup is not constant-time, and that is a considered choice
+        rather than an oversight: what it compares is a SHA-256 *digest*, so
+        a timing signal about it is not a timing signal about the credential
+        that produced it. The single expected value that IS compared directly
+        stays on :func:`hmac.compare_digest`. See ``server/ws_tickets.py``.
+
+        Auth is considered CONFIGURED when either a shared token or at least
+        one app credential exists. With neither, every connection is accepted
+        as ``AUTH_KIND_OPEN`` — the ``--ws-unsafe-no-auth`` posture, unchanged.
+        Configuring app credentials alone therefore turns auth ON, which is
+        the fail-closed direction.
+
+        Args:
+            websocket: The inbound connection, for its Upgrade request.
+            consume: When ``False``, a single-use ticket is peeked at rather
+                than spent. Only :meth:`_check_ws_token` passes ``False``; the
+                accept path must consume, or one captured ticket would open
+                any number of connections.
+
+        Returns:
+            The :class:`ConnectionAuth` to stamp on the connection, or
+            ``None`` to reject it with WS code 1008.
         """
-        if self._expected_token_digest is None:
-            return True
+        auth_configured = (
+            self._expected_token_digest is not None or bool(self._app_credentials)
+        )
+        if not auth_configured:
+            return ConnectionAuth(kind=AUTH_KIND_OPEN)
+
         presented = self._extract_presented_token(websocket)
         if not presented:
-            return False
-        got = hashlib.sha256(presented.encode("utf-8")).digest()
-        return hmac.compare_digest(got, self._expected_token_digest)
+            return None
+        digest = credential_digest(presented)
+
+        if self._expected_token_digest is not None and hmac.compare_digest(
+            digest, self._expected_token_digest
+        ):
+            return ConnectionAuth(kind=AUTH_KIND_SHARED)
+
+        app_id = self._app_credentials.lookup(digest)
+        if app_id is not None:
+            return ConnectionAuth(kind=AUTH_KIND_APP, app_id=app_id)
+
+        identity = self._ticket_registry.resolve_digest(digest, consume=consume)
+        if identity is not None:
+            return ConnectionAuth(
+                kind=AUTH_KIND_TICKET,
+                app_id=identity.app_id,
+                user=identity.qualified,
+            )
+
+        return None
+
+    def _check_ws_token(self, websocket: ServerConnection) -> bool:
+        """Whether this connection would be accepted — a NON-consuming probe.
+
+        The boolean half of :meth:`_resolve_connection_auth`, kept because a
+        bare "is this credential acceptable" predicate is a reasonable thing
+        to ask and because its answer is what the WS auth contract has always
+        been documented as. It passes ``consume=False``: a predicate that
+        silently spent a single-use ticket would be a trap for every caller
+        after the first.
+
+        The accept path calls :meth:`_resolve_connection_auth` directly — it
+        needs the identity, not a yes/no, and it must consume.
+        """
+        return self._resolve_connection_auth(websocket, consume=False) is not None
 
     async def _handle_client(self, websocket: ServerConnection) -> None:
         """Handle a single client connection.
@@ -1345,9 +1597,12 @@ class JaatoWSServer:
         If any interceptor's ``check`` returns ``True``, the connection is
         handed off to that interceptor's ``handler`` and this method returns.
 
-        After interceptors, bearer-token auth is enforced (if configured).
-        Failures get an immediate 1008 (Policy Violation) close so the
-        client sees a clean rejection rather than the connection hanging.
+        After interceptors, connection auth is enforced (if configured) by
+        :meth:`_resolve_connection_auth`, and its verdict is STAMPED on the
+        :class:`ClientConnection` — so a ticket-authenticated client carries
+        its identity from before its first frame (#1074). Failures get an
+        immediate 1008 (Policy Violation) close so the client sees a clean
+        rejection rather than the connection hanging.
         """
         # Check registered interceptors (e.g., peer gossip connections)
         for check, handler in self._interceptors:
@@ -1362,7 +1617,8 @@ class JaatoWSServer:
         # Bearer-token auth gate. Runs after interceptors so that
         # extension-owned connection types (e.g., gossip peers) can
         # implement their own auth.
-        if not self._check_ws_token(websocket):
+        auth = self._resolve_connection_auth(websocket)
+        if auth is None:
             remote = getattr(websocket, "remote_address", None)
             logger.warning("Rejecting WS client from %s: bearer auth failed", remote)
             try:
@@ -1381,6 +1637,12 @@ class JaatoWSServer:
                 client_id=client_id,
                 connected_at=datetime.now(timezone.utc).isoformat(),
                 subscriptions=set(),
+                # Identity as authenticated at connect (#1074). For every
+                # pre-#1074 posture these are the historical defaults:
+                # user_id None, app_id None, kind "open"/"shared".
+                user_id=auth.user,
+                app_id=auth.app_id,
+                auth_kind=auth.kind,
             )
             self._clients[client_id] = client
 
@@ -1406,7 +1668,7 @@ class JaatoWSServer:
 
             # Handle incoming messages
             async for message in websocket:
-                await self._handle_message(client_id, message)
+                await self._dispatch_client_message(client_id, message)
 
         except ConnectionClosed:
             pass
@@ -1431,8 +1693,207 @@ class JaatoWSServer:
                 self._event_sink_adapter.remove_client(client_id)
             logger.info(f"Client disconnected: {client_id}")
 
+    # =========================================================================
+    # Identity at connect — the ticket bind channel (#1074)
+    # =========================================================================
+
+    async def _dispatch_client_message(self, client_id: str, message: str) -> None:
+        """Route one client frame, honouring the app-credential boundary.
+
+        Sits between the receive loop and :meth:`_handle_message` and answers
+        two questions the ordinary dispatcher must not have to:
+
+        1. is this a ``ticket.*`` verb, which belongs to the bind channel
+           rather than to a session; and
+        2. is this an APP-credential connection, which may send nothing else.
+
+        Gate 2 is what makes "bind-only" a property of the transport. An app
+        credential authorises minting identities; letting it also drive a
+        session would make it a super-user of every workspace on the daemon,
+        attributed to no person. Fail-closed, and central: one check here
+        covers every verb, including ones added later.
+
+        A connection that is not an app credential is unaffected — every
+        frame reaches :meth:`_handle_message` exactly as before — except that
+        a ``ticket.*`` verb from it is answered ``"denied"`` rather than
+        falling through to "Unknown request type", so a misconfigured
+        integration learns the rule instead of a generic refusal.
+        """
+        verb = _peek_message_type(message)
+        if verb in TICKET_VERBS:
+            await self._handle_ticket_message(client_id, verb, message)
+            return
+        if self._client_auth_kind(client_id) == AUTH_KIND_APP:
+            await self._send_error(
+                client_id,
+                f"'{verb or 'this request'}' is not available on an "
+                "application-credential connection: it may only call "
+                "ticket.bind / ticket.revoke. Bind a user ticket and "
+                "connect with that to open a session.",
+            )
+            return
+        await self._handle_message(client_id, message)
+
+    def _client_auth_kind(self, client_id: str) -> str:
+        """The ``AUTH_KIND_*`` this client was accepted with.
+
+        A client that has already disconnected reads as ``AUTH_KIND_OPEN``,
+        which is inert: every branch that consults this asks whether the kind
+        IS ``AUTH_KIND_APP``, and a vanished client has nothing to refuse.
+        """
+        client = self._clients.get(client_id)
+        return client.auth_kind if client else AUTH_KIND_OPEN
+
+    def get_client_app(self, client_id: str) -> Optional[str]:
+        """The application a WS client authenticated as, or ``None``.
+
+        Populated for both credential kinds #1074 introduces — an app
+        credential names itself, and a user ticket names the application that
+        bound it — and ``None`` for the shared token and for open accept.
+        """
+        client = self._clients.get(client_id)
+        return client.app_id if client else None
+
+    async def _handle_ticket_message(
+        self, client_id: str, verb: str, message: str
+    ) -> None:
+        """Parse and dispatch one ``ticket.*`` frame.
+
+        Refuses any connection that is not an app credential BEFORE parsing
+        the body, so the refusal cannot depend on the shape of what was sent.
+        The denial names the reason rather than saying only "denied": a
+        deployment that has configured no app credentials at all is the
+        common case, and "the feature is off here" is a different next step
+        from "this connection is the wrong kind".
+        """
+        app_id = self.get_client_app(client_id)
+        if self._client_auth_kind(client_id) != AUTH_KIND_APP or not app_id:
+            await self._send_to_client(
+                client_id, self._ticket_denied(verb, message)
+            )
+            return
+        try:
+            event = deserialize_event(message)
+        except (json.JSONDecodeError, ValueError) as exc:
+            await self._send_error(client_id, f"Invalid {verb} request: {exc}")
+            return
+        if isinstance(event, TicketBindRequest):
+            await self._send_to_client(
+                client_id, self._bind_ticket(app_id, event)
+            )
+        elif isinstance(event, TicketRevokeRequest):
+            await self._send_to_client(
+                client_id, self._revoke_ticket(app_id, event)
+            )
+        else:  # pragma: no cover - TICKET_VERBS and the pair are one set
+            await self._send_error(client_id, f"Unhandled ticket verb: {verb}")
+
+    def _ticket_denied(self, verb: str, message: str):
+        """Build the ``denied`` result for a connection that may not bind."""
+        request_id = _peek_request_id(message)
+        detail = (
+            "ticket.bind / ticket.revoke require a connection authenticated "
+            "by an application credential"
+        )
+        if not self._app_credentials:
+            detail += "; this daemon has none configured (--ws-app-credentials)"
+        if verb == EventType.TICKET_REVOKE_REQUEST.value:
+            return TicketRevokeResultEvent(
+                request_id=request_id, status="denied", detail=detail
+            )
+        return TicketBindResultEvent(
+            request_id=request_id, status="denied", detail=detail
+        )
+
+    def _bind_ticket(
+        self, app_id: str, event: "TicketBindRequest"
+    ) -> "TicketBindResultEvent":
+        """Mint a ticket for ``event.user`` on behalf of ``app_id``.
+
+        ``app_id`` is the caller's own authenticated application, taken from
+        the connection rather than from the request — the request has no such
+        field, precisely so that qualification cannot be forged or forgotten.
+
+        Every failure mints nothing and is reported by a ``status`` a caller
+        can branch on: ``invalid`` for a request the registry refused,
+        ``capacity`` for a daemon already holding its ceiling of live
+        tickets.
+        """
+        try:
+            ticket, expires_at = self._ticket_registry.bind(
+                app_id=app_id,
+                user=event.user,
+                ttl_seconds=event.ttl_seconds,
+                single_use=event.single_use,
+            )
+        except ValueError as exc:
+            return TicketBindResultEvent(
+                request_id=event.request_id, status="invalid", detail=str(exc)
+            )
+        except TicketCapacityError as exc:
+            logger.warning("ticket.bind refused for app %r: %s", app_id, exc)
+            return TicketBindResultEvent(
+                request_id=event.request_id, status="capacity", detail=str(exc)
+            )
+        identity = BoundIdentity(app_id=app_id, user=event.user)
+        logger.info(
+            "ticket.bind: app=%s user=%s ttl=%ss single_use=%s",
+            app_id, event.user, event.ttl_seconds, event.single_use,
+        )
+        return TicketBindResultEvent(
+            request_id=event.request_id,
+            status="bound",
+            ticket=ticket,
+            qualified=identity.qualified,
+            app_id=app_id,
+            expires_at=expires_at,
+        )
+
+    def _revoke_ticket(
+        self, app_id: str, event: "TicketRevokeRequest"
+    ) -> "TicketRevokeResultEvent":
+        """Revoke one ticket, or every outstanding ticket of one user.
+
+        Scoped to ``app_id`` on both routes, so one application can neither
+        revoke nor log out another's users. A ticket belonging to a different
+        application answers ``not_found`` — the same answer an unknown ticket
+        gives — so this verb reveals nothing about tickets the caller did not
+        mint.
+
+        Exactly one of ``ticket`` / ``user`` is required: a request naming
+        both has two incompatible readings, and picking one silently is how
+        the wrong thing gets revoked.
+        """
+        if bool(event.ticket) == bool(event.user):
+            return TicketRevokeResultEvent(
+                request_id=event.request_id,
+                status="invalid",
+                detail="supply exactly one of 'ticket' or 'user'",
+            )
+        if event.ticket:
+            revoked = 1 if self._ticket_registry.revoke(
+                event.ticket, app_id=app_id
+            ) else 0
+        else:
+            revoked = self._ticket_registry.revoke_user(app_id, event.user)
+        logger.info(
+            "ticket.revoke: app=%s %s revoked=%d",
+            app_id,
+            f"user={event.user}" if event.user else "ticket=<redacted>",
+            revoked,
+        )
+        return TicketRevokeResultEvent(
+            request_id=event.request_id,
+            status="revoked" if revoked else "not_found",
+            revoked=revoked,
+        )
+
     async def _handle_message(self, client_id: str, message: str) -> None:
         """Handle an incoming message from a client.
+
+        Reached through :meth:`_dispatch_client_message`, which has already
+        refused the frame if it is a ``ticket.*`` verb or if the connection is
+        an app credential (#1074).
 
         Args:
             client_id: The client's ID.
