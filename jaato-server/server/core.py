@@ -479,12 +479,12 @@ def _slot_return_phrase(pooled: bool) -> str:
     )
 
 
-def _prompt_injected_event(payload: Dict[str, Any]) -> 'MidTurnPromptInjectedEvent':
+def _prompt_injected_event(server: 'JaatoServer', payload: Dict[str, Any]) -> 'MidTurnPromptInjectedEvent':
     """Build the mid-turn prompt-injection event from its payload."""
     return MidTurnPromptInjectedEvent(text=payload.get("text", "") or "")
 
 
-def _budget_rung_event(payload: Dict[str, Any]) -> 'BudgetRungFiredEvent':
+def _budget_rung_event(server: 'JaatoServer', payload: Dict[str, Any]) -> 'BudgetRungFiredEvent':
     """Build the #1069 event from a runner notification payload.
 
     A free function so the notification demuxer — already far over the
@@ -510,14 +510,46 @@ def _budget_rung_event(payload: Dict[str, Any]) -> 'BudgetRungFiredEvent':
     )
 
 
+def _plan_updated_from_payload(server: 'JaatoServer', payload: Dict[str, Any]) -> 'PlanUpdatedEvent':
+    """The runner's ``plan_updated`` frame: the reporter's plan dict + agent name."""
+    return server._plan_updated_event(
+        dict(payload.get("plan") or {}), payload.get("agent_name"))
+
+
+def _plan_step_updated_from_payload(server: 'JaatoServer', payload: Dict[str, Any]) -> 'PlanStepUpdatedEvent':
+    """The runner's ``plan_step_updated`` frame: the reporter's step delta + agent name."""
+    return server._plan_step_updated_event(
+        dict(payload.get("step") or {}), payload.get("agent_name"))
+
+
+def _plan_cleared_from_payload(server: 'JaatoServer', payload: Dict[str, Any]) -> 'PlanClearedEvent':
+    """The runner's ``plan_cleared`` frame."""
+    return server._plan_cleared_event(payload.get("agent_name"))
+
+
+def _plan_output_from_payload(server: 'JaatoServer', payload: Dict[str, Any]) -> 'AgentOutputEvent':
+    """The runner's ``plan_output`` frame: a reporter line for the scrolling panel."""
+    return server._plan_output_event(
+        str(payload.get("source") or "plan"),
+        str(payload.get("text") or ""),
+        str(payload.get("mode") or "write"),
+    )
+
+
 #: Runner notification event_type -> the client event it becomes, for the
 #: notifications whose entire handling is "build it, emit it, return".
 #: Everything with a side effect (a continuation that starts a model thread,
 #: a GC phase that mutates server state) stays an explicit branch in the
-#: demuxer, because a table of builders cannot express those.
+#: demuxer, because a table of builders cannot express those.  A builder
+#: takes the server too: the four plan frames resolve a profile name to an
+#: agent id through ``_agents``, which no payload carries.
 _PURE_NOTIFICATION_EVENTS = {
     "prompt_injected": _prompt_injected_event,
     "budget_rung": _budget_rung_event,
+    "plan_updated": _plan_updated_from_payload,
+    "plan_step_updated": _plan_step_updated_from_payload,
+    "plan_cleared": _plan_cleared_from_payload,
+    "plan_output": _plan_output_from_payload,
 }
 
 
@@ -4631,77 +4663,35 @@ class JaatoServer:
         )
 
     def _setup_plan_hooks(self) -> None:
-        """Set up plan update hooks."""
+        """Route the todo plugin's plan reports into client events.
+
+        The IN-PROCESS half only.  ``self.todo_plugin`` is the daemon
+        registry's instance, which is the one a session calls solely when
+        the session runs in this process (the embedded client, standalone
+        WS).  On a runner-served session -- the default -- the ``todo``
+        plugin is runner-tier and reports into the RUNNER's instance, so a
+        reporter installed here is never invoked; that path is
+        ``RunnerRPC._install_session_notification_callbacks``, which emits
+        ``plan_updated`` / ``plan_step_updated`` / ``plan_cleared`` /
+        ``plan_output`` notification frames that the demuxer turns into
+        the same events through the same ``_plan_*_event`` builders.
+        """
         if not self.todo_plugin:
             return
 
         server = self
 
-        def _get_agent_id(agent_name: Optional[str]) -> str:
-            """Get agent ID from agent name."""
-            agent_id = server._main_agent_id if agent_name is None else agent_name
-            for aid, agent in server._agents.items():
-                if agent.profile_name == agent_name:
-                    agent_id = aid
-                    break
-            return agent_id
-
         def update_callback(plan_data: dict, agent_name: Optional[str] = None):
-            """Emit PlanUpdatedEvent from plan data."""
-            agent_id = _get_agent_id(agent_name)
-            steps = []
-            for step in plan_data.get('steps', []):
-                step_data = {
-                    'content': step.get('description', ''),
-                    'status': step.get('status', 'pending'),
-                    'active_form': step.get('active_form'),
-                    'step_id': step.get('step_id', ''),
-                    'result': step.get('result'),
-                    'error': step.get('error'),
-                }
-                # Include cross-agent dependency info for blocked steps
-                if step.get('blocked_by'):
-                    step_data['blocked_by'] = step['blocked_by']
-                if step.get('depends_on'):
-                    step_data['depends_on'] = step['depends_on']
-                if step.get('received_outputs'):
-                    step_data['received_outputs'] = step['received_outputs']
-                steps.append(step_data)
-            server.emit(PlanUpdatedEvent(
-                agent_id=agent_id,
-                plan_name=plan_data.get('title', 'Plan'),
-                steps=steps,
-            ))
+            server.emit(server._plan_updated_event(plan_data, agent_name))
 
         def clear_callback(agent_name: Optional[str] = None):
-            """Emit PlanClearedEvent."""
-            agent_id = _get_agent_id(agent_name)
-            server.emit(PlanClearedEvent(agent_id=agent_id))
+            server.emit(server._plan_cleared_event(agent_name))
 
         def step_update_callback(step_data: dict, agent_name: Optional[str] = None):
-            """Emit PlanStepUpdatedEvent for lean step status deltas."""
-            agent_id = _get_agent_id(agent_name)
-            server.emit(PlanStepUpdatedEvent(
-                agent_id=agent_id,
-                step_id=step_data.get('step_id', ''),
-                sequence=step_data.get('sequence', 0),
-                content=step_data.get('content', ''),
-                status=step_data.get('status', 'pending'),
-                result=step_data.get('result'),
-                error=step_data.get('error'),
-                blocked_by=step_data.get('blocked_by'),
-                depends_on=step_data.get('depends_on'),
-                received_outputs=step_data.get('received_outputs'),
-            ))
+            server.emit(server._plan_step_updated_event(step_data, agent_name))
 
         def output_callback(source: str, text: str, mode: str):
-            """Emit AgentOutputEvent for plan messages."""
-            server.emit(AgentOutputEvent(
-                agent_id=server._main_agent_id,
-                source=source,
-                text=text,
-                mode=mode,
-            ))
+            server.emit(server._plan_output_event(source, text, mode))
 
         # Reuse LivePlanReporter from jaato-tui with event-emitting callbacks
         reporter = create_live_reporter(
@@ -4719,6 +4709,84 @@ class JaatoServer:
             subagent_plugin = self.registry.get_plugin("subagent")
             if subagent_plugin and hasattr(subagent_plugin, 'set_plan_reporter'):
                 subagent_plugin.set_plan_reporter(reporter)
+
+    def _plan_agent_id(self, agent_name: Optional[str]) -> str:
+        """The agent id a plan report's ``agent_name`` addresses.
+
+        The todo plugin names the agent by PROFILE name (``None`` for the
+        main agent); clients key plans by agent id, so a subagent's name is
+        mapped through ``_agents`` and an unknown name is used as-is.
+        """
+        agent_id = self._main_agent_id if agent_name is None else agent_name
+        for aid, agent in self._agents.items():
+            if agent.profile_name == agent_name:
+                agent_id = aid
+                break
+        return agent_id
+
+    def _plan_updated_event(
+        self, plan_data: Dict[str, Any], agent_name: Optional[str] = None,
+    ) -> PlanUpdatedEvent:
+        """A full-snapshot ``PlanUpdatedEvent`` from the reporter's plan dict.
+
+        ``plan_data`` is ``LivePlanReporter._plan_to_display_dict``'s shape
+        (``title``, ``steps[].description``); the event spells a step's text
+        ``content``, so each step is re-keyed here -- one place, whichever
+        process the report came from.
+        """
+        steps = []
+        for step in plan_data.get('steps', []) or []:
+            step_data = {
+                'content': step.get('description', ''),
+                'status': step.get('status', 'pending'),
+                'active_form': step.get('active_form'),
+                'step_id': step.get('step_id', ''),
+                'result': step.get('result'),
+                'error': step.get('error'),
+            }
+            # Include cross-agent dependency info for blocked steps
+            if step.get('blocked_by'):
+                step_data['blocked_by'] = step['blocked_by']
+            if step.get('depends_on'):
+                step_data['depends_on'] = step['depends_on']
+            if step.get('received_outputs'):
+                step_data['received_outputs'] = step['received_outputs']
+            steps.append(step_data)
+        return PlanUpdatedEvent(
+            agent_id=self._plan_agent_id(agent_name),
+            plan_name=plan_data.get('title', 'Plan') or 'Plan',
+            steps=steps,
+        )
+
+    def _plan_step_updated_event(
+        self, step_data: Dict[str, Any], agent_name: Optional[str] = None,
+    ) -> PlanStepUpdatedEvent:
+        """A lean ``PlanStepUpdatedEvent`` from the reporter's step delta."""
+        return PlanStepUpdatedEvent(
+            agent_id=self._plan_agent_id(agent_name),
+            step_id=step_data.get('step_id', ''),
+            sequence=step_data.get('sequence', 0),
+            content=step_data.get('content', ''),
+            status=step_data.get('status', 'pending'),
+            result=step_data.get('result'),
+            error=step_data.get('error'),
+            blocked_by=step_data.get('blocked_by'),
+            depends_on=step_data.get('depends_on'),
+            received_outputs=step_data.get('received_outputs'),
+        )
+
+    def _plan_cleared_event(self, agent_name: Optional[str] = None) -> PlanClearedEvent:
+        """The ``PlanClearedEvent`` for a reporter's clear."""
+        return PlanClearedEvent(agent_id=self._plan_agent_id(agent_name))
+
+    def _plan_output_event(self, source: str, text: str, mode: str) -> AgentOutputEvent:
+        """The reporter's supplementary line (``Plan created: ...``) as output."""
+        return AgentOutputEvent(
+            agent_id=self._main_agent_id,
+            source=source,
+            text=text,
+            mode=mode,
+        )
 
     def _setup_queue_channels(self) -> None:
         """Set up queue-based channels for permission/clarification."""
@@ -5138,7 +5206,7 @@ class JaatoServer:
                 # one — and makes the next addition free.
                 builder = _PURE_NOTIFICATION_EVENTS.get(event_type)
                 if builder is not None:
-                    server.emit(builder(payload))
+                    server.emit(builder(server, payload))
                     return
 
                 if event_type == "instruction_budget_updated":

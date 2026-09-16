@@ -370,3 +370,17 @@ describe("reduce — the daemon's prompt echo", () => {
     expect(blocks.some((b) => b.kind === "text" && b.source === "user")).toBe(false);
   });
 });
+
+describe("rail width", () => {
+  it("is clamped to the rail's bounds and starts at the default", () => {
+    expect(useJaato.getState().ui.railWidth).toBe(300);
+    useJaato.getState().setRailWidth(420);
+    expect(useJaato.getState().ui.railWidth).toBe(420);
+    useJaato.getState().setRailWidth(10);
+    expect(useJaato.getState().ui.railWidth).toBe(220);
+    useJaato.getState().setRailWidth(5000);
+    expect(useJaato.getState().ui.railWidth).toBe(720);
+    useJaato.getState().setRailWidth(Number.NaN);
+    expect(useJaato.getState().ui.railWidth).toBe(300);
+  });
+});

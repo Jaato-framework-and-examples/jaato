@@ -15,6 +15,7 @@ import { normalizeClarificationQuestion } from "@/protocol/clarification";
 import { summarizeToolCalls } from "@/protocol/turnStats";
 import { formatSessionList, normalizeSessionList, type SessionSummary } from "@/protocol/sessions";
 import { formatHistoryListing, historyBlocks } from "@/protocol/history";
+import { clampRailWidth, loadRailWidth, saveRailWidth } from "@/store/railWidth";
 import type {
   UserBlock,
   Agent,
@@ -148,6 +149,8 @@ export interface JaatoState {
     theme: string;
     /** Tool call currently pinned in the live-output popup. */
     popupCallId?: string | null;
+    /** Width of the session rail in px, dragged via the handle on its left edge; remembered per browser. */
+    railWidth: number;
   };
 
   // ── actions ──
@@ -184,6 +187,8 @@ export interface JaatoState {
   setWorkspaceListNotice: (n: JaatoState["workspace"]["notice"]) => void;
   setTheme: (t: string) => void;
   setPopup: (callId: string | null) => void;
+  /** Clamped to the rail's bounds and persisted. */
+  setRailWidth: (w: number) => void;
   resetSessionState: () => void;
 }
 
@@ -845,7 +850,7 @@ export const useJaato = create<JaatoState>()((set, get) => ({
   historyMode: "listing",
   commands: mergeCommandSpecs([]),
   ...emptySessionState(),
-  ui: { showPlan: false, showBudget: false, showWorkspace: false, showTools: false, theme: "light", popupCallId: null },
+  ui: { showPlan: false, showBudget: false, showWorkspace: false, showTools: false, theme: "light", popupCallId: null, railWidth: loadRailWidth() },
 
   dispatch: (events) =>
     set((state) => {
@@ -901,6 +906,7 @@ export const useJaato = create<JaatoState>()((set, get) => ({
   setWorkspaceListNotice: (n) => set((st) => ({ workspace: { ...st.workspace, notice: n } })),
   setTheme: (theme) => set((st) => ({ ui: { ...st.ui, theme } })),
   setPopup: (callId) => set((st) => ({ ui: { ...st.ui, popupCallId: callId } })),
+  setRailWidth: (w) => set((st) => { const railWidth = clampRailWidth(w); saveRailWidth(railWidth); return { ui: { ...st.ui, railWidth } }; }),
   resetSessionState: () => set(() => ({ ...emptySessionState() })),
 }));
 

@@ -4047,6 +4047,23 @@ class RunnerRPC:
     # to refresh.
     _NOTIF_DESCRIPTION_UPDATED = "description_updated"
 
+    # The plan the todo plugin reports, bridged runner -> daemon.  ``todo``
+    # is runner-tier, so a runner-served session reports into the RUNNER's
+    # instance -- whose reporter was the bootstrap's ``MemoryReporter``,
+    # read by nobody -- while the daemon's ``_setup_plan_hooks`` armed an
+    # instance no session calls.  Every ``createPlan`` on the default path
+    # therefore reached no client: the TUI's Ctrl+P panel and the web
+    # rail both said "no plan yet" beside a completed tool call.  The
+    # same shape as ``description_updated`` above, closed the same way:
+    # a ``LivePlanReporter`` installed per turn whose callbacks emit these
+    # frames, and the daemon demuxer's ``_PURE_NOTIFICATION_EVENTS`` table
+    # turning them into the plan events through the builders the
+    # in-process path uses.
+    _NOTIF_PLAN_UPDATED = "plan_updated"
+    _NOTIF_PLAN_STEP_UPDATED = "plan_step_updated"
+    _NOTIF_PLAN_CLEARED = "plan_cleared"
+    _NOTIF_PLAN_OUTPUT = "plan_output"
+
     @staticmethod
     def _turns_ran_snapshot(session) -> Optional[int]:
         """How many turns this session has RUN, or ``None`` if it cannot say.
@@ -4629,6 +4646,9 @@ class RunnerRPC:
         except Exception:  # noqa: BLE001
             logger.debug("description_callback shim install raised")
 
+        # The todo plugin's plan reporter (see _NOTIF_PLAN_UPDATED).
+        self._install_plan_reporter(session, originals, request_id)
+
         return originals
 
     def _restore_session_notification_callbacks(
@@ -4718,6 +4738,60 @@ class RunnerRPC:
                     )
             except Exception:  # noqa: BLE001
                 logger.debug("restore description_callback raised")
+        self._restore_plan_reporter(session, originals)
+
+    @staticmethod
+    def _plan_plugins(session: Any) -> "tuple[Any, Any]":
+        """The runner registry's ``todo`` and ``subagent`` plugins, or Nones."""
+        runtime = getattr(session, "_runtime", None)
+        registry = getattr(runtime, "registry", None) if runtime else None
+        if registry is None:
+            return None, None
+        return registry.get_plugin("todo"), registry.get_plugin("subagent")
+
+    def _install_plan_reporter(
+        self, session: Any, originals: Dict[str, Any], request_id: int,
+    ) -> None:
+        """Swap the todo plugin's reporter for one that emits ``plan_*`` frames.
+
+        The runner's instance boots with a ``MemoryReporter`` nobody reads;
+        for the turn it is replaced by a ``LivePlanReporter`` whose
+        callbacks emit the four plan frames, and the subagent plugin is
+        handed the same one so a subagent's plan reaches the client under
+        its own agent id.  Both originals are recorded for
+        :meth:`_restore_plan_reporter`.
+        """
+        try:
+            todo_plugin, subagent_plugin = self._plan_plugins(session)
+            if todo_plugin is None or not hasattr(todo_plugin, "_reporter"):
+                return
+            originals["todo_reporter"] = todo_plugin._reporter
+            reporter = _plan_notification_reporter(self, request_id)
+            todo_plugin._reporter = reporter
+            if subagent_plugin is not None and hasattr(subagent_plugin, "set_plan_reporter"):
+                originals["subagent_plan_reporter"] = getattr(
+                    subagent_plugin, "_plan_reporter", None,
+                )
+                subagent_plugin.set_plan_reporter(reporter)
+        except Exception:  # noqa: BLE001
+            logger.debug("plan reporter shim install raised")
+
+    def _restore_plan_reporter(self, session: Any, originals: Dict[str, Any]) -> None:
+        """Put back the reporters :meth:`_install_plan_reporter` swapped."""
+        if "todo_reporter" not in originals and "subagent_plan_reporter" not in originals:
+            return
+        try:
+            todo_plugin, subagent_plugin = self._plan_plugins(session)
+            if "todo_reporter" in originals and todo_plugin is not None:
+                todo_plugin._reporter = originals["todo_reporter"]
+            if (
+                "subagent_plan_reporter" in originals
+                and subagent_plugin is not None
+                and hasattr(subagent_plugin, "set_plan_reporter")
+            ):
+                subagent_plugin.set_plan_reporter(originals["subagent_plan_reporter"])
+        except Exception:  # noqa: BLE001
+            logger.debug("restore plan reporter raised")
 
     def _handle_session_shutdown(self) -> "tuple[bool, Any]":
         """Graceful runner-side session teardown.
@@ -5793,6 +5867,52 @@ def _spend(value: Optional[int]) -> Optional[int]:
         ``int(value)``, or ``None``.
     """
     return int(value) if value is not None else None
+
+
+def _plan_notification_reporter(rpc: "RunnerRPC", request_id: int) -> Any:
+    """A ``LivePlanReporter`` whose four callbacks emit ``plan_*`` frames.
+
+    The payloads are the reporter's own dicts, unconverted: the daemon's
+    ``_plan_updated_event`` / ``_plan_step_updated_event`` re-key them
+    exactly as they did when the reporter ran in the daemon, so the two
+    processes cannot disagree about the wire.  ``agent_name`` is the
+    PROFILE name the todo plugin reports under (``None`` for the main
+    agent); the daemon maps it to an agent id, which the runner does not
+    hold.  Each callback swallows its own failure: a plan report must not
+    take the tool call that produced it down.
+    """
+    from jaato_sdk.plugins.todo.channels import create_live_reporter
+
+    def _emit(event_type: str, payload: Dict[str, Any]) -> None:
+        try:
+            rpc.emit_notification(
+                request_id=request_id, event_type=event_type, payload=payload,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("%s notify raised", event_type)
+
+    def _update(plan_data: Dict[str, Any], agent_name: Optional[str] = None) -> None:
+        _emit(rpc._NOTIF_PLAN_UPDATED,
+              {"plan": dict(plan_data or {}), "agent_name": agent_name})
+
+    def _step(step_data: Dict[str, Any], agent_name: Optional[str] = None) -> None:
+        _emit(rpc._NOTIF_PLAN_STEP_UPDATED,
+              {"step": dict(step_data or {}), "agent_name": agent_name})
+
+    def _clear(agent_name: Optional[str] = None) -> None:
+        _emit(rpc._NOTIF_PLAN_CLEARED, {"agent_name": agent_name})
+
+    def _output(source: str, text: str, mode: str) -> None:
+        _emit(rpc._NOTIF_PLAN_OUTPUT,
+              {"source": str(source or "plan"), "text": str(text or ""),
+               "mode": str(mode or "write")})
+
+    return create_live_reporter(
+        update_callback=_update,
+        step_update_callback=_step,
+        clear_callback=_clear,
+        output_callback=_output,
+    )
 
 
 class _AgentUIHooksNotificationShim:

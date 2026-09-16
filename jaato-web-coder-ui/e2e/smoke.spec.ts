@@ -518,3 +518,22 @@ test("without a backend the workspace list offers Disconnect, which is the exit 
   await page.getByRole("button", { name: "Disconnect" }).click();
   await expect(page.getByRole("button", { name: "Connect" })).toBeVisible();
 });
+
+test("the rail's drag handle resizes it, by pointer and by keyboard", async ({ page }) => {
+  await openSession(page);
+  const rail = page.getByRole("complementary", { name: "Session rail" });
+  const handle = page.getByRole("separator", { name: "Resize the session rail" });
+  expect(Math.round((await rail.boundingBox())!.width)).toBe(300);
+  const box = (await handle.boundingBox())!;
+  await page.mouse.move(box.x + box.width / 2, box.y + 200);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width / 2 - 120, box.y + 200, { steps: 6 });
+  await page.mouse.up();
+  expect(Math.round((await rail.boundingBox())!.width)).toBe(420);
+  await handle.focus();
+  await page.keyboard.press("ArrowRight");
+  expect(Math.round((await rail.boundingBox())!.width)).toBe(404);
+  // Remembered per browser: a new session in the same tab reopens at that width.
+  await openSession(page);
+  expect(Math.round((await page.getByRole("complementary", { name: "Session rail" }).boundingBox())!.width)).toBe(404);
+});

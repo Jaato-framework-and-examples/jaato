@@ -57,7 +57,11 @@ const CHANGE_CLS: Record<string, string> = { created: "text-success", added: "te
 
 function RowActions({ id, hidden, ignored }: { id: string; hidden: boolean; ignored: boolean | undefined }) {
   const toggleHidden = useJaato((s) => s.toggleWorkspaceHidden);
-  const cls = "font-heading uppercase tracking-[0.08em] text-[10px] px-1 text-text-muted hover:text-steel opacity-0 group-hover:opacity-100 focus:opacity-100";
+  // Always drawn, dimmed until the row is hovered or a button focused: a
+  // touch screen has no hover, so an action that only appears on hover is
+  // unreachable there -- the tablet the panel was first tried on could not
+  // hide or ignore anything.
+  const cls = "font-heading uppercase tracking-[0.08em] text-[10px] px-1 text-text-muted hover:text-steel opacity-60 group-hover:opacity-100 focus:opacity-100";
   return (
     <span className="ml-auto shrink-0 flex gap-1">
       <button type="button" className={cls} onClick={() => toggleHidden(id)} aria-label={`${hidden ? "Unhide" : "Hide"} ${id}`} title={hidden ? "Show this entry again" : "Hide this entry from the panel (this session only)"}>
@@ -120,7 +124,7 @@ export function WorkspacePanel() {
           <button type="button" className="link" onClick={toggleShowHidden}>{showHidden ? "hide hidden" : "show hidden"}</button>
         </div>
       )}
-      {total > 0 && <div className="mt-2.5 text-xs text-text-muted">Hover an entry to hide it from the panel, or add it to <span className="font-mono">.gitignore</span>.</div>}
+      {total > 0 && <div className="mt-2.5 text-xs text-text-muted"><span className="font-heading uppercase tracking-[0.08em] text-[10px]">hide</span> drops an entry from the panel; <span className="font-heading uppercase tracking-[0.08em] text-[10px]">ignore</span> adds it to <span className="font-mono">.gitignore</span>.</div>}
     </div>
   );
 }

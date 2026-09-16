@@ -4965,6 +4965,54 @@ Containment is still checked first, so a traversal is refused as one and
 before existence. Tests:
 `server/tests/test_workspace_root_is_not_a_workspace.py`.
 
+### A Plan Nobody Was Watching, and a Step That Was Not a Failure
+
+Two more from the same evening, one on each side of the tool row.
+
+**`createPlan` completed and every client said "no plan yet".** `todo` is
+runner-tier, so on the default path the plugin reports into the RUNNER's
+instance, whose reporter was the bootstrap's `MemoryReporter` (events
+stored, read by nobody), while the daemon's `_setup_plan_hooks` armed a
+`LivePlanReporter` on the DAEMON's instance, which no runner-served session
+calls. Not one `PlanUpdatedEvent` crossed the wire for a runner session; the
+TUI's Ctrl+P panel and the web rail were fed by the same absence. It is the
+description-callback gap (`description_updated`) with a different plugin,
+closed the same way: `RunnerRPC._install_plan_reporter` swaps the reporter
+per turn for one whose callbacks emit `plan_updated` / `plan_step_updated` /
+`plan_cleared` / `plan_output` frames (the reporter's own dicts, unconverted),
+hands the same reporter to the subagent plugin, and restores both on exit;
+the daemon's `_PURE_NOTIFICATION_EVENTS` table turns the four frames into
+the plan events through `_plan_updated_event` and its siblings, which are
+now the one place a reporter's `description` becomes the event's `content`,
+so the in-process and runner paths cannot disagree about a step. The table's
+builders take the server too, because a profile name resolves to an agent id
+through `_agents`, which no payload carries. `_setup_plan_hooks` stays for
+the embedded and standalone-WS sessions that are its actual audience, and
+its docstring now says so.
+
+**A completed step drew as a failed call.** `setStepStatus` answered with
+`"error": step.error`, which is `None` for a step just marked completed, and
+`tool_result_is_error` read `"error" in result` — so `{"error": None,
+"result": "Proyecto creado correctamente"}` was `is_error_result=True`: a red
+✗ in every client, an error in the reliability plugin's ledger, `is_error`
+on the telemetry span. A null error is the ABSENCE of one, and the helper
+now says `result.get("error") is not None`; the `background` plugin answers
+with the same shape on success and is covered by the same line. The todo
+plugin also stops spelling a step's own failure as the tool's: a step the
+model marked `failed` is the tool doing what it was asked, so its text
+travels as `step_error`. Tests:
+`server/runner/tests/test_plan_reporter_bridge.py`,
+`jaato_sdk/tests/test_tool_result_is_error.py`.
+
+**Two web-client touches from a tablet.** The Files panel's `hide` / `ignore`
+actions appeared on hover only, and a touch screen has no hover, so on the
+tablet the panel was first tried on nothing could be hidden or ignored; they
+are always drawn now, dimmed until the row is hovered. And the rail has a
+drag handle on its left edge (`components/layout/RailResizer.tsx`): a
+`separator` that resizes by pointer — mouse, pen or finger, `touch-action:
+none` — and by arrow keys, clamped to 220–720px and remembered per browser
+(`ui.railWidth`, `localStorage`).
+
 ### A Key the Web Files Panel Did Not Have
 
 The TUI's workspace panel (Ctrl+W) binds two keys to the entry under the

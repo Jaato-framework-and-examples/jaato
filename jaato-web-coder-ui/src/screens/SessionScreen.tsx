@@ -24,6 +24,7 @@ import { WorkspacePanel } from "@/components/panels/WorkspacePanel";
 import { AgentTabs } from "@/components/panels/AgentTabs";
 import { StatusBar } from "@/components/layout/StatusBar";
 import { Plate } from "@/components/layout/Plate";
+import { RailResizer } from "@/components/layout/RailResizer";
 import { answerClarification, attachSession, cancelClarification, ensureSessions, inputHistory, respondPermission, respondPostAuth, respondReference, submitInput } from "@/app/actions";
 import { sessionsInWorkspace } from "@/protocol/sessions";
 import { useKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
@@ -88,7 +89,7 @@ function Rail({ agentId }: { agentId: string }) {
   const changed = useJaato((s) => Object.keys(s.workspaceFiles).length);
   const budget = ctx?.usage.cost_usd != null ? `$${Number(ctx.usage.cost_usd).toFixed(4)}` : ctx?.percentUsed != null ? `${ctx.percentUsed.toFixed(0)}%` : null;
   return (
-    <aside className="hidden md:flex w-[300px] shrink-0 border-l hairline bg-surface flex-col min-h-0 overflow-auto" aria-label="Session rail">
+    <aside className="hidden md:flex shrink-0 border-l hairline bg-surface flex-col min-h-0 overflow-auto" style={{ width: ui.railWidth }} aria-label="Session rail">
       <RailSection title="Plan" value={planProgress(plan)} open={ui.showPlan} onToggle={() => toggle("showPlan")}><PlanPanel agentId={agentId} /></RailSection>
       <RailSection title="Budget" value={budget} open={ui.showBudget} onToggle={() => toggle("showBudget")}><BudgetPanel agentId={agentId} /></RailSection>
       <RailSection title="Files" value={changed ? `${changed} changed` : null} open={ui.showWorkspace} onToggle={() => toggle("showWorkspace")}><WorkspacePanel /></RailSection>
@@ -305,6 +306,7 @@ export function SessionScreen() {
           </div>
           <ToolOutputPopup agentId={selected} />
         </main>
+        <RailResizer />
         <Rail agentId={selected} />
       </div>
       <StatusBar />
