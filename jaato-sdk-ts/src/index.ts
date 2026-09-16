@@ -23,6 +23,7 @@ export {
   JaatoClient,
   MIN_PROTOCOL_VERSION,
   MIN_ATTACHMENT_RESUME_PROTOCOL,
+  MIN_WORKSPACE_IGNORE_PROTOCOL,
   isProtocolCompatible,
   type JaatoClientOptions,
   type TokenProvider,

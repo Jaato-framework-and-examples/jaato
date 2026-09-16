@@ -16,6 +16,7 @@ import {
   JaatoClient,
   MIN_ATTACHMENT_RESUME_PROTOCOL,
   MIN_SESSION_RELOAD_ENV_PROTOCOL,
+  MIN_WORKSPACE_IGNORE_PROTOCOL,
   MIN_PROTOCOL_VERSION,
 } from "./client.js";
 import {
@@ -630,6 +631,24 @@ describe("JaatoClient session management", () => {
 
   test("reloadSessionEnv is refused below protocol 1.11", async () => {
     await assert.rejects(() => client.reloadSessionEnv(), /session\.reload_env/);
+    assert.equal(getSent().length, 0);
+  });
+
+  test("toggleWorkspaceIgnore sends workspace.ignore with the entry as its one arg", async () => {
+    await client.close();
+    installMockWebSocket();
+    client = new JaatoClient({ url: "ws://localhost:8080" });
+    await connectAndAck(client, MIN_WORKSPACE_IGNORE_PROTOCOL);
+    if (lastInstance) lastInstance.sent = [];
+    await client.toggleWorkspaceIgnore(".jaato/logs/");
+    const [ev] = getSent();
+    assert.equal(ev.type, EventTypeValue.COMMAND);
+    assert.equal((ev as { command?: string }).command, "workspace.ignore");
+    assert.deepEqual((ev as { args?: string[] }).args, [".jaato/logs/"]);
+  });
+
+  test("toggleWorkspaceIgnore is refused below protocol 1.12", async () => {
+    await assert.rejects(() => client.toggleWorkspaceIgnore("x"), /workspace\.ignore/);
     assert.equal(getSent().length, 0);
   });
 

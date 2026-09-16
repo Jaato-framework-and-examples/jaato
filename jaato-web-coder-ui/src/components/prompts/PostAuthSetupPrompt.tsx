@@ -11,12 +11,18 @@
 import { useState } from "react";
 import type { PendingPostAuthSetup } from "@/store/types";
 
-export function PostAuthSetupPrompt({ p, onRespond }: {
+export function PostAuthSetupPrompt({ p, onRespond, alreadyConfigured = false }: {
   p: PendingPostAuthSetup;
   onRespond: (a: { connect: boolean; modelName?: string; persistEnv?: boolean }) => void;
+  /**
+   * The selected workspace's ``.env`` already binds this provider: nothing
+   * to persist, so the question is not asked (a reopened workspace must not
+   * be asked about its own ``.env`` again).
+   */
+  alreadyConfigured?: boolean;
 }) {
   const [model, setModel] = useState(p.models[0]?.name ?? "");
-  const [persist, setPersist] = useState(Boolean(p.workspacePath));
+  const [persist, setPersist] = useState(Boolean(p.workspacePath) && !alreadyConfigured);
   const canConnect = model.trim().length > 0;
   const heading = p.hasActiveSession
     ? `Signed in to ${p.providerDisplayName}. Switch this session to it? (currently ${[p.currentProvider, p.currentModel].filter(Boolean).join(" / ")})`
@@ -41,7 +47,7 @@ export function PostAuthSetupPrompt({ p, onRespond }: {
             <input aria-label="Model name" value={model} onChange={(e) => setModel(e.target.value)} placeholder="model name" className="mt-1 w-full rounded-md border hairline bg-bg px-2 py-1.5 font-mono" />
           )}
         </label>
-        {p.workspacePath && (
+        {p.workspacePath && !alreadyConfigured && (
           <label className="flex items-center gap-2 text-xs text-text-muted">
             <input type="checkbox" checked={persist} onChange={(e) => setPersist(e.target.checked)} />
             Save provider and model to <span className="font-mono">{p.workspacePath}/.env</span>

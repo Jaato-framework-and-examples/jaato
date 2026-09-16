@@ -1,4 +1,5 @@
 /** Context-window and token usage — the TUI's budget panel + `context` command. */
+import { describeToolCalls } from "@/protocol/turnStats";
 import { useJaato } from "@/store/store";
 
 function fmt(n: number | null | undefined): string {
@@ -36,7 +37,7 @@ export function BudgetPanel({ agentId }: { agentId: string }) {
       </dl>
       {ctx.lastTurn && (
         <div className="mt-3 text-xs text-text-muted">
-          Last turn{ctx.lastTurn.turnNumber != null ? ` #${ctx.lastTurn.turnNumber}` : ""}: {ctx.lastTurn.durationSeconds != null ? `${ctx.lastTurn.durationSeconds.toFixed(1)}s` : ""}{ctx.lastTurn.functionCalls != null ? ` · ${ctx.lastTurn.functionCalls} tool calls` : ""}{ctx.lastTurn.finishReason ? ` · ${ctx.lastTurn.finishReason}` : ""}
+          Last turn{ctx.lastTurn.turnNumber != null ? ` #${ctx.lastTurn.turnNumber}` : ""}: {ctx.lastTurn.durationSeconds != null ? `${ctx.lastTurn.durationSeconds.toFixed(1)}s` : ""}{ctx.lastTurn.toolCalls ? ` · ${describeToolCalls(ctx.lastTurn.toolCalls)}` : ""}{ctx.lastTurn.finishReason ? ` · ${ctx.lastTurn.finishReason}` : ""}
         </div>
       )}
     </div>

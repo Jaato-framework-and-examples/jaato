@@ -2093,6 +2093,50 @@ class IPCClient:
             args=[session_id] if session_id else [],
         ))
 
+    MIN_WORKSPACE_IGNORE_PROTOCOL = "1.12"
+
+    async def toggle_workspace_ignore(self, path: str) -> None:
+        """Add ``path`` to the session workspace's ``.gitignore``, or remove it again.
+
+        The TUI workspace panel's ``i`` key, served daemon-side (protocol
+        1.12) so a client with no access to the workspace's filesystem can
+        make the same edit.  Exact-match toggle of ONE line: a directory
+        entry keeps its trailing ``/``; a glob that already covers the path
+        is neither matched nor touched.  The daemon's ``WorkspaceMonitor``
+        reloads on the write, so the pattern binds every later file event;
+        entries already shown are not pruned.
+
+        The daemon answers with one ``WorkspaceIgnoreResultEvent`` whatever
+        happened — ``ok`` / ``ignored`` on success, ``ok=False`` with the
+        reason when the pattern was refused, the caller has no workspace,
+        or the write failed.
+
+        Args:
+            path: The workspace-relative entry, as the workspace panel
+                shows it.
+
+        Raises:
+            ValueError: Against a daemon below
+                :attr:`MIN_WORKSPACE_IGNORE_PROTOCOL`, which would ignore
+                the command silently — and "ignored" would then describe a
+                file nobody changed.
+        """
+        if not _protocol_compatible(
+                self.server_protocol_version,
+                self.MIN_WORKSPACE_IGNORE_PROTOCOL):
+            spoken = self.server_protocol_version or "unknown (not connected)"
+            raise ValueError(
+                f"toggle_workspace_ignore: this daemon speaks protocol {spoken} "
+                f"and does not serve workspace.ignore (needs >= "
+                f"{self.MIN_WORKSPACE_IGNORE_PROTOCOL}).  It would ignore the "
+                f"command silently, which reads like success.  Upgrade the "
+                f"daemon, or edit the workspace's .gitignore directly."
+            )
+        await self._send_event(CommandRequest(
+            command="workspace.ignore",
+            args=[path],
+        ))
+
     async def list_profiles(self) -> None:
         """Request list of available agent profiles.
 

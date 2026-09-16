@@ -18,9 +18,9 @@ export function useKeyboardShortcuts(): void {
       else if ((mod || e.altKey) && k === "w" && (e.altKey || e.shiftKey)) { e.preventDefault(); st.toggleUi("showWorkspace"); }
       else if (mod && k === "t") {
         e.preventDefault();
-        const next = !st.ui.showTools;
-        st.toggleUi("showTools");
-        st.setAllToolsExpanded(st.selectedAgentId, next);
+        // The TUI's Ctrl+T: every tool block in the chat expands or
+        // collapses at once, and new blocks follow the setting.
+        st.setToolsExpanded(!st.ui.showTools);
       }
       else if (mod && k === "a" && !(e.target as HTMLElement | null)?.matches?.("textarea,input")) {
         e.preventDefault();

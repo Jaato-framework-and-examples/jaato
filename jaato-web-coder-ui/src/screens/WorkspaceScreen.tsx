@@ -13,7 +13,7 @@
  * who prefer it; the list the daemon sends for it is what it names.
  */
 import { useEffect, useState } from "react";
-import { createWorkspace, requestWorkspaceList, selectWorkspace, updateConfig } from "@/sdk/connection";
+import { createWorkspace, deleteWorkspace, requestWorkspaceList, selectWorkspace, updateConfig } from "@/sdk/connection";
 import { useJaato } from "@/store/store";
 
 export function WorkspaceScreen() {
@@ -25,6 +25,7 @@ export function WorkspaceScreen() {
   const [apiKey, setApiKey] = useState("");
   const [busy, setBusy] = useState(false);
   const [manual, setManual] = useState<string | null>(null); // workspace whose manual form is open
+  const [confirming, setConfirming] = useState<string | null>(null); // workspace whose delete is awaiting confirmation
 
   useEffect(() => { requestWorkspaceList().catch(() => undefined); }, []);
   useEffect(() => {
@@ -42,6 +43,12 @@ export function WorkspaceScreen() {
     setBusy(true);
     try { await selectWorkspace(name); setManual(name); } finally { setBusy(false); }
   };
+  // Destructive and daemon-side (the directory and its sessions go), so the
+  // row asks first; the daemon's answer lands in ``ws.notice``.
+  const remove = async (name: string) => {
+    setBusy(true);
+    try { await deleteWorkspace(name); } finally { setBusy(false); setConfirming(null); }
+  };
   const create = async (e: React.FormEvent) => { e.preventDefault(); if (!newName.trim()) return; await createWorkspace(newName.trim()); setNewName(""); };
   const saveConfig = async (e: React.FormEvent) => { e.preventDefault(); setBusy(true); try { await updateConfig({ provider: provider || undefined, model: model || undefined, api_key: apiKey || undefined }); setApiKey(""); } finally { setBusy(false); } };
 
@@ -53,6 +60,7 @@ export function WorkspaceScreen() {
           <div className="text-xl font-semibold">Workspaces</div>
           <div className="text-sm text-text-muted">{ws.root ? <span className="font-mono">{ws.root}</span> : "Pick the workspace this session should run in."}</div>
         </div>
+        {ws.notice && <div role="status" className={`text-xs ${ws.notice.error ? "text-error" : "text-text-muted"}`}>{ws.notice.text}</div>}
         <ul className="rounded-xl border hairline surface-1 divide-y divide-[color-mix(in_srgb,var(--c-muted)_35%,transparent)]">
           {ws.list.length === 0 && <li className="px-4 py-3 text-sm text-text-muted italic">No workspaces yet — create one below.</li>}
           {ws.list.map((w) => (
@@ -61,10 +69,20 @@ export function WorkspaceScreen() {
                 <span className={w.configured ? "text-success" : "text-warning"}>{w.configured ? "●" : "○"}</span>
                 <span className="font-mono">{w.name}</span>
                 <span className="text-xs text-text-muted">{w.configured ? [w.provider, w.model].filter(Boolean).join(" / ") : "no provider in .env — sign in from the prompt, or configure"}</span>
+                {w.owner && <span className="text-[10px] text-text-muted border hairline rounded px-1" title={`Owned by ${w.owner}`}>{w.owner}</span>}
                 <span className="flex-1" />
                 {w.last_accessed && <span className="text-[11px] text-text-muted">{new Date(w.last_accessed).toLocaleString()}</span>}
               </button>
               <button type="button" disabled={busy} onClick={() => configure(w.name)} className="px-3 py-2.5 text-xs text-text-muted hover:text-primary" aria-label={`Configure workspace ${w.name}`}>configure</button>
+              {confirming === w.name ? (
+                <span className="flex items-center gap-1 pr-2 text-xs" role="group" aria-label={`Confirm deleting workspace ${w.name}`}>
+                  <span className="text-warning">delete {w.name} and its sessions?</span>
+                  <button type="button" disabled={busy} onClick={() => remove(w.name)} className="rounded px-2 py-1 bg-error/80 text-bg font-semibold" aria-label={`Confirm delete workspace ${w.name}`}>Delete</button>
+                  <button type="button" onClick={() => setConfirming(null)} className="rounded px-2 py-1 border hairline" aria-label="Cancel delete">Cancel</button>
+                </span>
+              ) : (
+                <button type="button" disabled={busy} onClick={() => setConfirming(w.name)} className="px-3 py-2.5 text-xs text-text-muted hover:text-error" aria-label={`Delete workspace ${w.name}`}>delete</button>
+              )}
             </li>
           ))}
         </ul>

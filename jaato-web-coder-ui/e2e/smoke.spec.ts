@@ -110,6 +110,43 @@ test("tool calls stream into a collapsible block and update the plan panel", asy
   await page.getByRole("button", { name: "Toggle plan (Ctrl+P)" }).click();
   await expect(page.getByText("Task plan")).toBeVisible();
   await expect(page.getByText("List the directory")).toBeVisible();
+  // The TUI's Ctrl+T: the status-bar toggle expands every tool block and
+  // collapses them again, instead of flipping a flag nothing reads.
+  const toolBlock = page.locator("[data-testid=tool-block] [aria-expanded]").first();
+  await page.getByRole("button", { name: "Toggle tool call boxes (Ctrl+T)" }).click();
+  await expect(toolBlock).toHaveAttribute("aria-expanded", "true");
+  await page.getByRole("button", { name: "Toggle tool call boxes (Ctrl+T)" }).click();
+  await expect(toolBlock).toHaveAttribute("aria-expanded", "false");
+});
+
+test("the status bar shows the permission default policy the daemon reports", async ({ page }) => {
+  await openSession(page);
+  await expect(page.getByTestId("permission-status")).toHaveText(/permissions\s+ask/);
+});
+
+test("`session list` prints the daemon's listing; `session attach` completes ids and replays the conversation", async ({ page }) => {
+  await openSession(page);
+  await composer(page).fill("session list");
+  await composer(page).press("Enter");
+  await expect(page.getByText("▶ current  ● loaded  ○ on disk")).toBeVisible();
+  await expect(page.getByText(/● 20260916_090000 - fix the budget panel \[anthropic\/claude-sonnet-4\]/)).toBeVisible();
+
+  // Third-level completion: the ids the daemon listed, filtered as you type.
+  await composer(page).fill("session attach 2026091");
+  const listbox = page.getByRole("listbox", { name: "Command proposals" });
+  await expect(listbox.getByRole("option", { name: /20260916_090000/ })).toBeVisible();
+  await expect(listbox.getByRole("option", { name: /20260915_170000/ })).toBeVisible();
+  await composer(page).fill("session attach 20260916");
+  await expect(listbox.getByRole("option")).toHaveCount(1);
+  await composer(page).press("Tab");
+  await expect(composer(page)).toHaveValue("session attach 20260916_090000 ");
+  await composer(page).press("Enter");
+
+  // The pane is the attached session's: its conversation, its permission policy.
+  await expect(page.getByText("what are those [object Object] in the budget panel?")).toBeVisible();
+  await expect(page.getByText("The panel reads function_calls as a number; it is a list of records.")).toBeVisible();
+  await expect(page.getByText("Connected to the mock daemon")).toHaveCount(0);
+  await expect(page.getByTestId("permission-status")).toHaveText(/permissions\s+allow/);
 });
 
 test("permission prompt shows the diff and the typed key answers it", async ({ page }) => {
@@ -124,6 +161,44 @@ test("permission prompt shows the diff and the typed key answers it", async ({ p
   await expect(page.getByText("Written (you answered")).toBeVisible();
   await page.getByRole("button", { name: "Toggle workspace changes (Alt+W)" }).click();
   await expect(page.getByText("~ app.py")).toBeVisible();
+  // The daemon's key is ``status``: a created file renders as ``+``.
+  await expect(page.getByText("+ session.log")).toBeVisible();
+});
+
+test("files panel: hide drops an entry from the view, show-hidden brings it back, ignore toggles .gitignore", async ({ page }) => {
+  await openSession(page);
+  await composer(page).fill("permit");
+  await composer(page).press("Enter");
+  await expect(page.getByText("Permission requested for")).toBeVisible();
+  await composer(page).fill("y");
+  await composer(page).press("Enter");
+  await expect(page.getByText("Written (you answered")).toBeVisible();
+  await page.getByRole("button", { name: "Toggle workspace changes (Alt+W)" }).click();
+  const panel = page.getByRole("region", { name: "Files" });
+  await expect(panel.getByText("~ app.py")).toBeVisible();
+
+  // hide (the TUI's ``h``): client-side, the entry leaves the view.
+  await panel.getByRole("button", { name: "Hide src/app.py", exact: true }).click();
+  await expect(panel.getByText("~ app.py")).toHaveCount(0);
+  await expect(panel.getByText("1 hidden")).toBeVisible();
+  // a whole directory hides everything under it
+  await panel.getByRole("button", { name: "Hide .jaato/", exact: true }).click();
+  await expect(panel.getByText("+ session.log")).toHaveCount(0);
+  await expect(panel.getByText("2 hidden")).toBeVisible();
+
+  // show hidden: back, dimmed, with the H marker, and unhide works.
+  await panel.getByRole("button", { name: "show hidden" }).click();
+  await expect(panel.getByText("~ app.py")).toBeVisible();
+  await expect(panel.locator("[data-hidden]")).toHaveCount(4); // .jaato/, logs/, session.log, app.py
+  await panel.getByRole("button", { name: "Unhide src/app.py", exact: true }).click();
+  await panel.getByRole("button", { name: "hide hidden" }).click();
+  await expect(panel.getByText("~ app.py")).toBeVisible();
+
+  // ignore (the TUI's ``i``): through the daemon, whose answer is the notice.
+  await panel.getByRole("button", { name: "Add src/app.py to .gitignore" }).click();
+  await expect(panel.getByRole("status")).toHaveText("src/app.py added to .gitignore");
+  await panel.getByRole("button", { name: "Remove src/app.py from .gitignore" }).click();
+  await expect(panel.getByRole("status")).toHaveText("src/app.py removed from .gitignore");
 });
 
 test("a permission ASK with no prompt content falls back to the tool arguments", async ({ page }) => {
@@ -260,6 +335,44 @@ test("workspace mode: an unconfigured workspace opens straight into the session 
   await expect(page.getByText("Session created with mock / mock-1")).toBeVisible();
 });
 
+test("workspace mode: a configured workspace reopens with its sessions and no provider or .env question", async ({ page }) => {
+  await page.goto("/");
+  await page.getByPlaceholder("ws://host:8080").fill("ws://127.0.0.1:8098");
+  await page.getByRole("button", { name: "Connect" }).click();
+  await page.getByRole("button", { name: "Open workspace project-a" }).click();
+  const card = page.getByText("Workspace", { exact: false }).first();
+  await expect(card).toBeVisible();
+  await expect(page.getByText("anthropic / claude-sonnet-4").first()).toBeVisible();
+  // No sign-in row, no .env talk: the workspace already binds a provider.
+  await expect(page.getByText("No provider configured yet?")).toHaveCount(0);
+  // Its previous session is offered for resuming, and resuming replays it.
+  await page.getByRole("button", { name: "Resume session 20260916_090000" }).click();
+  await expect(page.getByText("The panel reads function_calls as a number; it is a list of records.")).toBeVisible();
+});
+
+test("workspace mode: a workspace is deleted after confirmation, and a refusal is shown", async ({ page }) => {
+  await page.goto("/");
+  await page.getByPlaceholder("ws://host:8080").fill("ws://127.0.0.1:8098");
+  await page.getByRole("button", { name: "Connect" }).click();
+  await expect(page.getByRole("button", { name: "Open workspace project-b" })).toBeVisible();
+  // The daemon says who owns what it lists.
+  await expect(page.getByTitle("Owned by mock:tester")).toBeVisible();
+  // Cancel leaves everything as it was.
+  await page.getByRole("button", { name: "Delete workspace project-b" }).click();
+  await page.getByRole("button", { name: "Cancel delete" }).click();
+  await expect(page.getByRole("button", { name: "Open workspace project-b" })).toBeVisible();
+  // A refusal (loaded sessions) is reported, and the row stays.
+  await page.getByRole("button", { name: "Delete workspace project-a" }).click();
+  await page.getByRole("button", { name: "Confirm delete workspace project-a" }).click();
+  await expect(page.getByRole("status")).toContainText("has 1 loaded session(s)");
+  await expect(page.getByRole("button", { name: "Open workspace project-a" })).toBeVisible();
+  // The confirmed delete removes the row.
+  await page.getByRole("button", { name: "Delete workspace project-b" }).click();
+  await page.getByRole("button", { name: "Confirm delete workspace project-b" }).click();
+  await expect(page.getByRole("status")).toHaveText("Workspace project-b deleted");
+  await expect(page.getByRole("button", { name: "Open workspace project-b" })).toHaveCount(0);
+});
+
 test("workspace mode: the manual provider form is a disclosure, not a gate", async ({ page }) => {
   await page.goto("/");
   await page.getByPlaceholder("ws://host:8080").fill("ws://127.0.0.1:8098");
@@ -269,5 +382,7 @@ test("workspace mode: the manual provider form is a disclosure, not a gate", asy
   await expect(form.getByText("missing: provider, api_key")).toBeVisible();
   await expect(form.locator("select option")).toHaveCount(4); // — + the daemon's three
   await form.getByRole("button", { name: "Open session →" }).click();
-  await expect(page.getByText("New session")).toBeVisible();
+  // The picker, headed by the workspace; unconfigured, so the sign-in row stays.
+  await expect(page.getByTestId("session-picker")).toContainText("project-b");
+  await expect(page.getByLabel("Sign in to a provider")).toBeVisible();
 });

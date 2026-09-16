@@ -20,7 +20,8 @@ import { BudgetPanel } from "@/components/panels/BudgetPanel";
 import { WorkspacePanel } from "@/components/panels/WorkspacePanel";
 import { AgentTabs } from "@/components/panels/AgentTabs";
 import { StatusBar } from "@/components/layout/StatusBar";
-import { answerClarification, cancelClarification, inputHistory, respondPermission, respondPostAuth, respondReference, submitInput } from "@/app/actions";
+import { answerClarification, attachSession, cancelClarification, ensureSessions, inputHistory, respondPermission, respondPostAuth, respondReference, submitInput } from "@/app/actions";
+import { sessionsInWorkspace } from "@/protocol/sessions";
 import { useKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 
 function SidePanel({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
@@ -45,34 +46,62 @@ function authCommands(commands: { name: string; description?: string }[]): { nam
 }
 
 /**
- * What the TUI lets you do before any session exists, in one card:
- * start with a profile or the workspace defaults, or sign in to a
- * provider first.  Nothing here is required -- ``skip`` drops to the
- * prompt, where any daemon command (``<provider>-auth login``,
- * ``help``) runs with no session, exactly as in the TUI.
+ * What the TUI lets you do before any session exists, in one card.
+ *
+ * A workspace opened again is not a workspace being set up: when the
+ * selected workspace's ``.env`` already binds a provider, the card offers
+ * its previous sessions to resume and a new session on that binding, and
+ * asks nothing about providers or sign-in.  Only a workspace with no
+ * provider gets the sign-in row, after which the daemon offers to open the
+ * session itself.  Nothing here is required -- ``skip`` drops to the
+ * prompt, where any daemon command runs with no session, as in the TUI.
  */
-function ProfilePicker({ onPick, onAuth, onSkip }: {
+function ProfilePicker({ onPick, onAttach, onAuth, onSkip }: {
   onPick: (profile: string | null) => void;
+  onAttach: (sessionId: string) => void;
   onAuth: (command: string) => void;
   onSkip: () => void;
 }) {
   const profiles = useJaato((s) => s.profiles);
   const commands = useJaato((s) => s.commands);
+  const ws = useJaato((s) => s.workspace);
+  const sessions = useJaato((s) => s.sessions);
+  useEffect(() => { ensureSessions().catch(() => undefined); }, []);
   const auth = authCommands(commands);
+  const selected = ws.selected ? ws.list.find((w) => w.name === ws.selected) ?? { name: ws.selected } : undefined;
+  const cfg = ws.config && ws.config.workspace === ws.selected ? ws.config : undefined;
+  const configured = cfg?.configured === true;
+  const binding = [cfg?.provider, cfg?.model].filter(Boolean).join(" / ");
+  const resumable = selected ? sessionsInWorkspace(sessions, selected) : sessions;
   return (
     <div className="h-full flex items-center justify-center p-6 overflow-auto">
-      <div className="w-full max-w-lg rounded-xl border hairline surface-1 p-5 space-y-3">
-        <div className="text-lg font-semibold">New session</div>
-        <div className="text-sm text-text-muted">Pick an agent profile, or start with the workspace defaults.</div>
+      <div className="w-full max-w-lg rounded-xl border hairline surface-1 p-5 space-y-3" data-testid="session-picker">
+        <div className="text-lg font-semibold">{selected ? <>Workspace <span className="font-mono">{selected.name}</span></> : "New session"}</div>
+        {configured && <div className="text-sm text-text-muted">Provider <span className="font-mono">{binding}</span> from this workspace's <span className="font-mono">.env</span>.</div>}
+        {resumable.length > 0 && (
+          <div className="space-y-1.5" aria-label="Resume a session">
+            <div className="text-sm text-text-muted">Resume a session</div>
+            <ul className="divide-y divide-[color-mix(in_srgb,var(--c-muted)_35%,transparent)] rounded-md border hairline max-h-52 overflow-auto">
+              {resumable.map((sess) => (
+                <li key={sess.id}><button type="button" onClick={() => onAttach(sess.id)} aria-label={`Resume session ${sess.id}`} className="w-full text-left px-3 py-2 hover:bg-surface/60 flex items-baseline gap-2">
+                  <span className={sess.isLoaded ? "text-success" : "text-text-muted"}>{sess.isLoaded ? "●" : "○"}</span>
+                  <span className="font-mono">{sess.id}</span>
+                  <span className="text-xs text-text-muted truncate">{[sess.description || sess.name, sess.provider ? `${sess.provider}/${sess.model}` : "", sess.turnCount ? `${sess.turnCount} turns` : ""].filter(Boolean).join(" — ")}</span>
+                </button></li>
+              ))}
+            </ul>
+          </div>
+        )}
+        <div className="text-sm text-text-muted">{resumable.length > 0 ? "Or start a new one" : "Pick an agent profile, or start with the workspace defaults."}</div>
         <ul className="divide-y divide-[color-mix(in_srgb,var(--c-muted)_35%,transparent)] rounded-md border hairline max-h-80 overflow-auto">
-          <li><button type="button" onClick={() => onPick(null)} className="w-full text-left px-3 py-2 hover:bg-surface/60"><span className="font-mono">default</span> <span className="text-xs text-text-muted">— workspace .env provider and model</span></button></li>
+          <li><button type="button" onClick={() => onPick(null)} className="w-full text-left px-3 py-2 hover:bg-surface/60"><span className="font-mono">default</span> <span className="text-xs text-text-muted">— {configured ? binding : "workspace .env provider and model"}</span></button></li>
           {profiles.map((p) => (
             <li key={p.name}><button type="button" onClick={() => onPick(p.name)} className="w-full text-left px-3 py-2 hover:bg-surface/60">
               <span className="font-mono">{p.name}</span> <span className="text-xs text-text-muted">{[p.description, [p.provider, p.model].filter(Boolean).join("/")].filter(Boolean).join(" — ")}</span>
             </button></li>
           ))}
         </ul>
-        {auth.length > 0 && (
+        {auth.length > 0 && !configured && (
           <div className="space-y-1.5" aria-label="Sign in to a provider">
             <div className="text-sm text-text-muted">No provider configured yet? Sign in first; the daemon then offers to open the session for you.</div>
             <div className="flex flex-wrap gap-2">
@@ -102,6 +131,7 @@ export function SessionScreen() {
   const clarifications = useJaato((s) => s.clarifications);
   const references = useJaato((s) => s.referenceSelections);
   const postAuth = useJaato((s) => s.postAuth);
+  const wsConfig = useJaato((s) => s.workspace.config);
   const processing = useJaato((s) => s.processing[selected] ?? false);
   const [picking, setPicking] = useState(true);
   const [creating, setCreating] = useState(false);
@@ -149,15 +179,23 @@ export function SessionScreen() {
     submitInput(command, false).catch((err) => useJaato.getState().addSystemBlock(selected, String(err), "error"));
   };
 
+  const resumeSession = (id: string) => {
+    setPicking(false);
+    attachSession(id).catch((err) => useJaato.getState().addSystemBlock(selected, String(err), "error"));
+  };
+
+  // A workspace whose .env already names the provider just signed in to has
+  // nothing to persist: the card does not ask.
+  const alreadyConfigured = Boolean(postAuth && wsConfig?.configured && wsConfig.provider === postAuth.providerName);
   const postAuthCard = postAuth ? (
-    <div className="px-4"><PostAuthSetupPrompt p={postAuth} onRespond={(a) => { respondPostAuth(postAuth.requestId, a).catch((err) => useJaato.getState().addSystemBlock(selected, String(err), "error")); }} /></div>
+    <div className="px-4"><PostAuthSetupPrompt p={postAuth} alreadyConfigured={alreadyConfigured} onRespond={(a) => { respondPostAuth(postAuth.requestId, a).catch((err) => useJaato.getState().addSystemBlock(selected, String(err), "error")); }} /></div>
   ) : null;
 
   if (picking && !sessionId) {
     return (
       <div className="h-full flex flex-col">
         {postAuthCard}
-        <div className="flex-1 min-h-0"><ProfilePicker onPick={startSession} onAuth={runAuth} onSkip={() => setPicking(false)} /></div>
+        <div className="flex-1 min-h-0"><ProfilePicker onPick={startSession} onAttach={resumeSession} onAuth={runAuth} onSkip={() => setPicking(false)} /></div>
       </div>
     );
   }
@@ -178,7 +216,7 @@ export function SessionScreen() {
             {agentPerms.map((p) => <PermissionPrompt key={p.requestId} p={p} onRespond={(k) => respondPermission(p.requestId, k)} />)}
             {agentClars.map((c) => <ClarificationPrompt key={c.requestId} c={c} onAnswer={(a) => answerClarification(c, a)} onCancel={() => cancelClarification(c)} />)}
             {agentRefs.map((r) => <ReferenceSelectionPrompt key={r.requestId} r={r} onRespond={(v) => respondReference(r.requestId, v)} />)}
-            {postAuth && selected === "main" && <PostAuthSetupPrompt p={postAuth} onRespond={(a) => { respondPostAuth(postAuth.requestId, a).catch((err) => useJaato.getState().addSystemBlock(selected, String(err), "error")); }} />}
+            {postAuth && selected === "main" && <PostAuthSetupPrompt p={postAuth} alreadyConfigured={alreadyConfigured} onRespond={(a) => { respondPostAuth(postAuth.requestId, a).catch((err) => useJaato.getState().addSystemBlock(selected, String(err), "error")); }} />}
           </div>
           <div className="px-4 pb-2 pt-1">
             {processing && !captureMode && (

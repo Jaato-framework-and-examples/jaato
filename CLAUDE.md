@@ -505,6 +505,8 @@ await client.create_session(profile="researcher")
   (→ `SessionListEvent`; see [A Session Nobody Was Watching](#a-session-nobody-was-watching-812))
 - `session.stop <id>` — stop ANY loaded session by id, not just the caller's own
 - `session.reload_env [id]` — re-resolve a LIVE session's `.env` and credentials and rebuild its provider (see [A Credential Stored After the Runner Booted](#a-credential-stored-after-the-runner-booted))
+- `workspace.ignore <path>` — toggle one exact entry in the caller's workspace `.gitignore` (→ `WorkspaceIgnoreResultEvent`; protocol 1.12, see [A Key the Web Files Panel Did Not Have](#a-key-the-web-files-panel-did-not-have))
+- `workspace.delete` (a `WorkspaceDeleteRequest`, WS only) — delete a workspace the caller may see: its directory, its sessions, its registry row (→ `WorkspaceDeletedEvent`; protocol 1.13, see [A Workspace Everyone Could See](#a-workspace-everyone-could-see))
 
 **Flow:** Client sends `session.new --profile researcher` → server discovers profiles from `.jaato/profiles/` → resolves `SubagentProfile` → `JaatoServer` applies profile overrides (model, provider, plugins, plugin_configs, GC) during `initialize()`.
 
@@ -4728,6 +4730,99 @@ what the daemon emits on the runner path (options are
 `{key, label, description}` there — no `action`), and `permit-bare` is the
 same ASK from a plugin with no display info, pinning the tool-arguments
 fallback.
+
+### A Workspace Everyone Could See
+
+[A Workspace Name That Left the Workspace Root](#a-workspace-name-that-left-the-workspace-root)
+ends on a stated cost: *containment bounds the ROOT, not the tenant*. Every
+WS client saw every workspace under the root, could select any of them, and
+`session.list` returned every session on the daemon. That was the honest
+state while a WS connection had no identity. #1074 gave it one — a bound
+ticket stamps `app:user` on the connection — and nothing read it for
+workspaces.
+
+**A workspace belongs to whoever created it.** `WorkspaceInfo.owner` is
+stamped from `get_client_user` at `workspace.create`, persisted in the
+registry, and **preserved across re-discovery** — which rebuilds every other
+field from the directory, so a `_analyze_workspace` that forgot it would
+silently un-own every workspace on the first listing after a restart and
+make the rule cosmetic. One predicate, `WorkspaceManager.visible_to`, is
+read by the list and by both verbs, so the list can never show a workspace
+`select` then refuses:
+
+| Connection | Sees |
+|---|---|
+| no identity (shared bearer, no tickets configured) | everything — what it always saw |
+| `app:alice` | her own, and the **unowned** ones |
+
+Unowned is the state of every pre-existing workspace and of one created by
+an identity-less connection. Deliberately **not adopted on select**: a
+first-come claim on a shared directory is how a colleague's workspace
+disappears from their list. Migration is a registry edit.
+`WorkspaceOwnershipError` is a `ValueError` (the handlers' existing catch)
+and is worded so it cannot be read as "does not exist" — that wording
+invites creating it.
+
+**Sessions follow the same boundary.** The transport reports it through
+`EventSink.visible_workspace_paths` (`None` = no scoping: IPC, or a WS
+connection with no identity — the `client_peer` tolerance shape, so an
+out-of-tree sink contributes "no scoping" rather than raising).
+`CommandRouter._sessions_visible_to` keeps a session that runs **in** one of
+those workspaces or that this user **created** (`created_by`, #859), and
+`session.attach` admits exactly that set — refusing the rest by name as
+`ErrorEvent(error_type="SessionError")`, which is what settles a client's
+`ask()` rather than hanging it (#1007). Persisted-only sessions carry no
+creator in their listing, so for them the workspace rule is the whole rule.
+
+**And a workspace can be removed.** `workspace.delete` (protocol **1.13**)
+answers with one `WorkspaceDeletedEvent` whatever happened. It removes the
+directory — persisted sessions included — and the registry row, and refuses:
+a name that leaves the root or names the root; another user's workspace; a
+workspace with **loaded** sessions (resolved by the WS server through the
+session manager and handed in, because a directory a runner is confined to
+is not deleted, it is a session failure with a delayed cause); a workspace
+another client currently has selected. The deleting client's own selection
+is cleared on both the manager and the sink adapter. The web workspace list
+confirms inline before sending.
+
+Stated cost, unchanged in kind: the session still runs as the daemon's uid,
+so this is an entitlement boundary at the verbs, not a filesystem one.
+
+### A Key the Web Files Panel Did Not Have
+
+The TUI's workspace panel (Ctrl+W) binds two keys to the entry under the
+cursor: `h` **hides** it — a per-session, client-side set, with a
+show-hidden toggle that brings the set back dimmed with an `H` marker so an
+entry can be unhidden — and `i` **toggles its line in the workspace's
+`.gitignore`**, which the TUI does by writing the file itself, because it
+runs on the host. The web Files panel had neither, and could not have had
+the second: a browser client has no file to write.
+
+Hide is client state and is reproduced as such (`workspaceHidden`, the same
+entry ids — a directory carries its trailing `/` and hides its subtree). The
+`.gitignore` half becomes a daemon verb, **`workspace.ignore <path>`**
+(protocol **1.12**), answered by one `WorkspaceIgnoreResultEvent` whatever
+happened — a panel has to render *something* for the press. Three
+properties:
+
+| Property | Why |
+|---|---|
+| **one text transform, in `jaato_sdk.gitignore_toggle`** | the TUI's key and the daemon's verb both call it, so one press means one edit whichever client made it: exact-match toggle of ONE line, a glob already covering the path neither matched nor touched |
+| **the SESSION's workspace, then the client's declared one** | the session's tree is what `WorkspaceMonitor` watches — and it reloads its parser on this very write, so the pattern binds every later file event. Entries already shown are **not** pruned; that is what hide is for |
+| **the path is a pattern, not a path the daemon resolves** | so #742's relative-path rule does not apply; what is refused is anything that is not a workspace entry — empty, a line break, absolute (the panel's sandbox-monitored entries lie outside the tree `.gitignore` covers, the TUI's own no-op), or a leading `#` / `!`, which git would read as a comment or a negation and the toggle would then report a state the file does not have |
+
+A missing VERB again (the 1.7 rule): an older daemon ignores the command and
+"added to .gitignore" would describe a file nobody changed, so both SDKs
+refuse below `MIN_WORKSPACE_IGNORE_PROTOCOL` (`toggle_workspace_ignore` /
+`toggleWorkspaceIgnore`). The result event is client-initiated, the 1.10
+shape, so an old client never receives it unprompted.
+
+**And the panel read the wrong key.** `WorkspaceFilesChangedEvent.changes`
+is `[{path, status}]`; the web store read `change`, so on a real daemon every
+entry rendered `~` and a deleted file was never removed — while the mock sent
+`change` and the e2e suite was green. The same shape as the clarification,
+permission and budget-panel defects before it: the mock spoke the client's
+vocabulary, not the daemon's. The mock now sends `status`.
 
 ### A Boundary the Notebook Did Not Have (#710)
 

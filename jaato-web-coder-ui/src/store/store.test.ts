@@ -123,6 +123,22 @@ describe("reduce — prompts", () => {
   });
 });
 
+describe("reduce — turn accounting", () => {
+  it("reads turn.completed's function_calls as the list of records it is, not a count", () => {
+    const d = useJaato.getState().dispatch;
+    d([ev({ type: "turn.completed", agent_id: "main", turn_number: 1, duration_seconds: 2.5, finish_reason: "stop",
+      function_calls: [
+        { name: "readFile", start_time: "t0", end_time: "t1", duration_seconds: 0.2 },
+        { name: "readFile", start_time: "t1", end_time: "t2", duration_seconds: 0.1 },
+        { name: "cli_based_tool", start_time: "t2", end_time: "t3", duration_seconds: 1.4 },
+      ],
+      usage: { prompt_tokens: 10, output_tokens: 5, total_tokens: 15 } })]);
+    const last = useJaato.getState().context[MAIN_AGENT]!.lastTurn!;
+    expect(last.toolCalls).toEqual({ count: 3, byName: [["readFile", 2], ["cli_based_tool", 1]] });
+    expect(last.finishReason).toBe("stop");
+  });
+});
+
 describe("reduce — session metadata", () => {
   it("captures plan, context, commands, workspace files and session info", () => {
     const d = useJaato.getState().dispatch;
@@ -131,7 +147,7 @@ describe("reduce — session metadata", () => {
       ev({ type: "plan.step_updated", agent_id: "main", step_id: "1", status: "completed", result: "ok" }),
       ev({ type: "context.updated", agent_id: "main", usage: { total_tokens: 10 }, context_limit: 100, percent_used: 10 }),
       ev({ type: "command.list", commands: [{ name: "waypoint list", description: "w" }] }),
-      ev({ type: "workspace.files_changed", changes: [{ path: "a/b.py", change: "created" }, { path: "c.py", change: "deleted" }] }),
+      ev({ type: "workspace.files_changed", changes: [{ path: "a/b.py", status: "created" }, { path: "c.py", status: "deleted" }] }),
       ev({ type: "session.info", session_id: "S1", model_provider: "anthropic", model_name: "m" }),
     ]);
     const s = useJaato.getState();
@@ -142,6 +158,103 @@ describe("reduce — session metadata", () => {
     expect(s.workspaceFiles).toEqual({ "a/b.py": "created" });
     expect(s.sessionId).toBe("S1");
     expect(s.session.provider).toBe("anthropic");
+  });
+});
+
+describe("reduce — workspace files", () => {
+  it("reads the daemon's status key, so a created file is not shown as modified", () => {
+    const d = useJaato.getState().dispatch;
+    d([ev({ type: "workspace.files_snapshot", files: [{ path: "x.py", status: "created" }, { path: "gone.py", status: "deleted" }, { path: "y.py", status: "modified" }] })]);
+    expect(useJaato.getState().workspaceFiles).toEqual({ "x.py": "created", "y.py": "modified" });
+    d([ev({ type: "workspace.files_changed", changes: [{ path: "y.py", status: "deleted" }, { path: "z.py", change: "created" }] })]);
+    expect(useJaato.getState().workspaceFiles).toEqual({ "x.py": "created", "z.py": "created" });
+  });
+
+  it("hide is a per-session client-side set; a directory id hides its subtree", () => {
+    const st = useJaato.getState();
+    st.toggleWorkspaceHidden("src/app.py");
+    st.toggleWorkspaceHidden(".jaato/");
+    expect(useJaato.getState().workspaceHidden).toEqual(["src/app.py", ".jaato/"]);
+    useJaato.getState().toggleWorkspaceHidden("src/app.py");
+    expect(useJaato.getState().workspaceHidden).toEqual([".jaato/"]);
+    useJaato.getState().toggleWorkspaceShowHidden();
+    expect(useJaato.getState().workspaceShowHidden).toBe(true);
+    useJaato.getState().resetSessionState();
+    expect(useJaato.getState().workspaceHidden).toEqual([]);
+    expect(useJaato.getState().workspaceShowHidden).toBe(false);
+  });
+
+  it("a workspace.ignore.result records the entry's state and one notice; a refusal is an error notice", () => {
+    const d = useJaato.getState().dispatch;
+    d([ev({ type: "workspace.ignore.result", path: "build/", ok: true, ignored: true, gitignore_path: "/w/.gitignore" })]);
+    expect(useJaato.getState().workspaceIgnored).toEqual({ "build/": true });
+    expect(useJaato.getState().workspaceNotice).toEqual({ text: "build/ added to .gitignore" });
+    d([ev({ type: "workspace.ignore.result", path: "build/", ok: true, ignored: false })]);
+    expect(useJaato.getState().workspaceIgnored).toEqual({ "build/": false });
+    expect(useJaato.getState().workspaceNotice?.text).toBe("build/ removed from .gitignore");
+    d([ev({ type: "workspace.ignore.result", path: "/etc", ok: false, error: "workspace.ignore: absolute paths are not addressable via the workspace .gitignore" })]);
+    expect(useJaato.getState().workspaceNotice).toMatchObject({ error: true });
+    expect(useJaato.getState().workspaceIgnored).toEqual({ "build/": false });
+  });
+});
+
+describe("reduce — permission status", () => {
+  it("reads effective_default and suspension_scope, the daemon's keys", () => {
+    const d = useJaato.getState().dispatch;
+    d([ev({ type: "permission.status", effective_default: "deny", suspension_scope: null })]);
+    expect(useJaato.getState().permissionStatus).toEqual({ effectiveDefault: "deny", suspensionScope: null });
+    d([ev({ type: "permission.status", effective_default: "ask", suspension_scope: "turn" })]);
+    expect(useJaato.getState().permissionStatus).toEqual({ effectiveDefault: "ask", suspensionScope: "turn" });
+  });
+});
+
+describe("reduce — session list and history", () => {
+  const SESSIONS = [{ id: "s-1", description: "first", is_loaded: true, workspace_path: "/w/a" }, { id: "s-2", is_loaded: false }];
+  it("a session.list reply is kept for completion and printed as the TUI listing", () => {
+    useJaato.getState().dispatch([ev({ type: "session.list", sessions: SESSIONS })]);
+    const s = useJaato.getState();
+    expect(s.sessions.map((x) => x.id)).toEqual(["s-1", "s-2"]);
+    const last = s.blocks[MAIN_AGENT]!.at(-1)!;
+    expect(last.kind === "system" && last.text).toContain("● s-1 - first");
+  });
+  it("a silent request keeps the list and prints nothing", () => {
+    useJaato.getState().setSessionListSilent(true);
+    useJaato.getState().dispatch([ev({ type: "session.list", sessions: SESSIONS })]);
+    const s = useJaato.getState();
+    expect(s.sessions).toHaveLength(2);
+    expect(s.blocks[MAIN_AGENT]).toHaveLength(0);
+    expect(s.sessionListSilent).toBe(false);
+  });
+  it("session.info's snapshot refreshes the listing without printing", () => {
+    useJaato.getState().dispatch([ev({ type: "session.info", session_id: "s-1", sessions: SESSIONS })]);
+    expect(useJaato.getState().sessions).toHaveLength(2);
+    expect(useJaato.getState().blocks[MAIN_AGENT]).toHaveLength(0);
+  });
+  const HISTORY = [{ role: "user", parts: [{ type: "text", text: "hi" }] }, { role: "model", parts: [{ type: "text", text: "hello" }] }];
+  it("history replays as blocks after an attach, and lists otherwise", () => {
+    useJaato.getState().setHistoryMode("replay");
+    useJaato.getState().dispatch([ev({ type: "history", agent_id: "main", history: HISTORY })]);
+    let blocks = useJaato.getState().blocks[MAIN_AGENT]!;
+    expect(blocks.map((b) => b.kind)).toEqual(["user", "text"]);
+    expect(useJaato.getState().historyMode).toBe("listing");
+    useJaato.getState().dispatch([ev({ type: "history", agent_id: "main", history: HISTORY, turn_accounting: [{ prompt: 1, output: 2 }] })]);
+    blocks = useJaato.getState().blocks[MAIN_AGENT]!;
+    expect(blocks).toHaveLength(3);
+    expect(blocks[2]!.kind === "system" && blocks[2]!.text).toContain("Conversation History (2 messages, 1 turns)");
+  });
+});
+
+describe("tools toggle", () => {
+  it("expands or collapses every tool block, and new blocks follow the setting", () => {
+    const st = useJaato.getState();
+    st.dispatch([ev({ type: "tool.call_start", agent_id: "main", tool_name: "run", tool_args: {}, call_id: "c1" })]);
+    expect(useJaato.getState().blocks[MAIN_AGENT]![0]!.kind === "tool" && (useJaato.getState().blocks[MAIN_AGENT]![0] as { expanded: boolean }).expanded).toBe(false);
+    useJaato.getState().setToolsExpanded(true);
+    expect((useJaato.getState().blocks[MAIN_AGENT]![0] as { expanded: boolean }).expanded).toBe(true);
+    useJaato.getState().dispatch([ev({ type: "tool.call_start", agent_id: "main", tool_name: "run", tool_args: {}, call_id: "c2" })]);
+    expect((useJaato.getState().blocks[MAIN_AGENT]![1] as { expanded: boolean }).expanded).toBe(true);
+    useJaato.getState().setToolsExpanded(false);
+    expect(useJaato.getState().blocks[MAIN_AGENT]!.every((b) => b.kind === "tool" && !b.expanded)).toBe(true);
   });
 });
 
