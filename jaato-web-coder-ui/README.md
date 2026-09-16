@@ -139,6 +139,20 @@ with the `@jaato` org's stage-only token; a maintainer with 2FA promotes it
 --otp <code>`). It needs `@jaato/sdk` published first only at build time, from
 the sibling checkout. Bump `version` in `package.json` first.
 
+npm cannot stage a package it has never seen (`404` on the stage endpoint,
+measured on this package's first run), so the **first** version was published
+directly by a maintainer with 2FA from a checkout at the release commit:
+
+```bash
+cd jaato-web-coder-ui
+npm --prefix ../jaato-sdk-ts ci && npm ci
+npm run build                                # builds the SDK, type-checks, vite build
+npm publish --access public --otp <code>     # after `npm login`
+```
+
+The workflow refuses by name while the package is unknown to the registry;
+every later version stages.
+
 Set `PLAYWRIGHT_CHROMIUM=/path/to/chrome` to use a pre-installed browser
 instead of Playwright's download.
 

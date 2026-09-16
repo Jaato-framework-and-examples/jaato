@@ -51,7 +51,24 @@ publish`; the `@jaato` token is stage-only, so a maintainer with 2FA
 promotes it with `npm stage approve <stage-id> --otp <code>`). It
 **refuses** unless both of those exact versions are already on npm — a
 staged-but-unapproved sibling is not — so the order SDK → UI → server is
-enforced rather than remembered, approval included. `npm pack` on the development manifest
+enforced rather than remembered, approval included.
+
+npm cannot stage a package it has never seen, so the **first** version has
+to be published directly by a maintainer with 2FA, from a checkout at the
+release commit, with the same manifest rewrite the workflow does:
+
+```bash
+cd jaato-web-coder-server
+npm --prefix ../jaato-sdk-ts ci && npm --prefix ../jaato-sdk-ts run build
+npm --prefix ../jaato-web-coder-ui ci
+npm ci && npm run build
+node scripts/prepare-publish.mjs             # file: links -> caret ranges, drops private
+npm publish --access public --otp <code>     # after `npm login`
+git checkout package.json                    # the rewrite is not for committing
+```
+
+The workflow refuses by name while the package is unknown to the registry;
+every later version stages. `npm pack` on the development manifest
 fails by design (`prepack` runs `scripts/check-publishable.mjs`);
 `node scripts/prepare-publish.mjs --dry-run` shows what would ship.
 
