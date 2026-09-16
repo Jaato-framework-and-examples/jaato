@@ -52,6 +52,13 @@ is enforced rather than remembered. `npm pack` on the development manifest
 fails by design (`prepack` runs `scripts/check-publishable.mjs`);
 `node scripts/prepare-publish.mjs --dry-run` shows what would ship.
 
+That refusal checks that the sibling **version** is on npm, not that the
+published build matches the checkout. If a sibling's source changed since
+its last publish, bump its version and publish it first; otherwise the
+caret range resolves to the stale build. The bind channel needs
+`@jaato/sdk` **0.7.0 or later** (the token provider and the header fix for
+Node's built-in WebSocket); the 0.6.0 on npm predates both.
+
 ## Configuration
 
 `server.yaml`; every secret is a file beside it, mode 0600 (looser is
