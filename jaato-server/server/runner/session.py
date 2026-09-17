@@ -973,7 +973,10 @@ def _retire_and_verify_threads(
             "confined runner needs `/proc/*/task/ r,` (AppArmor "
             "template v32+) for the complete walk.",
             len(scan.unreadable), scan.scanned,
-            "; ".join(f"tid={tid}: {why}" for tid, why in scan.unreadable),
+            "; ".join(
+                f"tid={tid} name={scan.name_of(tid)!r}: {why}"
+                for tid, why in scan.unreadable
+            ),
             scan.summary(),
         )
     else:

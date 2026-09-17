@@ -1961,6 +1961,22 @@ class RunnerRPC:
             errors.append(f"registry_release: {type(exc).__name__}: {exc}")
             parked = []
 
+        # #1100: telemetry is runtime-scoped, so the registry sweep above
+        # cannot reach it and nothing else ever did — one live OTel
+        # export thread accrued per session this slot served.  After the
+        # registry release, so a plugin shutdown that emits a span still
+        # has somewhere to emit it.
+        #
+        # A failure joins ``errors``, and that has teeth: the daemon does
+        # not return a slot to the pool when ``errors`` is non-empty.
+        # Deliberate — a telemetry shutdown that raised is precisely the
+        # case where the export thread may still be running, which is the
+        # population this slot would carry into the next session.  Losing
+        # one warm slot beats pooling a poisoned one.
+        telemetry_error = shutdown_runtime_telemetry(runtime, "session.end")
+        if telemetry_error:
+            errors.append(f"telemetry: {telemetry_error}")
+
         # PR #174 hotfix (server 0.6.151+): clear the runner-side
         # session host so the next ``session.bootstrap`` on this slot
         # (cascade reuse path) is NOT rejected by the
@@ -4901,6 +4917,22 @@ class RunnerRPC:
                 "the session is closed regardless",
             )
 
+        # #1100: the cold counterpart of the ``session.end`` call.  The
+        # runner process may outlive this session (the daemon's close
+        # ladder owns termination), and process exit can only SIGKILL an
+        # export thread — a graceful flush beats that, which is the same
+        # argument this method already makes for a language server.
+        #
+        # OUTSIDE the block above rather than at the end of it: a
+        # ``park_from`` that raised is not a reason to skip this, and a
+        # teardown that reaps everything except the one resource nobody
+        # else reaps is the leak wearing the fix as a disguise.  The
+        # helper never raises, so it needs no handler of its own.
+        shutdown_runtime_telemetry(
+            getattr(session, "_runtime", None) if session else None,
+            "session.shutdown",
+        )
+
     def _handle_session_request_stop(
         self, args: Dict[str, Any],
     ) -> "tuple[bool, Any]":
@@ -5845,6 +5877,58 @@ class RunnerRPC:
 # ----------------------------------------------------------------------
 # Path F (cycle 7): AgentUIHooks → NotificationFrame shim
 # ----------------------------------------------------------------------
+
+
+def shutdown_runtime_telemetry(runtime: Any, reason: str) -> Optional[str]:
+    """Shut the runtime's telemetry plugin down at a session boundary (#1100).
+
+    Telemetry is RUNTIME-scoped: ``JaatoRuntime.__init__`` builds one
+    plugin per runtime, before any session exists, and a runner builds a
+    fresh ``JaatoRuntime`` on **every** ``session.bootstrap``
+    (``runner/session.py`` ``_default_runtime_factory``).  So the
+    outgoing runtime's plugin is never reached again -- and
+    ``TelemetryPlugin.shutdown`` had no caller anywhere in the tree.
+
+    It is not reachable from the sweep that releases everything else:
+    :meth:`RunnerRPC._handle_session_end` walks
+    ``registry.list_available()``, and telemetry is not a registry
+    plugin.  Dropping the reference is not freeing the resource -- an
+    OTel ``BatchSpanProcessor`` owns a live export thread -- so a pool
+    slot accumulated one such thread per session it served, for the life
+    of the process.  A plain leak, independent of AppArmor, and the most
+    likely member of the population #1100's confinement verification
+    finds surviving on a reused slot.
+
+    Deliberately NOT ``reset_for_next_session``.  That hook is called on
+    a slot boundary too and deliberately KEEPS the provider and tracer
+    ("across-session-by-design state") -- correct if one plugin instance
+    served the slot's whole life, which is exactly what the per-bootstrap
+    runtime makes false.
+
+    Cost: a bounded export flush at the session boundary.  Best effort --
+    a telemetry teardown must never fail a session end, so the reason is
+    returned rather than raised.
+
+    Returns:
+        ``None`` on success or when there is nothing to shut down; a
+        short ``"Type: message"`` string when ``shutdown()`` raised.
+    """
+    telemetry = getattr(runtime, "telemetry", None) if runtime else None
+    if telemetry is None:
+        return None
+    shutdown = getattr(telemetry, "shutdown", None)
+    if not callable(shutdown):
+        return None
+    try:
+        shutdown()
+    except Exception as exc:  # noqa: BLE001 -- boundary surface
+        logger.warning(
+            "telemetry shutdown raised during %s: %s", reason, exc,
+            exc_info=True,
+        )
+        return f"{type(exc).__name__}: {exc}"
+    logger.debug("telemetry shut down at %s", reason)
+    return None
 
 
 def _spend(value: Optional[int]) -> Optional[int]:

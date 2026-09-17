@@ -155,6 +155,23 @@ class PoolSlot:
     #: became a lie the moment a second one existed.  ``None`` for a
     #: slot that was never queued.
     teardown_reason: Optional[str] = None
+    #: Has this slot ever been handed to a session? (#1100)
+    #:
+    #: Set by :meth:`SlotKey.stamp`, i.e. the moment the slot is claimed
+    #: on the unaffined acquire path -- before the bootstrap envelope is
+    #: sent, because what matters is that the process starts running a
+    #: session's work, not that the work succeeded.  Never cleared: a
+    #: slot cannot un-run a session, and the threads that session left
+    #: behind cannot be re-confined (``aa_change_profile`` is per-task).
+    #:
+    #: Distinct from ``profile_name``, and that distinction IS the fix.
+    #: ``SlotKey.build`` folds ``""`` to ``None`` so unconfined has one
+    #: spelling -- right for a KEY, and it made a slot that SERVED an
+    #: unconfined session indistinguishable from one that has served
+    #: nothing, while it carries that session's ``unconfined`` threads.
+    #: "Never confined" and "has no threads to worry about" are not the
+    #: same statement.
+    has_served: bool = False
 
 
 @dataclass(frozen=True)
@@ -193,6 +210,15 @@ class SlotKey:
     with no AppArmor, where the workspace is still the thing #890 cares
     about; and ``workspace_root`` alone does not distinguish two
     boundaries over one workspace.
+
+    ``PoolSlot.has_served`` (#1100) is deliberately NOT a fifth field.  A
+    key says what an ARRIVING SESSION wants; ``has_served`` says what a
+    SLOT has done, and a session cannot ask for a slot that has served —
+    only :meth:`accepts_unaffined` reads it, which is the one comparison
+    that is about the slot's history rather than the session's request.
+    Putting it in the tuple would also break path (1), where the whole
+    key is compared for equality and a served slot must still match a
+    session that wants exactly its boundary.
     """
 
     cascade_driver_id: Optional[str] = None
@@ -237,11 +263,18 @@ class SlotKey:
         Stamped as a unit because they ARE the slot's identity: a slot
         affined to a cascade without recording the boundary it was
         confined to is a slot whose reuse check cannot be right.
+
+        ``has_served`` is raised here too (#1100), and never lowered.
+        This is the one place a slot stops being virgin, so it is the one
+        place that has to say so; DERIVING it from the four fields is
+        exactly what did not work, since all four are legitimately
+        ``None`` for an unconfined standalone session.
         """
         slot.cascade_id = self.cascade_driver_id
         slot.config_root = self.config_root
         slot.workspace_root = self.workspace_root
         slot.profile_name = self.profile_name
+        slot.has_served = True
 
     def accepts_unaffined(self, slot: "PoolSlot") -> bool:
         """May this key take *slot*, which carries no cascade affinity?
@@ -250,13 +283,61 @@ class SlotKey:
         state is either absent (never served) or already forfeit.  The
         question is the KERNEL BOUNDARY its threads are stuck inside.
 
-        So: a slot that was never confined (``profile_name`` unset) fits
-        anyone, and a slot wearing a profile fits only a session that
-        wants that same profile.  On a host with no AppArmor every
-        profile name is empty and this is a tautology — which is exactly
-        the "no AppArmor at all: completely unchanged" requirement.
+        So: a slot that has served **nothing** fits anyone, and a slot
+        that has served **anything** fits only a session wanting the
+        boundary it already has.
+
+        The first clause used to read ``not slot.profile_name`` — "was
+        never confined" — and that is a different statement (#1100).  An
+        unconfined session stamps ``profile_name=None`` (``SlotKey.build``
+        folds ``""`` to ``None`` so unconfined has one spelling, which is
+        right for a key), so its slot became indistinguishable from a
+        virgin one **while carrying that session's ``unconfined``
+        threads**.  Handed next to a confined session, the main thread
+        transitions, the two RPC lanes are recycled, and #1023's
+        per-thread verification correctly refuses the bootstrap for the
+        leftovers — which cannot be confined, only retired, because
+        ``aa_change_profile`` is per-task.
+
+        Confirmed on a live daemon: slot pid 95942 served an unconfined
+        session at 12:06, returned to the pool at 12:11, was handed to a
+        confined session at 12:17, and was refused with 6 of 7 threads
+        reporting ``unconfined``.
+
+        This is #1033's own generating rule — *the key must contain every
+        property of the slot that the next session cannot change* —
+        applied to the property #1033 missed.  ``has_served`` is that
+        property; it cannot be derived from the four key fields, because
+        every one of them is legitimately ``None`` for an unconfined
+        standalone session.
+
+        **Cost**, stated: on a daemon that mixes unconfined and confined
+        sessions, an unconfined session's slot is no longer offered to a
+        confined one, so that arrival cold-spawns (~7s) instead.  Already
+        visible in ``pool_profile_mismatch_skips_total`` beside
+        ``pool_acquire_miss_total`` — the counter the skip branch
+        increments does not care WHY the boundary did not fit — and
+        remedied by raising ``JAATO_RUNNER_POOL_MAX_SIZE``.  The same cost
+        #1033 accepted for the multi-boundary case.
+
+        On a host with no AppArmor every profile name is empty, so a
+        served slot's ``profile_name`` is ``None`` and every session's
+        key wants ``None``: the second clause is a tautology and nothing
+        changes.  The "no AppArmor at all: completely unchanged"
+        requirement therefore still holds — the new clause only refuses a
+        slot whose profile differs, which on such a host never happens.
+
+        ``or None`` on the slot's side is not decoration.  ``self`` is a
+        normalised key (``SlotKey.build`` folds ``""``), the slot's field
+        is whatever is stored on it, and the OLD gate's first clause
+        (``not slot.profile_name``) absorbed that asymmetry by accident.
+        Removing the short-circuit removes the accident, so the
+        normalisation is stated instead — the two spellings of
+        "unconfined" must not read as two boundaries.
         """
-        return not slot.profile_name or slot.profile_name == self.profile_name
+        if not slot.has_served:
+            return True
+        return (slot.profile_name or None) == self.profile_name
 
 
 def _canonical_path(path: Optional[str]) -> Optional[str]:
@@ -781,6 +862,10 @@ class PoolManager:
             workspaces or several profile shapes; growing alongside
             ``pool_acquire_miss_total`` means the pool is being split
             across more boundaries than ``target_size`` keeps stocked.
+            Since #1100 it also counts a slot that served an UNCONFINED
+            session being passed over by a confined one — the counter
+            does not care why the boundary did not fit, so the cost of
+            that gate needs no new instrumentation.
 
         Args:
             cascade_driver_id: Optional cascade tenant ID.  ``None``
