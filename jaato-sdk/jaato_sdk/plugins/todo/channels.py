@@ -77,15 +77,18 @@ class LivePlanReporter(TodoReporter):
         update_callback(plan_data: Dict, agent_id: Optional[str]) — called
             with a display-friendly dict whenever the plan changes.
         clear_callback(agent_id: Optional[str]) — called to clear the panel.
-        output_callback(source: str, text: str, mode: str) — called for
-            supplementary text output (completion messages, errors).
+        output_callback(source: str, text: str, mode: str,
+            agent_id: Optional[str]) — called for supplementary text
+            output (completion messages, errors).  Carries the agent for
+            the same reason the other three do.
     """
 
     def __init__(self):
         self._update_callback: Optional[Callable[[Dict[str, Any], Optional[str]], None]] = None
         self._step_update_callback: Optional[Callable[[Dict[str, Any], Optional[str]], None]] = None
         self._clear_callback: Optional[Callable[[Optional[str]], None]] = None
-        self._output_callback: Optional[Callable[[str, str, str], None]] = None
+        self._output_callback: Optional[
+            Callable[[str, str, str, Optional[str]], None]] = None
 
     @property
     def name(self) -> str:
@@ -98,7 +101,7 @@ class LivePlanReporter(TodoReporter):
             update_callback: Callable[[Dict, Optional[str]], None] — full plan snapshot
             step_update_callback: Callable[[Dict, Optional[str]], None] — lean step delta
             clear_callback: Callable[[Optional[str]], None]
-            output_callback: Callable[[str, str, str], None]
+            output_callback: Callable[[str, str, str, Optional[str]], None]
         """
         if config:
             self._update_callback = config.get("update_callback")
@@ -166,15 +169,24 @@ class LivePlanReporter(TodoReporter):
             data["received_outputs"] = step.received_outputs
         return data
 
-    def _emit_output(self, source: str, text: str, mode: str = "write") -> None:
-        """Emit supplementary output to the scrolling panel."""
+    def _emit_output(self, source: str, text: str, mode: str = "write",
+                     agent_id: Optional[str] = None) -> None:
+        """Emit supplementary output to the scrolling panel.
+
+        ``agent_id`` names the agent the line belongs to, exactly as the
+        other three callbacks carry it.  It was the one reporter callback
+        that dropped it, so a subagent's plan panel was attributed
+        correctly while its "Plan created: ..." / "[2] FAILED: ..." lines
+        landed in the MAIN agent's transcript.  Every caller below already
+        holds the id; only this hop discarded it.
+        """
         if self._output_callback:
-            self._output_callback(source, text, mode)
+            self._output_callback(source, text, mode, agent_id)
 
     def report_plan_created(self, plan: TodoPlan, agent_id: Optional[str] = None) -> None:
         """Report new plan creation - update the sticky panel."""
         self._emit_plan_update(plan, agent_id)
-        self._emit_output("plan", f"Plan created: {plan.title}", "write")
+        self._emit_output("plan", f"Plan created: {plan.title}", "write", agent_id)
 
     def report_step_update(self, plan: TodoPlan, step: TodoStep, agent_id: Optional[str] = None) -> None:
         """Report step status change — emit lean delta for the changed step.
@@ -190,13 +202,15 @@ class LivePlanReporter(TodoReporter):
             self._emit_output(
                 "plan",
                 f"[{step.sequence}] {step.description}: {step.result}",
-                "write"
+                "write",
+                agent_id,
             )
         elif step.status == StepStatus.FAILED and step.error:
             self._emit_output(
                 "plan",
                 f"[{step.sequence}] FAILED: {step.error}",
-                "write"
+                "write",
+                agent_id,
             )
 
     def report_plan_completed(self, plan: TodoPlan, agent_id: Optional[str] = None) -> None:
@@ -218,10 +232,10 @@ class LivePlanReporter(TodoReporter):
             summary += f", {progress['failed']} failed"
         summary += ")"
 
-        self._emit_output("plan", summary, "write")
+        self._emit_output("plan", summary, "write", agent_id)
 
         if plan.summary:
-            self._emit_output("plan", f"Summary: {plan.summary}", "write")
+            self._emit_output("plan", f"Summary: {plan.summary}", "write", agent_id)
 
     def shutdown(self) -> None:
         """Clean up - don't auto-clear to let user see final state."""
@@ -232,7 +246,8 @@ def create_live_reporter(
     update_callback: Callable[[Dict[str, Any], Optional[str]], None],
     step_update_callback: Optional[Callable[[Dict[str, Any], Optional[str]], None]] = None,
     clear_callback: Optional[Callable[[Optional[str]], None]] = None,
-    output_callback: Optional[Callable[[str, str, str], None]] = None,
+    output_callback: Optional[
+        Callable[[str, str, str, Optional[str]], None]] = None,
 ) -> LivePlanReporter:
     """Factory to create a configured LivePlanReporter.
 
@@ -242,7 +257,7 @@ def create_live_reporter(
         step_update_callback: Called with (step_data, agent_id) for lean step
             status deltas. If None, falls back to update_callback with full snapshot.
         clear_callback: Called with agent_id to clear the panel.
-        output_callback: Called with (source, text, mode) for output.
+        output_callback: Called with (source, text, mode, agent_id) for output.
 
     Returns:
         Configured LivePlanReporter instance.

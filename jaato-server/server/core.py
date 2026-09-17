@@ -533,6 +533,7 @@ def _plan_output_from_payload(server: 'JaatoServer', payload: Dict[str, Any]) ->
         str(payload.get("source") or "plan"),
         str(payload.get("text") or ""),
         str(payload.get("mode") or "write"),
+        payload.get("agent_name"),
     )
 
 
@@ -4690,8 +4691,9 @@ class JaatoServer:
         def step_update_callback(step_data: dict, agent_name: Optional[str] = None):
             server.emit(server._plan_step_updated_event(step_data, agent_name))
 
-        def output_callback(source: str, text: str, mode: str):
-            server.emit(server._plan_output_event(source, text, mode))
+        def output_callback(source: str, text: str, mode: str,
+                            agent_name: Optional[str] = None):
+            server.emit(server._plan_output_event(source, text, mode, agent_name))
 
         # Reuse LivePlanReporter from jaato-tui with event-emitting callbacks
         reporter = create_live_reporter(
@@ -4780,10 +4782,19 @@ class JaatoServer:
         """The ``PlanClearedEvent`` for a reporter's clear."""
         return PlanClearedEvent(agent_id=self._plan_agent_id(agent_name))
 
-    def _plan_output_event(self, source: str, text: str, mode: str) -> AgentOutputEvent:
-        """The reporter's supplementary line (``Plan created: ...``) as output."""
+    def _plan_output_event(self, source: str, text: str, mode: str,
+                           agent_name: Optional[str] = None) -> AgentOutputEvent:
+        """The reporter's supplementary line (``Plan created: ...``) as output.
+
+        Resolves the agent like its three siblings.  Hardcoding
+        ``_main_agent_id`` put a SUBAGENT's plan lines in the main agent's
+        transcript while its plan panel was attributed correctly — the two
+        halves of one report disagreeing about whose work it was.  A
+        reporter that names no agent still falls back to main, which is
+        what ``_plan_agent_id`` does with ``None``.
+        """
         return AgentOutputEvent(
-            agent_id=self._main_agent_id,
+            agent_id=self._plan_agent_id(agent_name),
             source=source,
             text=text,
             mode=mode,
