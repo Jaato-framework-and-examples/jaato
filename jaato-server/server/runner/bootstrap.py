@@ -63,8 +63,10 @@ import logging
 import os
 import threading
 import time
-from dataclasses import dataclass
-from typing import Callable, List, Optional, Sequence, Tuple
+from dataclasses import dataclass, field
+from typing import (
+    Callable, Dict, List, Mapping, Optional, Sequence, Tuple,
+)
 
 from shared.apparmor_label import (
     AppArmorLabel,
@@ -374,6 +376,17 @@ def confine_to_profile(
 # and it acts only on POSITIVE evidence -- see
 # :func:`verify_thread_confinement`.
 
+#: What a divergent tid is called when the interpreter does not know it.
+#:
+#: The ``task_dir`` route is COMPLETE -- it lists tids of threads created
+#: by C extensions that :func:`threading.enumerate` never sees -- so the
+#: name map is necessarily partial on that route.  A placeholder is the
+#: honest rendering: "Python does not know this thread" is itself a fact
+#: about the thread, and inventing a name from ``/proc/<tid>/comm`` is
+#: not available (measured on CPython 3.11: every runner thread's
+#: ``comm`` is ``"python"`` regardless of ``thread_name_prefix``).
+UNKNOWN_THREAD_NAME = "(unknown)"
+
 #: Default per-thread proc-attr directory; override-able for tests.
 #: Shape is ``<task_dir>/<tid>/attr/current``, which a fabricated
 #: temp tree reproduces exactly -- the only reason this is a
@@ -405,6 +418,14 @@ class ThreadConfinementDivergence(RuntimeError):
     ``unconfined`` runs in-process tools outside the kernel boundary
     entirely, while one labelled another session's ``jaato-ws-*``
     profile runs them against the wrong workspace (#1023 impact 3).
+
+    The message names each divergent thread (#1100).  The first version
+    printed ``tid=<n> label=<l>`` and nothing else, and a tid is not
+    something anyone can look up once the process is gone: two separate
+    live incidents were investigated -- one of them by correlating
+    daemon-log timestamps against slot pids -- without ever establishing
+    what the divergent threads were.  ``threading.enumerate`` had the
+    names in hand at scan time and they were discarded.
     """
 
     def __init__(
@@ -414,9 +435,14 @@ class ThreadConfinementDivergence(RuntimeError):
         *,
         scanned: int,
         route: str,
+        names: Optional[Mapping[int, str]] = None,
     ) -> None:
+        names = dict(names or {})
         detail = ", ".join(
-            f"tid={tid} label={label!r}" for tid, label in divergent
+            f"tid={tid} "
+            f"name={names.get(tid, UNKNOWN_THREAD_NAME)!r} "
+            f"label={label!r}"
+            for tid, label in divergent
         )
         super().__init__(
             f"AppArmor per-thread confinement divergence: expected every "
@@ -433,6 +459,11 @@ class ThreadConfinementDivergence(RuntimeError):
         self.divergent = tuple(divergent)
         self.scanned = scanned
         self.route = route
+        #: ``{tid: thread name}`` for every thread the interpreter knows,
+        #: divergent or not.  Kept whole rather than filtered to the
+        #: divergent set so a caller re-rendering this evidence has the
+        #: same map the message was built from.
+        self.names = names
 
 
 @dataclass(frozen=True)
@@ -454,6 +485,24 @@ class ThreadProfileScan:
         route: How tids were enumerated -- ``"task_dir"`` (complete) or
             ``"threading"`` (Python-visible threads only).  Recorded
             because it bounds what the scan could have seen.
+        names: ``{tid: thread name}`` for every thread
+            :func:`threading.enumerate` knows about, collected on BOTH
+            routes (#1100).  A tid absent from this map is one the
+            interpreter does not know -- always possible on the
+            ``task_dir`` route -- and renders as
+            :data:`UNKNOWN_THREAD_NAME`.
+
+            Collected even when nothing diverges, because it is read at
+            the moment the walk happens: a thread that exits between the
+            scan and the message has already left
+            :func:`threading.enumerate`, and a name resolved later would
+            be missing exactly for the population that is churning.
+
+            Advisory throughout.  A name never decides whether a thread
+            is divergent -- that would be the allow-list of unconfined
+            code #1100 rejects -- it only says what the divergent thread
+            was, which is the question the original refusal could not
+            answer.
     """
 
     expected: str
@@ -462,6 +511,11 @@ class ThreadProfileScan:
     unreadable: Tuple[Tuple[int, str], ...]
     gone: Tuple[int, ...]
     route: str
+    names: Mapping[int, str] = field(default_factory=dict)
+
+    def name_of(self, tid: int) -> str:
+        """What *tid* is called, or :data:`UNKNOWN_THREAD_NAME`."""
+        return self.names.get(tid, UNKNOWN_THREAD_NAME)
 
     @property
     def scanned(self) -> int:
@@ -518,6 +572,40 @@ def _label_is_inside(label: str, expected: str) -> bool:
     """
     name = profile_name_ignoring_mode(label)
     return name == expected or name.startswith(expected + "//")
+
+
+def _thread_names() -> Dict[int, str]:
+    """``{tid: thread name}`` for every thread the interpreter knows.
+
+    The map the refusal was missing (#1100).  ``threading.enumerate``
+    hands back :class:`threading.Thread` objects carrying both
+    ``native_id`` and ``name``; :func:`_tids_from_threading` read the
+    first and discarded the second, so a divergence could name a tid and
+    nothing else -- and a tid is not something an operator can look up
+    after the process is gone.  Two live incidents were investigated
+    without being able to say what ``82320`` and ``95982`` were.
+
+    Best effort by construction.  A thread that has not started yet has
+    ``native_id is None`` and is skipped; the map is only ever used to
+    LABEL evidence, never to decide what counts as evidence, so a
+    missing entry costs a placeholder and nothing else.
+    """
+    names: Dict[int, str] = {}
+    try:
+        main = threading.main_thread()
+    except Exception:  # noqa: BLE001 -- diagnostic, never fatal
+        main = None
+    if main is not None:
+        # ``os.getpid()`` is the main thread's tid on Linux, and is what
+        # :func:`_tids_from_threading` adds unconditionally, so name it
+        # from the same assumption rather than relying on the enumerate
+        # pass below to have produced a ``native_id`` for it.
+        names[os.getpid()] = getattr(main, "name", "MainThread")
+    for thread in threading.enumerate():
+        native_id = getattr(thread, "native_id", None)
+        if native_id:
+            names[int(native_id)] = getattr(thread, "name", "") or "(unnamed)"
+    return names
 
 
 def _tids_from_threading() -> List[int]:
@@ -624,6 +712,11 @@ def scan_thread_profiles(
         down for a ``/proc`` it merely could not read.
     """
     tids, route = _enumerate_tids(task_dir)
+    # Read BEFORE the per-thread label walk: a thread that exits during
+    # the walk is recorded as ``gone`` and never named, but one that
+    # exits between the walk and the message would otherwise lose its
+    # name at exactly the moment it is being reported.
+    names = _thread_names()
     matched: List[int] = []
     divergent: List[Tuple[int, str]] = []
     unreadable: List[Tuple[int, str]] = []
@@ -647,6 +740,7 @@ def scan_thread_profiles(
         unreadable=tuple(unreadable),
         gone=tuple(gone),
         route=route,
+        names=names,
     )
 
 
@@ -714,4 +808,5 @@ def verify_thread_confinement(
         scan.divergent,
         scanned=scan.scanned,
         route=scan.route,
+        names=scan.names,
     )

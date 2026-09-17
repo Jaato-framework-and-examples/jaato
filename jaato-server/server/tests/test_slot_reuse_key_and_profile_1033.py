@@ -72,8 +72,10 @@ REVERSIONS = [
     ),
     Reversion(
         target="jaato-server/server/runner_pool.py",
-        find=("        return not slot.profile_name or "
-              "slot.profile_name == self.profile_name"),
+        find=("        if not slot.has_served:\n"
+              "            return True\n"
+              "        return (slot.profile_name or None) "
+              "== self.profile_name"),
         replace="        return True",
         test=("TestReuseKey::"
               "test_a_pure_idle_slot_is_not_handed_across_profiles"),
@@ -134,8 +136,21 @@ def _slot(
     config_root: Optional[str] = None,
     workspace_root: Optional[str] = None,
     profile_name: Optional[str] = None,
+    has_served: Optional[bool] = None,
 ) -> PoolSlot:
-    """An idle slot with the identity a previous session left on it."""
+    """An idle slot with the identity a previous session left on it.
+
+    ``has_served`` (#1100) defaults to "any identity field was supplied",
+    which is what every caller here means: a slot carrying a workspace or
+    a profile is one a previous session left behind.  Passed explicitly
+    only where the DISTINCTION is the point — a slot that served an
+    unconfined session leaves all four fields ``None`` and is exactly the
+    case #1100 is about, so it cannot be derived in production code.
+    """
+    if has_served is None:
+        has_served = any(
+            (cascade_id, config_root, workspace_root, profile_name)
+        )
     return PoolSlot(
         pid=pid,
         sock=MagicMock(name=f"slot-{pid}-sock"),
@@ -143,6 +158,7 @@ def _slot(
         config_root=config_root,
         workspace_root=workspace_root,
         profile_name=profile_name,
+        has_served=has_served,
     )
 
 

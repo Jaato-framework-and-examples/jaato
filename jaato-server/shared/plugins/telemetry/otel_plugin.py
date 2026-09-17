@@ -589,14 +589,30 @@ class OTelPlugin:
         """Cascade-sharing reset (required by the ``TelemetryPlugin``
         protocol).
 
-        On a pool slot reused across cascade sessions, the framework
-        calls this BETWEEN sessions.  End this session's per-session /
-        per-agent long-lived spans so they don't leak into the next
-        session, and reset the per-turn agent context — but KEEP the
-        provider, tracer, and redaction config (across-session-by-design
-        state; tearing those down is ``shutdown()``'s job at slot end).
-        Per the litmus test in ``docs/design/runner-cascade-sharing.md``
-        §4.3.
+        Ends this session's per-session / per-agent long-lived spans so
+        they don't leak into the next one, and resets the per-turn agent
+        context — but KEEPS the provider, tracer and redaction config,
+        so a reset never tears down a live exporter mid-slot.  Per the
+        litmus test in ``docs/design/runner-cascade-sharing.md`` §4.3.
+
+        **Read what this does NOT say** (#1100).  It used to open "the
+        framework calls this BETWEEN sessions" and close "tearing those
+        down is ``shutdown()``'s job at slot end".  Neither held: this
+        plugin is RUNTIME-scoped and therefore not in the registry, so
+        the ``session.end`` sweep that fires ``reset_for_next_session``
+        on every plugin never reaches it — and a runner builds a fresh
+        ``JaatoRuntime`` per ``session.bootstrap``, so the instance is
+        dropped at that same boundary rather than living to a slot end.
+        With ``shutdown()`` having no caller anywhere in the tree, the
+        provider's ``BatchSpanProcessor`` export thread simply survived,
+        one per session served.
+
+        ``RunnerRPC`` now calls ``shutdown()`` at ``session.end`` and at
+        ``session.shutdown``, which IS this object's real boundary.  The
+        hook below keeps its contract for any caller that does reach it
+        (jaato-premium, an embedded host, a future registry-scoped
+        variant); what changed is that the class no longer describes a
+        lifecycle it does not have.
         """
         for key in list(self._long_lived_spans):
             self._end_long_lived(key)
