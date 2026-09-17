@@ -22,6 +22,7 @@ import { THEME_NAMES, applyTheme, saveThemePreference } from "@/theme/themes";
 import { disconnect, getClient, isConnected } from "@/sdk/connection";
 import { noteAuthKeyCommand } from "./authKeyCapture";
 import { markExited } from "./exitIntent";
+import { answerExit, requestExit } from "./exitChoice";
 
 export const inputHistory: string[] = [];
 
@@ -166,11 +167,12 @@ export async function attachSession(sessionId: string): Promise<void> {
 
 /** Handle a submitted line. Returns after the request is on the wire. */
 /**
- * The ``exit`` command: detach from the daemon and show the connect screen.
- * Also what the status bar's Exit button runs -- directly, not by
- * submitting the word, because a submitted line answers a pending
- * permission prompt first (``submitInput``), and "exit" typed there would
- * be read as a permission key.  The exit mark keeps a page served with
+ * Detach: leave the daemon and show the connect screen, with the session
+ * kept on the daemon for ``session attach`` later.  The ``exit`` command
+ * and the status bar's Exit button no longer run this directly -- they
+ * open the exit choice (``app/exitChoice.ts``), whose Detach answer is
+ * this; the workspace list's Disconnect still is, since there is no
+ * session there to ask about.  The exit mark keeps a page served with
  * ``autoConnect`` from connecting straight back (``app/exitIntent.ts``).
  */
 export async function exitToConnect(): Promise<void> {
@@ -183,6 +185,14 @@ export async function submitInput(text: string, verbatim: boolean): Promise<void
   const st = useJaato.getState();
   const agentId = st.selectedAgentId || MAIN_AGENT;
   const trimmed = text.trim();
+
+  // The exit choice takes the line first, as the TUI's pending exit
+  // confirmation does: a key typed while it is open answers it, and any
+  // other input is Return.
+  if (st.exitChoice) {
+    await answerExit(trimmed);
+    return;
+  }
 
   const perm = st.permissions.find((p) => p.agentId === agentId) ?? st.permissions[0];
   if (perm) {
@@ -211,7 +221,7 @@ export async function submitInput(text: string, verbatim: boolean): Promise<void
   const client = getClient();
   switch (parsed.action) {
     case "exit":
-      await exitToConnect();
+      await requestExit();
       return;
     case "stop":
       await client.stop();

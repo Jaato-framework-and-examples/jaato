@@ -200,6 +200,11 @@ async function turn(c: Client, text: string, agentId = "main"): Promise<void> {
     const choices = ["React 19", "Svelte 5", "Solid"];
     const first = /^\d+$/.test(answers[0] ?? "") ? (choices[Number(answers[0]) - 1] ?? answers[0]) : answers[0];
     await stream(c, agentId, `Thanks — you chose **${first}** and said "${answers[1]}".`);
+  } else if (lower.includes("hang")) {
+    // A turn that runs until ``session.stop``: how a test presses Exit
+    // mid-turn without betting on a clock (the e2e mock runs with no delays).
+    await new Promise<void>((r) => c.pending.set("hang", () => r()));
+    await stream(c, agentId, "Stopped mid-turn.");
   } else if (lower.includes("fail")) {
     const callId = randomUUID();
     send(c, { type: "tool.call_start", agent_id: agentId, tool_name: "run_command", tool_args: { command: "false" }, call_id: callId });
@@ -319,6 +324,17 @@ wss.on("connection", (ws, req) => {
           } else {
             send(c, { type: "system.message", message: "mock-auth: login | logout | status", style: "info" });
           }
+        } else if (cmd === "session.delete") {
+          // The daemon answers with a system.message naming the outcome; a
+          // loaded session's attached clients also hear "Session deleted:".
+          const target = String(args[0] ?? "");
+          if (target && target === c.sessionId) {
+            send(c, { type: "system.message", message: "Session deleted: mock session", style: "warning" });
+            c.sessionId = null;
+            send(c, { type: "system.message", message: `Session '${target}' deleted.`, style: "info" });
+          } else {
+            send(c, { type: "system.message", message: `Session '${target}' not found.`, style: "warning" });
+          }
         } else if (cmd === "session.list") {
           send(c, { type: "session.list", sessions: sessionListing(c) });
         } else if (cmd === "session.attach") {
@@ -364,6 +380,8 @@ wss.on("connection", (ws, req) => {
         break;
       case "session.stop":
         send(c, { type: "system.message", message: "Stopped.", style: "warning" });
+        c.pending.get("hang")?.(undefined);
+        c.pending.delete("hang");
         break;
       case "history.request": {
         const history = (c.sessionId && HISTORIES[c.sessionId]) || [];

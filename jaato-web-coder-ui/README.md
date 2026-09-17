@@ -146,10 +146,17 @@ in (`src/app/credentials.ts`, `src/components/workspace/CredentialPicker.tsx`).
 Two ways out, as buttons. The workspace list's header says who is signed in
 and offers the backend's **Sign out** (which also revokes that user's
 daemon tickets); without a backend it offers **Disconnect** instead. The
-status bar's **exit** is the `exit` command: detach from the daemon and
-return to the connect screen, leaving the session on the daemon for
-`session attach` later. A page served with `autoConnect` does not connect
-straight back after an exit; the next click does (`src/app/exitIntent.ts`).
+status bar's **exit** is the `exit` command, and like the TUI's it asks
+first what should become of the session (`src/app/exitChoice.ts`):
+**Detach** `d` leaves it on the daemon for `session attach` later and
+returns to the connect screen; **End session** `e` deletes it
+(`session.delete`, which never touches the workspace directory) and lands
+on the workspace list where there is one, else the connect screen; with a
+turn in flight **Cancel task and exit** `c` stops it first and detaches;
+**Return** `r` (or Escape) goes back. A typed key answers the plate as it
+does a permission prompt. A page served with `autoConnect` does not
+connect straight back after an exit; the next click does
+(`src/app/exitIntent.ts`).
 
 ### Hosting the bundle yourself
 

@@ -16,6 +16,7 @@ import { ToolOutputPopup } from "@/components/output/ToolOutputPopup";
 import { Composer } from "@/components/input/Composer";
 import { AttachStrip } from "@/components/input/AttachStrip";
 import { PermissionPrompt } from "@/components/prompts/PermissionPrompt";
+import { ExitPrompt } from "@/components/prompts/ExitPrompt";
 import { PostAuthSetupPrompt } from "@/components/prompts/PostAuthSetupPrompt";
 import { ClarificationPrompt } from "@/components/prompts/ClarificationPrompt";
 import { ReferenceSelectionPrompt } from "@/components/prompts/ReferenceSelectionPrompt";
@@ -28,6 +29,7 @@ import { Plate } from "@/components/layout/Plate";
 import { RailResizer } from "@/components/layout/RailResizer";
 import { answerClarification, attachSession, cancelClarification, ensureSessions, inputHistory, respondPermission, respondPostAuth, respondReference, submitInput } from "@/app/actions";
 import { openSessionWithQueued } from "@/app/staging";
+import { answerExit } from "@/app/exitChoice";
 import { sessionsInWorkspace } from "@/protocol/sessions";
 import { useKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 
@@ -214,6 +216,7 @@ export function SessionScreen() {
   const commands = useJaato((s) => s.commands);
   const initProgress = useJaato((s) => s.initProgress);
   const permissions = useJaato((s) => s.permissions);
+  const exitChoice = useJaato((s) => s.exitChoice);
   const clarifications = useJaato((s) => s.clarifications);
   const references = useJaato((s) => s.referenceSelections);
   const postAuth = useJaato((s) => s.postAuth);
@@ -249,13 +252,14 @@ export function SessionScreen() {
   const agentRefs = references.filter((r) => r.agentId === selected);
 
   const captureMode = useMemo(() => {
+    if (exitChoice) return { kind: "exit" as const, placeholder: `Exit: ${exitChoice.options.map((o) => o.key).join(" · ")}`, suggestions: exitChoice.options.map((o) => o.key) };
     const p = agentPerms[0];
     if (p) return { kind: "permission" as const, placeholder: `Answer ${p.toolName} — ${p.options.map((o) => o.key).join(" · ") || "y · n"}, or type a reply`, suggestions: p.options.map((o) => o.key) };
     const cl = agentClars.find((c) => c.inputMode);
     if (cl) return { kind: "clarification" as const, placeholder: "Type your answer (or a choice number) and press Enter" };
     if (agentRefs[0]) return { kind: "reference" as const, placeholder: "Type the reference to use" };
     return null;
-  }, [agentPerms, agentClars, agentRefs]);
+  }, [exitChoice, agentPerms, agentClars, agentRefs]);
 
   const runAuth = (command: string) => {
     // Leave the picker so the daemon's replies (the login URL, the
@@ -299,6 +303,7 @@ export function SessionScreen() {
           )}
           <OutputPane agentId={selected} />
           <div className="px-5">
+            {exitChoice && <ExitPrompt x={exitChoice} onAnswer={(k) => { answerExit(k).catch((err) => useJaato.getState().addSystemBlock(selected, String(err), "error")); }} />}
             {agentPerms.map((p) => <PermissionPrompt key={p.requestId} p={p} onRespond={(k) => respondPermission(p.requestId, k)} />)}
             {agentClars.map((c) => <ClarificationPrompt key={c.requestId} c={c} onAnswer={(a) => answerClarification(c, a)} onCancel={() => cancelClarification(c)} />)}
             {agentRefs.map((r) => <ReferenceSelectionPrompt key={r.requestId} r={r} onRespond={(v) => respondReference(r.requestId, v)} />)}

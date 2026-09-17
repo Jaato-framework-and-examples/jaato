@@ -42,7 +42,7 @@ export interface ComposerProps {
   commands: CommandSpec[];
   disabled?: boolean;
   /** Set when a prompt (permission / clarification / reference) is waiting for input. */
-  captureMode?: { kind: "permission" | "clarification" | "reference"; placeholder: string; suggestions?: string[] } | null;
+  captureMode?: { kind: "permission" | "clarification" | "reference" | "exit"; placeholder: string; suggestions?: string[] } | null;
   history: string[];
   onSubmit: (text: string, verbatim: boolean) => void;
   onEscapeEmpty?: () => void;
