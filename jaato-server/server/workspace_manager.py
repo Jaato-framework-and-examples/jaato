@@ -14,6 +14,7 @@ import json
 import functools
 import logging
 import os
+import shutil
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -115,6 +116,17 @@ class WorkspaceContainmentError(ValueError):
     """
 
 
+class WorkspaceOwnershipError(ValueError):
+    """A workspace belongs to a different authenticated user.
+
+    A :class:`ValueError` for the reason :class:`WorkspaceContainmentError`
+    is one: the WS handlers already turn a ``ValueError`` into an error
+    frame.  Distinct so a caller can tell "not yours" from "does not exist"
+    without parsing the message -- and so the two never share wording, since
+    a refusal that reads like a missing workspace invites creating it.
+    """
+
+
 @dataclass
 class WorkspaceInfo:
     """Information about a workspace."""
@@ -124,6 +136,14 @@ class WorkspaceInfo:
     provider: Optional[str] = None
     model: Optional[str] = None
     last_accessed: Optional[str] = None
+    #: The authenticated user who created it (``get_client_user`` at the
+    #: time of ``workspace.create`` -- a #1074 ticket identity reads
+    #: ``app:user``).  ``None`` for a workspace discovered on disk or created
+    #: by a connection with no identity: UNOWNED, visible to everyone, the
+    #: posture every pre-existing workspace keeps.  Persisted in the
+    #: registry and preserved across re-discovery, which rebuilds every
+    #: other field from the directory.
+    owner: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -164,7 +184,28 @@ class WorkspaceManager:
         self._load_registry()
 
     def _load_registry(self) -> None:
-        """Load workspace registry from disk."""
+        """Load workspace registry from disk.
+
+        The registry is keyed by workspace NAME and lives in one file per
+        daemon user (``~/.jaato/workspaces.json``) whatever
+        ``--workspace-root`` the daemon was started with, so a row written
+        under one root outlives a move to another.  Such a row used to be
+        loaded verbatim: it sat in ``_workspaces`` and so in every
+        ``workspace.list``, while ``select`` and ``delete`` resolved the same
+        NAME under the CURRENT root and answered "does not exist" -- a
+        workspace nobody could open or remove.  The stale row is now the
+        deployment's own root directory listed as a workspace of itself
+        (root ``/srv/jaato`` -> ``/srv/jaato/workspaces``, then the root
+        moved down one level), which is exactly the shape that produced it.
+
+        So a row is loaded only when the path it records still resolves to
+        ``<root>/<name>``; anything else is dropped with a WARNING naming
+        the root it was written for, and is gone from the file at the next
+        save.  A row whose directory no longer EXISTS is still loaded here
+        -- it carries the owner and the last-opened time, which the
+        directory cannot -- and :meth:`discover_workspaces` is what prunes
+        it, since that is the point at which the daemon looks at the disk.
+        """
         if not self.registry_path.exists():
             logger.debug(f"No workspace registry at {self.registry_path}")
             return
@@ -173,22 +214,53 @@ class WorkspaceManager:
             with open(self.registry_path, "r") as f:
                 data = json.load(f)
 
+            recorded_root = data.get("root")
+            dropped = []
             for ws_data in data.get("workspaces", []):
                 name = ws_data.get("name")
-                if name:
-                    self._workspaces[name] = WorkspaceInfo(
-                        name=name,
-                        path=ws_data.get("path", ""),
-                        configured=ws_data.get("configured", False),
-                        provider=ws_data.get("provider"),
-                        model=ws_data.get("model"),
-                        last_accessed=ws_data.get("last_accessed"),
-                    )
+                if not name:
+                    continue
+                if not self._registry_row_is_current(name, ws_data.get("path", "")):
+                    dropped.append(name)
+                    continue
+                self._workspaces[name] = WorkspaceInfo(
+                    name=name,
+                    path=ws_data.get("path", ""),
+                    configured=ws_data.get("configured", False),
+                    provider=ws_data.get("provider"),
+                    model=ws_data.get("model"),
+                    last_accessed=ws_data.get("last_accessed"),
+                    owner=ws_data.get("owner"),
+                )
 
+            if dropped:
+                logger.warning(
+                    "Ignoring %d workspace registry row(s) not under the workspace "
+                    "root %s (registry written for root %s): %s",
+                    len(dropped), self.workspace_root, recorded_root or "?",
+                    ", ".join(sorted(dropped)),
+                )
             logger.debug(f"Loaded {len(self._workspaces)} workspaces from registry")
 
         except Exception as e:
             logger.warning(f"Failed to load workspace registry: {e}")
+
+    def _registry_row_is_current(self, name: str, path: str) -> bool:
+        """Whether a registry row still describes ``<root>/<name>``.
+
+        A row records the path it was analysed at.  It is current when that
+        path is exactly the one the NAME resolves to under the current root
+        -- the same resolution ``select`` and ``delete`` perform, so a row
+        this accepts is one those verbs can act on.  A row with no path (a
+        registry predating the field) is accepted on its name alone.
+        """
+        if not path:
+            return True
+        try:
+            recorded = Path(path).expanduser().resolve()
+            return recorded == (self.workspace_root / name).resolve()
+        except (OSError, ValueError):
+            return False
 
     def _save_registry(self) -> None:
         """Save workspace registry to disk."""
@@ -210,14 +282,35 @@ class WorkspaceManager:
             logger.warning(f"Failed to save workspace registry: {e}")
 
     def _is_under_root(self, path: Path) -> bool:
-        """Whether an ALREADY-RESOLVED path is the root or lives beneath it.
+        """Whether an ALREADY-RESOLVED path lives strictly beneath the root.
 
         Takes a resolved path rather than resolving one, so the single
         caller that has a path instead of a name (the registry branch of
         :meth:`get_workspace_path`) shares this comparison instead of
         carrying a second opinion about what "under the root" means.
+
+        The root ITSELF is not under the root.  It used to be accepted, so
+        an empty name (``root / ""`` is the root) selected the root as a
+        workspace: ``_analyze_workspace`` named it after the root's own
+        basename, the cache held it under the key ``""``, and every
+        ``workspace.list`` showed a row -- ``workspaces`` on the live
+        daemon -- that ``select`` and ``delete`` then refused by name.
         """
-        return path == self.workspace_root or self.workspace_root in path.parents
+        return self.workspace_root in path.parents
+
+    @staticmethod
+    def _check_name(name: str) -> None:
+        """The NAMING rule: a workspace name is one flat path component.
+
+        Shared by the verbs that take a client-supplied name (``create``,
+        ``select``, ``delete``) so the cache key and ``WorkspaceInfo.name``
+        cannot disagree -- a nested name would be keyed as ``a/b`` and
+        analysed as ``b``.  :meth:`_resolve_under_root` enforces the
+        LOCATION rule; the two catch different things (``".."`` passes
+        this one, ``"a/b"`` passes that one).
+        """
+        if not name or "/" in name or "\\" in name:
+            raise ValueError(f"Invalid workspace name: {name!r}")
 
     def _resolve_under_root(self, name: str) -> Path:
         """Turn a client-supplied workspace NAME into a path under the root.
@@ -259,6 +352,11 @@ class WorkspaceManager:
                 f"Cannot resolve workspace name {name!r}: {e}"
             ) from e
 
+        if resolved == self.workspace_root:
+            raise WorkspaceContainmentError(
+                f"Workspace {name!r} resolves to the workspace root "
+                f"{self.workspace_root} itself, which is not a workspace"
+            )
         if not self._is_under_root(resolved):
             raise WorkspaceContainmentError(
                 f"Workspace {name!r} resolves to {resolved}, which is outside "
@@ -278,6 +376,20 @@ class WorkspaceManager:
         if not self.workspace_root.exists():
             logger.warning(f"Workspace root does not exist: {self.workspace_root}")
             return []
+
+        # A cached row whose directory is gone -- removed out of band, or
+        # carried over from a registry the daemon no longer has a directory
+        # for -- would otherwise be listed forever while ``select`` and
+        # ``delete`` refuse it by name.  This is the one point that looks at
+        # the disk, so it is where the cache is reconciled with it.
+        for name in list(self._workspaces):
+            try:
+                present = self._resolve_under_root(name).is_dir()
+            except WorkspaceContainmentError:
+                present = False
+            if not present:
+                logger.info("Forgetting workspace %r: no directory under %s", name, self.workspace_root)
+                self._workspaces.pop(name, None)
 
         discovered = []
 
@@ -304,16 +416,21 @@ class WorkspaceManager:
         logger.info(f"Discovered {len(discovered)} workspaces under {self.workspace_root}")
         return discovered
 
-    def _analyze_workspace(self, path: Path) -> WorkspaceInfo:
+    def _analyze_workspace(self, path: Path, name: Optional[str] = None) -> WorkspaceInfo:
         """Analyze a workspace directory to determine its configuration status.
 
         Args:
             path: Absolute path to workspace directory.
+            name: The workspace's NAME -- the cache key and what clients
+                address it by.  Defaults to the directory's basename, which
+                is right for discovery; a verb that resolved a name to a
+                path passes the name it resolved, so a symlinked entry is
+                still known by the name the client used.
 
         Returns:
             WorkspaceInfo with configuration details.
         """
-        name = path.name
+        name = name or path.name
         env_file = path / ".env"
 
         provider = None
@@ -332,9 +449,14 @@ class WorkspaceManager:
             # Consider configured if we have a provider
             configured = provider is not None
 
-        # Check existing entry for last_accessed
+        # Two fields the directory cannot tell us are carried over from the
+        # registry entry: when it was last opened, and WHO owns it.  Dropping
+        # the owner here would silently un-own every workspace on the first
+        # ``workspace.list`` after a restart -- the failure that would make
+        # the visibility rule cosmetic.
         existing = self._workspaces.get(name)
         last_accessed = existing.last_accessed if existing else None
+        owner = existing.owner if existing else None
 
         return WorkspaceInfo(
             name=name,
@@ -343,6 +465,7 @@ class WorkspaceManager:
             provider=provider,
             model=model,
             last_accessed=last_accessed,
+            owner=owner,
         )
 
     def _detect_provider(self, env_vars: Dict[str, Optional[str]]) -> Optional[str]:
@@ -363,23 +486,52 @@ class WorkspaceManager:
 
         return None
 
-    def list_workspaces(self) -> List[WorkspaceInfo]:
-        """List all known workspaces.
+    @staticmethod
+    def visible_to(ws_info: WorkspaceInfo, user: Optional[str]) -> bool:
+        """Whether *user* may see and use *ws_info*.
 
-        Combines cached workspaces with fresh discovery.
+        The one visibility rule, applied by :meth:`list_workspaces`,
+        :meth:`select_workspace` and :meth:`delete_workspace` alike, so the
+        list can never show a workspace the verbs then refuse or hide one
+        they would accept:
+
+        - a connection with NO identity (``user is None`` -- the shared
+          bearer token, a daemon with no tickets configured) sees every
+          workspace, which is what it always saw;
+        - an authenticated user sees the workspaces they own and the
+          UNOWNED ones (discovered on disk, or created before ownership was
+          recorded), and never another user's.
+        """
+        return user is None or ws_info.owner is None or ws_info.owner == user
+
+    def _check_owner(self, ws_info: WorkspaceInfo, user: Optional[str]) -> None:
+        if not self.visible_to(ws_info, user):
+            raise WorkspaceOwnershipError(
+                f"Workspace {ws_info.name!r} belongs to another user"
+            )
+
+    def list_workspaces(self, for_user: Optional[str] = None) -> List[WorkspaceInfo]:
+        """List the workspaces *for_user* may see.
+
+        Combines cached workspaces with fresh discovery, then applies
+        :meth:`visible_to`.  ``for_user=None`` is the unscoped listing.
 
         Returns:
             List of workspace info.
         """
         # Re-discover to get fresh state
         self.discover_workspaces()
-        return list(self._workspaces.values())
+        return [ws for ws in self._workspaces.values()
+                if self.visible_to(ws, for_user)]
 
-    def create_workspace(self, name: str) -> WorkspaceInfo:
+    def create_workspace(self, name: str, owner: Optional[str] = None) -> WorkspaceInfo:
         """Create a new workspace.
 
         Args:
             name: Name for the new workspace (becomes subdirectory name).
+            owner: The creating connection's authenticated user, recorded so
+                the workspace is theirs and hidden from other users; ``None``
+                leaves it unowned.
 
         Returns:
             WorkspaceInfo for the created workspace.
@@ -393,8 +545,7 @@ class WorkspaceManager:
         # ``path.name`` keying assumes), and ``_resolve_under_root``
         # enforces the LOCATION rule.  ".." passes the first and is caught
         # by the second; "a/b" passes the second and is caught by the first.
-        if not name or "/" in name or "\\" in name:
-            raise ValueError(f"Invalid workspace name: {name}")
+        self._check_name(name)
 
         path = self._resolve_under_root(name)
 
@@ -413,18 +564,89 @@ class WorkspaceManager:
             path=str(path),
             configured=False,
             last_accessed=datetime.now(timezone.utc).isoformat(),
+            owner=owner,
         )
 
         self._workspaces[name] = ws_info
         self._save_registry()
 
-        logger.info(f"Created workspace: {name} at {path}")
+        logger.info("Created workspace: %s at %s (owner=%s)", name, path, owner or "-")
+        return ws_info
+
+    def delete_workspace(
+        self,
+        name: str,
+        user: Optional[str] = None,
+        in_use_by: Optional[List[str]] = None,
+        client_id: Optional[str] = None,
+    ) -> WorkspaceInfo:
+        """Delete a workspace: its directory, and its registry entry.
+
+        Destructive and unrecoverable -- the sessions persisted under
+        ``<workspace>/.jaato`` go with it -- so the client is expected to
+        have confirmed.  What the manager itself refuses, each as a
+        ``ValueError`` the WS handler already turns into an error frame:
+
+        - a name that leaves the root (:class:`WorkspaceContainmentError`,
+          checked before existence, as for ``select``), or the root itself;
+        - a workspace that does not exist;
+        - another user's workspace (:class:`WorkspaceOwnershipError`);
+        - a workspace something is still using -- the ``in_use_by`` ids the
+          caller resolved (loaded sessions running in it), or another
+          client's current selection.  Deleting a directory a runner is
+          confined to is not a delete, it is a session failure with a
+          delayed cause.
+
+        The deleting client's own selection of it is cleared.
+
+        Args:
+            name: Workspace name (relative path from root).
+            user: The caller's authenticated user, for the ownership check.
+            in_use_by: Session ids the caller found loaded in this workspace.
+            client_id: The deleting client, whose own selection of the
+                workspace does not count as "in use" and is cleared.
+
+        Returns:
+            The deleted workspace's info, as it stood.
+        """
+        # Containment first, so a traversal is refused as one (and before
+        # existence); then the naming rule, which containment cannot check.
+        path = self._resolve_under_root(name)   # refuses the root itself
+        self._check_name(name)
+        if not path.exists():
+            raise ValueError(f"Workspace does not exist: {name}")
+
+        ws_info = self._analyze_workspace(path, name=name)
+        self._check_owner(ws_info, user)
+
+        if in_use_by:
+            raise ValueError(
+                f"Workspace {name!r} has {len(in_use_by)} loaded session(s): "
+                f"{', '.join(sorted(in_use_by))} -- stop them first"
+            )
+        others = [cid for cid, sel in self._client_workspaces.items()
+                  if sel == name and cid != client_id]
+        if others:
+            raise ValueError(
+                f"Workspace {name!r} is selected by {len(others)} other client(s)"
+            )
+
+        shutil.rmtree(path)
+        self._workspaces.pop(name, None)
+        if client_id is not None and self._client_workspaces.get(client_id) == name:
+            self._client_workspaces.pop(client_id, None)
+        if self._selected_workspace == name:
+            self._selected_workspace = None
+        self._save_registry()
+
+        logger.info("Deleted workspace: %s at %s (by %s)", name, path, user or "-")
         return ws_info
 
     def select_workspace(
         self,
         name: str,
         client_id: Optional[str] = None,
+        user: Optional[str] = None,
     ) -> WorkspaceInfo:
         """Select a workspace for a session or client.
 
@@ -433,6 +655,9 @@ class WorkspaceManager:
             client_id: Optional client identifier for per-client tracking.
                 When provided, the selection is stored per-client.
                 When None, uses the legacy single-workspace mode.
+            user: The caller's authenticated user; another user's workspace
+                is refused, so the list's visibility rule is also the
+                verbs' (a filtered list over unguarded verbs is decoration).
 
         Returns:
             WorkspaceInfo with current configuration status.
@@ -441,15 +666,18 @@ class WorkspaceManager:
             WorkspaceContainmentError: If the name resolves outside the
                 workspace root.  Checked BEFORE existence, so the refusal
                 does not double as an oracle for what exists out there.
+            WorkspaceOwnershipError: If the workspace belongs to another user.
             ValueError: If workspace does not exist.
         """
-        path = self._resolve_under_root(name)
+        path = self._resolve_under_root(name)   # containment, before existence
+        self._check_name(name)                  # one flat component
 
         if not path.exists():
             raise ValueError(f"Workspace does not exist: {name}")
 
         # Re-analyze to get fresh state
-        ws_info = self._analyze_workspace(path)
+        ws_info = self._analyze_workspace(path, name=name)
+        self._check_owner(ws_info, user)
         ws_info.last_accessed = datetime.now(timezone.utc).isoformat()
 
         self._workspaces[name] = ws_info
@@ -582,7 +810,7 @@ class WorkspaceManager:
                     "missing_fields": ["workspace is outside the workspace root"],
                 }
             if ws_path.exists():
-                ws_info = self._analyze_workspace(ws_path)
+                ws_info = self._analyze_workspace(ws_path, name=target)
             else:
                 return {
                     "workspace": target,
@@ -675,7 +903,7 @@ class WorkspaceManager:
 
         # Re-analyze and update cache
         ws_path = self._resolve_under_root(target)
-        ws_info = self._analyze_workspace(ws_path)
+        ws_info = self._analyze_workspace(ws_path, name=target)
         ws_info.last_accessed = datetime.now(timezone.utc).isoformat()
         self._workspaces[target] = ws_info
         self._save_registry()

@@ -217,16 +217,22 @@ def test_workspace_path_refuses_an_escaping_name_with_none(tree) -> None:
 
 def test_workspace_path_refuses_a_poisoned_registry_row(tree) -> None:
     """One accepted out-of-root selection used to be PERSISTED, so the
-    stored path is checked rather than trusted."""
+    stored path is checked rather than trusted.  Since the stale-row
+    reconciliation (``test_workspace_registry_stale_rows.py``) the row is
+    refused one step earlier -- ``_load_registry`` keeps only rows whose
+    path is ``<root>/<name>`` -- and the accessor's own check stays as the
+    second door, so neither answer may ever be the out-of-root path."""
     root, outside, registry = tree
     registry.write_text(json.dumps({
         "root": str(root),
         "workspaces": [{"name": "alpha", "path": str(outside), "configured": True}],
     }))
 
-    manager = _manager(tree)                       # loads that row from disk
-    assert manager._workspaces["alpha"].path == str(outside)
-    assert manager.get_workspace_path("alpha") is None
+    manager = _manager(tree)                       # the row is not loaded
+    assert "alpha" not in manager._workspaces
+    answer = manager.get_workspace_path("alpha")
+    assert answer != Path(outside)
+    assert answer is None or answer == (root / "alpha").resolve()
 
 
 def test_workspace_path_still_answers_for_a_contained_row(tree) -> None:

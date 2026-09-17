@@ -29,7 +29,28 @@ from server.runner_rpc_client import RunnerCallError, RunnerRPCClient
 
 
 async def _make_client(spawner: RunnerSpawner) -> Tuple[SpawnedRunner, RunnerRPCClient]:
-    """Spawn a confine-disabled runner and start the daemon-side client."""
+    """Spawn a confine-disabled runner, and return once it has ANSWERED.
+
+    The round trip is the point, not a warm-up (#996).  ``start()``
+    establishes nothing about the child: the socketpair is created
+    BEFORE ``fork()``, so both ends are connected the instant the parent
+    returns, and ``start()`` only adopts the parent end onto the loop
+    and begins reading.  There is no handshake anywhere in it.  A client
+    it returns is therefore "connected" to a child that may not have
+    executed a single instruction yet.
+
+    Everything the child does after the fork -- ``os.setsid()``, the
+    cgroup migration, ``exec()`` -- is concurrent with the parent, so a
+    parent that looks at the child's state immediately is reading a
+    process caught mid-startup.  Measured under 6-way CPU load on a
+    4-core host: ``os.getpgid(child)`` returned the DAEMON's process
+    group, settling to the child's own pid 3.4 ms later.
+
+    One ``echo`` fixes the class rather than one test.  The runner can
+    only answer it after ``exec()``, which is after ``setsid()`` and the
+    cgroup attach, so a reply is proof -- by the wire, with no clock --
+    that the child is past its whole pre-exec sequence.
+    """
     spawned = spawner.spawn(
         profile_name="ignored-confine-disabled",
         session_id="test-session",
@@ -41,6 +62,7 @@ async def _make_client(spawner: RunnerSpawner) -> Tuple[SpawnedRunner, RunnerRPC
         runner_pid=spawned.pid,
     )
     await client.start()
+    await client.call("echo", {"ready": True})
     return spawned, client
 
 
@@ -242,10 +264,20 @@ async def test_cancel_token_trips_runner_cancel() -> None:
 
 @pytest.mark.asyncio
 async def test_runner_leads_own_session() -> None:
-    """The runner calls ``os.setsid()`` at fork, so it leads its own
-    session — pgid == its own pid, distinct from the daemon's group.
-    This is the precondition that makes the killpg subtree-sweep safe
-    (it can never hit the daemon's group)."""
+    """The runner leads its own session -- pgid == its own pid, distinct
+    from the daemon's group.  This is the precondition that makes the
+    killpg subtree-sweep safe (it can never hit the daemon's group).
+
+    "At fork" describes where ``os.setsid()`` sits in the source, not
+    when the PARENT may rely on it: the child runs it concurrently, and
+    nothing in ``spawn()`` or ``start()`` waits.  Reading the pgid
+    without an ordering is a bet on the scheduler, and under load it
+    loses -- the read returns the daemon's group until the child is
+    scheduled (#996).  ``_make_client`` now returns only after the
+    runner has ANSWERED, which is proof it is past ``exec()`` and so
+    past ``setsid()``.  Keep that ordering; do not assert on a child
+    this helper has not heard from.
+    """
     spawner = RunnerSpawner()
     spawned, client = await _make_client(spawner)
     try:

@@ -30,6 +30,11 @@ from jaato_sdk.event_payloads import ToolCallCompletedPayload
         ({"result": "...", "status_code": 201}, False),
         # Error-body dicts.
         ({"error": "boom"}, True),
+        ({"error": {"code": 7}}, True),
+        # A null error is no error: the key spells the ABSENCE of one, and a
+        # tool echoing ``"error": None`` on success was drawn as failed.
+        ({"error": None}, False),
+        ({"error": None, "result": "done"}, False),
         ({"status_code": 500}, True),
         ({"status_code": 200}, False),
         ({"status_code": 404}, True),

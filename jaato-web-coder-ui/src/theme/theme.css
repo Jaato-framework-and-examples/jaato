@@ -5,21 +5,43 @@
    built CSS carried only preflight + our rules).  "../" is src/. */
 @source "../";
 
-/* Defaults = TUI "dark" theme; applyTheme() overrides these at runtime. */
+/* The two faces of the redesign, self-hosted from npm so a deployment
+   behind a corporate proxy needs no font CDN: Barlow for text, Barlow
+   Condensed for chrome (labels, buttons, tab names).  Weights are the
+   ones the design uses; a subset per file, the browser fetches what the
+   page's glyphs need. */
+@import "@fontsource/barlow/400.css";
+@import "@fontsource/barlow/500.css";
+@import "@fontsource/barlow/600.css";
+@import "@fontsource/barlow-condensed/500.css";
+@import "@fontsource/barlow-condensed/600.css";
+
+/* Defaults = the redesign's light face (the TUI "light" theme on the
+   Industry paper ground); applyTheme() overrides these at runtime for
+   whichever theme is selected.  Eleven colours come from the theme
+   file; ``--c-steel`` is the twelfth, the redesign's INTERFACE accent
+   (see themes.ts), kept apart from the theme's ``primary`` so a theme's
+   neons can shrink to state glyphs while one steel carries the chrome. */
 :root {
-  --c-primary: #5fd7ff;
-  --c-secondary: #87d787;
-  --c-accent: #d7af87;
-  --c-success: #5fd75f;
-  --c-warning: #ffff5f;
-  --c-error: #ff5f5f;
-  --c-muted: #808080;
-  --c-bg: #1a1a1a;
-  --c-surface: #333333;
-  --c-text: #ffffff;
-  --c-text-muted: #aaaaaa;
+  --c-primary: #0077cc;
+  --c-secondary: #006600;
+  --c-accent: #996600;
+  --c-success: #006600;
+  --c-warning: #996600;
+  --c-error: #cc0000;
+  --c-muted: #7a7a7d;
+  --c-bg: #f2f2f3;
+  --c-surface: #ffffff;
+  --c-text: #1d1f20;
+  --c-text-muted: #5d5d60;
+  --c-steel: #5980a6;
+  /* Hairlines are ink at 16%, so they read on both grounds without a second definition. */
+  --c-divider: color-mix(in srgb, var(--c-text) 16%, transparent);
+  /* A quiet tint on the ground: user turns, table stripes, hover. */
+  --c-tint: color-mix(in srgb, var(--c-text) 7%, var(--c-bg));
   --font-mono: ui-monospace, "JetBrains Mono", "Fira Code", Menlo, Consolas, monospace;
-  --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-sans: "Barlow", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-heading: "Barlow Condensed", "Barlow", system-ui, sans-serif;
 }
 
 @theme inline {
@@ -34,8 +56,12 @@
   --color-surface: var(--c-surface);
   --color-text: var(--c-text);
   --color-text-muted: var(--c-text-muted);
+  --color-steel: var(--c-steel);
+  --color-divider: var(--c-divider);
+  --color-tint: var(--c-tint);
   --font-mono: var(--font-mono);
   --font-sans: var(--font-sans);
+  --font-heading: var(--font-heading);
 }
 
 html, body, #root { height: 100%; margin: 0; }
@@ -46,15 +72,108 @@ body {
   font-size: 14px;
   line-height: 1.5;
 }
+/* Every component is a square, hairline-bordered object; nothing the
+   browser rounds by default gets to disagree. */
+button, input, select, textarea { border-radius: 0; font-family: inherit; }
 
-/* Surfaces derived from the eleven base colours. */
-.surface-1 { background: color-mix(in srgb, var(--c-surface) 55%, var(--c-bg)); }
-.surface-2 { background: var(--c-surface); }
-.hairline { border-color: color-mix(in srgb, var(--c-muted) 35%, transparent); }
+/* ── Plates ──────────────────────────────────────────────────────────
+   The unit of the redesign: a square, hairline-bordered surface with
+   registration marks at its corners (<Plate> renders the four marks).
+   ``--plate-edge`` recolours the border for a plate that means
+   something — steel for the focused / primary one, warning for a
+   permission request. */
+.plate {
+  position: relative;
+  background: var(--c-surface);
+  border: 1px solid var(--plate-edge, var(--c-divider));
+}
+.plate-ground { background: var(--c-bg); }
+.plate-steel { --plate-edge: var(--c-steel); }
+.plate-warning { --plate-edge: color-mix(in srgb, var(--c-warning) 55%, transparent); }
+.plate-error { --plate-edge: color-mix(in srgb, var(--c-error) 55%, transparent); }
+.plate > .corner {
+  position: absolute; width: 11px; height: 11px; pointer-events: none;
+  color: var(--corner-color, color-mix(in srgb, var(--c-text) 55%, transparent));
+}
+.plate > .corner::before, .plate > .corner::after { content: ""; position: absolute; background: currentColor; }
+.plate > .corner::before { left: 5px; top: 0; width: 1px; height: 100%; }
+.plate > .corner::after  { top: 5px; left: 0; width: 100%; height: 1px; }
+.plate > .corner.tl { top: -6px; left: -6px; }
+.plate > .corner.tr { top: -6px; right: -6px; }
+.plate > .corner.bl { bottom: -6px; left: -6px; }
+.plate > .corner.br { bottom: -6px; right: -6px; }
+
+/* Surfaces and lines, kept for the components that still name them. */
+.surface-1 { background: var(--c-surface); }
+.surface-2 { background: var(--c-tint); }
+.hairline { border-color: var(--c-divider); }
+.tint { background: var(--c-tint); }
+
+/* ── Chrome type ─────────────────────────────────────────────────────
+   Condensed, tracked, uppercase: what the INTERFACE says.  Monospace is
+   reserved for what the daemon said (ids, paths, models, arguments). */
+.kicker {
+  font-family: var(--font-heading); font-weight: 500; font-size: 11px;
+  letter-spacing: 0.14em; text-transform: uppercase; color: var(--c-steel);
+}
+.kicker-muted { color: var(--c-text-muted); }
+.chrome {
+  font-family: var(--font-heading); font-weight: 600; font-size: 14px;
+  letter-spacing: 0.08em; text-transform: uppercase;
+}
+.chrome-sm { font-size: 12px; }
+.display { font-family: var(--font-heading); font-weight: 600; line-height: 1.1; letter-spacing: -0.015em; }
+
+/* ── Buttons ──────────────────────────────────────────────────────── */
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  font-family: var(--font-heading); font-weight: 600; font-size: 14px; line-height: 1.2;
+  letter-spacing: 0.08em; text-transform: uppercase; white-space: nowrap;
+  color: var(--c-text); background: transparent;
+  border: 1px solid var(--c-divider); padding: 7px 14px; cursor: pointer;
+}
+.btn:hover { background: var(--c-tint); }
+.btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.btn-primary { background: var(--c-steel); color: var(--c-bg); border-color: var(--c-steel); }
+.btn-primary:hover { filter: brightness(0.92); background: var(--c-steel); }
+.btn-steel { color: var(--c-steel); border-color: var(--c-steel); }
+.btn-quiet { color: var(--c-text-muted); }
+.btn-quiet:hover { color: var(--c-text); }
+.btn-danger { color: var(--c-error); }
+.btn-sm { font-size: 12px; padding: 2px 8px; font-weight: 500; }
+.btn-md { font-size: 13px; padding: 5px 12px; }
+.btn kbd, .btn .key { font-family: var(--font-mono); font-size: 11px; letter-spacing: 0; text-transform: none; opacity: 0.7; border: 0; padding: 0; }
+.btn-primary kbd, .btn-primary .key { color: inherit; }
+
+/* Text links in the chrome: the quiet way out of a screen. */
+.link { color: var(--c-text-muted); text-decoration: underline; text-underline-offset: 3px; }
+.link:hover { color: var(--c-text); }
+
+/* ── Forms ────────────────────────────────────────────────────────── */
+.input {
+  width: 100%; min-height: 34px; padding: 6px 10px; font: inherit; font-size: 14px;
+  color: var(--c-text); caret-color: var(--c-steel);
+  background: var(--c-surface); border: 1px solid var(--c-divider); outline: none;
+}
+.input:hover { border-color: color-mix(in srgb, var(--c-text) 45%, transparent); }
+.input:focus-visible, .input:focus { border-color: var(--c-steel); }
+.input-mono { font-family: var(--font-mono); font-size: 13px; }
+.field-label { display: block; font-size: 12px; margin-bottom: 4px; color: var(--c-text-muted); }
+:focus-visible { outline: 2px solid var(--c-steel); outline-offset: 2px; }
+::selection { background: color-mix(in srgb, var(--c-steel) 30%, transparent); }
+
+/* Definition grids: label muted left, value right-aligned, mono. */
+.kv { display: grid; grid-template-columns: max-content 1fr; column-gap: 14px; row-gap: 3px; font-family: var(--font-mono); font-size: 11.5px; }
+.kv > :nth-child(odd) { color: var(--c-text-muted); }
+.kv > :nth-child(even) { text-align: right; }
+
+/* A thin progress bar: ground track, one solid fill. */
+.bar { height: 3px; background: color-mix(in srgb, var(--c-text) 16%, var(--c-bg)); overflow: hidden; }
+.bar > span { display: block; height: 100%; background: var(--c-steel); }
 
 /* Pygments token roles (see protocol/pygments.ts). */
-.tok-keyword     { color: var(--c-primary); font-weight: 600; }
-.tok-function    { color: var(--c-secondary); }
+.tok-keyword     { color: var(--c-steel); font-weight: 600; }
+.tok-function    { color: var(--c-success); }
 .tok-class       { color: var(--c-accent); }
 .tok-builtin     { color: var(--c-accent); }
 .tok-name        { color: var(--c-text); }
@@ -64,39 +183,40 @@ body {
 .tok-punctuation { color: var(--c-text-muted); }
 .tok-comment     { color: var(--c-muted); font-style: italic; }
 .tok-decorator   { color: var(--c-accent); }
-.tok-tag         { color: var(--c-primary); }
-.tok-attribute   { color: var(--c-secondary); }
+.tok-tag         { color: var(--c-steel); }
+.tok-attribute   { color: var(--c-success); }
 .tok-error       { color: var(--c-error); text-decoration: underline wavy; }
 .tok-inserted    { color: var(--c-success); }
 .tok-deleted     { color: var(--c-error); }
-.tok-heading     { color: var(--c-primary); font-weight: 700; }
+.tok-heading     { color: var(--c-steel); font-weight: 700; }
 .tok-prompt      { color: var(--c-muted); }
 .tok-text        { color: var(--c-text); }
 
 /* Diff lines in permission prompts / tool output. */
-.diff-add { color: var(--c-success); background: color-mix(in srgb, var(--c-success) 10%, transparent); }
-.diff-del { color: var(--c-error); background: color-mix(in srgb, var(--c-error) 10%, transparent); }
-.diff-hunk { color: var(--c-primary); }
+.diff-add { color: var(--c-success); background: color-mix(in srgb, var(--c-success) 8%, transparent); }
+.diff-del { color: var(--c-error); background: color-mix(in srgb, var(--c-error) 8%, transparent); }
+.diff-hunk { color: var(--c-steel); }
 .diff-meta { color: var(--c-muted); }
 
-/* Prose from the model. */
+/* Prose from the model: 15px on a 74ch measure, headings condensed. */
+.prose-j { font-size: 15px; line-height: 1.55; max-width: 74ch; }
 .prose-j p { margin: 0.35rem 0; }
-.prose-j h1, .prose-j h2, .prose-j h3, .prose-j h4 { margin: 0.8rem 0 0.3rem; line-height: 1.25; color: var(--c-primary); }
-.prose-j h1 { font-size: 1.35rem; } .prose-j h2 { font-size: 1.2rem; } .prose-j h3 { font-size: 1.05rem; } .prose-j h4 { font-size: 1rem; }
+.prose-j h1, .prose-j h2, .prose-j h3, .prose-j h4 { margin: 0.9rem 0 0.3rem; line-height: 1.15; font-family: var(--font-heading); font-weight: 600; letter-spacing: -0.01em; }
+.prose-j h1 { font-size: 1.6rem; } .prose-j h2 { font-size: 1.35rem; } .prose-j h3 { font-size: 1.15rem; } .prose-j h4 { font-size: 1rem; text-transform: uppercase; letter-spacing: 0.06em; }
 .prose-j ul, .prose-j ol { margin: 0.3rem 0 0.3rem 1.4rem; }
 .prose-j ul { list-style: disc; } .prose-j ol { list-style: decimal; }
 .prose-j li { margin: 0.1rem 0; }
-.prose-j blockquote { border-left: 3px solid var(--c-muted); padding-left: 0.75rem; color: var(--c-text-muted); margin: 0.4rem 0; }
-.prose-j hr { border: 0; border-top: 1px solid color-mix(in srgb, var(--c-muted) 45%, transparent); margin: 0.75rem 0; }
-.prose-j code.inline { font-family: var(--font-mono); font-size: 0.92em; background: color-mix(in srgb, var(--c-surface) 80%, var(--c-bg)); padding: 0.05rem 0.3rem; border-radius: 4px; }
-.prose-j a { color: var(--c-primary); text-decoration: underline; }
+.prose-j blockquote { border-left: 2px solid var(--c-steel); padding-left: 0.75rem; color: var(--c-text-muted); margin: 0.4rem 0; }
+.prose-j hr { border: 0; border-top: 1px solid var(--c-divider); margin: 0.75rem 0; }
+.prose-j code.inline { font-family: var(--font-mono); font-size: 0.87em; border-bottom: 1px solid color-mix(in srgb, var(--c-steel) 50%, transparent); padding: 0 0.1rem; }
+.prose-j a { color: var(--c-steel); text-decoration: underline; text-underline-offset: 3px; }
 
-.code-block { font-family: var(--font-mono); font-size: 12.5px; line-height: 1.45; }
+.code-block { font-family: var(--font-mono); font-size: 12.5px; line-height: 1.5; }
 .code-block .ln { user-select: none; color: var(--c-muted); text-align: right; padding-right: 0.9rem; min-width: 2.5rem; display: inline-block; }
 
 table.j-table { border-collapse: collapse; margin: 0.4rem 0; font-size: 13px; }
-table.j-table th, table.j-table td { border: 1px solid color-mix(in srgb, var(--c-muted) 40%, transparent); padding: 0.2rem 0.6rem; text-align: left; vertical-align: top; }
-table.j-table th { color: var(--c-primary); font-weight: 600; background: color-mix(in srgb, var(--c-surface) 60%, var(--c-bg)); }
+table.j-table th, table.j-table td { border: 1px solid var(--c-divider); padding: 0.2rem 0.6rem; text-align: left; vertical-align: top; }
+table.j-table th { font-family: var(--font-heading); font-weight: 600; font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--c-text-muted); background: var(--c-tint); }
 
 /* Thin scrollbars everywhere. */
 * { scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--c-muted) 50%, transparent) transparent; }
@@ -104,4 +224,4 @@ table.j-table th { color: var(--c-primary); font-weight: 600; background: color-
 @keyframes pulse-dot { 0%, 100% { opacity: 0.25; } 50% { opacity: 1; } }
 .pulse { animation: pulse-dot 1.2s ease-in-out infinite; }
 
-kbd { font-family: var(--font-mono); font-size: 0.75rem; border: 1px solid color-mix(in srgb, var(--c-muted) 50%, transparent); border-bottom-width: 2px; border-radius: 4px; padding: 0 0.3rem; color: var(--c-text-muted); }
+kbd { font-family: var(--font-mono); font-size: 0.75rem; border: 1px solid var(--c-divider); border-bottom-width: 2px; padding: 0 0.3rem; color: var(--c-text-muted); }

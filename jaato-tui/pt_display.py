@@ -1241,9 +1241,13 @@ class PTDisplay:
 
         The server's ``WorkspaceMonitor`` watches ``.gitignore`` and
         reloads its parser on the modification event so the new pattern
-        takes effect on subsequent file events.
+        takes effect on subsequent file events.  The TUI writes the file
+        directly because it runs on the host; a remote client reaches the
+        same edit through the daemon's ``workspace.ignore`` verb.
         """
         import os
+
+        from jaato_sdk.gitignore_toggle import toggle_gitignore_pattern
 
         path = self._workspace_panel.get_selected_path()
         if not path:
@@ -1267,22 +1271,10 @@ class PTDisplay:
             if os.path.exists(gitignore_path):
                 with open(gitignore_path, "r", encoding="utf-8") as fh:
                     existing = fh.read()
-            lines = existing.splitlines()
-            stripped = [ln.strip() for ln in lines]
-
-            if pattern in stripped:
-                # Drop every exact-match occurrence.
-                new_lines = [
-                    ln for ln, s in zip(lines, stripped) if s != pattern
-                ]
-                new_content = "\n".join(new_lines)
-                if new_content and not new_content.endswith("\n"):
-                    new_content += "\n"
-            else:
-                # Append, ensuring the previous content ends with a newline.
-                if existing and not existing.endswith("\n"):
-                    existing += "\n"
-                new_content = existing + pattern + "\n"
+            # The one definition of "toggle this entry", shared with the
+            # daemon's ``workspace.ignore`` verb (protocol 1.12) so a web
+            # client's press and this key make the same edit.
+            new_content, _ignored = toggle_gitignore_pattern(existing, pattern)
 
             with open(gitignore_path, "w", encoding="utf-8") as fh:
                 fh.write(new_content)

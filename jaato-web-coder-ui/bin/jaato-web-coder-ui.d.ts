@@ -15,6 +15,8 @@ export interface StaticConfig {
   token?: string;
   ticketUrl?: string;
   loginUrl?: string;
+  /** Where the sign-in backend keeps the user's provider API keys; absent = no combobox, a plain key field. */
+  credentialsUrl?: string;
   autoConnect?: boolean;
 }
 

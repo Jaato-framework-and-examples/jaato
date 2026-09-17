@@ -41,6 +41,7 @@ from typing import Any
 from . import explain as _explain
 from . import validate as _validate
 
+
 # --------------------------------------------------------------- explain
 #
 # Scopes are ONE TABLE, not an if/elif chain and not four tables.  The chain is
@@ -457,8 +458,14 @@ def _cmd_integration(args) -> int:
     name = args.name
     # --user and --workspace are mutually exclusive, so "not --workspace" IS
     # user scope; --user is accepted so the default can be stated out loud.
-    dest = _install.target_dir(name, user=not args.workspace,
-                               workspace=args.workspace)
+    try:
+        dest = _install.target_dir(name, user=not args.workspace,
+                                   workspace=args.workspace)
+    except _install.IntegrationManifestError as exc:
+        # A packaging error in what we shipped, not a mistake the operator
+        # made.  Say so instead of installing to a guessed path.
+        print(f"{exc}", file=sys.stderr)
+        return 1
     changed, lines = _install.install(name, dest, force=args.force, dry_run=args.dry_run)
     if args.json:
         state, detail = _install.compare(name, dest)
@@ -591,11 +598,11 @@ def main(argv=None) -> int:
                          "daemon restarts — instead of the plain client")
     pn.add_argument("--transport", choices=["ipc", "ws", "in_process"], default="ipc",
                     help="client transport: 'ipc' (local daemon over a Unix socket, "
-                         "default), 'ws' (remote daemon over ws:// / wss:// — "
+                         "default), 'ws' (remote daemon over WebSocket — "
                          "requires --url), or 'in_process' (embedded — runs the "
                          "runtime + session in THIS process, no daemon/socket; "
                          "incompatible with --recoverable).")
-    pn.add_argument("--url", help="WebSocket URL for --transport ws (ws:// or wss://)")
+    pn.add_argument("--url", help="WebSocket URL for --transport ws")
     pn.add_argument("--token", help="bearer token for --transport ws (optional)")
     pn.add_argument("--ca", help="CA-bundle path for --transport ws wss:// with a "
                                  "self-signed / dev cert (scoped ca=, never os.environ)")

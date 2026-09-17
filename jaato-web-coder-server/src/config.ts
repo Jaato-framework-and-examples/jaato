@@ -47,6 +47,13 @@ export interface ServerConfig {
   auth: { kind: "oidc"; oidc: OidcConfig };
   session: { secret: string; ttlSeconds: number; cookieName: string };
   ticket: { ttlSeconds: number };
+  /**
+   * The per-user store of provider API keys (``src/credentials.ts``).
+   * Absent = the feature is off: ``config.json`` names no
+   * ``credentialsUrl`` and the routes answer 404, so the bundle shows the
+   * plain key field it always had.
+   */
+  credentials?: { file: string; key: string };
 }
 
 const DEFAULT_TTL = "8h";
@@ -159,6 +166,18 @@ export function configFromObject(raw: unknown, baseDir: string): ServerConfig {
   const publicUrl = str(req(o.public_url, "public_url"), "public_url").replace(/\/+$/, "");
   if (!/^https?:\/\//.test(publicUrl)) throw new ConfigError("public_url must be an http(s) URL");
 
+  let credentials: ServerConfig["credentials"];
+  if (o.credentials !== undefined && o.credentials !== null) {
+    const c = o.credentials;
+    if (typeof c !== "object") throw new ConfigError("credentials must be a mapping with file and key_file");
+    const file = rel(str(req(c.file, "credentials.file"), "credentials.file"));
+    // The same 0600 rule as every other secret here; the store derives its
+    // AES key from this value, so a short one is a weak key, refused.
+    const key = readSecretFile(rel(str(req(c.key_file, "credentials.key_file"), "credentials.key_file")), "credential key");
+    if (key.length < 32) throw new ConfigError("credential key must be at least 32 characters");
+    credentials = { file, key };
+  }
+
   return {
     listen: parseListen(o.listen),
     publicUrl,
@@ -167,6 +186,7 @@ export function configFromObject(raw: unknown, baseDir: string): ServerConfig {
     auth: { kind: "oidc", oidc },
     session,
     ticket: { ttlSeconds: ticketTtl },
+    credentials,
   };
 }
 

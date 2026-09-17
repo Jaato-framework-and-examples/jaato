@@ -504,6 +504,9 @@ await client.create_session(profile="researcher")
 - `session.orphans` — list LOADED sessions with no client attached
   (→ `SessionListEvent`; see [A Session Nobody Was Watching](#a-session-nobody-was-watching-812))
 - `session.stop <id>` — stop ANY loaded session by id, not just the caller's own
+- `session.reload_env [id]` — re-resolve a LIVE session's `.env` and credentials and rebuild its provider (see [A Credential Stored After the Runner Booted](#a-credential-stored-after-the-runner-booted))
+- `workspace.ignore <path>` — toggle one exact entry in the caller's workspace `.gitignore` (→ `WorkspaceIgnoreResultEvent`; protocol 1.12, see [A Key the Web Files Panel Did Not Have](#a-key-the-web-files-panel-did-not-have))
+- `workspace.delete` (a `WorkspaceDeleteRequest`, WS only) — delete a workspace the caller may see: its directory, its sessions, its registry row (→ `WorkspaceDeletedEvent`; protocol 1.13, see [A Workspace Everyone Could See](#a-workspace-everyone-could-see))
 
 **Flow:** Client sends `session.new --profile researcher` → server discovers profiles from `.jaato/profiles/` → resolves `SubagentProfile` → `JaatoServer` applies profile overrides (model, provider, plugins, plugin_configs, GC) during `initialize()`.
 
@@ -731,6 +734,54 @@ so they already reach the model in its system prompt — and the rendered
 persona is now a persisted artifact. Secrets belong in the profile's `env:`
 as a `pass://` / `vault://` URI, which stays unresolved on disk and is
 resolved daemon-side at spawn.
+
+### A Credential Stored After the Runner Booted
+
+A session's environment is resolved ONCE. `JaatoServer._resolve_session_env`
+reads the workspace `.env`, the profile's `env:` map, the typed `trace:`
+block and the post-auth overrides, decodes secret URIs (the daemon is the
+only process that can exec `pass` / `vault`), and ships the dict on the
+bootstrap envelope; the runner applies it to `os.environ` once, and the
+provider resolves its credential once, in `initialize()`, and caches the
+client. Every one of those is right for a session whose configuration is
+settled, and together they close the door on the one being configured from
+the prompt: `zhipuai-auth key <k>` stores the key in
+`<workspace>/.jaato/zhipuai_auth.json` and the post-auth flow writes
+`JAATO_PROVIDER` / `MODEL_NAME` to the `.env`, both **after** the runner
+booted, so the open session keeps whatever it resolved at startup — a
+daemon-wide variable inherited from the service environment, or nothing —
+and every turn fails on it until a new session is created. Measured on a
+live daemon: `Found Zhipu AI API key (env ZHIPUAI_API_KEY)` on a session
+whose workspace held a valid stored key, 401 on every completion.
+
+**`session.reload_env` is the refresh.** The daemon drops the
+once-only flag, resolves again from the same four sources in the same
+order, and calls the runner's `session.reload_env` with the WHOLE dict; the
+runner runs it through `apply_session_env` — the one writer of the slot's
+session-scoped environment, shared with bootstrap, so a re-application is a
+REPLACEMENT (a key the previous dict set and the new one does not is gone,
+which is what lets a reload retract a credential as well as supply one) —
+and then `JaatoSession.reload_provider()` forgets the live provider and the
+per-provider tier cache, re-arms the lazy-creation config from the binding
+the session is currently on, and creates the new provider eagerly, so a
+credential that does not resolve fails in the reload's answer rather than on
+the next turn.
+
+| Property | Why |
+|---|---|
+| **refused mid-turn, with nothing changed** (`stage="busy"`) | swapping the environment under a streaming provider call is a race; the daemon checks `is_processing` before paying the RPC, the runner checks `is_running` again |
+| **env applied BEFORE the provider rebuild, and left applied when it fails** (`stage="provider"`) | the answer names the provider failure; the next `send_message`'s lazy creation still sees the new environment |
+| **the answer names the credential source** | `auth_info` is the provider's own account (`API key from …/zhipuai_auth.json`), the line an operator compares against what they just stored |
+| **the daemon fires it itself** after `<provider>-auth login\|key` | gated three ways: only those two actions (never `status`), only when the caller has a live session, only when that session runs the plugin's provider |
+
+Precedence is **unchanged**: a provider still resolves config knob, then
+environment, then the stored file, so a daemon-wide `JAATO_<P>_API_KEY` in
+the service environment outranks a workspace's stored key however often it
+is reloaded — the fix for that is removing the variable. Protocol **1.11**;
+both SDKs refuse the verb below it (the 1.7 rule: a missing verb is ignored
+silently, and "reloaded" would be reported about a session still on its
+old credential). `IPCClient.reload_session_env()` / `reloadSessionEnv()`;
+from a prompt, `session reload_env`.
 
 ### Subagent Architecture
 
@@ -2565,6 +2616,81 @@ capability rather than a lifetime.
 **Defining a new plugin trait:**
 1. Add a `TRAIT_*` constant in `shared/plugins/base.py` with a docstring documenting the contract
 2. Update consumers (server, daemon) to query `getattr(plugin, 'plugin_traits', frozenset())`
+
+### An Integration Declares Its Own Paths, and Its Own Harness
+
+`jaato-scaffold integration <name>` installs the `jaato-sdk` skill where
+another tool looks for skills. Everything tool-specific lives in that
+integration's `integration.json` — there is no `if name == "claude-code"`
+anywhere in the code, which is what lets a new harness be added without
+touching the generic module.
+
+**`target` is one key with two forms.** A string when a harness uses the same
+relative path at both scopes; an object when they differ:
+
+```json
+"target": ".claude/skills/jaato-sdk"
+
+"target": {"user":      ".pi/agent/skills/jaato-sdk",
+           "workspace": ".pi/skills/jaato-sdk"}
+```
+
+The rejected alternative was `target` **plus** `user_target` /
+`workspace_target` companions. Three keys cost a reader the question of which
+are alternatives and which are siblings, put two nulls in every `listing()`
+row (and flipped *which* two per integration, so every consumer handled both
+shapes), and — the sharp one — let an author declare one scope, forget the
+other, and get a **silently wrong path** for the missing one.
+
+**A manifest that cannot say raises.** The old code resolved a missing
+`target` to `.jaato-integration-<name>` and its docstring said the caller
+reported it. No caller did: the string occurred exactly once in the tree, at
+the site that built it, with no reader anywhere — so a forgotten key installed
+a real payload to a plausible-looking wrong path. `IntegrationManifestError`
+now covers a missing target, an object missing a scope, a non-string path, and
+an absolute one (targets are joined onto `$HOME` or the workspace, so absolute
+would escape the scope asked for). `listing()` reports such an integration as
+`invalid` rather than raising — the bare verb is how an operator finds out
+something is wrong, so it must survive the thing being wrong.
+
+**`detect` says how to know the harness is installed, and only its author
+knows.** `jaato-doctor` warned once per shipped-but-unapplied integration with
+no test of whether that tool exists on the machine. With one integration
+shipped that was invisible; with two, every user of the first gets a warning
+they cannot clear — the only way to satisfy it is to install a skill for a
+harness they do not use, and the noise grows with every integration added.
+
+```json
+"detect": {
+  "commands": ["claude"],
+  "paths": ["~/.claude/projects", "~/.claude/sessions", "~/.claude.json"],
+  "why": "Claude Code writes these as it runs; jaato creates only
+          ~/.claude/skills/jaato-sdk, so none can come from installing us."
+}
+```
+
+| Property | Why it is load-bearing |
+|---|---|
+| **`None` is not `False`** | an integration declaring no `detect` asserted nothing, and still warns exactly as before. Suppression follows an *assertion*, never an inference — absence of evidence is not evidence of absence |
+| **the skip is gated on `state == "absent"`** | detection is a heuristic, so the most it may ever do is withhold an optional suggestion. A copy that EXISTS is reported whatever detection says, which keeps `stale` / `edited` / `diverged` drift visible on a machine whose harness was removed after the skill was applied |
+| **a `detect.paths` entry may not be an ancestor of the integration's own target** | jaato creates those. Measured: on a host with *neither* harness, installing only our skills brings `~/.claude`, `~/.claude/skills`, `~/.pi` and `~/.pi/agent` into existence — so `~/.pi` would answer "Pi is here" on a machine that has never had Pi, silently restoring the noise the key exists to remove |
+
+That last row is the one error a machine can check
+(`manifest_detect_problems`). Whether a path is *truly* harness-owned cannot
+be checked here — it is what the author asserts, and `why` is how a reviewer
+who does not use that harness judges the claim. `commands` cannot be
+contaminated that way (we never put a binary on `PATH`) but is not absolute
+either: a harness outside this process's `PATH` reads as absent, which loses a
+nudge rather than inventing noise — the safer direction to be wrong in.
+
+**A guard with `REVERSIONS` lives in `jaato-server/shared/tests/`**, whatever
+package its subject is in — the meta-suite walks only `shared/tests` and
+`server/tests`, so a reversion declared elsewhere is silently unexercised.
+`test_doctor_detects_checkout_skew_823.py` is the precedent: it sits there and
+targets `jaato-sdk/jaato_sdk/doctor.py`. Widening that walk is not a
+mechanical change — `_collect_nodeids` keys by BASENAME and a collision
+already exists across the wider set (`test_completion_processors.py`), so
+widening would reintroduce the ambiguity #1084 fixed.
 
 ### Entry-point Plugin Trust
 
@@ -4410,6 +4536,87 @@ checkout does not contain and were neither confirmed nor fixed. Neither was
 `gossip/ws_auth_proxy.py`, the cookie route, which needs its own answer to
 "which application is this".
 
+### Both Transports Authenticate, and One Path Threw It Away
+
+Two transports now learn who is calling — IPC from `SO_PEERCRED`, WS from a
+bound ticket — and each has a suite proving its own `get_client_user` returns
+the right string. A third family proves `created_by` round-trips once
+something has set it. **Nothing tested the joint**, and the joint is where the
+defect was.
+
+The chain is one spine with two heads, and `CommandRouter` is the single
+consumer that asks:
+
+```
+IPC  SO_PEERCRED ──▶ JaatoIPCServer.get_client_user()  ──┐
+WS   ticket bind ──▶ JaatoWSServer.get_client_user()   ──┤
+                                                         ▼
+                        CommandRouter (transport-agnostic)
+                 ├─ create_session(created_by=…)
+                 └─ handle_request(user_id=…)
+                                                         ▼
+      Session.created_by ─▶ record 2.9+ ─▶ envelope ─▶ set_client_user_id()
+                         ├─ ledger `response` / `permission-check` user_id
+                         ├─ the #951 DECISION line's `user_id=`
+                         └─ the OpenInference `user.id` span attribute
+```
+
+`session.default` did not ask. `CommandRouter._handle_session_default` →
+`SessionManager.get_or_create_default` → `create_session(client_id,
+workspace_path=…)`, with no `created_by` — while the two siblings twelve lines
+away in the same file both read the sink. `_create_session_impl` declares
+`created_by: Optional[str] = None`, so the omission was not a `TypeError`, not
+a warning, and invisible in the resulting session: the record simply carries no
+creator and every downstream consumer OMITS the key rather than reporting an
+absence. `IPCClient.get_default_session()` is its only caller and is a public
+SDK method, so a session opened that way was anonymous in all four artefacts on
+**both** transports, however well each had authenticated its client.
+
+**Attribution applies to the create branch only.** `get_or_create_default` has
+two attach branches, and they leave `created_by` alone: it records who brought
+a session into existence, so re-stamping someone else's session with whoever
+attached next replaces a true fact with a plausible one — the rule
+`_emit_to_client`'s session stamper already states one field over.
+
+**The identity is read at the router, never below it.** `SessionManager` holds
+an event *callback*, not an `EventSink`, so it cannot ask; and the event body
+must never be able to claim an identity the transport is the only thing that
+knows. That is why the new parameter is threaded down rather than resolved in
+place.
+
+Two guards, because they answer different questions:
+
+| Guard | Asks |
+|---|---|
+| `test_attribution_reaches_both_transports.py` | does the value survive the joint, on each transport, on each of the three consumer paths |
+| `test_every_session_creation_is_attributed.py` | is there a FOURTH path — an AST scan over every `SessionManager.create_session` call site |
+
+The first builds **real** sinks: a `JaatoIPCServer` holding a fabricated peer
+and a `JaatoWSServer` holding a ticket resolved through the real
+`_resolve_connection_auth`, so the string under assertion is the one each
+transport actually derives rather than one the test wrote down. What it fakes
+is `SessionManager`, which is the right half to fake — the record/ledger/trace
+end is already covered by the round-trip suites, and what was missing is
+whether the value ever ARRIVES. A behavioural test cannot cover the second
+question at all: it would have to know about a call site to exercise it, and
+the failure being guarded against is a call site nobody thought about.
+
+**The AST guard uses a receiver ALLOW-list, not a skip-list.**
+`create_session` is also a method of `JaatoRuntime` — a different call with no
+`created_by` parameter — so a guard that skipped receivers it did not recognise
+would silently stop covering the daemon the day someone renames
+`_session_manager`. An unrecognised receiver fails and must be classified.
+`create_headless_session` is the one exemption, with its reason recorded: its
+client is the synthetic `_HEADLESS_CLIENT_ID`, so no sink can answer and a
+value there would be invented rather than authenticated.
+
+**Open, and deliberately not decided here:** whether a reactor-spawned headless
+stage should INHERIT its cascade driver's creator, the idiom
+`_create_subagent_session` already uses (`created_by=self._creator_of(parent)`).
+It is a real question — a cascade stage does belong to whoever drove the
+cascade — and it changes attribution for every reactor-spawned session, so it
+wants its own change rather than riding this one.
+
 ### Approver Identity (#859)
 
 `PermissionResolvedEvent` said HOW a decision was reached (`method`) and
@@ -4546,6 +4753,398 @@ fallback emission adds **~9 µs** with a *no-op* hook — and the daemon's real
 hook emits two events (`PermissionResolvedEvent` plus the
 `PermissionStatusEvent` `emit_permission_status()` appends) and serialises
 both to every connected client. A trace line is cheap; an event is not.
+
+### A Prompt the Runner Rendered and Never Sent
+
+A permission ASK on a runner-served session (the default) reached every
+client with **options and no question**. The permission plugin resolves a
+`PermissionDisplayInfo` from the tool's own plugin — the summary, the
+unified diff for a file edit, the analyzer warnings — and parks it in
+`request.context["display_info"]` before calling the channel. On the
+daemon-local path the daemon's `on_permission_requested` hook rendered
+that into an `AgentOutputEvent(source="permission")`. On the runner path
+`RunnerRPCChannel.request_permission` forwarded tool name, args and
+options and dropped the display info, so `PermissionRequestedEvent`
+arrived with `prompt_lines=None` and `warnings=None` — although
+`PromptPayload` and the event both declare the fields, and
+`docs/jaato_permission_system.md` draws the diff on the event. The daemon
+hook that used to render it is registered on the daemon-side plugin, which
+is not in the loop for a runner session, and the runner never arms it.
+
+| Client | What it showed on the default path |
+|---|---|
+| web (`jaato-web-coder-ui`) | a grid of raw tool arguments — the whole new file for a write, no diff, no warning |
+| TUI | `🔒 Permission required` and the options bar, nothing between them |
+
+**Rendered once, at the seam that has the information.**
+`prompt_fields_from_request` (`runner_rpc_channel.py`) mirrors
+`_build_prompt_lines(include_options=False)` — summary, details line by
+line, `Tool:`/`Args:` when a plugin renders no display info — and the
+payload carries the four fields; the daemon-side `PromptOperatorHandler`
+already copied them onto the event. Details are included whatever the
+`format_hint`: the daemon-local hook withheld `code` details so its output
+pipeline could highlight them, and there is no pipeline on this path.
+
+**The TUI reads the event.** `jaato-tui/permission_prompt.py` renders a
+`PermissionRequestedEvent` into the same text the daemon-local hook emits
+— the `<security-warning level="…">` block the buffer already parses, then
+the lines — and appends it under the `permission` source, so
+`set_tool_awaiting_approval` attaches it to the tool exactly as before.
+Called **unconditionally** for every event rather than as a branch of
+`handle_events`' `isinstance` chain, which is frozen at the top of the
+complexity ratchet. No double render: a daemon-local session emits the
+output event and never the requested event; a runner session the reverse.
+
+**The mock spoke the card's vocabulary, again.** The web mock's `permit`
+scenario sent `prompt_lines` and a warning on `permission.requested` — a
+shape only the daemon-local path produced — so the e2e suite certified
+diff rendering the default path never exercised, the same pattern that hid
+the clarification defect (the card read `question_text`/`options` while
+the batch wire carried `text`/`choices`). Both mock scenarios now emit
+what the daemon emits on the runner path (options are
+`{key, label, description}` there — no `action`), and `permit-bare` is the
+same ASK from a plugin with no display info, pinning the tool-arguments
+fallback.
+
+### A Workspace Everyone Could See
+
+[A Workspace Name That Left the Workspace Root](#a-workspace-name-that-left-the-workspace-root)
+ends on a stated cost: *containment bounds the ROOT, not the tenant*. Every
+WS client saw every workspace under the root, could select any of them, and
+`session.list` returned every session on the daemon. That was the honest
+state while a WS connection had no identity. #1074 gave it one — a bound
+ticket stamps `app:user` on the connection — and nothing read it for
+workspaces.
+
+**A workspace belongs to whoever created it.** `WorkspaceInfo.owner` is
+stamped from `get_client_user` at `workspace.create`, persisted in the
+registry, and **preserved across re-discovery** — which rebuilds every other
+field from the directory, so a `_analyze_workspace` that forgot it would
+silently un-own every workspace on the first listing after a restart and
+make the rule cosmetic. One predicate, `WorkspaceManager.visible_to`, is
+read by the list and by both verbs, so the list can never show a workspace
+`select` then refuses:
+
+| Connection | Sees |
+|---|---|
+| no identity (shared bearer, no tickets configured) | everything — what it always saw |
+| `app:alice` | her own, and the **unowned** ones |
+
+Unowned is the state of every pre-existing workspace and of one created by
+an identity-less connection. Deliberately **not adopted on select**: a
+first-come claim on a shared directory is how a colleague's workspace
+disappears from their list. Migration is a registry edit.
+`WorkspaceOwnershipError` is a `ValueError` (the handlers' existing catch)
+and is worded so it cannot be read as "does not exist" — that wording
+invites creating it.
+
+**Sessions follow the same boundary.** The transport reports it through
+`EventSink.visible_workspace_paths` (`None` = no scoping: IPC, or a WS
+connection with no identity — the `client_peer` tolerance shape, so an
+out-of-tree sink contributes "no scoping" rather than raising).
+`CommandRouter._sessions_visible_to` keeps a session that runs **in** one of
+those workspaces or that this user **created** (`created_by`, #859), and
+`session.attach` admits exactly that set — refusing the rest by name as
+`ErrorEvent(error_type="SessionError")`, which is what settles a client's
+`ask()` rather than hanging it (#1007). Persisted-only sessions carry no
+creator in their listing, so for them the workspace rule is the whole rule.
+
+**And a workspace can be removed.** `workspace.delete` (protocol **1.13**)
+answers with one `WorkspaceDeletedEvent` whatever happened. It removes the
+directory — persisted sessions included — and the registry row, and refuses:
+a name that leaves the root or names the root; another user's workspace; a
+workspace with **loaded** sessions (resolved by the WS server through the
+session manager and handed in, because a directory a runner is confined to
+is not deleted, it is a session failure with a delayed cause); a workspace
+another client currently has selected. The deleting client's own selection
+is cleared on both the manager and the sink adapter. The web workspace list
+confirms inline before sending.
+
+Stated cost, unchanged in kind: the session still runs as the daemon's uid,
+so this is an entitlement boundary at the verbs, not a filesystem one.
+
+### A Key Typed Once Per Workspace
+
+The web client's configure form asked for the provider's API key on every
+new workspace, because the daemon keeps it where `config.update` puts it:
+in that workspace's `.env`. The fix is **application state in the BFF**
+(`jaato-web-coder-server/src/credentials.ts`), deliberately not a daemon
+vault and not an SDK verb — the daemon knows users only as `app:user`, an
+application's concept, and the TUI would carry a verb it never calls. The
+signed-in user's keys are stored per OIDC `sub`, encrypted at rest
+(AES-256-GCM, key from a 0600 file, owner bound into the AAD), listed by
+label and hint, revealed on a same-origin `POST`, and forwarded by the page
+as `config.update`'s `api_key` exactly as a typed key travels. `pass` was
+rejected for the unattended path: the daemon resolves `pass://` as its own
+uid against its own GnuPG store, and gpg-agent's `max-cache-ttl` is
+absolute, so an unattended store eventually blocks on a pinentry nobody
+answers. With no `credentials:` block nothing changes, and the daemon's
+`~/.jaato/<provider>_auth.json` tiers stay as they are for mono-user
+installs. Design: [web-server-bff.md §12](docs/design/web-server-bff.md).
+
+### The Web Client on a Blueprint
+
+The web client was a faithful port of the terminal UI: rounded cards, one
+accent, panels that appear and disappear, a status bar that reads like a
+log line. The redesign (Claude Design, *Jaato Web UI Redesign*, proposal
+01c, the light face) keeps every behaviour and every word of the routing
+model and changes the structure it is drawn on: square hairline **plates**
+with registration marks (`components/layout/Plate.tsx`), Barlow Condensed
+for what the interface says and monospace for what the daemon said, and one
+**steel** interface accent while the theme's own colours shrink to state
+glyphs. It is one layer over the theme variables: `themes.ts` derives
+`--c-steel` from the theme's ground (full steel on a light one, a lighter
+steel on a dark one) and departs from a theme file in exactly one place
+(`WEB_OVERRIDES`: the light theme's ground is the design's paper, the dark
+theme's plates are `#202223`; state colours are never overridden), so
+`theme dark` and the other four still draw the same structure. `light` is
+the web client's default now; the store's and the loader's defaults agree.
+
+What each screen became: the connect plate in two columns; workspaces as a
+**table** (Open / Configure / Delete per row, the configure form a plate
+under it); new-session with resume and start side by side; the session with
+its identity in a 46px **header** (brand, agent tabs — always rendered,
+`main` included — and `ws` / `model` / `ctx` on the right), tool calls as
+**rows** (glyph, name in the chrome face, arguments in monospace, duration
+at the edge, the output in a ground plate under the name), user turns
+numbered `T<n>` in the gutter by the pane, one **persistent rail** whose
+Plan / Budget / Files sections open and close on the same `ui.show*` flags
+the shortcuts and the status bar toggle, and a 26px status bar; and the
+permission request as a full-width warning plate with the diff at full
+measure, the focused option solid, the refusals apart at the right edge.
+
+Two things the port turned up. The picker's silent `session.list` request
+fires twice under React's development double-effect, and
+`sessionListSilent` was a **flag** the first reply cleared — so the second
+printed a listing nobody typed. It is a count of replies owed now. And the
+e2e suite's one assertion on a button's text (`/^y yes$/`) encoded the old
+key-then-label order; the design puts the key after the label, and the
+test says so. Fonts are self-hosted from `@fontsource/barlow` and
+`@fontsource/barlow-condensed` (latin subsets in the bundle, ~180 KB of
+woff2), so a deployment behind a corporate proxy needs no font CDN.
+
+### Three Rows the Web Client Drew That Nobody Sent
+
+Reported from a live daemon in one evening: every `workspace.create` added
+a row named after the workspace ROOT's own directory (`workspaces`) that
+`select` and `delete` then refused; saving a provider left the configure
+form saying `missing: provider` over an empty dropdown; and every prompt
+appeared twice, the second time as agent output under a `USER` header.
+Three defects of the shape this file already names — **the mock spoke the
+client's vocabulary, not the daemon's** — and one daemon defect the first
+of them exposed.
+
+| Wire | The daemon sends | The client read |
+|---|---|---|
+| `workspace.created` | `WorkspaceCreatedEvent(workspace=...)` — a field the SDK model **did not declare**, dropped on ingest by `extra='ignore'`, so the event arrived as `{name: "", path: ""}` | a row named `""`; clicking it selected `""` |
+| `config.updated` | `workspace`, `provider`, `model`, `success` — what was WRITTEN, no status field | as a `config.status`: `configured=false`, an empty `available_providers`, and `missing: provider` for the provider it had just saved |
+| `agent.output` | every prompt echoed with `source: "user"` (on send, and again on a replay to an attaching client) | a text block, rendered as agent output |
+
+`WorkspaceCreatedEvent` now carries `workspace` (the row, as the list
+renders it) beside `name` / `path`; `WorkspaceListEvent.root` is finally
+sent. The store merges `config.updated` over the status it holds and
+updates the table row; and a `user`- (or `parent`-) sourced output line is
+the user's turn — it confirms the bubble the composer already drew when
+the texts match, and becomes a user bubble of its own otherwise (a replay
+after attach). The mock now emits all three in the daemon's shape.
+
+**And the root is not a workspace.** Selecting `""` reached
+`_resolve_under_root("")`, which is the root itself, and `_is_under_root`
+accepted it (`path == root or ...`). `_analyze_workspace` named the root by
+its basename, the cache held it under the key `""`, and the registry got a
+row nothing could act on — recreated on every click, which is why the
+stale-row prune one section up did not catch it (the root IS a directory).
+`_is_under_root` is strictly beneath now, so an empty name, `.` and
+`mine/..` are refused as `WorkspaceContainmentError` wherever a NAME is
+resolved — `select`, `delete`, `get_config_status`, and the registry-path
+branch of `get_workspace_path`. The naming rule `create` always applied
+(`_check_name`: one flat component) binds `select` and `delete` too, and a
+verb that resolved a name passes it to `_analyze_workspace`, so the cache
+key and `WorkspaceInfo.name` cannot disagree for a symlinked entry either.
+Containment is still checked first, so a traversal is refused as one and
+before existence. Tests:
+`server/tests/test_workspace_root_is_not_a_workspace.py`.
+
+### A Plan Nobody Was Watching, and a Step That Was Not a Failure
+
+Two more from the same evening, one on each side of the tool row.
+
+**`createPlan` completed and every client said "no plan yet".** `todo` is
+runner-tier, so on the default path the plugin reports into the RUNNER's
+instance, whose reporter was the bootstrap's `MemoryReporter` (events
+stored, read by nobody), while the daemon's `_setup_plan_hooks` armed a
+`LivePlanReporter` on the DAEMON's instance, which no runner-served session
+calls. Not one `PlanUpdatedEvent` crossed the wire for a runner session; the
+TUI's Ctrl+P panel and the web rail were fed by the same absence. It is the
+description-callback gap (`description_updated`) with a different plugin,
+closed the same way: `RunnerRPC._install_plan_reporter` swaps the reporter
+per turn for one whose callbacks emit `plan_updated` / `plan_step_updated` /
+`plan_cleared` / `plan_output` frames (the reporter's own dicts, unconverted),
+hands the same reporter to the subagent plugin, and restores both on exit;
+the daemon's `_PURE_NOTIFICATION_EVENTS` table turns the four frames into
+the plan events through `_plan_updated_event` and its siblings, which are
+now the one place a reporter's `description` becomes the event's `content`,
+so the in-process and runner paths cannot disagree about a step. The table's
+builders take the server too, because a profile name resolves to an agent id
+through `_agents`, which no payload carries. `_setup_plan_hooks` stays for
+the embedded and standalone-WS sessions that are its actual audience, and
+its docstring now says so.
+
+**A completed step drew as a failed call.** `setStepStatus` answered with
+`"error": step.error`, which is `None` for a step just marked completed, and
+`tool_result_is_error` read `"error" in result` — so `{"error": None,
+"result": "Proyecto creado correctamente"}` was `is_error_result=True`: a red
+✗ in every client, an error in the reliability plugin's ledger, `is_error`
+on the telemetry span. A null error is the ABSENCE of one, and the helper
+now says `result.get("error") is not None`; the `background` plugin answers
+with the same shape on success and is covered by the same line. The todo
+plugin also stops spelling a step's own failure as the tool's: a step the
+model marked `failed` is the tool doing what it was asked, so its text
+travels as `step_error`. Tests:
+`server/runner/tests/test_plan_reporter_bridge.py`,
+`jaato_sdk/tests/test_tool_result_is_error.py`.
+
+**Two web-client touches from a tablet.** The Files panel's `hide` / `ignore`
+actions appeared on hover only, and a touch screen has no hover, so on the
+tablet the panel was first tried on nothing could be hidden or ignored; they
+are always drawn now, dimmed until the row is hovered. And the rail has a
+drag handle on its left edge (`components/layout/RailResizer.tsx`): a
+`separator` that resizes by pointer — mouse, pen or finger, `touch-action:
+none` — and by arrow keys, clamped to 220–720px and remembered per browser
+(`ui.railWidth`, `localStorage`).
+
+### A File the Browser Could Not Put in the Workspace
+
+The premium `<jaato-task>` component (and the knowledge-manager client
+built on it) ships files to the daemon two ways: inline base64
+`staged_files` on the `session.new` envelope, and the canonical
+`StageFilesRequest` — one TEXT frame naming the files, one BINARY frame
+per file, one `StageFilesEvent` back, into the connection's selected or
+provisioned workspace (`docs/sdk-file-staging.md`). The TS SDK already
+carried `stageFiles`; the web coder used neither, so a browser session
+had no way to hand the agent a file.
+
+The web coder now uses the canonical verb for **both** moments, which is
+what the SDK method was written for and what the docstring on the legacy
+envelope field asks new clients to do:
+
+| Where | When it stages | Why that order |
+|---|---|---|
+| the composer (drop, paste, **Attach**) | at once, into the session's workspace | the agent's tools read it on the next turn; the message sent next ends with a line naming the staged paths |
+| the session picker, workspace selected | **before** `session.new` | the session starts with the files on disk |
+| the session picker, no workspace yet | after the daemon's `session.info` | a daemon that provisions the workspace **as part of** `session.new` has nowhere to put them earlier; still ahead of the first turn |
+
+Three properties, each attached to a way it went wrong while being built:
+
+- **The workspace is a fact learned from the daemon, not sampled at attach
+  time.** The picker is on screen the moment `workspace.select` is *sent*,
+  and the store's `selected` is written when its `config.status` reply is
+  reduced, a round-trip later — so a file attached in that window read as
+  "no workspace" and sat queued until a profile was picked. The staging
+  module subscribes to the store and stages the moment a workspace or a
+  session appears. Measured against a real daemon: the picker's file is on
+  disk before `session.new`, the composer's file lands under the folder
+  chosen in the strip.
+- **What the daemon would refuse is refused before any bytes are sent**,
+  in the daemon's own words — a name that climbs or is absolute, a file
+  over `DEFAULT_STAGE_PER_FILE_LIMIT`, a batch over
+  `DEFAULT_STAGE_TOTAL_LIMIT` (`src/protocol/attachments.ts` mirrors the
+  numbers). The daemon still checks; the client just does not stream 11 MB
+  to hear "no".
+- **One request per drop, requests in order.** The SDK correlates a
+  `StageFilesEvent` to a `stageFiles` call by *order*, so the module runs
+  every call through one promise chain; a directory dropped beside real
+  files fails alone (its `File` cannot be read) rather than failing the
+  batch.
+
+The mock daemon speaks the multi-frame protocol (`mock/daemon.ts`,
+`finishStaging`), including the up-front refusals, so the e2e suite drives
+the real frames. Not done: `send_message`'s inline `attachments` (model
+context, #838) — a file the model should *see* rather than have on disk
+is a different feature with a different cost, and the composer does not
+yet offer it.
+
+### An Exit That Never Asked
+
+The TUI's `exit` is a question before it is an action: a session lives on
+the daemon, so leaving it means one of three things — **detach** and keep
+it for `session attach` later, **end** it (`session.delete`), or, with a
+turn in flight, **cancel** the turn and detach — and the TUI asks which
+(`[d/e/r]`, or `[c/d/e/r]` mid-turn) before doing anything. The web
+client's `exit` command and status-bar Exit took the first reading
+unconditionally. Safe, and the only reading the button offered: a session
+someone wanted gone stayed loaded on the daemon until the orphan sweep or
+a `session delete <id>` typed from memory.
+
+The question is ported as a plate (`components/prompts/ExitPrompt.tsx`),
+drawn like the permission plate so the two read as one kind of prompt,
+with the TUI's option sets and letters (`app/exitChoice.ts`). The store
+holds the open question (`exitChoice`); the composer forwards a typed key
+to it **before** a pending permission prompt, as the TUI's pending exit
+confirmation takes the line first; Tab cycles the buttons, Enter answers
+the focused one, Escape and any unlisted key are Return.
+
+Two decisions the TUI never has to make, because it is a process and
+"end" is also "quit":
+
+| Answer | Where it lands |
+|---|---|
+| Detach, Cancel task and exit | disconnect, the connect screen — the exit command as it was |
+| End session, workspace mode | **the workspace list**, connection kept |
+| End session, single-workspace daemon | disconnect, the connect screen |
+
+`SessionManager.delete_session` removes the session's memory and disk
+record and never touches the directory it ran in, so after End the
+workspace is exactly where the person left it, and the list is where they
+pick it — or another — again. End also **waits for the daemon's answer**
+before leaving: `session.delete` is confirmed by a `system.message`
+(`Session '<id>' deleted.` / `not found.`, and `Session deleted: <name>`
+to attached clients), and leaving on the send alone would report a
+deletion nobody confirmed. A daemon that says nothing gets a bounded grace.
+
+The e2e mock gained `session.delete` in the daemon's shape and a `hang`
+turn that runs until `session.stop`: the suite runs with `MOCK_SPEED=0`,
+so a turn "long enough to press Exit during" cannot be a sleep, and the
+first draft's timed turn had already ended by the time the button was
+clicked. The pre-existing `Disconnect` on the workspace list is also why
+the End-session test asserts the connect button by `exact` name — a
+substring match counts it.
+
+### A Key the Web Files Panel Did Not Have
+
+The TUI's workspace panel (Ctrl+W) binds two keys to the entry under the
+cursor: `h` **hides** it — a per-session, client-side set, with a
+show-hidden toggle that brings the set back dimmed with an `H` marker so an
+entry can be unhidden — and `i` **toggles its line in the workspace's
+`.gitignore`**, which the TUI does by writing the file itself, because it
+runs on the host. The web Files panel had neither, and could not have had
+the second: a browser client has no file to write.
+
+Hide is client state and is reproduced as such (`workspaceHidden`, the same
+entry ids — a directory carries its trailing `/` and hides its subtree). The
+`.gitignore` half becomes a daemon verb, **`workspace.ignore <path>`**
+(protocol **1.12**), answered by one `WorkspaceIgnoreResultEvent` whatever
+happened — a panel has to render *something* for the press. Three
+properties:
+
+| Property | Why |
+|---|---|
+| **one text transform, in `jaato_sdk.gitignore_toggle`** | the TUI's key and the daemon's verb both call it, so one press means one edit whichever client made it: exact-match toggle of ONE line, a glob already covering the path neither matched nor touched |
+| **the SESSION's workspace, then the client's declared one** | the session's tree is what `WorkspaceMonitor` watches — and it reloads its parser on this very write, so the pattern binds every later file event. Entries already shown are **not** pruned; that is what hide is for |
+| **the path is a pattern, not a path the daemon resolves** | so #742's relative-path rule does not apply; what is refused is anything that is not a workspace entry — empty, a line break, absolute (the panel's sandbox-monitored entries lie outside the tree `.gitignore` covers, the TUI's own no-op), or a leading `#` / `!`, which git would read as a comment or a negation and the toggle would then report a state the file does not have |
+
+A missing VERB again (the 1.7 rule): an older daemon ignores the command and
+"added to .gitignore" would describe a file nobody changed, so both SDKs
+refuse below `MIN_WORKSPACE_IGNORE_PROTOCOL` (`toggle_workspace_ignore` /
+`toggleWorkspaceIgnore`). The result event is client-initiated, the 1.10
+shape, so an old client never receives it unprompted.
+
+**And the panel read the wrong key.** `WorkspaceFilesChangedEvent.changes`
+is `[{path, status}]`; the web store read `change`, so on a real daemon every
+entry rendered `~` and a deleted file was never removed — while the mock sent
+`change` and the e2e suite was green. The same shape as the clarification,
+permission and budget-panel defects before it: the mock spoke the client's
+vocabulary, not the daemon's. The mock now sends `status`.
 
 ### A Boundary the Notebook Did Not Have (#710)
 
@@ -4864,6 +5463,63 @@ the loaded case **with no clock at all**: one work-lane worker, held by a
 gated call, so the cancelled call is provably still queued; wire ordering is
 established by a control-lane probe rather than by polling. It fails
 `unknown=1, tripped=0` against the old registration site, deterministically.
+
+### A Failure While Reporting a Failure, Discarded (#1077)
+
+The daemon's model thread wound its turn down inside a `finally` holding
+**four `return` statements**. A `return` in a `finally` discards whatever
+exception is in flight, so the wind-down could complete having thrown away
+the thing that explained the failure. Python 3.14 makes the shape a
+`SyntaxWarning` (PEP 765), which is how it was found — four warnings on
+import.
+
+**Most of what PEP 765 warns about was already handled here**, and saying
+so is what locates the real exposure: the two `except` clauses below catch
+`Exception` and `KeyboardInterrupt`, and the thread target's return value
+is read by nobody. Two cases genuinely lost information:
+
+| | |
+|---|---|
+| a `BaseException` that is neither of the two caught | `SystemExit`, `GeneratorExit`, an injected `CancelledError` |
+| **an exception raised INSIDE either `except` handler** | a failure while reporting a failure — in the daemon's model thread |
+
+It is narrower still than that table: the swallow only happens when the
+wind-down actually *reaches* one of its four exits, so both cases
+additionally need a terminal error, a stashed continuation, a drained user
+send, or a pending nudge. A wind-down that fell off the end always
+propagated.
+
+**The fix moves the body, not the logic.** The 355-line wind-down is lifted
+**verbatim** into a nested `_finish_turn()` declared before the `try`; the
+`finally` is one call. Its four exits are now returns from `_finish_turn`,
+which is exactly what they meant — the `try` is the last statement in
+`model_thread`, so falling off the end and returning were already the same
+thing. `try` body and both handlers are byte-identical. A nested closure
+rather than a method because the body reads six enclosing names, and
+threading them through would have meant editing it.
+
+**`terminal_error` is read through the closure deliberately.** The handlers
+assign it, a cell resolves at call time, and it is bound to `None` before
+the `try` — so the wind-down cannot be handed a stale value, and the
+handler-raises case leaves it `None` (the two cannot co-occur).
+
+**Stated cost:** on the paths that previously swallowed, an in-flight
+exception now escapes the thread target and is reported by
+`threading.excepthook`. That is the intent, and it is new output on those
+paths.
+
+Complexity: `model_thread` 40 → **15**, so its ratchet entry is *removed*
+rather than lowered and the function is held to the ceiling like any
+un-baselined one; `_finish_turn` enters at 26, irreducible here by
+construction — rewriting 300 lines of wind-down in the same change would
+have made the one behavioural difference unreviewable.
+
+Guard: `server/tests/test_no_return_in_finally_1077.py`. Its AST scan needs
+two exclusions to be satisfiable, and both are pinned by a discrimination
+test: a `return` inside a function *declared in* the `finally` is the shape
+of the fix, and a `break` bound to a loop inside the `finally` transfers
+control within it (PEP 765 does not warn about that either). An AST sweep
+found these four were the only such sites in the tree, and none after.
 
 ### A Turn That Ended the Session, Handed Back as a Turn (#1007)
 

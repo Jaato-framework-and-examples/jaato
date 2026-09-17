@@ -254,6 +254,19 @@ WORK_LANE_METHODS = frozenset({
 #: "every method is classified" guard can account for it.
 MAIN_THREAD_METHODS = frozenset({"session.bootstrap"})
 
+#: Methods served by :meth:`RunnerRPC._dispatch_named_or_unknown` -- the
+#: table-driven tail of the dispatcher -- mapped to the handler attribute
+#: that takes ``env.args``.  New control-plane verbs go here rather than as
+#: another ``if`` arm in ``_dispatch_method``, which is frozen at its
+#: complexity baseline.  The lane guard reads this table as served methods.
+NAMED_METHOD_HANDLERS: Dict[str, str] = {
+    # A credential stored or a ``.env`` line written AFTER bootstrap never
+    # reached the running session: env is applied once, the provider caches
+    # its key in ``initialize()``.  The daemon re-resolves and pushes the
+    # whole dict; the runner re-applies it and rebuilds the provider.
+    "session.reload_env": "_handle_session_reload_env",
+}
+
 #: How many recently-registered request ids the reader thread remembers,
 #: for the reconciliation payload on ``session.health_check`` (#856).
 #:
@@ -1343,7 +1356,26 @@ class RunnerRPC:
             # cancel surface, no streaming.
             return self._handle_session_resolve_fork_point(env.args)
 
-        return False, {"error": f"unknown method: {env.method!r}"}
+        return self._dispatch_named_or_unknown(env)
+
+    def _dispatch_named_or_unknown(self, env: RequestEnvelope) -> "tuple[bool, Any]":
+        """Table-driven tail of :meth:`_dispatch_method`.
+
+        That method is a flat chain of ``if env.method == ...`` arms frozen
+        at its cyclomatic-complexity baseline, so a verb added there costs a
+        decision point the ratchet refuses.  Methods in
+        :data:`NAMED_METHOD_HANDLERS` are routed here by name instead: one
+        dict lookup, then the handler, then the unknown-method refusal the
+        chain always ended in.  Every entry takes ``env.args`` (an empty dict
+        when the request carried none) and answers the ``(ok, payload)``
+        pair every other handler does.  The lane guard
+        (``test_rpc_lane_classification.py``) reads this table beside the
+        chain, so a method served from here is classified like any other.
+        """
+        handler_name = NAMED_METHOD_HANDLERS.get(env.method)
+        if handler_name is None:
+            return False, {"error": f"unknown method: {env.method!r}"}
+        return getattr(self, handler_name)(env.args or {})
 
     def _dispatch_via_session_executor(
         self,
@@ -1738,6 +1770,73 @@ class RunnerRPC:
             "tool_count": tool_count,
             **transport,
         }
+
+    def _handle_session_reload_env(self, args: Dict[str, Any]) -> "tuple[bool, Any]":
+        """``session.reload_env`` -- re-apply the session env and rebuild the provider.
+
+        Bootstrap applies ``envelope.session_env`` to ``os.environ`` once and
+        the provider reads its credential once, in ``initialize()``.  So a
+        key stored with ``<provider>-auth key``, or a line written into the
+        workspace ``.env``, while the session is live is invisible to it
+        until a new session is created.  The daemon owns resolution (it is
+        the only process that can decode ``pass://`` / ``vault://``), so it
+        re-resolves and ships the FULL dict here, exactly as bootstrap did;
+        the runner does not read the ``.env`` itself.
+
+        ``args = {"session_env": {name: value, ...}}``.  Two orderings are
+        the contract:
+
+        - the environment is applied BEFORE the provider is rebuilt, and is
+          left applied when the rebuild fails -- the answer then names the
+          provider failure (``stage="provider"``) while a later
+          ``send_message``'s lazy creation sees the new environment;
+        - a running turn is refused up front (``stage="busy"``) with
+          nothing changed, because swapping the environment under a
+          streaming provider call is a race nobody asked for.
+
+        Returns:
+            ``(True, {"applied": int, "provider": str, "model": str,
+            "auth_info": str})`` on success.  ``(False, {"error", "stage"})``
+            with ``stage`` in ``no_host`` / ``no_session`` / ``busy`` /
+            ``provider`` otherwise.
+        """
+        from .session import apply_session_env
+
+        ready, err, session = self._require_ready_session()
+        if not ready:
+            return err
+        if bool(getattr(session, "is_running", False)):
+            return False, {
+                "error": (
+                    "session.reload_env: a turn is running on this session; "
+                    "retry once it is idle"
+                ),
+                "stage": "busy",
+            }
+        session_env = args.get("session_env") or {}
+        applied = apply_session_env(dict(session_env))
+        try:
+            session._session_env = dict(applied)
+        except Exception:  # noqa: BLE001 -- best-effort attribute set
+            logger.debug("session.reload_env: could not attach _session_env")
+        try:
+            info = session.reload_provider()
+        except Exception as exc:  # noqa: BLE001 -- reported, not raised
+            logger.warning(
+                "session.reload_env: env re-applied (%d keys) but the provider "
+                "did not rebuild: %s", len(applied), exc,
+            )
+            return False, {
+                "error": f"session.reload_env: provider rebuild failed: {exc}",
+                "stage": "provider",
+                "applied": len(applied),
+            }
+        logger.info(
+            "session.reload_env: applied %d env keys; provider=%s model=%s (%s)",
+            len(applied), info.get("provider"), info.get("model"),
+            info.get("auth_info") or "credential source unknown",
+        )
+        return True, {"applied": len(applied), **info}
 
     def _handle_session_end(self) -> "tuple[bool, Any]":
         """Cascade-sharing session boundary — reset per-session plugin state.
@@ -3948,6 +4047,23 @@ class RunnerRPC:
     # to refresh.
     _NOTIF_DESCRIPTION_UPDATED = "description_updated"
 
+    # The plan the todo plugin reports, bridged runner -> daemon.  ``todo``
+    # is runner-tier, so a runner-served session reports into the RUNNER's
+    # instance -- whose reporter was the bootstrap's ``MemoryReporter``,
+    # read by nobody -- while the daemon's ``_setup_plan_hooks`` armed an
+    # instance no session calls.  Every ``createPlan`` on the default path
+    # therefore reached no client: the TUI's Ctrl+P panel and the web
+    # rail both said "no plan yet" beside a completed tool call.  The
+    # same shape as ``description_updated`` above, closed the same way:
+    # a ``LivePlanReporter`` installed per turn whose callbacks emit these
+    # frames, and the daemon demuxer's ``_PURE_NOTIFICATION_EVENTS`` table
+    # turning them into the plan events through the builders the
+    # in-process path uses.
+    _NOTIF_PLAN_UPDATED = "plan_updated"
+    _NOTIF_PLAN_STEP_UPDATED = "plan_step_updated"
+    _NOTIF_PLAN_CLEARED = "plan_cleared"
+    _NOTIF_PLAN_OUTPUT = "plan_output"
+
     @staticmethod
     def _turns_ran_snapshot(session) -> Optional[int]:
         """How many turns this session has RUN, or ``None`` if it cannot say.
@@ -4530,6 +4646,9 @@ class RunnerRPC:
         except Exception:  # noqa: BLE001
             logger.debug("description_callback shim install raised")
 
+        # The todo plugin's plan reporter (see _NOTIF_PLAN_UPDATED).
+        self._install_plan_reporter(session, originals, request_id)
+
         return originals
 
     def _restore_session_notification_callbacks(
@@ -4619,6 +4738,60 @@ class RunnerRPC:
                     )
             except Exception:  # noqa: BLE001
                 logger.debug("restore description_callback raised")
+        self._restore_plan_reporter(session, originals)
+
+    @staticmethod
+    def _plan_plugins(session: Any) -> "tuple[Any, Any]":
+        """The runner registry's ``todo`` and ``subagent`` plugins, or Nones."""
+        runtime = getattr(session, "_runtime", None)
+        registry = getattr(runtime, "registry", None) if runtime else None
+        if registry is None:
+            return None, None
+        return registry.get_plugin("todo"), registry.get_plugin("subagent")
+
+    def _install_plan_reporter(
+        self, session: Any, originals: Dict[str, Any], request_id: int,
+    ) -> None:
+        """Swap the todo plugin's reporter for one that emits ``plan_*`` frames.
+
+        The runner's instance boots with a ``MemoryReporter`` nobody reads;
+        for the turn it is replaced by a ``LivePlanReporter`` whose
+        callbacks emit the four plan frames, and the subagent plugin is
+        handed the same one so a subagent's plan reaches the client under
+        its own agent id.  Both originals are recorded for
+        :meth:`_restore_plan_reporter`.
+        """
+        try:
+            todo_plugin, subagent_plugin = self._plan_plugins(session)
+            if todo_plugin is None or not hasattr(todo_plugin, "_reporter"):
+                return
+            originals["todo_reporter"] = todo_plugin._reporter
+            reporter = _plan_notification_reporter(self, request_id)
+            todo_plugin._reporter = reporter
+            if subagent_plugin is not None and hasattr(subagent_plugin, "set_plan_reporter"):
+                originals["subagent_plan_reporter"] = getattr(
+                    subagent_plugin, "_plan_reporter", None,
+                )
+                subagent_plugin.set_plan_reporter(reporter)
+        except Exception:  # noqa: BLE001
+            logger.debug("plan reporter shim install raised")
+
+    def _restore_plan_reporter(self, session: Any, originals: Dict[str, Any]) -> None:
+        """Put back the reporters :meth:`_install_plan_reporter` swapped."""
+        if "todo_reporter" not in originals and "subagent_plan_reporter" not in originals:
+            return
+        try:
+            todo_plugin, subagent_plugin = self._plan_plugins(session)
+            if "todo_reporter" in originals and todo_plugin is not None:
+                todo_plugin._reporter = originals["todo_reporter"]
+            if (
+                "subagent_plan_reporter" in originals
+                and subagent_plugin is not None
+                and hasattr(subagent_plugin, "set_plan_reporter")
+            ):
+                subagent_plugin.set_plan_reporter(originals["subagent_plan_reporter"])
+        except Exception:  # noqa: BLE001
+            logger.debug("restore plan reporter raised")
 
     def _handle_session_shutdown(self) -> "tuple[bool, Any]":
         """Graceful runner-side session teardown.
@@ -5694,6 +5867,53 @@ def _spend(value: Optional[int]) -> Optional[int]:
         ``int(value)``, or ``None``.
     """
     return int(value) if value is not None else None
+
+
+def _plan_notification_reporter(rpc: "RunnerRPC", request_id: int) -> Any:
+    """A ``LivePlanReporter`` whose four callbacks emit ``plan_*`` frames.
+
+    The payloads are the reporter's own dicts, unconverted: the daemon's
+    ``_plan_updated_event`` / ``_plan_step_updated_event`` re-key them
+    exactly as they did when the reporter ran in the daemon, so the two
+    processes cannot disagree about the wire.  ``agent_name`` is the
+    PROFILE name the todo plugin reports under (``None`` for the main
+    agent); the daemon maps it to an agent id, which the runner does not
+    hold.  Each callback swallows its own failure: a plan report must not
+    take the tool call that produced it down.
+    """
+    from jaato_sdk.plugins.todo.channels import create_live_reporter
+
+    def _emit(event_type: str, payload: Dict[str, Any]) -> None:
+        try:
+            rpc.emit_notification(
+                request_id=request_id, event_type=event_type, payload=payload,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("%s notify raised", event_type)
+
+    def _update(plan_data: Dict[str, Any], agent_name: Optional[str] = None) -> None:
+        _emit(rpc._NOTIF_PLAN_UPDATED,
+              {"plan": dict(plan_data or {}), "agent_name": agent_name})
+
+    def _step(step_data: Dict[str, Any], agent_name: Optional[str] = None) -> None:
+        _emit(rpc._NOTIF_PLAN_STEP_UPDATED,
+              {"step": dict(step_data or {}), "agent_name": agent_name})
+
+    def _clear(agent_name: Optional[str] = None) -> None:
+        _emit(rpc._NOTIF_PLAN_CLEARED, {"agent_name": agent_name})
+
+    def _output(source: str, text: str, mode: str,
+                agent_name: Optional[str] = None) -> None:
+        _emit(rpc._NOTIF_PLAN_OUTPUT,
+              {"source": str(source or "plan"), "text": str(text or ""),
+               "mode": str(mode or "write"), "agent_name": agent_name})
+
+    return create_live_reporter(
+        update_callback=_update,
+        step_update_callback=_step,
+        clear_callback=_clear,
+        output_callback=_output,
+    )
 
 
 class _AgentUIHooksNotificationShim:

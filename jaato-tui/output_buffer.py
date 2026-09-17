@@ -4163,10 +4163,12 @@ class OutputBuffer:
         # Append focused options line rendered from structured data.
         # Deliberately OUTSIDE the permission_content branch: the options are
         # built from structured data the client already holds, while
-        # permission_content arrives only via AgentOutputEvent(source=
-        # "permission").  When the server emits no such event the prompt would
-        # otherwise render a bare "Permission required" with no indication of
-        # what the user may type.
+        # permission_content arrives as text -- an AgentOutputEvent(source=
+        # "permission") on a daemon-local session, a PermissionRequestedEvent's
+        # prompt_lines (rendered by ``permission_prompt``) on a runner-served
+        # one.  When neither carries content the prompt would otherwise render
+        # a bare "Permission required" with no indication of what the user may
+        # type.
         if self._permission_response_options:
             output.append("\n")
             output.append(indent, style=self._style("tree_connector", "dim"))

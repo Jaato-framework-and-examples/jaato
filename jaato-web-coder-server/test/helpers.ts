@@ -88,6 +88,7 @@ export function writeSecrets(dir = mkdtempSync(join(tmpdir(), "jwcs-"))): { dir:
   writeFileSync(join(dir, "app.credential"), APP_CREDENTIAL + "\n", { mode: 0o600 });
   writeFileSync(join(dir, "oidc.secret"), "client-secret\n", { mode: 0o600 });
   writeFileSync(join(dir, "session.secret"), "s".repeat(48) + "\n", { mode: 0o600 });
+  writeFileSync(join(dir, "credentials.key"), "c".repeat(48) + "\n", { mode: 0o600 });
   return { dir };
 }
 

@@ -297,8 +297,9 @@ class CommandRouter:
                 self._handle_session_delete(client_id, event.args)
                 return
 
-            elif cmd in ("session.orphans", "session.stop"):
-                self._dispatch_orphan_command(cmd, client_id, event.args)
+            elif cmd in ("session.orphans", "session.stop", "session.reload_env"):
+                self._dispatch_orphan_command(
+                    cmd, client_id, event.args, session_id=session_id)
                 return
 
             elif cmd == "session.help":
@@ -329,10 +330,10 @@ class CommandRouter:
                 self._handle_session_unbind_wake(client_id, event.args, event.payload)
                 return
 
-            elif cmd.startswith("cascade."):
-                if self._dispatch_cascade_command(
-                        cmd, client_id, event.args, event.payload):
-                    return
+            elif self._dispatch_prefixed_command(
+                    cmd, client_id, event.args, event.payload, workspace_path,
+                    session_id=session_id):
+                return
 
             # Tools commands - handled per-session
             elif cmd.startswith("tools."):
@@ -383,22 +384,169 @@ class CommandRouter:
 
     def _dispatch_orphan_command(
         self, cmd: str, client_id: str, args: list,
+        session_id: Optional[str] = None,
     ) -> None:
-        """Route the two orphan-management verbs (#812).
+        """Route the session-administration verbs that share one branch.
 
-        One branch in :meth:`_dispatch` for both, rather than two: that
-        method sits at its cyclomatic-complexity baseline and may not grow,
-        and the pair is one feature — you list orphans in order to stop one.
+        One branch in :meth:`_dispatch` for all of them, rather than one
+        each: that method sits at its cyclomatic-complexity baseline and may
+        not grow.  The two orphan verbs (#812) are one feature — you list
+        orphans in order to stop one — and ``session.reload_env`` rides the
+        same branch because it is the same shape: an operator verb about a
+        loaded session's runtime state, answered with one confirmation line.
 
         Args:
-            cmd: ``"session.orphans"`` or ``"session.stop"``.
+            cmd: ``"session.orphans"``, ``"session.stop"`` or
+                ``"session.reload_env"``.
             client_id: The requesting client.
             args: The command's argv tail.
+            session_id: The caller's own session, which ``reload_env``
+                targets when no id is given.
         """
         if cmd == "session.orphans":
             self._handle_session_orphans(client_id)
+        elif cmd == "session.reload_env":
+            self._handle_session_reload_env(client_id, session_id, args)
         else:
             self._handle_session_stop(client_id, args)
+
+    def _dispatch_prefixed_command(
+        self, cmd: str, client_id: str, args: list, payload: Any,
+        workspace_path: Optional[str], session_id: Optional[str] = None,
+    ) -> bool:
+        """Route the ``cascade.*`` family and ``workspace.ignore`` from ONE branch.
+
+        :meth:`_dispatch` is frozen at its complexity baseline, so the
+        ``cascade.`` arm it already paid for is widened into a table rather
+        than joined by a sibling: the two families share the property that
+        the verb is daemon-level (no session round-trip) and answers on the
+        caller's own channel.
+
+        Returns:
+            True when the command was handled; False when ``cmd`` belongs to
+            neither family, so the caller keeps dispatching.
+        """
+        if cmd.startswith("cascade."):
+            return self._dispatch_cascade_command(cmd, client_id, args, payload)
+        if cmd == "workspace.ignore":
+            self._handle_workspace_ignore(
+                client_id, args, workspace_path, session_id=session_id)
+            return True
+        return False
+
+    def _resolve_caller_workspace(
+        self, client_id: str, client_workspace: Optional[str],
+        session_id: Optional[str] = None,
+    ) -> "tuple[Optional[str], Dict[str, Optional[str]]]":
+        """The workspace a daemon-level verb acts in for *client_id*.
+
+        Three sources, first hit wins, all of them returned so a refusal
+        can say which were empty rather than "no workspace":
+
+        1. the session the manager has this client attached to;
+        2. the session the TRANSPORT says the client is on (``session_id``
+           from ``handle_request`` -- the WS adapter's own map, which can
+           know the session across a reconnect the manager has not yet
+           re-bound);
+        3. the workspace the client declared (IPC ``set_workspace``, or the
+           WS selection).
+
+        A session's path outranks a declared one because the session's tree
+        is what ``WorkspaceMonitor`` watches and what the panel shows.
+        """
+        session = self._session_manager.get_client_session(client_id)
+        attached = getattr(session, "workspace_path", None) if session else None
+        by_id = None
+        if session_id and hasattr(self._session_manager, "get_session"):
+            target = self._session_manager.get_session(session_id)
+            by_id = getattr(target, "workspace_path", None) if target else None
+        sources = {"attached_session": attached or None,
+                   "transport_session": by_id or None,
+                   "declared": client_workspace or None}
+        return (attached or by_id or client_workspace or None), sources
+
+    def _handle_workspace_ignore(
+        self, client_id: str, args: list, client_workspace: Optional[str],
+        session_id: Optional[str] = None,
+    ) -> None:
+        """Handle ``workspace.ignore <path>`` (protocol 1.12).
+
+        Toggles one exact entry in the caller's workspace ``.gitignore`` —
+        the TUI workspace panel's ``i`` key, served daemon-side so a remote
+        client (the web coding UI) can do what the TUI does by writing the
+        file itself.  The edit is
+        :func:`jaato_sdk.gitignore_toggle.toggle_gitignore_pattern` on both
+        routes, so one press means one thing whichever client made it.
+
+        Which ``.gitignore``: :meth:`_resolve_caller_workspace` -- the
+        SESSION's workspace when the caller is attached to one (by the
+        manager's binding, or by the session id the transport handed in),
+        else the workspace the client declared or selected.
+        The session's is the tree ``WorkspaceMonitor`` watches — and the
+        monitor reloads its parser on this very write, so the pattern binds
+        every later file event.  Entries the panel already shows are NOT
+        pruned; the client's own hide is for that.
+
+        The path is a PATTERN written into a file inside the workspace, never
+        a path the daemon resolves, so #742's relative-path rule does not
+        apply; what is refused instead is anything that is not a workspace
+        entry (:func:`validate_ignore_pattern`).  Every outcome — including
+        a refusal — answers with one ``WorkspaceIgnoreResultEvent``, because
+        the caller is a panel that has to render *something* for the press.
+        """
+        import os
+
+        from jaato_sdk.events import WorkspaceIgnoreResultEvent
+        from jaato_sdk.gitignore_toggle import (
+            toggle_gitignore_pattern, validate_ignore_pattern,
+        )
+
+        pattern = args[0] if args else ""
+
+        def answer(**fields: Any) -> None:
+            self._event_sink.send_event(
+                client_id, WorkspaceIgnoreResultEvent(path=pattern, **fields))
+
+        reason = validate_ignore_pattern(pattern)
+        if reason:
+            answer(ok=False, error=f"workspace.ignore: {reason}")
+            return
+
+        workspace, sources = self._resolve_caller_workspace(
+            client_id, client_workspace, session_id)
+        if not workspace:
+            # Name what was looked at: "no workspace" alone sent a reader
+            # who could see their workspace in the header to the wrong place.
+            checked = ", ".join(
+                f"{k}={'none' if v is None else repr(v)}"
+                for k, v in sources.items())
+            logger.warning("workspace.ignore: client=%s session=%s has no "
+                           "resolvable workspace (%s)", client_id,
+                           session_id or "-", checked)
+            answer(ok=False, error=f"workspace.ignore: the caller has no "
+                                   f"workspace ({checked})")
+            return
+
+        gitignore_path = os.path.join(workspace, ".gitignore")
+        try:
+            existing = ""
+            if os.path.exists(gitignore_path):
+                with open(gitignore_path, "r", encoding="utf-8") as fh:
+                    existing = fh.read()
+            new_content, ignored = toggle_gitignore_pattern(existing, pattern)
+            with open(gitignore_path, "w", encoding="utf-8") as fh:
+                fh.write(new_content)
+        except OSError as exc:
+            logger.warning("workspace.ignore: client=%s could not write %s: %s",
+                           client_id, gitignore_path, exc)
+            answer(ok=False, error=f"workspace.ignore: could not write "
+                                   f"{gitignore_path}: {exc}",
+                   gitignore_path=gitignore_path)
+            return
+
+        logger.info("workspace.ignore: client=%s %s %r in %s", client_id,
+                    "added" if ignored else "removed", pattern, gitignore_path)
+        answer(ok=True, ignored=ignored, gitignore_path=gitignore_path)
 
     def _dispatch_cascade_command(
         self, cmd: str, client_id: str, args: list, payload: Any = None,
@@ -609,6 +757,8 @@ class CommandRouter:
                 error_type="UsageError",
                 recoverable=True,
             ))
+            return
+        if self._refuse_foreign_session(client_id, target_session_id):
             return
         # Check for workspace mismatch
         mismatch = self._session_manager.check_workspace_mismatch(
@@ -901,9 +1051,64 @@ class CommandRouter:
             wake_ref=wake_ref or "", outcome=outcome.value,
             detail=f"unbind_wake: {outcome.value}"))
 
+    def _sessions_visible_to(self, client_id: str) -> list:
+        """The daemon's sessions, scoped to what this client's user may see.
+
+        The boundary is the one the transport reports through
+        ``visible_workspace_paths`` (protocol 1.13): ``None`` -- IPC, or a
+        WS connection carrying no identity -- means the unscoped listing
+        every client always got.  A list means a session is shown when it
+        runs in one of those workspaces, or when this user created it
+        (``created_by``, #859), and hidden otherwise -- another user's
+        session in a shared workspace included.  ``session.list`` renders
+        this set and ``session.attach`` admits only members of it, so the
+        listing is never wider or narrower than what the verb accepts.
+        """
+        from server.event_sink import client_visible_workspaces
+
+        sessions = self._session_manager.list_sessions()
+        paths = client_visible_workspaces(self._event_sink, client_id)
+        if paths is None:
+            return sessions
+        user = self._event_sink.get_client_user(client_id)
+        if not isinstance(user, str):
+            user = None
+        roots = [os.path.normpath(p) for p in paths]
+
+        def _inside(workspace_path: Optional[str]) -> bool:
+            if not workspace_path:
+                return False
+            wp = os.path.normpath(workspace_path)
+            return any(wp == r or wp.startswith(r + os.sep) for r in roots)
+
+        return [s for s in sessions
+                if (user is not None and s.created_by == user) or _inside(s.workspace_path)]
+
+    def _refuse_foreign_session(self, client_id: str, target_session_id: str) -> bool:
+        """Refuse ``session.attach`` to a session outside the caller's boundary.
+
+        Returns True (and has answered the client) when the attach must not
+        proceed.  Unscoped transports never refuse here.
+        """
+        from server.event_sink import client_visible_workspaces
+        if client_visible_workspaces(self._event_sink, client_id) is None:
+            return False
+        if any(s.session_id == target_session_id
+               for s in self._sessions_visible_to(client_id)):
+            return False
+        from jaato_sdk.events import ErrorEvent
+        self._event_sink.send_event(client_id, ErrorEvent(
+            error=f"session.attach: {target_session_id} is not one of your sessions",
+            error_type="SessionError",
+            recoverable=True,
+        ))
+        logger.info("session.attach: client=%s refused foreign session %s",
+                    client_id, target_session_id)
+        return True
+
     def _handle_session_list(self, client_id: str, session_id: str) -> None:
         """Handle ``session.list`` command."""
-        sessions = self._session_manager.list_sessions()
+        sessions = self._sessions_visible_to(client_id)
         from jaato_sdk.events import SessionListEvent
 
         # Get client's current session to mark it in the list
@@ -935,7 +1140,12 @@ class CommandRouter:
     ) -> None:
         """Handle ``session.default`` command."""
         default_session_id = self._session_manager.get_or_create_default(
-            client_id, workspace_path=workspace_path
+            client_id, workspace_path=workspace_path,
+            # The transport's authenticated user, read HERE for the same
+            # reason ``session.new`` and the post-auth create read it here:
+            # the sink is the only thing that knows, and the event body
+            # must never be able to claim it (#859).
+            created_by=self._event_sink.get_client_user(client_id),
         )
         if default_session_id:
             # Update context now that session exists
@@ -1324,6 +1534,90 @@ class CommandRouter:
             "session.stop: client=%s target=%s found=%s was_processing=%s",
             client_id, target, result["found"], result["was_processing"],
         )
+
+    def _handle_session_reload_env(
+        self, client_id: str, session_id: Optional[str], args: list,
+    ) -> None:
+        """Handle ``session.reload_env [session_id]``.
+
+        Re-resolves the session's workspace ``.env`` (plus profile ``env:``
+        and overrides) and has the runner re-apply it and rebuild the
+        provider -- the way a credential stored with ``<provider>-auth key``
+        or a ``.env`` line written after the runner booted reaches a session
+        that is already open.  Defaults to the CALLER's session; an explicit
+        id targets any loaded one, the way ``session.stop`` does.
+
+        Confirms with one line naming the outcome, because the four answers
+        call for different next moves: rebuilt (and on which credential
+        source), busy mid-turn (retry when idle), not loaded, or a provider
+        that would not rebuild on the new environment (the reason, verbatim).
+        """
+        from jaato_sdk.events import ErrorEvent, SystemMessageEvent
+
+        target = args[0] if args else session_id
+        if not target:
+            self._event_sink.send_event(client_id, ErrorEvent(
+                error=("session.reload_env: no session -- attach to one or pass "
+                       "its id as the first argument"),
+                error_type="UsageError",
+                recoverable=True,
+            ))
+            return
+
+        outcome = self._session_manager.reload_session_env(target)
+        if not outcome["found"]:
+            msg = f"session.reload_env: {target} is not loaded -- nothing to reload"
+        elif outcome["was_processing"]:
+            msg = (f"session.reload_env: {target} is mid-turn; retry once it is "
+                   f"idle (nothing was changed)")
+        elif not outcome["ok"]:
+            msg = (f"session.reload_env: {target}: environment re-resolved but "
+                   f"the provider did not rebuild -- {outcome['error']}")
+        else:
+            result = outcome["result"] or {}
+            source = result.get("auth_info") or "credential source not reported"
+            msg = (f"session.reload_env: {target} reloaded {result.get('applied', 0)} "
+                   f"env keys; provider {result.get('provider')} / "
+                   f"{result.get('model')} rebuilt ({source})")
+        style = "system" if outcome["ok"] else "warning"
+        self._event_sink.send_event(client_id, SystemMessageEvent(
+            message=msg, style=style,
+        ))
+        logger.info(
+            "session.reload_env: client=%s target=%s found=%s ok=%s was_processing=%s",
+            client_id, target, outcome["found"], outcome["ok"],
+            outcome["was_processing"],
+        )
+
+    def _maybe_reload_live_session_after_auth(
+        self, client_id: str, plugin, args: list,
+    ) -> None:
+        """After ``<provider>-auth key|login`` succeeds, refresh the caller's live session.
+
+        The credential the command just stored is on disk; the session this
+        client is attached to resolved its credential at bootstrap and will
+        not look again (see :meth:`_handle_session_reload_env`).  When that
+        session runs the SAME provider the plugin authenticates, reload it
+        now, so the very next turn uses the new credential instead of failing
+        on the old one and sending the user to ``session.new``.
+
+        Gated three ways so it never fires as a surprise: only for the
+        actions that establish a credential (``login`` / ``key``, never
+        ``status``); only when the client has a live session; only when that
+        session's provider is the plugin's.  A session on another provider
+        is left alone -- its credentials did not change.
+        """
+        action = str(args[0]).lower() if args else ""
+        if action not in ("login", "key"):
+            return
+        session = self._session_manager.get_client_session(client_id)
+        if session is None or session.server is None:
+            return
+        provider = getattr(plugin, "provider_name", None)
+        active = getattr(session.server, "model_provider", None)
+        if not provider or provider != active:
+            return
+        self._handle_session_reload_env(client_id, session.session_id, [])
 
     def _handle_session_end(self, client_id: str, session_id: str) -> None:
         """Handle ``session.end`` command.
@@ -1792,6 +2086,9 @@ class CommandRouter:
             # After auth command execution, check if credentials are now valid
             # and offer to set up a session with the provider.
             if hasattr(plugin, 'verify_credentials') and plugin.verify_credentials():
+                # A live session on this provider resolved its credential at
+                # bootstrap and would keep the stale one; refresh it first.
+                self._maybe_reload_live_session_after_auth(client_id, plugin, args)
                 self._offer_post_auth_setup(client_id, plugin)
 
         except Exception as e:
@@ -2022,6 +2319,7 @@ class CommandRouter:
             {"name": "session bind_wake", "description": "Declare a wake binding (wake_ref + trust keys) for this session"},
             {"name": "session unbind_wake", "description": "Remove a wake binding for this session"},
             {"name": "session delete", "description": "Delete a session"},
+            {"name": "session reload_env", "description": "Re-read this session's workspace .env and credentials and rebuild its provider"},
             {"name": "session help", "description": "Show detailed help for session command"},
         ]
         commands.extend(session_commands)

@@ -2095,6 +2095,36 @@ class RunnerRPCClient:
             self.session_end(timeout=timeout), timeout=timeout,
         )
 
+    async def session_reload_env(
+        self, session_env: Dict[str, str], *, timeout: Optional[float] = 90.0,
+    ) -> Dict[str, Any]:
+        """Push a freshly resolved session env and have the runner rebuild its provider.
+
+        The daemon re-resolves the workspace ``.env`` + profile ``env:`` +
+        overrides (decoding secret URIs, which only it can) and ships the
+        WHOLE dict, as bootstrap does; the runner replaces its session env
+        with it and re-creates the provider so the next turn runs on the
+        credential now on disk.  Refused by the runner while a turn is
+        running (``stage="busy"``).
+
+        90s: the rebuild is a provider ``initialize()``, which for some
+        providers is a network handshake (~9s on zhipuai), plus the model
+        connect.
+        """
+        return await self._call_named(
+            "session.reload_env", {"session_env": dict(session_env)},
+            timeout=timeout,
+        )
+
+    def session_reload_env_threadsafe(
+        self, session_env: Dict[str, str], *, timeout: Optional[float] = 90.0,
+    ) -> Dict[str, Any]:
+        """Synchronous wrapper for :meth:`session_reload_env` from worker threads."""
+        return self._run_threadsafe(
+            self.session_reload_env(session_env, timeout=timeout),
+            timeout=timeout,
+        )
+
     def session_health_check_threadsafe(
         self, *, timeout: Optional[float] = 5.0,
     ) -> Dict[str, Any]:

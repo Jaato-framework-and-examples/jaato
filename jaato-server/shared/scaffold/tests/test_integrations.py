@@ -9,6 +9,7 @@ and the historical failure was that all four looked identical on disk.
 import json
 
 import pytest
+
 from shared.scaffold import integrations as I
 
 
@@ -23,6 +24,16 @@ def test_the_build_ships_the_agent_harness_integrations():
 
 def test_pi_reuses_the_agent_skill_payload():
     assert I.payload_dir("pi") == I.payload_dir("claude-code")
+
+
+def test_missing_shared_payload_is_not_reported_as_unknown(dest, monkeypatch, tmp_path):
+    monkeypatch.setattr(I, "payload_dir", lambda _name: tmp_path / "missing")
+
+    changed, lines = I.install("pi", dest)
+
+    assert not changed
+    assert "payload 'claude-code' is missing" in " ".join(lines)
+    assert "unknown integration" not in " ".join(lines)
 
 
 def test_pi_install_stamps_pi(tmp_path):
@@ -179,12 +190,10 @@ def test_unstamped_is_reported_not_treated_as_absent(dest):
 def test_the_target_comes_from_the_manifest_not_from_code(tmp_path):
     """Each harness owns its user and workspace skill locations."""
     from pathlib import Path
-
     m = I.manifest("claude-code")
     assert m["target"] == ".claude/skills/jaato-sdk"
     assert I.target_dir("claude-code", user=True, workspace=None) == \
         Path.home() / ".claude" / "skills" / "jaato-sdk"
-
     assert I.target_dir("pi", user=True, workspace=None) == \
         Path.home() / ".pi" / "agent" / "skills" / "jaato-sdk"
     assert I.target_dir("pi", user=False, workspace=str(tmp_path)) == \

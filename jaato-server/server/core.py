@@ -479,12 +479,12 @@ def _slot_return_phrase(pooled: bool) -> str:
     )
 
 
-def _prompt_injected_event(payload: Dict[str, Any]) -> 'MidTurnPromptInjectedEvent':
+def _prompt_injected_event(server: 'JaatoServer', payload: Dict[str, Any]) -> 'MidTurnPromptInjectedEvent':
     """Build the mid-turn prompt-injection event from its payload."""
     return MidTurnPromptInjectedEvent(text=payload.get("text", "") or "")
 
 
-def _budget_rung_event(payload: Dict[str, Any]) -> 'BudgetRungFiredEvent':
+def _budget_rung_event(server: 'JaatoServer', payload: Dict[str, Any]) -> 'BudgetRungFiredEvent':
     """Build the #1069 event from a runner notification payload.
 
     A free function so the notification demuxer — already far over the
@@ -510,14 +510,47 @@ def _budget_rung_event(payload: Dict[str, Any]) -> 'BudgetRungFiredEvent':
     )
 
 
+def _plan_updated_from_payload(server: 'JaatoServer', payload: Dict[str, Any]) -> 'PlanUpdatedEvent':
+    """The runner's ``plan_updated`` frame: the reporter's plan dict + agent name."""
+    return server._plan_updated_event(
+        dict(payload.get("plan") or {}), payload.get("agent_name"))
+
+
+def _plan_step_updated_from_payload(server: 'JaatoServer', payload: Dict[str, Any]) -> 'PlanStepUpdatedEvent':
+    """The runner's ``plan_step_updated`` frame: the reporter's step delta + agent name."""
+    return server._plan_step_updated_event(
+        dict(payload.get("step") or {}), payload.get("agent_name"))
+
+
+def _plan_cleared_from_payload(server: 'JaatoServer', payload: Dict[str, Any]) -> 'PlanClearedEvent':
+    """The runner's ``plan_cleared`` frame."""
+    return server._plan_cleared_event(payload.get("agent_name"))
+
+
+def _plan_output_from_payload(server: 'JaatoServer', payload: Dict[str, Any]) -> 'AgentOutputEvent':
+    """The runner's ``plan_output`` frame: a reporter line for the scrolling panel."""
+    return server._plan_output_event(
+        str(payload.get("source") or "plan"),
+        str(payload.get("text") or ""),
+        str(payload.get("mode") or "write"),
+        payload.get("agent_name"),
+    )
+
+
 #: Runner notification event_type -> the client event it becomes, for the
 #: notifications whose entire handling is "build it, emit it, return".
 #: Everything with a side effect (a continuation that starts a model thread,
 #: a GC phase that mutates server state) stays an explicit branch in the
-#: demuxer, because a table of builders cannot express those.
+#: demuxer, because a table of builders cannot express those.  A builder
+#: takes the server too: the four plan frames resolve a profile name to an
+#: agent id through ``_agents``, which no payload carries.
 _PURE_NOTIFICATION_EVENTS = {
     "prompt_injected": _prompt_injected_event,
     "budget_rung": _budget_rung_event,
+    "plan_updated": _plan_updated_from_payload,
+    "plan_step_updated": _plan_step_updated_from_payload,
+    "plan_cleared": _plan_cleared_from_payload,
+    "plan_output": _plan_output_from_payload,
 }
 
 
@@ -1487,6 +1520,50 @@ class JaatoServer:
                     )
 
         self._session_env_resolved = True
+
+    def reload_session_env(self) -> Dict[str, Any]:
+        """Re-resolve this session's environment and push it to its runner.
+
+        ``_resolve_session_env`` runs ONCE per server (its idempotency flag
+        exists so the daemon's pre-spawn resolution is not redone by the
+        runner-side ``initialize()``), and the runner applies the result
+        once, at bootstrap.  Both are right for a session whose
+        configuration is settled -- and wrong for the one that is being
+        configured from the prompt: ``<provider>-auth key`` stores a
+        credential, or the post-auth flow writes the workspace ``.env``,
+        AFTER the runner booted, and the live session keeps the credential
+        it resolved at startup (a daemon-wide one, or none) until a new
+        session is created.
+
+        This drops the flag, resolves again from the same four sources in
+        the same order (workspace ``.env``, profile ``env:``, typed
+        ``trace:``, post-auth overrides -- secret URIs decoded here, where
+        ``pass`` / ``vault`` can be exec'd), and hands the WHOLE dict to
+        the runner's ``session.reload_env``, which replaces its session env
+        and rebuilds the provider.  The daemon-side per-turn overlay
+        (:meth:`_with_session_env`) reads ``self._session_env`` and so picks
+        the new values up on the next turn with no further step.
+
+        Returns:
+            The runner's answer -- ``{"applied", "provider", "model",
+            "auth_info"}`` -- or, for a server with no runner attached,
+            ``{"applied": n, "runner": False}``: the env was re-resolved
+            and nothing else could be done from here.
+
+        Raises:
+            RuntimeError: When the runner refuses (a turn is running) or the
+                provider does not rebuild; the message carries the runner's
+                ``stage`` so the caller can say which.
+        """
+        self._session_env_resolved = False
+        self._resolve_session_env()
+        rpc = self._runner_rpc
+        if rpc is None:
+            return {"applied": len(self._session_env), "runner": False}
+        reload = getattr(rpc, "session_reload_env_threadsafe", None)
+        if not callable(reload):
+            return {"applied": len(self._session_env), "runner": False}
+        return reload(dict(self._session_env), timeout=90.0)
 
     @contextlib.contextmanager
     def _with_session_env(self):
@@ -4587,77 +4664,36 @@ class JaatoServer:
         )
 
     def _setup_plan_hooks(self) -> None:
-        """Set up plan update hooks."""
+        """Route the todo plugin's plan reports into client events.
+
+        The IN-PROCESS half only.  ``self.todo_plugin`` is the daemon
+        registry's instance, which is the one a session calls solely when
+        the session runs in this process (the embedded client, standalone
+        WS).  On a runner-served session -- the default -- the ``todo``
+        plugin is runner-tier and reports into the RUNNER's instance, so a
+        reporter installed here is never invoked; that path is
+        ``RunnerRPC._install_session_notification_callbacks``, which emits
+        ``plan_updated`` / ``plan_step_updated`` / ``plan_cleared`` /
+        ``plan_output`` notification frames that the demuxer turns into
+        the same events through the same ``_plan_*_event`` builders.
+        """
         if not self.todo_plugin:
             return
 
         server = self
 
-        def _get_agent_id(agent_name: Optional[str]) -> str:
-            """Get agent ID from agent name."""
-            agent_id = server._main_agent_id if agent_name is None else agent_name
-            for aid, agent in server._agents.items():
-                if agent.profile_name == agent_name:
-                    agent_id = aid
-                    break
-            return agent_id
-
         def update_callback(plan_data: dict, agent_name: Optional[str] = None):
-            """Emit PlanUpdatedEvent from plan data."""
-            agent_id = _get_agent_id(agent_name)
-            steps = []
-            for step in plan_data.get('steps', []):
-                step_data = {
-                    'content': step.get('description', ''),
-                    'status': step.get('status', 'pending'),
-                    'active_form': step.get('active_form'),
-                    'step_id': step.get('step_id', ''),
-                    'result': step.get('result'),
-                    'error': step.get('error'),
-                }
-                # Include cross-agent dependency info for blocked steps
-                if step.get('blocked_by'):
-                    step_data['blocked_by'] = step['blocked_by']
-                if step.get('depends_on'):
-                    step_data['depends_on'] = step['depends_on']
-                if step.get('received_outputs'):
-                    step_data['received_outputs'] = step['received_outputs']
-                steps.append(step_data)
-            server.emit(PlanUpdatedEvent(
-                agent_id=agent_id,
-                plan_name=plan_data.get('title', 'Plan'),
-                steps=steps,
-            ))
+            server.emit(server._plan_updated_event(plan_data, agent_name))
 
         def clear_callback(agent_name: Optional[str] = None):
-            """Emit PlanClearedEvent."""
-            agent_id = _get_agent_id(agent_name)
-            server.emit(PlanClearedEvent(agent_id=agent_id))
+            server.emit(server._plan_cleared_event(agent_name))
 
         def step_update_callback(step_data: dict, agent_name: Optional[str] = None):
-            """Emit PlanStepUpdatedEvent for lean step status deltas."""
-            agent_id = _get_agent_id(agent_name)
-            server.emit(PlanStepUpdatedEvent(
-                agent_id=agent_id,
-                step_id=step_data.get('step_id', ''),
-                sequence=step_data.get('sequence', 0),
-                content=step_data.get('content', ''),
-                status=step_data.get('status', 'pending'),
-                result=step_data.get('result'),
-                error=step_data.get('error'),
-                blocked_by=step_data.get('blocked_by'),
-                depends_on=step_data.get('depends_on'),
-                received_outputs=step_data.get('received_outputs'),
-            ))
+            server.emit(server._plan_step_updated_event(step_data, agent_name))
 
-        def output_callback(source: str, text: str, mode: str):
-            """Emit AgentOutputEvent for plan messages."""
-            server.emit(AgentOutputEvent(
-                agent_id=server._main_agent_id,
-                source=source,
-                text=text,
-                mode=mode,
-            ))
+        def output_callback(source: str, text: str, mode: str,
+                            agent_name: Optional[str] = None):
+            server.emit(server._plan_output_event(source, text, mode, agent_name))
 
         # Reuse LivePlanReporter from jaato-tui with event-emitting callbacks
         reporter = create_live_reporter(
@@ -4675,6 +4711,94 @@ class JaatoServer:
             subagent_plugin = self.registry.get_plugin("subagent")
             if subagent_plugin and hasattr(subagent_plugin, 'set_plan_reporter'):
                 subagent_plugin.set_plan_reporter(reporter)
+
+    def _plan_agent_id(self, agent_name: Optional[str]) -> str:
+        """The agent id a plan report's ``agent_name`` addresses.
+
+        The todo plugin names the agent by PROFILE name (``None`` for the
+        main agent); clients key plans by agent id, so a subagent's name is
+        mapped through ``_agents`` and an unknown name is used as-is.
+        """
+        agent_id = self._main_agent_id if agent_name is None else agent_name
+        for aid, agent in self._agents.items():
+            if agent.profile_name == agent_name:
+                agent_id = aid
+                break
+        return agent_id
+
+    def _plan_updated_event(
+        self, plan_data: Dict[str, Any], agent_name: Optional[str] = None,
+    ) -> PlanUpdatedEvent:
+        """A full-snapshot ``PlanUpdatedEvent`` from the reporter's plan dict.
+
+        ``plan_data`` is ``LivePlanReporter._plan_to_display_dict``'s shape
+        (``title``, ``steps[].description``); the event spells a step's text
+        ``content``, so each step is re-keyed here -- one place, whichever
+        process the report came from.
+        """
+        steps = []
+        for step in plan_data.get('steps', []) or []:
+            step_data = {
+                'content': step.get('description', ''),
+                'status': step.get('status', 'pending'),
+                'active_form': step.get('active_form'),
+                'step_id': step.get('step_id', ''),
+                'sequence': step.get('sequence'),
+                'result': step.get('result'),
+                'error': step.get('error'),
+            }
+            # Include cross-agent dependency info for blocked steps
+            if step.get('blocked_by'):
+                step_data['blocked_by'] = step['blocked_by']
+            if step.get('depends_on'):
+                step_data['depends_on'] = step['depends_on']
+            if step.get('received_outputs'):
+                step_data['received_outputs'] = step['received_outputs']
+            steps.append(step_data)
+        return PlanUpdatedEvent(
+            agent_id=self._plan_agent_id(agent_name),
+            plan_name=plan_data.get('title', 'Plan') or 'Plan',
+            steps=steps,
+        )
+
+    def _plan_step_updated_event(
+        self, step_data: Dict[str, Any], agent_name: Optional[str] = None,
+    ) -> PlanStepUpdatedEvent:
+        """A lean ``PlanStepUpdatedEvent`` from the reporter's step delta."""
+        return PlanStepUpdatedEvent(
+            agent_id=self._plan_agent_id(agent_name),
+            step_id=step_data.get('step_id', ''),
+            sequence=step_data.get('sequence', 0),
+            content=step_data.get('content', ''),
+            status=step_data.get('status', 'pending'),
+            result=step_data.get('result'),
+            error=step_data.get('error'),
+            blocked_by=step_data.get('blocked_by'),
+            depends_on=step_data.get('depends_on'),
+            received_outputs=step_data.get('received_outputs'),
+        )
+
+    def _plan_cleared_event(self, agent_name: Optional[str] = None) -> PlanClearedEvent:
+        """The ``PlanClearedEvent`` for a reporter's clear."""
+        return PlanClearedEvent(agent_id=self._plan_agent_id(agent_name))
+
+    def _plan_output_event(self, source: str, text: str, mode: str,
+                           agent_name: Optional[str] = None) -> AgentOutputEvent:
+        """The reporter's supplementary line (``Plan created: ...``) as output.
+
+        Resolves the agent like its three siblings.  Hardcoding
+        ``_main_agent_id`` put a SUBAGENT's plan lines in the main agent's
+        transcript while its plan panel was attributed correctly — the two
+        halves of one report disagreeing about whose work it was.  A
+        reporter that names no agent still falls back to main, which is
+        what ``_plan_agent_id`` does with ``None``.
+        """
+        return AgentOutputEvent(
+            agent_id=self._plan_agent_id(agent_name),
+            source=source,
+            text=text,
+            mode=mode,
+        )
 
     def _setup_queue_channels(self) -> None:
         """Set up queue-based channels for permission/clarification."""
@@ -5094,7 +5218,7 @@ class JaatoServer:
                 # one — and makes the next addition free.
                 builder = _PURE_NOTIFICATION_EVENTS.get(event_type)
                 if builder is not None:
-                    server.emit(builder(payload))
+                    server.emit(builder(server, payload))
                     return
 
                 if event_type == "instruction_budget_updated":
@@ -5587,195 +5711,47 @@ class JaatoServer:
             # "error" (read at the SlotSettledEvent emit).  Reset here so warm
             # slot reuse can't leak a prior session's terminal reason.
             server._terminal_reason = None
-            try:
-                # A fresh attach to a restored session may still be (re)spawning
-                # its runner asynchronously (attach has no synchronous ready-gate
-                # like session.new).  Await readiness rather than deref a None
-                # ``_runner_rpc`` — the reported NoneType crash.  Bounded; raise a
-                # clean error on timeout (caught below as a terminal error)
-                # instead of a hard AttributeError.
-                # Readiness is now bootstrap-complete (mark_runner_ready), not
-                # rpc-handle-live — so wait whenever it's unset.  Covers BOTH the
-                # attach re-spawn (rpc None) AND a reused warm pool slot whose
-                # handle is live but whose bootstrap for this session hasn't
-                # finished yet (same window the client-tool-push stall hit).
-                if not server._runner_ready.is_set():
-                    server._runner_ready.wait(timeout=30.0)
-                _rpc = server._runner_rpc
-                if _rpc is None or not server._runner_ready.is_set():
-                    raise RuntimeError(
-                        "session runner not ready: (re)spawn + bootstrap did not "
-                        "complete within 30s"
-                    )
-                # Run in workspace context so file operations use client's CWD
-                # Also apply session env so provider/tools can access session-specific config
-                with server._with_session_env(), server._in_workspace():
-                    # The runner puts a TYPED budget signal on the send result
-                    # (rpc.py).  Capture it: a budget refusal short-circuits
-                    # before any turn runs, so no turn-completion notification
-                    # fires and a driver waiting on a terminal event would sit
-                    # out its whole timeout and then report a generic failure.
-                    _send_result: Dict[str, Any] = {}
-                    _rpc.session_send_message_threadsafe(
-                        prompt,
-                        on_output=output_callback,
-                        on_notification=notification_handler,
-                        attachments=attachments,
-                        on_result=_send_result.update,
-                    )
-                    server._emit_budget_refusal_if_exhausted(_send_result)
+            # The turn's WIND-DOWN.  This used to be the body of the
+            # ``finally`` below, and its four early exits were ``return``
+            # statements sitting inside that ``finally`` -- which discards any
+            # exception in flight (PEP 765 makes it a SyntaxWarning on 3.14;
+            # #1077).  Most of what that warns about was already covered here:
+            # the two handlers below catch ``Exception`` and
+            # ``KeyboardInterrupt``, and a thread target's return value is read
+            # by nobody.  Two cases genuinely lost information, and the second
+            # is the expensive one:
+            #
+            #   * a ``BaseException`` that is neither of the two caught --
+            #     ``SystemExit``, ``GeneratorExit``, an injected
+            #     ``asyncio.CancelledError``;
+            #   * an exception raised INSIDE either ``except`` handler.  The
+            #     ``except Exception`` handler runs ~100 lines of failure
+            #     reporting (event emission, teardown, logging); a failure
+            #     while reporting a failure vanished along with the provider
+            #     error it was in the middle of reporting, on the daemon's
+            #     model thread.
+            #
+            # Lifting the body out is what fixes it: the four exits are now
+            # ordinary returns from an ordinary function, the ``finally`` is
+            # one call that falls off its end, and an in-flight exception
+            # survives to ``threading.excepthook``.  Control flow is otherwise
+            # unchanged -- falling off the end of this function is exactly what
+            # falling off the end of the old ``finally`` was, because the
+            # ``try`` is the last statement in ``model_thread``.
+            #
+            # ``terminal_error`` is read through the closure rather than passed
+            # in: the ``except`` handlers below assign it, and a cell resolves
+            # at call time, so the ``finally`` cannot hand over a stale value.
+            def _finish_turn() -> None:
+                """Wind the turn down: teardown, continuation drain, nudge
+                guard, terminal status.
 
-                    # Auto-continuation for formatter feedback
-                    # When formatters detect errors in model text output (syntax errors,
-                    # validation failures), the model needs to see the feedback eagerly —
-                    # not wait for the next user prompt. Loop here to inject feedback
-                    # as a hidden prompt and let the model self-correct.
-                    max_feedback_continuations = 2
-                    for _attempt in range(max_feedback_continuations):
-                        main_agent = server._agents.get(server._main_agent_id)
-                        if not main_agent or not main_agent.pending_formatter_feedback:
-                            break
-                        feedback = main_agent.pending_formatter_feedback
-                        main_agent.pending_formatter_feedback = None
-                        server._trace(f"FORMATTER_FEEDBACK_CONTINUATION: attempt {_attempt + 1}, {len(feedback)} chars")
-                        feedback_prompt = (
-                            f"<hidden>[Formatter Feedback]\n{feedback}</hidden>"
-                        )
-                        server._runner_rpc.session_send_message_threadsafe(
-                            feedback_prompt,
-                            on_output=output_callback,
-                            on_notification=notification_handler,
-                        )
-
-                    # Update context usage
-                    # Phase 3 §7c step 6.6.4.5b: route through runner-RPC.
-                    if server._runner_rpc is not None:
-                        usage = server._runner_rpc.session_get_context_usage_threadsafe()
-                        context_limit = (
-                            server._runner_rpc.session_get_context_limit_threadsafe()
-                        )
-                        server.emit(ContextUpdatedEvent(
-                            agent_id=server._main_agent_id,
-                            usage=server._build_usage(
-                                prompt_tokens=usage.get('prompt_tokens', 0),
-                                output_tokens=usage.get('output_tokens', 0),
-                                total_tokens=usage.get('total_tokens', 0),
-                            ),
-                            context_limit=context_limit,
-                            percent_used=usage.get('percent_used', 0),
-                            tokens_remaining=usage.get('tokens_remaining', 0),
-                            turns=usage.get('turns', 0),
-                        ))
-
-            except KeyboardInterrupt as e:
-                server.emit(SystemMessageEvent(
-                    message="Interrupted",
-                    style="warning",
-                ))
-                terminal_error = e
-            except Exception as e:
-                # Permanent INFO-level log of the wrapped error text at
-                # emit time.  Lets consumers verify end-to-end that the
-                # client-facing ErrorEvent payload carries the
-                # vendor-correct message (Fix #1a in PR #118) without
-                # needing to parse the binary IPC frame separately.
-                # Greppable token: MODEL_THREAD_TERMINAL_ERROR.
-                #
-                # RUNNER-SIDE FRAMES, when the failure came from across the
-                # RPC boundary.  The runner sanitizes and ships them in
-                # ``ErrorPayload.traceback``; ``RunnerCallError`` now carries
-                # them here.  Without this the crash reached every consumer
-                # as ONE SANITIZED LINE -- exception type and message intact,
-                # frames gone -- and the line reads like a finished error, so
-                # a reader assumes they have the wrong log rather than that
-                # the frames were dropped.
-                #
-                # They go to BOTH witnesses on purpose: the log for whoever
-                # is on the machine, ``details`` for a client that is not.
-                # OUR PLUMBING FAILING IS NOT THE AGENT FAILING.
-                #
-                # This handler terminates the session for anything it catches.
-                # A ``RunnerRPCTimeout`` is the daemon's own transport --
-                # typically its event loop not scheduling a coroutine -- and
-                # the session behind it is healthy.  Terminating for one
-                # killed a cascade half mid-run, twice on two builds: the
-                # cascade policy unloads on reason=error, the session goes
-                # cold, and a cold sibling is not woken by a sibling message,
-                # so the surviving half sent into a corpse for the rest of the
-                # run.
-                #
-                # Enumerating what must NOT terminate, rather than what must:
-                # a framework-internal type nobody listed here still dies (the
-                # status quo), whereas listing what must terminate would let
-                # an unlisted PROVIDER error survive and COMPLETION_NUDGE
-                # cycle on it -- the bug this terminal path exists to stop.
-                from server.runner_rpc_client import RunnerRPCTimeout
-
-                if isinstance(e, RunnerRPCTimeout):
-                    logger.warning(
-                        "MODEL_THREAD_TRANSPORT_ERROR error_type=%s error=%s "
-                        "-- the TURN failed; the SESSION stays loaded. This "
-                        "is daemon-side plumbing, not the agent.",
-                        type(e).__name__, str(e),
-                    )
-                    # #856: a lost dispatch carries whether the work MAY
-                    # ALREADY HAVE RUN, and that decides whether sending
-                    # the turn again is safe or duplicates side effects
-                    # that already happened.  It rides ``details``, which
-                    # is the field documented as "what a driver branches
-                    # on" while ``error`` stays the human sentence -- the
-                    # same shape ``SessionRefused.may_exist`` takes, and
-                    # for the same reason.
-                    #
-                    # NOT ``recoverable``.  In this tree that flag means
-                    # "this session can continue" (every recoverable=False
-                    # site is a config or provider-connect failure that
-                    # ends initialisation), and the whole point of sparing
-                    # a RunnerRPCTimeout here is that the session DOES
-                    # continue.  Flipping it to encode retry-safety would
-                    # assert something false about session viability to
-                    # every existing consumer.
-                    server.emit(ErrorEvent(
-                        error=str(e),
-                        error_type=type(e).__name__,
-                        recoverable=True,
-                        details=_transport_error_details(e),
-                    ))
-                    # RETURN.  Without it the terminal path below runs anyway:
-                    # ``terminal_error = e`` is reached unconditionally and the
-                    # finally takes the termination branch, so the session dies
-                    # exactly as before with a better log line above it.  #628
-                    # shipped that way -- the comment described the control
-                    # flow and nothing implemented it -- and a cascade half
-                    # still died 3.5 minutes in, WARNING and INFO one
-                    # millisecond apart on the same exception.
-                    #
-                    # ``return`` from inside ``except`` still runs the
-                    # ``finally``, which is the point: the turn winds down its
-                    # ordinary way (pending continuation, status) with
-                    # ``terminal_error`` left None, so the session stays
-                    # loaded.  Re-raising instead would run the finally and
-                    # then escape the thread target unhandled.
-                    return
-
-                _runner_tb = getattr(e, "traceback_text", None)
-                logger.info(
-                    "MODEL_THREAD_TERMINAL_ERROR error_type=%s error=%s",
-                    type(e).__name__, str(e),
-                )
-                if _runner_tb:
-                    logger.error(
-                        "MODEL_THREAD_TERMINAL_ERROR runner traceback:\n%s",
-                        _runner_tb,
-                    )
-                server.emit(ErrorEvent(
-                    error=str(e),
-                    error_type=type(e).__name__,
-                    details=({"runner_traceback": _runner_tb}
-                             if _runner_tb else None),
-                ))
-                terminal_error = e
-            finally:
+                Returns early exactly where the old ``finally`` did -- a
+                terminal error, a stashed continuation, a drained user send, a
+                completion nudge -- each of which hands the rest of the turn to
+                a freshly started model thread.  The return value is not read;
+                what the returns choose is which of the branches below runs.
+                """
                 server._model_running = False
                 server._model_thread = None
 
@@ -6131,6 +6107,199 @@ class JaatoServer:
                     status=status,
                 ))
                 clear_logging_context()
+
+            try:
+                # A fresh attach to a restored session may still be (re)spawning
+                # its runner asynchronously (attach has no synchronous ready-gate
+                # like session.new).  Await readiness rather than deref a None
+                # ``_runner_rpc`` — the reported NoneType crash.  Bounded; raise a
+                # clean error on timeout (caught below as a terminal error)
+                # instead of a hard AttributeError.
+                # Readiness is now bootstrap-complete (mark_runner_ready), not
+                # rpc-handle-live — so wait whenever it's unset.  Covers BOTH the
+                # attach re-spawn (rpc None) AND a reused warm pool slot whose
+                # handle is live but whose bootstrap for this session hasn't
+                # finished yet (same window the client-tool-push stall hit).
+                if not server._runner_ready.is_set():
+                    server._runner_ready.wait(timeout=30.0)
+                _rpc = server._runner_rpc
+                if _rpc is None or not server._runner_ready.is_set():
+                    raise RuntimeError(
+                        "session runner not ready: (re)spawn + bootstrap did not "
+                        "complete within 30s"
+                    )
+                # Run in workspace context so file operations use client's CWD
+                # Also apply session env so provider/tools can access session-specific config
+                with server._with_session_env(), server._in_workspace():
+                    # The runner puts a TYPED budget signal on the send result
+                    # (rpc.py).  Capture it: a budget refusal short-circuits
+                    # before any turn runs, so no turn-completion notification
+                    # fires and a driver waiting on a terminal event would sit
+                    # out its whole timeout and then report a generic failure.
+                    _send_result: Dict[str, Any] = {}
+                    _rpc.session_send_message_threadsafe(
+                        prompt,
+                        on_output=output_callback,
+                        on_notification=notification_handler,
+                        attachments=attachments,
+                        on_result=_send_result.update,
+                    )
+                    server._emit_budget_refusal_if_exhausted(_send_result)
+
+                    # Auto-continuation for formatter feedback
+                    # When formatters detect errors in model text output (syntax errors,
+                    # validation failures), the model needs to see the feedback eagerly —
+                    # not wait for the next user prompt. Loop here to inject feedback
+                    # as a hidden prompt and let the model self-correct.
+                    max_feedback_continuations = 2
+                    for _attempt in range(max_feedback_continuations):
+                        main_agent = server._agents.get(server._main_agent_id)
+                        if not main_agent or not main_agent.pending_formatter_feedback:
+                            break
+                        feedback = main_agent.pending_formatter_feedback
+                        main_agent.pending_formatter_feedback = None
+                        server._trace(f"FORMATTER_FEEDBACK_CONTINUATION: attempt {_attempt + 1}, {len(feedback)} chars")
+                        feedback_prompt = (
+                            f"<hidden>[Formatter Feedback]\n{feedback}</hidden>"
+                        )
+                        server._runner_rpc.session_send_message_threadsafe(
+                            feedback_prompt,
+                            on_output=output_callback,
+                            on_notification=notification_handler,
+                        )
+
+                    # Update context usage
+                    # Phase 3 §7c step 6.6.4.5b: route through runner-RPC.
+                    if server._runner_rpc is not None:
+                        usage = server._runner_rpc.session_get_context_usage_threadsafe()
+                        context_limit = (
+                            server._runner_rpc.session_get_context_limit_threadsafe()
+                        )
+                        server.emit(ContextUpdatedEvent(
+                            agent_id=server._main_agent_id,
+                            usage=server._build_usage(
+                                prompt_tokens=usage.get('prompt_tokens', 0),
+                                output_tokens=usage.get('output_tokens', 0),
+                                total_tokens=usage.get('total_tokens', 0),
+                            ),
+                            context_limit=context_limit,
+                            percent_used=usage.get('percent_used', 0),
+                            tokens_remaining=usage.get('tokens_remaining', 0),
+                            turns=usage.get('turns', 0),
+                        ))
+
+            except KeyboardInterrupt as e:
+                server.emit(SystemMessageEvent(
+                    message="Interrupted",
+                    style="warning",
+                ))
+                terminal_error = e
+            except Exception as e:
+                # Permanent INFO-level log of the wrapped error text at
+                # emit time.  Lets consumers verify end-to-end that the
+                # client-facing ErrorEvent payload carries the
+                # vendor-correct message (Fix #1a in PR #118) without
+                # needing to parse the binary IPC frame separately.
+                # Greppable token: MODEL_THREAD_TERMINAL_ERROR.
+                #
+                # RUNNER-SIDE FRAMES, when the failure came from across the
+                # RPC boundary.  The runner sanitizes and ships them in
+                # ``ErrorPayload.traceback``; ``RunnerCallError`` now carries
+                # them here.  Without this the crash reached every consumer
+                # as ONE SANITIZED LINE -- exception type and message intact,
+                # frames gone -- and the line reads like a finished error, so
+                # a reader assumes they have the wrong log rather than that
+                # the frames were dropped.
+                #
+                # They go to BOTH witnesses on purpose: the log for whoever
+                # is on the machine, ``details`` for a client that is not.
+                # OUR PLUMBING FAILING IS NOT THE AGENT FAILING.
+                #
+                # This handler terminates the session for anything it catches.
+                # A ``RunnerRPCTimeout`` is the daemon's own transport --
+                # typically its event loop not scheduling a coroutine -- and
+                # the session behind it is healthy.  Terminating for one
+                # killed a cascade half mid-run, twice on two builds: the
+                # cascade policy unloads on reason=error, the session goes
+                # cold, and a cold sibling is not woken by a sibling message,
+                # so the surviving half sent into a corpse for the rest of the
+                # run.
+                #
+                # Enumerating what must NOT terminate, rather than what must:
+                # a framework-internal type nobody listed here still dies (the
+                # status quo), whereas listing what must terminate would let
+                # an unlisted PROVIDER error survive and COMPLETION_NUDGE
+                # cycle on it -- the bug this terminal path exists to stop.
+                from server.runner_rpc_client import RunnerRPCTimeout
+
+                if isinstance(e, RunnerRPCTimeout):
+                    logger.warning(
+                        "MODEL_THREAD_TRANSPORT_ERROR error_type=%s error=%s "
+                        "-- the TURN failed; the SESSION stays loaded. This "
+                        "is daemon-side plumbing, not the agent.",
+                        type(e).__name__, str(e),
+                    )
+                    # #856: a lost dispatch carries whether the work MAY
+                    # ALREADY HAVE RUN, and that decides whether sending
+                    # the turn again is safe or duplicates side effects
+                    # that already happened.  It rides ``details``, which
+                    # is the field documented as "what a driver branches
+                    # on" while ``error`` stays the human sentence -- the
+                    # same shape ``SessionRefused.may_exist`` takes, and
+                    # for the same reason.
+                    #
+                    # NOT ``recoverable``.  In this tree that flag means
+                    # "this session can continue" (every recoverable=False
+                    # site is a config or provider-connect failure that
+                    # ends initialisation), and the whole point of sparing
+                    # a RunnerRPCTimeout here is that the session DOES
+                    # continue.  Flipping it to encode retry-safety would
+                    # assert something false about session viability to
+                    # every existing consumer.
+                    server.emit(ErrorEvent(
+                        error=str(e),
+                        error_type=type(e).__name__,
+                        recoverable=True,
+                        details=_transport_error_details(e),
+                    ))
+                    # RETURN.  Without it the terminal path below runs anyway:
+                    # ``terminal_error = e`` is reached unconditionally and the
+                    # finally takes the termination branch, so the session dies
+                    # exactly as before with a better log line above it.  #628
+                    # shipped that way -- the comment described the control
+                    # flow and nothing implemented it -- and a cascade half
+                    # still died 3.5 minutes in, WARNING and INFO one
+                    # millisecond apart on the same exception.
+                    #
+                    # ``return`` from inside ``except`` still runs the
+                    # ``finally``, which is the point: the turn winds down its
+                    # ordinary way (pending continuation, status) with
+                    # ``terminal_error`` left None, so the session stays
+                    # loaded.  Re-raising instead would run the finally and
+                    # then escape the thread target unhandled.
+                    return
+
+                _runner_tb = getattr(e, "traceback_text", None)
+                logger.info(
+                    "MODEL_THREAD_TERMINAL_ERROR error_type=%s error=%s",
+                    type(e).__name__, str(e),
+                )
+                if _runner_tb:
+                    logger.error(
+                        "MODEL_THREAD_TERMINAL_ERROR runner traceback:\n%s",
+                        _runner_tb,
+                    )
+                server.emit(ErrorEvent(
+                    error=str(e),
+                    error_type=type(e).__name__,
+                    details=({"runner_traceback": _runner_tb}
+                             if _runner_tb else None),
+                ))
+                terminal_error = e
+            finally:
+                # No ``return`` may live in here -- see ``_finish_turn``
+                # above and #1077.  Anything in flight propagates.
+                _finish_turn()
 
         self._model_thread = threading.Thread(target=model_thread, daemon=True)
         self._model_thread.start()

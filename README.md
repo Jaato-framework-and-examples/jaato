@@ -25,11 +25,11 @@
 ```bash
 jaato-scaffold integration claude-code  # install under ~/.claude/skills/
 jaato-scaffold integration pi           # install under ~/.pi/agent/skills/
-jaato-scaffold explain                   # what the framework offers, right now
-jaato-scaffold new client ...       # a runnable client, valid by construction
-jaato-scaffold validate <profile>   # lint an agent profile vs the live registry
-jaato-doctor   --workspace .        # preflight before connect()
-jaato-doctor   --session latest     # debug a running session (workspace / path-tool failures)
+jaato-scaffold explain                  # what the framework offers, right now
+jaato-scaffold new client ...           # a runnable client, valid by construction
+jaato-scaffold validate <profile>       # lint an agent profile vs the live registry
+jaato-doctor   --workspace .            # preflight before connect()
+jaato-doctor   --session latest         # debug a running session (workspace / path-tool failures)
 ```
 
 See the **Developer Tooling** section below for the full surface.

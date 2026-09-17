@@ -142,6 +142,11 @@ export async function createWorkspace(name: string): Promise<void> {
   await getClient().sendRawEvent({ type: EventTypeValue.WORKSPACE_CREATE_REQUEST, name });
 }
 
+/** ``workspace.delete`` (protocol 1.13): the daemon answers with ``workspace.deleted``. */
+export async function deleteWorkspace(name: string): Promise<void> {
+  await getClient().sendRawEvent({ type: EventTypeValue.WORKSPACE_DELETE_REQUEST, name });
+}
+
 export async function updateConfig(cfg: { provider?: string; model?: string; api_key?: string }): Promise<void> {
   await getClient().sendRawEvent({ type: EventTypeValue.CONFIG_UPDATE_REQUEST, ...cfg });
 }

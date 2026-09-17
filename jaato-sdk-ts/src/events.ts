@@ -93,12 +93,15 @@ export type JaatoEvents =
   | WorkspaceListEvent
   | WorkspaceCreateRequest
   | WorkspaceCreatedEvent
+  | WorkspaceDeleteRequest
+  | WorkspaceDeletedEvent
   | WorkspaceSelectRequest
   | ConfigStatusEvent
   | ConfigUpdateRequest
   | ConfigUpdatedEvent
   | WorkspaceFilesChangedEvent
   | WorkspaceFilesSnapshotEvent
+  | WorkspaceIgnoreResultEvent
   | StageFilesRequest
   | StageFilesEvent
   | PeerHeartbeatEvent
@@ -214,6 +217,8 @@ export type EventType =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -222,6 +227,7 @@ export type EventType =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -340,6 +346,8 @@ export type EventType1 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -348,6 +356,7 @@ export type EventType1 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -471,6 +480,8 @@ export type EventType2 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -479,6 +490,7 @@ export type EventType2 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -600,6 +612,8 @@ export type EventType3 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -608,6 +622,7 @@ export type EventType3 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -728,6 +743,8 @@ export type EventType4 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -736,6 +753,7 @@ export type EventType4 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -864,6 +882,8 @@ export type EventType5 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -872,6 +892,7 @@ export type EventType5 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -997,6 +1018,8 @@ export type EventType6 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -1005,6 +1028,7 @@ export type EventType6 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -1129,6 +1153,8 @@ export type EventType7 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -1137,6 +1163,7 @@ export type EventType7 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -1255,6 +1282,8 @@ export type EventType8 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -1263,6 +1292,7 @@ export type EventType8 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -1385,6 +1415,8 @@ export type EventType9 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -1393,6 +1425,7 @@ export type EventType9 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -1513,6 +1546,8 @@ export type EventType10 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -1521,6 +1556,7 @@ export type EventType10 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -1650,6 +1686,8 @@ export type EventType11 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -1658,6 +1696,7 @@ export type EventType11 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -1783,6 +1822,8 @@ export type EventType12 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -1791,6 +1832,7 @@ export type EventType12 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -1918,6 +1960,8 @@ export type EventType13 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -1926,6 +1970,7 @@ export type EventType13 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -2056,6 +2101,8 @@ export type EventType14 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -2064,6 +2111,7 @@ export type EventType14 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -2189,6 +2237,8 @@ export type EventType15 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -2197,6 +2247,7 @@ export type EventType15 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -2316,6 +2367,8 @@ export type EventType16 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -2324,6 +2377,7 @@ export type EventType16 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -2446,6 +2500,8 @@ export type EventType17 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -2454,6 +2510,7 @@ export type EventType17 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -2576,6 +2633,8 @@ export type EventType18 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -2584,6 +2643,7 @@ export type EventType18 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -2712,6 +2772,8 @@ export type EventType19 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -2720,6 +2782,7 @@ export type EventType19 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -2841,6 +2904,8 @@ export type EventType20 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -2849,6 +2914,7 @@ export type EventType20 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -2974,6 +3040,8 @@ export type EventType21 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -2982,6 +3050,7 @@ export type EventType21 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -3102,6 +3171,8 @@ export type EventType22 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -3110,6 +3181,7 @@ export type EventType22 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -3231,6 +3303,8 @@ export type EventType23 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -3239,6 +3313,7 @@ export type EventType23 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -3360,6 +3435,8 @@ export type EventType24 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -3368,6 +3445,7 @@ export type EventType24 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -3487,6 +3565,8 @@ export type EventType25 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -3495,6 +3575,7 @@ export type EventType25 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -3619,6 +3700,8 @@ export type EventType26 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -3627,6 +3710,7 @@ export type EventType26 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -3747,6 +3831,8 @@ export type EventType27 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -3755,6 +3841,7 @@ export type EventType27 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -3874,6 +3961,8 @@ export type EventType28 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -3882,6 +3971,7 @@ export type EventType28 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -4009,6 +4099,8 @@ export type EventType29 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -4017,6 +4109,7 @@ export type EventType29 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -4138,6 +4231,8 @@ export type EventType30 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -4146,6 +4241,7 @@ export type EventType30 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -4268,6 +4364,8 @@ export type EventType31 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -4276,6 +4374,7 @@ export type EventType31 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -4413,6 +4512,8 @@ export type EventType32 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -4421,6 +4522,7 @@ export type EventType32 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -4539,6 +4641,8 @@ export type EventType33 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -4547,6 +4651,7 @@ export type EventType33 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -4682,6 +4787,8 @@ export type EventType34 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -4690,6 +4797,7 @@ export type EventType34 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -4812,6 +4920,8 @@ export type EventType35 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -4820,6 +4930,7 @@ export type EventType35 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -4938,6 +5049,8 @@ export type EventType36 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -4946,6 +5059,7 @@ export type EventType36 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -5072,6 +5186,8 @@ export type EventType37 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -5080,6 +5196,7 @@ export type EventType37 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -5202,6 +5319,8 @@ export type EventType38 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -5210,6 +5329,7 @@ export type EventType38 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -5329,6 +5449,8 @@ export type EventType39 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -5337,6 +5459,7 @@ export type EventType39 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -5455,6 +5578,8 @@ export type EventType40 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -5463,6 +5588,7 @@ export type EventType40 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -5585,6 +5711,8 @@ export type EventType41 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -5593,6 +5721,7 @@ export type EventType41 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -5717,6 +5846,8 @@ export type EventType42 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -5725,6 +5856,7 @@ export type EventType42 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -5847,6 +5979,8 @@ export type EventType43 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -5855,6 +5989,7 @@ export type EventType43 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -5975,6 +6110,8 @@ export type EventType44 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -5983,6 +6120,7 @@ export type EventType44 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -6113,6 +6251,8 @@ export type EventType45 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -6121,6 +6261,7 @@ export type EventType45 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -6260,6 +6401,8 @@ export type EventType46 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -6268,6 +6411,7 @@ export type EventType46 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -6388,6 +6532,8 @@ export type EventType47 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -6396,6 +6542,7 @@ export type EventType47 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -6516,6 +6663,8 @@ export type EventType48 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -6524,6 +6673,7 @@ export type EventType48 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -6644,6 +6794,8 @@ export type EventType49 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -6652,6 +6804,7 @@ export type EventType49 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -6770,6 +6923,8 @@ export type EventType50 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -6778,6 +6933,7 @@ export type EventType50 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -6921,6 +7077,8 @@ export type EventType51 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -6929,6 +7087,7 @@ export type EventType51 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -7051,6 +7210,8 @@ export type EventType52 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -7059,6 +7220,7 @@ export type EventType52 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -7181,6 +7343,8 @@ export type EventType53 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -7189,6 +7353,7 @@ export type EventType53 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -7309,6 +7474,8 @@ export type EventType54 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -7317,6 +7484,7 @@ export type EventType54 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -7435,6 +7603,8 @@ export type EventType55 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -7443,6 +7613,7 @@ export type EventType55 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -7561,6 +7732,8 @@ export type EventType56 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -7569,6 +7742,7 @@ export type EventType56 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -7688,6 +7862,8 @@ export type EventType57 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -7696,6 +7872,7 @@ export type EventType57 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -7818,6 +7995,8 @@ export type EventType58 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -7826,6 +8005,7 @@ export type EventType58 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -7944,6 +8124,8 @@ export type EventType59 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -7952,6 +8134,7 @@ export type EventType59 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -8069,6 +8252,8 @@ export type EventType60 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -8077,6 +8262,7 @@ export type EventType60 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -8197,6 +8383,8 @@ export type EventType61 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -8205,6 +8393,7 @@ export type EventType61 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -8322,6 +8511,8 @@ export type EventType62 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -8330,6 +8521,7 @@ export type EventType62 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -8451,6 +8643,8 @@ export type EventType63 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -8459,6 +8653,7 @@ export type EventType63 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -8576,6 +8771,8 @@ export type EventType64 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -8584,6 +8781,7 @@ export type EventType64 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -8702,6 +8900,8 @@ export type EventType65 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -8710,6 +8910,7 @@ export type EventType65 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -8830,6 +9031,8 @@ export type EventType66 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -8838,6 +9041,7 @@ export type EventType66 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -8958,6 +9162,8 @@ export type EventType67 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -8966,6 +9172,7 @@ export type EventType67 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -9086,6 +9293,8 @@ export type EventType68 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -9094,6 +9303,7 @@ export type EventType68 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -9212,6 +9422,8 @@ export type EventType69 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -9220,6 +9432,7 @@ export type EventType69 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -9344,6 +9557,8 @@ export type EventType70 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -9352,6 +9567,7 @@ export type EventType70 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -9479,6 +9695,8 @@ export type EventType71 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -9487,6 +9705,7 @@ export type EventType71 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -9606,6 +9825,8 @@ export type EventType72 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -9614,6 +9835,7 @@ export type EventType72 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -9732,6 +9954,8 @@ export type EventType73 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -9740,6 +9964,7 @@ export type EventType73 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -9865,6 +10090,8 @@ export type EventType74 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -9873,6 +10100,7 @@ export type EventType74 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -9992,6 +10220,8 @@ export type EventType75 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -10000,6 +10230,7 @@ export type EventType75 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -10120,6 +10351,8 @@ export type EventType76 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -10128,6 +10361,7 @@ export type EventType76 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -10245,6 +10479,8 @@ export type EventType77 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -10253,6 +10489,7 @@ export type EventType77 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -10374,6 +10611,8 @@ export type EventType78 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -10382,6 +10621,7 @@ export type EventType78 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -10500,6 +10740,8 @@ export type EventType79 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -10508,6 +10750,7 @@ export type EventType79 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -10627,6 +10870,8 @@ export type EventType80 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -10635,6 +10880,7 @@ export type EventType80 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -10753,6 +10999,8 @@ export type EventType81 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -10761,6 +11009,7 @@ export type EventType81 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -10795,12 +11044,9 @@ export type EventType81 =
   | "gates.snapshot";
 export type Timestamp81 = string;
 export type SessionId81 = string;
-export type Workspace = string;
-export type Configured = boolean;
-export type Provider1 = string | null;
-export type Model1 = string | null;
-export type AvailableProviders = string[];
-export type MissingFields = string[];
+export type Name6 = string;
+export type Ok = boolean;
+export type Error7 = string;
 /**
  * All event types in the protocol.
  */
@@ -10884,6 +11130,8 @@ export type EventType82 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -10892,6 +11140,7 @@ export type EventType82 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -10926,9 +11175,7 @@ export type EventType82 =
   | "gates.snapshot";
 export type Timestamp82 = string;
 export type SessionId82 = string;
-export type Provider2 = string;
-export type Model2 = string | null;
-export type ApiKey = string | null;
+export type Name7 = string;
 /**
  * All event types in the protocol.
  */
@@ -11012,6 +11259,8 @@ export type EventType83 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -11020,6 +11269,7 @@ export type EventType83 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -11055,10 +11305,11 @@ export type EventType83 =
 export type Timestamp83 = string;
 export type SessionId83 = string;
 export type Workspace1 = string;
-export type Provider3 = string;
-export type Model3 = string | null;
-export type Success3 = boolean;
-export type Error7 = string | null;
+export type Configured = boolean;
+export type Provider1 = string | null;
+export type Model1 = string | null;
+export type AvailableProviders = string[];
+export type MissingFields = string[];
 /**
  * All event types in the protocol.
  */
@@ -11142,6 +11393,8 @@ export type EventType84 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -11150,6 +11403,7 @@ export type EventType84 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -11184,9 +11438,9 @@ export type EventType84 =
   | "gates.snapshot";
 export type Timestamp84 = string;
 export type SessionId84 = string;
-export type Changes = {
-  [k: string]: string;
-}[];
+export type Provider2 = string;
+export type Model2 = string | null;
+export type ApiKey = string | null;
 /**
  * All event types in the protocol.
  */
@@ -11270,6 +11524,8 @@ export type EventType85 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -11278,6 +11534,7 @@ export type EventType85 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -11312,10 +11569,11 @@ export type EventType85 =
   | "gates.snapshot";
 export type Timestamp85 = string;
 export type SessionId85 = string;
-export type Files = {
-  [k: string]: string;
-}[];
-export type Total = number;
+export type Workspace2 = string;
+export type Provider3 = string;
+export type Model3 = string | null;
+export type Success3 = boolean;
+export type Error8 = string | null;
 /**
  * All event types in the protocol.
  */
@@ -11399,6 +11657,8 @@ export type EventType86 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -11407,6 +11667,7 @@ export type EventType86 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -11441,12 +11702,9 @@ export type EventType86 =
   | "gates.snapshot";
 export type Timestamp86 = string;
 export type SessionId86 = string;
-export type WorkspaceId = string;
-export type Name6 = string;
-export type Size = number;
-export type ContentType = string | null;
-export type Mode1 = number | null;
-export type Files1 = StagedFileSpec[];
+export type Changes = {
+  [k: string]: string;
+}[];
 /**
  * All event types in the protocol.
  */
@@ -11530,6 +11788,8 @@ export type EventType87 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -11538,6 +11798,7 @@ export type EventType87 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -11572,11 +11833,10 @@ export type EventType87 =
   | "gates.snapshot";
 export type Timestamp87 = string;
 export type SessionId87 = string;
-export type WorkspaceId1 = string;
-export type Staged = string[];
-export type Failed = {
+export type Files = {
   [k: string]: string;
 }[];
+export type Total = number;
 /**
  * All event types in the protocol.
  */
@@ -11660,6 +11920,8 @@ export type EventType88 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -11668,6 +11930,7 @@ export type EventType88 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -11702,20 +11965,11 @@ export type EventType88 =
   | "gates.snapshot";
 export type Timestamp88 = string;
 export type SessionId88 = string;
-export type ServerId = string;
-export type ServerName = string;
-export type ServerVersion = string;
-export type ActiveSessions = number;
-export type ActiveAgents = number;
-export type AvailableProviders1 = string[];
-export type AvailableModels1 = string[];
-export type Tags = string[];
-export type CpuPercent = number;
-export type MemoryPercent = number;
-export type UptimeSeconds = number;
-export type TrustState = string;
-export type SuccessRate1H = number;
-export type EscalatedTools = number;
+export type Path1 = string;
+export type Ignored = boolean;
+export type Ok1 = boolean;
+export type Error9 = string;
+export type GitignorePath = string;
 /**
  * All event types in the protocol.
  */
@@ -11799,6 +12053,8 @@ export type EventType89 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -11807,6 +12063,7 @@ export type EventType89 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -11841,17 +12098,12 @@ export type EventType89 =
   | "gates.snapshot";
 export type Timestamp89 = string;
 export type SessionId89 = string;
-export type RequestId22 = string;
-export type OriginServer = string;
-export type AgentName1 = string;
-export type Task = string;
-export type Context1 = string;
-export type ProfileJson = string;
-export type InlineConfigJson = string;
-export type WorkspaceGitUrl = string;
-export type WorkspaceBranch = string;
-export type WorkspaceCommit = string;
-export type WorkspaceTempBranch = string;
+export type WorkspaceId = string;
+export type Name8 = string;
+export type Size = number;
+export type ContentType = string | null;
+export type Mode1 = number | null;
+export type Files1 = StagedFileSpec[];
 /**
  * All event types in the protocol.
  */
@@ -11935,6 +12187,8 @@ export type EventType90 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -11943,6 +12197,7 @@ export type EventType90 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -11977,8 +12232,11 @@ export type EventType90 =
   | "gates.snapshot";
 export type Timestamp90 = string;
 export type SessionId90 = string;
-export type RequestId23 = string;
-export type RemoteAgentId = string;
+export type WorkspaceId1 = string;
+export type Staged = string[];
+export type Failed = {
+  [k: string]: string;
+}[];
 /**
  * All event types in the protocol.
  */
@@ -12062,6 +12320,8 @@ export type EventType91 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -12070,6 +12330,7 @@ export type EventType91 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -12104,8 +12365,20 @@ export type EventType91 =
   | "gates.snapshot";
 export type Timestamp91 = string;
 export type SessionId91 = string;
-export type RequestId24 = string;
-export type Reason1 = string;
+export type ServerId = string;
+export type ServerName = string;
+export type ServerVersion = string;
+export type ActiveSessions = number;
+export type ActiveAgents = number;
+export type AvailableProviders1 = string[];
+export type AvailableModels1 = string[];
+export type Tags = string[];
+export type CpuPercent = number;
+export type MemoryPercent = number;
+export type UptimeSeconds = number;
+export type TrustState = string;
+export type SuccessRate1H = number;
+export type EscalatedTools = number;
 /**
  * All event types in the protocol.
  */
@@ -12189,6 +12462,8 @@ export type EventType92 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -12197,6 +12472,7 @@ export type EventType92 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -12231,10 +12507,17 @@ export type EventType92 =
   | "gates.snapshot";
 export type Timestamp92 = string;
 export type SessionId92 = string;
-export type RequestId25 = string;
-export type RemoteAgentId1 = string;
-export type Text4 = string;
-export type Source1 = string;
+export type RequestId22 = string;
+export type OriginServer = string;
+export type AgentName1 = string;
+export type Task = string;
+export type Context1 = string;
+export type ProfileJson = string;
+export type InlineConfigJson = string;
+export type WorkspaceGitUrl = string;
+export type WorkspaceBranch = string;
+export type WorkspaceCommit = string;
+export type WorkspaceTempBranch = string;
 /**
  * All event types in the protocol.
  */
@@ -12318,6 +12601,8 @@ export type EventType93 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -12326,6 +12611,7 @@ export type EventType93 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -12360,12 +12646,8 @@ export type EventType93 =
   | "gates.snapshot";
 export type Timestamp93 = string;
 export type SessionId93 = string;
-export type RequestId26 = string;
-export type RemoteAgentId2 = string;
-export type Success4 = boolean;
-export type Summary = string;
-export type Error8 = string;
-export type WorkspaceModified = boolean;
+export type RequestId23 = string;
+export type RemoteAgentId = string;
 /**
  * All event types in the protocol.
  */
@@ -12449,6 +12731,8 @@ export type EventType94 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -12457,6 +12741,7 @@ export type EventType94 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -12491,8 +12776,8 @@ export type EventType94 =
   | "gates.snapshot";
 export type Timestamp94 = string;
 export type SessionId94 = string;
-export type RequestId27 = string;
-export type RemoteAgentId3 = string;
+export type RequestId24 = string;
+export type Reason1 = string;
 /**
  * All event types in the protocol.
  */
@@ -12576,6 +12861,8 @@ export type EventType95 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -12584,6 +12871,7 @@ export type EventType95 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -12618,8 +12906,10 @@ export type EventType95 =
   | "gates.snapshot";
 export type Timestamp95 = string;
 export type SessionId95 = string;
-export type RequestId28 = string;
-export type RemoteAgentId4 = string;
+export type RequestId25 = string;
+export type RemoteAgentId1 = string;
+export type Text4 = string;
+export type Source1 = string;
 /**
  * All event types in the protocol.
  */
@@ -12703,6 +12993,8 @@ export type EventType96 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -12711,6 +13003,7 @@ export type EventType96 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -12745,10 +13038,12 @@ export type EventType96 =
   | "gates.snapshot";
 export type Timestamp96 = string;
 export type SessionId96 = string;
-export type GateName = string;
-export type TenantId = string;
-export type Owner = string;
-export type AnnouncedAt = string;
+export type RequestId26 = string;
+export type RemoteAgentId2 = string;
+export type Success4 = boolean;
+export type Summary = string;
+export type Error10 = string;
+export type WorkspaceModified = boolean;
 /**
  * All event types in the protocol.
  */
@@ -12832,6 +13127,8 @@ export type EventType97 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -12840,6 +13137,7 @@ export type EventType97 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -12874,14 +13172,8 @@ export type EventType97 =
   | "gates.snapshot";
 export type Timestamp97 = string;
 export type SessionId97 = string;
-export type GateName1 = string;
-export type TenantId1 = string;
-export type Owner1 = string;
-export type Outcome = {
-  [k: string]: unknown;
-} | null;
-export type ReleasedAt = string;
-export type WasAnnounced = boolean;
+export type RequestId27 = string;
+export type RemoteAgentId3 = string;
 /**
  * All event types in the protocol.
  */
@@ -12965,6 +13257,8 @@ export type EventType98 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -12973,6 +13267,7 @@ export type EventType98 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -13007,17 +13302,8 @@ export type EventType98 =
   | "gates.snapshot";
 export type Timestamp98 = string;
 export type SessionId98 = string;
-export type GateName2 = string;
-export type TenantId2 = string;
-export type State = string;
-export type Owner2 = string | null;
-export type Intent1 = {
-  [k: string]: unknown;
-} | null;
-export type AcquiredAt = string | null;
-export type ExpiresAt = string | null;
-export type Gates = GateState[];
-export type SnapshotAt = string;
+export type RequestId28 = string;
+export type RemoteAgentId4 = string;
 /**
  * All event types in the protocol.
  */
@@ -13101,6 +13387,8 @@ export type EventType99 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -13109,6 +13397,7 @@ export type EventType99 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -13143,13 +13432,10 @@ export type EventType99 =
   | "gates.snapshot";
 export type Timestamp99 = string;
 export type SessionId99 = string;
-export type Text5 = string;
-export type SourceType = string;
-export type SourceId = string | null;
-export type Attachments1 = {
-  [k: string]: unknown;
-}[];
-export type RequestId29 = string | null;
+export type GateName = string;
+export type TenantId = string;
+export type Owner = string;
+export type AnnouncedAt = string;
 /**
  * All event types in the protocol.
  */
@@ -13233,6 +13519,8 @@ export type EventType100 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -13241,6 +13529,7 @@ export type EventType100 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -13275,9 +13564,14 @@ export type EventType100 =
   | "gates.snapshot";
 export type Timestamp100 = string;
 export type SessionId100 = string;
-export type RequestId30 = string;
-export type Status3 = string;
-export type Detail = string | null;
+export type GateName1 = string;
+export type TenantId1 = string;
+export type Owner1 = string;
+export type Outcome = {
+  [k: string]: unknown;
+} | null;
+export type ReleasedAt = string;
+export type WasAnnounced = boolean;
 /**
  * All event types in the protocol.
  */
@@ -13361,6 +13655,8 @@ export type EventType101 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -13369,6 +13665,7 @@ export type EventType101 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -13403,13 +13700,17 @@ export type EventType101 =
   | "gates.snapshot";
 export type Timestamp101 = string;
 export type SessionId101 = string;
-export type RequestId31 = string;
-export type Messages =
-  | {
-      [k: string]: unknown;
-    }[]
-  | null;
-export type TimeoutSeconds = number;
+export type GateName2 = string;
+export type TenantId2 = string;
+export type State = string;
+export type Owner2 = string | null;
+export type Intent1 = {
+  [k: string]: unknown;
+} | null;
+export type AcquiredAt = string | null;
+export type ExpiresAt = string | null;
+export type Gates = GateState[];
+export type SnapshotAt = string;
 /**
  * All event types in the protocol.
  */
@@ -13493,6 +13794,8 @@ export type EventType102 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -13501,6 +13804,7 @@ export type EventType102 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -13535,9 +13839,13 @@ export type EventType102 =
   | "gates.snapshot";
 export type Timestamp102 = string;
 export type SessionId102 = string;
-export type RequestId32 = string;
-export type ResponseText = string;
-export type Error9 = string;
+export type Text5 = string;
+export type SourceType = string;
+export type SourceId = string | null;
+export type Attachments1 = {
+  [k: string]: unknown;
+}[];
+export type RequestId29 = string | null;
 /**
  * All event types in the protocol.
  */
@@ -13621,6 +13929,8 @@ export type EventType103 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -13629,6 +13939,7 @@ export type EventType103 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -13663,10 +13974,9 @@ export type EventType103 =
   | "gates.snapshot";
 export type Timestamp103 = string;
 export type SessionId103 = string;
-export type RequestId33 = string;
-export type AfterMessage = number | null;
-export type AfterToolCall = string | null;
-export type AfterTimestamp = string | null;
+export type RequestId30 = string;
+export type Status3 = string;
+export type Detail = string | null;
 /**
  * All event types in the protocol.
  */
@@ -13750,6 +14060,8 @@ export type EventType104 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -13758,6 +14070,7 @@ export type EventType104 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -13792,9 +14105,13 @@ export type EventType104 =
   | "gates.snapshot";
 export type Timestamp104 = string;
 export type SessionId104 = string;
-export type RequestId34 = string;
-export type ForkIndex = number;
-export type Error10 = string;
+export type RequestId31 = string;
+export type Messages =
+  | {
+      [k: string]: unknown;
+    }[]
+  | null;
+export type TimeoutSeconds = number;
 /**
  * All event types in the protocol.
  */
@@ -13878,6 +14195,8 @@ export type EventType105 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -13886,6 +14205,7 @@ export type EventType105 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -13920,11 +14240,9 @@ export type EventType105 =
   | "gates.snapshot";
 export type Timestamp105 = string;
 export type SessionId105 = string;
-export type WakeRef = string;
-export type Outcome1 = string;
-export type Detail1 = string;
-export type ExpiresAt1 = number;
-export type Endpoint = string;
+export type RequestId32 = string;
+export type ResponseText = string;
+export type Error11 = string;
 /**
  * All event types in the protocol.
  */
@@ -14008,6 +14326,8 @@ export type EventType106 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -14016,6 +14336,7 @@ export type EventType106 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -14050,8 +14371,10 @@ export type EventType106 =
   | "gates.snapshot";
 export type Timestamp106 = string;
 export type SessionId106 = string;
-export type WakeRef1 = string;
-export type Source2 = string;
+export type RequestId33 = string;
+export type AfterMessage = number | null;
+export type AfterToolCall = string | null;
+export type AfterTimestamp = string | null;
 /**
  * All event types in the protocol.
  */
@@ -14135,6 +14458,8 @@ export type EventType107 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -14143,6 +14468,7 @@ export type EventType107 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -14177,8 +14503,9 @@ export type EventType107 =
   | "gates.snapshot";
 export type Timestamp107 = string;
 export type SessionId107 = string;
-export type Tools3 = string[];
-export type Patterns = string[];
+export type RequestId34 = string;
+export type ForkIndex = number;
+export type Error12 = string;
 /**
  * All event types in the protocol.
  */
@@ -14262,6 +14589,8 @@ export type EventType108 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -14270,6 +14599,7 @@ export type EventType108 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -14304,8 +14634,11 @@ export type EventType108 =
   | "gates.snapshot";
 export type Timestamp108 = string;
 export type SessionId108 = string;
-export type Tools4 = string[];
-export type Patterns1 = string[];
+export type WakeRef = string;
+export type Outcome1 = string;
+export type Detail1 = string;
+export type ExpiresAt1 = number;
+export type Endpoint = string;
 /**
  * All event types in the protocol.
  */
@@ -14389,6 +14722,8 @@ export type EventType109 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -14397,6 +14732,7 @@ export type EventType109 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -14431,9 +14767,8 @@ export type EventType109 =
   | "gates.snapshot";
 export type Timestamp109 = string;
 export type SessionId109 = string;
-export type Target = string;
-export type Tools5 = string[];
-export type Patterns2 = string[];
+export type WakeRef1 = string;
+export type Source2 = string;
 /**
  * All event types in the protocol.
  */
@@ -14517,6 +14852,8 @@ export type EventType110 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -14525,6 +14862,7 @@ export type EventType110 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -14559,7 +14897,8 @@ export type EventType110 =
   | "gates.snapshot";
 export type Timestamp110 = string;
 export type SessionId110 = string;
-export type Target1 = string;
+export type Tools3 = string[];
+export type Patterns = string[];
 /**
  * All event types in the protocol.
  */
@@ -14643,6 +14982,8 @@ export type EventType111 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -14651,6 +14992,7 @@ export type EventType111 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -14685,7 +15027,8 @@ export type EventType111 =
   | "gates.snapshot";
 export type Timestamp111 = string;
 export type SessionId111 = string;
-export type Policy = string;
+export type Tools4 = string[];
+export type Patterns1 = string[];
 /**
  * All event types in the protocol.
  */
@@ -14769,6 +15112,8 @@ export type EventType112 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -14777,6 +15122,7 @@ export type EventType112 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -14811,7 +15157,9 @@ export type EventType112 =
   | "gates.snapshot";
 export type Timestamp112 = string;
 export type SessionId112 = string;
-export type RequestId35 = string;
+export type Target = string;
+export type Tools5 = string[];
+export type Patterns2 = string[];
 /**
  * All event types in the protocol.
  */
@@ -14895,6 +15243,8 @@ export type EventType113 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -14903,6 +15253,7 @@ export type EventType113 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -14937,15 +15288,7 @@ export type EventType113 =
   | "gates.snapshot";
 export type Timestamp113 = string;
 export type SessionId113 = string;
-export type RequestId36 = string;
-export type DefaultPolicy = string;
-export type SessionDefaultPolicy = string | null;
-export type WhitelistTools = string[];
-export type WhitelistPatterns = string[];
-export type BlacklistTools = string[];
-export type BlacklistPatterns = string[];
-export type SessionWhitelist = string[];
-export type SessionBlacklist = string[];
+export type Target1 = string;
 /**
  * All event types in the protocol.
  */
@@ -15029,6 +15372,8 @@ export type EventType114 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -15037,6 +15382,7 @@ export type EventType114 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -15071,10 +15417,7 @@ export type EventType114 =
   | "gates.snapshot";
 export type Timestamp114 = string;
 export type SessionId114 = string;
-export type RequestId37 = string;
-export type User = string;
-export type TtlSeconds = number;
-export type SingleUse = boolean;
+export type Policy = string;
 /**
  * All event types in the protocol.
  */
@@ -15158,6 +15501,8 @@ export type EventType115 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -15166,6 +15511,7 @@ export type EventType115 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -15200,13 +15546,7 @@ export type EventType115 =
   | "gates.snapshot";
 export type Timestamp115 = string;
 export type SessionId115 = string;
-export type RequestId38 = string;
-export type Status4 = string;
-export type Ticket = string;
-export type Qualified = string;
-export type AppId = string;
-export type ExpiresAt2 = string;
-export type Detail2 = string | null;
+export type RequestId35 = string;
 /**
  * All event types in the protocol.
  */
@@ -15290,6 +15630,8 @@ export type EventType116 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -15298,6 +15640,7 @@ export type EventType116 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -15332,9 +15675,15 @@ export type EventType116 =
   | "gates.snapshot";
 export type Timestamp116 = string;
 export type SessionId116 = string;
-export type RequestId39 = string;
-export type Ticket1 = string;
-export type User1 = string;
+export type RequestId36 = string;
+export type DefaultPolicy = string;
+export type SessionDefaultPolicy = string | null;
+export type WhitelistTools = string[];
+export type WhitelistPatterns = string[];
+export type BlacklistTools = string[];
+export type BlacklistPatterns = string[];
+export type SessionWhitelist = string[];
+export type SessionBlacklist = string[];
 /**
  * All event types in the protocol.
  */
@@ -15418,6 +15767,8 @@ export type EventType117 =
   | "workspace.create"
   | "workspace.created"
   | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -15426,6 +15777,7 @@ export type EventType117 =
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
+  | "workspace.ignore.result"
   | "event.external"
   | "inject_prompt.request"
   | "inject_prompt.result"
@@ -15460,6 +15812,404 @@ export type EventType117 =
   | "gates.snapshot";
 export type Timestamp117 = string;
 export type SessionId117 = string;
+export type RequestId37 = string;
+export type User = string;
+export type TtlSeconds = number;
+export type SingleUse = boolean;
+/**
+ * All event types in the protocol.
+ */
+export type EventType118 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp118 = string;
+export type SessionId118 = string;
+export type RequestId38 = string;
+export type Status4 = string;
+export type Ticket = string;
+export type Qualified = string;
+export type AppId = string;
+export type ExpiresAt2 = string;
+export type Detail2 = string | null;
+/**
+ * All event types in the protocol.
+ */
+export type EventType119 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp119 = string;
+export type SessionId119 = string;
+export type RequestId39 = string;
+export type Ticket1 = string;
+export type User1 = string;
+/**
+ * All event types in the protocol.
+ */
+export type EventType120 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp120 = string;
+export type SessionId120 = string;
 export type RequestId40 = string;
 export type Status5 = string;
 export type Revoked = number;
@@ -17012,6 +17762,14 @@ export interface WorkspaceCreateRequest {
 }
 /**
  * Response to workspace.create - new workspace created.
+ *
+ * ``workspace`` is the created entry as ``workspace.list`` would render it
+ * (name, path, ``configured``, ``owner``, ``last_accessed``), so a client
+ * can add the row without a second listing.  ``name`` and ``path`` repeat
+ * its two identifying fields for readers predating the dict.  The WS
+ * server used to send ONLY ``workspace=`` -- a field this model did not
+ * declare, dropped on ingest by ``extra='ignore'`` -- so every client
+ * learned of a created workspace as one with no name.
  */
 export interface WorkspaceCreatedEvent {
   type?: EventType79;
@@ -17019,24 +17777,59 @@ export interface WorkspaceCreatedEvent {
   session_id?: SessionId79;
   name?: Name4;
   path?: Path;
+  workspace?: Workspace;
+}
+export interface Workspace {
+  [k: string]: unknown;
 }
 /**
- * Client selects a workspace to use for the session.
+ * Client asks the daemon to delete a workspace it may see (protocol 1.13).
+ *
+ * Destructive: the client confirms before sending.  Answered by
+ * ``WorkspaceDeletedEvent``.
  */
-export interface WorkspaceSelectRequest {
+export interface WorkspaceDeleteRequest {
   type?: EventType80;
   timestamp?: Timestamp80;
   session_id?: SessionId80;
   name?: Name5;
 }
 /**
- * Response to workspace.select - configuration status of selected workspace.
+ * Answer to ``workspace.delete`` (protocol 1.13).
+ *
+ * One event whatever happened, because the client is a list that has to
+ * render *something* for the press: ``ok`` with the name on success;
+ * ``ok=False`` and the reason when the daemon refused -- the workspace
+ * belongs to another user, does not exist, still has loaded sessions or
+ * other clients selecting it, or the name left the root.  On success the
+ * directory and everything under it (persisted sessions included) is
+ * gone and the deleting client's selection of it is cleared.
  */
-export interface ConfigStatusEvent {
+export interface WorkspaceDeletedEvent {
   type?: EventType81;
   timestamp?: Timestamp81;
   session_id?: SessionId81;
-  workspace?: Workspace;
+  name?: Name6;
+  ok?: Ok;
+  error?: Error7;
+}
+/**
+ * Client selects a workspace to use for the session.
+ */
+export interface WorkspaceSelectRequest {
+  type?: EventType82;
+  timestamp?: Timestamp82;
+  session_id?: SessionId82;
+  name?: Name7;
+}
+/**
+ * Response to workspace.select - configuration status of selected workspace.
+ */
+export interface ConfigStatusEvent {
+  type?: EventType83;
+  timestamp?: Timestamp83;
+  session_id?: SessionId83;
+  workspace?: Workspace1;
   configured?: Configured;
   provider?: Provider1;
   model?: Model1;
@@ -17047,9 +17840,9 @@ export interface ConfigStatusEvent {
  * Client updates workspace configuration (provider, model, API key).
  */
 export interface ConfigUpdateRequest {
-  type?: EventType82;
-  timestamp?: Timestamp82;
-  session_id?: SessionId82;
+  type?: EventType84;
+  timestamp?: Timestamp84;
+  session_id?: SessionId84;
   provider?: Provider2;
   model?: Model2;
   api_key?: ApiKey;
@@ -17058,14 +17851,14 @@ export interface ConfigUpdateRequest {
  * Response to config.update - configuration was updated.
  */
 export interface ConfigUpdatedEvent {
-  type?: EventType83;
-  timestamp?: Timestamp83;
-  session_id?: SessionId83;
-  workspace?: Workspace1;
+  type?: EventType85;
+  timestamp?: Timestamp85;
+  session_id?: SessionId85;
+  workspace?: Workspace2;
   provider?: Provider3;
   model?: Model3;
   success?: Success3;
-  error?: Error7;
+  error?: Error8;
 }
 /**
  * Incremental workspace file change notification.
@@ -17081,9 +17874,9 @@ export interface ConfigUpdatedEvent {
  *     ``"deleted"``  – file was previously tracked and is now gone.
  */
 export interface WorkspaceFilesChangedEvent {
-  type?: EventType84;
-  timestamp?: Timestamp84;
-  session_id?: SessionId84;
+  type?: EventType86;
+  timestamp?: Timestamp86;
+  session_id?: SessionId86;
   changes?: Changes;
 }
 /**
@@ -17094,11 +17887,49 @@ export interface WorkspaceFilesChangedEvent {
  * replaying individual deltas.
  */
 export interface WorkspaceFilesSnapshotEvent {
-  type?: EventType85;
-  timestamp?: Timestamp85;
-  session_id?: SessionId85;
+  type?: EventType87;
+  timestamp?: Timestamp87;
+  session_id?: SessionId87;
   files?: Files;
   total?: Total;
+}
+/**
+ * Answer to ``workspace.ignore <path>`` (protocol 1.12).
+ *
+ * The TUI's workspace panel adds the entry under the cursor to the
+ * workspace's ``.gitignore`` — and removes it again with the same key —
+ * by writing the file itself, which it can because it runs on the host.
+ * A remote client (the web coding UI) cannot, so the daemon serves the
+ * same toggle as a command and answers with this event.  The edit is
+ * ``jaato_sdk.gitignore_toggle.toggle_gitignore_pattern`` on both routes,
+ * so the two clients cannot disagree about what one press does.
+ *
+ * The daemon's ``WorkspaceMonitor`` watches ``.gitignore`` and reloads its
+ * parser on the write, so the pattern applies to every LATER file event;
+ * an entry the panel already shows is not retroactively removed — that is
+ * what the client-side hide is for.
+ *
+ * Fields:
+ *     path: The entry as the caller sent it (a directory keeps its
+ *         trailing ``/``).
+ *     ignored: The entry's state AFTER the toggle — ``True`` when the line
+ *         was added, ``False`` when it was removed.  Meaningful only when
+ *         ``ok``.
+ *     ok: Whether the file was written.
+ *     error: Why not, when ``ok`` is ``False`` — the pattern was refused
+ *         (empty, absolute, a line break, a leading ``#`` / ``!``), the
+ *         caller has no workspace, or the write failed.
+ *     gitignore_path: The file that was edited, so a client can name it.
+ */
+export interface WorkspaceIgnoreResultEvent {
+  type?: EventType88;
+  timestamp?: Timestamp88;
+  session_id?: SessionId88;
+  path?: Path1;
+  ignored?: Ignored;
+  ok?: Ok1;
+  error?: Error9;
+  gitignore_path?: GitignorePath;
 }
 /**
  * Stage files into a workspace via a multi-frame WS protocol.
@@ -17140,9 +17971,9 @@ export interface WorkspaceFilesSnapshotEvent {
  * already-existing workspace mid-session.
  */
 export interface StageFilesRequest {
-  type?: EventType86;
-  timestamp?: Timestamp86;
-  session_id?: SessionId86;
+  type?: EventType89;
+  timestamp?: Timestamp89;
+  session_id?: SessionId89;
   workspace_id?: WorkspaceId;
   files?: Files1;
 }
@@ -17163,7 +17994,7 @@ export interface StageFilesRequest {
  * clients don't need a protocol bump later.
  */
 export interface StagedFileSpec {
-  name?: Name6;
+  name?: Name8;
   size?: Size;
   content_type?: ContentType;
   mode?: Mode1;
@@ -17190,9 +18021,9 @@ export interface StagedFileSpec {
  *   AppArmor refusal, ...).  ``error`` carries the OS message.
  */
 export interface StageFilesEvent {
-  type?: EventType87;
-  timestamp?: Timestamp87;
-  session_id?: SessionId87;
+  type?: EventType90;
+  timestamp?: Timestamp90;
+  session_id?: SessionId90;
   workspace_id?: WorkspaceId1;
   staged?: Staged;
   failed?: Failed;
@@ -17205,9 +18036,9 @@ export interface StageFilesEvent {
  * to expose cluster state to the model.
  */
 export interface PeerHeartbeatEvent {
-  type?: EventType88;
-  timestamp?: Timestamp88;
-  session_id?: SessionId88;
+  type?: EventType91;
+  timestamp?: Timestamp91;
+  session_id?: SessionId91;
   server_id?: ServerId;
   server_name?: ServerName;
   server_version?: ServerVersion;
@@ -17232,9 +18063,9 @@ export interface PeerHeartbeatEvent {
  * this spawn lifecycle.
  */
 export interface PeerSpawnRequestEvent {
-  type?: EventType89;
-  timestamp?: Timestamp89;
-  session_id?: SessionId89;
+  type?: EventType92;
+  timestamp?: Timestamp92;
+  session_id?: SessionId92;
   request_id?: RequestId22;
   origin_server?: OriginServer;
   agent_name?: AgentName1;
@@ -17254,9 +18085,9 @@ export interface PeerSpawnRequestEvent {
  * ephemeral session and is about to start processing.
  */
 export interface PeerSpawnAcceptedEvent {
-  type?: EventType90;
-  timestamp?: Timestamp90;
-  session_id?: SessionId90;
+  type?: EventType93;
+  timestamp?: Timestamp93;
+  session_id?: SessionId93;
   request_id?: RequestId23;
   remote_agent_id?: RemoteAgentId;
 }
@@ -17267,9 +18098,9 @@ export interface PeerSpawnAcceptedEvent {
  * capacity limits, missing provider, unknown profile).
  */
 export interface PeerSpawnRejectedEvent {
-  type?: EventType91;
-  timestamp?: Timestamp91;
-  session_id?: SessionId91;
+  type?: EventType94;
+  timestamp?: Timestamp94;
+  session_id?: SessionId94;
   request_id?: RequestId24;
   reason?: Reason1;
 }
@@ -17281,9 +18112,9 @@ export interface PeerSpawnRejectedEvent {
  * to the parent session via ``inject_prompt``.
  */
 export interface PeerAgentOutputEvent {
-  type?: EventType92;
-  timestamp?: Timestamp92;
-  session_id?: SessionId92;
+  type?: EventType95;
+  timestamp?: Timestamp95;
+  session_id?: SessionId95;
   request_id?: RequestId25;
   remote_agent_id?: RemoteAgentId1;
   text?: Text4;
@@ -17297,14 +18128,14 @@ export interface PeerAgentOutputEvent {
  * populated only when ``success`` is False.
  */
 export interface PeerAgentCompletedEvent {
-  type?: EventType93;
-  timestamp?: Timestamp93;
-  session_id?: SessionId93;
+  type?: EventType96;
+  timestamp?: Timestamp96;
+  session_id?: SessionId96;
   request_id?: RequestId26;
   remote_agent_id?: RemoteAgentId2;
   success?: Success4;
   summary?: Summary;
-  error?: Error8;
+  error?: Error10;
   workspace_modified?: WorkspaceModified;
 }
 /**
@@ -17314,9 +18145,9 @@ export interface PeerAgentCompletedEvent {
  * a previously spawned remote subagent.
  */
 export interface PeerStopRequestEvent {
-  type?: EventType94;
-  timestamp?: Timestamp94;
-  session_id?: SessionId94;
+  type?: EventType97;
+  timestamp?: Timestamp97;
+  session_id?: SessionId97;
   request_id?: RequestId27;
   remote_agent_id?: RemoteAgentId3;
 }
@@ -17324,9 +18155,9 @@ export interface PeerStopRequestEvent {
  * Confirmation that a remote peer received and processed the stop request.
  */
 export interface PeerStopAcknowledgedEvent {
-  type?: EventType95;
-  timestamp?: Timestamp95;
-  session_id?: SessionId95;
+  type?: EventType98;
+  timestamp?: Timestamp98;
+  session_id?: SessionId98;
   request_id?: RequestId28;
   remote_agent_id?: RemoteAgentId4;
 }
@@ -17339,9 +18170,9 @@ export interface PeerStopAcknowledgedEvent {
  * observe the spawned session's events.
  */
 export interface GateAnnouncedEvent {
-  type?: EventType96;
-  timestamp?: Timestamp96;
-  session_id?: SessionId96;
+  type?: EventType99;
+  timestamp?: Timestamp99;
+  session_id?: SessionId99;
   gate_name?: GateName;
   tenant_id?: TenantId;
   owner?: Owner;
@@ -17361,9 +18192,9 @@ export interface Intent {
  * on TTL expiry.
  */
 export interface GateReleasedEvent {
-  type?: EventType97;
-  timestamp?: Timestamp97;
-  session_id?: SessionId97;
+  type?: EventType100;
+  timestamp?: Timestamp100;
+  session_id?: SessionId100;
   gate_name?: GateName1;
   tenant_id?: TenantId1;
   owner?: Owner1;
@@ -17379,9 +18210,9 @@ export interface GateReleasedEvent {
  * the registry replays the live state once at subscription time.
  */
 export interface GatesSnapshotEvent {
-  type?: EventType98;
-  timestamp?: Timestamp98;
-  session_id?: SessionId98;
+  type?: EventType101;
+  timestamp?: Timestamp101;
+  session_id?: SessionId101;
   gates?: Gates;
   snapshot_at?: SnapshotAt;
 }
@@ -17432,9 +18263,9 @@ export interface GateState {
  * patterns via the priority dimension.
  */
 export interface InjectPromptRequest {
-  type?: EventType99;
-  timestamp?: Timestamp99;
-  session_id?: SessionId99;
+  type?: EventType102;
+  timestamp?: Timestamp102;
+  session_id?: SessionId102;
   text?: Text5;
   source_type?: SourceType;
   source_id?: SourceId;
@@ -17491,9 +18322,9 @@ export interface InjectPromptRequest {
  * absence is left checkable instead of forgeable.
  */
 export interface InjectPromptResultEvent {
-  type?: EventType100;
-  timestamp?: Timestamp100;
-  session_id?: SessionId100;
+  type?: EventType103;
+  timestamp?: Timestamp103;
+  session_id?: SessionId103;
   request_id?: RequestId30;
   status?: Status3;
   detail?: Detail;
@@ -17513,9 +18344,9 @@ export interface InjectPromptResultEvent {
  * flows compose this with ``resolve_fork_point``.
  */
 export interface ReplayMessagesRequest {
-  type?: EventType101;
-  timestamp?: Timestamp101;
-  session_id?: SessionId101;
+  type?: EventType104;
+  timestamp?: Timestamp104;
+  session_id?: SessionId104;
   request_id?: RequestId31;
   messages?: Messages;
   timeout_seconds?: TimeoutSeconds;
@@ -17524,12 +18355,12 @@ export interface ReplayMessagesRequest {
  * Server's response to :class:`ReplayMessagesRequest`.
  */
 export interface ReplayMessagesResultEvent {
-  type?: EventType102;
-  timestamp?: Timestamp102;
-  session_id?: SessionId102;
+  type?: EventType105;
+  timestamp?: Timestamp105;
+  session_id?: SessionId105;
   request_id?: RequestId32;
   response_text?: ResponseText;
-  error?: Error9;
+  error?: Error11;
 }
 /**
  * Resolve a fork point in the session's history to a message index.
@@ -17547,9 +18378,9 @@ export interface ReplayMessagesResultEvent {
  * tool uses internally.
  */
 export interface ResolveForkPointRequest {
-  type?: EventType103;
-  timestamp?: Timestamp103;
-  session_id?: SessionId103;
+  type?: EventType106;
+  timestamp?: Timestamp106;
+  session_id?: SessionId106;
   request_id?: RequestId33;
   after_message?: AfterMessage;
   after_tool_call?: AfterToolCall;
@@ -17559,12 +18390,12 @@ export interface ResolveForkPointRequest {
  * Server's response to :class:`ResolveForkPointRequest`.
  */
 export interface ResolveForkPointResultEvent {
-  type?: EventType104;
-  timestamp?: Timestamp104;
-  session_id?: SessionId104;
+  type?: EventType107;
+  timestamp?: Timestamp107;
+  session_id?: SessionId107;
   request_id?: RequestId34;
   fork_index?: ForkIndex;
-  error?: Error10;
+  error?: Error12;
 }
 /**
  * Server returns the result of ``session.bind_wake`` / ``session.unbind_wake``.
@@ -17576,9 +18407,9 @@ export interface ResolveForkPointResultEvent {
  * binding's Unix expiry — the values the caller's waker keys on.
  */
 export interface WakeBindResultEvent {
-  type?: EventType105;
-  timestamp?: Timestamp105;
-  session_id?: SessionId105;
+  type?: EventType108;
+  timestamp?: Timestamp108;
+  session_id?: SessionId108;
   wake_ref?: WakeRef;
   outcome?: Outcome1;
   detail?: Detail1;
@@ -17605,9 +18436,9 @@ export interface WakeBindResultEvent {
  * notification is a signal to attach, not the untrusted payload).
  */
 export interface SessionWokenEvent {
-  type?: EventType106;
-  timestamp?: Timestamp106;
-  session_id?: SessionId106;
+  type?: EventType109;
+  timestamp?: Timestamp109;
+  session_id?: SessionId109;
   wake_ref?: WakeRef1;
   source?: Source2;
 }
@@ -17620,9 +18451,9 @@ export interface SessionWokenEvent {
  * additive.
  */
 export interface PermissionAddWhitelistRequest {
-  type?: EventType107;
-  timestamp?: Timestamp107;
-  session_id?: SessionId107;
+  type?: EventType110;
+  timestamp?: Timestamp110;
+  session_id?: SessionId110;
   tools?: Tools3;
   patterns?: Patterns;
 }
@@ -17634,9 +18465,9 @@ export interface PermissionAddWhitelistRequest {
  * both lists are additive.
  */
 export interface PermissionAddBlacklistRequest {
-  type?: EventType108;
-  timestamp?: Timestamp108;
-  session_id?: SessionId108;
+  type?: EventType111;
+  timestamp?: Timestamp111;
+  session_id?: SessionId111;
   tools?: Tools4;
   patterns?: Patterns1;
 }
@@ -17647,9 +18478,9 @@ export interface PermissionAddBlacklistRequest {
  * ``"blacklist"``.  Empty lists are no-ops.
  */
 export interface PermissionRemoveRequest {
-  type?: EventType109;
-  timestamp?: Timestamp109;
-  session_id?: SessionId109;
+  type?: EventType112;
+  timestamp?: Timestamp112;
+  session_id?: SessionId112;
   target?: Target;
   tools?: Tools5;
   patterns?: Patterns2;
@@ -17663,9 +18494,9 @@ export interface PermissionRemoveRequest {
  * session-level overrides.
  */
 export interface PermissionClearRequest {
-  type?: EventType110;
-  timestamp?: Timestamp110;
-  session_id?: SessionId110;
+  type?: EventType113;
+  timestamp?: Timestamp113;
+  session_id?: SessionId113;
   target?: Target1;
 }
 /**
@@ -17676,18 +18507,18 @@ export interface PermissionClearRequest {
  * the base default for this session only.
  */
 export interface PermissionSetDefaultRequest {
-  type?: EventType111;
-  timestamp?: Timestamp111;
-  session_id?: SessionId111;
+  type?: EventType114;
+  timestamp?: Timestamp114;
+  session_id?: SessionId114;
   policy?: Policy;
 }
 /**
  * Request a structured snapshot of the current permission policy.
  */
 export interface PermissionPolicySnapshotRequest {
-  type?: EventType112;
-  timestamp?: Timestamp112;
-  session_id?: SessionId112;
+  type?: EventType115;
+  timestamp?: Timestamp115;
+  session_id?: SessionId115;
   request_id?: RequestId35;
 }
 /**
@@ -17699,9 +18530,9 @@ export interface PermissionPolicySnapshotRequest {
  * the stringly-typed ``permissions check`` command.
  */
 export interface PermissionPolicySnapshotEvent {
-  type?: EventType113;
-  timestamp?: Timestamp113;
-  session_id?: SessionId113;
+  type?: EventType116;
+  timestamp?: Timestamp116;
+  session_id?: SessionId116;
   request_id?: RequestId36;
   default_policy?: DefaultPolicy;
   session_default_policy?: SessionDefaultPolicy;
@@ -17751,9 +18582,9 @@ export interface PermissionPolicySnapshotEvent {
  *         socket for a side channel, and a weaker posture either way.
  */
 export interface TicketBindRequest {
-  type?: EventType114;
-  timestamp?: Timestamp114;
-  session_id?: SessionId114;
+  type?: EventType117;
+  timestamp?: Timestamp117;
+  session_id?: SessionId117;
   request_id?: RequestId37;
   user?: User;
   ttl_seconds?: TtlSeconds;
@@ -17802,9 +18633,9 @@ export interface TicketBindRequest {
  *         say — a reader of ``"unknown"`` is back where they started.
  */
 export interface TicketBindResultEvent {
-  type?: EventType115;
-  timestamp?: Timestamp115;
-  session_id?: SessionId115;
+  type?: EventType118;
+  timestamp?: Timestamp118;
+  session_id?: SessionId118;
   request_id?: RequestId38;
   status?: Status4;
   ticket?: Ticket;
@@ -17842,9 +18673,9 @@ export interface TicketBindResultEvent {
  *         application instead.
  */
 export interface TicketRevokeRequest {
-  type?: EventType116;
-  timestamp?: Timestamp116;
-  session_id?: SessionId116;
+  type?: EventType119;
+  timestamp?: Timestamp119;
+  session_id?: SessionId119;
   request_id?: RequestId39;
   ticket?: Ticket1;
   user?: User1;
@@ -17871,9 +18702,9 @@ export interface TicketRevokeRequest {
  *         say.
  */
 export interface TicketRevokeResultEvent {
-  type?: EventType117;
-  timestamp?: Timestamp117;
-  session_id?: SessionId117;
+  type?: EventType120;
+  timestamp?: Timestamp120;
+  session_id?: SessionId120;
   request_id?: RequestId40;
   status?: Status5;
   revoked?: Revoked;
@@ -17979,6 +18810,8 @@ export const EventTypeValue = {
   WORKSPACE_CREATE_REQUEST: "workspace.create",
   WORKSPACE_CREATED: "workspace.created",
   WORKSPACE_SELECT_REQUEST: "workspace.select",
+  WORKSPACE_DELETE_REQUEST: "workspace.delete",
+  WORKSPACE_DELETED: "workspace.deleted",
   CONFIG_STATUS: "config.status",
   CONFIG_UPDATE_REQUEST: "config.update",
   CONFIG_UPDATED: "config.updated",
@@ -17987,6 +18820,7 @@ export const EventTypeValue = {
   SESSION_PROFILES: "session.profiles",
   WORKSPACE_FILES_CHANGED: "workspace.files_changed",
   WORKSPACE_FILES_SNAPSHOT: "workspace.files_snapshot",
+  WORKSPACE_IGNORE_RESULT: "workspace.ignore.result",
   EVENT_EXTERNAL: "event.external",
   INJECT_PROMPT_REQUEST: "inject_prompt.request",
   INJECT_PROMPT_RESULT: "inject_prompt.result",

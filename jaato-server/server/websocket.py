@@ -21,7 +21,7 @@ import ssl
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set
 from urllib.parse import parse_qs, urlsplit
 import threading
 
@@ -69,6 +69,8 @@ from jaato_sdk.events import (
     WorkspaceCreateRequest,
     WorkspaceCreatedEvent,
     WorkspaceSelectRequest,
+    WorkspaceDeleteRequest,
+    WorkspaceDeletedEvent,
     ConfigStatusEvent,
     ConfigUpdateRequest,
     ConfigUpdatedEvent,
@@ -310,12 +312,48 @@ class WSEventSinkAdapter:
         self._client_sessions[client_id] = session_id
 
     def get_client_workspace(self, client_id: str) -> Optional[str]:
-        """Get the workspace path for a client."""
-        return self._client_workspaces.get(client_id)
+        """The workspace path for a client.
+
+        What ``workspace.select`` bridged into this adapter, else the
+        selection the WS server's :class:`WorkspaceManager` holds for the
+        same client.  Two stores carried one fact -- the bridge wrote the
+        first at select time and nothing else did -- so a client whose
+        selection reached the manager by any other route (a session created
+        for it, a selection restored on reconnect) declared no workspace
+        here, and ``workspace.ignore`` refused a caller whose header named
+        one.  Reading the manager makes the selection the source of truth
+        and the local map a cache of it.
+        """
+        declared = self._client_workspaces.get(client_id)
+        if declared:
+            return declared
+        manager = getattr(self._ws, "_workspace_manager", None)
+        if manager is None:
+            return None
+        try:
+            selected = manager.get_selected_workspace(client_id=client_id)
+        except Exception:  # noqa: BLE001 -- a lookup must never fail a verb
+            return None
+        return selected.path if selected and selected.path else None
 
     def set_client_workspace(self, client_id: str, workspace_path: str) -> None:
         """Associate a workspace path with a client."""
         self._client_workspaces[client_id] = workspace_path
+
+    def clear_client_workspace(self, client_id: str) -> None:
+        """Forget a client's workspace path (its workspace was deleted)."""
+        self._client_workspaces.pop(client_id, None)
+
+    def visible_workspace_paths(self, client_id: str) -> Optional[List[str]]:
+        """The workspace paths this client's user may see (protocol 1.13).
+
+        ``None`` -- no scoping -- when the server runs no workspace manager
+        or the connection carries no identity; otherwise the paths of
+        ``WorkspaceManager.list_workspaces(for_user=...)``, the same rule the
+        workspace verbs apply, so ``session.list`` cannot show a session in a
+        workspace ``workspace.select`` would refuse.
+        """
+        return self._ws.visible_workspace_paths(client_id)
 
     def get_client_user(self, client_id: str) -> Optional[str]:
         """Get the authenticated user for a WS client."""
@@ -1117,6 +1155,31 @@ class JaatoWSServer:
         """
         client = self._clients.get(client_id)
         return client.user_id if client else None
+
+    def visible_workspace_paths(self, client_id: str) -> Optional[List[str]]:
+        """See ``WSEventSinkAdapter.visible_workspace_paths``."""
+        if not self._workspace_manager:
+            return None
+        user = self.get_client_user(client_id)
+        if user is None:
+            return None
+        return [ws.path for ws in self._workspace_manager.list_workspaces(for_user=user)
+                if ws.path]
+
+    def _sessions_loaded_in(self, workspace_path: str) -> List[str]:
+        """Ids of the LOADED sessions running under *workspace_path*."""
+        if not self._command_router:
+            return []
+        sm = self._command_router._session_manager
+        root = os.path.normpath(workspace_path)
+        found: List[str] = []
+        for info in sm.list_sessions():
+            if not info.is_loaded or not info.workspace_path:
+                continue
+            wp = os.path.normpath(info.workspace_path)
+            if wp == root or wp.startswith(root + os.sep):
+                found.append(info.session_id)
+        return found
 
     def register_message_handler(
         self,
@@ -1930,6 +1993,7 @@ class JaatoWSServer:
             WorkspaceListRequest,
             WorkspaceCreateRequest,
             WorkspaceSelectRequest,
+            WorkspaceDeleteRequest,
             ConfigUpdateRequest,
         ))
         if is_workspace_request:
@@ -2148,6 +2212,8 @@ class JaatoWSServer:
             await self._handle_workspace_list(client_id)
         elif isinstance(event, WorkspaceCreateRequest):
             await self._handle_workspace_create(client_id, event.name)
+        elif isinstance(event, WorkspaceDeleteRequest):
+            await self._handle_workspace_delete(client_id, event.name)
         elif isinstance(event, WorkspaceSelectRequest):
             await self._handle_workspace_select(client_id, event.name)
             # Bridge selected workspace path to the event sink adapter
@@ -2861,10 +2927,14 @@ class JaatoWSServer:
             await self._send_error(client_id, "Workspace mode not enabled")
             return
 
-        workspaces = self._workspace_manager.list_workspaces()
+        # Scoped to the connection's authenticated user (#1074 tickets):
+        # their own and the unowned workspaces.  No identity, no scoping.
+        workspaces = self._workspace_manager.list_workspaces(
+            for_user=self.get_client_user(client_id))
         await self._send_to_client(
             client_id,
             WorkspaceListEvent(
+                root=str(self._workspace_manager.workspace_root),
                 workspaces=[ws.to_dict() for ws in workspaces],
             )
         )
@@ -2876,13 +2946,50 @@ class JaatoWSServer:
             return
 
         try:
-            ws_info = self._workspace_manager.create_workspace(name)
+            ws_info = self._workspace_manager.create_workspace(
+                name, owner=self.get_client_user(client_id))
+            # name/path are the event's declared identity fields; the dict is
+            # the whole row.  Sending the dict ALONE reached clients as an
+            # event with no name (the model dropped the undeclared key).
             await self._send_to_client(
                 client_id,
-                WorkspaceCreatedEvent(workspace=ws_info.to_dict())
+                WorkspaceCreatedEvent(
+                    name=ws_info.name,
+                    path=ws_info.path,
+                    workspace=ws_info.to_dict(),
+                )
             )
         except ValueError as e:
             await self._send_error(client_id, str(e))
+
+    async def _handle_workspace_delete(self, client_id: str, name: str) -> None:
+        """Handle ``workspace.delete`` (protocol 1.13).
+
+        Answers with one ``WorkspaceDeletedEvent`` whatever happened.  The
+        manager refuses containment, ownership and other clients' selections;
+        the loaded-session check needs the session manager, which lives
+        behind the command router, so it is resolved here and handed in.
+        """
+        if not self._workspace_manager:
+            await self._send_error(client_id, "Workspace mode not enabled")
+            return
+        try:
+            path = self._workspace_manager.get_workspace_path(name)
+            in_use = self._sessions_loaded_in(str(path)) if path else []
+            self._workspace_manager.delete_workspace(
+                name,
+                user=self.get_client_user(client_id),
+                in_use_by=in_use,
+                client_id=client_id,
+            )
+        except ValueError as e:
+            await self._send_to_client(
+                client_id, WorkspaceDeletedEvent(name=name, ok=False, error=str(e)))
+            return
+        if self._event_sink_adapter and path is not None:
+            if self._event_sink_adapter.get_client_workspace(client_id) == str(path):
+                self._event_sink_adapter.clear_client_workspace(client_id)
+        await self._send_to_client(client_id, WorkspaceDeletedEvent(name=name, ok=True))
 
     async def _handle_workspace_select(self, client_id: str, name: str) -> None:
         """Handle workspace selection request.
@@ -2896,7 +3003,8 @@ class JaatoWSServer:
             return
 
         try:
-            ws_info = self._workspace_manager.select_workspace(name, client_id=client_id)
+            ws_info = self._workspace_manager.select_workspace(
+                name, client_id=client_id, user=self.get_client_user(client_id))
             config_status = self._workspace_manager.get_config_status(name)
 
             # Send config status to client

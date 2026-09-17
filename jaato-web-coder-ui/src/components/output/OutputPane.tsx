@@ -2,8 +2,11 @@
  * The conversation column for one agent: a virtualised, auto-following
  * list of blocks.  Following stops when the user scrolls up and resumes
  * when they return to the bottom (or press End), like a terminal.
+ *
+ * The pane also numbers the turns: the n-th user message in the column
+ * is turn n, and ``UserBlockView`` prints it in the gutter.
  */
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { selectBlocks, useJaato } from "@/store/store";
 import { BlockView } from "./Blocks";
@@ -12,6 +15,13 @@ export function OutputPane({ agentId }: { agentId: string }) {
   const blocks = useJaato(selectBlocks(agentId));
   const parentRef = useRef<HTMLDivElement>(null);
   const [follow, setFollow] = useState(true);
+
+  const turnOf = useMemo(() => {
+    const m = new Map<string, number>();
+    let n = 0;
+    for (const b of blocks) if (b.kind === "user") m.set(b.id, ++n);
+    return m;
+  }, [blocks]);
 
   const virtualizer = useVirtualizer({
     count: blocks.length,
@@ -65,13 +75,13 @@ export function OutputPane({ agentId }: { agentId: string }) {
 
   const items = virtualizer.getVirtualItems();
   return (
-    <div ref={parentRef} className="relative flex-1 overflow-y-auto px-4" data-testid="output-pane">
+    <div ref={parentRef} className="relative flex-1 overflow-y-auto px-5 py-3" data-testid="output-pane">
       {blocks.length === 0 && (
         <div className="h-full flex items-center justify-center text-text-muted text-sm select-none">
-          <div className="text-center">
-            <div className="text-2xl mb-2">jaato</div>
+          <div className="text-center max-w-[52ch] space-y-2">
+            <div className="display text-[34px] text-text">jaato</div>
             <div>Type a message, or a command such as <kbd>help</kbd>, <kbd>tools</kbd>, <kbd>model</kbd>.</div>
-            <div className="mt-1">Commands are plain words — the composer proposes them as you type; <kbd>Esc</kbd> dismisses the proposal to send the word verbatim.</div>
+            <div>Commands are plain words — the composer proposes them as you type; <kbd>Esc</kbd> dismisses the proposal to send the word verbatim.</div>
           </div>
         </div>
       )}
@@ -85,7 +95,7 @@ export function OutputPane({ agentId }: { agentId: string }) {
               ref={virtualizer.measureElement}
               style={{ position: "absolute", top: 0, left: 0, width: "100%", transform: `translateY(${vi.start}px)` }}
             >
-              <BlockView block={block} />
+              <BlockView block={block} turn={turnOf.get(block.id)} />
             </div>
           );
         })}
@@ -93,7 +103,7 @@ export function OutputPane({ agentId }: { agentId: string }) {
       {!follow && blocks.length > 0 && (
         <button
           type="button"
-          className="sticky bottom-3 left-1/2 -translate-x-1/2 rounded-full px-3 py-1 text-xs bg-surface border hairline text-text-muted hover:text-text shadow"
+          className="sticky bottom-3 left-1/2 -translate-x-1/2 btn btn-sm bg-surface text-text-muted shadow-md"
           onClick={() => { const el = parentRef.current; if (el) { el.scrollTop = el.scrollHeight; } setFollow(true); }}
         >
           ↓ follow output

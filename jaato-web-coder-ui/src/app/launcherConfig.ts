@@ -12,7 +12,9 @@
  * ``token``: the page then asks that URL for a fresh per-user ticket before
  * every connection attempt (``app/tickets.ts``), and ``loginUrl`` (default
  * ``./auth/login``) is where a 401 sends the person.  All fields are
- * optional; ``ticketUrl`` wins over ``token`` when both are present.  The file is fetched relative to the page (so a
+ * optional; ``ticketUrl`` wins over ``token`` when both are present.
+ * ``sessionUrl`` and ``logoutUrl`` name the backend's who-am-I and sign-out
+ * endpoints when they do not sit beside ``ticketUrl``.  The file is fetched relative to the page (so a
  * bundle served under ``/app/`` looks for ``/app/config.json``), and
  * anything that is not a JSON document — Vite's dev server answers the
  * path with ``index.html``, a static host with 404 — means "no launcher
@@ -23,6 +25,18 @@ export interface LauncherConfig {
   token?: string;
   ticketUrl?: string;
   loginUrl?: string;
+  /** Where ``GET`` answers who is signed in; default: ``session`` beside ``ticketUrl`` (``app/backendSession.ts``). */
+  sessionUrl?: string;
+  /** Where a "Sign out" link goes; default: ``logout`` beside ``ticketUrl``. */
+  logoutUrl?: string;
+  /**
+   * Where the backend keeps the signed-in user's provider API keys
+   * (``app/credentials.ts``).  Named only by a backend that has the store;
+   * absent means the configure form shows a plain key field.  Deliberately
+   * NOT derived from ``ticketUrl`` like the two above: those endpoints
+   * always exist beside a ticket URL, this one is opt-in.
+   */
+  credentialsUrl?: string;
   autoConnect?: boolean;
 }
 
@@ -34,6 +48,9 @@ export function parseLauncherConfig(raw: unknown): LauncherConfig {
   if (typeof o.token === "string" && o.token) out.token = o.token;
   if (typeof o.ticketUrl === "string" && o.ticketUrl) out.ticketUrl = o.ticketUrl;
   if (typeof o.loginUrl === "string" && o.loginUrl) out.loginUrl = o.loginUrl;
+  if (typeof o.sessionUrl === "string" && o.sessionUrl) out.sessionUrl = o.sessionUrl;
+  if (typeof o.logoutUrl === "string" && o.logoutUrl) out.logoutUrl = o.logoutUrl;
+  if (typeof o.credentialsUrl === "string" && o.credentialsUrl) out.credentialsUrl = o.credentialsUrl;
   if (typeof o.autoConnect === "boolean") out.autoConnect = o.autoConnect;
   return out;
 }

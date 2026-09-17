@@ -5,6 +5,7 @@
  * (``OutputLine`` / ``ToolBlock`` / ``ActiveToolCall``) so the two
  * clients present the same session the same way.
  */
+import type { ToolCallSummary } from "@/protocol/turnStats";
 
 export interface MediaItem {
   mimeType: string;
@@ -30,6 +31,15 @@ export interface UserBlock {
   kind: "user";
   agentId: string;
   text: string;
+  /**
+   * The daemon has echoed this prompt back (``agent.output`` with
+   * ``source: "user"``).  The composer adds the bubble locally when the
+   * message is sent; the daemon then echoes it to every attached client,
+   * and the echo matches the pending local bubble instead of being drawn
+   * a second time.  A block created FROM an echo (a replay after attach,
+   * another client's prompt) starts echoed.
+   */
+  echoed?: boolean;
 }
 
 /** Client-side notices (connection, command results, help). */
@@ -108,12 +118,25 @@ export interface PendingPermission {
   inputMode: boolean;
 }
 
+/**
+ * One clarification question, as the card reads it.  The daemon spells a
+ * question two ways (``text``/``choices``/``required`` on the batch wire,
+ * ``question_text``/``options`` on the per-question wire); the store runs
+ * both through ``protocol/clarification.normalizeClarificationQuestion``
+ * so this shape is the only one rendered.
+ */
 export interface ClarificationQuestion {
   question_text?: string;
-  question_type?: string; // "choice" | "text" | "confirm" | ...
+  /** ``single_choice`` | ``multiple_choice`` | ``free_text`` (the daemon's ``QuestionType``). */
+  question_type?: string;
+  /** Choice texts, in wire order; answers are their 1-based positions. */
   options?: string[];
-  default?: string | null;
+  /** A 1-based choice position (choice questions) or a literal (free text); Enter on empty submits it. */
+  default?: string | number | null;
+  /** ``required: false`` on the wire — an empty answer skips it. */
   optional?: boolean;
+  /** Per-choice: this branch expects the user to attach a file (#989). Absent when no choice does. */
+  expects_attachment?: boolean[];
   [k: string]: unknown;
 }
 
@@ -202,7 +225,12 @@ export interface ContextState {
   lastTurn?: {
     turnNumber?: number | null;
     durationSeconds?: number | null;
-    functionCalls?: number | null;
+    /**
+     * The turn's tool calls, reduced from ``TurnCompletedEvent.function_calls``
+     * -- a LIST of ``{name, start_time, end_time, duration_seconds}`` records,
+     * not a count (``protocol/turnStats.ts``).
+     */
+    toolCalls?: ToolCallSummary | null;
     finishReason?: string | null;
     usage?: Record<string, number | null | undefined>;
   };
@@ -214,6 +242,10 @@ export interface WorkspaceInfo {
   provider?: string | null;
   model?: string | null;
   last_accessed?: string | null;
+  /** Absolute path on the daemon host, when the daemon sends it. */
+  path?: string | null;
+  /** The authenticated user who created it; unset for a pre-existing or unowned workspace. */
+  owner?: string | null;
 }
 
 export interface ConfigStatus {
@@ -244,3 +276,48 @@ export interface InitProgress {
 export type ConnectionPhase = "disconnected" | "connecting" | "connected" | "reconnecting" | "closed";
 
 export type Screen = "connect" | "workspaces" | "session";
+
+/**
+ * One answer the exit choice offers (``app/exitChoice.ts``): the key the
+ * composer accepts for it, the label on its button, and what it does.
+ */
+export interface ExitOption {
+  key: string;
+  label: string;
+  description: string;
+}
+
+/**
+ * The TUI's exit confirmation, as a prompt in the session screen.  The
+ * ``exit`` command and the status bar's Exit open it instead of leaving at
+ * once; ``running`` records whether a turn was in flight when it opened,
+ * which decides the option set (the TUI's ``[c/d/e/r]`` vs ``[d/e/r]``).
+ * ``focus`` is the option Tab cycles to and Enter answers.  Closed
+ * (``null``) by any answer, by Return, and by the session state reset.
+ */
+export interface ExitChoice {
+  running: boolean;
+  options: ExitOption[];
+  focus: number;
+}
+
+/**
+ * One file the user attached, on its way into the session's workspace
+ * (``app/staging.ts``).  ``path`` is where it lands, workspace-relative.
+ *
+ * Lifecycle: ``queued`` (picked on the session picker, before there is a
+ * workspace to stage into) → ``staging`` (bytes on the wire) → ``staged``
+ * or ``failed`` (the daemon's ``StageFilesEvent`` said which, and why).
+ * A ``staged`` entry stays in the composer's strip until the next message
+ * is sent, which names it in its footer and drops it; a ``failed`` one is
+ * dropped on send too.  The list lives outside the per-session state so
+ * files queued on the picker survive the reset an attach performs.
+ */
+export interface StagedUpload {
+  id: string;
+  path: string;
+  size: number;
+  status: "queued" | "staging" | "staged" | "failed";
+  /** The daemon's (or the client-side precheck's) reason, when ``failed``. */
+  error?: string;
+}

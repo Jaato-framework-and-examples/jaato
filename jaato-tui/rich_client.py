@@ -74,6 +74,9 @@ from clarification_batch import (
     enter_clarification_input_mode,
     submit_clarification_answer,
 )
+# A PermissionRequestedEvent's content -- diff, warnings -- rendered the way
+# the daemon-local AgentOutputEvent(source="permission") already is.
+from permission_prompt import maybe_render_permission_requested
 
 # Backend abstraction for mode-agnostic operation
 from backend import Backend, IPCBackend
@@ -1236,6 +1239,16 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 ipc_trace("  should_exit=True, breaking")
                 break
 
+            # Runner-tier sessions (the default) deliver a permission prompt's
+            # CONTENT -- summary, diff, warnings -- on PermissionRequestedEvent
+            # and emit no AgentOutputEvent(source="permission") at all; the
+            # daemon-local path emits the output event and never this one.
+            # Rendered under the same ``permission`` source, so the input-mode
+            # branch below attaches it to the tool either way.  An unconditional
+            # call rather than a branch of the chain: this handler is frozen at
+            # the top of the complexity ratchet.
+            maybe_render_permission_requested(event, agent_registry, display, ipc_trace)
+
             if isinstance(event, InitProgressEvent):
                 # Suppress init progress messages during reconnection
                 # The session is being restored, not created fresh - don't spam the output
@@ -1375,8 +1388,10 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 display.refresh()
 
             elif isinstance(event, PermissionInputModeEvent):
-                # New unified flow: content already emitted via AgentOutputEvent,
-                # this event just signals input mode and updates tool tree status
+                # Control event only: the content arrived just before it, as an
+                # AgentOutputEvent (daemon-local) or a PermissionRequestedEvent
+                # (runner-tier); this event signals input mode and updates the
+                # tool tree status.
                 ipc_trace(f"  PermissionInputModeEvent: tool={event.tool_name}, id={event.request_id}, call_id={event.call_id}")
                 pending_permission_request = {
                     "request_id": event.request_id,

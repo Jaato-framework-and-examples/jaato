@@ -17,7 +17,10 @@
  *
  *   "code"      → a streamed answer with a <j-code> block and a <j-table>
  *   "tool"      → a tool call with streamed output, then success
- *   "permit"    → a tool call that asks permission (diff prompt_lines)
+ *   "permit"    → a tool call that asks permission (diff prompt_lines + a warning)
+ *   "permit-bare" → the same ASK from a tool whose plugin renders no display
+ *                 info: no prompt_lines, no warning -- the card falls back to
+ *                 the tool arguments
  *   "ask"       → a batch_only clarification with two questions
  *   "fail"      → a failing tool call
  *   "subagent"  → spawns a subagent that streams in its own tab
@@ -38,7 +41,60 @@ const SPEED = Number(process.env.MOCK_SPEED ?? 1); // multiplier; 0 = no delays
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, SPEED ? ms * SPEED : 0));
 const ts = () => new Date().toISOString();
 
-interface Client { ws: WebSocket; sessionId: string | null; pending: Map<string, (v: unknown) => void>; }
+interface Client {
+  ws: WebSocket; sessionId: string | null; pending: Map<string, (v: unknown) => void>; ignored: Set<string>;
+  /**
+   * A ``workspace.files.stage_request`` in progress: the daemon reads one
+   * BINARY frame per declared file, in order, before answering with
+   * ``workspace.files.staged`` (docs/sdk-file-staging.md).  ``refused`` is
+   * the up-front rejection (no workspace, total cap): the frames are still
+   * drained so the stream stays aligned.
+   */
+  staging: { workspaceId: string; specs: { name: string; size: number }[]; frames: Buffer[]; refused: Record<string, string>[] | null } | null;
+}
+const STAGE_PER_FILE_LIMIT = 10 * 1024 * 1024;
+const STAGE_TOTAL_LIMIT = 50 * 1024 * 1024;
+
+function finishStaging(c: Client): void {
+  const st = c.staging!;
+  c.staging = null;
+  if (st.refused) { send(c, { type: "workspace.files.staged", workspace_id: st.workspaceId, staged: [], failed: st.refused }); return; }
+  const staged: string[] = [];
+  const failed: Record<string, string>[] = [];
+  st.specs.forEach((spec, i) => {
+    const frame = st.frames[i];
+    if (!spec.name || spec.name.startsWith("/") || spec.name.split("/").includes("..")) failed.push({ name: spec.name, category: "unsafe_path", error: "name must be a non-empty workspace-relative path with no '..' components" });
+    else if (spec.size > STAGE_PER_FILE_LIMIT) failed.push({ name: spec.name, category: "size_limit_per_file", error: `declared size ${spec.size} bytes exceeds per-file cap ${STAGE_PER_FILE_LIMIT}` });
+    else if (!frame || frame.length !== spec.size) failed.push({ name: spec.name, category: "size_mismatch", error: `declared ${spec.size} bytes, frame carried ${frame?.length ?? 0} bytes` });
+    else staged.push(spec.name);
+  });
+  send(c, { type: "workspace.files.staged", workspace_id: st.workspaceId, staged, failed });
+  // The daemon's workspace monitor then reports the new files.
+  if (staged.length) send(c, { type: "workspace.files_changed", changes: staged.map((path) => ({ path, status: "created" })) });
+}
+
+/** What ``session.list`` answers: the daemon's free-form per-session dicts. */
+function sessionListing(c: Client): Record<string, unknown>[] {
+  return [
+    { id: "20260916_090000", name: "", description: "fix the budget panel", model_provider: "anthropic", model_name: "claude-sonnet-4", is_loaded: true, is_current: c.sessionId === "20260916_090000", client_count: 1, turn_count: 3, workspace_path: "/srv/workspaces/project-a" },
+    { id: "20260915_170000", name: "old notes", description: "", model_provider: "", model_name: "", is_loaded: false, is_current: false, client_count: 0, turn_count: 1, workspace_path: "/srv/workspaces/project-b" },
+    ...(c.sessionId && !c.sessionId.startsWith("2026") ? [{ id: c.sessionId, name: "mock session", description: "", model_provider: "mock", model_name: "mock-1", is_loaded: true, is_current: true, client_count: 1, turn_count: 0, workspace_path: "/work" }] : []),
+  ];
+}
+
+/** The conversation ``history.request`` replays for the sessions above. */
+const HISTORIES: Record<string, Record<string, unknown>[]> = {
+  "20260916_090000": [
+    { role: "user", parts: [{ type: "text", text: "what are those [object Object] in the budget panel?" }] },
+    { role: "model", parts: [{ type: "text", text: "Let me look." }, { type: "function_call", id: "h1", name: "readFile", args: { path: "src/components/panels/BudgetPanel.tsx" } }] },
+    { role: "tool", parts: [{ type: "function_response", call_id: "h1", name: "readFile", result: { lines: 45 } }] },
+    { role: "model", parts: [{ type: "text", text: "The panel reads function_calls as a number; it is a list of records." }] },
+  ],
+  "20260915_170000": [
+    { role: "user", parts: [{ type: "text", text: "remember: notes live in docs/" }] },
+    { role: "model", parts: [{ type: "text", text: "Noted." }] },
+  ],
+};
 
 function send(c: Client, ev: Record<string, unknown>): void {
   if (c.ws.readyState !== c.ws.OPEN) return;
@@ -79,6 +135,9 @@ And a comparison:
 
 async function turn(c: Client, text: string, agentId = "main"): Promise<void> {
   const lower = text.toLowerCase();
+  // The daemon echoes the prompt to every attached client before the model
+  // speaks -- the same ``agent.output`` shape, with source ``user``.
+  send(c, { type: "agent.output", agent_id: agentId, source: "user", text, mode: "write" });
   send(c, { type: "agent.status_changed", agent_id: agentId, status: "processing" });
   await sleep(50);
 
@@ -90,35 +149,50 @@ async function turn(c: Client, text: string, agentId = "main"): Promise<void> {
     send(c, { type: "agent.completed", agent_id: subId, summary: "done" });
     await stream(c, agentId, "\nThe subagent finished; see its tab.");
   } else if (lower.includes("permit")) {
+    // The runner-tier wire (the default path): the daemon's PromptOperatorHandler
+    // emits permission.requested from the runner's PromptPayload -- options are
+    // {key, label, description} (no `action` on this path), the prompt content
+    // rides prompt_lines / format_hint / warnings / warning_level -- then the
+    // input_mode control event with the same options and call_id.  "permit-bare"
+    // is the same ASK from a tool whose plugin renders no display info, so the
+    // content fields are null and the card must fall back to tool_args.
+    const bare = lower.includes("permit-bare");
     const callId = randomUUID();
     const reqId = randomUUID();
-    send(c, { type: "tool.call_start", agent_id: agentId, tool_name: "write_file", tool_args: { path: "src/app.py", content: "print('hi')\n" }, call_id: callId });
+    const toolArgs = { path: "src/app.py", content: "print('hi')\n" };
+    const options = [
+      { key: "y", label: "yes", description: "allow this call" }, { key: "n", label: "no", description: "deny this call" },
+      { key: "a", label: "always", description: "allow for the rest of the session" }, { key: "t", label: "this turn", description: "allow until the model finishes responding" },
+    ];
+    send(c, { type: "tool.call_start", agent_id: agentId, tool_name: "write_file", tool_args: toolArgs, call_id: callId });
     send(c, {
       type: "permission.requested", agent_id: agentId, request_id: reqId, tool_name: "write_file",
-      tool_args: { path: "src/app.py" },
-      response_options: [
-        { key: "y", label: "yes", action: "allow" }, { key: "n", label: "no", action: "deny" },
-        { key: "a", label: "always", action: "whitelist" }, { key: "t", label: "this turn", action: "allow_turn" },
-      ],
-      prompt_lines: ["--- a/src/app.py", "+++ b/src/app.py", "@@ -1,2 +1,2 @@", "-print('hello')", "+print('hi')", " # end"],
-      format_hint: "diff",
-      warnings: "The path is outside the sandbox allowlist.", warning_level: "warning",
+      tool_args: toolArgs, response_options: options,
+      prompt_lines: bare ? null : ["Update file: src/app.py", "--- a/src/app.py", "+++ b/src/app.py", "@@ -1,2 +1,2 @@", "-print('hello')", "+print('hi')", " # end"],
+      format_hint: bare ? null : "diff",
+      warnings: bare ? null : "The path is outside the sandbox allowlist.", warning_level: bare ? null : "warning",
     });
-    send(c, { type: "permission.input_mode", agent_id: agentId, request_id: reqId, tool_name: "write_file", call_id: callId, response_options: [{ key: "y", label: "yes" }, { key: "n", label: "no" }, { key: "a", label: "always" }, { key: "t", label: "this turn" }] });
+    send(c, { type: "permission.input_mode", agent_id: agentId, request_id: reqId, tool_name: "write_file", call_id: callId, response_options: options, tool_args: null, editable_metadata: null });
     const answer = String(await waitFor(c, `perm:${reqId}`));
     const granted = ["y", "a", "t", "i", "once", "all", "yes"].includes(answer.toLowerCase());
     send(c, { type: "permission.resolved", agent_id: agentId, request_id: reqId, tool_name: "write_file", granted, method: "user" });
     send(c, { type: "tool.call_end", agent_id: agentId, tool_name: "write_file", call_id: callId, success: granted, duration_seconds: 0.21, error_message: granted ? null : "Permission denied by user", show_output: false });
-    if (granted) send(c, { type: "workspace.files_changed", changes: [{ path: "src/app.py", change: "modified" }] });
+    // WorkspaceFilesChangedEvent.changes carries {path, status} — the daemon's key.
+    if (granted) send(c, { type: "workspace.files_changed", changes: [{ path: "src/app.py", status: "modified" }, { path: ".jaato/logs/session.log", status: "created" }] });
     await stream(c, agentId, granted ? `Written (you answered \`${answer}\`).` : "Understood, not writing the file.");
   } else if (lower.includes("ask")) {
     const reqId = randomUUID();
     send(c, {
       type: "clarification.batch", agent_id: agentId, request_id: reqId, tool_name: "request_clarification", batch_only: true,
       context: "Before I start:",
+      // The shape question_payload() emits (shared/plugins/clarification/channels.py):
+      // text / question_type / required / choices[{text, default?}] -- NOT the
+      // per-question event's question_text / options.  The mock used to speak
+      // the card's vocabulary, which is how a card that could not render the
+      // daemon's passed every e2e test.
       questions: [
-        { question_text: "Which framework should the client use?", question_type: "choice", options: ["React 19", "Svelte 5", "Solid"] },
-        { question_text: "Anything else I should know?", question_type: "text", optional: true, default: "no" },
+        { index: 1, text: "Which framework should the client use?", question_type: "single_choice", required: true, choices: [{ text: "React 19" }, { text: "Svelte 5", default: true }, { text: "Solid" }] },
+        { index: 2, text: "Anything else I should know?", question_type: "free_text", required: false },
       ],
     });
     const answers = (await waitFor(c, `clar:${reqId}`)) as string[];
@@ -126,6 +200,11 @@ async function turn(c: Client, text: string, agentId = "main"): Promise<void> {
     const choices = ["React 19", "Svelte 5", "Solid"];
     const first = /^\d+$/.test(answers[0] ?? "") ? (choices[Number(answers[0]) - 1] ?? answers[0]) : answers[0];
     await stream(c, agentId, `Thanks — you chose **${first}** and said "${answers[1]}".`);
+  } else if (lower.includes("hang")) {
+    // A turn that runs until ``session.stop``: how a test presses Exit
+    // mid-turn without betting on a clock (the e2e mock runs with no delays).
+    await new Promise<void>((r) => c.pending.set("hang", () => r()));
+    await stream(c, agentId, "Stopped mid-turn.");
   } else if (lower.includes("fail")) {
     const callId = randomUUID();
     send(c, { type: "tool.call_start", agent_id: agentId, tool_name: "run_command", tool_args: { command: "false" }, call_id: callId });
@@ -154,7 +233,7 @@ async function turn(c: Client, text: string, agentId = "main"): Promise<void> {
   }
 
   send(c, { type: "context.updated", agent_id: agentId, usage: { prompt_tokens: 1200, output_tokens: 340, total_tokens: 1540, cache_read_tokens: 800 }, context_limit: 200000, percent_used: 0.77, tokens_remaining: 198460, turns: 1 });
-  send(c, { type: "turn.completed", agent_id: agentId, turn_number: 1, duration_seconds: 1.2, function_calls: lower.includes("tool") ? 1 : 0, finish_reason: "stop", usage: { prompt_tokens: 1200, output_tokens: 340, total_tokens: 1540 } });
+  send(c, { type: "turn.completed", agent_id: agentId, turn_number: 1, duration_seconds: 1.2, function_calls: lower.includes("tool") ? [{ name: "run_command", start_time: ts(), end_time: ts(), duration_seconds: 0.31 }] : [], finish_reason: "stop", usage: { prompt_tokens: 1200, output_tokens: 340, total_tokens: 1540 } });
   send(c, { type: "agent.status_changed", agent_id: agentId, status: "idle" });
 }
 
@@ -165,30 +244,55 @@ wss.on("connection", (ws, req) => {
   const presented = url.searchParams.get("token") ?? (auth.startsWith("Bearer ") ? auth.slice(7) : "");
   if (TOKEN && presented !== TOKEN) { ws.close(1008, "unauthorized"); return; }
 
-  const c: Client = { ws, sessionId: null, pending: new Map() };
-  send(c, { type: "connected", protocol_version: "1.0.0", server_info: { server_version: "mock-0.0.1", client_id: randomUUID() } });
+  const c: Client = { ws, sessionId: null, pending: new Map(), ignored: new Set(), staging: null };
+  send(c, { type: "connected", protocol_version: "1.12", server_info: { server_version: "mock-0.0.1", client_id: randomUUID() } });
 
-  ws.on("message", async (raw) => {
+  ws.on("message", async (raw, isBinary) => {
+    if (c.staging) {
+      // The binary frames a stage request declared, in order.
+      if (!isBinary) { c.staging = null; return; }
+      c.staging.frames.push(Buffer.from(raw as Buffer));
+      if (c.staging.frames.length >= c.staging.specs.length) finishStaging(c);
+      return;
+    }
     let ev: Record<string, unknown>;
     try { ev = JSON.parse(String(raw)); } catch { return; }
     const type = String(ev.type);
     switch (type) {
       case "client.config": break;
+      case "workspace.files.stage_request": {
+        const specs = ((ev.files as { name: string; size: number }[] | undefined) ?? []).map((f) => ({ name: String(f.name ?? ""), size: Number(f.size ?? 0) }));
+        const workspaceId = String(ev.workspace_id ?? "");
+        let refused: Record<string, string>[] | null = null;
+        if (!c.sessionId && !WORKSPACES) refused = specs.map((f) => ({ name: f.name, category: "workspace_not_found", error: "No workspace selected for client (workspace_id='')" }));
+        else if (specs.reduce((a, f) => a + f.size, 0) > STAGE_TOTAL_LIMIT) refused = specs.map((f) => ({ name: f.name, category: "size_limit_total", error: `declared total exceeds cap ${STAGE_TOTAL_LIMIT}` }));
+        c.staging = { workspaceId, specs, frames: [], refused };
+        if (!specs.length) finishStaging(c);
+        break;
+      }
       case "workspace.list":
         if (!WORKSPACES) send(c, { type: "error", error: "Workspace mode not enabled", error_type: "WorkspaceModeDisabled", recoverable: true });
         else send(c, { type: "workspace.list_response", root: "/srv/workspaces", workspaces: [
-          { name: "project-a", configured: true, provider: "anthropic", model: "claude-sonnet-4", last_accessed: ts() },
-          { name: "project-b", configured: false },
+          { name: "project-a", path: "/srv/workspaces/project-a", owner: "mock:tester", configured: true, provider: "anthropic", model: "claude-sonnet-4", last_accessed: ts() },
+          { name: "project-b", path: "/srv/workspaces/project-b", configured: false },
         ] });
         break;
       case "workspace.select":
         send(c, { type: "config.status", workspace: String(ev.name), configured: ev.name === "project-a", provider: ev.name === "project-a" ? "anthropic" : null, model: ev.name === "project-a" ? "claude-sonnet-4" : null, available_providers: ["anthropic", "google_genai", "openrouter"], missing_fields: ev.name === "project-a" ? [] : ["provider", "api_key"] });
         break;
       case "workspace.create":
-        send(c, { type: "workspace.created", workspace: { name: String(ev.name), configured: false } });
+        // The daemon's shape: name/path beside the whole row.
+        send(c, { type: "workspace.created", name: String(ev.name), path: `/srv/workspaces/${String(ev.name)}`, workspace: { name: String(ev.name), path: `/srv/workspaces/${String(ev.name)}`, configured: false, owner: "mock:tester", last_accessed: ts() } });
+        break;
+      case "workspace.delete":
+        // The daemon refuses a workspace with loaded sessions; project-a has one.
+        if (ev.name === "project-a") send(c, { type: "workspace.deleted", name: "project-a", ok: false, error: "Workspace 'project-a' has 1 loaded session(s): 20260916_090000 -- stop them first" });
+        else send(c, { type: "workspace.deleted", name: String(ev.name), ok: true });
         break;
       case "config.update":
-        send(c, { type: "config.updated", workspace: "project-b", configured: true, provider: ev.provider, model: ev.model, available_providers: [], missing_fields: [] });
+        // The daemon's ``ConfigUpdatedEvent`` carries what was written and
+        // no status field; the UI derives the status from it.
+        send(c, { type: "config.updated", workspace: "project-b", provider: ev.provider, model: ev.model ?? null, success: true });
         break;
       case "command.execute": {
         const cmd = String(ev.command);
@@ -199,7 +303,9 @@ wss.on("connection", (ws, req) => {
           await sleep(120);
           send(c, { type: "init.progress", step: "provider", status: "complete", message: "Ready", step_number: 2, total_steps: 2 });
           send(c, { type: "agent.created", agent_id: "main", agent_name: "main", agent_type: "main", profile_name: args.includes("--profile") ? args[args.indexOf("--profile") + 1] : null });
-          send(c, { type: "session.info", session_name: "mock session", model_provider: "mock", model_name: "mock-1", profile_name: args.includes("--profile") ? args[args.indexOf("--profile") + 1] : null, models: ["mock-1", "mock-2"] });
+          send(c, { type: "session.info", session_name: "mock session", model_provider: "mock", model_name: "mock-1", profile_name: args.includes("--profile") ? args[args.indexOf("--profile") + 1] : null, models: ["mock-1", "mock-2"], sessions: sessionListing(c) });
+          // PermissionStatusEvent, emitted by the daemon at init: effective_default + suspension_scope.
+          send(c, { type: "permission.status", effective_default: "ask", suspension_scope: null });
           send(c, { type: "system.message", message: "Connected to the mock daemon. Try: code, tool, permit, ask, fail, subagent.", style: "info" });
         } else if (cmd === "mock-auth") {
           // A daemon-level auth plugin command: works with NO session, like
@@ -218,8 +324,39 @@ wss.on("connection", (ws, req) => {
           } else {
             send(c, { type: "system.message", message: "mock-auth: login | logout | status", style: "info" });
           }
+        } else if (cmd === "session.delete") {
+          // The daemon answers with a system.message naming the outcome; a
+          // loaded session's attached clients also hear "Session deleted:".
+          const target = String(args[0] ?? "");
+          if (target && target === c.sessionId) {
+            send(c, { type: "system.message", message: "Session deleted: mock session", style: "warning" });
+            c.sessionId = null;
+            send(c, { type: "system.message", message: `Session '${target}' deleted.`, style: "info" });
+          } else {
+            send(c, { type: "system.message", message: `Session '${target}' not found.`, style: "warning" });
+          }
+        } else if (cmd === "session.list") {
+          send(c, { type: "session.list", sessions: sessionListing(c) });
+        } else if (cmd === "session.attach") {
+          const target = String(args[0] ?? "");
+          if (!HISTORIES[target]) { send(c, { type: "error", error: `Session not found: ${target}`, error_type: "SessionError", recoverable: true }); break; }
+          c.sessionId = target;
+          send(c, { type: "agent.created", agent_id: "main", agent_name: "main", agent_type: "main", profile_name: null });
+          send(c, { type: "session.info", session_id: target, session_name: target === "20260916_090000" ? "fix the budget panel" : "old notes", model_provider: target === "20260916_090000" ? "anthropic" : "mock", model_name: target === "20260916_090000" ? "claude-sonnet-4" : "mock-1", profile_name: null, models: ["mock-1"], sessions: sessionListing(c) });
+          send(c, { type: "permission.status", effective_default: "allow", suspension_scope: null });
         } else if (cmd === "session.profiles") {
           send(c, { type: "session.profiles", profiles: [{ name: "researcher", description: "Deep research", provider: "anthropic", model: "claude-sonnet-4" }, { name: "coder", description: "Coding agent", provider: "openrouter", model: "openai/gpt-5" }] });
+        } else if (cmd === "workspace.ignore") {
+          // The daemon toggles one exact line in <workspace>/.gitignore and
+          // answers with the entry's state AFTER the toggle (protocol 1.12).
+          const p = args[0] ?? "";
+          if (!p || p.startsWith("/")) {
+            send(c, { type: "workspace.ignore.result", path: p, ok: false, error: `workspace.ignore: ${p ? "absolute paths are not addressable via the workspace .gitignore" : "empty pattern"}` });
+          } else {
+            const ignored = !c.ignored.has(p);
+            if (ignored) c.ignored.add(p); else c.ignored.delete(p);
+            send(c, { type: "workspace.ignore.result", path: p, ok: true, ignored, gitignore_path: "/work/.gitignore" });
+          }
         } else if (cmd === "session.stop") {
           send(c, { type: "system.message", message: "Stopped.", style: "warning" });
         } else if (cmd === "model") {
@@ -243,11 +380,14 @@ wss.on("connection", (ws, req) => {
         break;
       case "session.stop":
         send(c, { type: "system.message", message: "Stopped.", style: "warning" });
+        c.pending.get("hang")?.(undefined);
+        c.pending.delete("hang");
         break;
-      case "history.request":
-        send(c, { type: "history", agent_id: "main", history: [] });
-        send(c, { type: "system.message", message: "(mock) history is empty", style: "hint" });
+      case "history.request": {
+        const history = (c.sessionId && HISTORIES[c.sessionId]) || [];
+        send(c, { type: "history", agent_id: "main", history, turn_accounting: history.length ? [{ prompt: 120, output: 40, total: 160 }] : [] });
         break;
+      }
       case "message.send":
         turn(c, String(ev.text ?? "")).catch(() => undefined);
         break;

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, beforeEach, describe, test } from "node:test";
 import { BindChannel } from "../src/bind-channel.js";
+import { FileCredentialStore } from "../src/credentials.js";
 import { createRouter, isSameOrigin } from "../src/routes.js";
 import { SessionStore } from "../src/session.js";
 import { APP_CREDENTIAL, FakeIdp, startMockDaemon, testConfig, type MockDaemon } from "./helpers.js";
@@ -27,7 +28,8 @@ describe("routes", () => {
     bind = new BindChannel({ bindUrl: daemon.url, appCredential: APP_CREDENTIAL });
     await bind.connect();
     sessions = new SessionStore(config.session.secret, config.session.ttlSeconds);
-    http.on("request", createRouter({ config, idp, sessions, bind, distDir: dist, log: (m) => logs.push(m) }));
+    const credentials = new FileCredentialStore(join(mkdtempSync(join(tmpdir(), "jwcs-cred-")), "credentials.json"), "c".repeat(48));
+    http.on("request", createRouter({ config, idp, sessions, bind, credentials, distDir: dist, log: (m) => logs.push(m) }));
   });
   after(async () => { await bind.close(); await new Promise<void>((r) => http.close(() => r())); await daemon.close(); });
   beforeEach(() => { daemon.binds.length = 0; daemon.revokes.length = 0; idp.refuse = null; });
@@ -52,7 +54,7 @@ describe("routes", () => {
 
   test("config.json points the bundle at the ticket endpoint, not at a token", async () => {
     const r = await fetch(`${base}/config.json`);
-    assert.deepEqual(await r.json(), { daemon: daemon.url, ticketUrl: "./api/ticket", loginUrl: "./auth/login", autoConnect: true });
+    assert.deepEqual(await r.json(), { daemon: daemon.url, ticketUrl: "./api/ticket", loginUrl: "./auth/login", autoConnect: true, credentialsUrl: "./api/credentials" });
     assert.equal(r.headers.get("cache-control"), "no-store");
   });
 
@@ -97,6 +99,73 @@ describe("routes", () => {
   test("a stale or unknown callback state is refused", async () => {
     const r = await fetch(`${base}/auth/callback?code=c&state=nope`, noRedirect);
     assert.equal(r.status, 400);
+  });
+
+  // ── The per-user key store ──────────────────────────────────────────
+
+  const so = { "sec-fetch-site": "same-origin", "content-type": "application/json" };
+
+  test("credentials: no session → 401; store, list (no secret), reveal, delete, all for the signed-in user only", async () => {
+    assert.equal((await fetch(`${base}/api/credentials`)).status, 401);
+    const alice = await signIn("alice");
+    const bob = await signIn("bob");
+
+    const created = await fetch(`${base}/api/credentials`, { method: "POST", headers: { cookie: alice, ...so }, body: JSON.stringify({ provider: "zhipuai", secret: "sk-abcdefghijklmnop", label: "work" }) });
+    assert.equal(created.status, 201);
+    const { entry } = await created.json();
+    assert.equal(entry.label, "work"); assert.equal(entry.hint, "mnop"); assert.equal(entry.secret, undefined);
+
+    const listed = await (await fetch(`${base}/api/credentials?provider=zhipuai`, { headers: { cookie: alice } })).json();
+    assert.deepEqual(listed.entries.map((e: { id: string }) => e.id), [entry.id]);
+    assert.ok(!JSON.stringify(listed).includes("abcdefghijkl"), "the listing carries no secret");
+    assert.deepEqual((await (await fetch(`${base}/api/credentials?provider=openrouter`, { headers: { cookie: alice } })).json()).entries, []);
+    // Bob sees nothing of Alice's and cannot reveal or delete her entry.
+    assert.deepEqual((await (await fetch(`${base}/api/credentials`, { headers: { cookie: bob } })).json()).entries, []);
+    assert.equal((await fetch(`${base}/api/credentials/${entry.id}/reveal`, { method: "POST", headers: { cookie: bob, ...so } })).status, 404);
+    assert.equal((await fetch(`${base}/api/credentials/${entry.id}`, { method: "DELETE", headers: { cookie: bob, ...so } })).status, 404);
+
+    const revealed = await fetch(`${base}/api/credentials/${entry.id}/reveal`, { method: "POST", headers: { cookie: alice, ...so } });
+    assert.equal(revealed.status, 200);
+    assert.equal((await revealed.json()).secret, "sk-abcdefghijklmnop");
+    assert.equal(revealed.headers.get("cache-control"), "no-store");
+
+    assert.equal((await fetch(`${base}/api/credentials/${entry.id}`, { method: "DELETE", headers: { cookie: alice, ...so } })).status, 204);
+    assert.deepEqual((await (await fetch(`${base}/api/credentials`, { headers: { cookie: alice } })).json()).entries, []);
+    assert.ok(!logs.some((l) => l.includes("abcdefghijkl")), "the log never carries a secret");
+  });
+
+  test("credentials: store, reveal and delete are same-origin only; bad input is 400, not 500", async () => {
+    const cookie = await signIn("alice");
+    const cross = { cookie, "sec-fetch-site": "cross-site", "content-type": "application/json" };
+    assert.equal((await fetch(`${base}/api/credentials`, { method: "POST", headers: cross, body: JSON.stringify({ provider: "zhipuai", secret: "sk-abcdefghijklmnop" }) })).status, 403);
+    const ok = await (await fetch(`${base}/api/credentials`, { method: "POST", headers: { cookie, ...so }, body: JSON.stringify({ provider: "zhipuai", secret: "sk-abcdefghijklmnop" }) })).json();
+    assert.equal(ok.entry.label, "zhipuai …mnop", "no label → the auto label");
+    assert.equal((await fetch(`${base}/api/credentials/${ok.entry.id}/reveal`, { method: "POST", headers: cross })).status, 403);
+    assert.equal((await fetch(`${base}/api/credentials/${ok.entry.id}`, { method: "DELETE", headers: cross })).status, 403);
+    assert.equal((await fetch(`${base}/api/credentials`, { method: "POST", headers: { cookie, ...so }, body: "not json" })).status, 400);
+    assert.equal((await fetch(`${base}/api/credentials`, { method: "POST", headers: { cookie, ...so }, body: JSON.stringify({ provider: "Zhipu AI", secret: "x".repeat(20) }) })).status, 400);
+    assert.equal((await fetch(`${base}/api/credentials`, { method: "POST", headers: { cookie, ...so }, body: JSON.stringify({ provider: "zhipuai", secret: "" }) })).status, 400);
+    assert.equal((await fetch(`${base}/api/credentials?provider=Bad%20Name`, { headers: { cookie } })).status, 400);
+    assert.equal((await fetch(`${base}/api/credentials/${ok.entry.id}`, { headers: { cookie } })).status, 404, "GET on one entry is not a route");
+    assert.equal((await fetch(`${base}/api/credentials/${ok.entry.id}`, { method: "DELETE", headers: { cookie, ...so } })).status, 204);
+  });
+
+  test("credentials: without a store the routes are 404 and config.json names no credentialsUrl", async () => {
+    const dist = mkdtempSync(join(tmpdir(), "jwcs-dist-"));
+    writeFileSync(join(dist, "index.html"), "<!doctype html>");
+    const bare = createServer();
+    await new Promise<void>((r) => bare.listen(0, "127.0.0.1", r));
+    const bareBase = `http://127.0.0.1:${(bare.address() as { port: number }).port}`;
+    const config = testConfig(daemon.url, bareBase);
+    bare.on("request", createRouter({ config, idp, sessions, bind, distDir: dist }));
+    try {
+      const cfg = await (await fetch(`${bareBase}/config.json`)).json();
+      assert.equal(cfg.credentialsUrl, undefined);
+      const cookie = await signIn("alice");
+      assert.equal((await fetch(`${bareBase}/api/credentials`, { headers: { cookie } })).status, 404);
+    } finally {
+      await new Promise<void>((r) => bare.close(() => r()));
+    }
   });
 
   test("the IdP refusing the account (missing role) is a 403 with the reason, and no session", async () => {

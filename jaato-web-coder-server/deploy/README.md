@@ -44,7 +44,8 @@ Optionally create a realm role (e.g. `jaato-user`) and set
 sudo jaato-web-coder-server init --dir /etc/jaato-web-coder
 ```
 
-writes `app.credential`, `session.secret` and a `server.yaml` template
+writes `app.credential`, `session.secret`, `credentials.key` (the key the
+per-user API-key store is encrypted with) and a `server.yaml` template
 (all 0600) and prints the daemon-side entry. Put that entry in
 `/etc/jaato/ws-apps.json` (mode 0600, owned by the daemon's user):
 
