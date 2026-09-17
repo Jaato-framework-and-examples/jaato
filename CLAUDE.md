@@ -1424,6 +1424,117 @@ to do what #1023 says it cannot, not that the kernel then behaves.
 
 See `docs/design/runner_prewarm_pool_plan.md` for the full multi-PR plan + decision log.
 
+### "Never Confined" Is Not "Never Served" (#1100)
+
+#1033 put the boundary in the reuse key. The gate that reads it asked the
+wrong question about half of it:
+
+```python
+return not slot.profile_name or slot.profile_name == self.profile_name
+```
+
+`SlotKey.build` folds `""` to `None` so unconfined has ONE spelling — right
+for a key — so a slot that **served an unconfined session** stamps
+`profile_name=None` and is indistinguishable from a **virgin** slot, while
+carrying that session's `unconfined` threads. Handed next to a confined
+session, the main thread transitions, the two RPC lanes are recycled, and
+#1023's per-thread verification correctly refuses the bootstrap for the
+leftovers — which cannot be confined, only retired.
+
+Confirmed on a live daemon, one slot:
+
+```
+12:06:57  slot pid=95942  profile=(none)                     confined=False  -> ran fine
+12:11:25  slot pid=95942  returned to pool
+12:17:44  slot pid=95942  profile=jaato-ws-test-hola-3-...   confined=True   -> REFUSED
+          "6 of 7 scanned threads report otherwise (tid=95982 label='unconfined', ...)"
+```
+
+It **escalates with uptime** — 2 of 3 threads one day, 6 of 7 the next —
+because the survivors accumulate per session on a long-lived slot. It fails
+CLOSED, which is the safe direction and the whole reason the guard is not
+what changed.
+
+`PoolSlot.has_served` is the missing property, and the gate becomes:
+
+```python
+if not slot.has_served:
+    return True
+return (slot.profile_name or None) == self.profile_name
+```
+
+This is #1033's own generating rule — *the key must contain every property
+of the slot that the next session cannot change* — applied to the one it
+missed. `has_served` **cannot be derived** from the key, because every one
+of its four fields is legitimately `None` for an unconfined standalone
+session; that is the defect, not an implementation detail of it. It is
+raised in `SlotKey.stamp` (the one place a slot stops being virgin) and
+never lowered, and it is deliberately NOT a fifth key field: a key says
+what an arriving SESSION wants, and path (1) compares the whole key for
+equality, where a served slot must still match a session wanting exactly
+its boundary.
+
+**Cost, and it needs no new instrumentation.** On a daemon mixing postures,
+a slot that ran unconfined is no longer offered to a confined session, so
+that arrival cold-spawns (~7 s). Already counted by
+`pool_profile_mismatch_skips_total` beside `pool_acquire_miss_total` — the
+skip branch does not care WHY the boundary did not fit — and remedied by
+raising `JAATO_RUNNER_POOL_MAX_SIZE`. The same cost #1033 accepted for the
+multi-boundary case. Unconfined→unconfined reuse is untouched, and on a host
+with no AppArmor every profile name is empty, so the second clause is a
+tautology and nothing changes.
+
+**The refusal now names the threads.** `_tids_from_threading` had each
+`Thread` object in hand, read `native_id` and discarded `.name`, so the
+message was `tid=… label=…` and two separate live incidents were
+investigated — one by correlating daemon-log timestamps against slot pids —
+without ever establishing what the divergent threads were.
+`ThreadProfileScan.names` carries the map (read at scan time, because a
+thread that exits before the message is rendered has already left
+`threading.enumerate`) and the message reads
+`tid=95982 name='runner-rpc-work_0' label='unconfined'`. A tid the
+interpreter does not know — always possible on the complete `task_dir`
+route — renders `(unknown)`; `/proc/<tid>/comm` is not a substitute, since
+every runner thread's `comm` is `"python"` on CPython 3.11.
+
+The name is **advisory and nothing else**. It never decides whether a thread
+is divergent: an allow-list of thread names is an allow-list of unconfined
+code, and it is the one change here that could not be validated without an
+enforcing host.
+
+**`TelemetryPlugin.shutdown()` had no caller anywhere in the tree**, and
+that is a plain thread leak independent of AppArmor — the most likely
+member of the surviving population. Telemetry is RUNTIME-scoped and a
+runner builds a fresh `JaatoRuntime` on **every** `session.bootstrap`, so
+the outgoing plugin is unreachable after session end; it is not a registry
+plugin, so `_handle_session_end`'s sweep over `registry.list_available()`
+never saw it. Dropping a reference is not freeing a resource: an OTel
+`BatchSpanProcessor` owns a live export thread, and a pool slot accrued one
+per session it served. `RunnerRPC` now calls it on both boundaries —
+`session.end` (warm, slot returns to the pool) and `session.shutdown`
+(cold) — because a runner reaches one or the other, never both.
+`OTelPlugin.reset_for_next_session` still keeps the provider, and its
+docstring no longer claims `shutdown()` does the teardown "at slot end":
+that was true only of an instance that survived the slot, which the
+per-bootstrap runtime makes false. A warm-path failure joins `errors`,
+which stops the daemon pooling that slot — deliberate, since a shutdown
+that raised is exactly when the export thread may still be running.
+
+Not verified here: no kernel, as with #1023 and #1033. Every confinement
+fact is exercised against a fabricated `attr/current` tree and in-memory
+pool state. Nothing proves the kernel behaves as #1023 describes; it proves
+the framework stops handing the kernel a slot it cannot re-confine, and
+that when it refuses one it says which threads it refused.
+
+Also not addressed: the comment on #1100 records that the WS path
+**provisions the AppArmor profile ~370 ms AFTER** the first runner has
+already spawned unconfined, so a session that asked for confinement gets an
+unconfined first runner by construction — which is what poisons the slot on
+a deployment that believes it runs confined throughout. The admission gate
+is still the right place for the fix, because it protects against ANY
+unconfined session sharing a daemon; whether the first runner should wait
+for provisioning is its own change.
+
 ### Slot-scoped Plugin Lifetime (#890)
 
 A pool slot serves several sessions of one cascade in turn, and
