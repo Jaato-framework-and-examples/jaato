@@ -18,6 +18,8 @@ import { formatHistoryListing, historyBlocks } from "@/protocol/history";
 import { clampRailWidth, loadRailWidth, saveRailWidth } from "@/store/railWidth";
 import type {
   StagedUpload,
+  ExitChoice,
+  ExitOption,
   UserBlock,
   Agent,
   ConfigStatus,
@@ -143,6 +145,8 @@ export interface JaatoState {
   /** ``PermissionStatusEvent``: the effective default policy and, when suspended, the scope. */
   permissionStatus?: { effectiveDefault: string; suspensionScope: string | null } | null;
   processing: Record<string, boolean>;
+  /** The open exit confirmation, or ``null`` (``app/exitChoice.ts``). */
+  exitChoice: ExitChoice | null;
 
   ui: {
     showPlan: boolean;
@@ -172,6 +176,9 @@ export interface JaatoState {
   toggleTool: (agentId: string, blockId: string) => void;
   setAllToolsExpanded: (agentId: string, expanded: boolean) => void;
   resolvePermission: (requestId: string) => void;
+  openExitChoice: (running: boolean, options: ExitOption[]) => void;
+  closeExitChoice: () => void;
+  focusExitChoice: (focus: number) => void;
   focusPermission: (requestId: string, focus: number) => void;
   answerClarification: (requestId: string, answer: string) => PendingClarification | undefined;
   dismissClarification: (requestId: string) => void;
@@ -226,6 +233,7 @@ const emptySessionState = () => ({
   workspaceNotice: null as { text: string; error?: boolean } | null,
   permissionStatus: null,
   processing: {} as Record<string, boolean>,
+  exitChoice: null as ExitChoice | null,
 });
 
 function agentOf(ev: AnyEvent): string {
@@ -889,6 +897,9 @@ export const useJaato = create<JaatoState>()((set, get) => ({
   setAllToolsExpanded: (agentId, expanded) =>
     set((st) => ({ blocks: { ...st.blocks, [agentId]: (st.blocks[agentId] ?? []).map((b) => (b.kind === "tool" ? { ...b, expanded } : b)) } })),
   resolvePermission: (requestId) => set((st) => ({ permissions: st.permissions.filter((p) => p.requestId !== requestId) })),
+  openExitChoice: (running, options) => set({ exitChoice: { running, options, focus: 0 } }),
+  closeExitChoice: () => set({ exitChoice: null }),
+  focusExitChoice: (focus) => set((st) => (st.exitChoice ? { exitChoice: { ...st.exitChoice, focus } } : {})),
   focusPermission: (requestId, focus) => set((st) => ({ permissions: st.permissions.map((p) => (p.requestId === requestId ? { ...p, focus } : p)) })),
   answerClarification: (requestId, answer) => {
     const cur = get().clarifications.find((c) => c.requestId === requestId);

@@ -7,7 +7,7 @@
  * and the permission default -- with a count of prompts waiting, since a
  * waiting prompt is the one thing worth reading off the foot of the page.
  */
-import { exitToConnect } from "@/app/actions";
+import { requestExit } from "@/app/exitChoice";
 import { BUILD, buildLine } from "@/app/buildInfo";
 import { useJaato } from "@/store/store";
 
@@ -42,8 +42,8 @@ export function StatusBar() {
       <button type="button" onClick={() => toggle("showBudget")} className={tab(ui.showBudget)} title="Toggle budget (Ctrl+B)" aria-label="Toggle budget (Ctrl+B)">Budget</button>
       <button type="button" onClick={() => toggle("showWorkspace")} className={tab(ui.showWorkspace)} title="Toggle workspace changes (Alt+W)" aria-label="Toggle workspace changes (Alt+W)">Files</button>
       <button type="button" onClick={() => setToolsExpanded(!ui.showTools)} className={tab(ui.showTools)} title={ui.showTools ? "Tool call boxes expanded — click to collapse them (Ctrl+T)" : "Tool call boxes collapsed — click to expand them (Ctrl+T)"} aria-label="Toggle tool call boxes (Ctrl+T)">Tools</button>
-      {/* The ``exit`` command as a button: detach, back to the connect screen; the session stays on the daemon. */}
-      <button type="button" onClick={() => { exitToConnect().catch(() => undefined); }} className={`${tab(false)} hover:text-error`} title="Detach from the session and return to the connect screen (the exit command)" aria-label="Exit (detach from the session)">Exit</button>
+      {/* The ``exit`` command as a button: asks what becomes of the session -- detach, end, or cancel the task -- before leaving. */}
+      <button type="button" onClick={() => { requestExit().catch(() => undefined); }} className={`${tab(false)} hover:text-error`} title="Leave: detach from the session, or end it (the exit command)" aria-label="Exit (detach from or end the session)">Exit</button>
     </div>
   );
 }

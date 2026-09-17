@@ -5064,6 +5064,52 @@ context, #838) — a file the model should *see* rather than have on disk
 is a different feature with a different cost, and the composer does not
 yet offer it.
 
+### An Exit That Never Asked
+
+The TUI's `exit` is a question before it is an action: a session lives on
+the daemon, so leaving it means one of three things — **detach** and keep
+it for `session attach` later, **end** it (`session.delete`), or, with a
+turn in flight, **cancel** the turn and detach — and the TUI asks which
+(`[d/e/r]`, or `[c/d/e/r]` mid-turn) before doing anything. The web
+client's `exit` command and status-bar Exit took the first reading
+unconditionally. Safe, and the only reading the button offered: a session
+someone wanted gone stayed loaded on the daemon until the orphan sweep or
+a `session delete <id>` typed from memory.
+
+The question is ported as a plate (`components/prompts/ExitPrompt.tsx`),
+drawn like the permission plate so the two read as one kind of prompt,
+with the TUI's option sets and letters (`app/exitChoice.ts`). The store
+holds the open question (`exitChoice`); the composer forwards a typed key
+to it **before** a pending permission prompt, as the TUI's pending exit
+confirmation takes the line first; Tab cycles the buttons, Enter answers
+the focused one, Escape and any unlisted key are Return.
+
+Two decisions the TUI never has to make, because it is a process and
+"end" is also "quit":
+
+| Answer | Where it lands |
+|---|---|
+| Detach, Cancel task and exit | disconnect, the connect screen — the exit command as it was |
+| End session, workspace mode | **the workspace list**, connection kept |
+| End session, single-workspace daemon | disconnect, the connect screen |
+
+`SessionManager.delete_session` removes the session's memory and disk
+record and never touches the directory it ran in, so after End the
+workspace is exactly where the person left it, and the list is where they
+pick it — or another — again. End also **waits for the daemon's answer**
+before leaving: `session.delete` is confirmed by a `system.message`
+(`Session '<id>' deleted.` / `not found.`, and `Session deleted: <name>`
+to attached clients), and leaving on the send alone would report a
+deletion nobody confirmed. A daemon that says nothing gets a bounded grace.
+
+The e2e mock gained `session.delete` in the daemon's shape and a `hang`
+turn that runs until `session.stop`: the suite runs with `MOCK_SPEED=0`,
+so a turn "long enough to press Exit during" cannot be a sleep, and the
+first draft's timed turn had already ended by the time the button was
+clicked. The pre-existing `Disconnect` on the workspace list is also why
+the End-session test asserts the connect button by `exact` name — a
+substring match counts it.
+
 ### A Key the Web Files Panel Did Not Have
 
 The TUI's workspace panel (Ctrl+W) binds two keys to the entry under the

@@ -278,6 +278,30 @@ export type ConnectionPhase = "disconnected" | "connecting" | "connected" | "rec
 export type Screen = "connect" | "workspaces" | "session";
 
 /**
+ * One answer the exit choice offers (``app/exitChoice.ts``): the key the
+ * composer accepts for it, the label on its button, and what it does.
+ */
+export interface ExitOption {
+  key: string;
+  label: string;
+  description: string;
+}
+
+/**
+ * The TUI's exit confirmation, as a prompt in the session screen.  The
+ * ``exit`` command and the status bar's Exit open it instead of leaving at
+ * once; ``running`` records whether a turn was in flight when it opened,
+ * which decides the option set (the TUI's ``[c/d/e/r]`` vs ``[d/e/r]``).
+ * ``focus`` is the option Tab cycles to and Enter answers.  Closed
+ * (``null``) by any answer, by Return, and by the session state reset.
+ */
+export interface ExitChoice {
+  running: boolean;
+  options: ExitOption[];
+  focus: number;
+}
+
+/**
  * One file the user attached, on its way into the session's workspace
  * (``app/staging.ts``).  ``path`` is where it lands, workspace-relative.
  *

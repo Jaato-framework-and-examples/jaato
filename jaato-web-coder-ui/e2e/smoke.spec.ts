@@ -474,14 +474,22 @@ test("without a key store the configure form keeps its plain key field", async (
 
 // ── Leaving: Exit in the chat, Sign out on the workspace list ─────────
 
-test("the status bar's Exit detaches like the exit command, and an autoConnect page does not connect straight back", async ({ page }) => {
+const EXIT = "Exit (detach from or end the session)";
+
+test("the status bar's Exit asks first; Detach leaves like the exit command, and an autoConnect page does not connect straight back", async ({ page }) => {
   await page.route("**/config.json", (route) =>
     route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ daemon: WS, autoConnect: true }) }),
   );
   await page.goto("/");
   await page.getByRole("button", { name: /default/ }).click();
   await expect(page.getByText("Connected to the mock daemon")).toBeVisible();
-  await page.getByRole("button", { name: "Exit (detach from the session)" }).click();
+  await page.getByRole("button", { name: EXIT }).click();
+  // The TUI's question, with its idle option set, and the composer captures the answer.
+  const plate = page.getByRole("group", { name: "Exit options" });
+  await expect(plate).toBeVisible();
+  await expect(plate.getByRole("button")).toHaveText([/Detach\s+d/, /End session\s+e/, /Return\s+r/]);
+  await expect(composer(page)).toHaveAttribute("placeholder", /Exit: d · e · r/);
+  await plate.getByRole("button", { name: /Detach/ }).click();
   // Back on the connect screen, and staying there: the page waits for a click.
   const open = page.getByRole("button", { name: "Open my environment" });
   await expect(open).toBeVisible();
@@ -491,7 +499,66 @@ test("the status bar's Exit detaches like the exit command, and an autoConnect p
   // The click reconnects (the mark was spent); a fresh load would have connected on its own again.
   await open.click();
   await expect(open).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Exit (detach from the session)" }).or(page.getByTestId("session-picker"))).toBeVisible();
+  await expect(page.getByRole("button", { name: EXIT }).or(page.getByTestId("session-picker"))).toBeVisible();
+});
+
+test("a typed r (or Escape) returns to the session; the exit command opens the same question", async ({ page }) => {
+  await openSession(page);
+  await composer(page).fill("exit");
+  await composer(page).press("Enter");
+  const plate = page.getByRole("group", { name: "Exit options" });
+  await expect(plate).toBeVisible();
+  await composer(page).fill("r");
+  await composer(page).press("Enter");
+  await expect(plate).toHaveCount(0);
+  await expect(page.getByText("Returning to session.")).toBeVisible();
+  // Still in the session: the prompt works as before.
+  await composer(page).fill("code");
+  await composer(page).press("Enter");
+  await expect(page.locator(".tok-keyword", { hasText: "def" })).toBeVisible();
+  await page.getByRole("button", { name: EXIT }).click();
+  await expect(plate).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(plate).toHaveCount(0);
+});
+
+test("with a turn in flight the question offers Cancel task and exit first, and it stops the turn before leaving", async ({ page }) => {
+  await openSession(page);
+  await composer(page).fill("hang");
+  await composer(page).press("Enter");
+  await expect(page.getByText("Agent working")).toBeVisible();
+  await page.getByRole("button", { name: EXIT }).click();
+  const plate = page.getByRole("group", { name: "Exit options" });
+  await expect(plate.getByText("Task in progress")).toBeVisible();
+  await expect(plate.getByRole("button")).toHaveText([/Cancel task and exit\s+c/, /Detach\s+d/, /End session\s+e/, /Return\s+r/]);
+  await composer(page).fill("c");
+  await composer(page).press("Enter");
+  await expect(page.getByRole("button", { name: "Connect" })).toBeVisible();
+});
+
+test("End session deletes the session and, in workspace mode, lands on the workspace list with the workspace still there", async ({ page }) => {
+  await page.goto("/");
+  await page.getByPlaceholder("ws://host:8080").fill(WS_WORKSPACES);
+  await page.getByRole("button", { name: "Connect" }).click();
+  await page.getByRole("button", { name: "Open workspace project-b" }).click();
+  await page.getByRole("button", { name: /default/ }).click();
+  await expect(page.getByText("Connected to the mock daemon")).toBeVisible();
+  await page.getByRole("button", { name: EXIT }).click();
+  await page.getByRole("group", { name: "Exit options" }).getByRole("button", { name: /End session/ }).click();
+  // Not the connect screen: the connection is kept and the list is where the
+  // workspace, which the deletion never touched, is picked again.
+  await expect(page.getByText("Workspaces", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Open workspace project-b" })).toBeVisible();
+  // ``exact``: the list's own way out is "Disconnect", which a substring match would count.
+  await expect(page.getByRole("button", { name: "Connect", exact: true })).toHaveCount(0);
+});
+
+test("End session on a single-workspace daemon disconnects like Detach", async ({ page }) => {
+  await openSession(page);
+  await page.getByRole("button", { name: EXIT }).click();
+  await composer(page).fill("e");
+  await composer(page).press("Enter");
+  await expect(page.getByRole("button", { name: "Connect" })).toBeVisible();
 });
 
 test("the workspace list says who is signed in and offers the backend's Sign out", async ({ page }) => {
