@@ -68,6 +68,13 @@ question 5) and consensus is not an advisor tie-break (its open question
 something has nowhere to put it except the existing text, and reconciling
 its claim with what is already written **is** the edit.
 
+The three also differ in what they record about **who produced them**,
+and the gradient runs the wrong way. A memory persists `source_agent` and
+`source_session` (`memory/models.py:104-105`, written by `asdict` in
+`storage.py:117`). A reference persists **nothing** — see §5, Seam 4. And
+neither records the human, although the daemon authenticated one. §8 is
+where that matters.
+
 The corollary is uncomfortable and should be said plainly: a wiki makes
 the write path adversarial. Two agents that disagree cannot both be
 right in one paragraph, and the system has to do something about it.
@@ -116,7 +123,7 @@ invariant is a memory store with better formatting.
 ## 3. A wiki written for an LLM reader is not a wiki written for a human
 
 This is where "wikiLLM" stops being "a wiki, for agents" and becomes its
-own thing. The reader is different in five ways, and each has a drafting
+own thing. The reader is different in six ways, and each has a drafting
 consequence:
 
 | The human reader | The LLM reader | Consequence |
@@ -126,8 +133,18 @@ consequence:
 | can ask a follow-up | cannot | ambiguity must be resolved in the text, not left for the reader to resolve |
 | reads for free | pays per token, per read, forever | length is a recurring cost, so brevity is a *policy*, not a style preference |
 | will not act on it | will act on it immediately | **negative results are first-class** |
+| can weigh an author — knows who is senior, who was guessing | reads a name as a credential | **attribution is not authority** (below) |
 
-That last row is the important one and it is the one `CLAUDE.md` already
+The sixth row is the one with a hard rule attached. Put a human's name in
+the *article text* and the model will weight the claim by who wrote it
+rather than by its evidence — which inverts §4's whole argument, and ends
+with an agent deferring to a senior engineer's stale claim over a passing
+test. Wikipedia keeps author names out of article bodies and in history
+for the same reason. So: **attribution lives in `history.jsonl`, never in
+the text the model reads.** It is for the curator, the auditor and the
+rollback, not for the reader.
+
+The fifth row is the important one and it is the one `CLAUDE.md` already
 gets right. An LLM handed an article about a subsystem will, unprompted,
 re-derive and re-attempt the approaches the article does not mention.
 So a wikiLLM article needs two sections a human wiki has no analogue
@@ -218,8 +235,8 @@ Every one of these is a profile, a persona, a script, or a driver:
 
 ### Seam — a pattern *would* express it, but the hot path is not pluggable
 
-Three. The first is the largest ask; the third is the smallest, and
-the closest to already being done:
+Four. The first is the largest ask; the last two are the smallest, and
+both land on the same dataclass:
 
 1. **There is no topic-keyed store with revisions and a safe write.**
    Memory's storage is append-JSONL under `raw/` plus a `curated.jsonl`,
@@ -311,6 +328,50 @@ the closest to already being done:
    than a replacement — declare the load-bearing few, infer the rest —
    and why `supersedes` is the most valuable entry in the vocabulary: it
    is the one relation whose staleness is self-announcing.
+
+4. **A reference records nothing about who produced it.**
+   `ReferenceSource` is `id`, `name`, `description`, `type`, `mode`, the
+   access fields, `fetch_hint`, `tags`, `contents`, `embedding`,
+   `bundle_name` — and `to_dict` / `from_dict` round-trip exactly that
+   set, so nothing is being dropped on save. There is no author, no
+   session, no user, no created-or-modified timestamp. The two
+   near-misses are not attribution: `SelectionRequest.timestamp`
+   (`references/models.py:333`) belongs to an in-flight channel request,
+   and `EmbeddingMetadata.source_hash` is a staleness fingerprint —
+   content identity, not authorship.
+
+   That is **coherent for what references were**: a human-curated catalog
+   written by `gen-references` or by hand, where *who wrote this* was
+   answered by git. It stops being coherent the moment an agent writes
+   one, which is the whole wikiLLM turn.
+
+   Memory is the contrast and the cautionary tale. It persists
+   `source_agent` and `source_session` (`memory/models.py:104-105`,
+   `storage.py:117` writes the whole dataclass with `asdict`) — and that
+   field was **null for every cascade session** after PR-196, because the
+   registry-shared plugin read whichever sibling bootstrapped last, so
+   one sibling's id leaked into another's memories and the runner-side
+   path read `None` outright. The plugin's own docstrings record the
+   measurement (`memory/plugin.py:184`, `226-231`, `334`: *"peer 7:1
+   retry-49 post-PR-196 still showed source_session=null on 4/4
+   memories"*), fixed by stamping per-session in `bootstrap_session` and
+   reading through `_get_session_id()`.
+
+   The lesson is the one §8 keeps arriving at from different directions:
+   **attribution that silently reports null is worse than none.** A
+   revision history you cannot trust is one you cannot roll back or audit
+   with, and it still looks like one.
+
+   The consequence for this document is sharper than "unimplemented".
+   §8's rule that **provenance gates placement** — locally reproducible
+   evidence in the trusted region, web-derived fenced — is on references
+   not merely unbuilt but **unrepresentable**: there is no field for the
+   fence to read. So the ask is a provenance block beside Seam 3's
+   `links`, on the same dataclass, both additive and both optional:
+   `source_agent`, `source_session`, `created_by`, `witnessed_by`,
+   `binding`, `created_at`. §8 says which of those are free and which are
+   not, and what it costs to write a human's name onto an artifact that
+   is designed to be shared.
 
 ### Fidelity — a pattern IS written and breaks, because a primitive misreports
 
@@ -422,7 +483,7 @@ it argues for curation running on a cadence rather than continuously.
 
 ---
 
-## 8. Three ways this fails
+## 8. Four ways this fails
 
 ### Correlated consensus is not consensus
 
@@ -449,6 +510,82 @@ Two mitigations, and jaato can express both:
   *"confirmed by a different binding"* a **checkable predicate** rather
   than a hope. A review profile on a different tier is then a real second
   opinion.
+
+### A warrant that nobody gave
+
+The section above is about mistaking correlated agents for independent
+ones. This is the same mistake about the human, and it starts by
+correcting a framing: agent attribution and human attribution are not
+alternatives. An agent runs **inside a session**, and that session very
+often has a person on the other end. Four axes, each answering a question
+none of the others can:
+
+| Axis | Answers | Today |
+|---|---|---|
+| `source_agent` | the writer's **competence and bias** — a documentation persona's claim about layout is not a security reviewer's claim about the same code | on a memory; not on a reference |
+| `source_session` | lets the context be **reconstructed** — the history, the tools, the turn | on a memory; not on a reference |
+| **the human** | **accountability**, and what makes review or escalation mean anything | on neither |
+| the binding | the independence predicate above | nowhere durable |
+
+So record the human. The trap is that **"the human" is not one thing**,
+and the difference is exactly the information a promotion decision needs:
+
+| The person | Relationship to the claim |
+|---|---|
+| approved the tool call that produced it | the strongest warrant available |
+| in the session, never saw this turn | present, uninvolved |
+| five hops up a cascade | `_create_subagent_session` sets `created_by=self._creator_of(parent)`, so identity propagates down. Right for accountability, **false** as "this person saw it" |
+| absent | `ClientType.API`, `_HEADLESS_CLIENT_ID` |
+
+Collapsing rows 1 and 3 into one `created_by` manufactures a warrant
+nobody gave — the same shape as the correlated-consensus error, arriving
+through the front door. So the field splits: **`created_by`** is the
+accountable identity, inherited down the cascade; **`witnessed_by`** is
+set only when a person actually saw *this* claim's evidence.
+
+**The tree already has the vocabulary for that distinction.** #859
+records `user_id` *and* `approver` on `PermissionResolvedEvent` and the
+ledger's `permission-check` row, and #951 added `asked=` to the DECISION
+line **precisely because `method` could not say whether anybody was
+consulted** — `allow_all` is produced both by a silent pre-approval and
+by a human typing `a`. That is this distinction one layer down. *A human
+approved the tool call that produced this claim* is already a recorded
+fact; it simply never reaches the memory that resulted.
+
+**Two of the four are nearly free, and one has a trap.** The memory
+plugin already holds the live session — `get_current_session()`
+(`memory/plugin.py:193-194`), which is how the PR-196 `source_session`
+fix works — and `JaatoSession._client_user_id` (`jaato_session.py:958`)
+is set from `SessionInitEnvelope.created_by` via `set_client_user_id`
+(`:1544`) on the runner side. Same object, one more attribute; no
+config-injection change.
+
+But **do not reach it through `_resolve_telemetry_user_id`**
+(`jaato_session.py:1603`). Its precedence falls back to
+`JAATO_TELEMETRY_USER_ID` from the per-session env, so a workspace `.env`
+could **forge authorship** on a knowledge artifact. Provenance needs a
+narrow accessor returning only the transport-authenticated value, with
+absence reading as *no human identity* rather than as an
+operator-supplied string — positive evidence only, the posture #1014 and
+#1023 take about confinement labels. The binding is the one that is
+genuinely new: `_observe_binding_usage` has `(provider, model, tier)` but
+only as per-response spend, stamped on nothing durable.
+
+**What it buys** is a promotion rule the current model cannot express at
+all: a **human-witnessed** claim clears a lower notability bar. One
+person who approved the tool call and read the output is better evidence
+than three correlated sessions agreeing — and with `asked=` already
+recorded, that is checkable rather than assumed.
+
+**What it costs**, stated because this is the section for it: an identity
+written onto a knowledge artifact **travels with it**. `created_by` on a
+session record is local; on a reference bundle or a wiki article it
+crosses org boundaries by design — bundles merge, `scope: universal`
+lands in `~/.jaato`, wikis federate as git. That needs an export policy
+(strip, or pseudonymise at the bundle boundary), and on a long-lived
+artifact *"delete this person"* becomes a history rewrite. The #1074
+qualified form (`app:user`) namespaces the identity, which helps with
+collisions and not at all with this.
 
 ### An article is untrusted content the moment a subagent wrote it
 
@@ -510,7 +647,12 @@ design already gives:
     runner-pool-slot-reuse/
       article.md                      # the claim, current revision
       talk.md                         # disputes, rejected edits, the evidence against
-      history.jsonl                   # revision, session, agent, BINDING, base_rev, diff
+      history.jsonl                   # revision, base_rev, diff + the four axes of §8:
+                                      #   source_agent, source_session,
+                                      #   created_by (accountable),
+                                      #   witnessed_by (saw the evidence),
+                                      #   binding (provider, model, tier)
+                                      #   -- never rendered into article.md (§3)
       links.json                      # declared edges + redirects, ON TOP of the
                                       #   inferred ones references already walks:
                                       #   [{"to": ..., "rel": "depends-on"
@@ -571,7 +713,13 @@ by running the same task corpus with the wiki injected and withheld.
    deleted?** Superseded-by handles replacement; deletion has no link.
 5. **Can an agent be trusted to write the `validation/` script for its
    own claim?** A check the claimant authored is a check that passes.
-6. **Who declares a `rel` edge (§5, Seam 3) — and does a wrong one cost
+6. **At which boundary is a human identity stripped?** §8 says it must
+   be, and the candidates are all defensible and incompatible: at export
+   from a bundle, at the `project` → `universal` promotion, at the git
+   remote, or never (an internal team wiki where the name is the point).
+   Whichever is chosen, it has to be *mechanical* — a policy that relies
+   on a curator remembering is a policy that leaks on the first busy day.
+7. **Who declares a `rel` edge (§5, Seam 3) — and does a wrong one cost
    more than no edge at all?** An inferred edge is imprecise and
    self-healing; a declared `supersedes` pointing the wrong way
    *actively suppresses* the article that should have been read. The
