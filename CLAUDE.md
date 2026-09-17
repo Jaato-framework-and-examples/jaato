@@ -5110,6 +5110,70 @@ clicked. The pre-existing `Disconnect` on the workspace list is also why
 the End-session test asserts the connect button by `exact` name — a
 substring match counts it.
 
+### State That Outlived the Connection It Belonged To
+
+Three reports from one deployed session on a tablet, and one cause behind
+all of them: **the daemon keeps per-connection state, the browser keeps its
+own copy, and nothing reconciled the two.**
+
+A reconnect is a NEW client on the daemon. The disconnect path calls
+`remove_client` on the workspace manager and on the event-sink adapter,
+dropping this connection's `workspace.select`, and detaches the client from
+its session. The store keeps both, so the screen went on naming a workspace
+and a session the live connection did not have. What the person saw:
+
+| Reported | Mechanism |
+|---|---|
+| a staged file refused with `No workspace selected for client client_6 (workspace_id='')` while the picker's own header named the workspace | `_resolve_staging_workspace` asks this connection's selection; the store's answer came from the previous one |
+| a session that came up on `RunnerBootstrapFailed: envelope.model_name is empty` | `session.new` with no workspace resolves no `.env`, so the envelope carries no model. The same loss, one verb over, with no error naming it |
+| the chat pane carrying a previous attempt's errors above a healthy session's lines | the pane was never cleared by the verb that binds it to a new session |
+
+**The client re-asserts what it believes, in the order the daemon needs it.**
+`reassertAfterReconnect` (`sdk/connection.ts`) fires on the
+reconnecting→connected transition: the workspace FIRST, because
+`session.attach` compares the session's workspace against the client's and
+opens a mismatch prompt when they differ, and a client that has just
+reconnected has none; then the session, with the SDK verb alone. Not the
+app's `attachSession`, which resets the pane and re-requests history: that is
+right when switching sessions and wrong here, where the transcript on screen
+is already this session's and a bare attach replays nothing. The SDK's own
+opt-in `autoReattachSessionId` is left off for the other half of that reason
+— it sends the attach without the workspace that has to precede it.
+
+A batch already on the wire when the socket dropped is answered by the new
+connection, so `staging.ts` retries a `workspace_not_found` refusal **once**,
+after re-asserting. Once, so a daemon that genuinely has no workspace still
+reports it.
+
+**Leaving the daemon drops the session state, because that is what it
+describes.** `sessionId` means "this client is attached to that session", and
+a client that closed its socket is attached to nothing. Keeping it left the
+screen rendering a dead session's transcript with a live composer — and
+`SessionScreen` shows its picker only when no session is held, so after a
+Detach and a reconnect there was no way back to the picker at all: the next
+connection opened straight into the transcript of the session it had just
+left. `disconnect()` is the one place that can say it, so it says it there.
+
+**And a new session starts on an empty pane.** `attachSession` has always
+reset; creating was the one verb that bound the screen to a different session
+and cleared nothing, so a failed attempt's errors were still at the top when
+the next attempt's "Session created" line arrived. Queued attachments survive
+both resets by construction — `uploads` lives outside `emptySessionState`,
+which is what lets the picker stage files into the session it is about to
+open.
+
+**The mock refused staging on a rule the daemon does not have**: "no session
+and not workspace mode", so in workspace mode it never refused, whatever the
+connection had selected. That is why 36 e2e tests could not see any of this.
+It now resolves the workspace the way `_resolve_staging_workspace` does —
+this connection's selection, else one provisioned for it at `session.new` —
+keeps its sessions across connections so a reconnecting client can attach to
+the one it had, and drops the socket on `mock-drop` with `terminate()` (a
+close frame carrying 1006 is one the library refuses to send, and a reserved
+code is what a dropped socket reports). Verified non-vacuous: with the
+re-assert neutralised the reconnect test fails on the daemon's refusal, and
+with the create reset neutralised two of the three unit cases fail.
+
 ### A Key the Web Files Panel Did Not Have
 
 The TUI's workspace panel (Ctrl+W) binds two keys to the entry under the

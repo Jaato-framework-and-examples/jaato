@@ -42,7 +42,17 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, SPEED ? ms 
 const ts = () => new Date().toISOString();
 
 interface Client {
-  ws: WebSocket; sessionId: string | null; pending: Map<string, (v: unknown) => void>; ignored: Set<string>;
+  ws: WebSocket; id: string; sessionId: string | null; pending: Map<string, (v: unknown) => void>; ignored: Set<string>;
+  /**
+   * The workspace THIS CONNECTION selected, and whether the daemon
+   * provisioned one for it at ``session.new``.  Both are per-connection in
+   * the daemon (``remove_client`` drops them when the socket closes), and
+   * ``_resolve_staging_workspace`` consults exactly these two, in this
+   * order.  The mock used to refuse staging on a different rule — "no
+   * session and not workspace mode" — which is why the suite could not see
+   * a reconnect losing the selection.
+   */
+  selected: string | null; provisioned: boolean;
   /**
    * A ``workspace.files.stage_request`` in progress: the daemon reads one
    * BINARY frame per declared file, in order, before answering with
@@ -237,6 +247,10 @@ async function turn(c: Client, text: string, agentId = "main"): Promise<void> {
   send(c, { type: "agent.status_changed", agent_id: agentId, status: "idle" });
 }
 
+let clientSeq = 0;
+// Sessions the mock has created, by id.  A daemon keeps its sessions across
+// connections, so a client that reconnects can attach to the one it had.
+const LIVE_SESSIONS = new Set<string>();
 const wss = new WebSocketServer({ host: HOST, port: PORT });
 wss.on("connection", (ws, req) => {
   const url = new URL(req.url ?? "/", "http://x");
@@ -244,7 +258,10 @@ wss.on("connection", (ws, req) => {
   const presented = url.searchParams.get("token") ?? (auth.startsWith("Bearer ") ? auth.slice(7) : "");
   if (TOKEN && presented !== TOKEN) { ws.close(1008, "unauthorized"); return; }
 
-  const c: Client = { ws, sessionId: null, pending: new Map(), ignored: new Set(), staging: null };
+  const c: Client = {
+    ws, id: `client_${++clientSeq}`, sessionId: null, pending: new Map(), ignored: new Set(),
+    selected: null, provisioned: false, staging: null,
+  };
   send(c, { type: "connected", protocol_version: "1.12", server_info: { server_version: "mock-0.0.1", client_id: randomUUID() } });
 
   ws.on("message", async (raw, isBinary) => {
@@ -264,7 +281,9 @@ wss.on("connection", (ws, req) => {
         const specs = ((ev.files as { name: string; size: number }[] | undefined) ?? []).map((f) => ({ name: String(f.name ?? ""), size: Number(f.size ?? 0) }));
         const workspaceId = String(ev.workspace_id ?? "");
         let refused: Record<string, string>[] | null = null;
-        if (!c.sessionId && !WORKSPACES) refused = specs.map((f) => ({ name: f.name, category: "workspace_not_found", error: "No workspace selected for client (workspace_id='')" }));
+        // The daemon's rule: this connection's selection, else a workspace
+        // it provisioned for it.  Attaching a session restores neither.
+        if (!c.selected && !c.provisioned) refused = specs.map((f) => ({ name: f.name, category: "workspace_not_found", error: `No workspace selected for client ${c.id} (workspace_id='')` }));
         else if (specs.reduce((a, f) => a + f.size, 0) > STAGE_TOTAL_LIMIT) refused = specs.map((f) => ({ name: f.name, category: "size_limit_total", error: `declared total exceeds cap ${STAGE_TOTAL_LIMIT}` }));
         c.staging = { workspaceId, specs, frames: [], refused };
         if (!specs.length) finishStaging(c);
@@ -278,6 +297,7 @@ wss.on("connection", (ws, req) => {
         ] });
         break;
       case "workspace.select":
+        c.selected = String(ev.name);
         send(c, { type: "config.status", workspace: String(ev.name), configured: ev.name === "project-a", provider: ev.name === "project-a" ? "anthropic" : null, model: ev.name === "project-a" ? "claude-sonnet-4" : null, available_providers: ["anthropic", "google_genai", "openrouter"], missing_fields: ev.name === "project-a" ? [] : ["provider", "api_key"] });
         break;
       case "workspace.create":
@@ -299,6 +319,10 @@ wss.on("connection", (ws, req) => {
         const args = (ev.args as string[] | undefined) ?? [];
         if (cmd === "session.new") {
           c.sessionId = `sess-${randomUUID().slice(0, 8)}`;
+          LIVE_SESSIONS.add(c.sessionId);
+          // A client with no workspace gets one provisioned as part of
+          // ``session.new``; one that selected keeps what it selected.
+          if (!c.selected) c.provisioned = true;
           send(c, { type: "init.progress", step: "plugins", status: "running", message: "Loading plugins", step_number: 1, total_steps: 2 });
           await sleep(120);
           send(c, { type: "init.progress", step: "provider", status: "complete", message: "Ready", step_number: 2, total_steps: 2 });
@@ -339,8 +363,15 @@ wss.on("connection", (ws, req) => {
           send(c, { type: "session.list", sessions: sessionListing(c) });
         } else if (cmd === "session.attach") {
           const target = String(args[0] ?? "");
-          if (!HISTORIES[target]) { send(c, { type: "error", error: `Session not found: ${target}`, error_type: "SessionError", recoverable: true }); break; }
+          if (!HISTORIES[target] && !LIVE_SESSIONS.has(target)) { send(c, { type: "error", error: `Session not found: ${target}`, error_type: "SessionError", recoverable: true }); break; }
           c.sessionId = target;
+          if (LIVE_SESSIONS.has(target)) {
+            // Re-attaching binds the session to THIS connection and nothing
+            // else: the workspace selection is the client's own to re-assert.
+            send(c, { type: "agent.created", agent_id: "main", agent_name: "main", agent_type: "main", profile_name: null });
+            send(c, { type: "session.info", session_id: target, session_name: "mock session", model_provider: "mock", model_name: "mock-1", profile_name: null, models: ["mock-1", "mock-2"], sessions: sessionListing(c) });
+            break;
+          }
           send(c, { type: "agent.created", agent_id: "main", agent_name: "main", agent_type: "main", profile_name: null });
           send(c, { type: "session.info", session_id: target, session_name: target === "20260916_090000" ? "fix the budget panel" : "old notes", model_provider: target === "20260916_090000" ? "anthropic" : "mock", model_name: target === "20260916_090000" ? "claude-sonnet-4" : "mock-1", profile_name: null, models: ["mock-1"], sessions: sessionListing(c) });
           send(c, { type: "permission.status", effective_default: "allow", suspension_scope: null });
@@ -364,6 +395,15 @@ wss.on("connection", (ws, req) => {
           send(c, { type: "system.message", message: `Model switched to ${args[0] ?? "mock-1"}`, style: "info" });
         } else if (cmd === "tools.list") {
           send(c, { type: "system.message", message: "Tools:\n  ✓ run_command\n  ✓ write_file\n  ✗ web_search (disabled)", style: "info" });
+        } else if (cmd === "mock-drop") {
+          // Drop the socket without closing the client: the SDK reconnects,
+          // and the new connection starts with no workspace and no session,
+          // exactly as the daemon's ``remove_client`` leaves it.
+          send(c, { type: "system.message", message: "Dropping the connection.", style: "warning" });
+          // ``terminate``: destroy the socket with no close frame, which is
+          // what a dropped connection looks like (and 1006 is a reserved
+          // code the ws library refuses to send).
+          setTimeout(() => c.ws.terminate(), 10);
         } else if (cmd === "reset") {
           send(c, { type: "system.message", message: "History cleared.", style: "info" });
         } else {
@@ -375,6 +415,7 @@ wss.on("connection", (ws, req) => {
         send(c, { type: "command.list", commands: [
           { name: "model", description: "Switch model (mock)" }, { name: "waypoint", description: "Manage waypoints" },
           { name: "mock-auth", description: "Mock Provider authentication" }, { name: "mock-auth login", description: "Sign in to Mock Provider" },
+          { name: "mock-drop", description: "Drop the socket (mock; the client reconnects)" },
           { name: "waypoint list", description: "List waypoints" }, { name: "permissions status", description: "Show permission status" },
         ] });
         break;

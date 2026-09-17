@@ -27,7 +27,7 @@ import { EventTypeValue } from "@jaato/sdk";
 import { MAIN_AGENT, useJaato } from "@/store/store";
 import type { StagedUpload } from "@/store/types";
 import { checkSizes, stagedName } from "@/protocol/attachments";
-import { getClient, isConnected } from "@/sdk/connection";
+import { getClient, isConnected, reassertAfterReconnect } from "@/sdk/connection";
 
 const bytesOf = new Map<string, File>();
 let chain: Promise<void> = Promise.resolve();
@@ -89,7 +89,7 @@ export function stageQueued(): Promise<void> {
   return chain;
 }
 
-async function stageBatch(): Promise<void> {
+async function stageBatch(retried = false): Promise<void> {
   const st = useJaato.getState();
   const queued = st.uploads.filter((u) => u.status === "queued" && bytesOf.has(u.id));
   if (!queued.length) return;
@@ -112,6 +112,18 @@ async function stageBatch(): Promise<void> {
   if (!sending.length) return;
   try {
     const result = await getClient().stageFiles("", payloads);
+    // A batch already on the wire when the socket dropped is answered by
+    // the NEW connection, which has no workspace: ``sdk/connection``
+    // re-asserts on every reconnect, but these bytes left before it could.
+    // Re-assert and send them once more rather than failing a file the
+    // person can see a workspace for.  Once, so a daemon that genuinely
+    // has no workspace still reports it.
+    if (!retried && st.workspace.selected
+        && (result.failed ?? []).some((f) => f.category === "workspace_not_found")) {
+      for (const u of sending) st.updateUpload(u.id, { status: "queued" });
+      await reassertAfterReconnect();
+      return stageBatch(true);
+    }
     const staged = new Set(result.staged ?? []);
     const failed = new Map((result.failed ?? []).map((f) => [f.name, f.error || f.category || "failed"]));
     const ok: string[] = [];

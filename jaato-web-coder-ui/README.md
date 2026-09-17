@@ -158,6 +158,15 @@ does a permission prompt. A page served with `autoConnect` does not
 connect straight back after an exit; the next click does
 (`src/app/exitIntent.ts`).
 
+Leaving drops this client's session state, because that is what it
+describes, so coming back opens the picker rather than a detached session's
+transcript. A new session starts on an empty pane, as attaching to one
+always has. And a reconnect re-asserts what the client believes before
+anything else goes out: the daemon keeps the workspace selection and the
+session attachment per connection, so without it the next staged file is
+refused and the next session resolves no `.env` (`reassertAfterReconnect`
+in `src/sdk/connection.ts`).
+
 ### Hosting the bundle yourself
 
 `dist/` is static (assets are referenced relatively, so it can sit under any
