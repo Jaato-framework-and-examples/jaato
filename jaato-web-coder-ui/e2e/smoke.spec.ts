@@ -561,6 +561,46 @@ test("End session on a single-workspace daemon disconnects like Detach", async (
   await expect(page.getByRole("button", { name: "Connect" })).toBeVisible();
 });
 
+test("a new session starts on an empty pane", async ({ page }) => {
+  await openSession(page);
+  await composer(page).fill("fail");
+  await composer(page).press("Enter");
+  await expect(page.getByText("The command failed; see the tool block.")).toBeVisible();
+  // Leave and open another one.  What the session just left said must not
+  // become the top of the next one's transcript: the errors of a failed
+  // attempt above a "Session created" line read as the new session's own.
+  await page.getByRole("button", { name: EXIT }).click();
+  await page.getByRole("group", { name: "Exit options" }).getByRole("button", { name: /Detach/ }).click();
+  await page.getByRole("button", { name: "Connect" }).click();
+  // The picker, not the transcript of the session just detached from: the
+  // connection that held it is gone, so this client holds no session.
+  await expect(page.getByTestId("session-picker")).toBeVisible();
+  await expect(page.getByText("The command failed; see the tool block.")).toHaveCount(0);
+  await page.getByRole("button", { name: /default/ }).click();
+  await expect(page.getByText("Connected to the mock daemon")).toBeVisible();
+  await expect(page.getByRole("button", { name: /run_command/ })).toHaveCount(0);
+});
+
+test("a reconnect re-selects the workspace, so a file attached after it still lands", async ({ page }) => {
+  await page.goto("/");
+  await page.getByPlaceholder("ws://host:8080").fill(WS_WORKSPACES);
+  await page.getByRole("button", { name: "Connect" }).click();
+  await page.getByRole("button", { name: "Open workspace project-a" }).click();
+  await page.getByRole("button", { name: /default/ }).click();
+  await expect(page.getByText("Connected to the mock daemon")).toBeVisible();
+  // The socket drops.  The daemon forgets this connection's workspace and
+  // detaches its session; the SDK reconnects as a new client, and the store
+  // still names both -- which is what used to refuse the next staged file
+  // with ``No workspace selected for client …``.
+  await composer(page).fill("mock-drop");
+  await composer(page).press("Enter");
+  await expect(page.getByText("Dropping the connection.")).toBeVisible();
+  await expect(page.getByText(/^reconnecting/)).toBeVisible();
+  await expect(page.getByText("connected", { exact: true })).toBeVisible();
+  await page.getByLabel("Attach files").setInputFiles([{ name: "after.txt", mimeType: "text/plain", buffer: Buffer.from("x") }]);
+  await expect(page.getByText("Staged into the workspace: after.txt")).toBeVisible();
+});
+
 test("the workspace list says who is signed in and offers the backend's Sign out", async ({ page }) => {
   await page.route("**/config.json", (route) =>
     route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ daemon: WS_WORKSPACES, ticketUrl: "/api/ticket", autoConnect: true }) }),

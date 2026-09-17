@@ -27,7 +27,7 @@ import { AgentTabs } from "@/components/panels/AgentTabs";
 import { StatusBar } from "@/components/layout/StatusBar";
 import { Plate } from "@/components/layout/Plate";
 import { RailResizer } from "@/components/layout/RailResizer";
-import { answerClarification, attachSession, cancelClarification, ensureSessions, inputHistory, respondPermission, respondPostAuth, respondReference, submitInput } from "@/app/actions";
+import { answerClarification, attachSession, cancelClarification, createSession, ensureSessions, inputHistory, respondPermission, respondPostAuth, respondReference, submitInput } from "@/app/actions";
 import { openSessionWithQueued } from "@/app/staging";
 import { answerExit } from "@/app/exitChoice";
 import { sessionsInWorkspace } from "@/protocol/sessions";
@@ -240,8 +240,9 @@ export function SessionScreen() {
     setPicking(false);
     setCreating(true);
     try {
-      const c = getClient();
-      await openSessionWithQueued(() => c.createSession(profile ? { profile } : {}));
+      // ``createSession`` (app/actions) rather than the SDK call: a new
+      // session starts on an empty pane, as an attach always has.
+      await openSessionWithQueued(() => createSession(profile));
     } finally {
       setCreating(false);
     }

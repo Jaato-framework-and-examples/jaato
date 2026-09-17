@@ -145,6 +145,28 @@ export async function ensureSessions(): Promise<void> {
 }
 
 /**
+ * Open a NEW session — the TUI's ``session new``.
+ *
+ * The pane is the transcript of ONE session, so it starts empty.  Without
+ * the reset, a failed attempt's errors stayed in the buffer and the new
+ * session's lines were appended UNDER them: a screen whose last three
+ * lines said the provider resolved and the session was created opened
+ * with somebody else's ``RunnerBootstrapFailed`` at the top, which reads
+ * top-down as "this session is broken".  ``attachSession`` has always
+ * reset for exactly this reason; creating was the one verb that bound the
+ * screen to a different session and cleared nothing.
+ *
+ * Queued attachments survive by construction — ``uploads`` lives outside
+ * ``emptySessionState`` (``store/store.ts``), which is what lets the
+ * picker stage files into the session it is about to open.
+ */
+export async function createSession(profile: string | null): Promise<void> {
+  const st = useJaato.getState();
+  st.resetSessionState();
+  await getClient().createSession(profile ? { profile } : {});
+}
+
+/**
  * Switch this client to another session — the TUI's ``session attach``.
  * The output of the session being left is dropped, the daemon attaches
  * and answers with its ``session.info``, and the conversation is rebuilt
