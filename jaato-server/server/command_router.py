@@ -1462,7 +1462,8 @@ class CommandRouter:
         are :meth:`SessionManager.list_orphan_sessions` dicts — the same
         event type ``session.list`` uses, so a client that can render one can
         render the other, and the richer per-orphan keys (``orphaned_seconds``,
-        the effective bounds, the ``runner`` identity) ride along.
+        the effective bounds, the unload grace and what is left of it (#1106),
+        the ``runner`` identity) ride along.
 
         An orphan is a LOADED session with no attached client at all — not
         even the synthetic headless marker a woken or cascade-driven session

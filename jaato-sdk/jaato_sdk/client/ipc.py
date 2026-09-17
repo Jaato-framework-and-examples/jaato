@@ -1978,8 +1978,12 @@ class IPCClient:
         The daemon answers with a ``SessionListEvent`` whose rows carry
         ``session_id``, ``orphaned_seconds``, the effective
         ``max_orphan_seconds`` / ``max_session_seconds`` bounds, whether the
-        session ``is_processing`` (spending, right now), and the ``runner``
-        identity — the runner pid, pool slot and cascade executing it.
+        session ``is_processing`` (spending, right now), the ``runner``
+        identity — the runner pid, pool slot and cascade executing it — and
+        (#1106) ``unload_grace_seconds`` / ``unload_grace_remaining``: a
+        nonzero remainder says the daemon is DELIBERATELY holding the session
+        for a client that may come back, which is otherwise indistinguishable
+        from one nothing has got round to unloading.
 
         An orphan is a session nothing is consuming: no attached client, not
         even the synthetic headless marker a woken or cascade-driven session

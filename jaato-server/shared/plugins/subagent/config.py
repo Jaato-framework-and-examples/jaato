@@ -3057,20 +3057,47 @@ _MIN_WINS_RUNTIME_LIMIT_FIELDS = (
     "max_orphan_seconds",
 )
 
+#: The min-wins fields for which ``0`` is the TIGHTEST value rather than
+#: "explicitly unbounded" (#1106).
+#:
+#: The distinction is not cosmetic and it is not shared with the tuple above.
+#: For a wall-clock BOUND, 0 means "never stop this session", which is the
+#: least restrictive thing a layer can say -- so :func:`_merged_min_wins_limit`
+#: reads it as infinity, and a child cannot disable a ceiling an ancestor set.
+#: For ``unload_grace_seconds``, 0 means "unload immediately", which is the
+#: MOST restrictive thing a layer can say: it releases the runner and the pool
+#: slot soonest.  A plain ``min()`` is therefore already correct, and routing
+#: it through the 0-as-infinity branch would invert the safety direction --
+#: a child asking for no grace at all would be overruled by a parent's 60s.
+_MIN_WINS_ZERO_TIGHTEST_FIELDS = (
+    "unload_grace_seconds",
+)
+
+#: Every runtime-limits field resolved by ``min()`` rather than by the
+#: block-level child-REPLACES rule, whichever reading of ``0`` it takes.
+#: This is the set :func:`_resolve_runtime_limit_ceilings` must normalise out
+#: of its agreement test, so two parents differing only in a min-wins field
+#: are resolved rather than reported as conflicting.
+_ALL_MIN_WINS_RUNTIME_LIMIT_FIELDS = (
+    _MIN_WINS_RUNTIME_LIMIT_FIELDS + _MIN_WINS_ZERO_TIGHTEST_FIELDS
+)
+
 
 def _merged_min_wins_limit(
     parents: List['SubagentProfile'],
     child: 'SubagentProfile',
     field_name: str,
+    *,
+    zero_is_unbounded: bool = True,
 ) -> Optional[float]:
-    """MIN of one :data:`_MIN_WINS_RUNTIME_LIMIT_FIELDS` field across every layer.
+    """MIN of one :data:`_ALL_MIN_WINS_RUNTIME_LIMIT_FIELDS` field across layers.
 
     Divergent parent values are not a conflict — the minimum is well-defined
     and is the safe resolution, so two parents differing only here are
     resolved rather than reported.
 
-    ``0`` means "explicitly unbounded" for the wall-clock fields and must not
-    win a ``min()`` against a real ceiling (it is the LEAST restrictive value,
+    ``0`` means "explicitly unbounded" for the two wall-clock BOUNDS and must
+    not win a ``min()`` against a real ceiling (it is the LEAST restrictive value,
     not the most).  It is therefore read as infinity while comparing, and
     returned as ``0`` only when EVERY declaring layer said ``0`` — so a child
     can disable a bound no ancestor set, and cannot disable one an ancestor
@@ -3081,6 +3108,9 @@ def _merged_min_wins_limit(
         parents: The resolved parent profiles.
         child: The profile declaring ``inherits:``.
         field_name: Which field to resolve.
+        zero_is_unbounded: Whether ``0`` means "least restrictive" for this
+            field (the two wall-clock bounds) or is just the smallest value
+            like any other (:data:`_MIN_WINS_ZERO_TIGHTEST_FIELDS`).
 
     Returns:
         The most restrictive declared value, or ``None`` when no layer
@@ -3093,6 +3123,8 @@ def _merged_min_wins_limit(
     ]
     if not declared:
         return None
+    if not zero_is_unbounded:
+        return min(declared)
     bounded = [v for v in declared if v != 0]
     return min(bounded) if bounded else 0
 
@@ -3110,7 +3142,7 @@ def _resolve_runtime_limit_ceilings(
     wrote — which is why this half is not merged per-field.
 
     The agreement test normalises every
-    :data:`_MIN_WINS_RUNTIME_LIMIT_FIELDS` field out, because
+    :data:`_ALL_MIN_WINS_RUNTIME_LIMIT_FIELDS` field out, because
     :func:`_merged_min_wins_limit` resolves those by ``min()``: two parents
     that agree on every ceiling and differ only in the tool-pool width or a
     wall-clock bound must not be reported as conflicting.
@@ -3130,7 +3162,7 @@ def _resolve_runtime_limit_ceilings(
     declaring = [p for p in parents if p.runtime_limits is not None]
     if not declaring:
         return None, []
-    normalise = {f: None for f in _MIN_WINS_RUNTIME_LIMIT_FIELDS}
+    normalise = {f: None for f in _ALL_MIN_WINS_RUNTIME_LIMIT_FIELDS}
     comparable = {
         p.name: replace(p.runtime_limits, **normalise)
         for p in declaring
@@ -3154,9 +3186,12 @@ def _merge_runtime_limits(
 
     * every field outside :data:`_MIN_WINS_RUNTIME_LIMIT_FIELDS` —
       **scalar-override** (:func:`_resolve_runtime_limit_ceilings`);
-    * ``max_parallel_tools``, ``max_session_seconds`` and
-      ``max_orphan_seconds`` — **min-wins** across every layer that
-      declares them (:func:`_merged_min_wins_limit`).
+    * ``max_parallel_tools``, ``max_session_seconds``,
+      ``max_orphan_seconds`` and ``unload_grace_seconds`` — **min-wins**
+      across every layer that declares them
+      (:func:`_merged_min_wins_limit`).  The last one reads ``0`` as the
+      tightest value rather than as "unbounded"; see
+      :data:`_MIN_WINS_ZERO_TIGHTEST_FIELDS`.
 
     Args:
         parents: The resolved parent profiles, in declaration order.
@@ -3171,6 +3206,11 @@ def _merge_runtime_limits(
         name: _merged_min_wins_limit(parents, child, name)
         for name in _MIN_WINS_RUNTIME_LIMIT_FIELDS
     }
+    min_wins.update({
+        name: _merged_min_wins_limit(
+            parents, child, name, zero_is_unbounded=False)
+        for name in _MIN_WINS_ZERO_TIGHTEST_FIELDS
+    })
     base, conflicts = _resolve_runtime_limit_ceilings(parents, child)
     if base is None and all(v is None for v in min_wins.values()):
         return None, conflicts
