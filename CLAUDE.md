@@ -429,11 +429,18 @@ default_agent: researcher
 #   bounds, enforced daemon-side by the session-lifetime watchdog so they
 #   still apply when the client that created the session has died.  Both
 #   inherit most-restrictive-wins; 0 = explicitly unbounded.
-#   max_orphan_seconds is the one field here with a framework default (900s).
+#   max_orphan_seconds is one of two fields here with a framework default
+#   (900s).  The other is unload_grace_seconds (#1106, 60s): how long the
+#   daemon keeps an unwatched session LOADED before unloading it, so a
+#   browser reload or a network blip costs nothing instead of a full
+#   teardown + respawn.  It inherits most-restrictive-wins too, but 0 is
+#   its TIGHTEST value ("no grace", the pre-#1106 behaviour) where 0 on the
+#   two bounds means "unbounded".
 runtime_limits:
   pids_max: 64
   max_parallel_tools: 2
   max_orphan_seconds: 300
+  unload_grace_seconds: 60
 # scrub_secret_env: secret env vars stripped from every model-driven
 #   subprocess (cli / interactive_shell / mcp).  ON by default (#863) —
 #   absent = the framework set; `none` opts out (announced at WARNING);
@@ -3412,6 +3419,155 @@ have no consumer by construction — #812's first ask, "terminate on client
 loss", is deliberately **not** implemented as written), and a session that
 survives its stop because its model thread is wedged is re-judged on the next
 sweep rather than escalated.
+
+### A Session Torn Down Because the Browser Blinked (#1106)
+
+#812 asked when the daemon should **stop** a session nobody is watching.
+This is the other verb on the same state: when it should **unload** one. The
+answer was *immediately*, and nothing on that path had a time dimension at
+all.
+
+A WebSocket close — a tab reload, a network blip, a laptop waking, a phone
+backgrounding the page — reaches `command_router.handle_client_disconnect` →
+`SessionManager.detach_client` → `_maybe_unload_session`, which had exactly
+two gates:
+
+```python
+if session.attached_clients:  return     # still has clients
+if session.server._model_running:  return  # defer mid-turn
+```
+
+Both correct, neither a grace. The second is the only thing that had ever
+saved a session from a blip, and only by accident — it holds the session
+while a turn is in flight and the turn-tracking handler unloads it the moment
+the model goes `done`. An **idle** session with a blinking client was torn
+down on the spot: saved, log handlers closed, workspace monitor stopped,
+isolated subagents torn down, `server.shutdown()`, pool slot returned. The
+browser came back holding an id the daemon no longer had in memory and every
+send was answered `[SessionError] Session not found:`.
+
+Nothing was ever lost — `attach_session` revives from disk, and #1104 taught
+the page to re-attach — so what is wrong is the **price**: a full teardown and
+a full respawn for a two-second network event.
+
+**The line, and it is a line rather than a carve-out:** *a terminal ENDS a
+session; a disconnect only removes its audience.* Three of the four callers
+of `_maybe_unload_session` mean the second thing and now defer; the fourth
+passes `immediate=True`.
+
+| Call site | Means | Grace |
+|---|---|---|
+| `detach_client` | a client went away | **yes** |
+| attach switching away | a client left for another session | **yes** — left, not ended |
+| the agent-done re-check | a deferred unload resumes | yes, measured from when it became clientless, so a long turn CONSUMES the grace |
+| `_apply_default_cascade_policy` | a `SessionTerminatedEvent` | **no** |
+
+That last row is the regression that matters most. Its own docstring measures
+what a delay costs: every headless handoff returns its slot in ~250 ms, while
+one discovery slot that stayed pinned stalled a cascade for **6m43s**. A 60 s
+grace there would reintroduce that on every stage of every cascade.
+
+**The attach-switch row has a cost, and it is stated rather than waved at.**
+Without the grace, clicking through five sessions in a UI holds exactly one
+at a time; with it, up to five, for one decaying 60 s window. What the grace
+does NOT do is cause loads that would not otherwise happen — attaching
+already loads a session — so the worst case is the transient working set of
+someone browsing their own sessions, which is precisely the set they may
+click back into. The alternative is paying a teardown and a respawn per
+click, which is #1106's own complaint arriving through a different verb. A
+deployment that disagrees has the knob.
+
+```yaml
+runtime_limits:
+  unload_grace_seconds: 0     # no grace — the pre-#1106 behaviour
+```
+
+**Where the knob lives, and why not an env var.** `runtime_limits`, beside
+the two wall-clock bounds, with a framework default of **60 s** — the exact
+argument `max_orphan_seconds` used to earn its own default, because the
+session that needs this most is the one whose profile declared nothing. An
+env var would be a new `host`-scoped knob with no typed key, which is what
+`docs/design/env-vars-vs-profile-keys.md` and the `AWAITING_TYPED_KEY` ratchet
+exist to discourage; the profile key gets `explain runtime`, validation,
+snapshotting and inheritance for free.
+
+**60 s, because that is where the two costs cross.** A grace pins a runner
+(129–187 MB) and a pool slot for its whole window, and buys nothing past the
+point where disk revival is the right answer: a tab reload is ~2 s, a network
+blip tens of seconds, a lid-close or a backgrounded phone **minutes** — which
+no grace worth paying for would cover. It is also far below
+`DEFAULT_MAX_ORPHAN_SECONDS` (900 s), so the ordering of the two verdicts is
+unambiguous and the watchdog stays the outer bound.
+
+**`0` means no grace, and is the TIGHTEST value here** — the opposite reading
+from the two bounds in the same block, where `0` means "never stop this" and
+is the *least* restrictive thing a layer can say. Both are min-wins across an
+`inherits:` chain, so the two readings need two rules
+(`_MIN_WINS_ZERO_TIGHTEST_FIELDS`, `shared/plugins/subagent/config.py`):
+routing the grace through the 0-as-infinity branch would let a parent's 60 s
+overrule a child that asked for none.
+
+**The clock is DERIVED, and the issue's proposed source does not work.**
+#1106 suggested reusing `_orphan_since`. It cannot be: that clock is written
+only for a session the sweep has seen ATTACHED (`_ever_attached`), because the
+bound it feeds *stops* a session and must not reach a cold `session.wake`
+revive — which has an empty `attached_clients` by construction. Such a session
+would have **no** clock, "no clock" reads as "defer", and it would never be
+unloaded at all: the grace would be a leak rather than a delay. So
+`_clientless_since` is a sibling dict with no such gate, written by two
+readers that both derive the fact from an empty `attached_clients` at the
+moment they observe it — `_observe_session_lifetimes` for every loaded session
+each sweep, and `_note_clientless` from the unload gate itself, so the clock
+starts at the disconnect INSTANT rather than up to one sweep interval later.
+Never stamped where `attached_clients` is mutated: that is #735's shape, and a
+future call site that forgets both writers still defers and is picked up by
+the sweep.
+
+**The sweep is the level trigger.** All four callers are edge-triggered and
+none fires again just because time passed, so `_sweep_unload_grace` — in the
+same pass that derives the clock — re-drives each deferral through
+`_maybe_unload_session`, which re-applies every gate. It runs BEFORE the stop
+verdicts: a session eligible for both should be unloaded (saved, revivable)
+rather than stopped (cancelled).
+
+**The grace is armed with the thread that carries it out.**
+`_unload_grace_armed` is set by `start_lifetime_watchdog` and cleared by
+`stop_lifetime_watchdog`, and both halves read it. A `SessionManager` built in
+a test or an embedding process grows no watchdog on purpose and must not
+silently acquire a mechanism whose other half is missing — a deferral nobody
+acts on is #735 in its worst form, because the symptom is sessions quietly
+accumulating rather than an error. Disarmed, the pre-#1106 behaviour is exact.
+The arming line names all three fields with their effective values, and
+`session.orphans` rows carry `unload_grace_seconds` /
+`unload_grace_remaining`, so "kept for a client that may return" is
+distinguishable from "nothing has got round to unloading it".
+
+**A re-attach inside the grace costs nothing** — not "the unload aborts", but
+the unload thread is never started, so there is no save, no handler close, no
+`server.shutdown` and no slot return to undo. `_do_session_unload`'s existing
+under-the-lock re-check remains, now as a backstop rather than the only
+defence.
+
+**The grace is deliberately NOT scoped by `client_type`.** The tempting rule
+was "exempt `api`", on the grounds that a program's socket closing means the
+program exited. `ClientType` is a **presentation** field — its docstring says
+the values "describe the *kind* of display surface, not specific apps" — it is
+client-declared and optional, and it is wrong in both directions: a localhost
+`web` UI blinks least of anything and a chat bot on a mobile network blinks
+most. Deciding how long the daemon holds a session from what the client's
+screen looks like is the substitution #881 is about. The case it would buy is
+narrower than it looks, too: a cascade-stamped or headless session is already
+exempt through the terminal row above, so what remains is a **non-cascade
+programmatic** driver that simply disconnects — and that deployment has a
+visible knob (`unload_grace_seconds: 0`) where a `client_type` rule would be a
+second, silent lifetime policy nobody validates. `test_unload_grace_1106.py`
+pins this both behaviourally and at the source level, because a behavioural
+test alone can be satisfied by a rule that reads the field and happens to
+agree.
+
+Out of scope, per the issue: terminate-on-client-loss (#812 records the
+decision not to have it), `proxy` mode in `jaato-web-coder-server`, and the
+§11.5 logout gap.
 
 ### Configuring a Plugin and Enabling It Are Two Decisions (#950)
 

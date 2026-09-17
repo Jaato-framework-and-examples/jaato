@@ -64,6 +64,8 @@ from .session_lifetime import (
     describe_armed_bounds,
     evaluate,
     resolve_bounds,
+    resolve_unload_grace,
+    unload_grace_remaining,
 )
 from .session_workspace_index import SessionWorkspaceIndex
 from .wake_binding_registry import WakeBindingRegistry, BindOutcome
@@ -1147,6 +1149,43 @@ class SessionManager:
         # never saw attached is never stopped by the orphan bound (an explicit
         # ``max_session_seconds`` still applies).
         self._ever_attached: Set[str] = set()
+        # Monotonic instant each loaded session last became CLIENTLESS, for
+        # the unload grace (#1106).  Sibling of ``_orphan_since`` and
+        # deliberately NOT the same dict: they measure the same predicate
+        # (``_is_orphaned``) and gate on different things.  ``_orphan_since``
+        # is written only for a session the sweep has seen ATTACHED, because
+        # the bound it feeds STOPS a session and must not reach a cold wake
+        # revive.  This one is written for every clientless session, because
+        # the decision it feeds — may this session be unloaded yet — is one
+        # ``_maybe_unload_session`` already makes for those sessions today.
+        # Folding the two would either arm the stop bound on cold revives or
+        # leave the grace with no clock on them, and the second is the worse
+        # failure: no clock reads as "defer", so such a session would never
+        # be unloaded at all.
+        #
+        # Derived, never stamped at a mutation site, for the reason above
+        # ``_orphan_since``: two readers write it —
+        # :meth:`_observe_session_lifetimes` for every loaded session each
+        # sweep, and :meth:`_note_clientless` from the unload gate itself, so
+        # the clock starts at the detach INSTANT rather than up to one sweep
+        # later.  Both derive it from ``attached_clients`` being empty right
+        # now.  A future call site that forgets both is still covered by the
+        # sweep; one that stamped a timestamp on detach would not be.
+        self._clientless_since: Dict[str, float] = {}
+        # Whether a level trigger exists for the deferrals the unload grace
+        # produces (#1106).  Set by :meth:`start_lifetime_watchdog`, cleared
+        # by :meth:`stop_lifetime_watchdog`.
+        #
+        # The grace DEFERS an unload and the sweep is the only thing that
+        # comes back for it, so without the sweep a deferral is not a delay,
+        # it is a leak: every clientless session stays loaded forever, each
+        # holding a runner (129-187 MB) and a pool slot.  A ``SessionManager``
+        # built in a test or an embedding process grows no watchdog thread on
+        # purpose, and it must not silently acquire that behaviour — so it
+        # keeps the pre-#1106 semantics exactly, which is also the honest
+        # reading of #735: a mechanism nothing carries out is worse than the
+        # absence of the mechanism, because it looks armed.
+        self._unload_grace_armed: bool = False
         self._lifetime_watchdog: Optional[threading.Thread] = None
         self._lifetime_watchdog_stop = threading.Event()
         self._lifetime_sweep_interval = DEFAULT_SWEEP_INTERVAL_SECONDS
@@ -4668,8 +4707,10 @@ class SessionManager:
             dangerous state — spending, right now), ``orphaned_seconds``
             (``None`` until the watchdog's first sweep observes it),
             ``loaded_seconds``, the effective ``max_orphan_seconds`` /
-            ``max_session_seconds``, and ``runner`` (the identity dict, or
-            ``None``).
+            ``max_session_seconds``, the effective ``unload_grace_seconds``
+            and how much of it is left (``unload_grace_remaining`` — ``0.0``
+            once the grace has elapsed or when no sweep is running to act on
+            it), and ``runner`` (the identity dict, or ``None``).
         """
         now = time.monotonic()
         rows: List[Dict[str, Any]] = []
@@ -4680,10 +4721,12 @@ class SessionManager:
             ]
             orphan_since = dict(self._orphan_since)
             ever_attached = set(self._ever_attached)
+            clientless_since = dict(self._clientless_since)
+            grace_armed = self._unload_grace_armed
         for session_id, session in entries:
             since = orphan_since.get(session_id)
-            session_bound, orphan_bound = resolve_bounds(
-                self._session_runtime_limits(session))
+            limits = self._session_runtime_limits(session)
+            session_bound, orphan_bound = resolve_bounds(limits)
             rows.append({
                 "session_id": session_id,
                 "name": session.name or "",
@@ -4703,6 +4746,17 @@ class SessionManager:
                 "loaded_seconds": round(now - session.loaded_at, 1),
                 "max_orphan_seconds": orphan_bound,
                 "max_session_seconds": session_bound,
+                # What is holding this row's session in memory right now
+                # (#1106): a nonzero ``unload_grace_remaining`` says the
+                # daemon is DELIBERATELY keeping it for a client that may
+                # come back, which is otherwise indistinguishable from a
+                # session nothing has got round to unloading.
+                "unload_grace_seconds": resolve_unload_grace(limits),
+                "unload_grace_remaining": (
+                    round(unload_grace_remaining(
+                        clientless_since.get(session_id), now, limits), 1)
+                    if grace_armed else 0.0
+                ),
                 "runner": (
                     session.runner_identity.to_dict()
                     if session.runner_identity is not None else None
@@ -4853,6 +4907,14 @@ class SessionManager:
         its ``list_orphan_sessions`` row and in the verdict line that stops
         it.
 
+        The line covers ``unload_grace_seconds`` too (#1106), even though the
+        grace is applied by :meth:`_maybe_unload_session` rather than by a
+        verdict here — this thread is what carries the deferred unloads out
+        (:meth:`_sweep_unload_grace`), so a daemon that never armed it would
+        defer unloads NOBODY would ever perform.  That is the #735 failure
+        wearing a worse disguise than usual, since its symptom is sessions
+        quietly accumulating rather than an error.
+
         Started explicitly by the daemon rather than from ``__init__`` so a
         ``SessionManager`` constructed in a test or an embedding process
         grows no background thread it did not ask for.  Idempotent.
@@ -4877,10 +4939,14 @@ class SessionManager:
             daemon=True,
         )
         self._lifetime_watchdog = thread
+        # Arm the unload grace with the thread that carries its deferrals
+        # out, and in that order -- see :attr:`_unload_grace_armed`.
+        self._unload_grace_armed = True
         thread.start()
         logger.info(
             "session-lifetime watchdog armed: sweep=%.1fs; defaults %s "
-            "(a profile's runtime_limits overrides; 0 = unbounded)",
+            "(a profile's runtime_limits overrides; 0 = unbounded for the "
+            "two bounds, and 'no grace' for unload_grace_seconds)",
             self._lifetime_sweep_interval, describe_armed_bounds(None),
         )
         return True
@@ -4892,6 +4958,9 @@ class SessionManager:
             timeout: Seconds to wait for the thread to join.
         """
         self._lifetime_watchdog_stop.set()
+        # Disarm the grace with the thread, so a deferral cannot outlive the
+        # only thing that would act on it (#1106).
+        self._unload_grace_armed = False
         thread = self._lifetime_watchdog
         if thread is not None and thread.is_alive():
             thread.join(timeout=timeout)
@@ -4919,7 +4988,8 @@ class SessionManager:
     ) -> List[SessionLifetimeObservation]:
         """Snapshot every loaded session's clocks, updating the orphan map.
 
-        Also where ``_orphan_since`` is maintained: a session seen with no
+        Also where ``_orphan_since`` and ``_clientless_since`` are
+        maintained: a session seen with no
         clients gets an entry (at ``now`` the first time), and one seen WITH
         a client has any entry dropped — so the grace measures CONTINUOUS
         orphanhood, and a reconnect renews the session's claim on being
@@ -4944,9 +5014,15 @@ class SessionManager:
                     # and the bound was written for the other case.
                     if session_id in self._ever_attached:
                         self._orphan_since.setdefault(session_id, now)
+                    # The unload grace's clock takes NO such gate (#1106):
+                    # it is not a verdict about abandoned work, it is how
+                    # long a clientless session stays cached, and a cold
+                    # revive with no clock would never be unloaded at all.
+                    self._clientless_since.setdefault(session_id, now)
                 else:
                     self._ever_attached.add(session_id)
                     self._orphan_since.pop(session_id, None)
+                    self._clientless_since.pop(session_id, None)
                 observations.append(SessionLifetimeObservation(
                     session_id=session_id,
                     loaded_at=session.loaded_at,
@@ -4955,6 +5031,8 @@ class SessionManager:
                 ))
             for stale_id in set(self._orphan_since) - live_ids:
                 self._orphan_since.pop(stale_id, None)
+            for stale_id in set(self._clientless_since) - live_ids:
+                self._clientless_since.pop(stale_id, None)
             self._ever_attached &= live_ids
         return observations
 
@@ -4968,6 +5046,12 @@ class SessionManager:
         function in :mod:`server.session_lifetime`), then stop each verdict
         through :meth:`stop_session` — the same cancellation path
         ``budget_control``'s ``abort`` rung uses.
+
+        Also the level trigger for the unload grace (#1106): the same
+        observation pass that derives the clientless clock carries out the
+        unloads :meth:`_maybe_unload_session` deferred, via
+        :meth:`_sweep_unload_grace`, BEFORE the stop verdicts — see there for
+        why that order.
 
         A stopped session is left to the existing unload machinery rather
         than torn down here: ``stop_session`` cancels it, its model thread
@@ -4983,7 +5067,9 @@ class SessionManager:
             The verdicts acted on this pass — empty on a healthy daemon.
         """
         now = time.monotonic() if now is None else now
-        verdicts = evaluate(self._observe_session_lifetimes(now), now)
+        observations = self._observe_session_lifetimes(now)
+        self._sweep_unload_grace(observations, now)
+        verdicts = evaluate(observations, now)
         for verdict in verdicts:
             logger.warning(
                 "session-lifetime bound: %s — stopping it daemon-side "
@@ -4996,6 +5082,75 @@ class SessionManager:
             with self._lock:
                 self._orphan_since.pop(verdict.session_id, None)
         return verdicts
+
+    def _sweep_unload_grace(
+        self, observations: List[SessionLifetimeObservation], now: float,
+    ) -> List[str]:
+        """Carry out the unloads the grace deferred (#1106).
+
+        The other half of the grace.  :meth:`_maybe_unload_session` learned to
+        DEFER a clientless session, and something has to come back for it —
+        the four callers are all edge-triggered (a client detached, a client
+        switched away, a turn ended, a terminal arrived) and none of them
+        fires again just because time passed.  This sweep is the level
+        trigger, and it is the same pass that already derives the clock, so
+        the two cannot disagree about when a session became clientless.
+
+        A no-op while the grace is disarmed (:attr:`_unload_grace_armed`),
+        which is the same switch :meth:`_maybe_unload_session` reads: the two
+        halves are armed and disarmed together, so a manager whose sweep is
+        driven by hand keeps the pre-#1106 behaviour on both sides.
+
+        It adds no second unload path: every candidate goes back through
+        :meth:`_maybe_unload_session`, which re-applies both original gates
+        (clients, model thread) and the grace itself.  A session whose grace
+        has NOT elapsed is simply not a candidate, so the common case costs
+        one arithmetic comparison per loaded session.
+
+        Runs BEFORE the stop verdicts in :meth:`sweep_session_lifetimes`, and
+        the order is deliberate: a session eligible for both should be
+        unloaded (saved, revivable) rather than stopped (cancelled) — the
+        gentler verdict wins when both apply, and after an unload the session
+        is gone from ``_sessions`` so nothing is stopped twice.
+
+        Args:
+            observations: This pass's observations, which carry each
+                session's resolved ``runtime_limits``.
+            now: Monotonic now, shared across the pass.
+
+        Returns:
+            The session ids an unload was requested for — a list rather than
+            a count so a test can name them.
+        """
+        with self._lock:
+            if not self._unload_grace_armed:
+                # One switch for both halves of the mechanism.  Disarmed, the
+                # gate defers nothing, so there is nothing here to carry out
+                # — and the sweep must not invent an unload the pre-#1106
+                # daemon would never have performed.
+                return []
+            clientless = dict(self._clientless_since)
+            loaded = set(self._sessions)
+        due: List[str] = []
+        for obs in observations:
+            session_id = obs.session_id
+            if session_id not in loaded:
+                continue
+            since = clientless.get(session_id)
+            if since is None:
+                continue  # Has a client; nothing to unload.
+            if unload_grace_remaining(since, now, obs.limits) > 0:
+                continue
+            due.append(session_id)
+        for session_id in due:
+            try:
+                self._maybe_unload_session(session_id, now=now)
+            except Exception:  # noqa: BLE001 — one session must not disarm
+                logger.exception(
+                    "unload-grace sweep: _maybe_unload_session raised for "
+                    "%s — the next sweep re-derives its state", session_id,
+                )
+        return due
 
     def unregister_all_cascade_clients_for_connection(
         self, connection_client_id: str,
@@ -5388,7 +5543,16 @@ class SessionManager:
                     self._client_to_session.pop(client_id, None)
         reason = getattr(event, "reason", "unknown")
         try:
-            self._maybe_unload_session(session.session_id)
+            # ``immediate`` -- NOT subject to the unload grace (#1106).  This
+            # is the one call site acting on a TERMINAL: the session has
+            # ENDED, where every other caller means only that its audience
+            # left, and that is the line the grace is drawn along rather than
+            # a carve-out from it.  The paragraph above measures what a delay
+            # here costs: every headless handoff returns its slot in ~250 ms,
+            # and one discovery slot that stayed pinned stalled a cascade for
+            # 6m43s.  A 60s grace on this path would reintroduce that on
+            # every stage of every cascade.
+            self._maybe_unload_session(session.session_id, immediate=True)
             logger.info(
                 "_apply_default_cascade_policy: triggered unload for "
                 "headless/cascade session %s after "
@@ -10921,8 +11085,64 @@ class SessionManager:
             except Exception as e:
                 logger.error(f"Failed to save subagent {agent_id}: {e}")
 
-    def _maybe_unload_session(self, session_id: str) -> None:
+    def _note_clientless(self, session_id: str, now: float) -> float:
+        """Record that *session_id* was observed clientless at *now* (#1106).
+
+        Returns the instant the session LAST became clientless, which is this
+        one only when nothing had observed it already — the grace measures
+        CONTINUOUS clientlessness, so an existing entry always wins.
+
+        The sweep is the other writer and does the same thing for every
+        loaded session; this exists so the clock starts at the instant the
+        unload was first requested rather than up to one sweep interval
+        later.  Both derive the fact from an empty ``attached_clients``
+        rather than from being told a client left, which is what keeps a
+        future call site from disarming the grace by forgetting to stamp it
+        (#735, and the comment on :attr:`_clientless_since`).
+
+        Args:
+            session_id: The session observed with no attached clients.
+            now: Monotonic now.
+
+        Returns:
+            The effective clientless-since instant.
+        """
+        with self._lock:
+            return self._clientless_since.setdefault(session_id, now)
+
+    def _maybe_unload_session(
+        self, session_id: str, *, immediate: bool = False,
+        now: Optional[float] = None,
+    ) -> None:
         """Unload a session from memory if no clients attached.
+
+        **The grace (#1106).**  A client going away is not the same event as
+        a session ending, and until #1106 this method treated them as one:
+        a WebSocket close — a tab reload, a network blip, a phone
+        backgrounding the page — tore the session down synchronously, and the
+        browser came back holding an id the daemon no longer had in memory.
+        Nothing was lost (``attach_session`` revives from disk) but a full
+        teardown and a full respawn is a large price for a two-second network
+        event.
+
+        So a session that has been clientless for less than
+        ``runtime_limits.unload_grace_seconds`` is DEFERRED rather than
+        unloaded, and the lifetime sweep re-drives it once the grace elapses
+        (:meth:`_sweep_unload_grace`).  A client that re-attaches inside the
+        window pays nothing: the session was never touched.
+
+        The grace applies only while the lifetime sweep is running
+        (:attr:`_unload_grace_armed`), because that sweep is the only thing
+        that comes back for a deferral; a ``SessionManager`` with no watchdog
+        keeps the pre-#1106 behaviour rather than deferring unloads forever.
+
+        ``immediate=True`` is the carve-out, and it is the line rather than an
+        exception to it — *a terminal ENDS a session; a disconnect only
+        removes its audience*.  :meth:`_apply_default_cascade_policy` passes
+        it because it is acting on a ``SessionTerminatedEvent``, and its own
+        docstring records what a delay there costs: headless handoffs return
+        their slot in ~250 ms, while one pinned discovery slot stalled a
+        cascade for 6m43s.
 
         Saves to disk first if dirty.  The heavy cleanup work (save,
         workspace monitor stop, subagent teardown, server.shutdown)
@@ -10942,13 +11162,31 @@ class SessionManager:
 
         Args:
             session_id: The session to potentially unload.
+            immediate: Skip the grace.  Reserved for the one caller acting on
+                a terminal, where the session has ENDED rather than merely
+                been left.
+            now: Monotonic instant to judge the grace against; defaults to
+                ``time.monotonic()``.  Injectable so a test states the moment
+                it means instead of sleeping through one (#996, #713).
         """
         session = self._sessions.get(session_id)
         if not session:
             return
 
         if session.attached_clients:
+            # Observed ATTACHED, so the clientless clock is stale: drop it,
+            # exactly as the sweep does.  A reconnect renews the session's
+            # claim on being wanted, so the grace measures CONTINUOUS
+            # clientlessness rather than time since the first disconnect.
+            self._clientless_since.pop(session_id, None)
             return  # Still has clients
+
+        # Past this point the session IS clientless, which is the fact the
+        # grace clock is derived from -- so record it here rather than
+        # waiting for the next sweep, and never later than the first request
+        # to unload.
+        now = time.monotonic() if now is None else now
+        clientless_since = self._note_clientless(session_id, now)
 
         # Don't unload while the model thread is still running — the
         # client may have disconnected (WS ping timeout, network blip)
@@ -10960,6 +11198,18 @@ class SessionManager:
                 session_id,
             )
             return
+
+        if not immediate and self._unload_grace_armed:
+            limits = self._session_runtime_limits(session)
+            remaining = unload_grace_remaining(clientless_since, now, limits)
+            if remaining > 0:
+                logger.info(
+                    "Deferring unload of session %s — unload grace "
+                    "%.1fs, %.1fs remaining (a client that re-attaches "
+                    "inside it pays nothing)",
+                    session_id, resolve_unload_grace(limits), remaining,
+                )
+                return
 
         # Defer heavy cleanup to a background thread so the asyncio
         # loop (when this is called from an IPC disconnect handler)
@@ -10996,6 +11246,11 @@ class SessionManager:
             # attached between _maybe_unload_session's check and
             # this thread starting.
             if session.attached_clients:
+                # Derived, like every other write of this clock: we have
+                # just OBSERVED a client, so the grace restarts if the
+                # session is ever left again.  Under the unload grace
+                # (#1106) this abort is the common case rather than a race.
+                self._clientless_since.pop(session_id, None)
                 logger.info(
                     "Unload of session %s aborted — a client re-attached "
                     "while the unload thread was scheduling", session_id,
@@ -11061,6 +11316,10 @@ class SessionManager:
             )
         with self._lock:
             self._sessions.pop(session_id, None)
+            # The grace clock belongs to a LOADED session; drop it with the
+            # session rather than leaving it for the sweep's stale reap, so
+            # a later session cannot inherit an already-elapsed grace (#1106).
+            self._clientless_since.pop(session_id, None)
             # Unload complete: signal any attach_session awaiting this teardown,
             # then drop the in-flight marker so a fresh attach takes the
             # disk-restore path (_load_session) and re-spawns the runner.

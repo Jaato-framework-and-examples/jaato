@@ -75,6 +75,37 @@ other detached shapes are excluded structurally:
 * an idle orphan is normally unloaded by ``_maybe_unload_session`` before the
   grace expires anyway.
 
+A third field, and a different VERB (#1106)
+-------------------------------------------
+
+``unload_grace_seconds`` lives in the same block and is read here, and it is
+not a third bound.  The two above decide whether to **stop** a session that
+has run too long; it decides how long to wait before **unloading** one that is
+merely unwatched.
+
+The distinction is the whole reason it is a separate field rather than a
+smaller ``max_orphan_seconds``.  Stopping is a verdict about work nobody will
+read; unloading is a cache eviction.  Before #1106 the unload path had no time
+dimension at all: a WebSocket close reached ``SessionManager.detach_client``
+and the teardown ran synchronously, so a tab reload cost a full save, a
+plugin teardown, a ``server.shutdown`` and a pool-slot return, and the browser
+came back to a session id the daemon no longer held in memory.
+
+The two compose by ordering rather than by arithmetic.  The grace default
+(60 s) sits far below the orphan default (900 s), so an unwatched session is
+normally UNLOADED long before the watchdog would stop it, and the watchdog
+stays the outer bound for the case the grace cannot reach — a session whose
+model thread is still running, which ``_maybe_unload_session`` declines to
+unload at all.  The sentence in the list above about an idle orphan being
+"normally unloaded before the grace expires anyway" describes a race; #1106
+makes it deliberate.
+
+``0`` is the explicit opt-out and restores the pre-#1106 behaviour.  Unlike
+the two bounds, ``0`` here is the most restrictive value, not the least:
+:func:`resolve_unload_grace` therefore reads it as "no grace" rather than as
+"unbounded", and the inheritance rule (``shared/plugins/subagent/config.py``)
+takes a plain ``min()`` for it.
+
 Composition with ``budget_control``
 -----------------------------------
 
@@ -91,6 +122,7 @@ from typing import Any, Iterable, List, Optional, Tuple
 
 from shared.runtime_limits import (
     DEFAULT_MAX_ORPHAN_SECONDS,
+    DEFAULT_UNLOAD_GRACE_SECONDS,
     UNBOUNDED_SECONDS,
 )
 
@@ -213,6 +245,75 @@ def resolve_bounds(limits: Any) -> Tuple[Optional[float], Optional[float]]:
     return session_bound, orphan_bound
 
 
+def resolve_unload_grace(limits: Any) -> float:
+    """The effective ``unload_grace_seconds`` for a session (#1106).
+
+    Three states, as with :func:`resolve_bounds`, but the third resolves to a
+    number rather than to ``None`` — there is no "unbounded" grace, only a
+    zero one:
+
+    * **declared and positive** — that value;
+    * **declared as 0** — no grace, the pre-#1106 behaviour, and the
+      operator's explicit opt-out;
+    * **not declared** — :data:`~shared.runtime_limits.DEFAULT_UNLOAD_GRACE_SECONDS`.
+
+    A ``limits`` object that is ``None``, or that predates the field (an older
+    session snapshot revived by a newer daemon, or a stand-in server in a
+    test), reads as "not declared" and takes the default — never raises.
+
+    Args:
+        limits: The session's ``RuntimeLimits``, or ``None``.
+
+    Returns:
+        Seconds; ``0.0`` means unload immediately.
+    """
+    raw = getattr(limits, "unload_grace_seconds", None)
+    if raw is None:
+        return DEFAULT_UNLOAD_GRACE_SECONDS
+    if not isinstance(raw, (int, float)) or isinstance(raw, bool):
+        return DEFAULT_UNLOAD_GRACE_SECONDS
+    if raw == UNBOUNDED_SECONDS:
+        return 0.0
+    return float(raw)
+
+
+def unload_grace_remaining(
+    clientless_since: Optional[float], now: float, limits: Any,
+) -> float:
+    """Seconds of grace left before a clientless session may be unloaded.
+
+    A pure function of three values so the whole decision can be exercised
+    with no daemon, no thread and no sleeping — ``now`` is a parameter for the
+    reason #996 and #713 made it one elsewhere: a test states the instant it
+    means instead of betting on a clock.
+
+    ``clientless_since is None`` is deliberately read as "it just became
+    clientless, so the full grace remains" rather than as "no clock, unload
+    now".  The clock is DERIVED — by the sweep, and by the unload gate itself
+    at the moment it observes an empty ``attached_clients`` — never stamped at
+    the ten-odd sites that mutate that set (#735, and this module's own
+    docstring).  A future call site that learns to unload and forgets
+    everything else therefore still defers, and the sweep picks it up; the
+    opposite default would let that call site silently disarm the grace.
+
+    Args:
+        clientless_since: Monotonic instant the session last became
+            clientless, or ``None`` when no observation has recorded one.
+        now: Monotonic now.
+        limits: The session's ``RuntimeLimits``, or ``None``.
+
+    Returns:
+        ``0.0`` when the grace has elapsed (or is disabled), else how much is
+        left.  Never negative.
+    """
+    grace = resolve_unload_grace(limits)
+    if grace <= 0:
+        return 0.0
+    if clientless_since is None:
+        return grace
+    return max(0.0, grace - (now - clientless_since))
+
+
 def evaluate_one(
     observation: SessionLifetimeObservation, now: float,
 ) -> Optional[LifetimeVerdict]:
@@ -285,12 +386,17 @@ def describe_armed_bounds(limits: Any) -> str:
     armed, with the effective numbers rather than the declared ones — the two
     differ whenever a field was omitted or set to 0.
 
+    All three daemon-layer fields are named, including ``unload_grace_seconds``
+    (#1106) — a grace that silently does not apply is the same defect as a cap
+    that silently does not apply, and it is harder to notice, because its
+    failure mode is the behaviour that was there before.
+
     Args:
         limits: The session's ``RuntimeLimits``, or ``None``.
 
     Returns:
         e.g. ``"max_session_seconds=unbounded max_orphan_seconds=900.0s
-        (framework default)"``.
+        (framework default) unload_grace_seconds=60.0s (framework default)"``.
     """
     session_bound, orphan_bound = resolve_bounds(limits)
     declared_orphan = getattr(limits, "max_orphan_seconds", None)
@@ -300,6 +406,11 @@ def describe_armed_bounds(limits: Any) -> str:
     orphan_txt = "unbounded" if orphan_bound is None else f"{orphan_bound:.1f}s"
     if declared_orphan is None and orphan_bound is not None:
         orphan_txt += " (framework default)"
+    grace = resolve_unload_grace(limits)
+    grace_txt = "0.0s (no grace)" if grace <= 0 else f"{grace:.1f}s"
+    if getattr(limits, "unload_grace_seconds", None) is None:
+        grace_txt += " (framework default)"
     return (
-        f"max_session_seconds={session_txt} max_orphan_seconds={orphan_txt}"
+        f"max_session_seconds={session_txt} max_orphan_seconds={orphan_txt} "
+        f"unload_grace_seconds={grace_txt}"
     )

@@ -63,6 +63,11 @@ def _make_sm() -> SessionManager:
     # Sessions the sweep has seen attached — the orphan bound's second
     # condition.  See test_orphan_bound_observes_attachment_812.py.
     sm._ever_attached = set()
+    # The unload grace's own clock, and its armed flag (#1106).  Left
+    # DISARMED here: the grace is only armed alongside the sweep thread that
+    # carries its deferrals out, and these harnesses drive the sweep by hand.
+    sm._clientless_since = {}
+    sm._unload_grace_armed = False
     sm._lifetime_watchdog = None
     sm._lifetime_watchdog_stop = threading.Event()
     sm._lifetime_sweep_interval = 15.0

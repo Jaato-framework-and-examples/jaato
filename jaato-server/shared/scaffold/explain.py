@@ -584,6 +584,9 @@ _RUNTIME_LIMIT_FIELDS = (
     ("max_orphan_seconds", "daemon",
      "wall-clock with NO client attached before the daemon stops it; "
      "0 = unbounded"),
+    ("unload_grace_seconds", "daemon",
+     "wall-clock the daemon holds an unwatched session in memory before "
+     "UNLOADING it (a reconnect inside it costs nothing); 0 = no grace"),
 )
 
 
@@ -610,6 +613,9 @@ def _runtime_limits_report() -> Dict[str, Any]:
         "max_orphan_seconds": (
             f"{rl.DEFAULT_MAX_ORPHAN_SECONDS:g}s (framework default)"
         ),
+        "unload_grace_seconds": (
+            f"{rl.DEFAULT_UNLOAD_GRACE_SECONDS:g}s (framework default)"
+        ),
     }
     iso = rl.ISOLATED_SUBAGENT_DEFAULT_RUNTIME_LIMITS
     return {
@@ -631,6 +637,10 @@ def _runtime_limits_report() -> Dict[str, Any]:
             "max_parallel_tools": "MIN across every layer that declares it",
             "max_session_seconds": "MIN across every layer that declares it",
             "max_orphan_seconds": "MIN across every layer that declares it",
+            "unload_grace_seconds": (
+                "MIN across every layer that declares it (0 is the TIGHTEST "
+                "value here, not 'unbounded')"
+            ),
         },
     }
 
@@ -657,13 +667,13 @@ def _runtime_limits_lines(report: Dict[str, Any]) -> List[str]:
         "  inheritance: the ceilings are child-REPLACES (parents must agree);"
     )
     lines.append(
-        "               max_parallel_tools and the two wall-clock bounds are"
+        "               max_parallel_tools and the three daemon-layer fields"
     )
     lines.append(
-        "               MIN across every layer that sets one, so a child may"
+        "               are MIN across every layer that sets one, so a child"
     )
     lines.append(
-        "               only ever narrow what it was spawned under."
+        "               may only ever narrow what it was spawned under."
     )
     lines.append(
         "  the 'daemon' layer is enforced by the SessionManager watchdog, not"
@@ -672,13 +682,40 @@ def _runtime_limits_lines(report: Dict[str, Any]) -> List[str]:
         "  inside the session -- so it still applies when the client that created"
     )
     lines.append(
-        "  the session has died (#812).  max_orphan_seconds is the ONE field here"
+        "  the session has died (#812).  max_orphan_seconds and"
     )
     lines.append(
-        "  with a framework default: the session it exists for is the one whose"
+        "  unload_grace_seconds are the two fields here with a framework"
     )
     lines.append(
-        "  profile declared nothing.  Declare 0 to opt out."
+        "  default: the session each exists for is the one whose profile"
+    )
+    lines.append(
+        "  declared nothing.  Declare 0 to opt out of either."
+    )
+    lines.append(
+        "  unload_grace_seconds is the daemon layer's third field and the odd"
+    )
+    lines.append(
+        "  one out in its VERB: the two bounds STOP a session that ran too"
+    )
+    lines.append(
+        "  long, this one DELAYS the teardown of one that is merely unwatched,"
+    )
+    lines.append(
+        "  so a browser reload or a network blip no longer costs a full save +"
+    )
+    lines.append(
+        "  respawn (#1106).  It carries a framework default for the same reason"
+    )
+    lines.append(
+        "  max_orphan_seconds does, and 0 means NO grace (the pre-#1106"
+    )
+    lines.append(
+        "  behaviour) rather than 'unbounded' -- so a child declaring 0 wins"
+    )
+    lines.append(
+        "  the MIN, where a child declaring 0 for a bound does not."
     )
     return lines
 

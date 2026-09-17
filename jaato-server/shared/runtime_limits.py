@@ -81,6 +81,36 @@ _MAX_PARALLEL_TOOLS_LIMIT = 256
 # one who genuinely runs unattended-forever sessions declares 0.
 DEFAULT_MAX_ORPHAN_SECONDS = 900.0
 
+# How long the daemon holds a LOADED session after its last client goes away,
+# before unloading it (#1106).
+#
+# Nothing on the unload path had a time dimension at all: a WebSocket close --
+# a tab reload, a network blip, a phone backgrounding the page -- reached
+# ``SessionManager.detach_client`` and the session was saved, its log handlers
+# closed, its workspace monitor stopped, its isolated subagents torn down, its
+# server shut down and its pool slot returned, synchronously.  Nothing is lost
+# (``attach_session`` revives from disk) but a full teardown and a full
+# respawn is a large price for a two-second network event.
+#
+# 60s rather than longer, and the argument is where the two costs cross.  A
+# grace pins a runner (129-187 MB) and a pool slot for its whole window, and
+# the window buys nothing after the point where disk revival is the right
+# answer: a tab reload is ~2s, a network blip tens of seconds, and a lid-close
+# or a backgrounded phone is minutes -- which no grace worth paying for would
+# cover anyway.  60s covers the transient cases and declines the ones revival
+# already handles.
+#
+# It is deliberately far below :data:`DEFAULT_MAX_ORPHAN_SECONDS`, because the
+# two are different verdicts on the same state and the ordering must be
+# unambiguous: this UNLOADS a session (save + teardown, revivable), the orphan
+# bound STOPS one (cancel + save).  The watchdog stays the outer bound.
+#
+# ``0`` is the explicit opt-out and restores the pre-#1106 behaviour exactly.
+# Unlike the two bounds above, ``0`` here is the MOST restrictive value rather
+# than "unbounded" -- see ``_MIN_WINS_ZERO_TIGHTEST_FIELDS`` in
+# ``shared/plugins/subagent/config.py``.
+DEFAULT_UNLOAD_GRACE_SECONDS = 60.0
+
 # The value both wall-clock fields read as "explicitly unbounded".  Zero
 # rather than a string because these are numeric deadlines, and 0-disables is
 # already this tree's spelling for one (``JAATO_GC_MEDIA_BYTES``,
@@ -148,10 +178,12 @@ def _positive_number(name: str, value: Any) -> None:
 def _non_negative_number(name: str, value: Any) -> None:
     """Reject anything that is not a non-negative ``int`` or ``float``.
 
-    The sibling of :func:`_positive_number` for the two wall-clock bounds,
-    which accept ``0`` as "explicitly unbounded" -- so 0 must validate here
-    where it would be rejected there.  ``bool`` is excluded for the reason
-    given on :func:`_positive_int`.
+    The sibling of :func:`_positive_number` for the three daemon-layer
+    wall-clock fields, each of which accepts ``0`` -- as "explicitly
+    unbounded" for the two bounds, and as "no grace at all" for
+    ``unload_grace_seconds`` -- so 0 must validate here where it would be
+    rejected there.  ``bool`` is excluded for the reason given on
+    :func:`_positive_int`.
 
     Args:
         name: Field name, for the message.
@@ -168,7 +200,8 @@ def _non_negative_number(name: str, value: Any) -> None:
         )
     if value < 0:
         raise ValueError(
-            f"{name} must be >= 0, got {value} (0 means explicitly unbounded)"
+            f"{name} must be >= 0, got {value} "
+            f"(0 is the explicit opt-out for this field)"
         )
 
 
@@ -272,6 +305,16 @@ class RuntimeLimits:
     #: cascade-driven session carries.  Defaulted, because the session this
     #: field exists for is precisely the one whose profile declared nothing.
     max_orphan_seconds: Optional[float] = None
+    #: Wall-clock the daemon holds a LOADED session after its LAST client
+    #: detaches, before unloading it (#1106).  The odd one out among the three
+    #: daemon-layer fields in what it does: the two above STOP a session that
+    #: has run too long, this one DELAYS the teardown of a session that is
+    #: merely unwatched, so a client that reconnects inside the window finds
+    #: its session still in memory and pays nothing.  Defaulted, for the same
+    #: reason ``max_orphan_seconds`` is: the session this exists for is the one
+    #: whose profile declared nothing.  ``0`` = no grace, i.e. the pre-#1106
+    #: behaviour, and is the TIGHTEST value here rather than "unbounded".
+    unload_grace_seconds: Optional[float] = None
 
     # Future-proof: forward-compat passthrough for fields the runtime
     # doesn't recognise yet.  Profile schema validation should reject
@@ -300,6 +343,7 @@ class RuntimeLimits:
                                    "turn, not hundreds")
         _non_negative_number("max_session_seconds", self.max_session_seconds)
         _non_negative_number("max_orphan_seconds", self.max_orphan_seconds)
+        _non_negative_number("unload_grace_seconds", self.unload_grace_seconds)
 
     @classmethod
     def from_dict(cls, data: Optional[Mapping[str, Any]]) -> "RuntimeLimits":
@@ -314,7 +358,7 @@ class RuntimeLimits:
         known_fields = {"memory_max_mb", "pids_max", "cpu_weight",
                         "tool_timeout_seconds", "max_output_bytes",
                         "max_parallel_tools", "max_session_seconds",
-                        "max_orphan_seconds"}
+                        "max_orphan_seconds", "unload_grace_seconds"}
         kwargs: Dict[str, Any] = {k: data[k] for k in known_fields if k in data}
         extra = {k: v for k, v in data.items() if k not in known_fields}
         return cls(extra=extra, **kwargs)

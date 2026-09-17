@@ -416,9 +416,26 @@ class TestDispatch:
 class TestDefaultPolicy:
     def _setup_sm_with_unload_stub(self, sm: SessionManager) -> List[str]:
         """Patch _maybe_unload_session to record calls; return the
-        recording list for assertions."""
+        recording list for assertions.
+
+        Accepts (and REQUIRES) ``immediate=True``: since #1106 every other
+        caller of ``_maybe_unload_session`` defers for the unload grace, and
+        this policy is the one that must not -- a terminal ENDS a session
+        where a disconnect only removes its audience, and a delay here is
+        what pinned a discovery slot for 6m43s.  Asserting it in the stub
+        means every case in this class covers it.
+        """
         unload_calls: List[str] = []
-        sm._maybe_unload_session = lambda sid: unload_calls.append(sid)
+
+        def _record(sid, *, immediate=False, now=None):
+            assert immediate is True, (
+                "the cascade policy must unload IMMEDIATELY -- waiting out "
+                "the #1106 unload grace pins the pool slot the cascade's "
+                "next stage is waiting for"
+            )
+            unload_calls.append(sid)
+
+        sm._maybe_unload_session = _record
         return unload_calls
 
     def test_non_terminal_event_no_op(self):
