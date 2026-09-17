@@ -384,3 +384,30 @@ describe("rail width", () => {
     expect(useJaato.getState().ui.railWidth).toBe(300);
   });
 });
+
+describe("uploads: the attachment strip's state", () => {
+  it("takeUploads hands back the staged paths and keeps what is still in flight", () => {
+    const st = useJaato.getState();
+    st.addUploads([
+      { id: "u1", path: "a.pdf", size: 10, status: "queued" },
+      { id: "u2", path: "docs/b.md", size: 20, status: "queued" },
+      { id: "u3", path: "c.bin", size: 30, status: "queued" },
+    ]);
+    st.updateUpload("u1", { status: "staged" });
+    st.updateUpload("u2", { status: "failed", error: "unsafe_path" });
+    st.updateUpload("u3", { status: "staging" });
+    expect(useJaato.getState().takeUploads()).toEqual(["a.pdf"]);
+    // the failed chip is dropped with the send; the one on the wire stays
+    expect(useJaato.getState().uploads.map((u) => [u.id, u.status])).toEqual([["u3", "staging"]]);
+    useJaato.getState().removeUpload("u3");
+    expect(useJaato.getState().uploads).toEqual([]);
+  });
+
+  it("survives the reset an attach performs, so files queued on the picker reach the session", () => {
+    const st = useJaato.getState();
+    st.addUploads([{ id: "u9", path: "brief.txt", size: 5, status: "queued" }]);
+    st.resetSessionState();
+    expect(useJaato.getState().uploads.map((u) => u.id)).toEqual(["u9"]);
+    useJaato.getState().removeUpload("u9");
+  });
+});

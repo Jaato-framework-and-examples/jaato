@@ -24,12 +24,19 @@
  * Pending permission / clarification prompts take over ``Enter``: the
  * typed text becomes the answer (``y``, ``a``, an option key, a free-
  * text reply), exactly like typing into the TUI while a prompt is up.
+ *
+ * Files dropped on the box, pasted into it, or picked through the
+ * strip's "Attach files" are STAGED into the session's workspace at once
+ * (``app/staging.ts``); the strip above the box shows each one's state,
+ * and the message sent next names them in a trailing line.
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { commandCompletions, wouldRouteAsCommand, type CommandSpec, type Completion } from "@/protocol/commands";
 import { sessionIdCompletions, wantsSessionIds } from "@/protocol/sessions";
 import { ensureSessions } from "@/app/actions";
+import { attachFiles } from "@/app/staging";
 import { useJaato } from "@/store/store";
+import { AttachStrip, filesFromTransfer } from "./AttachStrip";
 
 export interface ComposerProps {
   commands: CommandSpec[];
@@ -52,6 +59,7 @@ export function Composer({ commands, disabled, captureMode, history, onSubmit, o
   const [selected, setSelected] = useState(0);
   const [histIdx, setHistIdx] = useState<number | null>(null);
   const [caret, setCaret] = useState(0);
+  const [dragOver, setDragOver] = useState(false);
   const ref = useRef<HTMLTextAreaElement>(null);
   const verbatimWord = useRef<string>("");
 
@@ -229,7 +237,14 @@ export function Composer({ commands, disabled, captureMode, history, onSubmit, o
           </div>
         </div>
       )}
-      <div className={`flex items-end gap-2.5 border px-3 py-2 bg-surface ${captureMode ? "border-warning" : "border-steel"}`}>
+      <AttachStrip hint="Staged into the session's workspace now; the next message names them." />
+      <div
+        className={`flex items-end gap-2.5 border px-3 py-2 bg-surface ${captureMode ? "border-warning" : "border-steel"} ${dragOver ? "bg-tint outline outline-1 outline-steel" : ""}`}
+        onDragOver={(e) => { if (filesFromTransfer(e.dataTransfer).length || e.dataTransfer.types.includes("Files")) { e.preventDefault(); setDragOver(true); } }}
+        onDragLeave={() => setDragOver(false)}
+        onDrop={(e) => { const files = filesFromTransfer(e.dataTransfer); setDragOver(false); if (files.length) { e.preventDefault(); attachFiles(files, ""); } }}
+        onPaste={(e) => { const files = filesFromTransfer(e.clipboardData); if (files.length) { e.preventDefault(); attachFiles(files, ""); } }}
+      >
         <span className={`font-mono select-none pb-[3px] ${captureMode ? "text-warning" : "text-steel"}`}>{captureMode ? "?" : "›"}</span>
         <textarea
           ref={ref}
@@ -244,6 +259,9 @@ export function Composer({ commands, disabled, captureMode, history, onSubmit, o
           onKeyDown={onKeyDown}
           className="flex-1 resize-none bg-transparent outline-none font-mono text-[13.5px] leading-5 placeholder:text-text-muted max-h-60"
         />
+        <button type="button" onClick={() => (document.querySelector("[data-attach-input]") as HTMLInputElement | null)?.click()} disabled={disabled} className="chrome-sm font-heading font-medium uppercase tracking-[0.08em] pb-[3px] text-text-muted hover:text-steel disabled:opacity-40" aria-label="Attach" title="Attach files to the workspace (or drop / paste them here)">
+          Attach
+        </button>
         <button type="button" onClick={submit} disabled={disabled || (!text.trim() && !captureMode)} className={`chrome-sm font-heading font-medium uppercase tracking-[0.08em] pb-[3px] disabled:opacity-40 ${captureMode ? "text-warning" : "text-steel"}`} aria-label="Send">
           {captureMode ? "Answer" : "Send"} ⏎
         </button>
@@ -258,7 +276,7 @@ export function Composer({ commands, disabled, captureMode, history, onSubmit, o
         ) : routedIfNotVerbatim ? (
           <span>Sending as text (not the <span className="font-mono">{routedIfNotVerbatim}</span> command) · Tab to make it a command</span>
         ) : (
-          <span>Enter sends a message · a first word that names a command runs it · Esc sends it verbatim · Shift+Enter for a newline</span>
+          <span>Enter sends a message · a first word that names a command runs it · Esc sends it verbatim · Shift+Enter for a newline · drop or paste files to stage them</span>
         )}
       </div>
     </div>

@@ -14,6 +14,7 @@ import { getClient } from "@/sdk/connection";
 import { OutputPane } from "@/components/output/OutputPane";
 import { ToolOutputPopup } from "@/components/output/ToolOutputPopup";
 import { Composer } from "@/components/input/Composer";
+import { AttachStrip } from "@/components/input/AttachStrip";
 import { PermissionPrompt } from "@/components/prompts/PermissionPrompt";
 import { PostAuthSetupPrompt } from "@/components/prompts/PostAuthSetupPrompt";
 import { ClarificationPrompt } from "@/components/prompts/ClarificationPrompt";
@@ -26,6 +27,7 @@ import { StatusBar } from "@/components/layout/StatusBar";
 import { Plate } from "@/components/layout/Plate";
 import { RailResizer } from "@/components/layout/RailResizer";
 import { answerClarification, attachSession, cancelClarification, ensureSessions, inputHistory, respondPermission, respondPostAuth, respondReference, submitInput } from "@/app/actions";
+import { openSessionWithQueued } from "@/app/staging";
 import { sessionsInWorkspace } from "@/protocol/sessions";
 import { useKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 
@@ -183,6 +185,10 @@ function ProfilePicker({ onPick, onAttach, onAuth, onSkip }: {
             </div>
           </div>
         </div>
+        <div className="px-5 pt-3 border-t hairline" aria-label="Files for the session">
+          <div className="kicker kicker-muted text-[12px] mb-1.5">Files for the session</div>
+          <AttachStrip always hint={selected ? "Staged into this workspace before the session opens." : "Staged into the session's workspace as soon as it is provisioned."} />
+        </div>
         <div className="flex flex-wrap items-center gap-3 px-5 py-3 border-t hairline">
           {auth.length > 0 && !configured && (
             <div className="flex flex-wrap items-center gap-3" aria-label="Sign in to a provider">
@@ -232,7 +238,7 @@ export function SessionScreen() {
     setCreating(true);
     try {
       const c = getClient();
-      await c.createSession(profile ? { profile } : {});
+      await openSessionWithQueued(() => c.createSession(profile ? { profile } : {}));
     } finally {
       setCreating(false);
     }
@@ -261,7 +267,7 @@ export function SessionScreen() {
 
   const resumeSession = (id: string) => {
     setPicking(false);
-    attachSession(id).catch((err) => useJaato.getState().addSystemBlock(selected, String(err), "error"));
+    openSessionWithQueued(() => attachSession(id)).catch((err) => useJaato.getState().addSystemBlock(selected, String(err), "error"));
   };
 
   // A workspace whose .env already names the provider just signed in to has

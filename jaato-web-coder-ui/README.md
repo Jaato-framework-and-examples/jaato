@@ -57,6 +57,26 @@ with a command word. A hint under the box always states what Enter will do.
 as in the TUI. See `src/protocol/commands.ts` for the routing rules, which
 are a port of `jaato-tui/client_commands.py`.
 
+## Files go into the workspace, not the prompt
+
+Drop files on the composer, paste them, or press **Attach**, and they are
+**staged into the session's workspace** on the daemon — the same
+`StageFilesRequest` verb the premium `<jaato-task>` component uses (one
+JSON frame naming the files, one binary frame each, one answer per file;
+`docs/sdk-file-staging.md`). A strip above the box shows each file's state
+(queued / staging / ✓ staged / ✗ with the daemon's reason), the Files
+panel lists them as the daemon's monitor sees them, and the next message
+ends with one line naming the paths so the model knows where they are:
+`@path` then reads them. The strip's **into** field picks a folder for the
+files that follow; a dropped directory keeps its structure.
+
+The session picker has the same strip, for a session that should start
+with files in place: with a workspace selected they are staged before
+`session.new`; on a daemon that provisions the workspace as part of
+`session.new` they wait for its `session.info` and are staged then, still
+ahead of the first turn. The daemon caps a file at 10 MB and a request at
+50 MB; the client applies the same caps before sending.
+
 ## Run it
 
 The client is published on npm as `@jaato/web-coder-ui`; the package is the built
@@ -249,4 +269,5 @@ e2e/           Playwright smoke suite
 `Enter` send · `Shift+Enter` newline · `Tab` complete / re-arm proposals ·
 `Esc` dismiss proposal (send verbatim) · `Ctrl+P` plan · `Ctrl+B` budget ·
 `Alt+W` files · `Ctrl+T` expand/collapse tools · `Ctrl+A` next agent ·
-`Ctrl+O` next running tool in the popup · `Ctrl+C` (nothing selected) stop.
+`Ctrl+O` next running tool in the popup · `Ctrl+C` (nothing selected) stop ·
+drop / paste a file on the composer to stage it into the workspace.

@@ -41,7 +41,37 @@ const SPEED = Number(process.env.MOCK_SPEED ?? 1); // multiplier; 0 = no delays
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, SPEED ? ms * SPEED : 0));
 const ts = () => new Date().toISOString();
 
-interface Client { ws: WebSocket; sessionId: string | null; pending: Map<string, (v: unknown) => void>; ignored: Set<string>; }
+interface Client {
+  ws: WebSocket; sessionId: string | null; pending: Map<string, (v: unknown) => void>; ignored: Set<string>;
+  /**
+   * A ``workspace.files.stage_request`` in progress: the daemon reads one
+   * BINARY frame per declared file, in order, before answering with
+   * ``workspace.files.staged`` (docs/sdk-file-staging.md).  ``refused`` is
+   * the up-front rejection (no workspace, total cap): the frames are still
+   * drained so the stream stays aligned.
+   */
+  staging: { workspaceId: string; specs: { name: string; size: number }[]; frames: Buffer[]; refused: Record<string, string>[] | null } | null;
+}
+const STAGE_PER_FILE_LIMIT = 10 * 1024 * 1024;
+const STAGE_TOTAL_LIMIT = 50 * 1024 * 1024;
+
+function finishStaging(c: Client): void {
+  const st = c.staging!;
+  c.staging = null;
+  if (st.refused) { send(c, { type: "workspace.files.staged", workspace_id: st.workspaceId, staged: [], failed: st.refused }); return; }
+  const staged: string[] = [];
+  const failed: Record<string, string>[] = [];
+  st.specs.forEach((spec, i) => {
+    const frame = st.frames[i];
+    if (!spec.name || spec.name.startsWith("/") || spec.name.split("/").includes("..")) failed.push({ name: spec.name, category: "unsafe_path", error: "name must be a non-empty workspace-relative path with no '..' components" });
+    else if (spec.size > STAGE_PER_FILE_LIMIT) failed.push({ name: spec.name, category: "size_limit_per_file", error: `declared size ${spec.size} bytes exceeds per-file cap ${STAGE_PER_FILE_LIMIT}` });
+    else if (!frame || frame.length !== spec.size) failed.push({ name: spec.name, category: "size_mismatch", error: `declared ${spec.size} bytes, frame carried ${frame?.length ?? 0} bytes` });
+    else staged.push(spec.name);
+  });
+  send(c, { type: "workspace.files.staged", workspace_id: st.workspaceId, staged, failed });
+  // The daemon's workspace monitor then reports the new files.
+  if (staged.length) send(c, { type: "workspace.files_changed", changes: staged.map((path) => ({ path, status: "created" })) });
+}
 
 /** What ``session.list`` answers: the daemon's free-form per-session dicts. */
 function sessionListing(c: Client): Record<string, unknown>[] {
@@ -209,15 +239,32 @@ wss.on("connection", (ws, req) => {
   const presented = url.searchParams.get("token") ?? (auth.startsWith("Bearer ") ? auth.slice(7) : "");
   if (TOKEN && presented !== TOKEN) { ws.close(1008, "unauthorized"); return; }
 
-  const c: Client = { ws, sessionId: null, pending: new Map(), ignored: new Set() };
+  const c: Client = { ws, sessionId: null, pending: new Map(), ignored: new Set(), staging: null };
   send(c, { type: "connected", protocol_version: "1.12", server_info: { server_version: "mock-0.0.1", client_id: randomUUID() } });
 
-  ws.on("message", async (raw) => {
+  ws.on("message", async (raw, isBinary) => {
+    if (c.staging) {
+      // The binary frames a stage request declared, in order.
+      if (!isBinary) { c.staging = null; return; }
+      c.staging.frames.push(Buffer.from(raw as Buffer));
+      if (c.staging.frames.length >= c.staging.specs.length) finishStaging(c);
+      return;
+    }
     let ev: Record<string, unknown>;
     try { ev = JSON.parse(String(raw)); } catch { return; }
     const type = String(ev.type);
     switch (type) {
       case "client.config": break;
+      case "workspace.files.stage_request": {
+        const specs = ((ev.files as { name: string; size: number }[] | undefined) ?? []).map((f) => ({ name: String(f.name ?? ""), size: Number(f.size ?? 0) }));
+        const workspaceId = String(ev.workspace_id ?? "");
+        let refused: Record<string, string>[] | null = null;
+        if (!c.sessionId && !WORKSPACES) refused = specs.map((f) => ({ name: f.name, category: "workspace_not_found", error: "No workspace selected for client (workspace_id='')" }));
+        else if (specs.reduce((a, f) => a + f.size, 0) > STAGE_TOTAL_LIMIT) refused = specs.map((f) => ({ name: f.name, category: "size_limit_total", error: `declared total exceeds cap ${STAGE_TOTAL_LIMIT}` }));
+        c.staging = { workspaceId, specs, frames: [], refused };
+        if (!specs.length) finishStaging(c);
+        break;
+      }
       case "workspace.list":
         if (!WORKSPACES) send(c, { type: "error", error: "Workspace mode not enabled", error_type: "WorkspaceModeDisabled", recoverable: true });
         else send(c, { type: "workspace.list_response", root: "/srv/workspaces", workspaces: [

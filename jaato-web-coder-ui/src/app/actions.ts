@@ -14,6 +14,7 @@
  * through to ``parseUserInput`` so a dismissed command word ships as text.
  */
 import { EventTypeValue } from "@jaato/sdk";
+import { attachmentFooter } from "@/protocol/attachments";
 import { parseUserInput } from "@/protocol/commands";
 import { MAIN_AGENT, useJaato } from "@/store/store";
 import type { PendingClarification } from "@/store/types";
@@ -250,10 +251,15 @@ export async function submitInput(text: string, verbatim: boolean): Promise<void
       await client.executeCommand(parsed.command ?? "", parsed.args ?? []);
       return;
     }
-    case "message":
-      st.addUserBlock(agentId, parsed.text ?? text);
+    case "message": {
+      // Files staged while this prompt was written are named in a trailing
+      // line, so the model knows where they landed; the local bubble shows
+      // the same text the daemon will echo.
+      const body = (parsed.text ?? text) + attachmentFooter(st.takeUploads());
+      st.addUserBlock(agentId, body);
       st.dispatch([{ type: EventTypeValue.AGENT_STATUS_CHANGED, agent_id: agentId, status: "processing" } as never]);
-      await client.sendMessage(parsed.text ?? text);
+      await client.sendMessage(body);
       return;
+    }
   }
 }

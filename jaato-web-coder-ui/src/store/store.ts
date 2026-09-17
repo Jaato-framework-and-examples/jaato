@@ -17,6 +17,7 @@ import { formatSessionList, normalizeSessionList, type SessionSummary } from "@/
 import { formatHistoryListing, historyBlocks } from "@/protocol/history";
 import { clampRailWidth, loadRailWidth, saveRailWidth } from "@/store/railWidth";
 import type {
+  StagedUpload,
   UserBlock,
   Agent,
   ConfigStatus,
@@ -137,6 +138,8 @@ export interface JaatoState {
   workspaceIgnored: Record<string, boolean>;
   /** One-line outcome of the last ``.gitignore`` toggle, shown in the panel. */
   workspaceNotice: { text: string; error?: boolean } | null;
+  /** Files attached from the browser, in the order they were picked (see ``StagedUpload``). */
+  uploads: StagedUpload[];
   /** ``PermissionStatusEvent``: the effective default policy and, when suspended, the scope. */
   permissionStatus?: { effectiveDefault: string; suspensionScope: string | null } | null;
   processing: Record<string, boolean>;
@@ -189,6 +192,15 @@ export interface JaatoState {
   setPopup: (callId: string | null) => void;
   /** Clamped to the rail's bounds and persisted. */
   setRailWidth: (w: number) => void;
+  addUploads: (items: StagedUpload[]) => void;
+  updateUpload: (id: string, patch: Partial<StagedUpload>) => void;
+  removeUpload: (id: string) => void;
+  /**
+   * Consume the strip when a message is sent: returns the paths that were
+   * staged (for the prompt's footer) and drops every settled entry.  A
+   * file still ``queued`` or ``staging`` is left for the next send.
+   */
+  takeUploads: () => string[];
   resetSessionState: () => void;
 }
 
@@ -849,6 +861,7 @@ export const useJaato = create<JaatoState>()((set, get) => ({
   sessionListSilent: 0,
   historyMode: "listing",
   commands: mergeCommandSpecs([]),
+  uploads: [],
   ...emptySessionState(),
   ui: { showPlan: false, showBudget: false, showWorkspace: false, showTools: false, theme: "light", popupCallId: null, railWidth: loadRailWidth() },
 
@@ -907,6 +920,14 @@ export const useJaato = create<JaatoState>()((set, get) => ({
   setTheme: (theme) => set((st) => ({ ui: { ...st.ui, theme } })),
   setPopup: (callId) => set((st) => ({ ui: { ...st.ui, popupCallId: callId } })),
   setRailWidth: (w) => set((st) => { const railWidth = clampRailWidth(w); saveRailWidth(railWidth); return { ui: { ...st.ui, railWidth } }; }),
+  addUploads: (items) => set((st) => ({ uploads: [...st.uploads, ...items] })),
+  updateUpload: (id, patch) => set((st) => ({ uploads: st.uploads.map((u) => (u.id === id ? { ...u, ...patch } : u)) })),
+  removeUpload: (id) => set((st) => ({ uploads: st.uploads.filter((u) => u.id !== id) })),
+  takeUploads: () => {
+    const staged = get().uploads.filter((u) => u.status === "staged").map((u) => u.path);
+    set((st) => ({ uploads: st.uploads.filter((u) => u.status === "queued" || u.status === "staging") }));
+    return staged;
+  },
   resetSessionState: () => set(() => ({ ...emptySessionState() })),
 }));
 

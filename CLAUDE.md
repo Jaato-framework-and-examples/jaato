@@ -5013,6 +5013,57 @@ drag handle on its left edge (`components/layout/RailResizer.tsx`): a
 none` — and by arrow keys, clamped to 220–720px and remembered per browser
 (`ui.railWidth`, `localStorage`).
 
+### A File the Browser Could Not Put in the Workspace
+
+The premium `<jaato-task>` component (and the knowledge-manager client
+built on it) ships files to the daemon two ways: inline base64
+`staged_files` on the `session.new` envelope, and the canonical
+`StageFilesRequest` — one TEXT frame naming the files, one BINARY frame
+per file, one `StageFilesEvent` back, into the connection's selected or
+provisioned workspace (`docs/sdk-file-staging.md`). The TS SDK already
+carried `stageFiles`; the web coder used neither, so a browser session
+had no way to hand the agent a file.
+
+The web coder now uses the canonical verb for **both** moments, which is
+what the SDK method was written for and what the docstring on the legacy
+envelope field asks new clients to do:
+
+| Where | When it stages | Why that order |
+|---|---|---|
+| the composer (drop, paste, **Attach**) | at once, into the session's workspace | the agent's tools read it on the next turn; the message sent next ends with a line naming the staged paths |
+| the session picker, workspace selected | **before** `session.new` | the session starts with the files on disk |
+| the session picker, no workspace yet | after the daemon's `session.info` | a daemon that provisions the workspace **as part of** `session.new` has nowhere to put them earlier; still ahead of the first turn |
+
+Three properties, each attached to a way it went wrong while being built:
+
+- **The workspace is a fact learned from the daemon, not sampled at attach
+  time.** The picker is on screen the moment `workspace.select` is *sent*,
+  and the store's `selected` is written when its `config.status` reply is
+  reduced, a round-trip later — so a file attached in that window read as
+  "no workspace" and sat queued until a profile was picked. The staging
+  module subscribes to the store and stages the moment a workspace or a
+  session appears. Measured against a real daemon: the picker's file is on
+  disk before `session.new`, the composer's file lands under the folder
+  chosen in the strip.
+- **What the daemon would refuse is refused before any bytes are sent**,
+  in the daemon's own words — a name that climbs or is absolute, a file
+  over `DEFAULT_STAGE_PER_FILE_LIMIT`, a batch over
+  `DEFAULT_STAGE_TOTAL_LIMIT` (`src/protocol/attachments.ts` mirrors the
+  numbers). The daemon still checks; the client just does not stream 11 MB
+  to hear "no".
+- **One request per drop, requests in order.** The SDK correlates a
+  `StageFilesEvent` to a `stageFiles` call by *order*, so the module runs
+  every call through one promise chain; a directory dropped beside real
+  files fails alone (its `File` cannot be read) rather than failing the
+  batch.
+
+The mock daemon speaks the multi-frame protocol (`mock/daemon.ts`,
+`finishStaging`), including the up-front refusals, so the e2e suite drives
+the real frames. Not done: `send_message`'s inline `attachments` (model
+context, #838) — a file the model should *see* rather than have on disk
+is a different feature with a different cost, and the composer does not
+yet offer it.
+
 ### A Key the Web Files Panel Did Not Have
 
 The TUI's workspace panel (Ctrl+W) binds two keys to the entry under the

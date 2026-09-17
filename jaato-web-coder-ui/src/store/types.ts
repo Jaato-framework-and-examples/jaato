@@ -276,3 +276,24 @@ export interface InitProgress {
 export type ConnectionPhase = "disconnected" | "connecting" | "connected" | "reconnecting" | "closed";
 
 export type Screen = "connect" | "workspaces" | "session";
+
+/**
+ * One file the user attached, on its way into the session's workspace
+ * (``app/staging.ts``).  ``path`` is where it lands, workspace-relative.
+ *
+ * Lifecycle: ``queued`` (picked on the session picker, before there is a
+ * workspace to stage into) → ``staging`` (bytes on the wire) → ``staged``
+ * or ``failed`` (the daemon's ``StageFilesEvent`` said which, and why).
+ * A ``staged`` entry stays in the composer's strip until the next message
+ * is sent, which names it in its footer and drops it; a ``failed`` one is
+ * dropped on send too.  The list lives outside the per-session state so
+ * files queued on the picker survive the reset an attach performs.
+ */
+export interface StagedUpload {
+  id: string;
+  path: string;
+  size: number;
+  status: "queued" | "staging" | "staged" | "failed";
+  /** The daemon's (or the client-side precheck's) reason, when ``failed``. */
+  error?: string;
+}

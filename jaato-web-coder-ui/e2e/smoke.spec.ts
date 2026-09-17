@@ -537,3 +537,57 @@ test("the rail's drag handle resizes it, by pointer and by keyboard", async ({ p
   await openSession(page);
   expect(Math.round((await page.getByRole("complementary", { name: "Session rail" }).boundingBox())!.width)).toBe(404);
 });
+
+test("files attached in the composer are staged into the workspace, listed in Files, and named by the next message", async ({ page }) => {
+  await openSession(page);
+  // A pick through the strip's hidden input (a drop or a paste reach the same call).
+  await page.getByLabel("Attach files").setInputFiles([
+    { name: "notes.md", mimeType: "text/markdown", buffer: Buffer.from("# notes\nhello\n") },
+    { name: "data.bin", mimeType: "application/octet-stream", buffer: Buffer.from([1, 2, 3, 4]) },
+  ]);
+  const strip = page.getByRole("group", { name: "Attached files" });
+  await expect(strip.getByText("notes.md")).toBeVisible();
+  await expect(strip.locator("li[data-status=staged]")).toHaveCount(2);
+  await expect(page.getByText("Staged into the workspace: notes.md, data.bin")).toBeVisible();
+  // The daemon's file monitor reports them, so the Files panel lists them.
+  await page.getByRole("button", { name: "Toggle workspace changes (Alt+W)" }).click();
+  const panel = page.getByRole("region", { name: "Files" });
+  await expect(panel.getByText("+ notes.md")).toBeVisible();
+  await expect(panel.getByText("+ data.bin")).toBeVisible();
+  // The next message names them and the strip is cleared.
+  await composer(page).fill("summarise the notes");
+  await composer(page).press("Enter");
+  await expect(page.getByText("Attached files, staged in the workspace: notes.md, data.bin")).toBeVisible();
+  await expect(strip).toHaveCount(0);
+});
+
+test("a file refused by the daemon shows the daemon's reason on its chip", async ({ page }) => {
+  await openSession(page);
+  // Over the daemon's per-file cap: refused by the client's precheck with the daemon's own words, and never sent.
+  await page.getByLabel("Attach files").setInputFiles([{ name: "big.bin", mimeType: "application/octet-stream", buffer: Buffer.alloc(11 * 1024 * 1024) }]);
+  const strip = page.getByRole("group", { name: "Attached files" });
+  await expect(strip.locator("li[data-status=failed]")).toHaveCount(1);
+  await expect(strip.getByText(/per-file cap/)).toBeVisible();
+  await expect(page.getByText(/Staged into the workspace/)).toHaveCount(0);
+  // The failed chip goes with the next send, and the prompt gains no footer for it.
+  await composer(page).fill("hello");
+  await composer(page).press("Enter");
+  await expect(strip).toHaveCount(0);
+  await expect(page.getByText(/Attached files, staged/)).toHaveCount(0);
+});
+
+test("files attached on the session picker are in the workspace when the session opens", async ({ page }) => {
+  await page.goto("/");
+  await page.getByPlaceholder("ws://host:8080").fill(WS);
+  await page.getByRole("button", { name: "Connect" }).click();
+  const strip = page.getByRole("group", { name: "Attached files" });
+  await expect(strip).toBeVisible();
+  await page.getByLabel("Attach files").setInputFiles([{ name: "brief.txt", mimeType: "text/plain", buffer: Buffer.from("do the thing") }]);
+  // No workspace yet on this daemon: the file waits for the session.
+  await expect(strip.locator("li[data-status=queued]")).toHaveCount(1);
+  await page.getByRole("button", { name: /default/ }).click();
+  await expect(page.getByText("Connected to the mock daemon")).toBeVisible();
+  await expect(page.getByText("Staged into the workspace: brief.txt")).toBeVisible();
+  await page.getByRole("button", { name: "Toggle workspace changes (Alt+W)" }).click();
+  await expect(page.getByRole("region", { name: "Files" }).getByText("+ brief.txt")).toBeVisible();
+});
