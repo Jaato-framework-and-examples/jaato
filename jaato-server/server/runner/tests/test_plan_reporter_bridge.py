@@ -133,7 +133,8 @@ def test_the_reporter_emits_plan_frames_with_the_reporters_own_dicts():
     assert upd["agent_name"] is None
     assert upd["plan"]["title"] == "Prueba"
     assert upd["plan"]["steps"][0]["description"] == "Crear el proyecto"
-    assert captured[1]["payload"] == {"source": "plan", "text": "Plan created: Prueba", "mode": "write"}
+    assert captured[1]["payload"] == {"source": "plan", "text": "Plan created: Prueba",
+                                      "mode": "write", "agent_name": None}
 
     captured.clear()
     step = plan.steps[0]
@@ -214,3 +215,67 @@ def test_a_malformed_frame_emits_a_default_event_not_a_crash():
     handler("plan_updated", {})
     ev = srv._emitted_events[0]
     assert isinstance(ev, PlanUpdatedEvent) and ev.plan_name == "Plan" and ev.steps == []
+
+
+# --- the fourth frame carries the agent too ---------------------------------
+#
+# Three of the four plan frames carried ``agent_name``; ``plan_output`` did
+# not, and ``_plan_output_event`` hardcoded ``_main_agent_id``.  So a
+# SUBAGENT's plan PANEL was attributed correctly while its "Plan created:"
+# / "[2] FAILED:" lines landed in the MAIN agent's transcript -- the two
+# halves of one report disagreeing about whose work it was.  Only newly
+# visible because this bridge is what makes the frames reach a client.
+
+
+def test_a_subagents_plan_output_line_is_attributed_to_the_subagent():
+    """The defect: this line used to land in the main agent's transcript."""
+    srv = _server()
+
+    class _Agent:
+        profile_name = "worker"
+
+    srv._agents = {"sub-1": _Agent()}
+    handler = srv._build_send_message_notification_handler()
+    handler("plan_output", {"source": "plan", "text": "Plan created: x",
+                            "mode": "write", "agent_name": "worker"})
+    out = srv._emitted_events[0]
+    assert isinstance(out, AgentOutputEvent)
+    assert out.agent_id == "sub-1"
+
+
+def test_plan_output_without_an_agent_still_falls_back_to_main():
+    """A reporter that names no agent keeps the old behaviour."""
+    srv = _server()
+    handler = srv._build_send_message_notification_handler()
+    handler("plan_output", {"source": "plan", "text": "x", "mode": "write"})
+    assert srv._emitted_events[0].agent_id == srv._main_agent_id
+
+
+def test_every_plan_frame_the_reporter_emits_carries_an_agent():
+    """The guard: all FOUR frames, which is what core.py's builder table claims.
+
+    Asserted on the reporter's own emissions rather than on hand-built
+    payloads, so a callback that drops the id on its way to the frame
+    fails here even if the demuxer would have resolved it.
+    """
+    from jaato_sdk.plugins.todo.models import StepStatus
+
+    captured: List[Dict[str, Any]] = []
+    todo = _FakeTodo()
+    rpc = _rpc(captured)
+    rpc._install_session_notification_callbacks(_session(todo), request_id=7)
+    plan = _plan()
+
+    todo._reporter.report_plan_created(plan, agent_id="worker")
+    plan.steps[0].status = StepStatus.FAILED
+    plan.steps[0].error = "boom"
+    todo._reporter.report_step_update(plan, plan.steps[0], agent_id="worker")
+
+    kinds = [c["event_type"] for c in captured]
+    assert "plan_output" in kinds, f"no plan_output among {kinds}"
+    for c in captured:
+        assert "agent_name" in c["payload"], (
+            f"{c['event_type']} dropped the agent; all four plan frames "
+            f"carry it, which is what core.py's builder table asserts"
+        )
+        assert c["payload"]["agent_name"] == "worker", c["event_type"]

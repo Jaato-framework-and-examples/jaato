@@ -5902,10 +5902,11 @@ def _plan_notification_reporter(rpc: "RunnerRPC", request_id: int) -> Any:
     def _clear(agent_name: Optional[str] = None) -> None:
         _emit(rpc._NOTIF_PLAN_CLEARED, {"agent_name": agent_name})
 
-    def _output(source: str, text: str, mode: str) -> None:
+    def _output(source: str, text: str, mode: str,
+                agent_name: Optional[str] = None) -> None:
         _emit(rpc._NOTIF_PLAN_OUTPUT,
               {"source": str(source or "plan"), "text": str(text or ""),
-               "mode": str(mode or "write")})
+               "mode": str(mode or "write"), "agent_name": agent_name})
 
     return create_live_reporter(
         update_callback=_update,
