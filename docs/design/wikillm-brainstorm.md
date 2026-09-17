@@ -552,24 +552,66 @@ by a human typing `a`. That is this distinction one layer down. *A human
 approved the tool call that produced this claim* is already a recorded
 fact; it simply never reaches the memory that resulted.
 
-**Two of the four are nearly free, and one has a trap.** The memory
-plugin already holds the live session — `get_current_session()`
-(`memory/plugin.py:193-194`), which is how the PR-196 `source_session`
-fix works — and `JaatoSession._client_user_id` (`jaato_session.py:958`)
-is set from `SessionInitEnvelope.created_by` via `set_client_user_id`
-(`:1544`) on the runner side. Same object, one more attribute; no
-config-injection change.
+**How a plugin reaches the human: `get_session_user()`, beside
+`get_session_env()`.** The obvious route is the wrong one, and the module
+that owns this seam says so in its own docstring. An in-tree plugin *can*
+reach the live session — `get_current_session()`
+(`memory/plugin.py:193-194`) is how the PR-196 `source_session` fix works
+— but `jaato_sdk/session_env.py` lists exactly that name as
+**deliberately not exported**, because it hands back a `JaatoSession` and
+*"a plugin reaching into `session._runtime` is not something to make
+easier from out of tree"*. An out-of-tree knowledge plugin — the audience
+Seam 4 is about — cannot take that route, and the SDK is right to refuse
+it.
 
-But **do not reach it through `_resolve_telemetry_user_id`**
-(`jaato_session.py:1603`). Its precedence falls back to
-`JAATO_TELEMETRY_USER_ID` from the per-session env, so a workspace `.env`
-could **forge authorship** on a knowledge artifact. Provenance needs a
-narrow accessor returning only the transport-authenticated value, with
-absence reading as *no human identity* rather than as an
-operator-supplied string — positive evidence only, the posture #1014 and
-#1023 take about confinement labels. The binding is the one that is
-genuinely new: `_observe_binding_usage` has `(provider, model, tier)` but
-only as per-response spend, stamped on nothing durable.
+So the identity belongs where the session-scoped **credential** read
+already lives. `jaato_sdk/session_env.py` exports three names
+(`get_session_env`, `set_session_env`, `clear_session_env`) over one
+module-private `ContextVar`, for a reason that transfers verbatim: a
+plugin that reads `os.environ` directly gets **another session's** value
+on a daemon serving two, because `JaatoServer._with_session_env()`
+overlays the process environment per turn (#918). A plugin that reads a
+user identity from anywhere but session scope has the same bug with worse
+consequences.
+
+The setter needs no new machinery. `_with_session_env` (`core.py:1568`)
+is already the per-turn scope, already sets the ContextVar first and
+clears it in `finally`, and `JaatoServer._client_user_id` is already
+populated from `SessionInitEnvelope.created_by`
+(`session_manager.py:3831`). One line, in a block that exists.
+
+**And exactly one thing must NOT be symmetric with its neighbour.**
+`get_session_env` falls back to `os.environ`, correctly — an env var has
+a legitimate ambient source. **A user identity has none.** Giving
+`get_session_user()` any env fallback would relocate the
+`_resolve_telemetry_user_id` hole (`jaato_session.py:1603`, whose
+precedence drops to `JAATO_TELEMETRY_USER_ID` from the per-session env)
+into the SDK, where it would look sanctioned — a workspace `.env` forging
+authorship on a shared knowledge artifact. So: no fallback, `None`
+outside session context, and absence means *the transport authenticated
+nobody*, never *guess*. Positive evidence only, the posture #1014 and
+#1023 take about confinement labels. Telemetry keeps its env fallback,
+which is legitimate there and is the whole reason the two accessors must
+not be the same function.
+
+**One ContextVar, one definition.** `shared/session_context.py` imports
+the trio rather than declaring its own (`:82-86`), because — its
+docstring again — *"a second copy in the SDK would read empty, fall
+through to `os.environ`, and reintroduce the bug in a form that looks
+fixed"*. The fourth name joins that import, and the guard that asserts
+**object identity** rather than behaviour extends to cover it.
+
+**It answers `created_by` and cannot answer `witnessed_by`.** Different
+lifetimes: the accountable identity is per-SESSION, which is what a
+ContextVar is shaped for; the witness is per-CLAIM — *did a person
+approve this tool call* — and comes from the permission decision, where
+#859's `approver` and #951's `asked=` already live. One accessor
+answering both would re-perform exactly the collapse this section exists
+to prevent.
+
+The binding is the one that is genuinely new: `_observe_binding_usage`
+has `(provider, model, tier)` but only as per-response spend, stamped on
+nothing durable.
 
 **What it buys** is a promotion rule the current model cannot express at
 all: a **human-witnessed** claim clears a lower notability bar. One
