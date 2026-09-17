@@ -96,6 +96,12 @@ model reads both. §6 is about that.
    once, by something that had the full context, instead of being
    re-guessed per query from a cosine. Embeddings find the *entry point*;
    links do the expansion.
+
+   **Half of this already ships**, which was not obvious until someone
+   asked whether references can link to references. `references` walks a
+   transitive graph today — see §5, Seam 3, where the finding and the
+   remaining gap are written down. The gap is not traversal. It is that
+   every edge means the same thing.
 5. **Policy as executable rules.** Wikipedia has verifiability, no
    original research, notability, NPOV. The translations are in §3 and
    §4, and one of them is genuinely mechanisable in a way Wikipedia's
@@ -212,7 +218,8 @@ Every one of these is a profile, a persona, a script, or a driver:
 
 ### Seam — a pattern *would* express it, but the hot path is not pluggable
 
-Two, and the first is the real ask:
+Three. The first is the largest ask; the third is the smallest, and
+the closest to already being done:
 
 1. **There is no topic-keyed store with revisions and a safe write.**
    Memory's storage is append-JSONL under `raw/` plus a `curated.jsonl`,
@@ -232,6 +239,78 @@ Two, and the first is the real ask:
    is its own regex pass with separator normalisation. A third knowledge
    surface writes a third. The seam is a *shared matcher*, not a third
    consumer.
+
+3. **The reference graph has edges and no edge *types*.** Enough of this
+   ships that the gap has to be stated precisely, or it reads as a
+   feature request for something already built.
+
+   `references` already traverses a graph.
+   `_resolve_transitive_references` (`references/plugin.py:749`) runs a
+   BFS from the selected and preselected set, bounded by
+   `MAX_TRANSITIVE_DEPTH = 10` (`plugin.py:100`), discovering edges two
+   ways: **ID mention**, where `_find_referenced_ids` (`plugin.py:639`)
+   scans a reference's content for catalog ids as whole words — the regex
+   deliberately tolerates `@ref:id`, **`[[id]]`**, backticks and bare
+   prose — and **path resolution**, where `_find_referenced_paths`
+   (`plugin.py:668`) extracts markdown links and `./` / `../` paths,
+   resolves them against the source's own directory, and matches other
+   LOCAL sources by `resolved_path`. It keeps edge provenance in a
+   `parent_map` (discovered id → the parents that referenced it, held as
+   `_transitive_parent_map`, `plugin.py:144`), and that provenance
+   reaches the model: the instruction block annotates
+   *"(Transitively included — referenced by @parent)"* and
+   `listReferences` emits `transitive: true` with `transitive_from`.
+
+   So a reference already pulls in its neighbourhood **and tells the
+   model why each neighbour arrived**. What it does not have:
+
+   | Missing | Consequence |
+   |---|---|
+   | **no declared edges** — `ReferenceSource` has no `links` field | every edge is inferred from body text at read time, so renaming an id silently deletes every inbound edge. No integrity check, no dangling-link finding |
+   | **untyped edges** | *mentioned* is the only relation. No `depends-on` vs `supersedes` vs `contradicts` — and most of a knowledge graph's value is in the edge labels |
+   | **no reverse index** | *"what points at B?"* costs a walk of the whole catalog |
+   | **not queryable** | no tool or subcommand exposes the graph; `transitive_from` surfaces only for refs already in *this* selection |
+   | **effectively local-file only** | an edge needs `_get_reference_content` to return a body, so URL sources pay a network read and MCP sources largely do not participate |
+
+   The one that bites in practice is none of those individually. It is
+   that **expansion is bounded in depth and not in cost**: depth 10, any
+   fan-out, no edge weights, no relevance ranking, no token budget. In a
+   densely cross-referencing catalog, *pull in the neighbourhood* is
+   *pull in the catalog*. Depth 10 is a runaway guard, not a relevance
+   bound — the same distinction §7 draws about the index, and the same
+   one `CLAUDE.md` draws about `max_completion_nudges` being a per-turn
+   and not a per-session budget.
+
+   **The ask is a `links` field with a small closed `rel` vocabulary**,
+   and inference is *kept* beside it: an inferred edge can never go
+   stale, because it is recomputed from content, and it is what makes
+   drop-in-a-file work at all. Declared edges add what inference cannot
+   supply — typing, direction, and referential integrity — for the few
+   relations that carry weight.
+
+   The payoff is not the declaration. It is that **the edge type decides
+   the expansion policy**, which is what makes traversal simultaneously
+   cheaper and better where an untyped graph can only be one or the
+   other:
+
+   | `rel` | expansion |
+   |---|---|
+   | `depends-on` | auto-expand — A is not comprehensible without B |
+   | `elaborates` | do **not** expand; surface as a hint, the way unselected references already are |
+   | `supersedes` | rewrite the selection — pull the newer one *instead of*, never *as well as* |
+   | `contradicts` | never auto-expand. This is what a **curator** reads (§6), not what a working agent is handed |
+
+   Two things fall out for free: a reverse index built at load, and a
+   `reference_link_dangling` finding for `jaato-scaffold validate`, which
+   is unrepresentable today — an edge to a renamed reference does not
+   break, it stops existing.
+
+   Stated cost, because the argument cuts both ways: declared edges are a
+   maintenance surface and they *do* go stale, which is the exact charge
+   §4 lays against articles. That is why the proposal is a hybrid rather
+   than a replacement — declare the load-bearing few, infer the rest —
+   and why `supersedes` is the most valuable entry in the vocabulary: it
+   is the one relation whose staleness is self-announcing.
 
 ### Fidelity — a pattern IS written and breaks, because a primitive misreports
 
@@ -432,7 +511,11 @@ design already gives:
       article.md                      # the claim, current revision
       talk.md                         # disputes, rejected edits, the evidence against
       history.jsonl                   # revision, session, agent, BINDING, base_rev, diff
-      links.json                      # [[wikilinks]], redirects, supersedes/superseded-by
+      links.json                      # declared edges + redirects, ON TOP of the
+                                      #   inferred ones references already walks:
+                                      #   [{"to": ..., "rel": "depends-on"
+                                      #     | "elaborates" | "supersedes"
+                                      #     | "contradicts"}]  -- see §5 Seam 3
       validation/                     # the freshness check (§4)
   claims/                             # append-only, edge-written, curator-drained
 ~/.jaato/wiki/                        # universal scope — same shape
@@ -488,6 +571,12 @@ by running the same task corpus with the wiki injected and withheld.
    deleted?** Superseded-by handles replacement; deletion has no link.
 5. **Can an agent be trusted to write the `validation/` script for its
    own claim?** A check the claimant authored is a check that passes.
+6. **Who declares a `rel` edge (§5, Seam 3) — and does a wrong one cost
+   more than no edge at all?** An inferred edge is imprecise and
+   self-healing; a declared `supersedes` pointing the wrong way
+   *actively suppresses* the article that should have been read. The
+   asymmetry says declared edges want a narrower writer than declared
+   articles do, which may mean the curator and nobody else.
 6. **Does the wiki version with the code?** A git-tracked wiki answers
    *"what did we believe at commit X"* for free, and makes every branch a
    fork of the knowledge base — which may be an excellent property or a
