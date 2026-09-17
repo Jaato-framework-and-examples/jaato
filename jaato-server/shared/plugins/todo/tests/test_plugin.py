@@ -277,7 +277,10 @@ class TestSetStepStatusExecutor:
         })
 
         assert result["status"] == "failed"
-        assert result["error"] == "Something went wrong"
+        # The step's own failure text is ``step_error``; a top-level ``error``
+        # would read as the TOOL failing, and it did what it was asked.
+        assert result["step_error"] == "Something went wrong"
+        assert "error" not in result
 
     def test_set_step_status_to_skipped(self):
         plugin = TodoPlugin()

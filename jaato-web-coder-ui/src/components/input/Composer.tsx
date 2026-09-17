@@ -24,12 +24,19 @@
  * Pending permission / clarification prompts take over ``Enter``: the
  * typed text becomes the answer (``y``, ``a``, an option key, a free-
  * text reply), exactly like typing into the TUI while a prompt is up.
+ *
+ * Files dropped on the box, pasted into it, or picked through the
+ * strip's "Attach files" are STAGED into the session's workspace at once
+ * (``app/staging.ts``); the strip above the box shows each one's state,
+ * and the message sent next names them in a trailing line.
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { commandCompletions, wouldRouteAsCommand, type CommandSpec, type Completion } from "@/protocol/commands";
 import { sessionIdCompletions, wantsSessionIds } from "@/protocol/sessions";
 import { ensureSessions } from "@/app/actions";
+import { attachFiles } from "@/app/staging";
 import { useJaato } from "@/store/store";
+import { AttachStrip, filesFromTransfer } from "./AttachStrip";
 
 export interface ComposerProps {
   commands: CommandSpec[];
@@ -52,6 +59,7 @@ export function Composer({ commands, disabled, captureMode, history, onSubmit, o
   const [selected, setSelected] = useState(0);
   const [histIdx, setHistIdx] = useState<number | null>(null);
   const [caret, setCaret] = useState(0);
+  const [dragOver, setDragOver] = useState(false);
   const ref = useRef<HTMLTextAreaElement>(null);
   const verbatimWord = useRef<string>("");
 
@@ -211,26 +219,33 @@ export function Composer({ commands, disabled, captureMode, history, onSubmit, o
   return (
     <div className="relative">
       {popupOpen && (
-        <div role="listbox" aria-label="Command proposals" className="absolute bottom-full mb-1 left-0 w-[min(34rem,100%)] rounded-md border hairline bg-bg shadow-lg text-[13px] overflow-hidden z-30">
+        <div role="listbox" aria-label="Command proposals" className="plate plate-ground absolute bottom-full mb-1.5 left-0 w-[min(34rem,100%)] shadow-md text-[13px] z-30">
           {completions.map((c, i) => (
             <div
               key={c.insert}
               role="option"
               aria-selected={i === selected}
               onMouseDown={(e) => { e.preventDefault(); accept(c); }}
-              className={`flex items-baseline gap-3 px-2 py-1 cursor-pointer ${i === selected ? "bg-surface text-primary" : "hover:bg-surface/60"}`}
+              className={`flex items-baseline gap-3 px-2.5 py-1 cursor-pointer ${i === selected ? "bg-surface text-steel" : "hover:bg-tint"}`}
             >
               <span className="font-mono">{c.label}</span>
               {c.description && <span className="text-text-muted text-xs truncate">{c.description}</span>}
             </div>
           ))}
-          <div className="px-2 py-0.5 text-[11px] text-text-muted border-t hairline flex gap-3">
+          <div className="px-2.5 py-1 text-[11px] text-text-muted border-t hairline flex gap-3">
             <span><kbd>Tab</kbd> complete</span><span><kbd>Enter</kbd> run</span><span><kbd>Esc</kbd> not a command — send as text</span>
           </div>
         </div>
       )}
-      <div className={`flex items-end gap-2 rounded-lg border px-3 py-2 surface-1 ${captureMode ? "border-warning/60" : "hairline"} focus-within:border-primary/60`}>
-        <span className="font-mono text-text-muted select-none pb-[3px]">{captureMode ? "?" : "›"}</span>
+      <AttachStrip hint="Staged into the session's workspace now; the next message names them." />
+      <div
+        className={`flex items-end gap-2.5 border px-3 py-2 bg-surface ${captureMode ? "border-warning" : "border-steel"} ${dragOver ? "bg-tint outline outline-1 outline-steel" : ""}`}
+        onDragOver={(e) => { if (filesFromTransfer(e.dataTransfer).length || e.dataTransfer.types.includes("Files")) { e.preventDefault(); setDragOver(true); } }}
+        onDragLeave={() => setDragOver(false)}
+        onDrop={(e) => { const files = filesFromTransfer(e.dataTransfer); setDragOver(false); if (files.length) { e.preventDefault(); attachFiles(files, ""); } }}
+        onPaste={(e) => { const files = filesFromTransfer(e.clipboardData); if (files.length) { e.preventDefault(); attachFiles(files, ""); } }}
+      >
+        <span className={`font-mono select-none pb-[3px] ${captureMode ? "text-warning" : "text-steel"}`}>{captureMode ? "?" : "›"}</span>
         <textarea
           ref={ref}
           value={text}
@@ -242,21 +257,26 @@ export function Composer({ commands, disabled, captureMode, history, onSubmit, o
           onChange={(e) => { setText(e.target.value); setCaret(e.target.selectionStart ?? e.target.value.length); }}
           onSelect={(e) => setCaret((e.target as HTMLTextAreaElement).selectionStart ?? 0)}
           onKeyDown={onKeyDown}
-          className="flex-1 resize-none bg-transparent outline-none font-mono text-[13.5px] leading-5 placeholder:text-text-muted/70 max-h-60"
+          className="flex-1 resize-none bg-transparent outline-none font-mono text-[13.5px] leading-5 placeholder:text-text-muted max-h-60"
         />
-        <button type="button" onClick={submit} disabled={disabled || (!text.trim() && !captureMode)} className="text-xs px-2 py-1 rounded bg-surface text-text-muted hover:text-text disabled:opacity-40" aria-label="Send">
-          ⏎
+        <button type="button" onClick={() => (document.querySelector("[data-attach-input]") as HTMLInputElement | null)?.click()} disabled={disabled} className="chrome-sm font-heading font-medium uppercase tracking-[0.08em] pb-[3px] text-text-muted hover:text-steel disabled:opacity-40" aria-label="Attach" title="Attach files to the workspace (or drop / paste them here)">
+          Attach
+        </button>
+        <button type="button" onClick={submit} disabled={disabled || (!text.trim() && !captureMode)} className={`chrome-sm font-heading font-medium uppercase tracking-[0.08em] pb-[3px] disabled:opacity-40 ${captureMode ? "text-warning" : "text-steel"}`} aria-label="Send">
+          {captureMode ? "Answer" : "Send"} ⏎
         </button>
       </div>
-      <div className="h-5 px-1 text-[11px] text-text-muted flex items-center gap-3">
+      <div className={`mt-1.5 pl-2.5 border-l-2 text-[13px] text-text-muted flex items-center gap-3 min-h-5 ${captureMode ? "border-warning" : "border-steel"}`}>
         {captureMode && captureMode.suggestions?.length ? (
-          <span>Answer with {captureMode.suggestions.map((s) => <kbd key={s} className="mx-0.5">{s}</kbd>)} or type a reply</span>
+          <span>A key answers the prompt — {captureMode.suggestions.map((s) => <kbd key={s} className="mx-0.5">{s}</kbd>)} · anything longer is sent to the agent as a reply</span>
+        ) : captureMode ? (
+          <span>Enter sends your answer</span>
         ) : routed ? (
-          <span><kbd>Enter</kbd> runs command <span className="font-mono text-accent">{routed}</span> · <kbd>Esc</kbd> to send as text instead</span>
+          <span>Enter runs command <span className="font-mono text-steel">{routed}</span> · Esc to send as text instead</span>
         ) : routedIfNotVerbatim ? (
-          <span>Sending as text (not the <span className="font-mono">{routedIfNotVerbatim}</span> command) · <kbd>Tab</kbd> to make it a command</span>
+          <span>Sending as text (not the <span className="font-mono">{routedIfNotVerbatim}</span> command) · Tab to make it a command</span>
         ) : (
-          <span className="opacity-70"><kbd>Enter</kbd> send · <kbd>Shift</kbd>+<kbd>Enter</kbd> newline · <kbd>@file</kbd> <kbd>%prompt</kbd> references</span>
+          <span>Enter sends a message · a first word that names a command runs it · Esc sends it verbatim · Shift+Enter for a newline · drop or paste files to stage them</span>
         )}
       </div>
     </div>

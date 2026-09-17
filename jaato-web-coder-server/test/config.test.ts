@@ -34,6 +34,22 @@ describe("config", () => {
     assert.throws(() => testConfig("ws://d", "https://x", { daemon: { url: "ws://d", app_id: "bad:id", app_credential_file: "app.credential" } }), /app_id/);
   });
 
+  test("credentials: absent means off; present needs file + a 0600 key_file of 32+ chars", () => {
+    assert.equal(testConfig("ws://d", "https://x").credentials, undefined);
+    const on = testConfig("ws://d", "https://x", { credentials: { file: "credentials.json", key_file: "credentials.key" } });
+    assert.ok(on.credentials!.file.endsWith("/credentials.json"));
+    assert.equal(on.credentials!.key, "c".repeat(48));
+    assert.throws(() => testConfig("ws://d", "https://x", { credentials: { key_file: "credentials.key" } }), /credentials\.file/);
+    assert.throws(() => testConfig("ws://d", "https://x", { credentials: { file: "c.json" } }), /credentials\.key_file/);
+    const { dir } = writeSecrets();
+    writeFileSync(join(dir, "weak.key"), "tooshort\n", { mode: 0o600 });
+    assert.throws(() => configFromObject({
+      listen: ":1", public_url: "https://x", daemon: { url: "ws://d", app_id: "a", app_credential_file: "app.credential" },
+      auth: { oidc: { issuer: "https://i", client_id: "c", client_secret_file: "oidc.secret" } }, session: { secret_file: "session.secret" },
+      credentials: { file: "c.json", key_file: "weak.key" },
+    }, dir), /at least 32/);
+  });
+
   test("ticket ttl outside the daemon's 1..3600 is refused here rather than by the daemon later", () => {
     assert.throws(() => testConfig("ws://d", "https://x", { ticket: { ttl_seconds: 0 } }), ConfigError);
     assert.throws(() => testConfig("ws://d", "https://x", { ticket: { ttl_seconds: 4000 } }), ConfigError);

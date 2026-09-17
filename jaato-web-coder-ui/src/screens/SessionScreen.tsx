@@ -1,7 +1,10 @@
 /**
- * The main view: agent tabs, the selected agent's output, pending
- * prompts, the composer, side panels and the status bar.  On mount it
- * asks the daemon for its command list and profiles, then creates (or
+ * The main view (design frame 04): the session's identity in a 46px
+ * header (brand, one tab per agent, workspace / model / context on the
+ * right), the selected agent's output with pending prompts and the
+ * composer under it, one persistent rail on the right whose Plan /
+ * Budget / Files sections open and close, and the status bar.  On mount
+ * it asks the daemon for its command list and profiles, then creates (or
  * reattaches) a session.
  */
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -11,28 +14,88 @@ import { getClient } from "@/sdk/connection";
 import { OutputPane } from "@/components/output/OutputPane";
 import { ToolOutputPopup } from "@/components/output/ToolOutputPopup";
 import { Composer } from "@/components/input/Composer";
+import { AttachStrip } from "@/components/input/AttachStrip";
 import { PermissionPrompt } from "@/components/prompts/PermissionPrompt";
 import { PostAuthSetupPrompt } from "@/components/prompts/PostAuthSetupPrompt";
 import { ClarificationPrompt } from "@/components/prompts/ClarificationPrompt";
 import { ReferenceSelectionPrompt } from "@/components/prompts/ReferenceSelectionPrompt";
-import { PlanPanel } from "@/components/panels/PlanPanel";
+import { PlanPanel, planProgress } from "@/components/panels/PlanPanel";
 import { BudgetPanel } from "@/components/panels/BudgetPanel";
 import { WorkspacePanel } from "@/components/panels/WorkspacePanel";
 import { AgentTabs } from "@/components/panels/AgentTabs";
 import { StatusBar } from "@/components/layout/StatusBar";
+import { Plate } from "@/components/layout/Plate";
+import { RailResizer } from "@/components/layout/RailResizer";
 import { answerClarification, attachSession, cancelClarification, ensureSessions, inputHistory, respondPermission, respondPostAuth, respondReference, submitInput } from "@/app/actions";
+import { openSessionWithQueued } from "@/app/staging";
 import { sessionsInWorkspace } from "@/protocol/sessions";
 import { useKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 
-function SidePanel({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
+/**
+ * The header: who this session is.  The brand cell, the agent tabs, and
+ * on the right what the daemon reported -- the workspace, the model and
+ * a context bar -- in monospace, since those are its words.
+ */
+function SessionHeader() {
+  const session = useJaato((s) => s.session);
+  const ws = useJaato((s) => s.workspace.selected);
+  const selected = useJaato((s) => s.selectedAgentId);
+  const ctx = useJaato((s) => s.context[selected]);
+  const pct = ctx?.percentUsed;
+  const model = [session.provider, session.model].filter(Boolean).join(" / ");
   return (
-    <section className="w-72 shrink-0 border-l hairline surface-1 flex flex-col min-h-0" aria-label={title}>
-      <header className="flex items-center justify-between px-3 py-1.5 border-b hairline text-xs uppercase tracking-wide text-text-muted">
-        <span>{title}</span>
-        <button type="button" onClick={onClose} aria-label={`Close ${title}`} className="hover:text-text">✕</button>
-      </header>
-      <div className="flex-1 overflow-auto">{children}</div>
-    </section>
+    <header className="flex items-stretch h-[46px] border-b hairline shrink-0">
+      <div className="flex items-center px-4 border-r hairline"><span className="display text-[18px] tracking-[0.02em]">jaato</span></div>
+      <AgentTabs />
+      <span className="flex-1" />
+      <div className="hidden md:flex items-center gap-[18px] px-[18px] font-mono text-xs">
+        {ws && <span><span className="text-text-muted">ws </span>{ws}</span>}
+        {model && <span><span className="text-text-muted">model </span>{model}</span>}
+        {session.profile && <span><span className="text-text-muted">profile </span>{session.profile}</span>}
+        {pct != null && (
+          <span className="flex items-center gap-2" title="Context window used">
+            <span className="text-text-muted">ctx</span>
+            <span className="inline-block w-[84px] h-1.5 bg-[color-mix(in_srgb,var(--c-text)_16%,var(--c-bg))]"><span className={`block h-full ${pct > 80 ? "bg-error" : pct > 60 ? "bg-warning" : "bg-steel"}`} style={{ width: `${Math.min(100, pct)}%` }} /></span>
+            <span className={pct > 80 ? "text-error" : pct > 60 ? "text-warning" : ""}>{pct.toFixed(0)}%</span>
+          </span>
+        )}
+      </div>
+    </header>
+  );
+}
+
+/**
+ * One section of the rail: a header that opens and closes it (the same
+ * ``ui.show*`` flag the status bar and the shortcuts toggle) and, when
+ * open, a labelled region with the panel.  The value on the header's
+ * right is the one number the section is about, so a closed section
+ * still says something.
+ */
+function RailSection({ title, value, open, onToggle, children }: { title: string; value?: string | null; open: boolean; onToggle: () => void; children: React.ReactNode }) {
+  return (
+    <>
+      <button type="button" onClick={onToggle} className="flex items-baseline justify-between px-3.5 py-2 border-b hairline w-full text-left hover:bg-tint/60" aria-expanded={open} aria-label={`${open ? "Close" : "Open"} ${title}`}>
+        <span className="kicker">{title}</span>
+        <span className="font-mono text-[11px] text-text-muted">{value ? `${value} ` : ""}{open ? "▾" : "▸"}</span>
+      </button>
+      {open && <section aria-label={title} className="border-b hairline overflow-auto min-h-0 shrink-0 max-h-[60%]">{children}</section>}
+    </>
+  );
+}
+
+function Rail({ agentId }: { agentId: string }) {
+  const ui = useJaato((s) => s.ui);
+  const toggle = useJaato((s) => s.toggleUi);
+  const plan = useJaato((s) => s.plan[agentId]);
+  const ctx = useJaato((s) => s.context[agentId]);
+  const changed = useJaato((s) => Object.keys(s.workspaceFiles).length);
+  const budget = ctx?.usage.cost_usd != null ? `$${Number(ctx.usage.cost_usd).toFixed(4)}` : ctx?.percentUsed != null ? `${ctx.percentUsed.toFixed(0)}%` : null;
+  return (
+    <aside className="hidden md:flex shrink-0 border-l hairline bg-surface flex-col min-h-0 overflow-auto" style={{ width: ui.railWidth }} aria-label="Session rail">
+      <RailSection title="Plan" value={planProgress(plan)} open={ui.showPlan} onToggle={() => toggle("showPlan")}><PlanPanel agentId={agentId} /></RailSection>
+      <RailSection title="Budget" value={budget} open={ui.showBudget} onToggle={() => toggle("showBudget")}><BudgetPanel agentId={agentId} /></RailSection>
+      <RailSection title="Files" value={changed ? `${changed} changed` : null} open={ui.showWorkspace} onToggle={() => toggle("showWorkspace")}><WorkspacePanel /></RailSection>
+    </aside>
   );
 }
 
@@ -46,15 +109,17 @@ function authCommands(commands: { name: string; description?: string }[]): { nam
 }
 
 /**
- * What the TUI lets you do before any session exists, in one card.
+ * What the TUI lets you do before any session exists, in one plate
+ * (design frame 03): resume and start new, side by side.
  *
  * A workspace opened again is not a workspace being set up: when the
- * selected workspace's ``.env`` already binds a provider, the card offers
+ * selected workspace's ``.env`` already binds a provider, the plate offers
  * its previous sessions to resume and a new session on that binding, and
  * asks nothing about providers or sign-in.  Only a workspace with no
  * provider gets the sign-in row, after which the daemon offers to open the
- * session itself.  Nothing here is required -- ``skip`` drops to the
- * prompt, where any daemon command runs with no session, as in the TUI.
+ * session itself.  Nothing here is required -- the link at the foot drops
+ * to the prompt, where any daemon command runs with no session, as in the
+ * TUI.
  */
 function ProfilePicker({ onPick, onAttach, onAuth, onSkip }: {
   onPick: (profile: string | null) => void;
@@ -73,48 +138,71 @@ function ProfilePicker({ onPick, onAttach, onAuth, onSkip }: {
   const configured = cfg?.configured === true;
   const binding = [cfg?.provider, cfg?.model].filter(Boolean).join(" / ");
   const resumable = selected ? sessionsInWorkspace(sessions, selected) : sessions;
+  const row = "flex gap-3 py-2.5 border-t hairline w-full text-left hover:bg-tint/60";
   return (
-    <div className="h-full flex items-center justify-center p-6 overflow-auto">
-      <div className="w-full max-w-lg rounded-xl border hairline surface-1 p-5 space-y-3" data-testid="session-picker">
-        <div className="text-lg font-semibold">{selected ? <>Workspace <span className="font-mono">{selected.name}</span></> : "New session"}</div>
-        {configured && <div className="text-sm text-text-muted">Provider <span className="font-mono">{binding}</span> from this workspace's <span className="font-mono">.env</span>.</div>}
-        {resumable.length > 0 && (
-          <div className="space-y-1.5" aria-label="Resume a session">
-            <div className="text-sm text-text-muted">Resume a session</div>
-            <ul className="divide-y divide-[color-mix(in_srgb,var(--c-muted)_35%,transparent)] rounded-md border hairline max-h-52 overflow-auto">
-              {resumable.map((sess) => (
-                <li key={sess.id}><button type="button" onClick={() => onAttach(sess.id)} aria-label={`Resume session ${sess.id}`} className="w-full text-left px-3 py-2 hover:bg-surface/60 flex items-baseline gap-2">
-                  <span className={sess.isLoaded ? "text-success" : "text-text-muted"}>{sess.isLoaded ? "●" : "○"}</span>
-                  <span className="font-mono">{sess.id}</span>
-                  <span className="text-xs text-text-muted truncate">{[sess.description || sess.name, sess.provider ? `${sess.provider}/${sess.model}` : "", sess.turnCount ? `${sess.turnCount} turns` : ""].filter(Boolean).join(" — ")}</span>
-                </button></li>
-              ))}
-            </ul>
+    <div className="h-full flex items-center justify-center p-6 sm:p-12 overflow-auto">
+      <Plate className="w-full max-w-[880px] flex flex-col" data-testid="session-picker">
+        <div className="flex items-baseline justify-between gap-4 px-5 py-4 border-b hairline">
+          <div className="flex items-baseline gap-3">
+            {selected ? <><span className="kicker tracking-[0.16em]">Workspace</span><span className="font-mono text-[16px]">{selected.name}</span></> : <span className="display text-[20px]">New session</span>}
           </div>
-        )}
-        <div className="text-sm text-text-muted">{resumable.length > 0 ? "Or start a new one" : "Pick an agent profile, or start with the workspace defaults."}</div>
-        <ul className="divide-y divide-[color-mix(in_srgb,var(--c-muted)_35%,transparent)] rounded-md border hairline max-h-80 overflow-auto">
-          <li><button type="button" onClick={() => onPick(null)} className="w-full text-left px-3 py-2 hover:bg-surface/60"><span className="font-mono">default</span> <span className="text-xs text-text-muted">— {configured ? binding : "workspace .env provider and model"}</span></button></li>
-          {profiles.map((p) => (
-            <li key={p.name}><button type="button" onClick={() => onPick(p.name)} className="w-full text-left px-3 py-2 hover:bg-surface/60">
-              <span className="font-mono">{p.name}</span> <span className="text-xs text-text-muted">{[p.description, [p.provider, p.model].filter(Boolean).join("/")].filter(Boolean).join(" — ")}</span>
-            </button></li>
-          ))}
-        </ul>
-        {auth.length > 0 && !configured && (
-          <div className="space-y-1.5" aria-label="Sign in to a provider">
-            <div className="text-sm text-text-muted">No provider configured yet? Sign in first; the daemon then offers to open the session for you.</div>
-            <div className="flex flex-wrap gap-2">
-              {auth.map((c) => (
-                <button key={c.name} type="button" onClick={() => onAuth(`${c.name} login`)} className="px-2.5 py-1 rounded-md text-xs border hairline hover:bg-surface font-mono" title={c.description}>{c.name} login</button>
+          {configured && <div className="font-mono text-xs text-text-muted">{binding} <span className="text-steel">from .env</span></div>}
+        </div>
+        <div className={`grid grid-cols-1 ${resumable.length > 0 ? "md:grid-cols-[1fr_1px_1fr]" : ""}`}>
+          {resumable.length > 0 && (
+            <>
+              <div className="px-5 py-4 flex flex-col gap-2.5" aria-label="Resume a session">
+                <div className="kicker kicker-muted text-[12px]">Resume</div>
+                <div className="flex flex-col max-h-72 overflow-auto">
+                  {resumable.map((sess) => (
+                    <button key={sess.id} type="button" onClick={() => onAttach(sess.id)} aria-label={`Resume session ${sess.id}`} className={row}>
+                      <span className={sess.isLoaded ? "text-success" : "text-text-muted"}>{sess.isLoaded ? "●" : "○"}</span>
+                      <span className="min-w-0 flex-1">
+                        <span className="block font-mono text-[13px]">{sess.id}</span>
+                        <span className="block text-[13px] text-text-muted truncate">{[sess.description || sess.name, sess.provider ? `${sess.provider}/${sess.model}` : "", sess.turnCount ? `${sess.turnCount} turns` : ""].filter(Boolean).join(" · ")}</span>
+                      </span>
+                      <span className={`btn btn-sm self-center ${sess.isLoaded ? "btn-steel" : "btn-quiet"}`}>Attach</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="hidden md:block bg-divider" aria-hidden="true" />
+            </>
+          )}
+          <div className="px-5 py-4 flex flex-col gap-2.5">
+            <div className="kicker kicker-muted text-[12px]">{resumable.length > 0 ? "Start new — agent profile" : "Agent profile"}</div>
+            <div className="flex flex-col max-h-80 overflow-auto">
+              <button type="button" onClick={() => onPick(null)} className={row}>
+                <span className="font-mono text-[11px] text-steel w-[22px] shrink-0 pt-0.5">01</span>
+                <span className="min-w-0"><span className="block font-mono text-[13px]">default</span><span className="block text-[13px] text-text-muted">{configured ? binding : "the workspace .env provider and model"}</span></span>
+              </button>
+              {profiles.map((p, i) => (
+                <button key={p.name} type="button" onClick={() => onPick(p.name)} className={row}>
+                  <span className="font-mono text-[11px] text-steel w-[22px] shrink-0 pt-0.5">{String(i + 2).padStart(2, "0")}</span>
+                  <span className="min-w-0"><span className="block font-mono text-[13px]">{p.name}</span><span className="block text-[13px] text-text-muted">{[p.description, [p.provider, p.model].filter(Boolean).join("/")].filter(Boolean).join(" · ")}</span></span>
+                </button>
               ))}
             </div>
           </div>
-        )}
-        <div className="text-right">
-          <button type="button" onClick={onSkip} className="text-xs text-text-muted underline">Skip — go to the prompt without a session</button>
         </div>
-      </div>
+        <div className="px-5 pt-3 border-t hairline" aria-label="Files for the session">
+          <div className="kicker kicker-muted text-[12px] mb-1.5">Files for the session</div>
+          <AttachStrip always hint={selected ? "Staged into this workspace before the session opens." : "Staged into the session's workspace as soon as it is provisioned."} />
+        </div>
+        <div className="flex flex-wrap items-center gap-3 px-5 py-3 border-t hairline">
+          {auth.length > 0 && !configured && (
+            <div className="flex flex-wrap items-center gap-3" aria-label="Sign in to a provider">
+              <span className="kicker kicker-muted">Sign in first</span>
+              {auth.map((c) => (
+                <button key={c.name} type="button" onClick={() => onAuth(`${c.name} login`)} className="font-mono text-xs border hairline px-2 py-1 hover:border-steel hover:text-steel" title={c.description}>{c.name} login</button>
+              ))}
+              <span className="text-[12px] text-text-muted">No provider configured yet? Sign in first; the daemon then offers to open the session for you.</span>
+            </div>
+          )}
+          <span className="flex-1" />
+          <button type="button" onClick={onSkip} className="link text-[13px]">Go to the prompt without a session</button>
+        </div>
+      </Plate>
     </div>
   );
 }
@@ -123,8 +211,6 @@ export function SessionScreen() {
   useKeyboardShortcuts();
   const sessionId = useJaato((s) => s.sessionId);
   const selected = useJaato((s) => s.selectedAgentId);
-  const ui = useJaato((s) => s.ui);
-  const toggle = useJaato((s) => s.toggleUi);
   const commands = useJaato((s) => s.commands);
   const initProgress = useJaato((s) => s.initProgress);
   const permissions = useJaato((s) => s.permissions);
@@ -152,7 +238,7 @@ export function SessionScreen() {
     setCreating(true);
     try {
       const c = getClient();
-      await c.createSession(profile ? { profile } : {});
+      await openSessionWithQueued(() => c.createSession(profile ? { profile } : {}));
     } finally {
       setCreating(false);
     }
@@ -164,7 +250,7 @@ export function SessionScreen() {
 
   const captureMode = useMemo(() => {
     const p = agentPerms[0];
-    if (p) return { kind: "permission" as const, placeholder: `Permission for ${p.toolName}: type an option key (${p.options.map((o) => o.key).join(", ") || "y/n"})`, suggestions: p.options.map((o) => o.key) };
+    if (p) return { kind: "permission" as const, placeholder: `Answer ${p.toolName} — ${p.options.map((o) => o.key).join(" · ") || "y · n"}, or type a reply`, suggestions: p.options.map((o) => o.key) };
     const cl = agentClars.find((c) => c.inputMode);
     if (cl) return { kind: "clarification" as const, placeholder: "Type your answer (or a choice number) and press Enter" };
     if (agentRefs[0]) return { kind: "reference" as const, placeholder: "Type the reference to use" };
@@ -181,14 +267,14 @@ export function SessionScreen() {
 
   const resumeSession = (id: string) => {
     setPicking(false);
-    attachSession(id).catch((err) => useJaato.getState().addSystemBlock(selected, String(err), "error"));
+    openSessionWithQueued(() => attachSession(id)).catch((err) => useJaato.getState().addSystemBlock(selected, String(err), "error"));
   };
 
   // A workspace whose .env already names the provider just signed in to has
   // nothing to persist: the card does not ask.
   const alreadyConfigured = Boolean(postAuth && wsConfig?.configured && wsConfig.provider === postAuth.providerName);
   const postAuthCard = postAuth ? (
-    <div className="px-4"><PostAuthSetupPrompt p={postAuth} alreadyConfigured={alreadyConfigured} onRespond={(a) => { respondPostAuth(postAuth.requestId, a).catch((err) => useJaato.getState().addSystemBlock(selected, String(err), "error")); }} /></div>
+    <div className="px-5"><PostAuthSetupPrompt p={postAuth} alreadyConfigured={alreadyConfigured} onRespond={(a) => { respondPostAuth(postAuth.requestId, a).catch((err) => useJaato.getState().addSystemBlock(selected, String(err), "error")); }} /></div>
   ) : null;
 
   if (picking && !sessionId) {
@@ -202,33 +288,32 @@ export function SessionScreen() {
 
   return (
     <div className="h-full flex flex-col">
-      <AgentTabs />
+      <SessionHeader />
       <div className="flex-1 flex min-h-0">
         <main className="flex-1 flex flex-col min-w-0 relative">
           {(creating || initProgress) && (
-            <div className="px-4 py-1 text-xs text-text-muted border-b hairline flex items-center gap-2">
-              <span className="pulse">●</span>
+            <div className="px-5 py-1 kicker kicker-muted border-b hairline flex items-center gap-2">
+              <span className="pulse text-primary">●</span>
               {initProgress ? `${initProgress.message ?? initProgress.step ?? "initialising"}${initProgress.stepNumber != null && initProgress.totalSteps ? ` (${initProgress.stepNumber}/${initProgress.totalSteps})` : ""}` : "Creating session…"}
             </div>
           )}
           <OutputPane agentId={selected} />
-          <div className="px-4">
+          <div className="px-5">
             {agentPerms.map((p) => <PermissionPrompt key={p.requestId} p={p} onRespond={(k) => respondPermission(p.requestId, k)} />)}
             {agentClars.map((c) => <ClarificationPrompt key={c.requestId} c={c} onAnswer={(a) => answerClarification(c, a)} onCancel={() => cancelClarification(c)} />)}
             {agentRefs.map((r) => <ReferenceSelectionPrompt key={r.requestId} r={r} onRespond={(v) => respondReference(r.requestId, v)} />)}
             {postAuth && selected === "main" && <PostAuthSetupPrompt p={postAuth} alreadyConfigured={alreadyConfigured} onRespond={(a) => { respondPostAuth(postAuth.requestId, a).catch((err) => useJaato.getState().addSystemBlock(selected, String(err), "error")); }} />}
           </div>
-          <div className="px-4 pb-2 pt-1">
+          <div className="px-5 pb-3 pt-2.5 border-t hairline">
             {processing && !captureMode && (
-              <div className="text-[11px] text-text-muted px-1 flex items-center gap-2"><span className="pulse text-primary">●</span> agent working — type to queue a follow-up, <kbd>stop</kbd> or <kbd>Ctrl</kbd>+<kbd>C</kbd> to interrupt</div>
+              <div className="kicker kicker-muted text-[12px] tracking-[0.1em] mb-1.5 flex items-center gap-2"><span className="pulse text-primary">●</span> Agent working — type to queue a follow-up · <span className="font-mono normal-case tracking-normal">stop</span> or Ctrl+C to interrupt</div>
             )}
             <Composer commands={commands} history={inputHistory} captureMode={captureMode} onSubmit={(t, v) => { submitInput(t, v).catch((err) => useJaato.getState().addSystemBlock(selected, String(err), "error")); }} />
           </div>
           <ToolOutputPopup agentId={selected} />
         </main>
-        {ui.showPlan && <SidePanel title="Plan" onClose={() => toggle("showPlan")}><PlanPanel agentId={selected} /></SidePanel>}
-        {ui.showBudget && <SidePanel title="Budget" onClose={() => toggle("showBudget")}><BudgetPanel agentId={selected} /></SidePanel>}
-        {ui.showWorkspace && <SidePanel title="Files" onClose={() => toggle("showWorkspace")}><WorkspacePanel /></SidePanel>}
+        <RailResizer />
+        <Rail agentId={selected} />
       </div>
       <StatusBar />
     </div>

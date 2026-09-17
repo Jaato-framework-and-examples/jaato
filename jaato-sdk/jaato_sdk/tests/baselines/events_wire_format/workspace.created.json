@@ -3,5 +3,6 @@
   "timestamp": "<TIMESTAMP>",
   "session_id": "",
   "name": "",
-  "path": ""
+  "path": "",
+  "workspace": {}
 }

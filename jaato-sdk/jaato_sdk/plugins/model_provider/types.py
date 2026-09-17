@@ -686,10 +686,18 @@ def tool_result_is_error(result: Any) -> bool:
     status_code >= 400).  Distinct from the executor's success flag /
     ``ToolResult.is_error`` (= not success), which only catches raised
     exceptions / permission / missing-executor.  Canonical definition reused by
-    the reliability plugin and the tool.call_completed event populate."""
+    the reliability plugin and the tool.call_completed event populate.
+
+    A null ``error`` is the ABSENCE of one.  ``"error" in result`` read
+    ``{"error": None}`` as a failure, and several tools answer with that
+    shape on success -- ``setStepStatus`` echoed ``"error": step.error`` for
+    a step it had just marked completed, so every client drew the call as
+    failed beside a result saying it went fine, and the reliability plugin
+    counted a success as an error.
+    """
     if not isinstance(result, dict):
         return False
-    return "error" in result or result.get("status_code", 200) >= 400
+    return result.get("error") is not None or result.get("status_code", 200) >= 400
 
 
 def tool_result_status(result: Any) -> Optional[str]:

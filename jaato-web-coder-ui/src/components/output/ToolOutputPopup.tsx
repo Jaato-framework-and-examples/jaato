@@ -1,13 +1,17 @@
 /**
- * Floating live-output panel for running tools — the TUI's
+ * Floating live-output plate for running tools — the TUI's
  * ``tool_output_popup``: appears when a running tool starts producing
  * output, tails it, offers tabs across concurrent running tools, and
  * dismisses when the pinned tool finishes (unless it belongs to a
  * continuation group, e.g. an interactive shell, which keeps it open).
+ * Drawn as a steel-edged ground plate over the composer (design frame
+ * 04): ``Live · <tool>`` for the pinned one, the other running tools as
+ * quiet kickers beside it.
  */
 import { useEffect, useMemo, useRef } from "react";
 import { useJaato } from "@/store/store";
 import type { ToolBlock } from "@/store/types";
+import { Plate } from "@/components/layout/Plate";
 
 export function ToolOutputPopup({ agentId }: { agentId: string }) {
   const blocks = useJaato((s) => s.blocks[agentId]);
@@ -36,23 +40,23 @@ export function ToolOutputPopup({ agentId }: { agentId: string }) {
 
   if (!pinned) return null;
   return (
-    <div className="absolute right-4 bottom-4 w-[min(46rem,60vw)] max-h-[45vh] flex flex-col rounded-lg border border-primary/50 bg-bg shadow-xl z-20" role="dialog" aria-label="Live tool output">
-      <div className="flex items-center gap-1 px-2 py-1 border-b hairline text-xs">
+    <Plate ground edge="steel" className="absolute right-5 bottom-[104px] w-[min(560px,70%)] max-h-[45vh] flex flex-col shadow-lg z-20" role="dialog" aria-label="Live tool output">
+      <div className="flex items-center gap-2.5 px-2.5 py-1.5 border-b hairline">
         {running.map((b) => (
           <button
             key={b.callId}
             type="button"
             onClick={() => setPopup(b.callId)}
-            className={`px-2 py-0.5 rounded font-mono ${b.callId === pinned.callId ? "bg-surface text-primary" : "text-text-muted hover:text-text"}`}
+            className={`kicker tracking-[0.12em] text-[12px] ${b.callId === pinned.callId ? "" : "kicker-muted hover:text-text"}`}
           >
-            ● {b.toolName}
+            {b.callId === pinned.callId ? "Live · " : ""}{b.toolName}
           </button>
         ))}
         <span className="flex-1" />
-        <span className="text-text-muted hidden md:inline"><kbd>Ctrl</kbd>+<kbd>O</kbd> next</span>
-        <button type="button" className="ml-2 text-text-muted hover:text-text" onClick={() => setPopup(null)} aria-label="Close">✕</button>
+        <span className="font-mono text-[10px] text-text-muted hidden md:inline">Ctrl+O next</span>
+        <button type="button" className="text-text-muted hover:text-text" onClick={() => setPopup(null)} aria-label="Close">✕</button>
       </div>
-      <pre ref={preRef} className="code-block whitespace-pre-wrap break-words p-2 overflow-auto flex-1">{pinned.output}</pre>
-    </div>
+      <pre ref={preRef} className="code-block whitespace-pre-wrap break-words px-3 py-2.5 overflow-auto flex-1">{pinned.output}</pre>
+    </Plate>
   );
 }

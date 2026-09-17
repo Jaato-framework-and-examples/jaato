@@ -133,3 +133,72 @@ class TestDispatch:
         assert router._dispatch_prefixed_command(
             "workspace.other", "c1", [], None, None) is False
         sink.send_event.assert_not_called()
+
+
+class TestWorkspaceResolution:
+    """Seen live: a session whose header named its workspace, whose Files
+    panel listed that workspace's files, and whose ``ignore`` press was
+    refused with "the caller has no workspace".  The verb consulted two
+    sources and said nothing about which was empty; it consults a third
+    now -- the session the TRANSPORT says the client is on -- and the
+    refusal names all three."""
+
+    def test_the_transport_session_id_resolves_when_the_manager_has_no_binding(self, tmp_path):
+        router, sm, sink = _make_router(session_workspace=None, client_workspace=None)
+        target = MagicMock(); target.workspace_path = str(tmp_path)
+        sm.get_session.return_value = target
+        router._handle_workspace_ignore("c1", ["x"], None, session_id="s-1")
+        sm.get_session.assert_called_once_with("s-1")
+        assert _only_answer(sink).gitignore_path == str(tmp_path / ".gitignore")
+
+    def test_the_attached_session_still_wins_over_the_transport_id(self, tmp_path):
+        a = tmp_path / "a"; b = tmp_path / "b"; a.mkdir(); b.mkdir()
+        router, sm, sink = _make_router(session_workspace=str(a), client_workspace=None)
+        other = MagicMock(); other.workspace_path = str(b)
+        sm.get_session.return_value = other
+        router._handle_workspace_ignore("c1", ["x"], None, session_id="s-2")
+        assert _only_answer(sink).gitignore_path == str(a / ".gitignore")
+
+    def test_the_refusal_names_every_source_it_checked(self):
+        router, sm, sink = _make_router(session_workspace=None, client_workspace=None)
+        sm.get_session.return_value = None
+        router._handle_workspace_ignore("c1", ["x"], None, session_id="s-3")
+        err = _only_answer(sink).error
+        assert "attached_session=none" in err
+        assert "transport_session=none" in err
+        assert "declared=none" in err
+
+
+class TestWSAdapterWorkspace:
+    """The WS adapter answers ``get_client_workspace`` from the workspace
+    manager's selection when nothing was bridged into its own map."""
+
+    def _adapter(self, declared=None, selected_path=None):
+        from server.websocket import WSEventSinkAdapter
+        ws = MagicMock()
+        if selected_path is None:
+            ws._workspace_manager.get_selected_workspace.return_value = None
+        else:
+            sel = MagicMock(); sel.path = selected_path
+            ws._workspace_manager.get_selected_workspace.return_value = sel
+        adapter = WSEventSinkAdapter(ws)
+        if declared:
+            adapter.set_client_workspace("c1", declared)
+        return adapter, ws
+
+    def test_the_bridged_value_is_answered_first(self):
+        adapter, ws = self._adapter(declared="/bridged", selected_path="/selected")
+        assert adapter.get_client_workspace("c1") == "/bridged"
+        ws._workspace_manager.get_selected_workspace.assert_not_called()
+
+    def test_the_managers_selection_fills_an_empty_map(self):
+        adapter, ws = self._adapter(selected_path="/selected")
+        assert adapter.get_client_workspace("c1") == "/selected"
+        ws._workspace_manager.get_selected_workspace.assert_called_once_with(client_id="c1")
+
+    def test_no_selection_is_none_not_an_error(self):
+        adapter, _ = self._adapter()
+        assert adapter.get_client_workspace("c1") is None
+        adapter2, ws2 = self._adapter()
+        ws2._workspace_manager = None
+        assert adapter2.get_client_workspace("c1") is None

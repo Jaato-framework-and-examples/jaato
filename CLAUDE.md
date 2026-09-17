@@ -4863,6 +4863,207 @@ confirms inline before sending.
 Stated cost, unchanged in kind: the session still runs as the daemon's uid,
 so this is an entitlement boundary at the verbs, not a filesystem one.
 
+### A Key Typed Once Per Workspace
+
+The web client's configure form asked for the provider's API key on every
+new workspace, because the daemon keeps it where `config.update` puts it:
+in that workspace's `.env`. The fix is **application state in the BFF**
+(`jaato-web-coder-server/src/credentials.ts`), deliberately not a daemon
+vault and not an SDK verb — the daemon knows users only as `app:user`, an
+application's concept, and the TUI would carry a verb it never calls. The
+signed-in user's keys are stored per OIDC `sub`, encrypted at rest
+(AES-256-GCM, key from a 0600 file, owner bound into the AAD), listed by
+label and hint, revealed on a same-origin `POST`, and forwarded by the page
+as `config.update`'s `api_key` exactly as a typed key travels. `pass` was
+rejected for the unattended path: the daemon resolves `pass://` as its own
+uid against its own GnuPG store, and gpg-agent's `max-cache-ttl` is
+absolute, so an unattended store eventually blocks on a pinentry nobody
+answers. With no `credentials:` block nothing changes, and the daemon's
+`~/.jaato/<provider>_auth.json` tiers stay as they are for mono-user
+installs. Design: [web-server-bff.md §12](docs/design/web-server-bff.md).
+
+### The Web Client on a Blueprint
+
+The web client was a faithful port of the terminal UI: rounded cards, one
+accent, panels that appear and disappear, a status bar that reads like a
+log line. The redesign (Claude Design, *Jaato Web UI Redesign*, proposal
+01c, the light face) keeps every behaviour and every word of the routing
+model and changes the structure it is drawn on: square hairline **plates**
+with registration marks (`components/layout/Plate.tsx`), Barlow Condensed
+for what the interface says and monospace for what the daemon said, and one
+**steel** interface accent while the theme's own colours shrink to state
+glyphs. It is one layer over the theme variables: `themes.ts` derives
+`--c-steel` from the theme's ground (full steel on a light one, a lighter
+steel on a dark one) and departs from a theme file in exactly one place
+(`WEB_OVERRIDES`: the light theme's ground is the design's paper, the dark
+theme's plates are `#202223`; state colours are never overridden), so
+`theme dark` and the other four still draw the same structure. `light` is
+the web client's default now; the store's and the loader's defaults agree.
+
+What each screen became: the connect plate in two columns; workspaces as a
+**table** (Open / Configure / Delete per row, the configure form a plate
+under it); new-session with resume and start side by side; the session with
+its identity in a 46px **header** (brand, agent tabs — always rendered,
+`main` included — and `ws` / `model` / `ctx` on the right), tool calls as
+**rows** (glyph, name in the chrome face, arguments in monospace, duration
+at the edge, the output in a ground plate under the name), user turns
+numbered `T<n>` in the gutter by the pane, one **persistent rail** whose
+Plan / Budget / Files sections open and close on the same `ui.show*` flags
+the shortcuts and the status bar toggle, and a 26px status bar; and the
+permission request as a full-width warning plate with the diff at full
+measure, the focused option solid, the refusals apart at the right edge.
+
+Two things the port turned up. The picker's silent `session.list` request
+fires twice under React's development double-effect, and
+`sessionListSilent` was a **flag** the first reply cleared — so the second
+printed a listing nobody typed. It is a count of replies owed now. And the
+e2e suite's one assertion on a button's text (`/^y yes$/`) encoded the old
+key-then-label order; the design puts the key after the label, and the
+test says so. Fonts are self-hosted from `@fontsource/barlow` and
+`@fontsource/barlow-condensed` (latin subsets in the bundle, ~180 KB of
+woff2), so a deployment behind a corporate proxy needs no font CDN.
+
+### Three Rows the Web Client Drew That Nobody Sent
+
+Reported from a live daemon in one evening: every `workspace.create` added
+a row named after the workspace ROOT's own directory (`workspaces`) that
+`select` and `delete` then refused; saving a provider left the configure
+form saying `missing: provider` over an empty dropdown; and every prompt
+appeared twice, the second time as agent output under a `USER` header.
+Three defects of the shape this file already names — **the mock spoke the
+client's vocabulary, not the daemon's** — and one daemon defect the first
+of them exposed.
+
+| Wire | The daemon sends | The client read |
+|---|---|---|
+| `workspace.created` | `WorkspaceCreatedEvent(workspace=...)` — a field the SDK model **did not declare**, dropped on ingest by `extra='ignore'`, so the event arrived as `{name: "", path: ""}` | a row named `""`; clicking it selected `""` |
+| `config.updated` | `workspace`, `provider`, `model`, `success` — what was WRITTEN, no status field | as a `config.status`: `configured=false`, an empty `available_providers`, and `missing: provider` for the provider it had just saved |
+| `agent.output` | every prompt echoed with `source: "user"` (on send, and again on a replay to an attaching client) | a text block, rendered as agent output |
+
+`WorkspaceCreatedEvent` now carries `workspace` (the row, as the list
+renders it) beside `name` / `path`; `WorkspaceListEvent.root` is finally
+sent. The store merges `config.updated` over the status it holds and
+updates the table row; and a `user`- (or `parent`-) sourced output line is
+the user's turn — it confirms the bubble the composer already drew when
+the texts match, and becomes a user bubble of its own otherwise (a replay
+after attach). The mock now emits all three in the daemon's shape.
+
+**And the root is not a workspace.** Selecting `""` reached
+`_resolve_under_root("")`, which is the root itself, and `_is_under_root`
+accepted it (`path == root or ...`). `_analyze_workspace` named the root by
+its basename, the cache held it under the key `""`, and the registry got a
+row nothing could act on — recreated on every click, which is why the
+stale-row prune one section up did not catch it (the root IS a directory).
+`_is_under_root` is strictly beneath now, so an empty name, `.` and
+`mine/..` are refused as `WorkspaceContainmentError` wherever a NAME is
+resolved — `select`, `delete`, `get_config_status`, and the registry-path
+branch of `get_workspace_path`. The naming rule `create` always applied
+(`_check_name`: one flat component) binds `select` and `delete` too, and a
+verb that resolved a name passes it to `_analyze_workspace`, so the cache
+key and `WorkspaceInfo.name` cannot disagree for a symlinked entry either.
+Containment is still checked first, so a traversal is refused as one and
+before existence. Tests:
+`server/tests/test_workspace_root_is_not_a_workspace.py`.
+
+### A Plan Nobody Was Watching, and a Step That Was Not a Failure
+
+Two more from the same evening, one on each side of the tool row.
+
+**`createPlan` completed and every client said "no plan yet".** `todo` is
+runner-tier, so on the default path the plugin reports into the RUNNER's
+instance, whose reporter was the bootstrap's `MemoryReporter` (events
+stored, read by nobody), while the daemon's `_setup_plan_hooks` armed a
+`LivePlanReporter` on the DAEMON's instance, which no runner-served session
+calls. Not one `PlanUpdatedEvent` crossed the wire for a runner session; the
+TUI's Ctrl+P panel and the web rail were fed by the same absence. It is the
+description-callback gap (`description_updated`) with a different plugin,
+closed the same way: `RunnerRPC._install_plan_reporter` swaps the reporter
+per turn for one whose callbacks emit `plan_updated` / `plan_step_updated` /
+`plan_cleared` / `plan_output` frames (the reporter's own dicts, unconverted),
+hands the same reporter to the subagent plugin, and restores both on exit;
+the daemon's `_PURE_NOTIFICATION_EVENTS` table turns the four frames into
+the plan events through `_plan_updated_event` and its siblings, which are
+now the one place a reporter's `description` becomes the event's `content`,
+so the in-process and runner paths cannot disagree about a step. The table's
+builders take the server too, because a profile name resolves to an agent id
+through `_agents`, which no payload carries. `_setup_plan_hooks` stays for
+the embedded and standalone-WS sessions that are its actual audience, and
+its docstring now says so.
+
+**A completed step drew as a failed call.** `setStepStatus` answered with
+`"error": step.error`, which is `None` for a step just marked completed, and
+`tool_result_is_error` read `"error" in result` — so `{"error": None,
+"result": "Proyecto creado correctamente"}` was `is_error_result=True`: a red
+✗ in every client, an error in the reliability plugin's ledger, `is_error`
+on the telemetry span. A null error is the ABSENCE of one, and the helper
+now says `result.get("error") is not None`; the `background` plugin answers
+with the same shape on success and is covered by the same line. The todo
+plugin also stops spelling a step's own failure as the tool's: a step the
+model marked `failed` is the tool doing what it was asked, so its text
+travels as `step_error`. Tests:
+`server/runner/tests/test_plan_reporter_bridge.py`,
+`jaato_sdk/tests/test_tool_result_is_error.py`.
+
+**Two web-client touches from a tablet.** The Files panel's `hide` / `ignore`
+actions appeared on hover only, and a touch screen has no hover, so on the
+tablet the panel was first tried on nothing could be hidden or ignored; they
+are always drawn now, dimmed until the row is hovered. And the rail has a
+drag handle on its left edge (`components/layout/RailResizer.tsx`): a
+`separator` that resizes by pointer — mouse, pen or finger, `touch-action:
+none` — and by arrow keys, clamped to 220–720px and remembered per browser
+(`ui.railWidth`, `localStorage`).
+
+### A File the Browser Could Not Put in the Workspace
+
+The premium `<jaato-task>` component (and the knowledge-manager client
+built on it) ships files to the daemon two ways: inline base64
+`staged_files` on the `session.new` envelope, and the canonical
+`StageFilesRequest` — one TEXT frame naming the files, one BINARY frame
+per file, one `StageFilesEvent` back, into the connection's selected or
+provisioned workspace (`docs/sdk-file-staging.md`). The TS SDK already
+carried `stageFiles`; the web coder used neither, so a browser session
+had no way to hand the agent a file.
+
+The web coder now uses the canonical verb for **both** moments, which is
+what the SDK method was written for and what the docstring on the legacy
+envelope field asks new clients to do:
+
+| Where | When it stages | Why that order |
+|---|---|---|
+| the composer (drop, paste, **Attach**) | at once, into the session's workspace | the agent's tools read it on the next turn; the message sent next ends with a line naming the staged paths |
+| the session picker, workspace selected | **before** `session.new` | the session starts with the files on disk |
+| the session picker, no workspace yet | after the daemon's `session.info` | a daemon that provisions the workspace **as part of** `session.new` has nowhere to put them earlier; still ahead of the first turn |
+
+Three properties, each attached to a way it went wrong while being built:
+
+- **The workspace is a fact learned from the daemon, not sampled at attach
+  time.** The picker is on screen the moment `workspace.select` is *sent*,
+  and the store's `selected` is written when its `config.status` reply is
+  reduced, a round-trip later — so a file attached in that window read as
+  "no workspace" and sat queued until a profile was picked. The staging
+  module subscribes to the store and stages the moment a workspace or a
+  session appears. Measured against a real daemon: the picker's file is on
+  disk before `session.new`, the composer's file lands under the folder
+  chosen in the strip.
+- **What the daemon would refuse is refused before any bytes are sent**,
+  in the daemon's own words — a name that climbs or is absolute, a file
+  over `DEFAULT_STAGE_PER_FILE_LIMIT`, a batch over
+  `DEFAULT_STAGE_TOTAL_LIMIT` (`src/protocol/attachments.ts` mirrors the
+  numbers). The daemon still checks; the client just does not stream 11 MB
+  to hear "no".
+- **One request per drop, requests in order.** The SDK correlates a
+  `StageFilesEvent` to a `stageFiles` call by *order*, so the module runs
+  every call through one promise chain; a directory dropped beside real
+  files fails alone (its `File` cannot be read) rather than failing the
+  batch.
+
+The mock daemon speaks the multi-frame protocol (`mock/daemon.ts`,
+`finishStaging`), including the up-front refusals, so the e2e suite drives
+the real frames. Not done: `send_message`'s inline `attachments` (model
+context, #838) — a file the model should *see* rather than have on disk
+is a different feature with a different cost, and the composer does not
+yet offer it.
+
 ### A Key the Web Files Panel Did Not Have
 
 The TUI's workspace panel (Ctrl+W) binds two keys to the entry under the

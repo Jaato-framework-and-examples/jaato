@@ -331,7 +331,8 @@ class CommandRouter:
                 return
 
             elif self._dispatch_prefixed_command(
-                    cmd, client_id, event.args, event.payload, workspace_path):
+                    cmd, client_id, event.args, event.payload, workspace_path,
+                    session_id=session_id):
                 return
 
             # Tools commands - handled per-session
@@ -411,7 +412,7 @@ class CommandRouter:
 
     def _dispatch_prefixed_command(
         self, cmd: str, client_id: str, args: list, payload: Any,
-        workspace_path: Optional[str],
+        workspace_path: Optional[str], session_id: Optional[str] = None,
     ) -> bool:
         """Route the ``cascade.*`` family and ``workspace.ignore`` from ONE branch.
 
@@ -428,12 +429,45 @@ class CommandRouter:
         if cmd.startswith("cascade."):
             return self._dispatch_cascade_command(cmd, client_id, args, payload)
         if cmd == "workspace.ignore":
-            self._handle_workspace_ignore(client_id, args, workspace_path)
+            self._handle_workspace_ignore(
+                client_id, args, workspace_path, session_id=session_id)
             return True
         return False
 
+    def _resolve_caller_workspace(
+        self, client_id: str, client_workspace: Optional[str],
+        session_id: Optional[str] = None,
+    ) -> "tuple[Optional[str], Dict[str, Optional[str]]]":
+        """The workspace a daemon-level verb acts in for *client_id*.
+
+        Three sources, first hit wins, all of them returned so a refusal
+        can say which were empty rather than "no workspace":
+
+        1. the session the manager has this client attached to;
+        2. the session the TRANSPORT says the client is on (``session_id``
+           from ``handle_request`` -- the WS adapter's own map, which can
+           know the session across a reconnect the manager has not yet
+           re-bound);
+        3. the workspace the client declared (IPC ``set_workspace``, or the
+           WS selection).
+
+        A session's path outranks a declared one because the session's tree
+        is what ``WorkspaceMonitor`` watches and what the panel shows.
+        """
+        session = self._session_manager.get_client_session(client_id)
+        attached = getattr(session, "workspace_path", None) if session else None
+        by_id = None
+        if session_id and hasattr(self._session_manager, "get_session"):
+            target = self._session_manager.get_session(session_id)
+            by_id = getattr(target, "workspace_path", None) if target else None
+        sources = {"attached_session": attached or None,
+                   "transport_session": by_id or None,
+                   "declared": client_workspace or None}
+        return (attached or by_id or client_workspace or None), sources
+
     def _handle_workspace_ignore(
         self, client_id: str, args: list, client_workspace: Optional[str],
+        session_id: Optional[str] = None,
     ) -> None:
         """Handle ``workspace.ignore <path>`` (protocol 1.12).
 
@@ -444,8 +478,10 @@ class CommandRouter:
         :func:`jaato_sdk.gitignore_toggle.toggle_gitignore_pattern` on both
         routes, so one press means one thing whichever client made it.
 
-        Which ``.gitignore``: the SESSION's workspace when the caller is
-        attached to one, else the workspace the client declared at connect.
+        Which ``.gitignore``: :meth:`_resolve_caller_workspace` -- the
+        SESSION's workspace when the caller is attached to one (by the
+        manager's binding, or by the session id the transport handed in),
+        else the workspace the client declared or selected.
         The session's is the tree ``WorkspaceMonitor`` watches — and the
         monitor reloads its parser on this very write, so the pattern binds
         every later file event.  Entries the panel already shows are NOT
@@ -476,11 +512,19 @@ class CommandRouter:
             answer(ok=False, error=f"workspace.ignore: {reason}")
             return
 
-        session = self._session_manager.get_client_session(client_id)
-        workspace = (getattr(session, "workspace_path", None) if session else None) \
-            or client_workspace
+        workspace, sources = self._resolve_caller_workspace(
+            client_id, client_workspace, session_id)
         if not workspace:
-            answer(ok=False, error="workspace.ignore: the caller has no workspace")
+            # Name what was looked at: "no workspace" alone sent a reader
+            # who could see their workspace in the header to the wrong place.
+            checked = ", ".join(
+                f"{k}={'none' if v is None else repr(v)}"
+                for k, v in sources.items())
+            logger.warning("workspace.ignore: client=%s session=%s has no "
+                           "resolvable workspace (%s)", client_id,
+                           session_id or "-", checked)
+            answer(ok=False, error=f"workspace.ignore: the caller has no "
+                                   f"workspace ({checked})")
             return
 
         gitignore_path = os.path.join(workspace, ".gitignore")

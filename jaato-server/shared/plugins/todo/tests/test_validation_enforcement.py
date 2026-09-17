@@ -240,9 +240,9 @@ class TestValidationEnforcement:
             "error": "Validator subagent did not return",
         })
 
-        # Failed status should work — error field contains the step's error, not a rejection
+        # Failed status should work — step_error carries the step's error; a top-level error would read as a rejection
         assert result["status"] == "failed"
-        assert result["error"] == "Validator subagent did not return"
+        assert result["step_error"] == "Validator subagent did not return"
 
     def test_validation_step_allows_skipped(self):
         """Setting a validation step to skipped should always work."""

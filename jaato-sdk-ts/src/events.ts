@@ -11304,7 +11304,7 @@ export type EventType83 =
   | "gates.snapshot";
 export type Timestamp83 = string;
 export type SessionId83 = string;
-export type Workspace = string;
+export type Workspace1 = string;
 export type Configured = boolean;
 export type Provider1 = string | null;
 export type Model1 = string | null;
@@ -11569,7 +11569,7 @@ export type EventType85 =
   | "gates.snapshot";
 export type Timestamp85 = string;
 export type SessionId85 = string;
-export type Workspace1 = string;
+export type Workspace2 = string;
 export type Provider3 = string;
 export type Model3 = string | null;
 export type Success3 = boolean;
@@ -17762,6 +17762,14 @@ export interface WorkspaceCreateRequest {
 }
 /**
  * Response to workspace.create - new workspace created.
+ *
+ * ``workspace`` is the created entry as ``workspace.list`` would render it
+ * (name, path, ``configured``, ``owner``, ``last_accessed``), so a client
+ * can add the row without a second listing.  ``name`` and ``path`` repeat
+ * its two identifying fields for readers predating the dict.  The WS
+ * server used to send ONLY ``workspace=`` -- a field this model did not
+ * declare, dropped on ingest by ``extra='ignore'`` -- so every client
+ * learned of a created workspace as one with no name.
  */
 export interface WorkspaceCreatedEvent {
   type?: EventType79;
@@ -17769,6 +17777,10 @@ export interface WorkspaceCreatedEvent {
   session_id?: SessionId79;
   name?: Name4;
   path?: Path;
+  workspace?: Workspace;
+}
+export interface Workspace {
+  [k: string]: unknown;
 }
 /**
  * Client asks the daemon to delete a workspace it may see (protocol 1.13).
@@ -17817,7 +17829,7 @@ export interface ConfigStatusEvent {
   type?: EventType83;
   timestamp?: Timestamp83;
   session_id?: SessionId83;
-  workspace?: Workspace;
+  workspace?: Workspace1;
   configured?: Configured;
   provider?: Provider1;
   model?: Model1;
@@ -17842,7 +17854,7 @@ export interface ConfigUpdatedEvent {
   type?: EventType85;
   timestamp?: Timestamp85;
   session_id?: SessionId85;
-  workspace?: Workspace1;
+  workspace?: Workspace2;
   provider?: Provider3;
   model?: Model3;
   success?: Success3;

@@ -29,6 +29,14 @@ export interface LauncherConfig {
   sessionUrl?: string;
   /** Where a "Sign out" link goes; default: ``logout`` beside ``ticketUrl``. */
   logoutUrl?: string;
+  /**
+   * Where the backend keeps the signed-in user's provider API keys
+   * (``app/credentials.ts``).  Named only by a backend that has the store;
+   * absent means the configure form shows a plain key field.  Deliberately
+   * NOT derived from ``ticketUrl`` like the two above: those endpoints
+   * always exist beside a ticket URL, this one is opt-in.
+   */
+  credentialsUrl?: string;
   autoConnect?: boolean;
 }
 
@@ -42,6 +50,7 @@ export function parseLauncherConfig(raw: unknown): LauncherConfig {
   if (typeof o.loginUrl === "string" && o.loginUrl) out.loginUrl = o.loginUrl;
   if (typeof o.sessionUrl === "string" && o.sessionUrl) out.sessionUrl = o.sessionUrl;
   if (typeof o.logoutUrl === "string" && o.logoutUrl) out.logoutUrl = o.logoutUrl;
+  if (typeof o.credentialsUrl === "string" && o.credentialsUrl) out.credentialsUrl = o.credentialsUrl;
   if (typeof o.autoConnect === "boolean") out.autoConnect = o.autoConnect;
   return out;
 }

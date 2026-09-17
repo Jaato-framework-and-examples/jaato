@@ -1143,7 +1143,11 @@ class TodoPlugin(RunnerForwardingMixin):
                 payload["provides"] = step.provides
             self._publish_event(event_type_map[new_status], plan, step, payload)
 
-        # Build response with continuation prompt
+        # Build response with continuation prompt.  The step's own failure
+        # text travels as ``step_error``, not ``error``: a top-level ``error``
+        # is the framework's "this tool call failed" signal
+        # (``tool_result_is_error``), and marking a step failed is the tool
+        # doing exactly what it was asked.
         progress = plan.get_progress()
         response = {
             "step_id": step.step_id,
@@ -1151,7 +1155,7 @@ class TodoPlugin(RunnerForwardingMixin):
             "description": step.description,
             "status": step.status.value,
             "result": step.result,
-            "error": step.error,
+            "step_error": step.error,
             "progress": progress,
         }
 

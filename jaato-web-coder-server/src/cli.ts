@@ -64,6 +64,13 @@ session:
 
 ticket:
   ttl_seconds: 60
+
+# Provider API keys a signed-in user has used before, so a new workspace
+# offers them instead of asking again.  Encrypted at rest with the key in
+# key_file (mode 0600); remove the block to run without the store.
+credentials:
+  file: credentials.json
+  key_file: credentials.key
 `;
 }
 
@@ -76,6 +83,7 @@ export function runInit(argv: string[]): number {
   const files: Array<[string, string, number]> = [
     ["app.credential", credential + "\n", 0o600],
     ["session.secret", randomBytes(48).toString("base64url") + "\n", 0o600],
+    ["credentials.key", randomBytes(48).toString("base64url") + "\n", 0o600],
     ["server.yaml", configTemplate(appId), 0o600],
   ];
   for (const [name] of files) {
@@ -85,7 +93,7 @@ export function runInit(argv: string[]): number {
     }
   }
   for (const [name, content, mode] of files) writeFileSync(join(dir, name), content, { mode });
-  process.stdout.write(`wrote ${dir}/{app.credential,session.secret,server.yaml} (mode 0600)
+  process.stdout.write(`wrote ${dir}/{app.credential,session.secret,credentials.key,server.yaml} (mode 0600)
 
 Daemon side — put this in the file named by --ws-app-credentials (mode 0600):
   {"${appId}": "${credential}"}

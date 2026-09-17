@@ -15,9 +15,35 @@ Design notes, stack rationale and the input model live in
 | UI | React 19 + Vite 7 | largest widget ecosystem for the pieces a client like this needs (virtualised lists, docking, terminals) |
 | State | Zustand, one event-sourced reducer | the protocol is a stream of typed events; the store folds them, components subscribe to slices |
 | Protocol | `@jaato/sdk` (workspace `file:` dep, source-aliased) | codegen'd event types stay in lockstep with `events.py`; no hand-written event mirror |
-| Styling | Tailwind v4 + CSS variables | the eleven base colours of the TUI's `themes/*.json` become CSS custom properties, so both clients share one palette definition |
+| Styling | Tailwind v4 + CSS variables | the eleven base colours of the TUI's `themes/*.json` become CSS custom properties, so both clients share one palette definition; the redesign's plates, chrome type and interface accent are one layer on top of them (see [Look](#look)) |
 | Rendering | own `<j-*>` + markdown parsers, no `innerHTML` | the server emits neutral markup (`<j-code>`, `<j-table>`, Pygments token classes); the client only maps classes to theme colours |
 | Tests | Vitest (protocol, store) + Playwright (UI against a scripted mock daemon) | |
+
+## Look
+
+The client is drawn on a blueprint (Claude Design, *Jaato Web UI
+Redesign*, proposal 01c): square, hairline-bordered **plates** with
+registration marks at their corners, **Barlow Condensed** for what the
+interface says (kickers, buttons, tab names) and monospace reserved for
+what the daemon said (ids, paths, models, arguments), and one **steel**
+interface accent carrying the chrome while the theme's own colours shrink
+to state glyphs.  The light face (`theme light`, the default) is the
+design's paper ground; `theme dark` and the other four TUI themes draw the
+same structure on their own ground, because the structure is written in
+terms of the theme variables plus a derived `--c-steel`
+(`src/theme/themes.ts`).  Fonts are self-hosted from `@fontsource`, so a
+deployment behind a corporate proxy needs no font CDN.
+
+The five screens the design draws: the connect plate (what jaato is on the
+left, the one thing to do on the right, daemon settings behind a
+disclosure, the build stamp at the foot); workspaces as a table;
+new-session with resume and start side by side; the session with its
+identity in a 46px header (brand, agent tabs, workspace / model / context),
+tool calls as rows, user turns numbered in the gutter, one persistent rail
+whose Plan / Budget / Files sections open and close (same toggles as
+before: `Ctrl+P` / `Ctrl+B` / `Alt+W` and the status bar), and a 26px
+status bar; and the permission request as a full-width warning plate with
+the diff at full measure and one solid action.
 
 ## Commands are words, not `/verbs`
 
@@ -30,6 +56,26 @@ with a command word. A hint under the box always states what Enter will do.
 `.jaato/commands/`) pass through untouched and disable command proposals,
 as in the TUI. See `src/protocol/commands.ts` for the routing rules, which
 are a port of `jaato-tui/client_commands.py`.
+
+## Files go into the workspace, not the prompt
+
+Drop files on the composer, paste them, or press **Attach**, and they are
+**staged into the session's workspace** on the daemon — the same
+`StageFilesRequest` verb the premium `<jaato-task>` component uses (one
+JSON frame naming the files, one binary frame each, one answer per file;
+`docs/sdk-file-staging.md`). A strip above the box shows each file's state
+(queued / staging / ✓ staged / ✗ with the daemon's reason), the Files
+panel lists them as the daemon's monitor sees them, and the next message
+ends with one line naming the paths so the model knows where they are:
+`@path` then reads them. The strip's **into** field picks a folder for the
+files that follow; a dropped directory keeps its structure.
+
+The session picker has the same strip, for a session that should start
+with files in place: with a workspace selected they are staged before
+`session.new`; on a daemon that provisions the workspace as part of
+`session.new` they wait for its `session.info` and are staged then, still
+ahead of the first turn. The daemon caps a file at 10 MB and a request at
+50 MB; the client applies the same caps before sending.
 
 ## Run it
 
@@ -86,6 +132,24 @@ On a daemon with `--workspace-root`, the workspace list comes first; picking
 a workspace goes straight to that card whether or not the workspace already
 names a provider. The daemon's manual provider / model / API-key form is one
 click away behind `configure` on each row, never a gate.
+
+Served by `jaato-web-coder-server` with its key store enabled (`config.json`
+names `credentialsUrl`), that form's API-key field is a combobox of the keys
+you stored before for the selected provider — label and a masked hint, never
+the secret — plus "New key…". The newest one is preselected, so a second
+workspace on the same provider is one click; the key is revealed once when
+you save and forwarded to the daemon exactly as a typed one is. A
+`<provider>-auth key …` typed at the prompt is remembered the same way. The
+daemon knows nothing of the store: it is the backend's, keyed by who signed
+in (`src/app/credentials.ts`, `src/components/workspace/CredentialPicker.tsx`).
+
+Two ways out, as buttons. The workspace list's header says who is signed in
+and offers the backend's **Sign out** (which also revokes that user's
+daemon tickets); without a backend it offers **Disconnect** instead. The
+status bar's **exit** is the `exit` command: detach from the daemon and
+return to the connect screen, leaving the session on the daemon for
+`session attach` later. A page served with `autoConnect` does not connect
+straight back after an exit; the next click does (`src/app/exitIntent.ts`).
 
 ### Hosting the bundle yourself
 
@@ -194,7 +258,8 @@ src/
                input/Composer.tsx   prompts/ (Permission, Clarification, ReferenceSelection)
                panels/ (Plan, Budget, Workspace, AgentTabs)   layout/StatusBar.tsx
   screens/     ConnectScreen, WorkspaceScreen, SessionScreen
-  theme/       themes.ts (imports ../jaato-tui/themes/*.json), theme.css
+  theme/       themes.ts (imports ../jaato-tui/themes/*.json, derives the steel accent), theme.css (tokens, plates, chrome type)
+  components/layout/Plate.tsx  the redesign's unit of surface: a square hairline plate with registration marks
 mock/daemon.ts scripted daemon speaking the wire protocol, for dev + e2e
 e2e/           Playwright smoke suite
 ```
@@ -204,4 +269,5 @@ e2e/           Playwright smoke suite
 `Enter` send · `Shift+Enter` newline · `Tab` complete / re-arm proposals ·
 `Esc` dismiss proposal (send verbatim) · `Ctrl+P` plan · `Ctrl+B` budget ·
 `Alt+W` files · `Ctrl+T` expand/collapse tools · `Ctrl+A` next agent ·
-`Ctrl+O` next running tool in the popup · `Ctrl+C` (nothing selected) stop.
+`Ctrl+O` next running tool in the popup · `Ctrl+C` (nothing selected) stop ·
+drop / paste a file on the composer to stage it into the workspace.

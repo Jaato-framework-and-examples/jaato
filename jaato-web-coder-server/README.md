@@ -100,19 +100,41 @@ refused, not read):
 | `auth.oidc.required_role` | optional realm or client role that gates sign-in |
 | `session.secret_file`, `ttl`, `cookie_name` | the HttpOnly, SameSite=Lax session cookie |
 | `ticket.ttl_seconds` | lifetime asked of the daemon per ticket (default 60; the daemon accepts 1..3600) |
+| `credentials.file`, `key_file` | optional: the per-user store of provider API keys (`src/credentials.ts`), encrypted at rest with a key derived from `key_file` (0600, 32+ chars). Absent = off: the bundle shows its plain key field |
+
+### Keys a user has used before
+
+Without the store, every new workspace's configure form asks for the
+provider's API key again, because the daemon keeps it only in that
+workspace's `.env`. With `credentials:` set, the form offers the keys this
+user stored before (label and a masked hint, never the secret), plus "New
+key…"; a chosen key is revealed to the page once and forwarded to the
+daemon as `config.update`'s `api_key`, exactly as a typed one is. A
+`<provider>-auth key …` typed at the prompt is filed too, under the
+provider the daemon's `auth.setup` offer names. Owner is the OIDC `sub`.
+The daemon and the SDK know nothing of this; it is application state,
+like the session cookie. What the encryption buys and does not buy is in
+`src/credentials.ts`.
 
 ## Routes
 
 | Route | Method | |
 |---|---|---|
-| `/config.json` | GET | `{daemon, ticketUrl, loginUrl, autoConnect}` — what the bundle reads |
+| `/config.json` | GET | `{daemon, ticketUrl, loginUrl, autoConnect[, credentialsUrl]}` — what the bundle reads |
 | `/auth/login` | GET | 302 to the issuer (PKCE S256, state, nonce) |
 | `/auth/callback` | GET | finishes sign-in, sets the cookie, 302 to `/` |
 | `/auth/backchannel-logout` | POST | OIDC back-channel logout: ends matching sessions, revokes tickets |
 | `/api/session` | GET | `{user, expiresAt}` or 401 |
 | `/api/ticket` | POST | one single-use ticket; same-origin only (`Sec-Fetch-Site` / `Origin`) |
 | `/api/logout` | GET | ends the session, revokes, redirects through the issuer's logout |
+| `/api/credentials?provider=` | GET | the user's stored keys for a provider: `{entries: [{id, provider, label, hint, createdAt}]}` |
+| `/api/credentials` | POST | store `{provider, secret, label?}` → 201 `{entry}`; same-origin only |
+| `/api/credentials/<id>/reveal` | POST | `{secret}`; same-origin only |
+| `/api/credentials/<id>` | DELETE | forget; same-origin only |
 | everything else | GET | the bundle |
+
+The four credential routes exist only with a `credentials:` block; otherwise
+they are 404 and `config.json` names no `credentialsUrl`.
 
 ## Develop
 

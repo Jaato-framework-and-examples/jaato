@@ -312,8 +312,29 @@ class WSEventSinkAdapter:
         self._client_sessions[client_id] = session_id
 
     def get_client_workspace(self, client_id: str) -> Optional[str]:
-        """Get the workspace path for a client."""
-        return self._client_workspaces.get(client_id)
+        """The workspace path for a client.
+
+        What ``workspace.select`` bridged into this adapter, else the
+        selection the WS server's :class:`WorkspaceManager` holds for the
+        same client.  Two stores carried one fact -- the bridge wrote the
+        first at select time and nothing else did -- so a client whose
+        selection reached the manager by any other route (a session created
+        for it, a selection restored on reconnect) declared no workspace
+        here, and ``workspace.ignore`` refused a caller whose header named
+        one.  Reading the manager makes the selection the source of truth
+        and the local map a cache of it.
+        """
+        declared = self._client_workspaces.get(client_id)
+        if declared:
+            return declared
+        manager = getattr(self._ws, "_workspace_manager", None)
+        if manager is None:
+            return None
+        try:
+            selected = manager.get_selected_workspace(client_id=client_id)
+        except Exception:  # noqa: BLE001 -- a lookup must never fail a verb
+            return None
+        return selected.path if selected and selected.path else None
 
     def set_client_workspace(self, client_id: str, workspace_path: str) -> None:
         """Associate a workspace path with a client."""
@@ -2913,6 +2934,7 @@ class JaatoWSServer:
         await self._send_to_client(
             client_id,
             WorkspaceListEvent(
+                root=str(self._workspace_manager.workspace_root),
                 workspaces=[ws.to_dict() for ws in workspaces],
             )
         )
@@ -2926,9 +2948,16 @@ class JaatoWSServer:
         try:
             ws_info = self._workspace_manager.create_workspace(
                 name, owner=self.get_client_user(client_id))
+            # name/path are the event's declared identity fields; the dict is
+            # the whole row.  Sending the dict ALONE reached clients as an
+            # event with no name (the model dropped the undeclared key).
             await self._send_to_client(
                 client_id,
-                WorkspaceCreatedEvent(workspace=ws_info.to_dict())
+                WorkspaceCreatedEvent(
+                    name=ws_info.name,
+                    path=ws_info.path,
+                    workspace=ws_info.to_dict(),
+                )
             )
         except ValueError as e:
             await self._send_error(client_id, str(e))

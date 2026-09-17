@@ -210,7 +210,7 @@ test("a permission ASK with no prompt content falls back to the tool arguments",
   await expect(page.getByText("Permission requested for")).toBeVisible();
   await expect(page.getByRole("group", { name: /Permission request/ }).getByText("src/app.py")).toBeVisible();
   await expect(page.locator(".diff-add")).toHaveCount(0);
-  await page.getByRole("button", { name: /^y yes$/ }).click();
+  await page.getByRole("button", { name: /^yes y$/ }).click();
   await expect(page.getByText("Written (you answered")).toBeVisible();
 });
 
@@ -385,4 +385,209 @@ test("workspace mode: the manual provider form is a disclosure, not a gate", asy
   // The picker, headed by the workspace; unconfigured, so the sign-in row stays.
   await expect(page.getByTestId("session-picker")).toContainText("project-b");
   await expect(page.getByLabel("Sign in to a provider")).toBeVisible();
+});
+
+// ── Keys the sign-in backend remembers (the configure form's combobox) ──
+
+const WS_WORKSPACES = "ws://127.0.0.1:8098";
+
+/** A backend with a key store: config.json names credentialsUrl and the routes answer for one stored key. */
+async function backendWithKeyStore(page: import("@playwright/test").Page, entries: Array<{ id: string; provider: string; label: string; hint: string }>) {
+  const calls: Array<{ method: string; url: string; body?: unknown }> = [];
+  await page.route("**/config.json", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ daemon: WS_WORKSPACES, ticketUrl: "/api/ticket", credentialsUrl: "/api/credentials", autoConnect: true }) }),
+  );
+  await page.route("**/api/ticket", (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ticket: "t-1" }) }));
+  await page.route("**/api/credentials**", (route) => {
+    const req = route.request();
+    const url = new URL(req.url());
+    const rec = { method: req.method(), url: url.pathname + url.search, body: req.postDataJSON() as unknown };
+    calls.push(rec);
+    if (req.method() === "GET") {
+      const provider = url.searchParams.get("provider");
+      return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ entries: entries.filter((e) => e.provider === provider).map((e) => ({ ...e, createdAt: "2026-09-16T10:00:00Z" })) }) });
+    }
+    if (url.pathname.endsWith("/reveal")) return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ secret: "sk-revealed-0000mnop" }) });
+    if (req.method() === "DELETE") { entries.splice(0, entries.length, ...entries.filter((e) => !url.pathname.endsWith(`/${e.id}`))); return route.fulfill({ status: 204 }); }
+    const body = req.postDataJSON() as { provider: string; label?: string; secret: string };
+    const entry = { id: "new-1", provider: body.provider, label: body.label ?? `${body.provider} …${body.secret.slice(-4)}`, hint: body.secret.slice(-4) };
+    entries.push(entry);
+    return route.fulfill({ status: 201, contentType: "application/json", body: JSON.stringify({ entry: { ...entry, createdAt: "2026-09-16T11:00:00Z" } }) });
+  });
+  return calls;
+}
+
+test("a stored key is offered for the provider, preselected, and revealed only when applied", async ({ page }) => {
+  const calls = await backendWithKeyStore(page, [{ id: "k1", provider: "anthropic", label: "work", hint: "mnop" }]);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Configure workspace project-b" }).click();
+  const form = page.getByLabel("Manual provider configuration");
+  await form.getByLabel("Provider").selectOption("anthropic");
+  const picker = form.getByLabel("API key");
+  // The newest stored key for this provider is the default; the secret never came down.
+  await expect(picker).toHaveValue("k1");
+  await expect(form.getByRole("option", { name: "work (…mnop)" })).toHaveCount(1);
+  expect(calls.some((c) => c.url.includes("/reveal"))).toBe(false);
+  // Another provider has no stored key: the list says so and offers a new one.
+  await form.getByLabel("Provider").selectOption("openrouter");
+  await expect(picker).toHaveValue("");
+  await expect(form.getByRole("option", { name: "— no stored key —" })).toHaveCount(1);
+  await form.getByLabel("Provider").selectOption("anthropic");
+  await expect(picker).toHaveValue("k1");
+  // Applying reveals it once and forwards it to the daemon as the api_key.
+  await form.getByRole("button", { name: "Save configuration" }).click();
+  await expect(page.getByText("configured", { exact: true })).toBeVisible();
+  expect(calls.filter((c) => c.url === "/api/credentials/k1/reveal" && c.method === "POST")).toHaveLength(1);
+});
+
+test("a new key is stored under a label before it is applied, and a stored one can be forgotten", async ({ page }) => {
+  const calls = await backendWithKeyStore(page, [{ id: "k1", provider: "anthropic", label: "work", hint: "mnop" }]);
+  await page.goto("/");
+  await page.getByRole("button", { name: "Configure workspace project-b" }).click();
+  const form = page.getByLabel("Manual provider configuration");
+  await form.getByLabel("Provider").selectOption("anthropic");
+  await expect(form.getByLabel("API key")).toHaveValue("k1");
+  await form.getByRole("button", { name: "Forget stored key work" }).click();
+  await expect(form.getByRole("option", { name: "work (…mnop)" })).toHaveCount(0);
+  expect(calls.some((c) => c.method === "DELETE" && c.url === "/api/credentials/k1")).toBe(true);
+  await form.getByLabel("API key").selectOption("__new__");
+  await form.getByLabel("New API key").fill("sk-typed-000000wxyz");
+  await form.getByLabel("Key label").fill("personal");
+  await form.getByRole("button", { name: "Save configuration" }).click();
+  await expect(page.getByText("configured", { exact: true })).toBeVisible();
+  const stored = calls.find((c) => c.method === "POST" && c.url === "/api/credentials");
+  expect(stored?.body).toEqual({ provider: "anthropic", secret: "sk-typed-000000wxyz", label: "personal" });
+  // The typed key is now a stored one: the list carries it and it is the selection.
+  await expect(form.getByRole("option", { name: "personal (…wxyz)" })).toHaveCount(1);
+  await expect(form.getByLabel("API key")).toHaveValue("new-1");
+});
+
+test("without a key store the configure form keeps its plain key field", async ({ page }) => {
+  await page.goto("/");
+  await page.getByPlaceholder("ws://host:8080").fill(WS_WORKSPACES);
+  await page.getByRole("button", { name: "Connect" }).click();
+  await page.getByRole("button", { name: "Configure workspace project-b" }).click();
+  const form = page.getByLabel("Manual provider configuration");
+  await expect(form.getByLabel("API key")).toHaveAttribute("type", "password");
+  await expect(form.getByTestId("credential-picker")).toHaveCount(0);
+});
+
+// ── Leaving: Exit in the chat, Sign out on the workspace list ─────────
+
+test("the status bar's Exit detaches like the exit command, and an autoConnect page does not connect straight back", async ({ page }) => {
+  await page.route("**/config.json", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ daemon: WS, autoConnect: true }) }),
+  );
+  await page.goto("/");
+  await page.getByRole("button", { name: /default/ }).click();
+  await expect(page.getByText("Connected to the mock daemon")).toBeVisible();
+  await page.getByRole("button", { name: "Exit (detach from the session)" }).click();
+  // Back on the connect screen, and staying there: the page waits for a click.
+  const open = page.getByRole("button", { name: "Open my environment" });
+  await expect(open).toBeVisible();
+  await page.waitForTimeout(700);
+  await expect(open).toBeVisible();
+  await expect(page.getByRole("button", { name: /default/ })).toHaveCount(0);
+  // The click reconnects (the mark was spent); a fresh load would have connected on its own again.
+  await open.click();
+  await expect(open).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Exit (detach from the session)" }).or(page.getByTestId("session-picker"))).toBeVisible();
+});
+
+test("the workspace list says who is signed in and offers the backend's Sign out", async ({ page }) => {
+  await page.route("**/config.json", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ daemon: WS_WORKSPACES, ticketUrl: "/api/ticket", autoConnect: true }) }),
+  );
+  await page.route("**/api/ticket", (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ticket: "t-1" }) }));
+  await page.route("**/api/session", (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ user: "alice" }) }));
+  await page.goto("/");
+  await expect(page.getByText("Workspaces", { exact: true })).toBeVisible();
+  await expect(page.getByText("Signed in as")).toBeVisible();
+  await expect(page.getByText("alice", { exact: true })).toBeVisible();
+  const signOut = page.getByRole("link", { name: "Sign out" });
+  await expect(signOut).toHaveAttribute("href", "/api/logout");
+  // No backend: nothing to sign out of, so the way out is the connection itself.
+  await expect(page.getByRole("button", { name: "Disconnect" })).toHaveCount(0);
+});
+
+test("without a backend the workspace list offers Disconnect, which is the exit command", async ({ page }) => {
+  await page.goto("/");
+  await page.getByPlaceholder("ws://host:8080").fill(WS_WORKSPACES);
+  await page.getByRole("button", { name: "Connect" }).click();
+  await expect(page.getByRole("link", { name: "Sign out" })).toHaveCount(0);
+  await page.getByRole("button", { name: "Disconnect" }).click();
+  await expect(page.getByRole("button", { name: "Connect" })).toBeVisible();
+});
+
+test("the rail's drag handle resizes it, by pointer and by keyboard", async ({ page }) => {
+  await openSession(page);
+  const rail = page.getByRole("complementary", { name: "Session rail" });
+  const handle = page.getByRole("separator", { name: "Resize the session rail" });
+  expect(Math.round((await rail.boundingBox())!.width)).toBe(300);
+  const box = (await handle.boundingBox())!;
+  await page.mouse.move(box.x + box.width / 2, box.y + 200);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width / 2 - 120, box.y + 200, { steps: 6 });
+  await page.mouse.up();
+  expect(Math.round((await rail.boundingBox())!.width)).toBe(420);
+  await handle.focus();
+  await page.keyboard.press("ArrowRight");
+  expect(Math.round((await rail.boundingBox())!.width)).toBe(404);
+  // Remembered per browser: a new session in the same tab reopens at that width.
+  await openSession(page);
+  expect(Math.round((await page.getByRole("complementary", { name: "Session rail" }).boundingBox())!.width)).toBe(404);
+});
+
+test("files attached in the composer are staged into the workspace, listed in Files, and named by the next message", async ({ page }) => {
+  await openSession(page);
+  // A pick through the strip's hidden input (a drop or a paste reach the same call).
+  await page.getByLabel("Attach files").setInputFiles([
+    { name: "notes.md", mimeType: "text/markdown", buffer: Buffer.from("# notes\nhello\n") },
+    { name: "data.bin", mimeType: "application/octet-stream", buffer: Buffer.from([1, 2, 3, 4]) },
+  ]);
+  const strip = page.getByRole("group", { name: "Attached files" });
+  await expect(strip.getByText("notes.md")).toBeVisible();
+  await expect(strip.locator("li[data-status=staged]")).toHaveCount(2);
+  await expect(page.getByText("Staged into the workspace: notes.md, data.bin")).toBeVisible();
+  // The daemon's file monitor reports them, so the Files panel lists them.
+  await page.getByRole("button", { name: "Toggle workspace changes (Alt+W)" }).click();
+  const panel = page.getByRole("region", { name: "Files" });
+  await expect(panel.getByText("+ notes.md")).toBeVisible();
+  await expect(panel.getByText("+ data.bin")).toBeVisible();
+  // The next message names them and the strip is cleared.
+  await composer(page).fill("summarise the notes");
+  await composer(page).press("Enter");
+  await expect(page.getByText("Attached files, staged in the workspace: notes.md, data.bin")).toBeVisible();
+  await expect(strip).toHaveCount(0);
+});
+
+test("a file refused by the daemon shows the daemon's reason on its chip", async ({ page }) => {
+  await openSession(page);
+  // Over the daemon's per-file cap: refused by the client's precheck with the daemon's own words, and never sent.
+  await page.getByLabel("Attach files").setInputFiles([{ name: "big.bin", mimeType: "application/octet-stream", buffer: Buffer.alloc(11 * 1024 * 1024) }]);
+  const strip = page.getByRole("group", { name: "Attached files" });
+  await expect(strip.locator("li[data-status=failed]")).toHaveCount(1);
+  await expect(strip.getByText(/per-file cap/)).toBeVisible();
+  await expect(page.getByText(/Staged into the workspace/)).toHaveCount(0);
+  // The failed chip goes with the next send, and the prompt gains no footer for it.
+  await composer(page).fill("hello");
+  await composer(page).press("Enter");
+  await expect(strip).toHaveCount(0);
+  await expect(page.getByText(/Attached files, staged/)).toHaveCount(0);
+});
+
+test("files attached on the session picker are in the workspace when the session opens", async ({ page }) => {
+  await page.goto("/");
+  await page.getByPlaceholder("ws://host:8080").fill(WS);
+  await page.getByRole("button", { name: "Connect" }).click();
+  const strip = page.getByRole("group", { name: "Attached files" });
+  await expect(strip).toBeVisible();
+  await page.getByLabel("Attach files").setInputFiles([{ name: "brief.txt", mimeType: "text/plain", buffer: Buffer.from("do the thing") }]);
+  // No workspace yet on this daemon: the file waits for the session.
+  await expect(strip.locator("li[data-status=queued]")).toHaveCount(1);
+  await page.getByRole("button", { name: /default/ }).click();
+  await expect(page.getByText("Connected to the mock daemon")).toBeVisible();
+  await expect(page.getByText("Staged into the workspace: brief.txt")).toBeVisible();
+  await page.getByRole("button", { name: "Toggle workspace changes (Alt+W)" }).click();
+  await expect(page.getByRole("region", { name: "Files" }).getByText("+ brief.txt")).toBeVisible();
 });
