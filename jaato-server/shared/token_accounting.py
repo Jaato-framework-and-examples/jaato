@@ -89,12 +89,15 @@ class TokenLedger:
         one file per session exactly as ``trace.session_log`` is.  An empty
         value means "no ledger", not "the default name".
         """
-        raw = self._path if self._path is not None else os.environ.get(LEDGER_PATH_ENV)  # env: output path for the token-accounting JSONL ledger
+        # Session-scoped reads go through the per-session context first,
+        # so two sessions on one daemon do not read each other's paths.
+        from .session_context import get_session_env
+        raw = self._path if self._path is not None else get_session_env(LEDGER_PATH_ENV)
         if not raw:
             return None
         if os.path.isabs(raw):
             return raw
-        workspace = os.environ.get("JAATO_WORKSPACE_ROOT")
+        workspace = get_session_env("JAATO_WORKSPACE_ROOT")
         return os.path.join(workspace, raw) if workspace else raw
 
     def _record(self, stage: str, details: Dict[str, Any]) -> None:
