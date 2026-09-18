@@ -313,6 +313,7 @@ jaato-scaffold explain runtime              # session/runner entities · workspa
 jaato-scaffold validate <profile.yaml|workspace>   # lint a profile vs the live registry
 jaato-scaffold new client --workspace DIR --provider P --model M   # generate a starting client
 jaato-scaffold new client --transport ws --url wss://host:8080 --recoverable --ca ca.pem ...
+jaato-scaffold new gitignore --workspace DIR       # .jaato/: runtime state ignored, authored assets committable
 jaato-scaffold new <archetype> ... --dry-run       # the exact tree it would write, unwritten
 ```
 

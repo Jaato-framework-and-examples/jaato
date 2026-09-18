@@ -116,28 +116,66 @@ def _resolver_registered(scheme: str) -> bool:
         return False
 
 
-def _ensure_env_gitignore(ws: Path, plan: "_Plan") -> None:
-    """Ensure the workspace ``.gitignore`` ignores ``.env`` (keeps
-    ``.env.example`` tracked).  Converting to env-var credentials means the
-    user now puts a LIVE key in ``.env``; an absent ignore rule turns that into
-    a leak.  Creates or appends as needed, idempotently.
+_ENV_RULE_BLOCK = ("# Local env holds a LIVE provider credential — never commit it.\n"
+                   ".env\n"
+                   "!.env.example\n")
 
-    Writes go through *plan* rather than the filesystem directly, so
-    ``--dry-run`` reports this file without creating it.
+
+def _with_env_rule(text: Optional[str]) -> Optional[str]:
+    """*text* with the ``.env`` rule appended, or ``None`` if it has one.
+
+    Converting to env-var credentials means the user now puts a LIVE key in
+    ``.env``; an absent ignore rule turns that into a leak.  Keeps
+    ``.env.example`` tracked.  Pure — the caller decides whether and how the
+    result reaches disk — so it composes with the ``.jaato/`` block in
+    :func:`_ensure_gitignore` instead of racing it for the same file.
+
+    Args:
+        text: The current ``.gitignore`` text, or ``None`` for no file.
     """
-    gi = ws / ".gitignore"
-    block = ("# Local env holds a LIVE provider credential — never commit it.\n"
-             ".env\n"
-             "!.env.example\n")
-    if not gi.exists():
-        plan.write(gi, block)
-        return
-    text = gi.read_text(encoding="utf-8")
-    lines = {ln.strip() for ln in text.splitlines()}
-    if ".env" in lines:
-        return  # already ignored
+    if text is None:
+        return _ENV_RULE_BLOCK
+    if ".env" in {ln.strip() for ln in text.splitlines()}:
+        return None  # already ignored
     prefix = text if text.endswith("\n") else text + "\n"
-    plan.write(gi, prefix + "\n" + block, action="update")
+    return prefix + "\n" + _ENV_RULE_BLOCK
+
+
+def _ensure_gitignore(ws: Path, plan: "_Plan", *, env_rule: bool) -> None:
+    """Bring the workspace ``.gitignore`` up to date, in ONE write.
+
+    Two blocks share the file.  The ``.jaato/`` block (:mod:`gitignore`)
+    is needed by every archetype that writes under ``.jaato/``: without it
+    a workspace either commits its session records, logs and stored
+    credentials, or ignores the directory wholesale and loses the profiles
+    its sessions ran under.  The ``.env`` rule is needed only by the
+    secrets modes that put a live key in ``.env``.  They are composed here
+    rather than written by two helpers because a plan may be a rehearsal:
+    the second helper would read the file the first never wrote, and both
+    would report ``create``.
+
+    Idempotent — a file already carrying what it needs is not touched, so a
+    re-run of ``new`` leaves no trace, and an existing line is never
+    rewritten (a wholesale ``.jaato/`` rule is neutralised by the block's
+    leading ``!.jaato/`` instead).  Writes go through *plan*, so
+    ``--dry-run`` reports this file without creating it.
+
+    Args:
+        ws: The workspace root.
+        plan: The invocation's plan; the write is recorded on it.
+        env_rule: Also ensure the ``.env`` rule (``--secrets env`` / ``none``).
+    """
+    from . import gitignore as _gitignore
+    gi = ws / ".gitignore"
+    original = gi.read_text(encoding="utf-8") if gi.exists() else None
+    text = original
+    if env_rule:
+        text = _with_env_rule(text) or text
+    merged = _gitignore.merge(text)
+    text = merged if merged is not None else text
+    if text is None or text == original:
+        return
+    plan.write(gi, text, action="update" if original is not None else "create")
 
 
 def _ws_secrets_marker(ws: Path) -> Path:
@@ -350,9 +388,67 @@ def run(args) -> int:
         return _new_client_archetype(args, archetype)
     if archetype == _archetypes.PROCESSOR:
         return _new_processor(args)
+    if archetype == _archetypes.GITIGNORE:
+        return _new_gitignore(args)
     print(f"unknown archetype {archetype!r} — one of: "
           + ", ".join(_archetypes.accepted()))
     return 2
+
+
+# ------------------------------------------------------------- gitignore
+
+def _new_gitignore(args) -> int:
+    """``new gitignore``: the ``.jaato/`` block on its own.
+
+    For a workspace whose assets were written by hand, or scaffolded before
+    every archetype merged the block — it is the fix ``validate`` names in
+    its ``gitignore_*`` findings.  Idempotent: on a workspace that already
+    carries the block it writes nothing and says so, exit 0, so a script can
+    run it unconditionally.
+
+    Emit-then-check, like every archetype: the file is read back through
+    the daemon's own parser — the same assessment ``validate`` runs — and
+    the run fails if an authored entry is still ignored or a state probe is
+    not, which is what a wholesale rule this block failed to neutralise
+    would look like.
+    """
+    from . import gitignore as _gitignore
+
+    ws = Path(args.workspace).resolve()
+    dry_run = bool(getattr(args, "dry_run", False))
+    doc = _archetypes.resolve(_archetypes.GITIGNORE)
+    plan = _Plan(ws, doc, dry_run=dry_run)
+    _ensure_gitignore(ws, plan, env_rule=False)
+
+    if dry_run:
+        print(f"`jaato-scaffold new gitignore` would write into {ws}:\n")
+        if plan.entries:
+            print(plan.render())
+        else:
+            print("  (nothing — .gitignore already carries the .jaato/ block)")
+        _dry_run_footer(doc, "the read-back check")
+        return 0
+
+    if not plan.entries:
+        print(f".gitignore in {ws} already carries the .jaato/ block — "
+              f"nothing written")
+        return 0
+    print(f"scaffolded .gitignore in {ws}:")
+    for w in plan.labels:
+        print(f"  + {w}")
+
+    print("\nreading it back through the daemon's gitignore parser …")
+    verdict = _gitignore.assess(ws)
+    if not verdict.clean:
+        hidden = ", ".join(verdict.hidden_authored) or "-"
+        leaked = ", ".join(p for p, _ in verdict.unignored_state) or "-"
+        print(f"✘ the block did not take — generator bug: still ignored "
+              f"[{hidden}]; still committable [{leaked}]")
+        return 1
+    print("✓ authored .jaato/ entries committable, runtime state ignored.")
+    print("\nnext:\n  git status   # profiles/, agents/, ... show as untracked;"
+          " sessions/ and logs/ do not")
+    return 0
 
 
 # --------------------------------------------------------- client archetypes
@@ -1082,6 +1178,9 @@ def _new_client_archetype(args, archetype: str) -> int:
         gate_skipped = _emit_sweep_gate(plan, ws, gate_name,
                                         subs["__PROVENANCE__"],
                                         provider, model, bool(args.force))
+        # The gate lands under .jaato/ (processor, schema, profile), so the
+        # workspace needs the block that keeps it committable.
+        _ensure_gitignore(ws, plan, env_rule=False)
 
     if dry_run:
         print(f"`jaato-scaffold new {archetype}` would write into {ws}:\n")
@@ -1532,6 +1631,9 @@ def _new_processor(args) -> int:
                   f"--workspace {ws}")
     plan.write(target, _tpl.render(name, provenance),
                "update" if target.exists() else "create")
+    # The module lands under .jaato/scripts/, so the workspace needs the
+    # block that keeps it committable while sessions/ and logs/ stay ignored.
+    _ensure_gitignore(ws, plan, env_rule=False)
 
     if dry_run:
         print(f"`new processor --name {name}` would write into {ws}:\n")
@@ -1855,8 +1957,10 @@ def _new_profile_set(args) -> int:
                    f"{key_env_var}="]
     _emit_set_env(ws, plan, provider, active, args.set, kind, key_env_var)
 
-    if kind in ("env", "none"):
-        _ensure_env_gitignore(ws, plan)
+    # Every profile-set puts authored assets under .jaato/, so the block that
+    # keeps them committable while sessions/ and logs/ stay ignored is
+    # unconditional; the .env rule only when the credential lives there.
+    _ensure_gitignore(ws, plan, env_rule=kind in ("env", "none"))
     if getattr(args, "secrets", None):
         _write_ws_secrets(ws, raw_secrets, plan)
 

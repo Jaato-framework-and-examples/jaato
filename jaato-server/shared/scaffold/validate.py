@@ -2034,6 +2034,83 @@ def validate_env(workspace: str) -> List[Diagnostic]:
     return out
 
 
+def validate_gitignore(workspace: str) -> List[Diagnostic]:
+    """Validate what the workspace ``.gitignore`` does to ``.jaato/``.
+
+    ``.jaato/`` mixes authored assets (profiles, agents, schemas,
+    processors) with runtime state (sessions, logs, memories, caches, and
+    the ``<provider>_auth.json`` a stored credential lands in), so a
+    ``.gitignore`` is wrong in one of two directions: it ignores the
+    directory wholesale, and the assets cannot be committed, or it ignores
+    nothing under it, and the state is one ``git add -A`` from a remote.
+    Judged by EFFECT through the daemon's own parser
+    (:func:`shared.scaffold.gitignore.assess`), never by spelling — a file
+    that reaches the right result with its own lines is not reported.
+
+    Three findings, all ``warn``: a workspace need not be a repository, and
+    the remedy is one command that leaves every existing line in place.
+
+    - ``gitignore_missing`` — the workspace is a repository ROOT (a
+      ``.git`` beside ``.jaato/``) with no ``.gitignore`` at all.  A nested
+      workspace with no file of its own is not reported: its parent's rules
+      are unknown here, and reading their absence as "unignored" would warn
+      on every eval workspace sitting under an ignored parent.
+    - ``gitignore_hides_jaato_assets`` — authored entries are ignored.  Says
+      so explicitly when a rule excludes ``.jaato/`` itself, because that is
+      the one case no later ``!.jaato/<x>/`` line can repair.
+    - ``gitignore_leaks_jaato_state`` — state probes are NOT ignored.
+
+    Read-only, like the rest of ``validate``; the fix is
+    ``jaato-scaffold new gitignore``, which every finding names.  Silent
+    when the workspace has no ``.jaato/`` — there is nothing to protect.
+    """
+    from . import gitignore as _gitignore
+
+    ws = Path(workspace).resolve()
+    out: List[Diagnostic] = []
+    if not (ws / ".jaato").is_dir():
+        return out
+    verdict = _gitignore.assess(ws)
+    fix = f"jaato-scaffold new gitignore --workspace {ws}"
+    if not verdict.exists:
+        if (ws / ".git").exists():
+            out.append(Diagnostic(
+                "warn", "gitignore_missing",
+                "no .gitignore in this repository root — .jaato/ carries "
+                "runtime state beside the authored assets, so sessions/, "
+                "logs/, memories/ and any stored <provider>_auth.json are "
+                f"one `git add -A` from being committed.  Run: {fix}",
+                profile=".gitignore"))
+        return out
+    if verdict.hidden_authored:
+        # A wholesale rule hides every entry; listing all of them would bury
+        # the one fact that matters — that no `!` line can repair it.
+        hidden = ("every authored entry (profiles/, agents/, scripts/, ...) — "
+                  "a rule excludes .jaato/ itself, so no later `!.jaato/<x>/` "
+                  "line can re-include anything beneath it"
+                  if verdict.dir_excluded
+                  else ", ".join(verdict.hidden_authored))
+        out.append(Diagnostic(
+            "warn", "gitignore_hides_jaato_assets",
+            f".gitignore ignores {hidden} under .jaato/; the authored half "
+            f"of this workspace cannot be committed.  Run: {fix} (appends "
+            f"`!.jaato/` + `.jaato/*` + a re-include per authored entry; "
+            f"your existing lines are left in place)",
+            profile=".gitignore"))
+    if verdict.unignored_state:
+        leaked = ", ".join(probe for probe, _ in verdict.unignored_state)
+        cred = (" — including a stored provider credential"
+                if any("CREDENTIAL" in what
+                       for _, what in verdict.unignored_state) else "")
+        out.append(Diagnostic(
+            "warn", "gitignore_leaks_jaato_state",
+            f".gitignore does not ignore {leaked} under .jaato/{cred}: "
+            f"runtime state is one `git add -A` from being committed.  "
+            f"Run: {fix}",
+            profile=".gitignore"))
+    return out
+
+
 # ------------------------------------------------------------- single file
 
 def validate_profile_file(file_path: str) -> List[Diagnostic]:
@@ -2489,8 +2566,9 @@ def validate_workspace(
         out.append(Diagnostic("error", "parse_error", err, profile=stem,
                               tier=_tier(stem)))
 
-    # workspace-level .env cross-references (provider / profile-set)
-    for d in validate_env(str(ws)):
+    # workspace-level checks: .env cross-references (provider / profile-set)
+    # and what .gitignore does to .jaato/ (assets committable, state not)
+    for d in validate_env(str(ws)) + validate_gitignore(str(ws)):
         d.tier = "workspace"
         out.append(d)
 
