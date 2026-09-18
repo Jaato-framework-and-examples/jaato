@@ -162,6 +162,34 @@ can refuse a table it does not understand:
 A new variable is additive and does not bump `JAATO_EVAL_CONTRACT`: a
 driver that has never heard of one behaves exactly as it did.
 
+**A `script` grader is handed the same table, from the same builder.** So
+a driver task scores itself with the package that drove it:
+
+```yaml
+harness:
+  kind: driver
+  run: '"$JAATO_EVAL_PYTHON" -m ta_cascade.analyze'
+graders:
+  - kind: script
+    run: '"$JAATO_EVAL_PYTHON" -m ta_cascade.score'
+```
+
+Before jaato #1127 only the first line worked. The grader built its own
+environment out of `os.environ` plus the params, so `$JAATO_EVAL_PYTHON`
+expanded to nothing, the shell reported exit 127, and the adapter read
+that — correctly, for what it could see — as a missing toolchain and
+**BLOCKED every arm**, while every arm's driver exited 0 with its
+workspace on disk. There was no way round it in a manifest: `python` is
+the `PATH` bet this table exists to remove, and an absolute path is a
+per-host constant in a committed file.
+
+The rows a grader is handed differ only in what it has: its
+`JAATO_EVAL_PARAM_*` are the arm's `input.params` on a driver arm and its
+`agent_params` on a session arm — the mapping the arm ran with, either
+way — and `JAATO_EVAL_CASCADE_ID` is absent on a session arm whose task
+declared no pool, since such an arm runs un-cid'd. Reaching a second
+consumer is additive, so this did not bump `JAATO_EVAL_CONTRACT` either.
+
 The driver opens its sessions with `workspace_path=$JAATO_EVAL_WORKSPACE`,
 `config_root=$JAATO_EVAL_CONFIG_ROOT`, `env_file=".env"` and
 `cascade_driver_id=$JAATO_EVAL_CASCADE_ID`. `tasks/driver-probe` is a
@@ -255,17 +283,28 @@ The `judge` rubric is a completion schema, so the score comes back typed —
 the provider enforces the shape at sampling time. There is no free-text
 score to parse, and changing what "good" means is a schema edit.
 
-### A script grader can see the task's inputs
+### A script grader can see the arm it is grading
 
-`processor` and `judge` graders get a `GraderContext`, which carries
-`agent_params`. A shell command cannot read a Python object, so the
-`script` grader hands the same inputs over as environment variables:
+`processor` and `judge` graders get a `GraderContext`. A shell command
+cannot read a Python object, so the `script` grader hands the arm over as
+environment variables — the **same table a driver arm is handed**, from
+the same builder, so the two cannot disagree about a name or a value:
 
 | variable | is |
 |---|---|
 | `JAATO_EVAL` | `1` — this is a graded run |
-| `JAATO_EVAL_PARAM_<KEY>` | one `agent_params` entry, key upper-cased, non-identifier characters replaced by `_` |
+| `JAATO_EVAL_CONTRACT` | `1` — the version of this table |
+| `JAATO_EVAL_PARAM_<KEY>` | one input entry, key upper-cased, non-identifier characters replaced by `_` |
 | `JAATO_EVAL_PARAMS` | the whole mapping as JSON, under the author's own key spellings |
+| `JAATO_EVAL_PYTHON` | the interpreter jaato-eval runs under, and therefore the one that **has `jaato_sdk`** — write `run: '"$JAATO_EVAL_PYTHON" score.py'`, never `python` |
+| `JAATO_EVAL_WORKSPACE` | the mutated workspace, which is also the working directory |
+| `JAATO_EVAL_CONFIG_ROOT` | the task's read-only `.jaato/` |
+| `JAATO_EVAL_SOCKET` | the daemon the **arm** ran on, for a grader that opens its own session — **absent** when the sweep uses the SDK default |
+| `JAATO_EVAL_CASCADE_ID` | the cid the arm's sessions were stamped with — **absent** for a session arm whose task declared no pool |
+
+The last three follow the absence rule below: a variable the arm has no
+value for is *unset*, so `[ -n "$JAATO_EVAL_SOCKET" ]` is a working test
+rather than one that always passes.
 
 So a check that depends on an input says so in the manifest:
 

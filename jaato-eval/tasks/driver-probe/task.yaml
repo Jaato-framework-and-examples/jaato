@@ -50,8 +50,17 @@ budget:
     - at: 100%
       action: abort
 
+# Two graders, because a driver arm's scorer is the other half of the
+# contract (#1127).  The first is a shell one-liner over the tree; the
+# second is `fixture/score.py`, invoked through `$JAATO_EVAL_PYTHON` for
+# the same reason `run` above is — a grader that has to import the package
+# it graded needs the interpreter that has it, and until #1127 that
+# variable was empty here, so the shell ran `""` and the arm BLOCKED at
+# exit 127 with its driver already exited 0.
 graders:
   - kind: script
     run: 'test -f answer.txt && grep -qx "$JAATO_EVAL_PARAM_WORD" answer.txt && cmp -s answer.txt echo.txt'
+  - kind: script
+    run: '"$JAATO_EVAL_PYTHON" score.py'
 
 repeats: 2

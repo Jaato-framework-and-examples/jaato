@@ -19,6 +19,20 @@ notice when the input changes: re-point a task at a different issue id and
 every arm is graded against the previous one's criteria, reported as FAIL
 with no error anywhere (jaato #762).  Exporting the parameters lets a
 grader follow the input by construction instead of by remembering.
+
+The third is *which* arm.  The parameters were exported here first and
+lifted into :mod:`jaato_eval.params` when a driver arm became the second
+consumer, on the argument that a grader and the thing it grades must read
+the SAME variable for the same input.  The rest of the contract did not
+follow, and the row that cost something was ``JAATO_EVAL_PYTHON``: a
+driver task is told to write ``run: '"$JAATO_EVAL_PYTHON" -m pkg.driver'``
+rather than bet on the host's ``PATH``, and a scorer written the same way
+got an empty variable, asked the shell to execute ``""``, and was BLOCKED
+as a missing toolchain on every arm — while the arms themselves exited 0
+(jaato #1127).  The whole table now comes from one builder
+(:func:`jaato_eval.contract.arm_environment`), so the interpreter, the
+workspace, the config root, the socket and the cascade id say the same
+thing on both sides of the run.
 """
 from __future__ import annotations
 
@@ -26,8 +40,8 @@ import os
 import subprocess
 from typing import List
 
+from ..contract import arm_environment
 from ..manifest import GraderSpec
-from ..params import param_env as _param_env
 from ..sign_off import describe_unsigned
 from ..verdict import FAIL, PASS, Verdict
 from .base import GraderContext, blocked
@@ -55,12 +69,15 @@ class ScriptGrader:
         expect_exit: Exit code counted as PASS (default 0).  For tasks
             whose success condition is a command *failing*.
 
-    Environment the command inherits, on top of ``os.environ``:
-        ``JAATO_EVAL=1``: this is a graded run, not an interactive one.
-        ``JAATO_EVAL_PARAM_<KEY>``: one variable per ``agent_params``
-            entry, key upper-cased with non-identifier characters
-            replaced by ``_``.
-        ``JAATO_EVAL_PARAMS``: the whole mapping as JSON.
+    Environment the command inherits, on top of ``os.environ``: the arm
+    contract, from :func:`jaato_eval.contract.arm_environment` — the same
+    builder a driver arm is handed, so the two cannot disagree about a
+    name or a value.  ``JAATO_EVAL=1`` says this is a graded run;
+    ``JAATO_EVAL_PARAM_<KEY>`` and ``JAATO_EVAL_PARAMS`` carry the arm's
+    inputs; ``JAATO_EVAL_PYTHON``, ``JAATO_EVAL_WORKSPACE``,
+    ``JAATO_EVAL_CONFIG_ROOT``, ``JAATO_EVAL_SOCKET`` and
+    ``JAATO_EVAL_CASCADE_ID`` are the rest of the table, the last three
+    ABSENT rather than empty when the arm has none.
 
     So a grader that depends on an input says so in the manifest::
 
@@ -68,7 +85,14 @@ class ScriptGrader:
           run: bash acceptance.sh compliant "$JAATO_EVAL_PARAM_ISSUE_ID"
 
     rather than baking the value into ``acceptance.sh``, where nothing
-    can notice when the task's input moves on without it.
+    can notice when the task's input moves on without it — and a grader
+    that has to import the package it grades names the interpreter that
+    has it::
+
+        - kind: script
+          run: '"$JAATO_EVAL_PYTHON" -m ta_cascade.score'
+
+    rather than ``python``, which is a bet on the runner's ``PATH``.
     """
 
     def __init__(self, spec: GraderSpec) -> None:
@@ -104,7 +128,13 @@ class ScriptGrader:
         timeout = float(self.spec.config.get("timeout_seconds", 600))
         expect_exit = int(self.spec.config.get("expect_exit", 0))
 
-        param_env, collision = _param_env(context.agent_params)
+        contract_env, collision = arm_environment(
+            workspace=context.workspace_path,
+            config_root=context.config_root,
+            params=context.agent_params,
+            cascade_id=context.cascade_id,
+            socket_path=context.socket_path,
+        )
         if collision:
             return blocked(self.spec, claim, collision)
 
@@ -112,7 +142,11 @@ class ScriptGrader:
             proc = subprocess.run(
                 command, shell=True, cwd=str(context.workspace_path),
                 capture_output=True, text=True, timeout=timeout,
-                env={**os.environ, "JAATO_EVAL": "1", **param_env},
+                # The contract overlays the inherited environment rather
+                # than the other way round: a sweep started from inside
+                # another graded run must not have its parent's arm
+                # described to this one's grader.
+                env={**os.environ, **contract_env},
             )
         except subprocess.TimeoutExpired:
             return blocked(self.spec, claim,

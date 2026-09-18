@@ -51,6 +51,17 @@ not understand rather than guess at one.  A NEW variable is additive and
 does not bump the version: a driver that has never heard of it behaves
 exactly as it did.
 
+A ``script`` GRADER receives the same table, from the same builder
+(:func:`jaato_eval.contract.arm_environment`).  That is what lets a
+driver task say ``run: '"$JAATO_EVAL_PYTHON" -m pkg.driver'`` and then
+grade it with ``run: '"$JAATO_EVAL_PYTHON" -m pkg.score'`` — the two
+naming ONE interpreter, as they already name one set of parameters
+(jaato #1127).  Its ``JAATO_EVAL_PARAM_*`` are the arm's
+``input.params`` for a driver arm and its ``agent_params`` for a session
+arm, which is the same mapping the arm ran with either way; its
+``JAATO_EVAL_CASCADE_ID`` is absent on a session arm whose task declared
+no pool, under the ``JAATO_EVAL_SOCKET`` rule below.
+
 CREDENTIALS ARE NOT IN THE CONTRACT, AND ARE NOT IN THE FIXTURE
 ===============================================================
 
@@ -124,7 +135,6 @@ import asyncio
 import json
 import os
 import signal
-import sys
 import time
 import uuid
 from collections import deque
@@ -133,12 +143,15 @@ from pathlib import Path
 from typing import Any, Deque, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from .accounting import _SUMMED_USAGE, _TurnAccumulator
-from .params import param_env
+from .contract import CONTRACT_VERSION as _CONTRACT_VERSION
+from .contract import arm_environment
 from .pool import _slug
 
-#: The version of the contract table in the module docstring.  Bumped when
-#: a variable changes meaning; a new variable is additive and is not.
-CONTRACT_VERSION = "1"
+#: The version of the contract table in the module docstring, re-exported
+#: from :mod:`jaato_eval.contract` — which owns it now that the table has a
+#: second consumer.  Bumped when a variable changes MEANING; a new variable,
+#: or an existing one reaching a new consumer, is additive and is not.
+CONTRACT_VERSION = _CONTRACT_VERSION
 
 #: ``sysexits.h``'s temporary-failure code: the driver's way of saying "the
 #: environment, not the run" — daemon unreachable, fixture unusable.
@@ -195,40 +208,23 @@ def driver_environment(*, workspace: Path, config_root: Path,
                        socket_path: Optional[str]) -> Dict[str, str]:
     """The contract, as the environment ADDED to the driver's.
 
-    Returns only the contract variables; the caller overlays them on
-    ``os.environ`` at spawn.  Kept pure so the table in the module
-    docstring is testable as a table.
-
-    What it deliberately does NOT carry is a credential: see the module
-    docstring.  A driver's profiles resolve theirs through ``pass://`` /
-    ``vault://`` or from the daemon's environment, never from the arm's
-    fixture ``.env``.
+    The table itself lives in :func:`jaato_eval.contract.arm_environment`,
+    which a ``script`` grader calls too — a grader and the thing it grades
+    reading one table is the whole point of the export (jaato #1127), and
+    two builders of it could disagree about a name or a value.  This
+    wrapper is the driver's way of reporting the one failure the table
+    can have.
 
     Raises:
         ValueError: when two ``params`` keys collide on one variable name.
             The manifest parser refuses that before any arm runs, so this
             is a guard on the contract rather than a path a task reaches.
     """
-    env, collision = param_env(params)
+    contract, collision = arm_environment(
+        workspace=workspace, config_root=config_root, params=params,
+        cascade_id=cascade_id, socket_path=socket_path)
     if collision:
         raise ValueError(f"input.params: {collision}")
-    contract = {
-        "JAATO_EVAL": "1",
-        "JAATO_EVAL_CONTRACT": CONTRACT_VERSION,
-        "JAATO_EVAL_WORKSPACE": str(workspace),
-        "JAATO_EVAL_CONFIG_ROOT": str(config_root),
-        "JAATO_EVAL_CASCADE_ID": cascade_id,
-        **env,
-    }
-    if socket_path:
-        contract["JAATO_EVAL_SOCKET"] = str(socket_path)
-    # The interpreter, not an interpreter: this one is where ``jaato_sdk``
-    # is importable, and a driver is an SDK client.  ABSENT rather than
-    # empty when the interpreter cannot name itself (an embedded build),
-    # under the ``JAATO_EVAL_SOCKET`` rule — a variable that is there is a
-    # variable a driver may use unconditionally.
-    if sys.executable:
-        contract["JAATO_EVAL_PYTHON"] = sys.executable
     return contract
 
 
