@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional
 
 from .manifest import TaskManifest
 from .provenance import provenance
+from .results_format import RESULTS_FORMAT_VERSION, caveats_for
 from .verdict import BLOCKED, Report, Verdict
 
 
@@ -176,6 +177,14 @@ class ArmResult:
     def to_dict(self) -> Dict[str, Any]:
         """Flat record for the JSONL results file."""
         return {
+            # The two fields written for a consumer OUTSIDE this package
+            # (jaato #1124).  ``results_version`` is what lets such a reader
+            # refuse a file it cannot read instead of rendering half of it;
+            # ``caveats`` carries the limits of the instruments that graded
+            # THIS arm, in the harness's own words, so a number and its
+            # qualification cannot be separated by whoever quotes them.
+            "results_version": RESULTS_FORMAT_VERSION,
+            "caveats": caveats_for(v.grader_id for v in self.verdicts),
             "arm_id": self.spec.arm_id,
             "task_id": self.spec.task.task_id,
             "profile_set": self.spec.profile_set,

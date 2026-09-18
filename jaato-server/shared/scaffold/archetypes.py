@@ -62,6 +62,15 @@ PROCESSOR = "processor"
 #: findings name.
 GITIGNORE = "gitignore"
 
+#: The regulatory-documentation archetype -- neither a client, a profile nor
+#: a processor: it writes markdown ABOUT a workspace rather than anything the
+#: workspace runs.  Two documents, one per reader (jaato #1121): ``--profile``
+#: emits the Annex IV technical documentation for the system that profile
+#: defines, ``--component`` emits the Article 25(4) pack for jaato itself.
+#: Both are skeletons a provider completes -- see ``dossier.py`` for why a
+#: generated legal document must never omit a section it cannot fill.
+DOSSIER = "dossier"
+
 #: Client archetypes, derived from the template registry so a new template is
 #: automatically an accepted archetype (and, via the guard, must be documented).
 CLIENT_ARCHETYPES: Tuple[str, ...] = tuple(sorted(TEMPLATES))
@@ -836,6 +845,93 @@ ARCHETYPES: Dict[str, ArchetypeDoc] = {
             "git status — .jaato/profiles/ and friends show as untracked, "
             "sessions/ and logs/ do not",
             "jaato-scaffold validate <ws>",
+        ),
+    ),
+
+    DOSSIER: ArchetypeDoc(
+        name=DOSSIER,
+        kind="documentation",
+        summary="The EU AI Act paperwork this tree can compute: an Annex IV "
+                "technical-documentation skeleton for one profile "
+                "(--profile), or the Article 25(4) component pack for jaato "
+                "itself (--component).",
+        requires=("--workspace", "--profile or --component"),
+        writes=(
+            EmittedFile(
+                path="docs/annex-iv-{name}.md",
+                what="the Annex IV technical documentation for the system "
+                     "that profile defines — computed sections filled, the "
+                     "rest marked TODO in the Article's own words",
+                status="fill-in",
+                when="--profile NAME",
+                detail=(
+                    "all nine Annex IV headings, always — a heading the "
+                    "framework cannot fill says so rather than being "
+                    "omitted, because an absent section in a legal document "
+                    "reads as *nothing to declare*",
+                    "every computed fact comes from the helper the matching "
+                    "`explain` page reads, so the dossier cannot disagree "
+                    "with `explain`",
+                    "each computed section is dated and stamped with the "
+                    "commit it describes — a fact about a tree is a fact "
+                    "about a commit",
+                    "with --eval-results, §4 carries a jaato-eval run's "
+                    "metrics AND that harness's own caveats verbatim",
+                ),
+            ),
+            EmittedFile(
+                path="docs/jaato-component-pack.md",
+                what="the Article 25(4) information pack for jaato as a "
+                     "component of somebody else's high-risk system",
+                status="generated",
+                when="--component",
+                detail=(
+                    "what the framework GUARANTEES, each named with the "
+                    "thing that enforces it — a guarantee with no enforcer "
+                    "is a claim, and a claim in a 25(4) pack is what gets "
+                    "relied on",
+                    "what it does NOT guarantee, said out loud",
+                    "the versioned surfaces a written agreement can cite",
+                ),
+            ),
+        ),
+        flags=(
+            ("--profile NAME", "emit the Annex IV dossier for that profile; "
+                               "refused if NAME resolves to no profile in "
+                               "--workspace, because a dossier generated for "
+                               "the wrong system is worse than none"),
+            ("--component", "emit the Article 25(4) pack instead; needs no "
+                            "profile, since it describes the framework"),
+            ("--eval-results FILE", "fill the accuracy section (§4) from a "
+                                    "jaato-eval results file; a file whose "
+                                    "declared format this reader does not "
+                                    "know is refused by name rather than "
+                                    "half-rendered"),
+            ("--force", "overwrite a document already at that path"),
+        ),
+        edit_before_running=(
+            "every **TODO** block — each names the Article that asks for it "
+            "and says why the framework cannot supply it",
+            "the accuracy section's Threshold column: which level is "
+            "appropriate to the intended purpose is the provider's call "
+            "(Article 15(3)), never a measurement",
+        ),
+        generated_correct=(
+            "the section list: all nine Annex IV points, in the "
+            "Regulation's order and wording",
+            "the computed blocks — regenerate rather than edit, since a "
+            "hand-edited computed section is a second source of truth about "
+            "the framework and it is the document that goes stale",
+        ),
+        check="the rendered markdown is re-read and every Annex IV heading "
+              "must be present — a section dropped because the framework "
+              "had nothing to say for it is the silent omission this "
+              "archetype exists not to do",
+        next_steps=(
+            "jaato-scaffold explain oversight <profile>   # Article 14(4)",
+            "jaato-scaffold explain audit <profile>       # Articles 12/19",
+            "fill every TODO, then have it reviewed by someone who is not "
+            "the framework",
         ),
     ),
 

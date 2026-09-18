@@ -341,8 +341,9 @@ what it does, where it lives, what it deliberately does not do.
 > `risk_class: high` and adds the five `high_risk_*` findings
 > (`shared/scaffold/validate.py`); `explain profile` renders it;
 > `explain oversight <profile>` reads it. Guard:
-> `shared/tests/test_regulatory_profile_block.py`. The dossier (§4.6) is
-> not built yet.
+> `shared/tests/test_regulatory_profile_block.py`. The dossier (§4.6) reads
+> it too -- and documents a profile that declares no block as **UNDECLARED**
+> rather than as `minimal`.
 
 ```yaml
 # .jaato/profiles/screener.yaml
@@ -683,6 +684,36 @@ running framework saying the same thing.
 
 ### 4.6 A generated technical dossier (Articles 11, 13, Annex IV, 25(4))
 
+> **Shipped (#1121).** `shared/scaffold/dossier.py` renders both documents,
+> `jaato-scaffold new dossier` writes them, and the Article 25(4) pack is
+> committed at [`docs/jaato-component-pack.md`](../jaato-component-pack.md)
+> as the first versioned instance -- a written agreement needs a document to
+> point at, and a generator nobody has run produces none.
+>
+> Four properties, each attached to a way a generated legal document goes
+> wrong. **Computed, never asserted**: every fact comes from the helper the
+> matching `explain` page reads, so the dossier cannot disagree with
+> `explain`, and the document is never the second source of truth about the
+> framework. **A `TODO` section is never silently omitted**: all nine Annex
+> IV headings are always present, and `new dossier` reads its own output
+> back to prove it, because an absent section in a legal document reads as
+> *nothing to declare*. **Side-effect free**, like `validate`: profiles are
+> located and parsed, never rendered -- rendering a persona runs its
+> `{{!py:...}}` prefetch. **Dated and stamped**: a fact about a tree is a
+> fact about a commit, and a dossier read six months later must say which.
+>
+> What the framework will not do for the provider is the part worth naming:
+> a profile with no `regulatory:` block is documented as **UNDECLARED**, not
+> as `minimal`. Article 6(4) makes the determination theirs, and a generated
+> document that printed a class would be one somebody relies on.
+>
+> The component pack's **non-guarantees are longer than its guarantees**, on
+> purpose: a limitations section a reader can finish quickly is one that
+> leaves them unable to tell what was considered from what was forgotten.
+> Each guarantee names the thing in the tree that ENFORCES it, because a
+> guarantee with no enforcer is a claim, and a claim in a 25(4) pack is what
+> gets relied on.
+
 `jaato-scaffold new dossier --profile <name>` writes an Annex IV skeleton
 computed from the installed framework and the resolved profile: system
 description (plugins with provenance, providers and models per tier, tool
@@ -792,6 +823,40 @@ continuity pattern already describes the curator; the knob is what makes
 check and the dossier can print.
 
 ### 4.9 Eval results into the dossier (Article 15(3), 9(6)–(8))
+
+> **Shipped (#1124).** The results file became a **contract**
+> ([`docs/eval-results.md`](../eval-results.md)) rather than whatever
+> `ArmResult` happened to hold, because the reader may not import the
+> engine: `jaato_eval` imports `jaato_sdk` and nothing else from this tree,
+> so a consumer in `shared` that imported it would run that rule backwards.
+> Two fields exist for the reader and for nobody in the harness.
+>
+> `results_version` is what lets a refusal be possible at all. A file whose
+> declared version this reader does not know is refused **by name** --
+> naming the version found and the versions known -- rather than rendered
+> as far as it makes sense, because a half-understood accuracy table looks
+> exactly like a complete one, and an accuracy section is the part of a
+> dossier a reader quotes. **An absent version is an unknown version**, not
+> a version 1 record: the field has been written since the contract was
+> declared, so its absence says the file predates it.
+>
+> `caveats` carries the limits of the instruments that graded each arm, in
+> the words of the harness that measured them, and every one is rendered
+> **verbatim**. The alternative -- each consumer writing its own warning
+> about LLM judges -- is a second copy of a fact, and the copy that rots is
+> the one nothing executes: it goes on being quoted after the limit is
+> fixed, or misses one added later. So the adapter carries no caveat text of
+> its own, and a guard reads its source to keep it that way.
+>
+> Three reader rules travel with the numbers, each attached to a way they
+> mislead: `BLOCKED` leaves the pass-rate denominator (nothing was
+> exercised, so it is neither a pass nor a failure of the thing under
+> test, and a cell where everything blocked has **no** rate rather than
+> `0%`); a null is "we did not find out", never a zero; and the arm is the
+> unit, because repeats disagreeing IS the measurement. Every row's
+> **Threshold** is a `TODO` naming Article 15(3): which level is
+> appropriate to the intended purpose is the provider's call, and not a
+> measurement this harness can make.
 
 `jaato-eval` writes JSONL per arm. A small adapter renders the metrics of a
 named results file into the dossier's accuracy section, with the harness's

@@ -390,9 +390,144 @@ def run(args) -> int:
         return _new_processor(args)
     if archetype == _archetypes.GITIGNORE:
         return _new_gitignore(args)
+    if archetype == _archetypes.DOSSIER:
+        return _new_dossier(args)
     print(f"unknown archetype {archetype!r} — one of: "
           + ", ".join(_archetypes.accepted()))
     return 2
+
+
+# --------------------------------------------------------------- dossier
+
+def _dossier_flag_refusal(profile, component: bool, eval_results) -> Optional[int]:
+    """The three ways the two flags contradict each other, or ``None``.
+
+    Split out of :func:`_new_dossier` so the builder reads as "decide which
+    document, render it, check it" -- validation and work are the two halves
+    this function used to do at once.
+    """
+    if component and profile:
+        print("--component describes the framework and --profile describes a "
+              "system built on it: two documents for two readers. Pick one.")
+        return 2
+    if not component and not profile:
+        print("`new dossier` needs --profile NAME (the Annex IV dossier for "
+              "that system) or --component (the Article 25(4) pack for jaato "
+              "itself).")
+        return 2
+    if component and eval_results:
+        print("--eval-results fills the accuracy section of an Annex IV "
+              "dossier; the component pack has none. Pass --profile NAME.")
+        return 2
+    return None
+
+
+def _dossier_document(args, ws: Path):
+    """``(relative_path, markdown)`` for the document this invocation asks for.
+
+    Returns ``(None, exit_code)`` when the request cannot be served -- a
+    profile that does not resolve, or a renderer that raised.  Nothing is
+    written on either path: a dossier generated for the wrong system is worse
+    than none.
+    """
+    from . import dossier as _dossier
+
+    if getattr(args, "component", False):
+        try:
+            return "docs/jaato-component-pack.md", _dossier.render_component_pack()
+        except Exception as exc:  # noqa: BLE001 -- name it, never half-write
+            print(f"could not render the component pack: {exc}")
+            return None, 1
+
+    profile = args.profile
+    # The same resolver, and the same refusal wording, `new client --profile`
+    # uses: a profile that exists only under an unselected set is reported as
+    # that, never as missing.
+    refusal = _check_named_profile(args, _archetypes.DOSSIER, profile)
+    if refusal is not None:
+        return None, refusal
+    try:
+        text = _dossier.render_dossier(
+            profile, str(ws),
+            eval_results=getattr(args, "eval_results", None),
+            profile_set=getattr(args, "set", None) or _env_profile_set(ws))
+    except KeyError:
+        print(f"new dossier: profile {profile!r} could not be resolved in "
+              f"{ws}. A dossier generated for the wrong system is worse than "
+              f"none, so nothing was written.")
+        return None, 2
+    return f"docs/annex-iv-{_slug(profile)}.md", text
+
+
+def _new_dossier(args) -> int:
+    """``new dossier``: the EU AI Act paperwork this tree can compute (#1121).
+
+    Two documents with two different readers, selected by flag rather than
+    both emitted: ``--profile`` writes the Annex IV technical documentation
+    for the system that profile defines, ``--component`` writes the Article
+    25(4) pack for jaato as somebody else's component.  Neither is a
+    compliance document -- every section the framework cannot fill carries a
+    ``TODO`` naming the Article that asks for it.
+
+    Emit-then-check, like every archetype: the rendered markdown is read back
+    and every Annex IV heading must be present.  A section quietly dropped
+    because the framework had nothing to say for it is the exact failure this
+    archetype exists not to commit, so it is checked rather than trusted.
+    """
+    from . import dossier as _dossier
+
+    ws = Path(args.workspace).resolve()
+    dry_run = bool(getattr(args, "dry_run", False))
+    component = bool(getattr(args, "component", False))
+
+    refusal = _dossier_flag_refusal(getattr(args, "profile", None), component,
+                                    getattr(args, "eval_results", None))
+    if refusal is not None:
+        return refusal
+
+    rel, text = _dossier_document(args, ws)
+    if rel is None:
+        return text            # the exit code _dossier_document chose
+
+    target = ws / rel
+    if target.exists() and not getattr(args, "force", False):
+        print(f"{rel} already exists — pass --force to regenerate it. "
+              f"Regenerating is the intended way to keep the computed "
+              f"sections true; editing them in place makes the document a "
+              f"second source of truth about the framework.")
+        return 1
+
+    doc = _archetypes.resolve(_archetypes.DOSSIER)
+    plan = _Plan(ws, doc, dry_run=dry_run)
+    plan.write(target, text, action="update" if target.exists() else "create")
+
+    if dry_run:
+        print(f"`jaato-scaffold new dossier` would write into {ws}:\n")
+        print(plan.render())
+        _dry_run_footer(doc, "the heading read-back")
+        return 0
+
+    print(f"scaffolded into {ws}:")
+    for label in plan.labels:
+        print(f"  + {label}")
+
+    print("\nreading it back …")
+    missing = _dossier.missing_sections(text) if not component else ()
+    if missing:
+        print("✘ headings absent from the rendered document — generator bug: "
+              + ", ".join(missing))
+        return 1
+    print("✓ every declared heading is present.")
+    print("\nnext:")
+    for step in doc.next_steps:
+        print(f"  {step}")
+    return 0
+
+
+def _slug(name: str) -> str:
+    """A filename-safe stem for a profile name, preserving what it says."""
+    safe = "".join(c if (c.isalnum() or c in "-_") else "-" for c in name)
+    return safe.strip("-") or "profile"
 
 
 # ------------------------------------------------------------- gitignore
@@ -737,17 +872,10 @@ def _env_profile_set(ws: Path) -> Optional[str]:
     set the generated client will run under, rather than against a
     set-less view in which every scaffolded agent profile is invisible.
     """
-    envf = ws / ".env"
-    if not envf.is_file():
-        return None
-    try:
-        for line in envf.read_text(encoding="utf-8", errors="replace").splitlines():
-            key, _, value = line.partition("=")
-            if key.strip() == "JAATO_PROFILE_SET":
-                return value.strip() or None
-    except OSError:             # pragma: no cover - best-effort
-        return None
-    return None
+    # One definition, in ``explain``: the generator and the explain pages
+    # must not disagree about which set a workspace is on, and the pages
+    # need the same answer to resolve a profile the daemon would load.
+    return _explain.workspace_profile_set(str(ws))
 
 
 def _profile_sets(ws: Path) -> List[str]:

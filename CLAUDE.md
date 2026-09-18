@@ -5167,8 +5167,9 @@ wants its own change rather than riding this one.
 Regulation (EU) 2024/1689 addresses the **provider** and **deployer** of an
 AI system; a jaato *application* (profile + persona + tools + model binding)
 is the system and the framework is a component supplier. The assessment is
-[docs/design/eu-ai-act.md](docs/design/eu-ai-act.md). Eleven mechanisms exist
-in the tree, each the smallest shape that makes an obligation expressible:
+[docs/design/eu-ai-act.md](docs/design/eu-ai-act.md). Thirteen mechanisms
+exist in the tree, each the smallest shape that makes an obligation
+expressible:
 
 | Obligation | Mechanism |
 |---|---|
@@ -5184,6 +5185,8 @@ in the tree, each the smallest shape that makes an obligation expressible:
 | 15(4) don't feed bias back | `Memory.generated_by` (which model wrote it — stamped by the PLUGIN, never from the tool's arguments) + `curated_by` (who approved it: a second field, because who wrote it and who approved it are two facts) + `plugin_configs.memory.require_curation`, which withholds uncurated memories from BOTH retrieval paths and says how many. `validate` warns when the knob closes the learning loop instead of mitigating it |
 | 72 / 73 know what to report | `IncidentEvent` (protocol 1.16) + an `INCIDENT:` line in the application trace, raised by `shared.incidents.raise_incident` from the five sites that already knew; `jaato-doctor --incidents [--since 15d]` renders all three Art. 73 windows beside each row. It carries **no severity**: whether an entry is a serious incident under Art. 3(49) is a determination about consequences no log line holds. Unreadable is reported as unread, never as "none" |
 | 14(4) human oversight | `jaato-scaffold explain oversight [<profile>]` — the two stop verbs, the permission gate, the built-in constraints, reversibility, read from their enforcers; `jaato-doctor` prints the exact `jaato-server --stop` for the running daemon |
+| 11 / 13 draw up the documentation | `jaato-scaffold new dossier --profile <p>` — the Annex IV skeleton, computed from the same helpers `explain` reads so it cannot disagree with them; **every one of the nine headings is present**, because a section dropped for having nothing to say reads as *nothing to declare*. `--component` emits the Art. 25(4) pack for jaato itself, committed at [docs/jaato-component-pack.md](docs/jaato-component-pack.md) as the first versioned instance |
+| 15(3) / 9(8) declare the accuracy | `--eval-results <file>` fills Annex IV §4 from a `jaato-eval` run: pass rate per (task, profile set), blocked arms out of the denominator, a **TODO** threshold on every row. The harness's own caveats ride IN the results file (`results_version`, `caveats`; [docs/eval-results.md](docs/eval-results.md)) and are rendered verbatim, so a number cannot be separated from the limits of the instrument that produced it. A file whose declared format this reader does not know is refused BY NAME — an absent version is an unknown version |
 
 **`validate` reads the block.** `disclosure_absent` (warn) for a
 persona-bound profile that declares nothing about interaction; under
@@ -5201,8 +5204,18 @@ declares no class validates exactly as before: absent is `minimal` for
 validation and *undeclared* for documentation, because a framework that
 printed `minimal` for it would be asserting a determination nobody made.
 
-Deliberately not built yet, each named in the design doc with its reason:
-the Annex IV dossier generator.
+The two documents are **skeletons**, not compliance documents, and say so on
+their first line: what the framework can compute is a small part of Annex IV,
+and every part it cannot is left marked in the Article's own words rather than
+omitted. The component pack lists what jaato does NOT guarantee at greater
+length than what it does — a limitations section a reader finishes quickly is
+one that leaves them unable to tell what was considered from what was
+forgotten.
+
+Nothing on `docs/design/eu-ai-act.md`'s list is now unbuilt; what remains is
+named there as a decision rather than a gap (a text watermark waits on the
+Art. 50(7) code of practice, and signing an audit chain is a key-management
+problem this tree does not take on).
 
 ### Approver Identity (#859)
 
@@ -8353,6 +8366,9 @@ This is not optional cleanup — treat missing or inaccurate docstrings as a def
 - [Model Tiers × Prompt Caching](docs/design/model-tier-prompt-cache.md) - What `enter_tier` costs when prompt caching is on: cache is keyed per model, so an in-place tier switch re-reads the whole prefix cold (break-even ~6 consecutive calls at the new tier). Covers the `_wire_cache_plugin` gap that made profile cache knobs inert, the system-block tier line that invalidates BP1, and the per-provider knob divergence + proposed common `cache:` field.
 - [MiniMax, Kimi and MiMo providers](docs/design/minimax-kimi-mimo-providers.md) - Design for three first-party OpenAI-compatible providers (`minimax`, `kimi`, `mimo`) and the framework prerequisite they share: **reasoning replay** — sending an assistant turn's `reasoning_content` back on the next request of a tool-call loop, which the session currently drops from history and every OpenAI-shaped converter ignores. Covers the surface decision (chat completions, not the Anthropic shims), per-vendor thinking-control dialects, tool-choice vocabularies, catalog vs table context resolution, error taxonomies, and the registration checklist.
 - [Plugin schema census](docs/design/plugin-schema-census.md) - Which config keys each plugin READS that its `get_config_schema()` does not DECLARE, measured tree-wide by `scripts/plugin_schema_census.py`. A census, deliberately **not** a guard: the raw count spans four surfaces (framework-injected keys, the block an author writes, a nested dict with its own owner, and a separate file the block points at), and a ratchet seeded before those are separated would freeze the ambiguity as a fact. `permission` is worked through site by site as the one audited row.
-- [EU AI Act](docs/design/eu-ai-act.md) - What Regulation (EU) 2024/1689 asks of a jaato *application* (the AI system is the profile + persona + tools + model binding; jaato is a component supplier under Art. 25(4), and BUSL-1.1 is not a free and open-source licence, so neither Art. 2(12) nor the 25(4) carve-out applies), which obligations bind when after the Digital Omnibus (Art. 50 disclosure and marking since 2 Aug 2026; Annex III high-risk from 2 Dec 2027), and the mechanisms in order. Shipped: a `regulatory:` profile block, a `disclosure` instruction piece, a `generated_by` stamp on model media, a ledger that reaches disk (`trace.ledger`), and `explain oversight` + the doctor's stop line. Not yet: the first-interaction announcement, the output-marker hook, one audit-record contract with `record_keeping:` retention, a generated Annex IV dossier, and an incident register. See [EU AI Act Mechanisms](#eu-ai-act-mechanisms).
+- [The audit log](docs/audit-log.md) - Which of the five stores records what, the three rules a reader of them must apply, and what `record_keeping:` changes about DELETE. Plus the tamper-evidence contract: a `sha256-chain` proves no edit in place, never authorship.
+- [The jaato-eval results contract](docs/eval-results.md) - What a reader outside `jaato-eval` may rely on in a results file: `results_version` (and why an absent one is an unknown one, refused by name), `caveats` (rendered verbatim, because a second copy of a caveat is the copy that rots), and the three reader rules that keep the numbers from misleading.
+- [jaato as a component](docs/jaato-component-pack.md) - The Article 25(4) information pack, generated by `jaato-scaffold new dossier --component` and committed as the first versioned instance: what the framework guarantees with the thing that enforces each, what it does not, and the versioned surfaces a written agreement can cite.
+- [EU AI Act](docs/design/eu-ai-act.md) - What Regulation (EU) 2024/1689 asks of a jaato *application* (the AI system is the profile + persona + tools + model binding; jaato is a component supplier under Art. 25(4), and BUSL-1.1 is not a free and open-source licence, so neither Art. 2(12) nor the 25(4) carve-out applies), which obligations bind when after the Digital Omnibus (Art. 50 disclosure and marking since 2 Aug 2026; Annex III high-risk from 2 Dec 2027), and the mechanisms in order. Every mechanism it names is shipped: the `regulatory:` profile block, the `disclosure` piece and the first-interaction announcement, `generated_by` plus the `TRAIT_OUTPUT_MARKER` hook, one audit-record contract with `record_keeping:` retention and a sha256 chain, the incident register, memory provenance, and the Annex IV dossier generator with its `jaato-eval` accuracy section. What remains is recorded there as a decision rather than a gap. See [EU AI Act Mechanisms](#eu-ai-act-mechanisms).
 - [AppArmor Setup](docs/apparmor-setup.md) - Kernel-enforced workspace isolation. WS deployments confine automatically when AppArmor is available; IPC clients opt in via `IPCClient(..., apparmor=True)` (defaults to `False`).
 - [GCP Setup Guide](docs/gcp-setup.md) - Setting up GCP project for Vertex AI

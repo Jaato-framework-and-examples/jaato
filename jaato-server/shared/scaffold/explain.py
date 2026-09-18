@@ -3692,11 +3692,39 @@ def _profile_oversight_lines(name: str, P: Dict[str, Any]) -> List[str]:
     ]
 
 
-def oversight_profile(name: str, workspace: str) -> Rendered:
-    """``explain oversight <profile>`` -- what THIS profile has armed.
+def workspace_profile_set(workspace: str) -> Optional[str]:
+    """``JAATO_PROFILE_SET`` from a workspace's own ``.env``, if it names one.
 
-    Resolved through ``discover_profiles`` so an inherited permission
-    policy or budget ladder counts, exactly as the daemon would load it.
+    A profile inside ``profiles/<set>/`` is only in the effective set when
+    that set is selected, and the selector a workspace runs under lives in
+    its ``.env`` -- written there by ``new profile-set``.  Reading it is
+    what makes ``explain oversight <name>`` resolve against the SAME set
+    the workspace's own client will run under; without it, every profile a
+    scaffolded workspace declares is invisible to these pages.
+
+    One definition: ``build`` reads it from here rather than carrying its
+    own, so the generator and the explain pages cannot disagree about which
+    set a workspace is on.
+    """
+    envf = Path(workspace).resolve() / ".env"
+    if not envf.is_file():
+        return None
+    try:
+        for line in envf.read_text(encoding="utf-8",
+                                   errors="replace").splitlines():
+            key, _, value = line.partition("=")
+            if key.strip() == "JAATO_PROFILE_SET":
+                return value.strip() or None
+    except OSError:             # pragma: no cover -- best-effort
+        return None
+    return None
+
+
+def _resolve_workspace_profile(name: str, workspace: str,
+                               profile_set: Optional[str] = None):
+    """A named profile as the DAEMON would load it, set selection included.
+
+    Returns ``(profile_or_None, workspace_path)``.
     """
     from shared.plugins.subagent.config import discover_profiles
 
@@ -3704,8 +3732,19 @@ def oversight_profile(name: str, workspace: str) -> Rendered:
     result = discover_profiles(
         profiles_dir=".jaato/profiles", base_path=str(ws),
         config_root=str(ws / ".jaato"),
+        force_profile_set=profile_set or workspace_profile_set(str(ws)),
     )
-    prof = result.profiles.get(name)
+    return (result.profiles or {}).get(name), ws
+
+
+def oversight_profile(name: str, workspace: str,
+                      profile_set: Optional[str] = None) -> Rendered:
+    """``explain oversight <profile>`` -- what THIS profile has armed.
+
+    Resolved through ``discover_profiles`` so an inherited permission
+    policy or budget ladder counts, exactly as the daemon would load it.
+    """
+    prof, ws = _resolve_workspace_profile(name, workspace, profile_set)
     if prof is None:
         return ({"profile": name, "found": False, "error": "no such profile"},
                 f"no profile {name!r} under {ws}/.jaato/profiles/")
@@ -3905,16 +3944,10 @@ def _audit_profile_lines(name: str, P: Dict[str, Any]) -> List[str]:
     return lines
 
 
-def audit_profile(name: str, workspace: str) -> Rendered:
+def audit_profile(name: str, workspace: str,
+                  profile_set: Optional[str] = None) -> Rendered:
     """``explain audit <profile>`` -- where THIS profile's record lands."""
-    from shared.plugins.subagent.config import discover_profiles
-
-    ws = Path(workspace).resolve()
-    result = discover_profiles(
-        profiles_dir=".jaato/profiles", base_path=str(ws),
-        config_root=str(ws / ".jaato"),
-    )
-    prof = result.profiles.get(name)
+    prof, ws = _resolve_workspace_profile(name, workspace, profile_set)
     if prof is None:
         return ({"profile": name, "found": False, "error": "no such profile"},
                 f"no profile {name!r} under {ws}/.jaato/profiles/")

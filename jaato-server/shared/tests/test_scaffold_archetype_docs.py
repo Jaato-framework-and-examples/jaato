@@ -82,6 +82,12 @@ def _invocation(name: str, ws) -> argparse.Namespace:
                      agents="alpha,beta")
     if name == A.PROCESSOR:
         return _args(archetype=name, workspace=str(ws), name="gate")
+    if name == A.DOSSIER:
+        # --component is the invocation that needs nothing else: the Annex IV
+        # half needs a profile to exist in the workspace first, which is a
+        # different archetype's output.  Its condition is exercised by
+        # test_the_dossier_conditional_files_appear_under_their_condition.
+        return _args(archetype=name, workspace=str(ws), component=True)
     return _args(archetype=name, workspace=str(ws))
 
 
