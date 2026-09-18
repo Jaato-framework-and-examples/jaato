@@ -8,6 +8,11 @@
 # Like example-echo this is a smoke test for the harness, not a benchmark:
 # a task every model passes carries no information.  It runs against a
 # live daemon; nothing here is exercised without one.
+#
+# CREDENTIALS: the arm's `.env` carries only JAATO_PROFILE_SET, so the
+# profiles this driver's sessions bind must resolve their key through a
+# `pass://` / `vault://` URI or from the daemon's own environment — never
+# from the fixture. See README, "The contract".
 id: example/driver-probe
 description: >
   A two-stage driver: stage 1 writes answer.txt, stage 2 copies it to
@@ -24,9 +29,14 @@ environment:
 input:
   params: {WORD: READY}
 
+# `$JAATO_EVAL_PYTHON` rather than `python`: `run` inherits the engine's
+# PATH and nothing else, and the interpreter jaato-eval runs under is the
+# one that has `jaato_sdk` — which a driver needs and `python` on this
+# host may not be.  Written as `python driver.py`, this probe recorded
+# `exit 127, /bin/sh: 1: python: not found` on a venv install.
 harness:
   kind: driver
-  run: python driver.py
+  run: '"$JAATO_EVAL_PYTHON" driver.py'
 
 # A pool, so the driver's sessions draw on it: the daemon applies a cid's
 # pool to every session stamped with it, and the contract's cascade id IS

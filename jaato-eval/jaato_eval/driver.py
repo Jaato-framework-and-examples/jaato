@@ -35,18 +35,38 @@ variable                    value
 ``JAATO_EVAL_CASCADE_ID``   the arm's cid.  EVERY session the driver opens
                             must be stamped with it — that is what makes the
                             pool, the observer and the per-stage records work
+``JAATO_EVAL_PYTHON``       the interpreter jaato-eval itself runs under, and
+                            therefore the one that HAS ``jaato_sdk``.  ``run``
+                            inherits the engine's ``PATH`` and nothing else,
+                            so ``run: python driver.py`` is a bet on that
+                            host's ``PATH``; ``"$JAATO_EVAL_PYTHON"
+                            driver.py`` is not
 ``JAATO_EVAL_PARAM_<KEY>``  one per ``input.params`` entry, and
 ``JAATO_EVAL_PARAMS``       the whole mapping as JSON — the encoding a
                             ``script`` grader already receives
 ==========================  =================================================
 
 The contract is versioned by name so a driver can refuse a table it does
-not understand rather than guess at one.
+not understand rather than guess at one.  A NEW variable is additive and
+does not bump the version: a driver that has never heard of it behaves
+exactly as it did.
+
+CREDENTIALS ARE NOT IN THE CONTRACT, AND ARE NOT IN THE FIXTURE
+===============================================================
+
+The ``.env`` the engine writes into the arm's workspace carries
+``JAATO_PROFILE_SET`` and nothing else, by design — the sweep's model axis
+is the only thing the engine has to say there.  So a driver's profile set
+must resolve its credential from a ``pass://`` / ``vault://`` URI in the
+profile's ``env:`` map, or from the DAEMON's own environment.  A profile
+that reads ``JAATO_<PROVIDER>_API_KEY`` out of the workspace ``.env`` finds
+none in an arm's fixture, and that is the first thing a real driver hits.
 
 THE EXIT-CODE VOCABULARY
 ========================
 
-Mirrors the one rule in :mod:`jaato_eval.sign_off`:
+Mirrors the one rule in :mod:`jaato_eval.sign_off`, and applies to a code
+THE DRIVER CHOSE:
 
 * ``0`` — ran to its end; the tree is gradeable.
 * ``75`` (``EX_TEMPFAIL``) — an environment fault: daemon unreachable,
@@ -55,8 +75,14 @@ Mirrors the one rule in :mod:`jaato_eval.sign_off`:
   still run; payload-reading graders BLOCK, naming the driver.  The
   driver's stderr tail becomes ``termination_detail``.
 
-A driver killed at the arm ceiling has no exit code of its own and is
-BLOCKED exactly as a session arm is.
+Three endings are NOT the driver's choice and never reach that vocabulary,
+because each would put an environment fault into the pass-rate denominator
+as a FAIL — see :attr:`DriverOutcome.fault`:
+
+* ``126`` / ``127`` — the shell could not run the command at all.
+* a NEGATIVE return code — a signal nobody here sent.
+* the arm ceiling — no exit code of its own; BLOCKED exactly as a session
+  arm is.
 
 WHAT THE OBSERVER MEASURES, AND HOW IT KNOWS WHOSE IT IS
 =========================================================
@@ -98,6 +124,7 @@ import asyncio
 import json
 import os
 import signal
+import sys
 import time
 import uuid
 from collections import deque
@@ -116,6 +143,28 @@ CONTRACT_VERSION = "1"
 #: ``sysexits.h``'s temporary-failure code: the driver's way of saying "the
 #: environment, not the run" — daemon unreachable, fixture unusable.
 EX_TEMPFAIL = 75
+
+#: The codes a POSIX shell returns when it could not RUN the command at
+#: all, mapped to what each one says.  ``run`` inherits the engine's
+#: ``PATH``, so a task written against an interpreter that host does not
+#: have on it (``run: python driver.py`` on a host whose ``python`` is the
+#: venv's and is not on ``PATH``) reaches exactly this — measured: exit
+#: 127, no driver executed, and the script grader then FAILed the arm.
+#: These are environment faults for the same reason the ``script`` grader
+#: already reads 127 as one: nothing about the configuration under test
+#: was exercised, so the arm must leave the pass-rate denominator.
+#:
+#: 128+N — the code a NON-exec'ing shell returns for a child it saw die of
+#: signal N — is deliberately NOT here.  It is inside the range a driver
+#: may choose (``sys.exit(137)`` is a legal thing to write), so reading it
+#: as a fault would take a code the driver chose out of the vocabulary.
+#: A shell that ``exec``s its only command — which is what ``sh -c
+#: '<one command>'`` does — is itself the signalled process, and that
+#: arrives as a NEGATIVE return code, which is unambiguous and IS covered.
+SHELL_CANNOT_RUN = {
+    126: "found but not executable",
+    127: "not found",
+}
 
 #: How long a driver killed at the ceiling gets between SIGTERM and
 #: SIGKILL.  SIGTERM first because a driver has sessions open on the
@@ -150,6 +199,11 @@ def driver_environment(*, workspace: Path, config_root: Path,
     ``os.environ`` at spawn.  Kept pure so the table in the module
     docstring is testable as a table.
 
+    What it deliberately does NOT carry is a credential: see the module
+    docstring.  A driver's profiles resolve theirs through ``pass://`` /
+    ``vault://`` or from the daemon's environment, never from the arm's
+    fixture ``.env``.
+
     Raises:
         ValueError: when two ``params`` keys collide on one variable name.
             The manifest parser refuses that before any arm runs, so this
@@ -168,6 +222,13 @@ def driver_environment(*, workspace: Path, config_root: Path,
     }
     if socket_path:
         contract["JAATO_EVAL_SOCKET"] = str(socket_path)
+    # The interpreter, not an interpreter: this one is where ``jaato_sdk``
+    # is importable, and a driver is an SDK client.  ABSENT rather than
+    # empty when the interpreter cannot name itself (an embedded build),
+    # under the ``JAATO_EVAL_SOCKET`` rule — a variable that is there is a
+    # variable a driver may use unconditionally.
+    if sys.executable:
+        contract["JAATO_EVAL_PYTHON"] = sys.executable
     return contract
 
 
@@ -403,14 +464,75 @@ class DriverOutcome:
         return self.exit_code == 0
 
     @property
-    def environment_fault(self) -> bool:
-        return self.exit_code == EX_TEMPFAIL
+    def fault(self) -> Optional[str]:
+        """Why this ending is an environment fault, or ``None``.
+
+        ONLY A CODE THE DRIVER CHOSE is read through the exit-code
+        vocabulary; everything else the engine can recognise as *the
+        driver never ran*, or *something outside the run ended it*, is a
+        fault, and a fault is BLOCKED.  That is the distinction
+        :attr:`timed_out` already draws for the engine's OWN kill,
+        extended to the endings the engine did not cause either.
+
+        Three cases, each measured or unambiguous:
+
+        * ``EX_TEMPFAIL`` — the driver's own declaration.
+        * :data:`SHELL_CANNOT_RUN` — the shell could not run the command,
+          so no driver executed.  Left as an unsigned arm this is an
+          environment fault counted against the pass rate: the observed
+          shape was ``exit 127`` with the script grader then FAILing an
+          arm in which nothing had happened.
+        * a NEGATIVE return code — the process died of a signal nobody
+          here sent (an OOM kill, an operator's ``kill``).  The engine's
+          own kill never arrives this way: it sets :attr:`timed_out` and
+          leaves ``exit_code`` ``None``.
+
+        Returns:
+            One sentence naming the fault and its consequence, ready for
+            the caller to put a detail tail after — or ``None`` when the
+            exit code is the driver's own statement about its run.
+        """
+        code = self.exit_code
+        if code is None or code == 0:
+            return None
+        if code == EX_TEMPFAIL:
+            return (f"driver reported an environment fault (exit {code}, "
+                    f"EX_TEMPFAIL) — BLOCKED, not FAIL: the driver says the "
+                    f"daemon or the fixture was unusable, so nothing about "
+                    f"the configuration under test was exercised.")
+        if code in SHELL_CANNOT_RUN:
+            return (f"the shell could not run harness.run (exit {code}, "
+                    f"{SHELL_CANNOT_RUN[code]}) — BLOCKED, not FAIL: no "
+                    f"driver executed, so nothing about the configuration "
+                    f"under test was exercised. Check the command's "
+                    f"interpreter against this host: $JAATO_EVAL_PYTHON is "
+                    f"the interpreter jaato-eval itself runs under.")
+        if code < 0:
+            return (f"driver was killed by {_signal_name(-code)} — BLOCKED, "
+                    f"not FAIL: the engine did not send it (its own kill at "
+                    f"the ceiling leaves no exit code), so whatever ended "
+                    f"this run was outside the configuration under test.")
+        return None
 
     @property
     def evidence(self) -> str:
         """The tail a verdict quotes: stderr, else stdout, else nothing."""
         lines = self.stderr_tail or self.stdout_tail
         return "\n".join(lines).strip()
+
+
+def _signal_name(number: int) -> str:
+    """``SIGKILL (9)`` for a signal this platform names, ``signal 9`` else.
+
+    Named rather than numbered because the number alone does not tell an
+    operator which of the two common cases they are in — a ``SIGKILL`` on
+    a long driver is the OOM killer far more often than anything else,
+    and a ``SIGSEGV`` is the driver's own crash.
+    """
+    try:
+        return f"{signal.Signals(number).name} (signal {number})"
+    except ValueError:
+        return f"signal {number}"
 
 
 async def run_driver(command: str, *, cwd: Path, env: Mapping[str, str],

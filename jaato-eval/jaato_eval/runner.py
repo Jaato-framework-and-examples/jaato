@@ -41,10 +41,12 @@ An arm is one session (``harness.kind: session``, the default) or one
 DRIVER PROCESS orchestrating many (``harness.kind: driver``, jaato #1110;
 the mechanics live in :mod:`jaato_eval.driver`).  :func:`run_arm`
 dispatches on the kind after materialising the workspace, and both paths
-land in the same two buckets: a driver killed at the ceiling or exiting
-``EX_TEMPFAIL`` is BLOCKED, a driver exiting ``0`` is graded, and a driver
-exiting anything else is the driver kind's UNSIGNED terminal
-(``DriverStoppedShort``) — graded per grader, as a spent nudge budget is.
+land in the same two buckets: a driver exiting ``0`` is graded, a driver
+that never really ran is BLOCKED (killed at the ceiling, its own
+``EX_TEMPFAIL``, a shell that could not run the command, a signal nobody
+here sent), and a driver exiting any code it CHOSE is the driver kind's
+UNSIGNED terminal (``DriverStoppedShort``) — graded per grader, as a spent
+nudge budget is.
 """
 from __future__ import annotations
 
@@ -432,12 +434,12 @@ async def _run_driver_arm(spec: ArmSpec, result: ArmResult, workspace: Workspace
 
     if outcome.timed_out:
         result.blocked_reason = _ceiling_blocked_reason(limit, arm_timeout_seconds)
-    elif outcome.environment_fault:
-        result.blocked_reason = (
-            f"driver reported an environment fault (exit {outcome.exit_code}, "
-            f"EX_TEMPFAIL) — BLOCKED, not FAIL: the driver says the daemon or "
-            f"the fixture was unusable, so nothing about the configuration "
-            f"under test was exercised. {detail}".rstrip())
+    elif outcome.fault:
+        # The three endings the driver did not choose — its own
+        # EX_TEMPFAIL, a shell that could not run the command, a signal
+        # nobody here sent.  ``DriverOutcome.fault`` says which and why;
+        # the engine adds what was said.
+        result.blocked_reason = f"{outcome.fault} {detail}".rstrip()
     if result.blocked_reason:
         if not keep_workspace:
             discard(workspace)
@@ -724,7 +726,11 @@ class _ArmSession:
 #: Dimensions the persisted tracker snapshot reports, mapped onto the
 #: accumulator's vocabulary.  Only unambiguous pairs are carried: the
 #: snapshot's ``tokens`` is a single total with no prompt/output split, so
-#: it cannot fill those two without inventing a division.
+#: it cannot fill those two without inventing a division.  The ``usd``
+#: pair carries one more caveat than the mapping can state — a snapshot
+#: ``0.0`` means "no response reported a cost", so it must not overwrite
+#: ``cost_usd = None``; :func:`_record_partial_usage` is where the two
+#: facts are both in hand, and is where that is applied.
 _TRACKER_TO_USAGE = {"usd": "cost_usd", "tokens": "spend_total_tokens"}
 
 
@@ -866,11 +872,25 @@ def _record_partial_usage(result: "ArmResult",
         if key == "turns":
             result.turns = max(result.turns, int(value))
             continue
-        # Never report LESS than either source saw.  The tracker counts per
-        # response and normally wins for a cut arm; the accumulator can still
-        # be ahead on a dimension the snapshot does not carry, or if the
-        # record was written before the final response landed.
         current = usage.get(key)
+        # A TRACKER ZERO IS NOT A MEASURED ZERO, and ``cost_usd`` is the
+        # one dimension where that difference is representable: the
+        # accumulator keeps it ``None`` until a turn reports a cost,
+        # because "free" and "nobody said" are opposite facts (the
+        # distinction jaato #688 gives its own name upstream,
+        # ``TokenUsage.reported``).  The tracker's ``usd`` starts at zero
+        # and advances only when a response reports one, so a ``0.0``
+        # there carries exactly what ``None`` already carries — and
+        # writing it in would answer the question rather than decline to,
+        # on every driver arm, since this runs on that path unconditionally.
+        # A zero the ACCUMULATOR reached stands: a turn said so.
+        if key == "cost_usd" and current is None and not value:
+            continue
+        # Otherwise: never report LESS than either source saw.  The tracker
+        # counts per response and normally wins for a cut arm; the
+        # accumulator can still be ahead on a dimension the snapshot does
+        # not carry, or if the record was written before the final response
+        # landed.
         if not isinstance(current, (int, float)) or value > current:
             usage[key] = value
     result.usage = usage

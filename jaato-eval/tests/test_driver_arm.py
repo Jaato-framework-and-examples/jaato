@@ -14,6 +14,9 @@ What the tests pin, each against the way it could go wrong:
   module docstring tables;
 * the exit-code vocabulary sorts into the engine's two buckets — and the
   non-zero case is an UNSIGNED arm (graded per grader), not BLOCKED;
+* an ending the driver did NOT choose stays out of that vocabulary: a
+  shell that could not run the command, and a signal nobody here sent,
+  are BLOCKED rather than FAILed through a grader;
 * sessions are attributed to the arm by the record in ITS workspace, so a
   concurrent sibling's sessions under a shared pool cid are not counted;
 * the observer is registered BEFORE the process starts, with event
@@ -28,9 +31,9 @@ import textwrap
 import unittest
 from pathlib import Path
 
-from jaato_eval.driver import (CONTRACT_VERSION, arm_cascade_id,
-                               attributed_sessions, driver_environment,
-                               record_binding)
+from jaato_eval.driver import (CONTRACT_VERSION, EX_TEMPFAIL, DriverOutcome,
+                               arm_cascade_id, attributed_sessions,
+                               driver_environment, record_binding)
 from jaato_eval.manifest import load_manifest
 from jaato_eval.sign_off import (DRIVER_STOPPED_SHORT, describe_unsigned,
                                  is_unsigned_terminal)
@@ -95,6 +98,26 @@ graders:
 """
 
 
+#: The same task with an arbitrary ``run`` — for the endings that happen
+#: BEFORE any driver does: a command the shell cannot run at all, and a
+#: process a signal ends.  ``run`` is substituted as a JSON string, which
+#: is a valid YAML double-quoted scalar whatever the command contains.
+RAW_TASK = """
+id: t/driver
+environment:
+  fixture: fixture
+  config_root: cfg
+input:
+  params: {{WORD: READY}}
+harness:
+  kind: driver
+  run: {run}
+graders:
+  - kind: script
+    run: "grep -qx READY answer.txt"
+"""
+
+
 #: A payload-reading grader, indented as a second item of ``graders:``.
 PROCESSOR_GRADER = "  - kind: processor\n    script: check.py\n"
 
@@ -125,6 +148,12 @@ class DriverHarness(RunnerHarness):
         (self.root / "task.yaml").write_text(TASK.format(
             python=sys.executable, mode=mode, sids=sids,
             extra_graders=extra_graders))
+        self.task = load_manifest(self.root / "task.yaml")
+
+    def _raw_driver_task(self, run):
+        """A driver task whose ``run`` is whatever the test needs."""
+        (self.root / "fixture" / "driver.py").write_text(DRIVER)
+        (self.root / "task.yaml").write_text(RAW_TASK.format(run=json.dumps(run)))
         self.task = load_manifest(self.root / "task.yaml")
 
     def _workspace(self, result):
@@ -201,6 +230,87 @@ class ExitCodeCase(DriverHarness):
         self.assertIsNone(self.behaviour["graded_context"].payload)
 
 
+class NotTheDriversChoiceCase(DriverHarness):
+    """Endings the exit-code vocabulary must not read as the driver's.
+
+    Each of these would otherwise be an UNSIGNED arm: the script grader
+    runs against a tree nothing produced, FAILs, and an environment fault
+    is counted against the pass rate — the case BLOCKED exists for, and
+    the one the ``script`` grader has always read 127 as.
+    """
+
+    def test_a_command_the_shell_cannot_find_is_blocked_not_graded(self):
+        """Exit 127, measured: `run: python driver.py` where `python` is
+        not on the engine's PATH, no driver executed."""
+        self._raw_driver_task("jaato-eval-no-such-interpreter driver.py")
+        result = self._run({"observer_events": []})
+        self.assertEqual(result.state, BLOCKED)
+        self.assertIn("exit 127", result.blocked_reason)
+        self.assertIn("not found", result.blocked_reason)
+        # The remedy, where the reader is: the contract carries one.
+        self.assertIn("JAATO_EVAL_PYTHON", result.blocked_reason)
+        # No grader ran, so nothing FAILed an arm that never happened.
+        self.assertEqual(result.verdicts, [])
+        self.assertIsNone(result.error)
+
+    def test_a_command_that_is_not_executable_is_blocked(self):
+        """Exit 126 — found, and the shell could still not run it."""
+        script = self.root / "fixture" / "not-executable.sh"
+        script.write_text("#!/bin/sh\nexit 0\n")
+        script.chmod(0o644)
+        self._raw_driver_task("./not-executable.sh")
+        result = self._run({"observer_events": []})
+        self.assertEqual(result.state, BLOCKED)
+        self.assertIn("exit 126", result.blocked_reason)
+        self.assertIn("not executable", result.blocked_reason)
+        self.assertEqual(result.verdicts, [])
+
+    def test_a_signal_nobody_here_sent_is_blocked_naming_it(self):
+        """A negative return code — an OOM kill's shape.
+
+        ``exec`` so the shell is REPLACED by the process that dies,
+        whatever shell this host has: the signalled process is then the
+        one the engine waited on, which is what makes the return code
+        negative rather than the shell's own 128+N.
+        """
+        self._raw_driver_task(
+            f"exec {sys.executable} -c "
+            f"'import os, signal; os.kill(os.getpid(), signal.SIGKILL)'")
+        result = self._run({"observer_events": []})
+        self.assertEqual(result.state, BLOCKED)
+        self.assertIn("SIGKILL", result.blocked_reason)
+        self.assertIn("the engine did not send it", result.blocked_reason)
+        self.assertEqual(result.verdicts, [])
+
+    def test_the_classification_is_a_table(self):
+        """The rule itself, including the two codes it must NOT claim."""
+        def fault(code):
+            return DriverOutcome(exit_code=code, timed_out=False,
+                                 stderr_tail=[], stdout_tail=[],
+                                 duration_seconds=0.0).fault
+
+        self.assertIsNone(fault(0))
+        self.assertIsNone(fault(3), "a code the driver chose is its verdict")
+        # 128+N is a code a driver may legally choose (`sys.exit(137)`),
+        # so it stays the driver's; only the unambiguous negative form of
+        # the same fact is read as a signal.
+        self.assertIsNone(fault(137))
+        self.assertIn("EX_TEMPFAIL", fault(EX_TEMPFAIL))
+        self.assertIn("exit 127", fault(127))
+        self.assertIn("exit 126", fault(126))
+        self.assertIn("SIGKILL", fault(-9))
+        # A ceiling kill has no exit code at all, so nothing to classify:
+        # the engine's own kill never reaches the vocabulary.
+        self.assertIsNone(fault(None))
+
+    def test_a_signal_this_platform_cannot_name_is_still_reported(self):
+        """The number is the fact; the name is the help."""
+        outcome = DriverOutcome(exit_code=-999, timed_out=False,
+                                stderr_tail=[], stdout_tail=[],
+                                duration_seconds=0.0)
+        self.assertIn("signal 999", outcome.fault)
+
+
 class ContractCase(DriverHarness):
     """What the driver process was handed."""
 
@@ -225,6 +335,24 @@ class ContractCase(DriverHarness):
         # .env the engine writes for the sweep's model axis.
         self.assertEqual((ws / "cwd.txt").read_text(), str(ws))
         self.assertIn("JAATO_PROFILE_SET=cheap", (ws / ".env").read_text())
+
+    def test_the_contract_names_the_interpreter_that_has_the_sdk(self):
+        """``run`` inherits the engine's PATH and nothing else, so a task
+        written as ``python driver.py`` is a bet on that host's PATH — one
+        this probe lost, with exit 127 and no driver executed.  The
+        interpreter jaato-eval runs under is the one that HAS jaato_sdk,
+        and a driver is an SDK client."""
+        self._driver_task("ok")
+        result = self._run({"observer_events": _events("sid-a")},
+                           keep_workspace=True)
+        env = json.loads((self._workspace(result) / "env.json").read_text())
+        self.assertEqual(env["JAATO_EVAL_PYTHON"], sys.executable)
+
+    def test_the_new_variable_did_not_bump_the_contract_version(self):
+        """Additive: a driver that has never heard of it behaves as it
+        did, so refusing the table on the version would refuse a table it
+        does understand."""
+        self.assertEqual(CONTRACT_VERSION, "1")
 
     def test_no_socket_means_no_variable(self):
         """Absent, not empty: the driver falls back to the SDK default

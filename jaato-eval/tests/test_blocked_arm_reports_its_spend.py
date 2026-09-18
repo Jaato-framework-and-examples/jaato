@@ -254,6 +254,48 @@ def test_reported_cost_never_drops_below_either_source(tmp_path):
     )
 
 
+def test_a_tracker_zero_does_not_answer_the_cost_question(tmp_path):
+    """`usd: 0.0` in the snapshot is "nobody reported one", not "free".
+
+    The accumulator keeps ``cost_usd`` ``None`` until a turn reports a
+    cost, with that distinction spelled out in its docstring — and the
+    tracker's ``usd`` starts at zero and advances only when a response
+    reports one, so it carries the same absence.  Merging it in turned
+    "unknown" into a measured ``$0.0000``, which is the shape jaato #688
+    names upstream (``TokenUsage.reported``): a provider that reported
+    nothing read as a provider that charged nothing.
+
+    A driver arm makes it visible on every arm, because that path calls
+    the recorder on its success path too and not only when BLOCKED.
+    """
+    result = _arm_result()
+    _record_partial_usage(result, _TurnAccumulator(),
+                          {"cost_usd": 0.0, "spend_total_tokens": 0.0})
+
+    assert result.usage["cost_usd"] is None, (
+        "an unreported cost was recorded as a measured zero"
+    )
+    # The token dimensions have no such ambiguity to protect: the
+    # accumulator starts them AT zero, so zero is already their
+    # "nothing seen" value and merging one in changes nothing.
+    assert result.usage["spend_total_tokens"] == 0
+
+
+def test_a_zero_a_turn_actually_reported_survives(tmp_path):
+    """The rule is about the ABSENCE of evidence, not about the value.
+
+    A turn that reported ``cost_usd=0.0`` — a free model, a cached
+    response — measured zero, and that measurement must reach the report
+    as a zero rather than being folded back into "unknown".
+    """
+    acc = _TurnAccumulator()
+    acc.on_turn(_Event(_Usage(prompt=10, output=5, cost=0.0)))
+
+    result = _arm_result()
+    _record_partial_usage(result, acc, {"cost_usd": 0.0})
+    assert result.usage["cost_usd"] == 0.0
+
+
 def test_a_missing_or_corrupt_record_is_not_worse_than_none(tmp_path):
     """No snapshot must never be worse than no snapshot."""
     from jaato_eval.runner import _tracker_usage
