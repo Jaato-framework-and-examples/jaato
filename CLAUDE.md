@@ -1204,6 +1204,67 @@ from `.jaato/gc.json`; both layers pass a key only when it is present, so
 omitting one leaves the framework default (and `JAATO_GC_MEDIA_BYTES`) in
 charge rather than silently overriding it.
 
+### A Workspace With No GC, and a File That Overrode What It Did Not Say
+
+Two halves of one question — *what does a session get when nobody chose a GC
+strategy* — and both answered wrongly, in opposite directions.
+
+**A created workspace had no strategy at all.** A session's GC comes from its
+profile's `gc:` block, else `<workspace>/.jaato/gc.json`, else
+`~/.jaato/gc.json`; when none of the three answers, `JaatoServer.initialize`
+leaves `gc_result` at `None` and the session runs with **no context garbage
+collection whatever** — the history grows until the pre-send guard refuses it
+or the upstream does. `WorkspaceManager.create_workspace` made `.jaato/`,
+touched an empty `.env` and stopped, and a session driven against such a
+workspace is a bare `session.new` over that `.env`'s `JAATO_PROVIDER` /
+`MODEL_NAME` pair — no profile, so no `gc:` block. Every workspace the web
+client creates was in exactly that state.
+
+It is fixed by writing `.jaato/gc.json`, **not** by a line in `.env`, which is
+where one reaches first: there is no `JAATO_GC_TYPE`. The four `JAATO_GC_*`
+variables are read by `GCConfig`'s field defaults, and that object is
+constructed only once a strategy has been selected — so a threshold written
+into `.env` with nothing selecting a strategy configures nothing, silently.
+Choosing the strategy is the load-bearing act.
+
+`budget` rather than `truncate` because it dominates it: with an
+`InstructionBudget` it removes by GC policy (enrichment first, never
+`LOCKED`), and without one `BudgetGCPlugin.collect` falls back to the same
+turn-based truncation `gc_truncate` would have done. There is no state in
+which it is the worse choice. The generated file carries `type` and nothing
+else, for the reason the other half of this section is about. Existing
+workspaces are not migrated — the file is a starting point its owner is meant
+to edit, and a workspace that predates this may have been deliberately left
+without one.
+
+**And a `gc.json` decided keys it never mentioned.** `load_gc_from_file` built
+its `GCConfig` with `data.get(key, <literal>)` for the trigger keys, so
+`threshold_percent` and `target_percent` were fixed at 80.0 / 60.0 for any
+session that had a `gc.json` **at all** — while those fields' own docstrings
+promise *"Can be overridden via `JAATO_GC_THRESHOLD`"* / `JAATO_GC_TARGET`.
+`_media_settings` had already fixed precisely this for the three media keys
+and written the rule down — *omission has to mean "the dataclass decides", not
+"the default I happened to type"* — and the trigger keys were left behind.
+
+`pressure_percent` was worse, because its default is not a number.
+`data.get('pressure_percent')` answers `None` for a file that omits it, `None`
+is how `GCConfig` spells **continuous mode** (GC after every turn above
+`target_percent`, `threshold_percent` ignored), and passing it explicitly beat
+the env-derived 90.0 — so omitting one key silently selected a different
+operating *mode*. The `== 0` test sitting immediately below that read is the
+evidence it was never meant to: that line exists to make a literal `0` mean
+continuous, which is only worth writing if *absent* does not. The profile
+route into the same dataclass never had any of this (`GCProfileConfig`
+carries real dataclass defaults, `pressure_percent = 90.0` among them), so
+**the two routes disagreed about what an omitted key means**. `_scalar_settings`
+is `_media_settings`' rule applied to the rest of the file; a declared `0` or
+`null` still opts into continuous mode, because that is the documented opt-in.
+
+The two halves are one change because the first is unsafe without the second:
+a generated `{"type": "budget"}` under the old loader would have put every new
+workspace into continuous GC and made the `JAATO_GC_*` knobs in its own `.env`
+inert.
+
 ### One Invariant, Enforced Where History Leaves (#674)
 
 Every provider here requires that an assistant turn's function calls and

@@ -281,7 +281,7 @@ BASELINE: Dict[str, int] = {
     "jaato-server/shared/plugins/filesystem_query/plugin.py::FilesystemQueryPlugin._execute_glob_files": 16,
     "jaato-server/shared/plugins/filesystem_query/plugin.py::FilesystemQueryPlugin._execute_grep_content": 25,
     "jaato-server/shared/plugins/filesystem_query/plugin.py::FilesystemQueryPlugin.execute_streaming": 23,
-    "jaato-server/shared/plugins/gc/__init__.py::load_gc_from_file": 20,
+    "jaato-server/shared/plugins/gc/__init__.py::load_gc_from_file": 19,
     "jaato-server/shared/plugins/gc/utils.py::dedup_identical_tool_results": 16,
     "jaato-server/shared/plugins/gc_budget/plugin.py::BudgetGCPlugin._build_tool_call_pair_map": 17,
     "jaato-server/shared/plugins/gc_budget/plugin.py::BudgetGCPlugin.collect": 28,
