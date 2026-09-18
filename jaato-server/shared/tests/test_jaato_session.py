@@ -208,6 +208,7 @@ class TestJaatoSessionConfigure:
             include_base=True,
             include_constants=True,
             include_security=True,
+            include_disclosure=True,
         )
 
 

@@ -414,6 +414,7 @@ class AgentUIHooks(Protocol):
         mime_type: Optional[str] = None,
         data_b64: Optional[str] = None,
         final: bool = False,
+        generated_by: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Called when a tool emits output during execution.
 
@@ -435,6 +436,10 @@ class AgentUIHooks(Protocol):
             mime_type: Tags the ``data_b64`` payload (e.g. ``"audio/wav"``).
             data_b64: Base64-encoded binary payload.
             final: Last chunk of this stream.
+            generated_by: Provenance of the bytes (``ToolOutputEvent.
+                generated_by``): the model's own media is stamped
+                ``{"kind": "ai", ...}`` by the session, a tool attachment
+                carries its producer's stamp, and ``None`` claims nothing.
 
         Note:
             An implementation receiving ``mime_type``/``data_b64`` must not

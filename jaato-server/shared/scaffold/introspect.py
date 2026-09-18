@@ -687,8 +687,8 @@ def placeholders() -> List[Placeholder]:
             name=token,
             meaning=meaning,
             resolved_by="jaato_sdk.trace (the writer, per line)",
-            applies_to="trace.session_log / trace.provider_log and their env "
-                       "vars",
+            applies_to="trace.session_log / trace.provider_log / trace.ledger "
+                       "and their env vars",
         )
         for token, meaning in TRACE_PATH_PLACEHOLDERS.items()
     ]
@@ -743,6 +743,14 @@ def _profile_field_constraints() -> Dict[str, str]:
             f"a list of globs; the entry '{ss.SCRUB_DEFAULT}' expands in place and "
             f"'{ss.EXEMPT_PREFIX}NAME' exempts a variable  |  applies to plugins: "
             f"{', '.join(ss.SCRUB_SURFACES)}")
+    except Exception:
+        pass
+    try:
+        from shared.plugins.subagent import config as _pc
+        out["regulatory"] = (
+            f"risk_class: {' | '.join(_pc.RISK_CLASSES)} (most-restrictive-wins "
+            f"across inherits)  |  keys: {', '.join(sorted(_pc.REGULATORY_KEYS))}"
+            f"  |  provider: {{name, contact}}  |  absent = undeclared")
     except Exception:
         pass
     try:

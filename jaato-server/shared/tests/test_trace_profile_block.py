@@ -119,8 +119,10 @@ def test_an_absent_or_empty_block_is_none():
 def test_the_env_var_mapping_has_one_home():
     """``TRACE_ENV_VARS`` is what ``as_env`` and the catalog both read."""
     assert TRACE_ENV_VARS == {"session_log": "JAATO_TRACE_LOG",
-                              "provider_log": "JAATO_PROVIDER_TRACE"}
-    cfg = TraceProfileConfig(session_log="/a.log", provider_log="/b.log")
+                              "provider_log": "JAATO_PROVIDER_TRACE",
+                              "ledger": "LEDGER_PATH"}
+    cfg = TraceProfileConfig(session_log="/a.log", provider_log="/b.log",
+                             ledger="/c.jsonl")
     assert set(cfg.as_env()) == set(TRACE_ENV_VARS.values())
 
 

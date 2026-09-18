@@ -74,6 +74,26 @@ won't see any field that was added after its minimum.
 
 ## CHANGELOG
 
+(1.6 through 1.13 are recorded beside `PROTOCOL_VERSION` in
+`jaato-sdk/jaato_sdk/events.py`.)
+
+### 1.14 — model media carries provenance
+
+`ToolOutputEvent.generated_by` (optional): the machine-readable marking
+Regulation (EU) 2024/1689 Art. 50(2) asks for on artificially generated
+output. The model's own speech and images, delivered under `"model-output"`,
+carry `{"kind": "ai", "provider", "model", "session_id", "agent_id"}`
+(`jaato_sdk.events.ai_generated_by`), stamped by the session at delivery
+because it is the one place that knows both that the bytes are the model's
+and which binding produced them. A tool-result attachment carries what its
+producer put on `Attachment.generated_by`; a chunk a tool merely relayed
+carries nothing, because a fetched image is not AI-generated because an
+agent fetched it.
+
+Additive optional field, the 1.4 shape: an older client ignores it, and
+the regenerated TypeScript surface gained one new type (`GeneratedBy`)
+and renamed nothing.
+
 ### 1.5 — the resume verbs carry bytes
 
 `InjectPromptRequest.attachments` (optional), and the same field on the

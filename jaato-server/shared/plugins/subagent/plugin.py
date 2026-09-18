@@ -121,8 +121,22 @@ def _trace_wire_shape(profile: Any) -> Dict[str, Any]:
     trace = getattr(profile, 'trace', None)
     paths = {} if trace is None else {
         k: v for k, v in (("session_log", trace.session_log),
-                          ("provider_log", trace.provider_log)) if v}
+                          ("provider_log", trace.provider_log),
+                          ("ledger", trace.ledger)) if v}
     return {"trace": paths} if paths else {}
+
+
+def _regulatory_wire_shape(profile: Any) -> Dict[str, Any]:
+    """The ``profile_payload`` fragment carrying a profile's ``regulatory:`` block.
+
+    The sibling of :func:`_trace_wire_shape`, for the same two reasons:
+    one unconditional ``update()`` at the call site keeps
+    ``_dispatch_isolated_spawn`` at its complexity baseline, and the wire
+    spelling (the block's own file shape, ``to_dict``) lives in one place
+    the daemon-side allow-list mirrors.
+    """
+    reg = getattr(profile, "regulatory", None)
+    return {"regulatory": reg.to_dict()} if reg is not None else {}
 
 
 def _apply_trace_env(profile: Any, saved: Dict[str, Optional[str]]) -> None:
@@ -3052,6 +3066,10 @@ class SubagentPlugin(DaemonForwardingMixin):
         # writing its trace wherever the daemon's env happened to point
         # — the untyped behaviour the block replaces.
         profile_payload.update(_trace_wire_shape(profile))
+        # Regulatory block (optional): the child's disclosure piece reads
+        # it, so an isolated subagent must arrive declaring what its
+        # profile declared.
+        profile_payload.update(_regulatory_wire_shape(profile))
         # GC config (optional).
         if profile.gc is not None:
             gc_obj = profile.gc

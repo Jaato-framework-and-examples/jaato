@@ -1739,6 +1739,9 @@ export type Sequence = number | null;
 export type MimeType = string | null;
 export type DataB64 = string | null;
 export type Final = boolean;
+export type GeneratedBy = {
+  [k: string]: unknown;
+} | null;
 /**
  * All event types in the protocol.
  */
@@ -16561,6 +16564,17 @@ export interface ToolCallEndEvent {
  *     final: Last chunk of this stream, so a client can close its
  *         playback buffer or finish writing the file without waiting
  *         on a separate completion event.
+ *     generated_by: Provenance of the bytes, for the Art. 50(2) marking
+ *         (protocol 1.14).  The model's own media carries
+ *         :func:`ai_generated_by` -- ``{"kind": "ai", "provider",
+ *         "model", "session_id", "agent_id"}`` -- stamped at delivery by
+ *         the session that knows which binding produced it; a
+ *         tool-result attachment carries what its producer put on
+ *         ``Attachment.generated_by``; ``None`` means nothing is CLAIMED
+ *         about the bytes, which is what a tool that merely relayed a
+ *         file must say.  Machine-readable half of the marking; the
+ *         client-facing half (a visible label, a manifest sidecar) is
+ *         the consumer's, and this is what it reads.
  *
  * Note:
  *     When ``mime_type``/``data_b64`` are set the chunk MUST bypass the
@@ -16579,6 +16593,7 @@ export interface ToolOutputEvent {
   mime_type?: MimeType;
   data_b64?: DataB64;
   final?: Final;
+  generated_by?: GeneratedBy;
 }
 /**
  * Permission is requested for a tool execution.

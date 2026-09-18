@@ -253,6 +253,11 @@ class ToolOutputPayload(TypedDict):
     mime_type: NotRequired[Optional[str]]
     data_b64: NotRequired[Optional[str]]
     final: NotRequired[bool]
+    # Provenance of the bytes (protocol 1.14, EU AI Act Art. 50(2)):
+    # ``{"kind": "ai", provider, model, session_id, agent_id}`` on the
+    # model's own media, a producer's claim on a tool attachment, absent
+    # on a relayed file.  See ``ToolOutputEvent.generated_by``.
+    generated_by: NotRequired[Optional[Dict[str, Any]]]
     # Which session this event is about (protocol 1.2+).  Mirrors the
     # base ``Event.session_id``, stamped centrally as the daemon routes;
     # NotRequired because a hand-built payload need not supply it.

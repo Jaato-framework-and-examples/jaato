@@ -6112,6 +6112,7 @@ class _AgentUIHooksNotificationShim:
         mime_type: Optional[str] = None,
         data_b64: Optional[str] = None,
         final: bool = False,
+        generated_by: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Forward a tool-output chunk from the runner to the daemon.
 
@@ -6136,6 +6137,8 @@ class _AgentUIHooksNotificationShim:
                 payload["final"] = bool(final)
                 if sequence is not None:
                     payload["sequence"] = int(sequence)
+                if generated_by:
+                    payload["generated_by"] = dict(generated_by)
             self._rpc.emit_notification(
                 request_id=self._request_id,
                 event_type=self._rpc._NOTIF_TOOL_OUTPUT,

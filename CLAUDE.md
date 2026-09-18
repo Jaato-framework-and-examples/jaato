@@ -4960,6 +4960,44 @@ It is a real question — a cascade stage does belong to whoever drove the
 cascade — and it changes attribution for every reactor-spawned session, so it
 wants its own change rather than riding this one.
 
+### EU AI Act Mechanisms
+
+Regulation (EU) 2024/1689 addresses the **provider** and **deployer** of an
+AI system; a jaato *application* (profile + persona + tools + model binding)
+is the system and the framework is a component supplier. The assessment is
+[docs/design/eu-ai-act.md](docs/design/eu-ai-act.md). Five mechanisms exist
+in the tree, each the smallest shape that makes an obligation expressible:
+
+| Obligation | Mechanism |
+|---|---|
+| 6(4) document the risk determination | `regulatory:` profile block — `{intended_purpose, risk_class: minimal\|limited\|high, annex_iii, provider: {name, contact}, interacts_with_persons, disclosure_text}`. Declared, never inferred. `risk_class` inherits most-restrictive-wins, the rest child-replaces. Rides every ingress incl. the isolated-runner payload |
+| 50(1) say you are an AI | the `disclosure` instruction piece (`shared/ai_disclosure.py`), fourth beside `disk` / `constants` / `security`; kept by the blanket `suppress_base_instructions: true`, dropped only by name and then announced at WARNING (`ANNOUNCED_PIECES`) |
+| 50(2) mark generated output | `ToolOutputEvent.generated_by` (protocol 1.14): `{"kind": "ai", provider, model, session_id, agent_id}` on the model's own media, stamped in `_deliver_model_media`; `Attachment.generated_by` for a producer's claim; nothing on a relayed file |
+| 12 / 19 keep the logs | `TokenLedger` appends per record to `LEDGER_PATH`; `trace.ledger` is the typed key (relative = per session); `write_ledger` flushes only what was not appended |
+| 14(4) human oversight | `jaato-scaffold explain oversight [<profile>]` — the two stop verbs, the permission gate, the built-in constraints, reversibility, read from their enforcers; `jaato-doctor` prints the exact `jaato-server --stop` for the running daemon |
+
+**`validate` reads the block.** `disclosure_absent` (warn) for a
+persona-bound profile that declares nothing about interaction; under
+`risk_class: high` the codes in `HIGH_RISK_ESCALATED_CODES`
+(`budget_control_absent`, `budget_limits_without_abort`,
+`secret_scrub_disabled`, `missing_description`,
+`permission_rule_without_plugin`, `unknown_tool`, `disclosure_absent`)
+become **errors**, and five high-risk-only errors name the obligation each
+covers: `high_risk_without_intended_purpose`,
+`high_risk_without_oversight_policy` (no `plugin_configs.permission.policy`),
+`high_risk_without_record_keeping` (no `trace.session_log`),
+`high_risk_disclosure_suppressed`, `high_risk_shell_unconfined`
+(`interactive_shell` without `require_confinement: true`). A profile that
+declares no class validates exactly as before: absent is `minimal` for
+validation and *undeclared* for documentation, because a framework that
+printed `minimal` for it would be asserting a determination nobody made.
+
+Deliberately not built yet, each named in the design doc with its reason:
+the first-interaction announcement a client renders (`disclosure_announcement`
+has the text; nothing emits it), the `TRAIT_OUTPUT_MARKER` hook, the
+audit-record schema with `record_keeping:` retention, the Annex IV dossier
+generator, the incident register.
+
 ### Approver Identity (#859)
 
 `PermissionResolvedEvent` said HOW a decision was reached (`method`) and
@@ -8108,5 +8146,6 @@ This is not optional cleanup — treat missing or inaccurate docstrings as a def
 - [Model Tiers × Prompt Caching](docs/design/model-tier-prompt-cache.md) - What `enter_tier` costs when prompt caching is on: cache is keyed per model, so an in-place tier switch re-reads the whole prefix cold (break-even ~6 consecutive calls at the new tier). Covers the `_wire_cache_plugin` gap that made profile cache knobs inert, the system-block tier line that invalidates BP1, and the per-provider knob divergence + proposed common `cache:` field.
 - [MiniMax, Kimi and MiMo providers](docs/design/minimax-kimi-mimo-providers.md) - Design for three first-party OpenAI-compatible providers (`minimax`, `kimi`, `mimo`) and the framework prerequisite they share: **reasoning replay** — sending an assistant turn's `reasoning_content` back on the next request of a tool-call loop, which the session currently drops from history and every OpenAI-shaped converter ignores. Covers the surface decision (chat completions, not the Anthropic shims), per-vendor thinking-control dialects, tool-choice vocabularies, catalog vs table context resolution, error taxonomies, and the registration checklist.
 - [Plugin schema census](docs/design/plugin-schema-census.md) - Which config keys each plugin READS that its `get_config_schema()` does not DECLARE, measured tree-wide by `scripts/plugin_schema_census.py`. A census, deliberately **not** a guard: the raw count spans four surfaces (framework-injected keys, the block an author writes, a nested dict with its own owner, and a separate file the block points at), and a ratchet seeded before those are separated would freeze the ambiguity as a fact. `permission` is worked through site by site as the one audited row.
+- [EU AI Act](docs/design/eu-ai-act.md) - What Regulation (EU) 2024/1689 asks of a jaato *application* (the AI system is the profile + persona + tools + model binding; jaato is a component supplier under Art. 25(4), and BUSL-1.1 is not a free and open-source licence, so neither Art. 2(12) nor the 25(4) carve-out applies), which obligations bind when after the Digital Omnibus (Art. 50 disclosure and marking since 2 Aug 2026; Annex III high-risk from 2 Dec 2027), and the mechanisms in order. Shipped: a `regulatory:` profile block, a `disclosure` instruction piece, a `generated_by` stamp on model media, a ledger that reaches disk (`trace.ledger`), and `explain oversight` + the doctor's stop line. Not yet: the first-interaction announcement, the output-marker hook, one audit-record contract with `record_keeping:` retention, a generated Annex IV dossier, and an incident register. See [EU AI Act Mechanisms](#eu-ai-act-mechanisms).
 - [AppArmor Setup](docs/apparmor-setup.md) - Kernel-enforced workspace isolation. WS deployments confine automatically when AppArmor is available; IPC clients opt in via `IPCClient(..., apparmor=True)` (defaults to `False`).
 - [GCP Setup Guide](docs/gcp-setup.md) - Setting up GCP project for Vertex AI

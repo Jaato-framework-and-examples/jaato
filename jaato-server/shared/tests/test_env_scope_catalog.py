@@ -393,10 +393,11 @@ def test_every_typed_key_resolves():
     )
 
 
-def test_the_trace_block_covers_exactly_its_two_env_vars():
+def test_the_trace_block_covers_exactly_its_env_vars():
     """The promotion this catalog shipped with stays wired.
 
-    ``trace:`` exists to give the two trace paths a typed home; if the
+    ``trace:`` exists to give the trace paths (and, since the ledger
+    appends per record, the ledger path) a typed home; if the
     block and the catalog drift apart, the promotion has silently been
     undone and the catalog would still claim coverage.
     """

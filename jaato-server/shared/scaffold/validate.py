@@ -34,6 +34,7 @@ from shared.plugins.model_provider.base import KNOB_LAYERS
 # loader's module notes carry the decision and the rejected alternatives.
 from shared.spawn_schema_loader import unreachable_spawn_types
 from jaato_sdk.plugins.model_provider.types import DISCOVERABILITY_EAGER
+from shared.instruction_suppression import PIECE_DISCLOSURE
 from . import introspect
 
 # Layer names that nest under plugin_configs.<provider> as sub-dicts.
@@ -506,6 +507,9 @@ def validate_profile(
     # --- what the profile says about ITSELF ------------------------------
     _check_profile_identity(profile, add)
 
+    # --- what it declares under the EU AI Act (regulatory:) -------------
+    _check_regulatory(profile, add)
+
     # --- provider --------------------------------------------------------
     pinfo = _resolve_and_check_provider(profile, provider_name, providers, add)
     # model present? (a resolved, runnable profile should bind one; a pure
@@ -671,6 +675,8 @@ def validate_profile(
             add("warn", "unknown_gc",
                 f"gc type '{gc_type}' not among {gc_names}", where="gc.type")
 
+    # --- a declared risk class raises the stakes of everything above -----
+    _escalate_for_risk_class(profile, out)
     return out
 
 
@@ -738,6 +744,154 @@ def _check_profile_identity(profile: Any, add) -> None:
             "  (Inherited: the value may come from a parent profile — "
             "`system_instructions` concatenates down the inherits chain.)",
             where="system_instructions")
+
+
+#: Findings that are WARNINGS on an ordinary profile and ERRORS under
+#: ``regulatory.risk_class: high``.  Each one is a warning for the reason
+#: the whole silent-ignore family warns -- an error would fail every
+#: existing workspace -- and that reasoning stops holding the moment the
+#: author has declared the application high-risk under the Act: an
+#: unbounded loop, a leaked credential, an unnamed delegate or an
+#: undisclosed AI are then compliance defects, not authoring conveniences.
+#: The set is a declared constant so ``explain`` can print it and a test
+#: can pin it.
+HIGH_RISK_ESCALATED_CODES = frozenset({
+    "budget_control_absent",
+    "budget_limits_without_abort",
+    "secret_scrub_disabled",
+    "missing_description",
+    "permission_rule_without_plugin",
+    "unknown_tool",
+    "disclosure_absent",
+})
+
+
+def _binds_persona(profile: Any) -> bool:
+    """Whether a session built from this profile talks in SOMEBODY's voice.
+
+    A persona (``default_agent``) or the deprecated inline
+    ``system_instructions`` is what turns a profile into an application a
+    person can meet; an abstract base with neither binds no conversation
+    and owes no disclosure.
+    """
+    return bool(getattr(profile, "default_agent", None)
+                or getattr(profile, "system_instructions", None))
+
+
+def _check_regulatory(profile: Any, add) -> None:
+    """The findings the ``regulatory:`` block makes possible.
+
+    ``disclosure_absent`` (**warn**; error under ``high``)
+        the profile binds a persona and declares nothing about whether
+        natural persons interact with it -- so nothing decides whether the
+        Article 50(1) announcement is owed.  An explicit ``false`` is a
+        declaration and is silent; only the ABSENCE is reported.
+
+    The ``high_risk_*`` findings (:func:`_check_high_risk_obligations`)
+    fire only under an explicit ``risk_class: high``, and are **errors**:
+    each names an obligation the Act attaches to that class (Art. 9/12/
+    14/15) that the profile has not met with the mechanism the framework
+    already provides.
+    """
+    reg = getattr(profile, "regulatory", None)
+    if _binds_persona(profile) and (
+        reg is None or reg.interacts_with_persons is None
+    ):
+        add("warn", "disclosure_absent",
+            "binds a persona and declares nothing about whether natural "
+            "persons interact with it — set `regulatory.interacts_with_persons` "
+            "(true: the framework's disclosure piece and first-interaction "
+            "announcement apply, Art. 50(1); false: it is a component another "
+            "system drives).  Absent, nothing decides which.",
+            where="regulatory.interacts_with_persons")
+    if reg is not None and reg.is_high_risk:
+        _check_high_risk_obligations(profile, reg, add)
+
+
+def _permission_policy(profile: Any):
+    """The profile's ``plugin_configs.permission.policy`` mapping, or ``None``."""
+    configs = getattr(profile, "plugin_configs", None) or {}
+    section = configs.get("permission")
+    policy = section.get("policy") if isinstance(section, dict) else None
+    return policy if isinstance(policy, dict) and policy else None
+
+
+def _shell_confinement_required(profile: Any) -> bool:
+    """Whether ``interactive_shell`` is enabled AND told to refuse an unconfined spawn."""
+    configs = getattr(profile, "plugin_configs", None) or {}
+    shell_cfg = configs.get("interactive_shell")
+    return (isinstance(shell_cfg, dict)
+            and shell_cfg.get("require_confinement") is True)
+
+
+def _check_high_risk_obligations(profile: Any, reg: Any, add) -> None:
+    """The four things a ``risk_class: high`` profile must have declared.
+
+    Split from :func:`_check_regulatory` so neither approaches the
+    complexity ceiling; every finding here is an **error**, because the
+    author has already made the determination that raises the stakes.
+    """
+    if not reg.intended_purpose:
+        add("error", "high_risk_without_intended_purpose",
+            "risk_class: high with no `intended_purpose` — the sentence every "
+            "Annex IV section and every deployer's instructions for use start "
+            "from (Art. 11, 13(3)(b)).", where="regulatory.intended_purpose")
+
+    if _permission_policy(profile) is None:
+        add("error", "high_risk_without_oversight_policy",
+            "risk_class: high with no `plugin_configs.permission.policy` — "
+            "the permission gate is the framework's human-oversight measure "
+            "(Art. 14(4)(d): the person can decide not to use, or override, "
+            "an output).  Declare a policy (defaultPolicy, whitelist, "
+            "blacklist, an approval channel); `explain plugin permission` "
+            "prints the shape.", where="plugin_configs.permission.policy")
+
+    recorded = any(where in ("trace.session_log", "env.JAATO_TRACE_LOG")
+                   for _v, where in _trace_path_sources(profile))
+    if not recorded:
+        add("error", "high_risk_without_record_keeping",
+            "risk_class: high with no application trace configured — "
+            "`trace.session_log` (or env JAATO_TRACE_LOG) is where every "
+            "permission DECISION, budget rung and tool verdict is written, "
+            "and Art. 12 requires those events recorded automatically over "
+            "the system's lifetime.  Set `trace: {session_log: "
+            ".jaato/logs/session_trace.jsonl}`.", where="trace.session_log")
+
+    if PIECE_DISCLOSURE in (getattr(profile, "suppress_base_instructions", None) or ()):
+        add("error", "high_risk_disclosure_suppressed",
+            "risk_class: high with `suppress_base_instructions` naming the "
+            "`disclosure` piece — the model is no longer told to disclose "
+            "that it is an AI system (Art. 50(1), in force since 2 Aug "
+            "2026).  Remove `disclosure` from the suppression.",
+            where="suppress_base_instructions.disclosure")
+
+    plugins = getattr(profile, "plugins", None) or []
+    if "interactive_shell" in plugins and not _shell_confinement_required(profile):
+        add("error", "high_risk_shell_unconfined",
+            "risk_class: high enables `interactive_shell` without "
+            "`plugin_configs.interactive_shell.require_confinement: true` "
+            "— without it a PTY the model drives runs unconfined when "
+            "the kernel boundary is absent, announced only at WARNING "
+            "(Art. 15: robustness and cybersecurity appropriate to the "
+            "risk).", where="plugin_configs.interactive_shell.require_confinement")
+
+
+def _escalate_for_risk_class(profile: Any, out: List[Diagnostic]) -> None:
+    """Promote :data:`HIGH_RISK_ESCALATED_CODES` to errors under ``high``.
+
+    A post-pass over the profile's own findings rather than a branch in
+    each check, so a check added later is escalated by being NAMED in the
+    set, and a check that is not named keeps its severity -- the set is the
+    whole policy.  Nothing changes for a profile that declares no class
+    or a class below ``high``.
+    """
+    reg = getattr(profile, "regulatory", None)
+    if reg is None or not reg.is_high_risk:
+        return
+    for d in out:
+        if d.severity == "warn" and d.code in HIGH_RISK_ESCALATED_CODES:
+            d.severity = "error"
+            d.message += "  (error because regulatory.risk_class is high)"
 
 
 def _check_spawn_schema_wire_types(profiles, config_root: str, out) -> None:

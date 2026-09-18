@@ -539,6 +539,45 @@ def check_daemon_identity(info: DaemonInfo) -> List[Check]:
                   f"USER={info.user or '?'}")]
 
 
+def _daemon_flag_value(argv: Optional[List[str]], flag: str) -> Optional[str]:
+    """The value following *flag* in the daemon's argv, or ``None``."""
+    if not argv or flag not in argv:
+        return None
+    i = argv.index(flag)
+    return argv[i + 1] if i + 1 < len(argv) else None
+
+
+def check_oversight(info: DaemonInfo, socket_path: str, pidfile: str) -> List[Check]:
+    """Name the stop button for the daemon that is running (EU AI Act, Art. 14(4)(e)).
+
+    ``jaato-server --stop`` saves every loaded session, cancels each and
+    returns the runners, from the host shell with no client and no session
+    id -- which is where a person who has to stop a system they did not
+    start is standing.  Nothing a deployer reads named it as the oversight
+    measure, and the invocation depends on how THIS daemon was started
+    (its ``--pid-file`` / ``--ipc-socket``), so it is printed here from the
+    daemon's own argv rather than documented as a default someone has to
+    match up.  One session is ``session stop <id>`` from any attached
+    client, and ``session orphans`` lists what is loaded and unwatched.
+    Never connects: the line names the verbs, it does not run them.
+    """
+    argv = _daemon_cmdline(info.pid) if info.pid is not None else None
+    pid_flag = _daemon_flag_value(argv, "--pid-file") or pidfile
+    sock_flag = _daemon_flag_value(argv, "--ipc-socket") or socket_path
+    invocation = f"jaato-server --stop --pid-file {pid_flag} --ipc-socket {sock_flag}"
+    one = ("one session: `session stop <id>` from an attached client "
+           "(SDK stop_session, daemon protocol >= 1.7); `session orphans` "
+           "lists what is loaded with nobody watching.")
+    if not info.listening:
+        return [Check("stop button", WARN,
+                      f"no daemon listening on {socket_path} -- nothing to stop. "
+                      f"Once one runs: `{invocation}`.  {one}")]
+    who = f"PID {info.pid}" if info.pid is not None else "pid unknown (no pidfile)"
+    return [Check("stop button", PASS,
+                  f"{who}: `{invocation}` saves every loaded session, then "
+                  f"cancels each and reaps the runners.  {one}")]
+
+
 def check_home_match(info: DaemonInfo) -> List[Check]:
     """Compare the daemon's HOME to the caller's — the #1 pass:// trap.
 
@@ -1435,6 +1474,7 @@ def run_checks(
     checks += check_mcp_sdk()
     checks += check_socket(info, auto_start=auto_start)
     checks += check_daemon_identity(info)
+    checks += check_oversight(info, socket_path, pidfile)
     if web_socket:
         checks += check_websocket(web_socket, info, ws_token_file=ws_token_file)
     checks += check_home_match(info)

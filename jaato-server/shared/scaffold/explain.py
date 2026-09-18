@@ -2226,7 +2226,8 @@ def agents(workspace: str = ".") -> Rendered:
         "    `system_instructions:` is DEPRECATED and describes the wrong thing —",
         "    a persona is not 'the session's system instructions'.  The rendered",
         "    prompt LAYERS: .jaato/instructions/ base + THIS persona + plugin",
-        "    instructions + framework constants + the untrusted-content boundary.",
+        "    instructions + framework constants + the untrusted-content boundary",
+        "    + the AI disclosure (EU AI Act Art. 50(1)).",
         "    `suppress_base_instructions` can drop every layer EXCEPT the persona",
         "    and its plugins — which is what makes the persona the durable half.",
         "    Markdown also travels: it is reviewable, diffable, and reusable across",
@@ -2407,8 +2408,9 @@ def _trace_block_note() -> List[str]:
     """
     return [
         "",
-        "  trace: — the two diagnostic log paths, and the ONE knob whose value",
-        "  is a path the framework writes to.  Both keys take the same rules:",
+        "  trace: — the two diagnostic log paths plus the token LEDGER, the ONE",
+        "  knob whose value is a path the framework writes to.  All three keys",
+        "  take the same rules:",
         "    absolute   one file, shared by every session using this profile",
         "    relative   resolved against each session's own workspace by the",
         "               READER (jaato_sdk/trace.py) — one file per session",
@@ -2418,6 +2420,8 @@ def _trace_block_note() -> List[str]:
         "        trace:",
         "          provider_log: .jaato/logs/provider{agent_suffix}.jsonl",
         "          session_log:  .jaato/logs/session.jsonl",
+        "          ledger:       .jaato/logs/ledger.jsonl   # every round trip +",
+        "                                                  # permission verdict",
         "",
         "  A PROVIDER trace splits per agent whether or not you ask: with no",
         "  placeholder the agent id is appended before the extension",
@@ -3248,3 +3252,336 @@ def integrations():
     """
     from . import integrations as _int
     return _int.listing()
+
+
+# --------------------------------------------------------------- oversight
+
+def _oversight_measures() -> Dict[str, Any]:
+    """The framework's human-oversight measures, read from where they live.
+
+    Every value here is imported from the module that ENFORCES it -- the
+    SDK's socket / pidfile defaults, the protocol floor the stop verb needs,
+    the watchdog's default, the budget ladder's vocabulary, the permission
+    plugin's own declared policy schema -- so this page cannot describe an
+    order the daemon does not keep.  The vocabulary is Article 14(4) of
+    Regulation (EU) 2024/1689, because that is what a deployer reading it
+    has to map the framework onto.
+    """
+    from jaato_sdk.client.ipc import (
+        DEFAULT_PID_FILE, DEFAULT_SOCKET_PATH, IPCClient,
+    )
+    from shared import budget_control as bc
+    from shared import runtime_limits as rl
+
+    return {
+        "stop": [
+            {
+                "verb": "jaato-server --stop",
+                "scope": "the whole deployment",
+                "where": "the host shell; needs no client and no session id",
+                "invocation": (
+                    f"jaato-server --stop --pid-file {DEFAULT_PID_FILE} "
+                    f"--ipc-socket {DEFAULT_SOCKET_PATH}"
+                ),
+                "persists": (
+                    "every loaded session is saved to disk, then each is "
+                    "cancelled and shut down and its runner returned or "
+                    "reaped; the pidfile is the handle, the socket the "
+                    "fallback when the pidfile is stale"
+                ),
+            },
+            {
+                "verb": "session.stop <id>",
+                "scope": "one loaded session, whoever created it",
+                "where": (
+                    "any attached client (TUI: `session stop <id>`; SDK: "
+                    "IPCClient.stop_session); daemon protocol >= "
+                    f"{IPCClient.MIN_SESSION_STOP_PROTOCOL}, refused below it"
+                ),
+                "invocation": "session stop <id>",
+                "persists": (
+                    "cancellation, not a kill: the session's cancel token is "
+                    "tripped (the same path budget_control's abort rung "
+                    "uses), a mid-turn session stops at its next check "
+                    "point, and it is then unloaded, which saves it"
+                ),
+            },
+        ],
+        "who_is_running": (
+            "session.orphans (TUI: `session orphans`) lists every LOADED "
+            "session with no client attached, how long it has been orphaned, "
+            "whether it is spending right now, and the runner executing it"
+        ),
+        "decision_gate": {
+            "mechanism": "the permission plugin (plugin_configs.permission.policy)",
+            "article": "14(4)(d) -- decide not to use, or override, an output",
+            "policy_vocabulary": _permission_policy_vocabulary(),
+        },
+        "built_in_constraints": [
+            {
+                "mechanism": "budget_control degrade ladder",
+                "article": "14(3)(a) -- built into the system by the provider",
+                "detail": (
+                    f"limits on {', '.join(bc.DIMENSIONS)}; of the terminal "
+                    f"actions ({', '.join(sorted(bc.TERMINAL_ACTIONS))}) only "
+                    "'abort' stops the run -- limits alone are observed, "
+                    "never enforced"
+                ),
+            },
+            {
+                "mechanism": "session-lifetime watchdog (runtime_limits)",
+                "article": "14(3)(a)",
+                "detail": (
+                    "daemon-side, so it applies when the client died: "
+                    f"max_orphan_seconds defaults to "
+                    f"{rl.DEFAULT_MAX_ORPHAN_SECONDS:g}s, max_session_seconds "
+                    "is opt-in; 0 disables either"
+                ),
+            },
+            {
+                "mechanism": "completion gate (completion_processors)",
+                "article": "14(4)(a) -- understand capacities and limitations",
+                "detail": (
+                    "a validate() script refuses signal_completion until its "
+                    "checks pass; max_refusals bounds how often, "
+                    "budget_control bounds the retries"
+                ),
+            },
+        ],
+        "reversibility": {
+            "reversible": (
+                "file_edit: every write is backed up under "
+                "<config_root>/sessions/<session_id>/backups/ before it lands"
+            ),
+            "not_reversible": (
+                "anything a subprocess or a remote call did -- cli, "
+                "interactive_shell, mcp, service_connector, web_fetch POSTs; "
+                "the permission gate is the measure that stands in front of "
+                "them"
+            ),
+        },
+    }
+
+
+def _permission_policy_vocabulary() -> Dict[str, Any]:
+    """The permission plugin's OWN declared policy shape, read off its schema.
+
+    Walks ``introspect.plugins()['permission'].config_settings`` for the
+    ``policy`` knob's children and the ``channel_type`` enum, so the page
+    prints the vocabulary ``validate`` enforces and never a copy of it.
+    Best-effort: a build with no permission plugin renders an empty dict.
+    """
+    out: Dict[str, Any] = {}
+    try:
+        info = introspect.plugins().get("permission")
+    except Exception:
+        info = None
+    if info is None:
+        return out
+    for setting in info.config_settings:
+        if setting.name == "channel_type" and setting.enum:
+            out["approval_channels"] = list(setting.enum)
+        if setting.name == "policy" and setting.children:
+            for child in setting.children:
+                if child.enum:
+                    out[f"policy.{child.name}"] = list(child.enum)
+                else:
+                    out[f"policy.{child.name}"] = child.type or "object"
+    return out
+
+
+def _oversight_lines(M: Dict[str, Any]) -> List[str]:
+    """Render :func:`_oversight_measures` as the bare ``explain oversight`` page."""
+    lines = [
+        "human oversight  (Regulation (EU) 2024/1689, Art. 14 -- what the",
+        "framework provides, in the Article's own vocabulary)",
+        "  ----------------------------------------------------------------",
+        "STOP  (14(4)(e): intervene, or interrupt through a stop button)",
+    ]
+    for stop in M["stop"]:
+        lines.append(f"  {stop['verb']:<22} {stop['scope']}")
+        lines.extend(_wrap_bullet(f"where: {stop['where']}", indent=4, glyph=" "))
+        lines.append(f"      run:   {stop['invocation']}")
+        lines.extend(_wrap_bullet(f"then: {stop['persists']}", indent=4, glyph=" "))
+    lines.append("")
+    lines.append("WHO IS RUNNING")
+    lines.extend(_wrap_bullet(M["who_is_running"], indent=2, glyph=" "))
+    lines.append("")
+    gate = M["decision_gate"]
+    lines.append(f"DECIDE / OVERRIDE  ({gate['article']})")
+    lines.extend(_wrap_bullet(gate["mechanism"], indent=2, glyph=" "))
+    for key, value in gate["policy_vocabulary"].items():
+        shown = " | ".join(str(v) for v in value) if isinstance(value, list) else value
+        lines.append(f"    {key:<26} {shown}")
+    lines.append("")
+    lines.append("BUILT-IN CONSTRAINTS  (14(3)(a): the ones the system cannot override)")
+    for c in M["built_in_constraints"]:
+        lines.append(f"  {c['mechanism']}")
+        lines.extend(_wrap_bullet(c["detail"], indent=4, glyph=" "))
+    lines.append("")
+    lines.append("REVERSIBLE / NOT")
+    lines.extend(_wrap_bullet(M["reversibility"]["reversible"], indent=2, glyph="+"))
+    lines.extend(_wrap_bullet(M["reversibility"]["not_reversible"], indent=2, glyph="-"))
+    lines += [
+        "",
+        "  `explain oversight <profile> --workspace DIR` shows which of these a",
+        "  named profile has ARMED; `jaato-doctor` prints the exact --stop",
+        "  invocation for the daemon that is running.",
+    ]
+    return lines
+
+
+def oversight() -> Rendered:
+    """``explain oversight`` -- the Article 14 measures, computed.
+
+    The framework's stop button exists twice (``jaato-server --stop`` and
+    ``session.stop <id>``) and no surface a deployer reads named either as
+    an oversight measure; the rule for facts about the framework is that
+    they are computed, not written down (``docs/design/eu-ai-act.md``
+    §4.5).  A generated Annex IV dossier quotes this page rather than
+    restating it, which is the one way the instructions for use and the
+    running framework keep saying the same thing.
+    """
+    M = _oversight_measures()
+    return M, "\n".join(_oversight_lines(M))
+
+
+def _permission_summary(prof: Any) -> Dict[str, Any]:
+    """The profile's declared permission policy, or what its absence means."""
+    configs = getattr(prof, "plugin_configs", None) or {}
+    perm = configs.get("permission")
+    perm = perm if isinstance(perm, dict) else {}
+    policy = perm.get("policy")
+    policy = policy if isinstance(policy, dict) else {}
+    whitelist = policy.get("whitelist") or {}
+    blacklist = policy.get("blacklist") or {}
+    return {
+        "declared": bool(policy),
+        "defaultPolicy": policy.get("defaultPolicy"),
+        "whitelist_tools": len(whitelist.get("tools") or []),
+        "blacklist_tools": len(blacklist.get("tools") or []),
+        "channel_type": perm.get("channel_type"),
+    }
+
+
+def _budget_summary(prof: Any) -> Dict[str, Any]:
+    """The profile's budget ladder, and whether it can STOP the run."""
+    budget = getattr(prof, "budget_control", None)
+    rungs = [{"at": r.at_percent, "action": r.action}
+             for r in (getattr(budget, "degrade", None) or ())]
+    return {
+        "declared": budget is not None,
+        "limits": dict(getattr(budget, "limits", None) or {}),
+        "rungs": rungs,
+        "stops": bool(getattr(budget, "has_abort_rung", False)),
+    }
+
+
+#: The plugins whose effects no backup can undo -- a subprocess ran, a
+#: remote call was made.  Named here so the page and a dossier agree.
+_IRREVERSIBLE_SURFACES = ("cli", "interactive_shell", "mcp",
+                          "service_connector", "web_fetch")
+
+
+def _profile_oversight(prof: Any) -> Dict[str, Any]:
+    """What a RESOLVED profile has armed, measure by measure."""
+    limits = getattr(prof, "runtime_limits", None)
+    reg = getattr(prof, "regulatory", None)
+    return {
+        "regulatory": reg.to_dict() if reg is not None else None,
+        "permission_policy": _permission_summary(prof),
+        "budget_control": _budget_summary(prof),
+        "wall_clock": {
+            "max_session_seconds": getattr(limits, "max_session_seconds", None),
+            "max_orphan_seconds": getattr(limits, "max_orphan_seconds", None),
+        },
+        "completion_gate": [
+            {"name": p.name or p.script, "max_refusals": p.max_refusals}
+            for p in (getattr(prof, "completion_processors", None) or [])
+        ],
+        "irreversible_surfaces": sorted(
+            p for p in (getattr(prof, "plugins", None) or [])
+            if p in _IRREVERSIBLE_SURFACES),
+    }
+
+
+def _permission_line(perm: Dict[str, Any]) -> str:
+    if not perm["declared"]:
+        return ("  DECIDE / OVERRIDE  NO permission policy declared -- the runtime "
+                "policy of the root session applies (a subagent inherits it)")
+    return (f"  DECIDE / OVERRIDE  permission policy declared: "
+            f"defaultPolicy={perm['defaultPolicy'] or 'ask'}, "
+            f"{perm['whitelist_tools']} whitelisted, "
+            f"{perm['blacklist_tools']} blacklisted, "
+            f"channel={perm['channel_type'] or 'console'}")
+
+
+def _budget_line(bud: Dict[str, Any]) -> str:
+    if not bud["declared"]:
+        return "  STOP (budget)      NO budget_control -- unbounded on every dimension"
+    ladder = ", ".join(f"{r['at']:g}%->{r['action'] or 'rebind'}" for r in bud["rungs"])
+    verdict = ("STOPS the run" if bud["stops"]
+               else "does NOT stop the run (no abort rung)")
+    return (f"  STOP (budget)      limits {bud['limits'] or '{}'}; "
+            f"ladder [{ladder or 'none'}]; {verdict}")
+
+
+def _watchdog_line(wc: Dict[str, Any]) -> str:
+    from shared import runtime_limits as rl
+    orphan = wc["max_orphan_seconds"]
+    shown = (f"{rl.DEFAULT_MAX_ORPHAN_SECONDS:g} (default)" if orphan is None
+             else orphan)
+    return (f"  STOP (watchdog)    max_orphan_seconds={shown}"
+            f"  max_session_seconds={wc['max_session_seconds'] or 'unbounded'}")
+
+
+def _gate_line(gates: List[Dict[str, Any]]) -> str:
+    if not gates:
+        return "  COMPLETION GATE    none"
+    shown = ", ".join(f"{g['name']} (max_refusals={g['max_refusals'] or 'unbounded'})"
+                      for g in gates)
+    return f"  COMPLETION GATE    {shown}"
+
+
+def _profile_oversight_lines(name: str, P: Dict[str, Any]) -> List[str]:
+    """Render :func:`_profile_oversight`."""
+    reg = P["regulatory"] or {}
+    annex = f"  (annex_iii {reg['annex_iii']})" if reg.get("annex_iii") else ""
+    surfaces = ", ".join(P["irreversible_surfaces"]) or "no subprocess or remote surface enabled"
+    return [
+        f"human oversight, as ARMED by profile {name!r}:",
+        "",
+        f"  regulatory.risk_class     {reg.get('risk_class') or 'undeclared'}{annex}",
+        f"  interacts_with_persons    {reg.get('interacts_with_persons', 'undeclared')}",
+        "",
+        _permission_line(P["permission_policy"]),
+        _budget_line(P["budget_control"]),
+        _watchdog_line(P["wall_clock"]),
+        _gate_line(P["completion_gate"]),
+        f"  IRREVERSIBLE       {surfaces}",
+        "",
+        "  the two stop verbs apply to every profile alike -- "
+        "`explain oversight` (bare) names them.",
+    ]
+
+
+def oversight_profile(name: str, workspace: str) -> Rendered:
+    """``explain oversight <profile>`` -- what THIS profile has armed.
+
+    Resolved through ``discover_profiles`` so an inherited permission
+    policy or budget ladder counts, exactly as the daemon would load it.
+    """
+    from shared.plugins.subagent.config import discover_profiles
+
+    ws = Path(workspace).resolve()
+    result = discover_profiles(
+        profiles_dir=".jaato/profiles", base_path=str(ws),
+        config_root=str(ws / ".jaato"),
+    )
+    prof = result.profiles.get(name)
+    if prof is None:
+        return ({"profile": name, "found": False, "error": "no such profile"},
+                f"no profile {name!r} under {ws}/.jaato/profiles/")
+    P = _profile_oversight(prof)
+    P.update({"profile": name, "found": True})
+    return P, "\n".join(_profile_oversight_lines(name, P))

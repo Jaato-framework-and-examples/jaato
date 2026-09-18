@@ -17,8 +17,9 @@ This module makes the knob granular. It accepts:
 
 * ``bool`` — ``True`` suppresses ``{disk, constants}`` (the security boundary is
   KEPT: it is the indirect-prompt-injection defense for web_fetch / MCP tool
-  results, and silently dropping it on a convenience flag is a footgun). ``False``
-  suppresses nothing.
+  results, and silently dropping it on a convenience flag is a footgun; the
+  ``disclosure`` piece is kept for the same reason -- it is the Article 50(1)
+  "you are talking to an AI" posture). ``False`` suppresses nothing.
 * a mapping over the piece names (``{"disk": true, "constants": true,
   "security": false}``) — absent key = keep that piece.
 * a list/set of piece names to suppress (wire form), or the token ``"all"``.
@@ -39,15 +40,25 @@ from typing import Any, FrozenSet, List, Mapping
 PIECE_DISK = "disk"            # .jaato/instructions/*.md base layer
 PIECE_CONSTANTS = "constants"  # task-completion + parallel + turn-summary (OSS or premium)
 PIECE_SECURITY = "security"    # untrusted-content boundary (injection defense)
+PIECE_DISCLOSURE = "disclosure"  # "this is an AI system" (EU AI Act, Art. 50(1))
 
 SUPPRESSION_PIECES: FrozenSet[str] = frozenset(
-    {PIECE_DISK, PIECE_CONSTANTS, PIECE_SECURITY}
+    {PIECE_DISK, PIECE_CONSTANTS, PIECE_SECURITY, PIECE_DISCLOSURE}
 )
 
-# What the blanket ``true`` suppresses.  Security is deliberately EXCLUDED —
-# it is dropped only when named explicitly (dict ``security: true`` / list
-# ``[..., "security"]`` / the ``"all"`` token).
+# What the blanket ``true`` suppresses.  Security and disclosure are
+# deliberately EXCLUDED — each is dropped only when named explicitly (dict
+# ``security: true`` / list ``[..., "disclosure"]`` / the ``"all"`` token).
+# Security is the indirect-prompt-injection defense; disclosure is a legal
+# posture (Regulation (EU) 2024/1689, Art. 50(1): a person must be told they
+# are interacting with an AI system), and neither is the kind of thing a
+# convenience flag written to save tokens should silently remove.
 _TRUE_PIECES: FrozenSet[str] = frozenset({PIECE_DISK, PIECE_CONSTANTS})
+
+#: The pieces whose removal is a POSTURE change rather than a token saving,
+#: and is therefore announced at WARNING by the session that applies it --
+#: the rule ``scrub_secret_env: none`` and ``--ws-unsafe-no-auth`` follow.
+ANNOUNCED_PIECES: FrozenSet[str] = frozenset({PIECE_SECURITY, PIECE_DISCLOSURE})
 
 # Token that expands to every piece (list/set form), for callers who really do
 # want to drop the security boundary too.

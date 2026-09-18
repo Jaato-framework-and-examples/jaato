@@ -51,7 +51,9 @@ from .instruction_budget_builder import (
     apply_instruction_counts as _builder_apply_instruction_counts,
 )
 from .instruction_suppression import (
+    ANNOUNCED_PIECES,
     PIECE_CONSTANTS,
+    PIECE_DISCLOSURE,
     PIECE_DISK,
     PIECE_SECURITY,
     normalize_suppression,
@@ -184,6 +186,30 @@ TRUNCATION_RECOVERY_REASONS = frozenset({FinishReason.MAX_TOKENS})
 # loop.  Past the budget the turn ends exactly as it does today, with
 # the reason preserved.
 TRUNCATION_RECOVERY_BUDGET = 2
+
+
+def _announce_dropped_pieces(suppressed, agent_id: str) -> None:
+    """Log, at WARNING, each suppressed piece whose removal is a POSTURE change.
+
+    ``disk`` and ``constants`` are token savings and are dropped quietly.
+    ``security`` (the indirect-prompt-injection defense) and ``disclosure``
+    (the Article 50(1) "you are talking to an AI" instruction) are not:
+    each can be dropped only by naming it, and a weakened posture announces
+    itself here for the reason ``scrub_secret_env: none`` and
+    ``--ws-unsafe-no-auth`` do -- silence is how a session ends up running
+    without a boundary nobody remembers removing.  Read from
+    :data:`ANNOUNCED_PIECES`, so a piece added to that set is announced
+    without an edit here.
+    """
+    for piece in sorted(suppressed & ANNOUNCED_PIECES):
+        logger.warning(
+            "suppress_base_instructions drops the %r piece for agent %s -- "
+            "a posture change, not a token saving (%s)",
+            piece, agent_id,
+            "the untrusted-content boundary is off" if piece == "security"
+            else "the model is no longer told to disclose that it is an AI "
+                 "system, Regulation (EU) 2024/1689 Art. 50(1)",
+        )
 
 
 def _telemetry_json_default(obj: Any) -> str:
@@ -3259,7 +3285,9 @@ class JaatoSession:
                 include_base=PIECE_DISK not in _suppress,
                 include_constants=PIECE_CONSTANTS not in _suppress,
                 include_security=PIECE_SECURITY not in _suppress,
+                include_disclosure=PIECE_DISCLOSURE not in _suppress,
             )
+        _announce_dropped_pieces(_suppress, self._agent_id)
 
         # Dynamic-instructions expansion ({{!py:script.py}}).  Walks
         # the assembled system_instruction for placeholders and
@@ -9389,6 +9417,25 @@ NOTES
                 getattr(self, "_model_media_utterance", 0) + 1)
         return f"model:{self._agent_id}:{getattr(self, '_model_media_utterance', 1)}"
 
+    def _model_provenance(self) -> Dict[str, Any]:
+        """The ``generated_by`` stamp for bytes THIS session's model produced.
+
+        ``{"kind": "ai", "provider", "model", "session_id", "agent_id"}``
+        (``jaato_sdk.events.ai_generated_by``), read from the active
+        binding -- the tier's provider when one is entered, the runtime's
+        otherwise -- so a stamp names the model that actually spoke.
+        """
+        from jaato_sdk.events import ai_generated_by
+        runtime = getattr(self, "_runtime", None)
+        provider = (getattr(self, "_active_provider_name", None)
+                    or getattr(runtime, "provider_name", None))
+        return ai_generated_by(
+            provider=provider,
+            model=getattr(self, "_model_name", None),
+            session_id=getattr(self, "_daemon_session_id", None),
+            agent_id=getattr(self, "_agent_id", None),
+        )
+
     def _deliver_model_media(self, delta: 'MediaDelta') -> None:
         """Deliver one chunk of MODEL-generated media to subscribed clients.
 
@@ -9413,6 +9460,12 @@ NOTES
         ``AGENT_OUTPUT``.  This method does not decide that; it forwards
         whatever the provider put on the delta.
 
+        Every chunk carries :meth:`_model_provenance` as ``generated_by``
+        -- the Art. 50(2) machine-readable marking, stamped HERE because
+        this is the one place that knows both that the bytes are the
+        model's and which binding produced them (a ``MediaDelta`` names
+        neither).
+
         Never raises -- a delivery failure must not abort generation.
         """
         hooks = getattr(self, "_ui_hooks", None)
@@ -9428,6 +9481,7 @@ NOTES
                 mime_type=delta.mime_type,
                 data_b64=_b64encode(delta.data).decode("ascii"),
                 final=delta.final,
+                generated_by=self._model_provenance(),
             )
         except Exception:  # noqa: BLE001
             self._trace(
@@ -9484,6 +9538,9 @@ NOTES
                     mime_type=mime_type,
                     data_b64=payload,
                     final=(index == last),
+                    # The producer's own claim, or nothing: a relayed file
+                    # is not AI-generated because an agent relayed it.
+                    generated_by=getattr(att, "generated_by", None),
                 )
             except Exception:  # noqa: BLE001
                 self._trace(
