@@ -300,6 +300,10 @@ async def run_arm(spec: ArmSpec, *, workspace_root: Path,
         completion_gap=accumulator.completion_gap,
         turns=accumulator.turns,
         socket_path=socket_path,
+        # The pool's cid, or None for a task that declared no pool: a
+        # session arm legitimately runs un-cid'd, and the contract says
+        # such a variable is absent rather than empty.
+        cascade_id=cascade_driver_id,
         error=accumulator.agent_error,
     )
 
@@ -464,6 +468,9 @@ async def _run_driver_arm(spec: ArmSpec, result: ArmResult, workspace: Workspace
         termination_error_type="" if outcome.gradeable else DRIVER_STOPPED_SHORT,
         turns=result.turns,
         socket_path=socket_path,
+        # The one the DRIVER was handed, so its scorer reads the cid its
+        # sessions were actually stamped with.
+        cascade_id=cid,
         error=result.error,
     )
     _CONTEXT_SPY(context)

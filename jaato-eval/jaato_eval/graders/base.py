@@ -73,6 +73,15 @@ class GraderContext:
             a property of the RUN, not of the task, so it cannot live in
             the manifest.  Without this the judge silently reached the
             client default while the arm ran elsewhere.
+        cascade_id: The cascade id the arm's sessions were stamped with —
+            the task pool's cid, or the one minted for a driver arm that
+            had no pool.  ``None`` for a session arm whose task declared
+            no pool, which is a real absence rather than a missing value:
+            such an arm ran un-cid'd.  It is how a grader finds the arm's
+            own session records among a sibling's under a shared pool cid,
+            and it is exported to a ``script`` grader as
+            ``JAATO_EVAL_CASCADE_ID`` — the same variable, from the same
+            builder, that the driver was handed (jaato #1127).
         turns: How many turns the arm consumed.
         error: Terminal error text, when the arm ended in an error the
             engine graded through anyway (see :attr:`missing_sign_off`).
@@ -101,6 +110,7 @@ class GraderContext:
     completion_gap: Optional[str] = None
     turns: int = 0
     socket_path: Optional[str] = None
+    cascade_id: Optional[str] = None
     error: Optional[str] = None
     prior_verdicts: Dict[str, str] = field(default_factory=dict)
 
