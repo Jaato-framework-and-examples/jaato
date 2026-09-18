@@ -79,6 +79,19 @@ REVERSIONS = [
         test="test_the_promotion_path_stamps_the_approval",
     ),
     Reversion(
+        target=_PLUGIN,
+        find=('                memory.maturity = parsed["maturity"]\n'
+              '                self._stamp_curation(memory, parsed["maturity"])'),
+        replace='                memory.maturity = parsed["maturity"]',
+        because=(
+            "the EDITOR is the second writer of maturity, and a human "
+            "curator promoting a memory there produced a validated record "
+            "with no curator -- which require_curation then withholds, the "
+            "same defect one command over"
+        ),
+        test="test_the_editor_promotion_stamps_the_approval",
+    ),
+    Reversion(
         target=_VALIDATE,
         find="    _check_memory_curation(result.profiles, out)\n",
         replace="",
@@ -123,6 +136,28 @@ def _in_session(session):
     with isolated_current_session():
         set_current_session(session)
         yield
+
+
+@contextmanager
+def _env(**values):
+    """Set env vars for the block, restoring exactly what was there.
+
+    ``%memory edit`` spawns ``$EDITOR`` on a temp file, so the command
+    is drivable end to end with a script that rewrites the YAML -- which
+    is what makes the editor test exercise the real path rather than the
+    assignment inside it.
+    """
+    import os as _os
+    previous = {k: _os.environ.get(k) for k in values}
+    _os.environ.update(values)
+    try:
+        yield
+    finally:
+        for key, was in previous.items():
+            if was is None:
+                _os.environ.pop(key, None)
+            else:
+                _os.environ[key] = was
 
 
 def _plugin(tmp_path, **config):
@@ -315,6 +350,102 @@ def test_the_promotion_path_stamps_the_approval(tmp_path):
         "the promotion path is the documented way to open the gate; if it "
         "does not stamp, require_curation closes the learning loop entirely")
     assert [m["id"] for m in after["memories"]] == [memory_id]
+
+
+def test_the_editor_promotion_stamps_the_approval(tmp_path):
+    """The OTHER writer of ``maturity``: ``%memory edit <id>``.
+
+    ``update_memory`` is the model's promotion path; this is the
+    HUMAN's, and it is the one a curator actually reaches for.  It
+    assigned ``memory.maturity`` straight from the edited YAML with no
+    stamp, so a person promoting a memory in their editor produced a
+    ``validated`` record carrying no ``curated_by`` -- which
+    ``require_curation`` then withholds, telling them nothing.  The
+    same defect the promotion path had, one command over, and the
+    reason the AST guard below exists rather than a second hand-written
+    case per writer.
+
+    Driven through the real command with a scripted ``$EDITOR``: the
+    stamp is not what was missing on either path, its CALL was, so a
+    unit test of ``_stamp_curation`` would pass on the broken tree.
+    """
+    plugin = _plugin(tmp_path, require_curation=True)
+    with _in_session(_Session()):
+        stored = plugin._execute_store({
+            "content": "c", "description": "d", "tags": ["build"]})
+    memory_id = stored["memory_id"]
+
+    assert plugin._execute_retrieve({"ids": [memory_id]})["status"] == (
+        "no_results"), "a freshly stored memory is raw"
+
+    editor = tmp_path / "promote.sh"
+    editor.write_text(
+        "#!/bin/sh\n"
+        "sed -i 's/^maturity: raw$/maturity: validated/' \"$1\"\n"
+    )
+    editor.chmod(0o755)
+
+    with _in_session(_Session()):
+        with _env(EDITOR=str(editor)):
+            answer = plugin._memory_edit(memory_id)
+    assert "Updated memory" in answer, answer
+
+    after = plugin._execute_retrieve({"ids": [memory_id]})
+    assert after["status"] == "success", (
+        "a human curator promoting in the editor is an approval; unstamped, "
+        "require_curation withholds the memory they just approved")
+    assert [m["id"] for m in after["memories"]] == [memory_id]
+
+
+def test_every_maturity_writer_stamps():
+    """Structural, because the failure is a writer nobody thought about.
+
+    Two sites write ``memory.maturity`` in the plugin and both had to
+    be found by reading -- the second only after the first was fixed and
+    reviewed.  A third would be silent in exactly the same way: the
+    record looks promoted, ``is_curated`` reads ``False``, and the gate
+    withholds it with no error anywhere.
+
+    So the contract is checked at the source rather than case by case:
+    a statement block that assigns ``.maturity`` must also call
+    ``_stamp_curation``.  The sibling precedent is
+    ``test_budget_mid_turn_955.py`` -- a new path that records without
+    observing fails the build whether or not its author remembered.
+    """
+    tree = ast.parse((Path(__file__).resolve().parents[3] / _PLUGIN).read_text())
+
+    def _writes_maturity(stmt):
+        return (isinstance(stmt, ast.Assign)
+                and any(isinstance(t, ast.Attribute) and t.attr == "maturity"
+                        for t in stmt.targets))
+
+    def _stamps(stmt):
+        for node in ast.walk(stmt):
+            func = getattr(node, "func", None)
+            if (isinstance(node, ast.Call)
+                    and isinstance(func, ast.Attribute)
+                    and func.attr == "_stamp_curation"):
+                return True
+        return False
+
+    unstamped = []
+    for node in ast.walk(tree):
+        for field in ("body", "orelse", "finalbody"):
+            block = getattr(node, field, None)
+            if not isinstance(block, list):
+                continue
+            writes = [s for s in block if _writes_maturity(s)]
+            if writes and not any(_stamps(s) for s in block):
+                unstamped.extend(s.lineno for s in writes)
+
+    assert not unstamped, (
+        f"{_PLUGIN} assigns memory.maturity at line(s) "
+        f"{sorted(unstamped)} without calling _stamp_curation in the same "
+        f"block. Every writer of maturity is a curation decision: a "
+        f"promotion that does not stamp curated_by is withheld by "
+        f"require_curation, and a demotion that does not clear it keeps "
+        f"reading as approved (Art. 15(4), #1123)."
+    )
 
 
 def test_a_withdrawn_approval_is_withdrawn(tmp_path):

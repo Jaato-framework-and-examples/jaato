@@ -2368,7 +2368,16 @@ class MemoryPlugin(RunnerForwardingMixin):
             memory.content = parsed["content"]
             memory.tags = parsed["tags"]
             if "maturity" in parsed:
+                # Through the same helper update_memory uses (#1123): a
+                # human curator promoting a memory in the EDITOR is the
+                # approval `curated_by` exists to record, and a second
+                # writer of `maturity` that skipped the stamp would
+                # reproduce the defect one command over -- a `validated`
+                # record with no curator, which `require_curation` then
+                # withholds.  The schema validator above has already
+                # refused a maturity outside VALID_MATURITIES.
                 memory.maturity = parsed["maturity"]
+                self._stamp_curation(memory, parsed["maturity"])
             if "confidence" in parsed:
                 memory.confidence = float(parsed["confidence"])
             if "scope" in parsed:
