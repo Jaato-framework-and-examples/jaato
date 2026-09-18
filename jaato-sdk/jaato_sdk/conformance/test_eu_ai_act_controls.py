@@ -32,7 +32,7 @@ import pytest
 from jaato_sdk import IPCClient
 from jaato_sdk.client.convenience import Session, SessionEnded
 from jaato_sdk.conformance.daemon import ConformanceDaemon
-from jaato_sdk.events import ClientType, EventType
+from jaato_sdk.events import ClientType, EventType, HistoryEvent
 
 pytestmark = pytest.mark.conformance
 
@@ -112,14 +112,16 @@ async def _run(daemon, profile: str, prompts: List[str], answer: str = "y",
                await_tool: Optional[str] = None) -> Dict[str, Any]:
     """One session: subscribe BEFORE creation, ask, end (which persists it).
 
-    ``await_tool`` names a tool whose RESULT must be in the persisted record
-    before the session is ended; the record is returned under ``record``.
-    It is read while the session is still loaded, deliberately: the daemon
-    also persists on ``ToolCallStartEvent`` (crash recovery), and that
-    snapshot carries the call without its result -- reading after
-    ``end_session`` races the after-turn save against the runner's
-    teardown, which is how a CI runner handed the test the mid-turn
-    snapshot and nothing later.
+    ``await_tool`` names a tool whose RESULTS are fetched over the wire
+    (``request_history`` -> ``HistoryEvent``) from the live session before
+    it is ended, and returned under ``results``.  Not from the persisted
+    record: the daemon also persists on ``ToolCallStartEvent`` (crash
+    recovery), that snapshot carries the call without its result, and on a
+    CI runner the after-turn save was observed never to land at all in the
+    30 s the session stayed loaded -- so a disk reader was handed the
+    mid-turn snapshot however long it waited.  The wire read asks the
+    runner for its history as it stands, which is what the record is
+    supposed to be a copy of.
     """
     c = IPCClient(socket_path=daemon.socket_path, client_type=ClientType.API,
                   workspace_path=str(daemon.workspace), auto_start=False)
@@ -149,9 +151,7 @@ async def _run(daemon, profile: str, prompts: List[str], answer: str = "y",
                 outcome["ended"] = exc.reason
                 break
         if await_tool is not None:
-            outcome["record"] = await asyncio.to_thread(
-                record, daemon, sid, 30.0, True,
-                lambda data: bool(tool_results(data, await_tool)))
+            outcome["results"] = await _tool_results_over_the_wire(c, await_tool)
         await asyncio.sleep(0.3)
         try:
             await c.end_session()
@@ -161,6 +161,44 @@ async def _run(daemon, profile: str, prompts: List[str], answer: str = "y",
     finally:
         await c.disconnect()
     return {"session_id": sid, "events": events, "permissions": perms, **outcome}
+
+
+async def _tool_results_over_the_wire(c: IPCClient, tool: str,
+                                      wait: float = 30.0) -> List[Dict[str, Any]]:
+    """The ``response`` of every ``function_response`` part named ``tool`` in
+    the live session's history, asked for over the wire.  Re-asks until one
+    is there or ``wait`` runs out, and on the deadline names the parts the
+    last answer held, so a wrong tool name is not reported as silence."""
+    deadline = time.time() + wait
+    last: Optional[List[Dict[str, Any]]] = None
+    while True:
+        got = asyncio.Event()
+        answer: List[Any] = []
+
+        def on_any(ev):
+            if isinstance(ev, HistoryEvent) or type(ev).__name__ == "ErrorEvent":
+                answer.append(ev)
+                got.set()
+
+        unsub = c.subscribe_all(on_any)
+        try:
+            await c.request_history()
+            await asyncio.wait_for(got.wait(), timeout=15)
+        finally:
+            unsub()
+        ev = answer[0] if answer else None
+        if isinstance(ev, HistoryEvent):
+            last = ev.history
+            found = [p.get("response") or {} for m in last for p in m.get("parts", [])
+                     if p.get("type") == "function_response" and p.get("name") == tool]
+            if found:
+                return found
+        if time.time() >= deadline:
+            break
+        await asyncio.sleep(1.0)
+    seen = ("no HistoryEvent answered" if last is None else "last answer held parts: "
+            + repr([(p.get("type"), p.get("name")) for m in last for p in m.get("parts", [])]))
+    raise AssertionError(f"no {tool} result reached the session's history; {seen}")
 
 
 def run(daemon, profile, prompts, **kw):
@@ -308,7 +346,7 @@ def test_the_learning_loop_records_provenance_and_the_gate_holds(act_daemon):
 
     before = run(act_daemon, "reader", ["what is the refund policy?"],
                  await_tool="retrieve_memories")
-    res = tool_results(before["record"], "retrieve_memories")
+    res = before["results"]
     assert res and res[0].get("withheld_uncurated", 0) >= 1, res
     assert not [m for m in res[0].get("memories", []) if m["id"] == "mem_legacy_0001"]
 
@@ -324,6 +362,6 @@ def test_the_learning_loop_records_provenance_and_the_gate_holds(act_daemon):
 
     after = run(act_daemon, "reader", ["what is the refund policy?"],
                 await_tool="retrieve_memories")
-    res = tool_results(after["record"], "retrieve_memories")
+    res = after["results"]
     assert res and any(m["id"] == raw["id"] for m in res[0].get("memories", [])), (
         "the curated memory is still withheld after the curator promoted it")
