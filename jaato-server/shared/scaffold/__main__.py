@@ -139,6 +139,12 @@ _SCOPES = {
     "profile": ExplainScope(_explain.profile, "optional_named", "[<name>]",
                             render_named=_explain.profile_cost,
                             blurb="a session's CAPABILITIES"),
+    # ``oversight`` alone is the framework's Article 14 measures -- the two
+    # stop verbs, the decision gate, the built-in constraints; with a name
+    # it is what THAT profile has armed, resolved against the workspace.
+    "oversight": ExplainScope(_explain.oversight, "optional_named", "[<profile>]",
+                              render_named=_explain.oversight_profile,
+                              blurb="the HUMAN-OVERSIGHT measures (EU AI Act Art. 14)"),
     "paths": ExplainScope(_explain.paths),
     "prefetch": ExplainScope(_explain.prefetch),
     "completion": ExplainScope(_explain.completion,
