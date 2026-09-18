@@ -61,7 +61,9 @@ logger = logging.getLogger(__name__)
 # Top-level archive members. v1 archives put ``bundle/`` and ``payload/``
 # directly at the root; v2 archives nest everything under
 # ``kinds/<kind>/``. Either way the bundle directory is copied verbatim,
-# so whichever manifest marks it on disk is the one in the archive.
+# so a v2 archive carries the ``bundle.json`` that marked it on disk.
+# A v1 archive predates that file; :mod:`unpack` writes one into staging
+# on the strength of the envelope's own claim.
 ARCHIVE_ENVELOPE_FILENAME = "bundle_archive.json"
 ARCHIVE_KINDS_DIR = "kinds"
 ARCHIVE_BUNDLE_DIR = "bundle"

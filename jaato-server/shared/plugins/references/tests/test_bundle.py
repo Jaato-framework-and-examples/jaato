@@ -19,6 +19,7 @@ from shared.plugins.references.bundle import (
     metadata_hash,
     parse_bundle_ref,
     resolve_bundle_roots,
+    write_bundle_manifest,
     write_manifest,
 )
 from shared.plugins.references.models import (
@@ -38,6 +39,8 @@ def _manifest(path: Path, *, rows, model="all-MiniLM-L6-v2", dim=384, sidecar="r
     }
     if extra:
         payload.update(extra)
+    # The index descriptor marks nothing (#1130) -- declare the bundle too.
+    write_bundle_manifest(path.parent, name=path.parent.name)
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
@@ -227,6 +230,7 @@ class TestDiscoverBundles:
         _manifest(refs / EMBEDDING_CONFIG_FILENAME, rows=["r1"])
         bad = refs / "broken"
         bad.mkdir()
+        write_bundle_manifest(bad, name="broken")
         (bad / EMBEDDING_CONFIG_FILENAME).write_text("not json {{{")
         good = refs / "good"
         good.mkdir()
@@ -235,8 +239,9 @@ class TestDiscoverBundles:
         bundles = discover_bundles(refs)
 
         # The corrupt config does not remove the directory from the
-        # catalog — the file is what MARKS a bundle, and its body is
-        # only the vector index.  ``broken`` loads without one.
+        # catalog: ``bundle.json`` is what MARKS a bundle, and
+        # ``embedding_config.json`` only describes an index.  ``broken``
+        # loads as a bundle without one.
         assert [b.name for b in bundles] == [ROOT_BUNDLE_NAME, "broken", "good"]
         broken = next(b for b in bundles if b.name == "broken")
         assert broken.has_index is False
@@ -245,6 +250,7 @@ class TestDiscoverBundles:
     def test_manifest_missing_rows_loads_with_empty_rows(self, tmp_path):
         refs = tmp_path / "references"
         refs.mkdir()
+        write_bundle_manifest(refs)
         (refs / EMBEDDING_CONFIG_FILENAME).write_text(json.dumps({
             "embedding_model": "m",
             "embedding_dimensions": 4,

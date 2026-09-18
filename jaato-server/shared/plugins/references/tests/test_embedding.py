@@ -183,6 +183,8 @@ class TestLazyEmbeddingProviderInit:
         # Required fields per bundle_common/bundle.py:120-146.
         refs_dir = tmp_path / ".jaato" / "references"
         refs_dir.mkdir(parents=True)
+        # bundle.json is the marker (#1130); the index descriptor is beside it.
+        (refs_dir / "bundle.json").write_text("{}")
         (refs_dir / "embedding_config.json").write_text(
             json.dumps({
                 "embedding_model": "test-model",

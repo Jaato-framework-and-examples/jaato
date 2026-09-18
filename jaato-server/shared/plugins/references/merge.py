@@ -53,8 +53,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from .bundle import (
-    BUNDLE_MARKER_FILENAMES,
     EMBEDDING_CONFIG_FILENAME,
+    REFERENCE_NON_SOURCE_FILENAMES,
     ReferenceBundle,
     metadata_hash,
     require_index_paths,
@@ -241,7 +241,7 @@ def _load_sources_from_dir(directory: Path) -> List[ReferenceSource]:
     for p in sorted(directory.iterdir()):
         if not p.is_file() or p.suffix != ".json":
             continue
-        if p.name in BUNDLE_MARKER_FILENAMES:
+        if p.name in REFERENCE_NON_SOURCE_FILENAMES:
             continue
         try:
             raw = json.loads(p.read_text(encoding="utf-8"))

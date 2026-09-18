@@ -24,8 +24,10 @@ survive the move, and is what these tests hold:
   (the issue's two reproductions);
 * a directory with NO manifest is still ignored entirely — the
   anti-pollution guard the docstring promises;
-* a bundle already on disk, carrying only the references-era
-  ``embedding_config.json``, keeps loading;
+* an ``embedding_config.json`` on its own marks NOTHING: there is one
+  marker, and a domain's optional index descriptor is not it;
+* an indexed bundle carries the two files independently, and both are
+  read by the side that owns them;
 * the archive path is reachable for a vectorless bundle.
 """
 
@@ -38,12 +40,10 @@ import pytest
 
 from shared.plugins.bundle_common.bundle import (
     BUNDLE_MANIFEST_FILENAME,
-    BUNDLE_MARKER_FILENAMES,
     BUNDLE_TIER_USER,
     BUNDLE_TIER_WORKSPACE,
     ROOT_BUNDLE_NAME,
     Bundle,
-    bundle_marker_path,
     discover_bundles,
     is_bundle_directory,
     load_bundle,
@@ -52,9 +52,10 @@ from shared.plugins.bundle_common.bundle import (
 from shared.plugins.bundle_common.handler import (
     BundleEntry,
     BundleEntryHandler,
+    BundleEntryRegistry,
 )
 from shared.plugins.bundle_common.pack import pack_bundle
-from shared.plugins.bundle_common.unpack import read_envelope
+from shared.plugins.bundle_common.unpack import read_envelope, unpack_archive
 from shared.plugins.references.bundle import (
     EMBEDDING_CONFIG_FILENAME,
     ReferenceBundle,
@@ -93,15 +94,8 @@ REVERSIONS = [
     ),
     Reversion(
         target="jaato-server/shared/plugins/bundle_common/bundle.py",
-        find=(
-            "BUNDLE_MARKER_FILENAMES: Tuple[str, ...] = (\n"
-            "    (BUNDLE_MANIFEST_FILENAME,) + LEGACY_BUNDLE_MARKER_FILENAMES\n"
-            ")"
-        ),
-        replace=(
-            "BUNDLE_MARKER_FILENAMES: Tuple[str, ...] = "
-            "LEGACY_BUNDLE_MARKER_FILENAMES"
-        ),
+        find='BUNDLE_MANIFEST_FILENAME = "bundle.json"',
+        replace='BUNDLE_MANIFEST_FILENAME = "embedding_config.json"',
         test="TestVectorlessBundles::test_a_generic_manifest_declares_a_bundle",
         because="a manifest saying only what a distribution manifest should "
                 "say -- a name and a description -- not being recognised as "
@@ -110,19 +104,68 @@ REVERSIONS = [
     Reversion(
         target="jaato-server/shared/plugins/bundle_common/bundle.py",
         find=(
-            "    for filename in BUNDLE_MARKER_FILENAMES:\n"
-            "        candidate = directory / filename\n"
+            "    try:\n"
+            "        return (directory / BUNDLE_MANIFEST_FILENAME).is_file()\n"
+            "    except OSError:\n"
+            "        return False"
         ),
         replace=(
-            "    if directory.is_dir():\n"
-            "        return directory\n"
-            "    for filename in BUNDLE_MARKER_FILENAMES:\n"
-            "        candidate = directory / filename\n"
+            "    try:\n"
+            "        return directory.is_dir()\n"
+            "    except OSError:\n"
+            "        return False"
         ),
         test="TestAntiPollutionGuardSurvives::test_a_directory_without_a_manifest_is_not_a_bundle",
         because="dropping an unrelated directory into a tier root polluting "
                 "the catalog -- the requirement discover_bundles' docstring "
                 "calls out and that this change had to preserve",
+    ),
+    Reversion(
+        target="jaato-server/shared/plugins/bundle_common/bundle.py",
+        find=(
+            "    ONE marker: ``bundle.json``.  A directory is a bundle because a\n"
+            "    domain claimed it, never because of what it happens to contain --\n"
+            "    which is the whole of #1130.  In particular the references plugin's\n"
+            "    ``embedding_config.json`` is an index descriptor that sits beside\n"
+            "    the manifest and marks nothing.\n"
+            '    """\n'
+            "    try:\n"
+            "        return (directory / BUNDLE_MANIFEST_FILENAME).is_file()\n"
+        ),
+        replace=(
+            "    Recognises the references-era name as a second marker.\n"
+            '    """\n'
+            "    try:\n"
+            "        if (directory / 'embedding_config.json').is_file():\n"
+            "            return True\n"
+            "        return (directory / BUNDLE_MANIFEST_FILENAME).is_file()\n"
+        ),
+        test="TestAntiPollutionGuardSurvives::test_an_index_descriptor_alone_marks_nothing",
+        because="a domain's optional index descriptor being read as a second "
+                "bundle marker, which is the coupling #1130 exists to undo: "
+                "the directory would be a bundle because of what it happens "
+                "to contain rather than because a domain claimed it",
+    ),
+    Reversion(
+        target="jaato-server/shared/plugins/bundle_common/unpack.py",
+        find="    skip = {BUNDLE_MANIFEST_FILENAME} | set(non_entry_filenames)",
+        replace="    skip = {BUNDLE_MANIFEST_FILENAME}",
+        test="TestTheGenericLayerAsksRatherThanKnows"
+             "::test_a_declared_non_entry_file_is_not_counted_as_an_entry",
+        because="the generic layer ignoring what a domain says its own "
+                "metadata files are, so every one of them is counted as an "
+                "installed entry -- the count a person reads to decide "
+                "whether an unpack did what they asked",
+    ),
+    Reversion(
+        target="jaato-server/shared/plugins/references/entry_handler.py",
+        find="        return REFERENCE_NON_SOURCE_FILENAMES\n",
+        replace="        return ()\n",
+        test="TestTheGenericLayerAsksRatherThanKnows"
+             "::test_the_references_handler_answers_with_its_index",
+        because="the one domain that HAS such a file not declaring it, which "
+                "the Protocol's empty default makes silent: the seam exists, "
+                "the layer asks, and the answer is wrong",
     ),
 ]
 
@@ -143,15 +186,31 @@ _DOMAIN_FIELD_NAMES = frozenset({
 _BUNDLE_COMMON = Path(__file__).resolve().parents[2] / "shared" / "plugins" / "bundle_common"
 
 
+# The marker's name, spelled out rather than read from the constant.
+# A guard whose fixtures write to ``BUNDLE_MANIFEST_FILENAME`` follows
+# the constant wherever it is pointed, so it would keep passing with the
+# name pointed back at the index descriptor -- which is one of the two
+# shapes #1130 had to end.  Stating the name is what makes that
+# observable.
+_MARKER_NAME = "bundle.json"
+
+
 def _write_generic_manifest(directory: Path, **payload) -> None:
     directory.mkdir(parents=True, exist_ok=True)
-    (directory / BUNDLE_MANIFEST_FILENAME).write_text(
+    (directory / _MARKER_NAME).write_text(
         json.dumps(payload, indent=2), encoding="utf-8",
     )
 
 
 def _write_embedding_config(directory: Path, *, rows=(), model="m", dim=4) -> None:
+    """An INDEXED bundle: the manifest that marks it, plus its index.
+
+    Two files on purpose.  ``bundle.json`` is the domain's claim on the
+    directory; ``embedding_config.json`` describes a vector index that
+    may or may not be there.  Independent things, separate files.
+    """
     directory.mkdir(parents=True, exist_ok=True)
+    _write_generic_manifest(directory, name=directory.name)
     (directory / EMBEDDING_CONFIG_FILENAME).write_text(json.dumps({
         "embedding_model": model,
         "embedding_dimensions": dim,
@@ -310,7 +369,6 @@ class TestAntiPollutionGuardSurvives:
 
         assert discover_bundles(refs) == []
         assert is_bundle_directory(stray) is False
-        assert bundle_marker_path(stray) is None
         assert load_bundle(stray, name="somebody-elses-folder") is None
 
     def test_an_empty_tier_root_yields_nothing(self, tmp_path):
@@ -319,21 +377,35 @@ class TestAntiPollutionGuardSurvives:
 
         assert discover_bundles(refs) == []
 
+    def test_an_index_descriptor_alone_marks_nothing(self, tmp_path):
+        """There is ONE marker, and the references index is not it.
 
-class TestBundlesAlreadyOnDisk:
-    """"Every manifest already carries the embedding fields, so loading
-    is unchanged for everything already produced." """
-
-    def test_a_legacy_embedding_config_still_marks_a_bundle(self, tmp_path):
+        ``embedding_config.json`` was read as a bundle marker for as
+        long as it WAS the manifest.  Keeping it as a second marker
+        would preserve exactly the coupling #1130 exists to undo: a
+        directory would be a bundle because of what it happens to
+        contain, rather than because a domain claimed it.  The generic
+        layer does not know this filename at all -- the assertion below
+        holds for any file a domain might drop in.
+        """
         refs = tmp_path / "refs"
-        _write_embedding_config(refs / "teammate", rows=["a", "b"])
+        indexed = refs / "teammate"
+        indexed.mkdir(parents=True)
+        (indexed / EMBEDDING_CONFIG_FILENAME).write_text(json.dumps({
+            "embedding_model": "m",
+            "embedding_dimensions": 4,
+            "embedding_sidecar": "vectors.npy",
+            "rows": ["a"],
+        }), encoding="utf-8")
 
-        bundles = discover_bundles(refs)
+        assert is_bundle_directory(indexed) is False
+        assert load_bundle(indexed, name="teammate") is None
+        assert discover_bundles(refs) == []
+        assert discover_reference_bundles(refs) == []
 
-        assert [b.name for b in bundles] == ["teammate"]
-        assert bundle_marker_path(refs / "teammate").name == (
-            EMBEDDING_CONFIG_FILENAME
-        )
+
+class TestAnIndexedBundle:
+    """A bundle that has a vector index -- two files, independently."""
 
     def test_its_index_still_loads_on_the_references_side(self, tmp_path):
         refs = tmp_path / "refs"
@@ -347,16 +419,20 @@ class TestBundlesAlreadyOnDisk:
         assert bundle.owned_source_ids == {"a", "b"}
         assert bundle.sidecar_path == (refs / "teammate" / "vectors.npy")
 
-    def test_the_canonical_manifest_wins_when_a_bundle_carries_both(self, tmp_path):
+    def test_the_manifest_marks_and_the_index_describes(self, tmp_path):
+        """The two files are independent, and both are read.
+
+        This is the shape #1130 argues for: ``bundle.json`` is the
+        claim, ``embedding_config.json`` is a vector index sitting
+        beside it.  Neither implies the other.
+        """
         refs = tmp_path / "refs"
-        _write_generic_manifest(refs / "teammate", name="teammate")
         _write_embedding_config(refs / "teammate", rows=["a"])
+        teammate = refs / "teammate"
 
-        marker = bundle_marker_path(refs / "teammate")
-
-        assert marker.name == BUNDLE_MANIFEST_FILENAME
-        assert BUNDLE_MARKER_FILENAMES[0] == BUNDLE_MANIFEST_FILENAME
-        # ...and the index is still read.
+        assert (teammate / BUNDLE_MANIFEST_FILENAME).is_file()
+        assert (teammate / EMBEDDING_CONFIG_FILENAME).is_file()
+        assert is_bundle_directory(teammate) is True
         assert discover_reference_bundles(refs)[0].embedding_rows == ["a"]
 
     def test_workspace_still_shadows_user(self, tmp_path):
@@ -380,9 +456,18 @@ class _DefinitionsOnlyHandler(BundleEntryHandler):
     reach the packer while its entry point took a type that could not
     express a vectorless bundle."""
 
-    def __init__(self, bundle: Bundle, entries: List[BundleEntry]) -> None:
+    def __init__(
+        self,
+        bundle: Bundle,
+        entries: List[BundleEntry],
+        non_entry: tuple = (),
+    ) -> None:
         self._bundle = bundle
         self._entries = entries
+        self._non_entry = non_entry
+
+    def non_entry_filenames(self):
+        return self._non_entry
 
     @property
     def kind(self) -> str:
@@ -447,3 +532,103 @@ class TestTheArchivePathIsReachable:
         assert archive.is_file()
         assert [k.kind for k in result.kinds] == ["definitions"]
         assert read_envelope(archive)["source_name"] == "my-pack"
+
+
+class TestTheGenericLayerAsksRatherThanKnows:
+    """A domain's metadata is named by the domain, and by nobody else.
+
+    ``bundle.json`` is the generic layer's own file, so it skips that
+    one on its own authority.  Anything else a domain keeps beside it
+    -- the references plugin's ``embedding_config.json`` -- is a name
+    the layer must not hold, which is the same rule that moved the
+    seven embedding fields off :class:`Bundle`.  So it asks
+    :meth:`BundleEntryHandler.non_entry_filenames`.
+    """
+
+    def _pack_with(self, tmp_path: Path, non_entry: tuple) -> Path:
+        bundle_dir = tmp_path / ".jaato" / "definitions" / "my-pack"
+        _write_generic_manifest(bundle_dir, name="my-pack")
+        _write_definition(bundle_dir, "plain-ref")
+        # A domain metadata file that is *.json and is not an entry.
+        (bundle_dir / "domain_index.json").write_text(
+            json.dumps({"rows": []}), encoding="utf-8",
+        )
+        bundle = Bundle(
+            name="my-pack",
+            directory=bundle_dir.resolve(),
+            tier=BUNDLE_TIER_WORKSPACE,
+        )
+        entry = BundleEntry(
+            id="plain-ref",
+            kind="definitions",
+            file_path=bundle_dir / "plain-ref.json",
+            bundle_name="my-pack",
+            bundle_tier=BUNDLE_TIER_WORKSPACE,
+        )
+        handler = _DefinitionsOnlyHandler(bundle, [entry], non_entry)
+        archive = tmp_path / "my-pack.tar.gz"
+        pack_bundle(handler, bundle, archive)
+        return archive, handler
+
+    def test_a_declared_non_entry_file_is_not_counted_as_an_entry(
+        self, tmp_path,
+    ):
+        archive, handler = self._pack_with(tmp_path, ("domain_index.json",))
+        registry = BundleEntryRegistry()
+        registry.register(handler)
+        recipient = tmp_path / "recipient"
+        recipient.mkdir()
+
+        result = unpack_archive(
+            archive, registry=registry,
+            target_tier=BUNDLE_TIER_WORKSPACE,
+            target_name="my-pack",
+            workspace_path=recipient,
+        )
+
+        installed = recipient / ".jaato" / "definitions" / "my-pack"
+        # The file is INSTALLED -- it is the domain's metadata, not
+        # something to drop -- and it is not one of the entries.
+        assert (installed / "domain_index.json").is_file()
+        assert [k.entry_count for k in result.kinds] == [1]
+
+    def test_without_the_declaration_it_is_counted(self, tmp_path):
+        """The control: the same archive, the same file, no declaration.
+
+        Without it the layer would have to know the name itself, and
+        the count is wrong by exactly the metadata files the domain
+        keeps -- which is what makes this a seam rather than a
+        formality.
+        """
+        archive, handler = self._pack_with(tmp_path, ())
+        registry = BundleEntryRegistry()
+        registry.register(handler)
+        recipient = tmp_path / "recipient"
+        recipient.mkdir()
+
+        result = unpack_archive(
+            archive, registry=registry,
+            target_tier=BUNDLE_TIER_WORKSPACE,
+            target_name="my-pack",
+            workspace_path=recipient,
+        )
+
+        assert [k.entry_count for k in result.kinds] == [2]
+
+    def test_the_references_handler_answers_with_its_index(self):
+        """And the domain that has such a file answers with it.
+
+        Called unbound: the answer is a property of the DOMAIN, not of
+        any particular catalog, so it must not need a loaded plugin to
+        be obtained.  The default the Protocol supplies is ``()``, so
+        a handler that simply never overrode this would look correct
+        and have its index counted as a reference.
+        """
+        from shared.plugins.references.entry_handler import (
+            ReferencesEntryHandler,
+        )
+
+        declared = ReferencesEntryHandler.non_entry_filenames(None)
+
+        assert EMBEDDING_CONFIG_FILENAME in declared
+        assert BUNDLE_MANIFEST_FILENAME in declared

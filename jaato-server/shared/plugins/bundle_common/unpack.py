@@ -33,15 +33,16 @@ import tempfile
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .bundle import (
-    BUNDLE_MARKER_FILENAMES,
+    BUNDLE_MANIFEST_FILENAME,
     BUNDLE_TIER_USER,
     BUNDLE_TIER_WORKSPACE,
     ROOT_BUNDLE_NAME,
     VALID_BUNDLE_TIERS,
     is_bundle_directory,
+    write_bundle_manifest,
 )
 from .handler import BundleEntryHandler, BundleEntryRegistry
 from .pack import (
@@ -264,11 +265,12 @@ def unpack_archive(
             kind_root = per_kind_roots[kind]
             staged_bundle = kind_root / ARCHIVE_BUNDLE_DIR
             staged_payload = kind_root / ARCHIVE_PAYLOAD_DIR
+            if fmt == ARCHIVE_FORMAT_VERSION_V1:
+                _mark_staged_v1_bundle(staged_bundle, name=name)
             if not is_bundle_directory(staged_bundle):
                 raise UnpackError(
-                    f"archive's kind={kind!r} subtree is missing a bundle "
-                    f"manifest (expected bundle/ to contain one of "
-                    f"{', '.join(BUNDLE_MARKER_FILENAMES)})"
+                    f"archive's kind={kind!r} subtree is missing "
+                    f"bundle/{BUNDLE_MANIFEST_FILENAME}"
                 )
 
             target_dir = _resolve_target_dir(
@@ -286,6 +288,7 @@ def unpack_archive(
                 target_tier=target_tier,
                 target_name=name,
                 mode=mode,
+                non_entry_filenames=tuple(handler.non_entry_filenames()),
             ))
 
     return UnpackResult(
@@ -301,6 +304,49 @@ def unpack_archive(
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+
+def _mark_staged_v1_bundle(staged_bundle: Path, *, name: str) -> None:
+    """Give a staged v1 bundle directory the ``bundle.json`` it predates.
+
+    The v1 archive layout was written before a bundle had a generic
+    manifest: the only file marking its ``bundle/`` subtree was the
+    references plugin's ``embedding_config.json``, which since #1130
+    describes a vector index and marks nothing.  So a v1 archive is a
+    directory whose *envelope* declares it a bundle while the directory
+    itself no longer says so.
+
+    The envelope IS the claim, so the marker is written rather than the
+    old file being re-read as one.  Two consequences, and both are why
+    this is an upgrade rather than a second marker:
+
+    * the manifest is written into STAGING, so what lands on disk is a
+      normally-marked bundle -- the v1 shape exists only inside the
+      archive, never in an installed tree;
+    * a v1 archive whose ``bundle/`` subtree is absent altogether still
+      fails the check below, because there is nothing to mark.
+
+    Failures are swallowed: the caller's ``is_bundle_directory`` check
+    is what reports an unmarkable subtree, and it reports it in the
+    vocabulary of the archive rather than of a failed write.
+
+    Args:
+        staged_bundle: Staged ``bundle/`` directory for the v1 kind.
+        name: Bundle name the unpack will install under; recorded in the
+            manifest as documentation for a human reading the file.
+    """
+    if not staged_bundle.is_dir():
+        return
+    if (staged_bundle / BUNDLE_MANIFEST_FILENAME).exists():
+        return
+    try:
+        write_bundle_manifest(
+            staged_bundle,
+            name=name,
+            description="Upgraded from a v1 bundle archive.",
+        )
+    except OSError as e:
+        logger.debug("could not mark staged v1 bundle %s: %s", staged_bundle, e)
 
 
 def _resolve_staged_kind_roots(
@@ -366,6 +412,7 @@ def _install_kind(
     target_tier: str,
     target_name: str,
     mode: UnpackMode,
+    non_entry_filenames: Tuple[str, ...] = (),
 ) -> KindUnpackResult:
     """Move a single kind's staged subtree into its destination dir.
 
@@ -412,9 +459,11 @@ def _install_kind(
             for item in staged_payload.iterdir():
                 shutil.move(str(item), str(payload_dst / item.name))
 
+    # ``bundle.json`` is the generic layer's own file; anything else a
+    # domain keeps beside it is the domain's to name (#1130).
+    skip = {BUNDLE_MANIFEST_FILENAME} | set(non_entry_filenames)
     entry_count = sum(
-        1 for p in target_dir.glob("*.json")
-        if p.name not in BUNDLE_MARKER_FILENAMES
+        1 for p in target_dir.glob("*.json") if p.name not in skip
     )
     return KindUnpackResult(
         kind=kind,
@@ -493,10 +542,9 @@ def _safe_replace_bundle(target_dir: Path) -> None:
     """
     if not target_dir.is_dir():
         return
-    for marker_name in BUNDLE_MARKER_FILENAMES:
-        marker = target_dir / marker_name
-        if marker.is_file():
-            marker.unlink()
+    marker = target_dir / BUNDLE_MANIFEST_FILENAME
+    if marker.is_file():
+        marker.unlink()
     for npy in target_dir.glob("*.npy"):
         npy.unlink()
     for npy_lock in target_dir.glob("*.npy.lock"):

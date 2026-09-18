@@ -19,10 +19,12 @@ references*:
 * :data:`EMBEDDING_CONFIG_FILENAME` and
   :func:`load_reference_bundle` / :func:`write_manifest` — the
   ``embedding_config.json`` reader and writer. That file is a
-  references file; the generic layer knows its *name* only as a legacy
-  bundle marker (see
-  :data:`~shared.plugins.bundle_common.bundle.LEGACY_BUNDLE_MARKER_FILENAMES`)
-  and never reads its body.
+  references file, name and body alike: the generic layer neither
+  reads it nor recognises its name, and it marks nothing (#1130). The
+  names this domain keeps beside its definitions are declared once in
+  :data:`REFERENCE_NON_SOURCE_FILENAMES` and handed to the generic
+  layer through
+  :meth:`~shared.plugins.bundle_common.handler.BundleEntryHandler.non_entry_filenames`.
 * :func:`discover_bundles` — the generic scan, with each discovered
   directory upgraded to a :class:`ReferenceBundle`.
 * :func:`metadata_hash` — fingerprint stored in
@@ -58,7 +60,6 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
 # (``from shared.plugins.references.bundle import …``) keep working.
 from ..bundle_common.bundle import (  # noqa: F401
     BUNDLE_MANIFEST_FILENAME,
-    BUNDLE_MARKER_FILENAMES,
     BUNDLE_TIER_USER,
     BUNDLE_TIER_WORKSPACE,
     ROOT_BUNDLE_NAME,
@@ -67,6 +68,7 @@ from ..bundle_common.bundle import (  # noqa: F401
     Bundle,
     BundleRef,
     find_bundle,
+    is_bundle_directory,
     parse_bundle_ref,
     write_bundle_manifest,
 )
@@ -83,10 +85,22 @@ logger = logging.getLogger(__name__)
 
 
 # The references plugin's vector-index file. Owned here: this module is
-# the only thing in the tree that reads or writes its body. The generic
-# layer recognises the NAME as a legacy bundle marker so every
-# references bundle already on disk keeps being discovered.
+# the only thing in the tree that reads or writes its body, and the
+# generic layer knows nothing about it -- it marks NOTHING. A references
+# directory is a bundle because it carries ``bundle.json``; whether it
+# also carries a vector index is a separate, optional fact about its
+# contents. That separation is the whole of #1130.
 EMBEDDING_CONFIG_FILENAME = "embedding_config.json"
+
+# Files inside a references bundle that are metadata, not reference
+# definitions: the generic manifest that marks the bundle, and this
+# plugin's own vector-index descriptor.  #1130 keeps these two SEPARATE
+# files on purpose -- a bundle and an index are independent things, and
+# one file carrying both is what this issue exists to undo.
+REFERENCE_NON_SOURCE_FILENAMES: Tuple[str, ...] = (
+    BUNDLE_MANIFEST_FILENAME,
+    EMBEDDING_CONFIG_FILENAME,
+)
 
 # Valid reconcile modes declared in a bundle's embedding config.
 _VALID_RECONCILE_MODES: Set[str] = {"eager", "lazy", "off"}

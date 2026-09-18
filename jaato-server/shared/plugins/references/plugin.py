@@ -42,11 +42,12 @@ from .config_loader import (
 )
 from .bundle import (
     AmbiguousBundleRefError,
-    BUNDLE_MARKER_FILENAMES,
     BUNDLE_TIER_USER,
     BUNDLE_TIER_WORKSPACE,
     BundleRef,
     EMBEDDING_CONFIG_FILENAME,
+    REFERENCE_NON_SOURCE_FILENAMES,
+    is_bundle_directory,
     ROOT_BUNDLE_NAME,
     VALID_BUNDLE_TIERS,
     ReferenceBundle,
@@ -2656,6 +2657,46 @@ class ReferencesPlugin(RunnerForwardingMixin):
             ))
         return HelpLines(lines=lines)
 
+    @staticmethod
+    def _refuse_occupied_bundle_dir(
+        bundle_dir: Path,
+    ) -> Optional[Dict[str, Any]]:
+        """Refuse to create over a directory that is already spoken for.
+
+        Two refusals, because a bundle and an index are two independent
+        things (#1130): the directory may already be CLAIMED by a
+        manifest, or unclaimed but already carrying a references vector
+        index left behind by an earlier tree.  Each gets its own
+        message, since the operator's next move differs -- delete the
+        bundle, versus clear a stray index.
+
+        Neither branch overwrites anything.
+
+        Args:
+            bundle_dir: Directory ``bundle create`` is about to claim.
+
+        Returns:
+            An error result to return to the caller, or ``None`` when
+            the directory is free.
+        """
+        if is_bundle_directory(bundle_dir):
+            return {
+                "error": (
+                    f"bundle already exists at {bundle_dir} — refusing to "
+                    f"overwrite. Use 'bundle delete' or pick a different name."
+                )
+            }
+        index_path = bundle_dir / EMBEDDING_CONFIG_FILENAME
+        if index_path.is_file():
+            return {
+                "error": (
+                    f"an embedding index already exists at {index_path} — "
+                    f"refusing to overwrite. Use 'bundle delete' or pick a "
+                    f"different name."
+                )
+            }
+        return None
+
     def _cmd_bundle_create(self, raw_args: str) -> Dict[str, Any]:
         """Execute 'bundle create <name> [--scope workspace|user]'.
 
@@ -2775,14 +2816,10 @@ class ReferencesPlugin(RunnerForwardingMixin):
 
         bundle_dir = tier_root if name == ROOT_BUNDLE_NAME else tier_root / name
         bundle_dir.mkdir(parents=True, exist_ok=True)
+        occupied = self._refuse_occupied_bundle_dir(bundle_dir)
+        if occupied is not None:
+            return occupied
         index_path = bundle_dir / EMBEDDING_CONFIG_FILENAME
-        if index_path.is_file():
-            return {
-                "error": (
-                    f"manifest already exists at {index_path} — refusing "
-                    f"to overwrite. Use 'bundle delete' or pick a different name."
-                )
-            }
         sidecar_name = "references.embeddings.npy"
         index_path.write_text(
             json.dumps({
@@ -2793,9 +2830,9 @@ class ReferencesPlugin(RunnerForwardingMixin):
             }, indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",
         )
-        # The generic marker too, so the bundle stays discoverable if its
-        # index is later removed — and so a bundle created today is
-        # declared by its own manifest rather than by the legacy alias.
+        # The marker, written last: an index descriptor declares nothing
+        # about who owns the directory (#1130), so without this the
+        # bundle this command just built would not be discovered at all.
         write_bundle_manifest(
             bundle_dir,
             name=name,
@@ -2891,7 +2928,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
         # (excluding the bundle's own manifests).
         has_rows = bool(bundle.embedding_rows)
         has_ref_files = any(
-            p.name not in BUNDLE_MARKER_FILENAMES
+            p.name not in REFERENCE_NON_SOURCE_FILENAMES
             for p in bundle.directory.glob("*.json")
         )
         if (has_rows or has_ref_files) and not force:
@@ -3360,7 +3397,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
             return None
 
         for json_path in candidate_dir.glob("*.json"):
-            if json_path.name in BUNDLE_MARKER_FILENAMES:
+            if json_path.name in REFERENCE_NON_SOURCE_FILENAMES:
                 continue
             try:
                 data = json.loads(json_path.read_text(encoding="utf-8"))

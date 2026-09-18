@@ -21,12 +21,14 @@ Nothing here knows what a bundle CONTAINS. A domain that needs more
 about its own bundles subclasses :class:`Bundle` in its own package;
 :class:`shared.plugins.references.bundle.ReferenceBundle` is the worked
 example, carrying the embedding sidecar fields, the reconcile mode and
-the live matcher that used to sit on the generic dataclass. The only
-references-shaped thing left here is a *filename*: the legacy
-``embedding_config.json`` is still recognised as a bundle marker (see
-:data:`.bundle.LEGACY_BUNDLE_MARKER_FILENAMES`) so every bundle already
-on disk keeps loading, and its body is read by the references plugin
-and by nothing in this package.
+the live matcher that used to sit on the generic dataclass.
+
+Nothing references-shaped is left here, filenames included. A directory
+is a bundle because it carries ``bundle.json`` -- a domain's claim --
+never because of what else it happens to contain. The references
+plugin's ``embedding_config.json`` sits beside that manifest, describes
+a vector index, and marks nothing; a bundle and an index are
+independent, which is the whole of #1130.
 """
 
 # Intentionally no PLUGIN_KIND — see module docstring.

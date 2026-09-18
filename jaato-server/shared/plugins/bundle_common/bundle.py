@@ -87,21 +87,6 @@ logger = logging.getLogger(__name__)
 # bundle — that is the whole of the anti-pollution guard.
 BUNDLE_MANIFEST_FILENAME = "bundle.json"
 
-# Filenames that also mark a directory as a bundle, for bundles written
-# before the generic manifest existed. ``embedding_config.json`` is the
-# references plugin's vector-index file (its CONTENTS are read by
-# :mod:`shared.plugins.references.bundle` and by nothing here); every
-# references bundle already on disk carries one and no ``bundle.json``,
-# so recognising it as a marker is what keeps those bundles loading.
-# This is a compatibility alias for a filename, not a domain field.
-LEGACY_BUNDLE_MARKER_FILENAMES: Tuple[str, ...] = ("embedding_config.json",)
-
-# Every filename that says "this directory is a bundle", most canonical
-# first. Discovery, pack and unpack all read this one tuple.
-BUNDLE_MARKER_FILENAMES: Tuple[str, ...] = (
-    (BUNDLE_MANIFEST_FILENAME,) + LEGACY_BUNDLE_MARKER_FILENAMES
-)
-
 # Sentinel name for the root bundle. Displayed as ``(root)`` to users.
 ROOT_BUNDLE_NAME = ""
 
@@ -158,53 +143,30 @@ class Bundle:
 
     @property
     def manifest_path(self) -> Path:
-        """Where the generic manifest belongs — the path a writer uses.
+        """Where the manifest belongs — the path a writer uses.
 
         Always ``<directory>/bundle.json``, whether or not that file
-        exists yet. To ask which marker a bundle *actually* has on
-        disk, use :attr:`existing_manifest_path`.
+        exists yet. There is exactly one marker, so asking where it
+        belongs and asking which one a bundle carries are the same
+        question; :func:`is_bundle_directory` answers whether it is
+        there.
         """
         return self.directory / BUNDLE_MANIFEST_FILENAME
 
-    @property
-    def existing_manifest_path(self) -> Optional[Path]:
-        """The marker file present on disk, or ``None`` if none is.
-
-        Returns the most canonical marker when several exist (a bundle
-        that has been migrated may carry both ``bundle.json`` and the
-        legacy ``embedding_config.json``).
-        """
-        return bundle_marker_path(self.directory)
-
-
-def bundle_marker_path(directory: Path) -> Optional[Path]:
-    """Return the manifest marking ``directory`` as a bundle, or ``None``.
-
-    Checks :data:`BUNDLE_MARKER_FILENAMES` in order, so the canonical
-    ``bundle.json`` wins over a legacy marker when both are present.
-
-    Args:
-        directory: Candidate bundle directory.
-
-    Returns:
-        Absolute path to the marker file, or ``None`` when ``directory``
-        is not a bundle (or is not readable).
-    """
-    for filename in BUNDLE_MARKER_FILENAMES:
-        candidate = directory / filename
-        try:
-            if candidate.is_file():
-                return candidate
-        except OSError:
-            # A denied directory is "not a bundle here" — the caller
-            # (discovery) already DEBUG-logs the tier it could not scan.
-            return None
-    return None
-
 
 def is_bundle_directory(directory: Path) -> bool:
-    """Whether ``directory`` carries a bundle manifest."""
-    return bundle_marker_path(directory) is not None
+    """Whether *directory* carries a bundle manifest.
+
+    ONE marker: ``bundle.json``.  A directory is a bundle because a
+    domain claimed it, never because of what it happens to contain --
+    which is the whole of #1130.  In particular the references plugin's
+    ``embedding_config.json`` is an index descriptor that sits beside
+    the manifest and marks nothing.
+    """
+    try:
+        return (directory / BUNDLE_MANIFEST_FILENAME).is_file()
+    except OSError:
+        return False
 
 
 def load_bundle(
@@ -234,26 +196,29 @@ def load_bundle(
         The loaded :class:`Bundle`, or ``None`` when ``directory`` is
         not a bundle.
     """
-    marker = bundle_marker_path(directory)
-    if marker is None:
+    manifest = directory / BUNDLE_MANIFEST_FILENAME
+    try:
+        if not manifest.is_file():
+            return None
+    except OSError:
         return None
 
-    if marker.name == BUNDLE_MANIFEST_FILENAME:
-        # Read it only to report a corrupt file. Nothing in the generic
-        # manifest is required, so there is nothing to refuse over.
-        try:
-            raw = json.loads(marker.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError) as e:
+    # Read it only to report a corrupt file. Nothing in the manifest is
+    # required, so there is nothing to refuse over -- its PRESENCE is
+    # the claim, not its contents.
+    try:
+        raw = json.loads(manifest.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as e:
+        logger.warning(
+            "Bundle '%s': failed to read manifest %s: %s",
+            name or "(root)", manifest, e,
+        )
+    else:
+        if not isinstance(raw, dict):
             logger.warning(
-                "Bundle '%s': failed to read manifest %s: %s",
-                name or "(root)", marker, e,
+                "Bundle '%s': manifest must be a JSON object: %s",
+                name or "(root)", manifest,
             )
-        else:
-            if not isinstance(raw, dict):
-                logger.warning(
-                    "Bundle '%s': manifest must be a JSON object: %s",
-                    name or "(root)", marker,
-                )
 
     if tier not in VALID_BUNDLE_TIERS:
         logger.warning(
@@ -376,9 +341,11 @@ def discover_bundles(
     contains its own manifest. Subdirectories without a manifest are
     ignored entirely so dropping an unrelated directory into a tier
     root never accidentally pollutes the catalog. "A manifest" means
-    any of :data:`BUNDLE_MARKER_FILENAMES`; nothing about its *content*
-    is required, so a bundle that declares no vector index is
-    discovered exactly like one that does.
+    ``bundle.json`` and nothing else, and nothing about its *content*
+    is required -- so a directory carrying only a domain's own metadata
+    (the references plugin's ``embedding_config.json``) is NOT a
+    bundle, while a bundle that declares no vector index is discovered
+    exactly like one that does.
 
     Shadowing keys on bundle ``name`` (the root bundle name is the
     empty string :data:`ROOT_BUNDLE_NAME`); a workspace root manifest
