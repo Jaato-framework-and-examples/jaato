@@ -5360,6 +5360,22 @@ declares no class validates exactly as before: absent is `minimal` for
 validation and *undeclared* for documentation, because a framework that
 printed `minimal` for it would be asserting a determination nobody made.
 
+**The authoring surface knows the keys, all three verbs of it.** `explain
+profile` documented `regulatory:`, `trace.ledger` and `record_keeping:` and
+`validate` checked them once declared — and `new profile-set` emitted none of
+them, so a workspace scaffolded the documented way got a clean bill from
+`validate` (only `budget_control_absent`) while declaring nothing under the
+Act: `disclosure_absent` needs a persona-bound profile and the `high_risk_*`
+errors a declared class. Now the tier-1 base carries the three blocks
+**commented out** (a live `regulatory:` with no fields is a determination
+nobody made; a live `record_keeping:` changes what DELETE means), `validate`
+says once per workspace that nothing declares it (`regulatory_undeclared`,
+warn — the `budget_control_absent` posture, and never inferring `minimal`),
+and the Claude Code integration skill lists `explain oversight`, `explain
+audit` and the `dossier` archetype. Guard:
+`shared/tests/test_scaffold_surfaces_know_the_compliance_keys.py`, which also
+checks that every topic and archetype the skill lists is one the CLI has.
+
 **A ledger the runner never held.** Everything above about the ledger was
 true of the in-process path and false of the default one. The runner's
 bootstrap passed `ledger=None` to `configure_plugins` — on the reading that

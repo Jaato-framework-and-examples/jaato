@@ -2895,9 +2895,58 @@ def validate_workspace(
     _check_completion_assets(result.profiles, ws, config_root, out)
     _check_default_agent_exists(result.profiles, ws, config_root, out)
     _check_memory_curation(result.profiles, out)
+    _check_regulatory_declared(result.profiles, out)
     for d in out[_before:]:
         d.tier = "workspace"
     return out
+
+
+def _check_regulatory_declared(profiles, out) -> None:
+    """No profile in the workspace declares ``regulatory:`` at all.
+
+    Every other EU AI Act finding needs a declaration to bite on:
+    ``disclosure_absent`` fires on a persona-bound profile, the
+    ``high_risk_*`` errors under a declared class, ``record_keeping_inert``
+    on a declared block.  A workspace generated the documented way -- two
+    stages from ``new profile-set`` -- declared none of them and got a clean
+    bill, so the author who most needed to hear that the keys exist was the
+    one ``validate`` said nothing to.  Measured before this finding: a fresh
+    set validated with ``budget_control_absent`` and nothing else.
+
+    A NUDGE, and only that.  ``warn``, the posture ``budget_control_absent``
+    takes for a knob whose absence is a legitimate choice for a local tool
+    and a silent one for a deployment.  Once, for the workspace, not per
+    profile: the block describes the application, and one declaration
+    anywhere in the tree (a tier-1 base every set inherits) is the normal
+    shape.  And it asserts nothing about the class -- absent is undeclared,
+    which the framework documents as unknown and never as ``minimal``.
+
+    Silent only for a workspace with no profiles (nothing to declare on).
+    Deliberately NOT the ``missing_model`` carve-out for abstract bases: a
+    tier-1 base is where the block belongs (it describes the application,
+    every set inherits it), and ``validate <workspace>`` with no ``--set``
+    sees exactly those bases -- so exempting them would silence the nudge
+    on the one invocation a fresh workspace's author is likeliest to run.
+    """
+    if not profiles:
+        return
+    if any(getattr(prof, "regulatory", None) is not None for prof in profiles.values()):
+        return
+    out.append(Diagnostic(
+        "warn", "regulatory_undeclared",
+        "no profile in this workspace declares a `regulatory:` block, so "
+        "nothing here says what the application is for, who provides it, or "
+        "whether natural persons interact with it — and every other EU AI "
+        "Act check (disclosure_absent, the high_risk_* errors, "
+        "record_keeping_inert) waits on that declaration.  Absent is "
+        "UNDECLARED, never minimal: the determination is the provider's "
+        "(Art. 6(4)).  Add it to the tier-1 base every set inherits — "
+        "`regulatory: {intended_purpose, risk_class, interacts_with_persons, "
+        "provider: {name, contact}}` — then `explain oversight <profile>` and "
+        "`explain audit <profile>` say what it armed.  `new profile-set` "
+        "emits the block commented out.",
+        profile=None, where="regulatory",
+    ))
 
 
 def _provider_knob_tail(cfg_provider, cfg_name, layer_name, key):

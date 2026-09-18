@@ -538,6 +538,10 @@ ARCHETYPES: Dict[str, ArchetypeDoc] = {
                     "holds stage determinism (plugins, schemas, permission "
                     "policy); binding a provider or model here breaks "
                     "set-selection, so it is left out",
+                    "a commented EU AI Act block — regulatory: / trace: / "
+                    "record_keeping: — as a worked example; declared, never "
+                    "inferred, so it stays commented until you fill it in "
+                    "(`jaato-scaffold explain oversight`, `explain audit`)",
                 ),
                 when="unless it already exists (or --force)",
             ),
