@@ -39,15 +39,15 @@ REVERSIONS = [
     ),
     Reversion(
         target="jaato-sdk/jaato_sdk/release_channels.py",
-        find='            return ChannelStatus(channel=channel, verdict="unknown",',
-        replace='            return ChannelStatus(channel=channel, verdict="current",',
+        find='        return ChannelStatus(channel=channel, verdict="unknown",',
+        replace='        return ChannelStatus(channel=channel, verdict="current",',
         test="test_an_index_that_did_not_answer_is_not_a_clean_bill_of_health",
         because="reading an unreachable index as 'you are up to date'",
     ),
     Reversion(
         target="jaato-sdk/jaato_sdk/release_channels.py",
-        find='    epoch = int(m.group("epoch") or 0)',
-        replace='    return (text,)\n    epoch = int(m.group("epoch") or 0)',
+        find="    pre = _pre_segment(m)",
+        replace="    return (text,)\n    pre = _pre_segment(m)",
         test="test_versions_are_ordered_as_versions_not_as_strings",
         because="ordering versions lexicographically, so 0.9.0 beats 0.21.0",
     ),
@@ -55,6 +55,17 @@ REVERSIONS = [
     # PARSEABLE, or the module fails to import, pytest cannot collect, and the
     # meta-suite reports BLOCKED — which is not the same evidence as a guard
     # noticing its defect.
+    # The one whose failure is SILENT rather than loud: without this flag
+    # the uv command still runs and still installs something, just not the
+    # candidate the notification named.
+    Reversion(
+        target="jaato-sdk/jaato_sdk/release_channels.py",
+        find='                             "--index-strategy unsafe-best-match "\n',
+        replace="",
+        test="test_the_uv_candidate_command_resolves_the_candidate",
+        because=("a uv install command that runs cleanly and fetches the "
+                 "PyPI stable instead of the release candidate"),
+    ),
     Reversion(
         target="jaato-sdk/jaato_sdk/doctor.py",
         find="""    checks += check_package_releases(timeout=release_timeout,
@@ -183,3 +194,33 @@ def test_the_preflight_actually_runs_the_check():
         "does call are: " + ", ".join(sorted(n for n in called
                                              if n.startswith("check_")))
     )
+
+
+def test_the_uv_candidate_command_resolves_the_candidate():
+    """The uv form of the candidate command must not be a flag rename.
+
+    Measured 2026-09-18 against the real indexes, with ``jaato-sdk`` 0.22.0 on
+    PyPI and 0.23.0rc4 on TestPyPI, the naive translation of the pip command
+    -- same flags, ``uv`` in front -- resolved ``jaato-sdk==0.22.0``.  It
+    exits 0 and installs the wrong package, which is the worst shape a
+    documented command can have: there is no error to read.
+
+    uv gives ``--extra-index-url`` priority OVER ``--index-url`` (pip's
+    precedence is the reverse) and defaults to ``--index-strategy
+    first-index``, so the first index holding the name wins outright;
+    ``unsafe-best-match`` restores pip's "consider every index, take the best
+    version", and with it both commands resolve ``jaato-sdk==0.23.0rc4`` and
+    the same seven packages.
+
+    Asserted on the FLAGS rather than by resolving, because a guard that
+    reached a package index would go red on an offline host for a reason
+    nobody wrote -- the rule every test in this family follows.
+    """
+    candidate = {c.name: c for c in rc.CHANNELS}["testpypi"]
+    command = candidate.uv_install_command("jaato-sdk")
+    assert "--index-strategy unsafe-best-match" in command, (
+        "without pip's index rule, this command installs the PyPI stable "
+        "instead of the release candidate the notification just named -- "
+        f"cleanly, with nothing to read. Got: {command!r}"
+    )
+    assert "--prerelease allow" in command, "uv has no --pre"

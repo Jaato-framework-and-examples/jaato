@@ -101,8 +101,8 @@ def releases(*, timeout: Optional[float] = None,
             names = [d.name for d, s in updates if s.channel is channel]
             if names:
                 lines.append(f"    {channel.label}:")
-                lines.append("      "
-                             + channel.install_command(" ".join(names)))
+                lines += [f"      {command}" for _, command
+                          in channel.install_commands(" ".join(names))]
     else:
         lines.append("  nothing newer is published on either channel.")
 

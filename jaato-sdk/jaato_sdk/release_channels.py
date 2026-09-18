@@ -182,12 +182,73 @@ def _local_key(local: Optional[str]) -> Any:
     return tuple(parts)
 
 
+def _release_segment(raw: str) -> Tuple[int, ...]:
+    """The release numbers, with insignificant trailing zeros stripped.
+
+    PEP 440 makes ``1.0`` and ``1.0.0`` the same release, so they must produce
+    the same key — otherwise the two order as different versions and a
+    published ``1.0`` reads as older than the ``1.0.0`` beside it.
+    """
+    parts = [int(part) for part in raw.split(".")]
+    while len(parts) > 1 and parts[-1] == 0:
+        parts.pop()
+    return tuple(parts)
+
+
+def _pre_segment(m: "re.Match") -> Optional[Tuple[str, int]]:
+    """The pre-release phase and number, folded to PEP 440's canonical letter.
+
+    ``c`` / ``pre`` / ``preview`` all mean ``rc``; leaving them apart would
+    order two spellings of one release alphabetically.
+    """
+    if not m.group("pre_l"):
+        return None
+    letter = m.group("pre_l").lower()
+    return (_PRE_ALIASES.get(letter, letter), int(m.group("pre_n") or 0))
+
+
+def _post_segment(m: "re.Match") -> Optional[Tuple[str, int]]:
+    """The post-release number, from either spelling PEP 440 allows."""
+    if m.group("post_n1") is not None:
+        return ("post", int(m.group("post_n1")))
+    if m.group("post_l"):
+        return ("post", int(m.group("post_n2") or 0))
+    return None
+
+
+def _dev_segment(m: "re.Match") -> Optional[Tuple[str, int]]:
+    """The development-release number, if this version carries one."""
+    if not m.group("dev_l"):
+        return None
+    return ("dev", int(m.group("dev_n") or 0))
+
+
+def _pre_key(pre: Optional[Tuple[str, int]],
+             post: Optional[Tuple[str, int]],
+             dev: Optional[Tuple[str, int]]) -> Any:
+    """Where a version with no pre-release segment sorts.
+
+    Two boundaries rather than one, and which applies depends on the other
+    segments: ``1.0.dev1`` precedes every ``1.0a1`` (it is a build of a
+    version not yet begun), while a plain ``1.0`` follows every ``1.0rc``.
+    """
+    if pre is not None:
+        return pre
+    if post is None and dev is not None:
+        return _NEG_INFINITY              # 1.0.dev1 precedes 1.0a1
+    return _INFINITY                      # 1.0 follows every 1.0<pre>
+
+
 def parse_version(text: str) -> Optional[Tuple]:
     """Return a PEP 440 sort key for *text*, or ``None`` if it is not one.
 
     ``None`` is the whole point of the signature: it means *this string is
     not a version I can order*, which callers must carry as an unknown rather
     than fold into "older".  Nothing here ever guesses.
+
+    The segment helpers above own one field each, so this reads as the
+    grammar's shape — epoch, release, pre, post, dev, local — rather than as
+    a run of conditionals.
 
     Args:
         text: A version string as an index or installed metadata spells it.
@@ -202,40 +263,12 @@ def parse_version(text: str) -> Optional[Tuple]:
     if m is None:
         return None
 
-    epoch = int(m.group("epoch") or 0)
-    release = tuple(int(part) for part in m.group("release").split("."))
-    # Trailing zeros are not significant: 1.0 == 1.0.0, so they are stripped
-    # before comparison or the two would order as different releases.
-    trimmed = list(release)
-    while len(trimmed) > 1 and trimmed[-1] == 0:
-        trimmed.pop()
-    release = tuple(trimmed)
-
-    pre: Optional[Tuple[str, int]] = None
-    if m.group("pre_l"):
-        letter = m.group("pre_l").lower()
-        pre = (_PRE_ALIASES.get(letter, letter), int(m.group("pre_n") or 0))
-
-    post: Optional[Tuple[str, int]] = None
-    if m.group("post_n1") is not None:
-        post = ("post", int(m.group("post_n1")))
-    elif m.group("post_l"):
-        post = ("post", int(m.group("post_n2") or 0))
-
-    dev: Optional[Tuple[str, int]] = None
-    if m.group("dev_l"):
-        dev = ("dev", int(m.group("dev_n") or 0))
-
-    if pre is None and post is None and dev is not None:
-        pre_key: Any = _NEG_INFINITY      # 1.0.dev1 precedes 1.0a1
-    elif pre is None:
-        pre_key = _INFINITY               # 1.0 follows every 1.0<pre>
-    else:
-        pre_key = pre
-
-    return (epoch,
-            release,
-            pre_key,
+    pre = _pre_segment(m)
+    post = _post_segment(m)
+    dev = _dev_segment(m)
+    return (int(m.group("epoch") or 0),
+            _release_segment(m.group("release")),
+            _pre_key(pre, post, dev),
             _NEG_INFINITY if post is None else post,
             _INFINITY if dev is None else dev,
             _local_key(m.group("local")))
@@ -307,9 +340,11 @@ class Channel:
             so a channel cannot name a host and read another.
         allow_prereleases: Whether a pre-release may be this channel's
             answer.  See :func:`newest`.
-        install_hint: The command that installs from this channel, rendered
-            with the distribution name.  A notification that does not say
-            how to act on it is half a notification.
+        install_hint: The ``pip`` command that installs from this channel,
+            rendered with the distribution name.  A notification that does
+            not say how to act on it is half a notification.
+        uv_install_hint: The same thing for ``uv``.  Carried rather than
+            derived — see :meth:`install_commands`.
     """
 
     name: str
@@ -317,31 +352,82 @@ class Channel:
     base_url: str
     allow_prereleases: bool
     install_hint: str
+    uv_install_hint: str
 
     def metadata_url(self, dist: str) -> str:
         """The JSON metadata endpoint for *dist* on this index."""
         return f"{self.base_url.rstrip('/')}/pypi/{dist}/json"
 
     def install_command(self, dist: str) -> str:
-        """How to install *dist* from this channel."""
+        """How to install *dist* from this channel with ``pip``."""
         return self.install_hint.format(dist=dist)
+
+    def uv_install_command(self, dist: str) -> str:
+        """How to install *dist* from this channel with ``uv``."""
+        return self.uv_install_hint.format(dist=dist)
+
+    def install_commands(self, dist: str) -> Tuple[Tuple[str, str], ...]:
+        """``((installer, command), ...)`` for every installer we document.
+
+        Renderers loop over this rather than naming ``pip`` and ``uv``
+        themselves, so a third installer is one field here and no edit in
+        ``jaato-doctor`` or ``explain releases`` — which is what stops the
+        two surfaces documenting different sets.
+        """
+        return (("pip", self.install_command(dist)),
+                ("uv", self.uv_install_command(dist)))
 
 
 #: The channels, in the order a reader should consider them: what has shipped
 #: first, what is staged second.
+#:
+#: THE ``uv`` FORM OF THE CANDIDATE COMMAND IS NOT A FLAG RENAME, and getting
+#: that wrong is silent rather than loud — the naive translation runs cleanly
+#: and installs the wrong package.  Measured 2026-09-18 against the real
+#: indexes, with ``jaato-sdk`` 0.22.0 on PyPI and 0.23.0rc4 on TestPyPI:
+#:
+#:   uv pip install -U --prerelease allow \
+#:       --index-url https://test.pypi.org/simple/ \
+#:       --extra-index-url https://pypi.org/simple/ jaato-sdk
+#:   -> jaato-sdk==0.22.0            the PyPI STABLE, not the candidate
+#:
+#: Two differences produce that, and each needs its own flag:
+#:
+#:   * ``--pre`` is ``--prerelease allow``; uv has no ``--pre``.
+#:   * uv gives ``--extra-index-url`` priority OVER ``--index-url`` (pip's
+#:     precedence is the reverse) and defaults to ``--index-strategy
+#:     first-index``, so the first index holding the name wins outright.
+#:     ``--index-strategy unsafe-best-match`` restores pip's rule — consider
+#:     every index, take the best version — and is what makes the two
+#:     commands resolve the same thing.  Its name is uv's own and it is
+#:     accurate: reaching across indexes for a best version is how a
+#:     dependency-confusion substitution gets in, which is a property of
+#:     ``--extra-index-url`` in BOTH tools rather than something uv adds.
+#:
+#: Verified equal: both commands resolve ``jaato-sdk==0.23.0rc4`` and the
+#: same seven packages.  Spelling the flags out here rather than deriving
+#: them from the pip string is deliberate — they are not a transformation of
+#: it, and a helper that pretended otherwise would re-introduce exactly the
+#: wrong-package failure above.
 CHANNELS: Tuple[Channel, ...] = (
     Channel(name="pypi",
             label="production release",
             base_url="https://pypi.org",
             allow_prereleases=False,
-            install_hint="pip install -U {dist}"),
+            install_hint="pip install -U {dist}",
+            uv_install_hint="uv pip install -U {dist}"),
     Channel(name="testpypi",
             label="release candidate",
             base_url="https://test.pypi.org",
             allow_prereleases=True,
             install_hint=("pip install -U --pre --index-url "
                           "https://test.pypi.org/simple/ "
-                          "--extra-index-url https://pypi.org/simple/ {dist}")),
+                          "--extra-index-url https://pypi.org/simple/ {dist}"),
+            uv_install_hint=("uv pip install -U --prerelease allow "
+                             "--index-strategy unsafe-best-match "
+                             "--index-url https://test.pypi.org/simple/ "
+                             "--extra-index-url https://pypi.org/simple/ "
+                             "{dist}")),
 )
 
 #: Seconds a fetched answer stays good.  An index does not publish often and
@@ -763,6 +849,68 @@ def _verdict(installed: str, latest: Optional[str]) -> Tuple[str, Optional[str]]
     return "current", None
 
 
+def _cached_versions(entry: Optional[Dict[str, Any]]) -> List[str]:
+    """The version strings a cache entry holds, ignoring anything malformed.
+
+    A cache is best-effort by nature: a hand-edited or half-written file must
+    read as "fewer versions remembered", never raise out of a diagnostic.
+    """
+    if not entry:
+        return []
+    return [v for v in (entry.get("versions") or []) if isinstance(v, str)]
+
+
+def _entry_is_fresh(entry: Optional[Dict[str, Any]], *,
+                    max_age: float, now: float, refresh: bool) -> bool:
+    """May this cache entry answer without asking the index again?"""
+    if entry is None or refresh:
+        return False
+    stamped = entry.get("fetched_at")
+    if not isinstance(stamped, (int, float)):
+        return False
+    return (now - float(stamped)) < max_age
+
+
+def _status_from_stale_cache(channel: Channel, installed: str,
+                             entry: Dict[str, Any], exc: BaseException,
+                             now: float) -> ChannelStatus:
+    """Answer from an expired cache entry, saying that is what it is.
+
+    Stale evidence beats none — as long as it is LABELLED stale, or a reader
+    takes an old answer for a live one and the freshness the cache exists to
+    manage becomes invisible.
+    """
+    latest, unparseable = newest(_cached_versions(entry),
+                                 allow_prereleases=channel.allow_prereleases)
+    verdict, why = _verdict(installed, latest)
+    stamped = float(entry.get("fetched_at") or now)
+    age_minutes = int((now - stamped) // 60)
+    return ChannelStatus(
+        channel=channel, latest=latest, verdict=verdict,
+        error=(f"{_describe_failure(exc, channel)}; showing a cached answer "
+               f"from {age_minutes} min ago" + (f" ({why})" if why else "")),
+        unparseable=unparseable, from_cache=True, checked_at=stamped)
+
+
+def _status_from_versions(channel: Channel, installed: str,
+                          versions: List[str], *, complete: bool,
+                          from_cache: bool,
+                          fetched_at: float) -> ChannelStatus:
+    """Turn one channel's version listing into a verdict about *installed*."""
+    latest, unparseable = newest(versions,
+                                 allow_prereleases=channel.allow_prereleases)
+    verdict, error = _verdict(installed, latest)
+    if not complete and error is None and channel.allow_prereleases:
+        # The fallback answer is the index's newest STABLE version, which on
+        # this channel is exactly the wrong one; better to say so than to
+        # present it as the candidate listing.
+        error = ("the index served no release listing, so this is its own "
+                 "'latest' — which excludes release candidates")
+    return ChannelStatus(channel=channel, latest=latest, verdict=verdict,
+                         error=error, unparseable=unparseable,
+                         from_cache=from_cache, checked_at=fetched_at)
+
+
 def _channel_status(channel: Channel, dist: str, installed: str, *,
                     timeout: float, opener, cache: Dict[str, Any],
                     max_age: float, now: float, refresh: bool,
@@ -777,63 +925,60 @@ def _channel_status(channel: Channel, dist: str, installed: str, *,
     """
     key = _cache_key(channel, dist)
     entry = cache.get(key) if isinstance(cache.get(key), dict) else None
-    fresh = (entry is not None
-             and not refresh
-             and isinstance(entry.get("fetched_at"), (int, float))
-             and (now - float(entry["fetched_at"])) < max_age)
 
-    if fresh:
-        versions = [v for v in (entry.get("versions") or []) if isinstance(v, str)]
-        complete = bool(entry.get("complete", True))
-        fetched_at = float(entry["fetched_at"])
-        from_cache = True
-    else:
-        try:
-            if channel.name in unreachable:
-                raise _ChannelRetired(unreachable[channel.name])
-            payload = _fetch(channel.metadata_url(dist), timeout, opener)
-            versions, complete = _available_versions(payload)
-        except Exception as exc:      # noqa: BLE001 — every failure is a verdict
-            if _is_channel_wide(exc):
-                unreachable.setdefault(channel.name,
-                                       _describe_failure(exc, channel))
-            # A stale cached answer is better evidence than none, and saying
-            # so is what keeps it from being read as a live one.
-            if entry is not None:
-                stale = [v for v in (entry.get("versions") or [])
-                         if isinstance(v, str)]
-                latest, unparseable = newest(
-                    stale, allow_prereleases=channel.allow_prereleases)
-                verdict, why = _verdict(installed, latest)
-                age = now - float(entry.get("fetched_at") or now)
-                return ChannelStatus(
-                    channel=channel, latest=latest, verdict=verdict,
-                    error=(f"{_describe_failure(exc, channel)}; showing a "
-                           f"cached answer from {int(age // 60)} min ago"
-                           + (f" ({why})" if why else "")),
-                    unparseable=unparseable, from_cache=True,
-                    checked_at=float(entry.get("fetched_at") or now))
-            return ChannelStatus(channel=channel, verdict="unknown",
-                                 error=_describe_failure(exc, channel),
-                                 checked_at=None)
-        cache[key] = {"versions": versions, "complete": complete,
-                      "fetched_at": now}
-        fetched_at = now
-        from_cache = False
+    if _entry_is_fresh(entry, max_age=max_age, now=now, refresh=refresh):
+        return _status_from_versions(
+            channel, installed, _cached_versions(entry),
+            complete=bool(entry.get("complete", True)), from_cache=True,
+            fetched_at=float(entry["fetched_at"]))
 
-    latest, unparseable = newest(versions,
-                                 allow_prereleases=channel.allow_prereleases)
-    verdict, why = _verdict(installed, latest)
-    error = why
-    if not complete and error is None and channel.allow_prereleases:
-        # The fallback answer is the index's newest STABLE version, which on
-        # this channel is exactly the wrong one; better to say so than to
-        # present it as the candidate listing.
-        error = ("the index served no release listing, so this is its own "
-                 "'latest' — which excludes release candidates")
-    return ChannelStatus(channel=channel, latest=latest, verdict=verdict,
-                         error=error, unparseable=unparseable,
-                         from_cache=from_cache, checked_at=fetched_at)
+    try:
+        if channel.name in unreachable:
+            raise _ChannelRetired(unreachable[channel.name])
+        payload = _fetch(channel.metadata_url(dist), timeout, opener)
+        versions, complete = _available_versions(payload)
+    except Exception as exc:          # noqa: BLE001 — every failure is a verdict
+        if _is_channel_wide(exc):
+            unreachable.setdefault(channel.name,
+                                   _describe_failure(exc, channel))
+        if entry is not None:
+            return _status_from_stale_cache(channel, installed, entry, exc, now)
+        return ChannelStatus(channel=channel, verdict="unknown",
+                             error=_describe_failure(exc, channel),
+                             checked_at=None)
+
+    cache[key] = {"versions": versions, "complete": complete,
+                  "fetched_at": now}
+    return _status_from_versions(channel, installed, versions,
+                                 complete=complete, from_cache=False,
+                                 fetched_at=now)
+
+
+def _distribution_status(name: str, installed: str, *, channels, timeout,
+                         opener, cache, max_age, now, refresh,
+                         unreachable) -> DistStatus:
+    """Every channel's answer about one distribution, in :data:`CHANNELS` order."""
+    status = DistStatus(name=name, installed=installed)
+    for channel in channels:
+        status.channels.append(_channel_status(
+            channel, name, installed, timeout=timeout, opener=opener,
+            cache=cache, max_age=max_age, now=now, refresh=refresh,
+            unreachable=unreachable))
+    return status
+
+
+def _unknown_reasons(report: "ReleaseReport") -> List[str]:
+    """Why any channel declined to answer, de-duplicated and in first-seen order.
+
+    One unreachable index produces one reason per installed package, and a
+    report repeating "cannot reach https://pypi.org" four times buries the
+    one fact it carries.
+    """
+    reasons: List[str] = []
+    for _, status in report.unknown:
+        if status.error and status.error not in reasons:
+            reasons.append(status.error)
+    return reasons
 
 
 def check_releases(distributions: Optional[Mapping[str, str]] = None, *,
@@ -887,22 +1032,14 @@ def check_releases(distributions: Optional[Mapping[str, str]] = None, *,
     cache = _load_cache(path)
     before = json.dumps(cache, sort_keys=True) if path is not None else None
 
-    seen_errors: List[str] = []
     unreachable: Dict[str, str] = {}      # channel name -> why, this run only
     for name in sorted(dists, key=normalize_dist_name):
-        status = DistStatus(name=name, installed=dists[name] or "")
-        for channel in channels:
-            result = _channel_status(channel, name, status.installed,
-                                     timeout=timeout, opener=opener,
-                                     cache=cache, max_age=max_age, now=now,
-                                     refresh=refresh, unreachable=unreachable)
-            status.channels.append(result)
-            if result.verdict == "unknown" and result.error:
-                if result.error not in seen_errors:
-                    seen_errors.append(result.error)
-        report.distributions.append(status)
+        report.distributions.append(_distribution_status(
+            name, dists[name] or "", channels=channels, timeout=timeout,
+            opener=opener, cache=cache, max_age=max_age, now=now,
+            refresh=refresh, unreachable=unreachable))
 
-    report.errors.extend(seen_errors)
+    report.errors.extend(_unknown_reasons(report))
     if path is not None and json.dumps(cache, sort_keys=True) != before:
         _store_cache(path, cache)
     return report

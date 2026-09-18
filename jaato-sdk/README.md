@@ -6,6 +6,7 @@ Python client SDK for connecting to a [jaato](https://github.com/Jaato-framework
 
 ```bash
 pip install jaato-sdk
+# or:  uv pip install jaato-sdk
 ```
 
 ## Quick Start
@@ -103,7 +104,7 @@ To start the server with WebSocket enabled:
 python -m server --ipc-socket /tmp/jaato.sock --web-socket :8080 --daemon
 ```
 
-WS clients authenticate with a bearer token (auto-generated to `~/.jaato/ws.token` on first start) sent either as `Authorization: Bearer <token>` on the upgrade request or as `?token=<token>` for browsers that can't set headers. The server stores only the SHA-256 digest and rejects bad tokens with WS close code 1008 before any session work happens. The Python `WSClient` ships in this SDK — install the optional `websockets` dependency with `pip install 'jaato-sdk[ws]'`.
+WS clients authenticate with a bearer token (auto-generated to `~/.jaato/ws.token` on first start) sent either as `Authorization: Bearer <token>` on the upgrade request or as `?token=<token>` for browsers that can't set headers. The server stores only the SHA-256 digest and rejects bad tokens with WS close code 1008 before any session work happens. The Python `WSClient` ships in this SDK — install the optional `websockets` dependency with `pip install 'jaato-sdk[ws]'` (`uv pip install 'jaato-sdk[ws]'`).
 
 ### Clients
 

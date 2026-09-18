@@ -499,3 +499,92 @@ def test_a_retired_channel_still_serves_a_stale_cached_answer(tmp_path):
         assert status.latest == "0.9.0"
         assert status.from_cache is True
         assert "cached answer from" in (status.error or "")
+
+
+# --------------------------------------------------------------------------
+# The uv commands
+#
+# The candidate channel's uv form is NOT a flag rename of the pip form, and
+# getting it wrong is SILENT: the naive translation runs cleanly and installs
+# the PyPI stable instead of the candidate.  Measured 2026-09-18 against the
+# real indexes.  These pin the three properties that make the two equivalent;
+# what they cannot do is re-resolve against a live index, so the module's
+# comment carries the measurement and these carry the flags.
+# --------------------------------------------------------------------------
+
+def test_every_channel_documents_pip_and_uv():
+    """A uv user told only the pip form has to translate it themselves.
+
+    Which is the thing that goes wrong — hence both, per channel.
+    """
+    for channel in rc.CHANNELS:
+        installers = [name for name, _ in channel.install_commands("jaato-sdk")]
+        assert installers == ["pip", "uv"], (
+            f"{channel.name} documents {installers}, not both installers"
+        )
+
+
+def test_each_command_starts_with_the_installer_it_is_for():
+    """The command names its own tool, which is what lets renderers drop labels."""
+    for channel in rc.CHANNELS:
+        for installer, command in channel.install_commands("jaato-sdk"):
+            assert command.startswith(f"{installer} "), (
+                f"{channel.name}/{installer} command does not invoke it: {command!r}"
+            )
+
+
+def test_every_command_carries_the_distribution_name():
+    for channel in rc.CHANNELS:
+        for _, command in channel.install_commands("jaato-made-up"):
+            assert command.endswith("jaato-made-up")
+
+
+def test_the_candidate_uv_command_carries_the_flags_that_make_it_equivalent():
+    """The whole finding, as three assertions.
+
+    Each flag is load-bearing and each was measured:
+
+    * ``--prerelease allow`` — uv has no ``--pre``, so without it the
+      candidate is not a candidate for resolution at all.
+    * ``--index-strategy unsafe-best-match`` — uv gives ``--extra-index-url``
+      priority OVER ``--index-url`` (pip's precedence is the reverse) and
+      defaults to ``first-index``, so without it the command resolved
+      ``jaato-sdk==0.22.0``: the PyPI stable, cleanly installed, wrong.
+    * the TestPyPI index — or it is not asking the candidate channel.
+    """
+    candidate = {c.name: c for c in rc.CHANNELS}["testpypi"]
+    command = candidate.uv_install_command("jaato-sdk")
+    assert "--prerelease allow" in command, "uv has no --pre"
+    assert "--index-strategy unsafe-best-match" in command, (
+        "without pip's index rule, uv takes the first index holding the name "
+        "and installs the PyPI stable instead of the candidate"
+    )
+    assert "test.pypi.org" in command
+
+
+def test_the_uv_command_is_not_a_textual_rewrite_of_the_pip_one():
+    """Guards the shape a later 'simplification' would reach for.
+
+    Deriving `uv …` by prefixing or substituting on the pip string is exactly
+    what produces the wrong-package failure, because the flags differ rather
+    than being renamed.  The two candidate commands must not be one
+    transformation apart.
+    """
+    candidate = {c.name: c for c in rc.CHANNELS}["testpypi"]
+    pip_command = candidate.install_command("jaato-sdk")
+    uv_command = candidate.uv_install_command("jaato-sdk")
+    assert uv_command != f"uv {pip_command}", (
+        "the uv form cannot be the pip form with a prefix: --pre and the "
+        "index strategy have to change too"
+    )
+    assert "--pre " not in uv_command, "'--pre' is not a uv flag"
+
+
+def test_the_production_uv_command_is_the_simple_one():
+    """One index, no pre-releases — here the translation IS just the prefix.
+
+    Asserted so the candidate channel's extra flags read as specific to it
+    rather than as ceremony every uv command needs.
+    """
+    production = {c.name: c for c in rc.CHANNELS}["pypi"]
+    assert production.uv_install_command("jaato-sdk") == "uv pip install -U jaato-sdk"

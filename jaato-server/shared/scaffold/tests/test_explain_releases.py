@@ -90,6 +90,34 @@ def test_an_update_is_rendered_with_the_command_that_installs_it(served):
     assert "--pre" in text and "test.pypi.org" in text  # candidate
 
 
+def test_both_installers_are_offered_for_every_stale_channel(served):
+    """A uv user must not have to translate the candidate command themselves.
+
+    It is not a rename: uv's index precedence is the reverse of pip's, so the
+    obvious translation resolves the PyPI stable and says nothing about it.
+    """
+    served(_report(rows=_BOTH_STALE))
+    _, text = mod.releases()
+    assert "uv pip install -U jaato-sdk" in text                  # production
+    assert "--prerelease allow" in text                           # candidate
+    assert "--index-strategy unsafe-best-match" in text
+
+
+def test_the_renderer_names_no_installer_of_its_own(served):
+    """Both surfaces loop over the channel, so neither can drift from it.
+
+    A renderer that spelled `pip` and `uv` itself would keep rendering two
+    when a channel documents three — the mock-spoke-the-client's-vocabulary
+    shape this repository keeps finding.
+    """
+    import inspect
+    source = inspect.getsource(mod)
+    assert "install_commands" in source
+    assert "uv_install_command" not in source, (
+        "the renderer must not reach for one installer by name"
+    )
+
+
 def test_nothing_newer_says_so_rather_than_printing_an_empty_section(served):
     served(_report(rows=[("jaato-sdk", "0.22.0",
                           [("pypi", "0.22.0", "current", None, []),

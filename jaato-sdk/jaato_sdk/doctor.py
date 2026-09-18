@@ -344,7 +344,12 @@ def _updates_detail(report) -> str:
         if not rows:
             continue
         lines += [f"  {row}" for row in rows]
-        lines.append(f"    install: {channel.install_command('<package>')}")
+        # Every installer the channel documents, not just pip: a uv user told
+        # only the pip form has to translate it, and the candidate channel's
+        # translation is three flags rather than one (see `release_channels`).
+        lines.append("    install with either:")
+        lines += [f"      {command}" for _, command
+                  in channel.install_commands("<package>")]
     reasons = _unknown_reasons(report)
     if reasons:
         # A partial answer presented as a whole one is the other way this

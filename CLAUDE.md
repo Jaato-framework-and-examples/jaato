@@ -17,6 +17,13 @@ python3 -m venv .venv
 .venv/bin/pip install -e jaato-sdk/. -e "jaato-server/.[all]" -e "jaato-tui/.[all]"
 ```
 
+Or with [uv](https://docs.astral.sh/uv/) — `uv venv` creates `.venv` and
+`uv pip` resolves it, so the `.venv/bin/` prefix is not needed:
+```bash
+uv venv
+uv pip install -e jaato-sdk/. -e "jaato-server/.[all]" -e "jaato-tui/.[all]"
+```
+
 ### Running the Server (Multi-Client Mode)
 ```bash
 # Start server as daemon with IPC socket
@@ -1072,7 +1079,32 @@ what is newest**:
 | Surface | Form |
 |---|---|
 | `jaato-doctor` | one preflight line — `package releases`, WARN when something newer is published |
-| `jaato-scaffold explain releases` | every channel's answer per package, with the command that installs each |
+| `jaato-scaffold explain releases` | every channel's answer per package, with the commands that install each |
+
+**Each channel carries a `pip` and a `uv` command, and the second is not a
+rename of the first.** Both renderers loop over `Channel.install_commands`
+rather than naming the installers, so they cannot document different sets.
+The candidate channel is where the translation is load-bearing — measured
+2026-09-18, with `jaato-sdk` 0.22.0 on PyPI and 0.23.0rc4 on TestPyPI:
+
+```
+uv pip install -U --prerelease allow \
+    --index-url https://test.pypi.org/simple/ \
+    --extra-index-url https://pypi.org/simple/ jaato-sdk
+  -> jaato-sdk==0.22.0        the PyPI STABLE, not the candidate
+```
+
+It runs cleanly and installs the wrong package, which is the worst shape a
+documented command can have. Two flags differ, not one: `--pre` is
+`--prerelease allow`, and uv gives `--extra-index-url` priority **over**
+`--index-url` (pip's precedence is the reverse) while defaulting to
+`--index-strategy first-index`, so the first index holding the name wins
+outright. `--index-strategy unsafe-best-match` restores pip's rule —
+consider every index, take the best version — and with it both commands
+resolve `jaato-sdk==0.23.0rc4` and the same seven packages. The flags are
+therefore spelled out per channel rather than derived from the pip string:
+they are not a transformation of it, and a helper that pretended otherwise
+would re-introduce exactly that wrong-package failure.
 
 **The index's own `latest` is the wrong answer, on the channel that matters.**
 PyPI pins a project's "latest" to the newest **stable** version whenever one
@@ -7945,7 +7977,7 @@ Custom theme: Create `theme.json` in `.jaato/` or `~/.jaato/` with `colors` obje
 See [docs/opentelemetry-design.md](docs/opentelemetry-design.md) for comprehensive design.
 
 ```bash
-.venv/bin/pip install -r requirements-telemetry.txt
+.venv/bin/pip install -r requirements-telemetry.txt   # uv: uv pip install -r requirements-telemetry.txt
 export JAATO_TELEMETRY_ENABLED=true
 export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317
 ```

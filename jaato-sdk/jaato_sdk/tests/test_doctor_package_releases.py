@@ -84,6 +84,11 @@ def test_a_newer_build_warns_and_names_version_channel_and_command(served):
     assert "0.22.0" in check.detail and "0.23.0rc4" in check.detail
     assert "release candidate" in check.detail          # WHICH channel
     assert "--pre" in check.detail                      # and how to get it
+    # ...for uv users too: the candidate channel's uv form differs by three
+    # flags, so a uv reader given only the pip line translates it wrongly and
+    # silently installs the PyPI stable.
+    assert "uv pip install" in check.detail
+    assert "--index-strategy unsafe-best-match" in check.detail
 
 
 def test_everything_current_passes_and_says_what_it_compared(served):
