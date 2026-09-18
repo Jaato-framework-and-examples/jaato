@@ -696,6 +696,95 @@ def check_oversight(info: DaemonInfo, socket_path: str, pidfile: str) -> List[Ch
                   f"cancels each and reaps the runners.  {one}")]
 
 
+def check_audit_chain(paths: List[str]) -> List[Check]:
+    """Walk chained audit files and report the first link that broke (#1120).
+
+    Article 73(6) asks that, after a serious incident, the logs used in
+    the investigation not have been altered.  ``record_keeping.integrity:
+    sha256-chain`` links each record to the previous one's digest; this
+    is the reader, and it needs nothing but the file and the stdlib.
+
+    **It never FAILS the run.**  ``jaato-doctor`` is documented as usable
+    as a CI gate, and a broken chain is a finding for a person to act on,
+    not a build error -- the rule ``check_package_releases`` already
+    follows.  A break is reported at WARN, loudly, naming the line.
+
+    **An unchained file is reported as unchained, not as intact.**  The
+    question an investigator asks is whether this file was tampered with,
+    and for a file carrying no digests the true answer is that it is
+    evidence of nothing either way.  Answering "fine" would be answering
+    a different question.
+    """
+    from . import audit_chain
+
+    if not paths:
+        return [Check("audit chain", WARN,
+                      "no file named -- pass one or more paths to verify")]
+    checks: List[Check] = []
+    for raw in paths:
+        path = Path(raw)
+        if not path.is_file():
+            checks.append(Check(f"audit chain {path.name}", WARN,
+                                f"{path}: no such file"))
+            continue
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError as exc:
+            checks.append(Check(f"audit chain {path.name}", WARN,
+                                f"{path}: cannot read ({exc})"))
+            continue
+        intact, breaks = audit_chain.verify(lines)
+        if intact:
+            checks.append(Check(
+                f"audit chain {path.name}", PASS,
+                f"{len(lines)} record(s), chain intact -- the file was not "
+                f"edited in place.  It does NOT prove who wrote it: a writer "
+                f"holding the file can re-chain from any point."))
+            continue
+        first = breaks[0]
+        checks.append(Check(
+            f"audit chain {path.name}", WARN,
+            f"line {first.line}: {first.reason}"
+            + (f"  (+{len(breaks) - 1} more)" if len(breaks) > 1 else "")))
+    return checks
+
+
+def check_incidents(
+    paths: List[str], since_days: Optional[float] = None,
+) -> List[Check]:
+    """The incident register: what happened, and how long ago (#1122).
+
+    Article 73 gives a provider 15 days to report a serious incident from
+    becoming AWARE of it -- 10 for a death, 2 for a widespread
+    infringement.  All three clocks start from awareness, so the useful
+    thing to print beside each row is how much of each window is left.
+
+    **The tool does not classify.**  Whether an entry IS a serious
+    incident under Art. 3(49) is a determination about consequences the
+    framework cannot see, so all three windows are rendered and none is
+    chosen.  The header says so, rather than the rows carrying a
+    severity the framework is not in a position to assign.
+
+    **Unreadable is not empty.**  A workspace with no trace configured
+    is reported as one that could not be read -- absence of evidence is
+    not absence of incidents, and answering "none" to a question this
+    could not look at is the one thing a register must never do.  It is
+    the rule the release check already follows for an index that did not
+    answer.
+
+    Never FAILs: an incident is news for a person, and ``jaato-doctor``
+    is documented as usable as a CI gate.
+    """
+    from . import incidents_view
+
+    if not paths:
+        return [Check("incidents", WARN,
+                      "no trace file named — pass one or more paths, or set "
+                      "trace.session_log in the profile and pass that")]
+    return incidents_view.render(paths, since_days=since_days,
+                                 check=Check, pass_=PASS, warn=WARN)
+
+
 def check_home_match(info: DaemonInfo) -> List[Check]:
     """Compare the daemon's HOME to the caller's — the #1 pass:// trap.
 
@@ -1647,6 +1736,22 @@ def _print(checks: List[Check]) -> int:
     return 1 if n_fail else 0
 
 
+def _since_days(raw: Optional[str]) -> Optional[float]:
+    """``--since 15`` / ``--since 15d`` as days, or ``None``.
+
+    An unparseable value reads as ``None`` -- show everything -- rather
+    than as zero.  A register that silently showed nothing because its
+    filter did not parse would answer "no incidents" to a question it
+    never asked, which is the failure this whole verb exists to avoid.
+    """
+    if not raw:
+        return None
+    try:
+        return float(str(raw).strip().rstrip("dD"))
+    except ValueError:
+        return None
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     """CLI entry point: ``python -m jaato_sdk.doctor [options]``."""
     ap = argparse.ArgumentParser(
@@ -1689,6 +1794,21 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--refresh-release-check", action="store_true",
                     help="ignore the cached index answer and re-ask — for "
                          "'I just published, is it visible?'")
+    ap.add_argument("--incidents", nargs="+", default=None, metavar="PATH",
+                    help="REGISTER MODE (instead of preflight): list the "
+                         "incidents recorded in one or more application "
+                         "trace files, with the Art. 73 reporting clocks "
+                         "beside each. Does NOT classify: whether an entry "
+                         "is a serious incident under Art. 3(49) is a "
+                         "human determination.")
+    ap.add_argument("--since", default=None, metavar="DAYS",
+                    help="with --incidents: keep only entries this recent. "
+                         "Accepts '15' or '15d'.")
+    ap.add_argument("--audit-verify", nargs="+", default=None, metavar="PATH",
+                    help="VERIFY MODE (instead of preflight): walk chained "
+                         "audit files (record_keeping.integrity: sha256-chain) "
+                         "and report the first record whose link broke.  Needs "
+                         "nothing but the file — EU AI Act Art. 73(6).")
     ap.add_argument("--session", default=None, metavar="ID",
                     help="RUNTIME diagnostic mode (instead of preflight): inspect a "
                          "recent session's logs under <workspace>/.jaato/logs — did "
@@ -1696,7 +1816,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                          "workspace=none? Use 'latest' for the newest session.")
     args = ap.parse_args(argv)
 
-    if args.session:
+    if args.incidents:
+        checks = check_incidents(args.incidents, _since_days(args.since))
+    elif args.audit_verify:
+        checks = check_audit_chain(args.audit_verify)
+    elif args.session:
         checks = check_session(args.session, args.workspace)
     else:
         checks = run_checks(

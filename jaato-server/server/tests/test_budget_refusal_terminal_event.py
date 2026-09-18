@@ -48,10 +48,24 @@ def _call(result):
 def test_refusal_emits_a_terminal_event():
     fired, emitted, _ = _call(RESULT)
     assert fired is True
-    assert len(emitted) == 1
     assert emitted[0].type == EventType.SESSION_TERMINATED, (
         "the driver waits on a TERMINAL event; without one it sits out its "
         "whole timeout and reports a generic failure")
+
+
+def test_the_terminal_is_followed_by_an_incident():
+    """The register's row for a stopped run, beside the terminal.
+
+    The terminal is what a DRIVER waits on; the incident is what a
+    PERSON reads days later against an Art. 73 clock.  Two events
+    because they answer different questions, and the terminal stays
+    FIRST so nothing that branches on the first event changes meaning.
+    """
+    _, emitted, _ = _call(RESULT)
+    assert [e.type for e in emitted] == [
+        EventType.SESSION_TERMINATED, EventType.INCIDENT_RAISED]
+    assert emitted[1].kind == "budget_exhausted"
+    assert emitted[1].cause == RESULT["budget_exhausted_reason"]
 
 
 def test_reason_is_typed_not_prose():
@@ -151,6 +165,8 @@ def test_relay_end_to_end_wrapper_into_emit():
     asyncio.run(_go())
     JaatoServer._emit_budget_refusal_if_exhausted(srv, collected)
 
-    assert len(emitted) == 1
+    # The terminal FIRST, then the #1122 incident row.  Asserting on the
+    # first event rather than on the count, so the register can grow a
+    # sibling without this test reading it as a regression in the relay.
     assert emitted[0].reason == "budget_exhausted"
     assert emitted[0].details["usage"]["turns"] == 2.0

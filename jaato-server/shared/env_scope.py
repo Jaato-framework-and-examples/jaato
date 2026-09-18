@@ -409,6 +409,11 @@ CATALOG: Dict[str, EnvClass] = {
         "get_session_env for exactly that reason"),
     "JAATO_PROVIDER": EnvClass(SESSION, "provider",
         "the profile's own `provider` field is the typed equivalent"),
+    "JAATO_LEDGER_INTEGRITY": EnvClass(SESSION, "record_keeping.integrity",
+        "the ledger's tamper-evidence posture (sha256-chain | none). The "
+        "env var is the TRANSPORT, not where an author writes it: the "
+        "ledger is constructed before any profile resolves, so the typed "
+        "block seeds this the way trace.ledger seeds LEDGER_PATH"),
     "JAATO_SSL_VERIFY": EnvClass(HOST, None,
         "TLS verification escape hatch for intercepting proxies; a host "
         "posture"),

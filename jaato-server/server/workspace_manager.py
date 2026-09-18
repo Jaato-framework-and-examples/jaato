@@ -662,7 +662,12 @@ class WorkspaceManager:
           caller resolved (loaded sessions running in it), or another
           client's current selection.  Deleting a directory a runner is
           confined to is not a delete, it is a session failure with a
-          delayed cause.
+          delayed cause;
+        - a workspace under RETENTION -- its profiles declared
+          ``record_keeping.retention_days`` and audit files here have not
+          reached it (EU AI Act Art. 19(1), #1119).  ``session.delete``
+          removes a conversation and leaves the record, which is the verb
+          for this case.
 
         The deleting client's own selection of it is cleared.
 
@@ -697,6 +702,18 @@ class WorkspaceManager:
             raise ValueError(
                 f"Workspace {name!r} is selected by {len(others)} other client(s)"
             )
+
+        # Art. 19(1) (#1119): a workspace whose profiles declared a
+        # ``record_keeping.retention_days`` holds audit files a delete
+        # would destroy before their minimum elapsed.  Refused rather than
+        # preserved-as-orphans or overridden-with-a-warning -- see
+        # ``record_retention.workspace_retention_hold`` for why.  A
+        # workspace that declares nothing is unaffected, which is every
+        # workspace that existed before this.
+        from .record_retention import workspace_retention_hold
+        hold = workspace_retention_hold(path)
+        if hold:
+            raise ValueError(f"Workspace {name!r} is under retention: {hold}")
 
         shutil.rmtree(path)
         self._workspaces.pop(name, None)

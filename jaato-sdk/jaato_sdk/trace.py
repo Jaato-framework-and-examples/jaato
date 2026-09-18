@@ -262,6 +262,45 @@ def _substitute_agent_placeholders(path: Optional[str]) -> Optional[str]:
     return _KNOWN_PLACEHOLDER_RE.sub(lambda m: values[m.group(1)], path)
 
 
+def resolve_agent_trace_path(
+    path: Optional[str],
+    workspace_root: Optional[str] = None,
+) -> Optional[str]:
+    """A trace path made absolute and agent-substituted, for a caller
+    that is OUTSIDE the session environment.
+
+    Everything else here reads ``os.environ``, which is correct while a
+    session's env overlay is applied and wrong the moment it is not.
+    The daemon raises an incident from the ``finally`` of its model
+    thread -- after the overlay has been popped -- so it holds the two
+    values itself and passes them in rather than reading an environment
+    that has already reverted to the daemon's own.
+
+    Without this the line went to the daemon's process-wide trace (or
+    ``/tmp``), so ``jaato-doctor --incidents <workspace>/.jaato/logs/...``
+    reported "none recorded" for exactly the kinds the daemon raises; and
+    a path naming ``{agent}`` created a literal ``{agent}`` directory,
+    the #775 shape.
+
+    Args:
+        path: The configured trace path, or ``None``/`""` for disabled.
+        workspace_root: What a RELATIVE path resolves against.  Falls
+            back to the ambient variable, then to the process cwd.
+
+    Returns:
+        An absolute path, or ``None`` when tracing is disabled.
+    """
+    if not path:
+        return None
+    substituted = _substitute_agent_placeholders(path)
+    if not substituted:
+        return None
+    if os.path.isabs(substituted):
+        return substituted
+    root = workspace_root or os.environ.get("JAATO_WORKSPACE_ROOT")
+    return os.path.join(root, substituted) if root else os.path.abspath(substituted)
+
+
 def _resolve_trace_file(file_path: str) -> str:
     """Resolve a trace file path, using JAATO_WORKSPACE_ROOT for relative paths.
 

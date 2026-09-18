@@ -29,6 +29,7 @@ import pytest
 
 from shared.plugins.subagent.config import (
     PROFILE_FILE_KEYS,
+    RecordKeepingConfig,
     RISK_CLASSES,
     RegulatoryProfileConfig,
     SubagentProfile,
@@ -288,10 +289,14 @@ def test_the_high_risk_only_findings_fire_and_name_the_remedy():
     assert codes == {
         "high_risk_without_intended_purpose",
         "high_risk_without_oversight_policy",
+        # The record is WRITTEN (#1109) ...
         "high_risk_without_record_keeping",
+        # ... and KEPT (#1119).  The pair: one says nothing records, the
+        # other says nothing keeps what records.  Neither is useful alone.
+        "high_risk_without_retention",
         "high_risk_shell_unconfined",
     }
-    # And the fifth, when the disclosure piece is suppressed by name.
+    # And the sixth, when the disclosure piece is suppressed by name.
     dropped = _run(_ns(reg, suppress_base_instructions=frozenset({"disclosure"})))
     assert "high_risk_disclosure_suppressed" in {d.code for d in dropped}
     assert all(d.severity == "error" for d in found)
@@ -305,7 +310,9 @@ def test_each_high_risk_finding_is_satisfied_by_the_mechanism_it_names():
             "permission": {"policy": {"defaultPolicy": "ask"}},
             "interactive_shell": {"require_confinement": True},
         },
-        trace=SimpleNamespace(session_log=".jaato/logs/trace.jsonl", provider_log=None),
+        trace=SimpleNamespace(session_log=".jaato/logs/trace.jsonl",
+                              provider_log=None),
+        record_keeping=RecordKeepingConfig(retention_days=180),
     ))
     assert found == []
 

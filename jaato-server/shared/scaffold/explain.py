@@ -3375,6 +3375,65 @@ def _oversight_measures() -> Dict[str, Any]:
                 "them"
             ),
         },
+        "output_marking": _output_marking_posture(),
+    }
+
+
+def _output_marking_posture() -> Dict[str, Any]:
+    """What the framework marks under Art. 50(2), and what it does not (#1118).
+
+    The section a deployer needs and could not get anywhere: three true
+    statements about text provenance, none of which was written down on
+    a surface anyone reads.  Stated here rather than only in the design
+    doc because this page is the computed statement of what the
+    framework does for a person on the other end -- and because it is
+    what an Annex IV dossier quotes.
+
+    Two of the three values are READ from the tree rather than asserted
+    (the protocol version that carries the stamp, and the marker plugins
+    installed), so the page cannot claim a marking the build does not
+    have.  The text posture is the one genuinely editorial line, and it
+    names its own revisit trigger.
+    """
+    from jaato_sdk.events import PROTOCOL_VERSION
+
+    markers: List[str] = []
+    try:
+        from jaato_sdk.plugins.base import TRAIT_OUTPUT_MARKER
+        for name, info in sorted(introspect.plugins().items()):
+            if TRAIT_OUTPUT_MARKER in (getattr(info, "plugin_traits", None)
+                                       or frozenset()):
+                markers.append(name)
+    except Exception:  # noqa: BLE001 -- a diagnostic must not raise
+        markers = []
+
+    return {
+        "media": (
+            "the model's own audio and images carry `generated_by` on the "
+            f"wire (protocol {PROTOCOL_VERSION}): kind, provider, model, "
+            "session_id, agent_id.  That field travels with the DELIVERY "
+            "EVENT and stops there -- a client that saves the bytes keeps "
+            "no record of it"
+        ),
+        "files": (
+            "a plugin declaring TRAIT_OUTPUT_MARKER puts the marking in or "
+            "beside the payload, so it survives leaving jaato.  Installed "
+            "here: " + (", ".join(markers) if markers else "none")
+        ),
+        "text": (
+            "NOT marked.  AgentOutputEvent.source attributes it at the "
+            "event layer (agent / system / permission / user) and that is "
+            "all; no text watermark ships until the Art. 50(7) code of "
+            "practice or a harmonised standard names one, because a "
+            "prefix a client strips is a marking that certifies what it "
+            "did not find"
+        ),
+        "deployer_publishing": (
+            "Art. 50(4) -- disclosing that text published to inform the "
+            "public on matters of public interest was AI-generated -- is a "
+            "PUBLISHING decision.  The framework cannot see that a "
+            "transcript was published, and does not attempt to"
+        ),
     }
 
 
@@ -3437,6 +3496,15 @@ def _oversight_lines(M: Dict[str, Any]) -> List[str]:
     lines.append("REVERSIBLE / NOT")
     lines.extend(_wrap_bullet(M["reversibility"]["reversible"], indent=2, glyph="+"))
     lines.extend(_wrap_bullet(M["reversibility"]["not_reversible"], indent=2, glyph="-"))
+    mark = M.get("output_marking")
+    if mark:
+        lines.append("")
+        lines.append("MARKING GENERATED OUTPUT  (Art. 50(2), 50(4))")
+        for key, label in (("media", "media"), ("files", "files"),
+                           ("text", "text"),
+                           ("deployer_publishing", "publishing")):
+            lines.append(f"  {label}")
+            lines.extend(_wrap_bullet(mark[key], indent=6, glyph=" "))
     lines += [
         "",
         "  `explain oversight <profile> --workspace DIR` shows which of these a",
@@ -3498,12 +3566,41 @@ _IRREVERSIBLE_SURFACES = ("cli", "interactive_shell", "mcp",
                           "service_connector", "web_fetch")
 
 
+#: What ``explain oversight <profile>`` prints when a profile does not
+#: announce, keyed by the reason :func:`~shared.ai_disclosure.announcement_for`
+#: gave.  Three reasons rather than one line saying "none": an author cannot
+#: otherwise tell a profile that DECLINED to declare from one that declared
+#: ``false``, and the remedy differs (write the key, or nothing).
+_ANNOUNCEMENT_REASONS: Dict[str, str] = {
+    "not_declared": ("interacts_with_persons is undeclared "
+                     "(validate reports this as disclosure_absent)"),
+    "declared_no_persons": "interacts_with_persons: false",
+    "client_discloses": "the connected client declares it discloses already",
+}
+
+
+def _announcement(prof: Any) -> Dict[str, Any]:
+    """Whether this profile announces under Art. 50(1), and with what text.
+
+    Reads :func:`shared.ai_disclosure.announcement_for` -- the SAME
+    predicate ``JaatoServer.disclosure_announcement`` calls -- so this page
+    cannot say a profile announces while its sessions stay silent.  The
+    per-connection half (``PresentationContext.client_discloses_ai``) is
+    unknowable here and is described rather than applied, which is why the
+    rendered line names it as a thing that can still withhold.
+    """
+    from shared.ai_disclosure import announcement_for
+    text, reason = announcement_for(getattr(prof, "regulatory", None))
+    return {"text": text, "withheld_reason": reason}
+
+
 def _profile_oversight(prof: Any) -> Dict[str, Any]:
     """What a RESOLVED profile has armed, measure by measure."""
     limits = getattr(prof, "runtime_limits", None)
     reg = getattr(prof, "regulatory", None)
     return {
         "regulatory": reg.to_dict() if reg is not None else None,
+        "announcement": _announcement(prof),
         "permission_policy": _permission_summary(prof),
         "budget_control": _budget_summary(prof),
         "wall_clock": {
@@ -3558,6 +3655,20 @@ def _gate_line(gates: List[Dict[str, Any]]) -> str:
     return f"  COMPLETION GATE    {shown}"
 
 
+def _announcement_lines(ann: Dict[str, Any]) -> List[str]:
+    """The Art. 50(1) announcement rows of ``explain oversight <profile>``."""
+    pad = " " * 28
+    if ann["text"]:
+        return [
+            f"  announcement              {ann['text']!r}",
+            f"{pad}emitted once at session creation; a client",
+            f"{pad}sending client_discloses_ai withholds it",
+        ]
+    why = _ANNOUNCEMENT_REASONS.get(
+        ann["withheld_reason"] or "", "no reason recorded")
+    return [f"  announcement              none -- {why}"]
+
+
 def _profile_oversight_lines(name: str, P: Dict[str, Any]) -> List[str]:
     """Render :func:`_profile_oversight`."""
     reg = P["regulatory"] or {}
@@ -3568,6 +3679,7 @@ def _profile_oversight_lines(name: str, P: Dict[str, Any]) -> List[str]:
         "",
         f"  regulatory.risk_class     {reg.get('risk_class') or 'undeclared'}{annex}",
         f"  interacts_with_persons    {reg.get('interacts_with_persons', 'undeclared')}",
+        *_announcement_lines(P["announcement"]),
         "",
         _permission_line(P["permission_policy"]),
         _budget_line(P["budget_control"]),
@@ -3580,11 +3692,39 @@ def _profile_oversight_lines(name: str, P: Dict[str, Any]) -> List[str]:
     ]
 
 
-def oversight_profile(name: str, workspace: str) -> Rendered:
-    """``explain oversight <profile>`` -- what THIS profile has armed.
+def workspace_profile_set(workspace: str) -> Optional[str]:
+    """``JAATO_PROFILE_SET`` from a workspace's own ``.env``, if it names one.
 
-    Resolved through ``discover_profiles`` so an inherited permission
-    policy or budget ladder counts, exactly as the daemon would load it.
+    A profile inside ``profiles/<set>/`` is only in the effective set when
+    that set is selected, and the selector a workspace runs under lives in
+    its ``.env`` -- written there by ``new profile-set``.  Reading it is
+    what makes ``explain oversight <name>`` resolve against the SAME set
+    the workspace's own client will run under; without it, every profile a
+    scaffolded workspace declares is invisible to these pages.
+
+    One definition: ``build`` reads it from here rather than carrying its
+    own, so the generator and the explain pages cannot disagree about which
+    set a workspace is on.
+    """
+    envf = Path(workspace).resolve() / ".env"
+    if not envf.is_file():
+        return None
+    try:
+        for line in envf.read_text(encoding="utf-8",
+                                   errors="replace").splitlines():
+            key, _, value = line.partition("=")
+            if key.strip() == "JAATO_PROFILE_SET":
+                return value.strip() or None
+    except OSError:             # pragma: no cover -- best-effort
+        return None
+    return None
+
+
+def _resolve_workspace_profile(name: str, workspace: str,
+                               profile_set: Optional[str] = None):
+    """A named profile as the DAEMON would load it, set selection included.
+
+    Returns ``(profile_or_None, workspace_path)``.
     """
     from shared.plugins.subagent.config import discover_profiles
 
@@ -3592,11 +3732,225 @@ def oversight_profile(name: str, workspace: str) -> Rendered:
     result = discover_profiles(
         profiles_dir=".jaato/profiles", base_path=str(ws),
         config_root=str(ws / ".jaato"),
+        force_profile_set=profile_set or workspace_profile_set(str(ws)),
     )
-    prof = result.profiles.get(name)
+    return (result.profiles or {}).get(name), ws
+
+
+def oversight_profile(name: str, workspace: str,
+                      profile_set: Optional[str] = None) -> Rendered:
+    """``explain oversight <profile>`` -- what THIS profile has armed.
+
+    Resolved through ``discover_profiles`` so an inherited permission
+    policy or budget ladder counts, exactly as the daemon would load it.
+    """
+    prof, ws = _resolve_workspace_profile(name, workspace, profile_set)
     if prof is None:
         return ({"profile": name, "found": False, "error": "no such profile"},
                 f"no profile {name!r} under {ws}/.jaato/profiles/")
     P = _profile_oversight(prof)
     P.update({"profile": name, "found": True})
     return P, "\n".join(_profile_oversight_lines(name, P))
+
+
+# ---------------------------------------------------------------------------
+# explain audit -- the record-keeping contract (EU AI Act Arts. 12, 13(3)(f), 19)
+# ---------------------------------------------------------------------------
+
+def _audit_schema_view() -> Dict[str, Any]:
+    """The declared audit record, as data.
+
+    Reads :data:`jaato_sdk.audit.AUDIT_SCHEMA` rather than restating it,
+    the rule every page here follows: a page that described the record
+    would be a second statement of it, and the two would disagree the
+    first time a writer changed.
+    """
+    from jaato_sdk import audit
+
+    return {
+        "schema_version": audit.AUDIT_SCHEMA_VERSION,
+        "stores": [
+            {
+                "key": s.key,
+                "path_source": s.path_source,
+                "format": s.fmt,
+                "description": s.description,
+                "retained": s.retained,
+            }
+            for s in audit.STORES
+        ],
+        "events": [
+            {
+                "kind": e.kind,
+                "article": e.article,
+                "store": e.store,
+                "written_by": e.written_by,
+                "note": e.note,
+                "fields": [
+                    {"name": f.name, "description": f.description,
+                     "guaranteed": f.guaranteed}
+                    for f in e.fields
+                ],
+            }
+            for e in audit.AUDIT_SCHEMA
+        ],
+    }
+
+
+def _audit_schema_lines(view: Dict[str, Any]) -> List[str]:
+    """Render :func:`_audit_schema_view`."""
+    lines = [
+        "the audit record  (Regulation (EU) 2024/1689, Arts. 12, 13(3)(f), 19)",
+        f"  schema version {view['schema_version']}",
+        "",
+        "  NOT a sixth store -- a CONTRACT over the stores that already record.",
+        "  13(3)(f) asks the instructions for use to describe the mechanisms a",
+        "  deployer collects, stores and interprets the logs with; this page is",
+        "  that description, computed rather than written down beside the code.",
+        "",
+        "STORES",
+    ]
+    for store in view["stores"]:
+        kept = "governed by retention_days" if store["retained"] else (
+            "governed by conversation_retention_days -- this is the "
+            "CONVERSATION, not the log about it")
+        lines.append(f"  {store['key']}")
+        lines.append(f"      where:  {store['path_source']}")
+        lines.append(f"      format: {store['format']}")
+        lines.extend(_wrap_bullet(store["description"], indent=6, glyph=" "))
+        lines.extend(_wrap_bullet(kept, indent=6, glyph=" "))
+    lines.append("")
+    lines.append("EVENTS")
+    for event in view["events"]:
+        lines.append(f"  {event['kind']}   -> {event['store']}")
+        lines.append(f"      {event['article']}")
+        lines.append(f"      written by {event['written_by']}")
+        for fld in event["fields"]:
+            mark = " " if fld["guaranteed"] else "?"
+            lines.append(f"      {mark} {fld['name']:<18} {fld['description']}")
+        if event["note"]:
+            lines.extend(_wrap_bullet(event["note"], indent=6, glyph="!"))
+    lines += [
+        "",
+        "  '?' marks a field present only when it was MEASURED.  Absent is not",
+        "  zero and is never written as null -- a provider that reported no",
+        "  cache must not read as a cache that never hit.",
+        "",
+        "  `explain audit <profile> --workspace DIR` shows the concrete paths",
+        "  THAT profile writes to and what its record_keeping: block says.",
+    ]
+    return lines
+
+
+def audit() -> Rendered:
+    """``explain audit`` -- the record-keeping contract.
+
+    Article 13(3)(f) asks a high-risk system's instructions for use to
+    describe "the mechanisms included within the AI system that allows
+    deployers to properly collect, store and interpret the logs".  Five
+    stores record and none said what is guaranteed, so that description
+    would have had to be reverse-engineered from five formats.
+    """
+    view = _audit_schema_view()
+    return view, "\n".join(_audit_schema_lines(view))
+
+
+def _audit_profile(prof: Any, workspace: Path) -> Dict[str, Any]:
+    """Which stores a RESOLVED profile writes to, and for how long."""
+    from jaato_sdk import audit as audit_schema
+
+    trace = getattr(prof, "trace", None)
+    keeping = getattr(prof, "record_keeping", None)
+    declared = bool(keeping is not None and keeping.declared)
+
+    def _resolved(value: Optional[str]) -> Optional[str]:
+        """A trace path as the session would write it.
+
+        Absolute stays absolute (one file shared by every session using
+        the profile); relative is resolved per session against the
+        WORKSPACE, so the page shows the pattern rather than pretending
+        to know a session id.
+        """
+        if not value:
+            return None
+        return value if Path(value).is_absolute() else str(workspace / value)
+
+    return {
+        "record_keeping": keeping.to_dict() if keeping is not None else None,
+        "record_keeping_declared": declared,
+        "paths": {
+            "ledger": _resolved(getattr(trace, "ledger", None)),
+            "session_trace": _resolved(getattr(trace, "session_log", None)),
+            "provider_trace": _resolved(getattr(trace, "provider_log", None)),
+        },
+        "schema_version": audit_schema.AUDIT_SCHEMA_VERSION,
+    }
+
+
+def _audit_profile_lines(name: str, P: Dict[str, Any]) -> List[str]:
+    """Render :func:`_audit_profile`."""
+    lines = [f"the audit record, as WRITTEN by profile {name!r}:", ""]
+    for key, label in (("ledger", "ledger"),
+                       ("session_trace", "session trace"),
+                       ("provider_trace", "provider trace")):
+        path = P["paths"][key]
+        if path:
+            lines.append(f"  {label:<16} {path}")
+        else:
+            lines.append(
+                f"  {label:<16} NOT WRITTEN -- this profile declares no "
+                f"trace.{'session_log' if key == 'session_trace' else key.replace('_trace', '_log')}")
+    lines.append("")
+    keeping = P["record_keeping"]
+    if not P["record_keeping_declared"]:
+        lines += [
+            "  record_keeping   UNDECLARED -- session.delete and "
+            "workspace.delete",
+            "                   remove everything, including whatever of the",
+            "                   above lives under the workspace.  Art. 19(1) "
+            "asks a",
+            "                   provider to keep the logs at least six months; "
+            "nothing",
+            "                   here does.",
+        ]
+    else:
+        retention = keeping.get("retention_days")
+        conv = keeping.get("conversation_retention_days")
+        lines.append(
+            f"  retention_days   {retention if retention is not None else 'unset'}"
+            + ("  (0 = keep until something deletes it)"
+               if retention == 0 else ""))
+        lines.append(
+            f"  conversation     {conv if conv is not None else 'unset'}"
+            "   days the SESSION RECORD is kept")
+        integrity = keeping.get("integrity", "none")
+        lines.append(f"  integrity        {integrity}")
+        if integrity == "sha256-chain":
+            lines += [
+                "                   each record links to the previous one's",
+                "                   digest.  Verify with `jaato-doctor",
+                "                   --audit-verify <path>`.  It proves the file",
+                "                   was not edited IN PLACE; it does NOT prove",
+                "                   who wrote it -- a writer holding the file",
+                "                   can re-chain from any point.  A chained",
+                "                   file cannot be pruned from the front, so",
+                "                   retention rotates whole segments.",
+            ]
+    lines += [
+        "",
+        "  `explain audit` (bare) is the schema: which events are recorded,",
+        "  which fields each carries, and which store each lands in.",
+    ]
+    return lines
+
+
+def audit_profile(name: str, workspace: str,
+                  profile_set: Optional[str] = None) -> Rendered:
+    """``explain audit <profile>`` -- where THIS profile's record lands."""
+    prof, ws = _resolve_workspace_profile(name, workspace, profile_set)
+    if prof is None:
+        return ({"profile": name, "found": False, "error": "no such profile"},
+                f"no profile {name!r} under {ws}/.jaato/profiles/")
+    P = _audit_profile(prof, ws)
+    P.update({"profile": name, "found": True})
+    return P, "\n".join(_audit_profile_lines(name, P))

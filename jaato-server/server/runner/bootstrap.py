@@ -65,7 +65,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from typing import (
-    Callable, Dict, List, Mapping, Optional, Sequence, Tuple,
+    Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple,
 )
 
 from shared.apparmor_label import (
@@ -803,6 +803,13 @@ def verify_thread_confinement(
         if not scan.divergent:
             return scan
 
+    # The incident register (#1122).  Raised BEFORE the exception, and
+    # from here rather than from a caller, because this refusal happens
+    # before any session exists -- there is nobody above to notice it, and
+    # a bootstrap refused for thread divergence is evidence that code ran
+    # outside the boundary the session record claims.  The guard working,
+    # and exactly the thing Art. 72's post-market monitoring is about.
+    _raise_confinement_incident(expected_profile, scan)
     raise ThreadConfinementDivergence(
         expected_profile,
         scan.divergent,
@@ -810,3 +817,23 @@ def verify_thread_confinement(
         route=scan.route,
         names=scan.names,
     )
+
+
+def _raise_confinement_incident(expected_profile: str, scan: Any) -> None:
+    """Record a refused bootstrap in the incident register.  Never raises.
+
+    Separate from the raise so the refusal is unaffected by anything that
+    happens here: the whole point of the guard is that it fails CLOSED,
+    and a register that could turn its exception into a different one
+    would be the worst possible regression in it.
+    """
+    try:
+        from shared.incidents import KIND_CONFINEMENT_REFUSED, raise_incident
+        raise_incident(
+            KIND_CONFINEMENT_REFUSED,
+            f"{len(scan.divergent)} of {scan.scanned} scanned threads are "
+            f"not in {expected_profile!r} (route={scan.route})",
+            site="server/runner/bootstrap.py::verify_thread_confinement",
+        )
+    except Exception:  # noqa: BLE001 -- see the docstring
+        pass

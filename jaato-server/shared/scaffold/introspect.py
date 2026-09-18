@@ -201,6 +201,13 @@ class PluginInfo:
     # distribution reaches a profile that then comes up without its
     # tools.  True when the annotation is missing entirely.
     tier_missing: bool = False
+    # The PLUGIN-level traits the class declares (``TRAIT_AUTH_PROVIDER``,
+    # ``TRAIT_SLOT_SCOPED``, ``TRAIT_OUTPUT_MARKER``, …).  Carried so a
+    # page can answer "which plugins in THIS build mark generated
+    # output?" by reading the build rather than by keeping a list beside
+    # it -- the rule every `explain` page follows, and the one that stops
+    # a page claiming a capability an install does not have.
+    plugin_traits: FrozenSet[str] = frozenset()
 
 
 @dataclass
@@ -1045,6 +1052,17 @@ def _settings_from_properties(props: Any, depth: int = 0) -> List["ConfigSetting
     return out
 
 
+def _declared_plugin_traits(plugin: Any) -> FrozenSet[str]:
+    """The PLUGIN-level traits a plugin class declares.
+
+    A helper rather than two lines inside :func:`plugins` because that
+    function is at its complexity baseline and the ratchet is a ratchet:
+    new logic goes in a helper or the function gets split, never in a
+    raised number.
+    """
+    return frozenset(getattr(plugin, "plugin_traits", None) or ())
+
+
 def plugins() -> Dict[str, PluginInfo]:
     """All tool/enrichment plugins, best-effort offline.
 
@@ -1082,6 +1100,7 @@ def plugins() -> Dict[str, PluginInfo]:
         except Exception:
             info.dynamic = True
         info.commands.extend(_collect_user_commands(plugin))
+        info.plugin_traits = _declared_plugin_traits(plugin)
         # plugin-level description (class docstring, first line)
         doc = (type(plugin).__doc__ or "").strip()
         info.description = doc.split("\n", 1)[0].strip() if doc else ""

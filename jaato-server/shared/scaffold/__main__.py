@@ -150,6 +150,15 @@ _SCOPES = {
     "oversight": ExplainScope(_explain.oversight, "optional_named", "[<profile>]",
                               render_named=_explain.oversight_profile,
                               blurb="the HUMAN-OVERSIGHT measures (EU AI Act Art. 14)"),
+    # ``audit`` alone is the RECORD-KEEPING CONTRACT -- which events are
+    # recorded, what each carries and which store it lands in; with a name it
+    # is the concrete paths that profile writes to and what its
+    # ``record_keeping:`` block says.  Art. 13(3)(f) asks the instructions for
+    # use to describe exactly this, and five stores recorded without any of
+    # them saying what was guaranteed.
+    "audit": ExplainScope(_explain.audit, "optional_named", "[<profile>]",
+                          render_named=_explain.audit_profile,
+                          blurb="the AUDIT RECORD (EU AI Act Arts. 12, 19)"),
     "paths": ExplainScope(_explain.paths),
     "prefetch": ExplainScope(_explain.prefetch),
     "completion": ExplainScope(_explain.completion,
@@ -592,6 +601,19 @@ def main(argv=None) -> int:
                     help="stem shared by the gate's four files (default "
                          "'acceptance'): the processor module, the completion "
                          "schema, the profile, and the profile entry's `name:`.")
+    pn.add_argument("--component", action="store_true",
+                    help="for `new dossier`: emit the Article 25(4) "
+                         "information pack for jaato AS A COMPONENT of "
+                         "somebody else's high-risk system, instead of the "
+                         "Annex IV dossier for one of yours. Needs no "
+                         "profile — it describes the framework.")
+    pn.add_argument("--eval-results", metavar="FILE", dest="eval_results",
+                    help="for `new dossier --profile`: fill the accuracy "
+                         "section (Annex IV §4, Article 15(3)) from a "
+                         "jaato-eval results file. The harness's own caveats "
+                         "are carried verbatim beside its numbers, and a file "
+                         "whose declared format this reader does not know is "
+                         "refused by name rather than half-rendered.")
     pn.add_argument("--force", action="store_true", help="overwrite existing")
     pn.add_argument("--secrets", metavar="MODE",
                     help="how profiles reference the provider credential: "

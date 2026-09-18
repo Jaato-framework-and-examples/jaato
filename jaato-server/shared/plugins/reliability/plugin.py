@@ -949,6 +949,37 @@ class ReliabilityPlugin(RunnerForwardingMixin):
         except Exception as e:
             logger.debug(f"Failed to emit nudge telemetry event: {e}")
 
+    def _raise_block_incident(self, tool_name: str, reason: str) -> None:
+        """Record a circuit opening in the incident register.  Never raises.
+
+        A tool taken out of service after repeated failure is something a
+        person should look at (Art. 72 post-market monitoring): the
+        framework's own mitigation fired, which means the deployment was
+        doing something it could not do.  The plugin already logged it,
+        in its own format; this is what puts it in the one register.
+
+        Wrapped throughout, like every other raiser: an incident recorded
+        ABOUT a failure must not be able to add one.
+
+        **It names its session.**  The plugin holds one, and a register
+        row reading ``no session`` cannot be attributed -- on a daemon
+        serving two, the row is indistinguishable between them, so the
+        operator asking "what happened in session B in the last 15 days"
+        gets an answer that names neither.  The BINDING (provider, model,
+        tier) is genuinely not something this plugin holds, and stays
+        absent: absent is not zero.
+        """
+        try:
+            from shared.incidents import KIND_CIRCUIT_OPENED, raise_incident
+            raise_incident(
+                KIND_CIRCUIT_OPENED,
+                f"{tool_name} blocked: {reason}",
+                site="shared/plugins/reliability/plugin.py::_update_trust_state",
+                session_id=getattr(self, "_session_id", None),
+            )
+        except Exception:  # noqa: BLE001 -- see the docstring
+            pass
+
     def _emit_trust_state_event(
         self,
         failure_key: str,
@@ -1392,6 +1423,11 @@ class ReliabilityPlugin(RunnerForwardingMixin):
                     state.state.value,
                     reason,
                 )
+                # The incident register (#1122).  Gated on the SAME
+                # ``not was_blocked`` as the hook and the telemetry: a
+                # tool that keeps failing while already blocked is one
+                # incident, not one per call.
+                self._raise_block_incident(state.tool_name, reason)
 
         # Apply escalation if needed
         if should_escalate and state.state == TrustState.TRUSTED:

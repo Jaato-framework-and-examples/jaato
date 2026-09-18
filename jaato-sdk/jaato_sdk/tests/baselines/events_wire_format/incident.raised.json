@@ -1,0 +1,12 @@
+{
+  "type": "incident.raised",
+  "timestamp": "<TIMESTAMP>",
+  "session_id": "",
+  "kind": "",
+  "at": 0.0,
+  "cause": "",
+  "site": null,
+  "provider": null,
+  "model": null,
+  "tier": null
+}

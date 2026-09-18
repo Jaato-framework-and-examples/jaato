@@ -35,7 +35,12 @@ _SESSION = "jaato-server/shared/jaato_session.py"
 REVERSIONS = [
     Reversion(
         target=_SESSION,
-        find="                final=delta.final,\n                generated_by=self._model_provenance(),",
+        # The anchor moved in #1117: the stamp is now resolved into
+        # ``provenance`` one line up, because the marking seam needs the
+        # same value.  A reversion that anchors on the OLD spelling is
+        # reported BLOCKED rather than passing -- which is the meta-guard
+        # working, and is how this was caught.
+        find="                final=delta.final,\n                generated_by=provenance,",
         replace="                final=delta.final,",
         because=(
             "the model's own media must carry the Art. 50(2) marking; an "
