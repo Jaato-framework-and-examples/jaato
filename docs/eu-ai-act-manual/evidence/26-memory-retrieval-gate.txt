@@ -4,4 +4,4 @@ BEFORE the curator promoted anything (one legacy record validated with no curate
 
 AFTER the curator promoted the raw memory:
 {"status": "success", "count": 1, "matched": 2, "truncated": false, "message": "Returned 1 of 2 matching memories — truncated by limit=3. Call retrieve_memories again with a larger `limit` to see the rest.  1 further match(es) were withheld as uncurated (require_curation)."}
-  - mem_20260918_215335_7851  maturity=validated  Refund windows per plan
+  - mem_20260918_232940_9806  maturity=validated  Refund windows per plan

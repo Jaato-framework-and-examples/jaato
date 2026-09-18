@@ -29,7 +29,7 @@ $ cat chart.png.provenance.json
     "session_id": "20260918_212513"
   },
   "jaato_output_marker": "1",
-  "marked_at": "2026-09-18T21:53:30Z",
+  "marked_at": "2026-09-18T23:29:35Z",
   "signature": null,
   "subject": {
     "media_type": "image/png",

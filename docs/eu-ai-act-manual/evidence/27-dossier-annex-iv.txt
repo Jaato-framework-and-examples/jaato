@@ -5,7 +5,7 @@ Annex IV of Regulation (EU) 2024/1689, for the AI system this profile defines. G
 
 > **This is a skeleton, not a compliance document.** The sections marked *Computed* are facts about the installed framework, read from the same helpers `jaato-scaffold explain` reads. Everything else is the provider's to write, and the framework leaves it marked rather than blank.
 
-> *Computed from the installed framework at commit `c96faba` on 2026-09-18. Regenerate after any release or profile change; a stale computed section is worse than an absent one, because it reads as current.*
+> *Computed from the installed framework at commit `070c376` on 2026-09-18. Regenerate after any release or profile change; a stale computed section is worse than an absent one, because it reads as current.*
 
 ## 1. General description of the AI system
 

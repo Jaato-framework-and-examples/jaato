@@ -28,6 +28,27 @@
     "note": ""
   },
   {
+    "slug": "30-new-profile-set-commented-block",
+    "title": "new profile-set: the three blocks in the tier-1 base, commented out",
+    "control": "regulatory",
+    "command": "jaato-scaffold new profile-set --workspace /srv/acme-new --provider anthropic --model claude-sonnet-4-5 --set acme --agents collector,writer && sed -n 1,24p .jaato/profiles/_base_collector.yaml",
+    "note": ""
+  },
+  {
+    "slug": "31-validate-regulatory-undeclared",
+    "title": "validate: a workspace that declares nothing under the Act is told so",
+    "control": "regulatory",
+    "command": "jaato-scaffold validate /srv/acme-new | grep -v budget_control_absent",
+    "note": "the four budget_control_absent warnings the same run prints are elided"
+  },
+  {
+    "slug": "32-integration-skill-lists-the-verbs",
+    "title": "The Claude Code integration skill names the verbs and the keys",
+    "control": "regulatory",
+    "command": "jaato-scaffold integration claude-code --workspace /srv/acme-new && grep -n 'oversight\\|explain audit\\|dossier\\|regulatory\\|record_keeping' .claude/skills/jaato-sdk/SKILL.md",
+    "note": ""
+  },
+  {
     "slug": "05-announcement-events",
     "title": "The first-interaction announcement, on the wire",
     "control": "disclosure",
@@ -38,7 +59,7 @@
     "slug": "06-disclosure-instruction-piece",
     "title": "The disclosure piece inside the rendered system prompt",
     "control": "disclosure",
-    "command": "jq -r .rendered_instructions .jaato/sessions/20260918_215247.json | grep -A3 'AI DISCLOSURE'",
+    "command": "jq -r .rendered_instructions .jaato/sessions/20260918_232854.json | grep -A3 'AI DISCLOSURE'",
     "note": ""
   },
   {
@@ -157,7 +178,7 @@
     "slug": "23-memory-generated-by",
     "title": "A stored memory records which model wrote it",
     "control": "memory",
-    "command": "cat .jaato/memories/raw/mem_20260918_215335_7851.json",
+    "command": "cat .jaato/memories/raw/mem_20260918_232940_9806.json",
     "note": ""
   },
   {

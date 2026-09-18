@@ -4,4 +4,4 @@ $ session.new --profile screener; ask x3   # limits: {turns: 2}, abort at 100%
 {"event": "SESSION_TERMINATED", "reason": "budget_exhausted"}
 {"event": "SESSION_TERMINATED", "reason": "client_request"}
 
-{"prompt": "Second question", "raised": "SessionEnded: session 20260918_215247 ended (budget_exhausted)"}
+{"prompt": "Second question", "raised": "SessionEnded: session 20260918_232854 ended (budget_exhausted)"}

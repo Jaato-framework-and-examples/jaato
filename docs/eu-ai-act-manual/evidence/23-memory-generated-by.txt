@@ -1,13 +1,13 @@
-$ cat .jaato/memories/raw/mem_20260918_215335_7851.json
+$ cat .jaato/memories/raw/mem_20260918_232940_9806.json
 {
-  "id": "mem_20260918_215335_7851",
+  "id": "mem_20260918_232940_9806",
   "content": "Customers on the Pro plan get a 14-day refund window; Basic plan gets 7 days.",
   "description": "Refund windows per plan",
   "tags": [
     "refunds",
     "billing"
   ],
-  "timestamp": "2026-09-18T21:53:35.785154",
+  "timestamp": "2026-09-18T23:29:40.980619",
   "usage_count": 0,
   "last_accessed": null,
   "maturity": "raw",
@@ -15,12 +15,12 @@ $ cat .jaato/memories/raw/mem_20260918_215335_7851.json
   "scope": "project",
   "evidence": null,
   "source_agent": "main",
-  "source_session": "20260918_215330",
+  "source_session": "20260918_232935",
   "generated_by": {
     "kind": "ai",
     "provider": "echo",
     "model": "echo",
-    "session_id": "20260918_215330",
+    "session_id": "20260918_232935",
     "agent_id": "main"
   },
   "curated_by": null

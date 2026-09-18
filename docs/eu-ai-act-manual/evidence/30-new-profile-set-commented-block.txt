@@ -1,0 +1,24 @@
+$ jaato-scaffold new profile-set --workspace /srv/acme-new --provider anthropic --model claude-sonnet-4-5 --set acme --agents collector,writer && sed -n 1,24p .jaato/profiles/_base_collector.yaml
+# Tier-1 base for the 'collector' stage — PROVIDER-AGNOSTIC.
+# Holds stage determinism (plugins, schemas, permission policy).
+# Active model + provider live in profiles/<set>/collector.yaml,
+# selected by JAATO_PROFILE_SET.  This base MUST stay inherit-able
+# (do not bind a provider/model here — that breaks set-selection).
+name: _base_collector
+description: collector stage (base; bind provider/model in a set).
+plugins: []  # choose plugins — see `jaato-scaffold explain plugins`
+# EU AI Act (Regulation (EU) 2024/1689) — declare, never inferred.
+# Uncomment and fill in; `jaato-scaffold validate` then checks it and
+# `explain oversight <profile>` / `explain audit <profile>` say what it armed.
+# regulatory:
+#   intended_purpose: <one sentence: what this system is for>
+#   risk_class: minimal          # minimal | limited | high (Art. 6(4), yours to determine)
+#   interacts_with_persons: true # true: the AI announces itself (Art. 50(1))
+#   provider: {name: <your organisation>, contact: <email>}
+# trace:
+#   ledger: .jaato/logs/ledger.jsonl            # every model round trip + verdict (Art. 12)
+#   session_log: .jaato/logs/session_trace.jsonl
+# record_keeping:
+#   retention_days: 180                   # Art. 19(1): keep the logs; 0 = until deleted
+#   conversation_retention_days: 30       # the session record may go sooner
+#   integrity: sha256-chain               # tamper evidence; `jaato-doctor --audit-verify`

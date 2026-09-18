@@ -19,68 +19,68 @@
         font-weight: 700;
     }
 
-    .terminal-274657708-matrix {
+    .terminal-300020143-matrix {
         font-family: Fira Code, monospace;
         font-size: 20px;
         line-height: 24.4px;
         font-variant-east-asian: full-width;
     }
 
-    .terminal-274657708-title {
+    .terminal-300020143-title {
         font-size: 18px;
         font-weight: bold;
         font-family: arial;
     }
 
-    .terminal-274657708-r1 { fill: #c5c8c6;font-weight: bold }
-.terminal-274657708-r2 { fill: #c5c8c6 }
+    .terminal-300020143-r1 { fill: #c5c8c6;font-weight: bold }
+.terminal-300020143-r2 { fill: #c5c8c6 }
     </style>
 
     <defs>
-    <clipPath id="terminal-274657708-clip-terminal">
+    <clipPath id="terminal-300020143-clip-terminal">
       <rect x="0" y="0" width="1267.8" height="194.2" />
     </clipPath>
-    <clipPath id="terminal-274657708-line-0">
+    <clipPath id="terminal-300020143-line-0">
     <rect x="0" y="1.5" width="1268.8" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-274657708-line-1">
+<clipPath id="terminal-300020143-line-1">
     <rect x="0" y="25.9" width="1268.8" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-274657708-line-2">
+<clipPath id="terminal-300020143-line-2">
     <rect x="0" y="50.3" width="1268.8" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-274657708-line-3">
+<clipPath id="terminal-300020143-line-3">
     <rect x="0" y="74.7" width="1268.8" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-274657708-line-4">
+<clipPath id="terminal-300020143-line-4">
     <rect x="0" y="99.1" width="1268.8" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-274657708-line-5">
+<clipPath id="terminal-300020143-line-5">
     <rect x="0" y="123.5" width="1268.8" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-274657708-line-6">
+<clipPath id="terminal-300020143-line-6">
     <rect x="0" y="147.9" width="1268.8" height="24.65"/>
             </clipPath>
     </defs>
 
-    <rect fill="#292929" stroke="rgba(255,255,255,0.35)" stroke-width="1" x="1" y="1" width="1285" height="243.2" rx="8"/><text class="terminal-274657708-title" fill="#c5c8c6" text-anchor="middle" x="642" y="27">A&#160;budget&#160;ceiling&#160;stops&#160;the&#160;run,&#160;and&#160;the&#160;client&#160;is&#160;told&#160;why</text>
+    <rect fill="#292929" stroke="rgba(255,255,255,0.35)" stroke-width="1" x="1" y="1" width="1285" height="243.2" rx="8"/><text class="terminal-300020143-title" fill="#c5c8c6" text-anchor="middle" x="642" y="27">A&#160;budget&#160;ceiling&#160;stops&#160;the&#160;run,&#160;and&#160;the&#160;client&#160;is&#160;told&#160;why</text>
             <g transform="translate(26,22)">
             <circle cx="0" cy="0" r="7" fill="#ff5f57"/>
             <circle cx="22" cy="0" r="7" fill="#febc2e"/>
             <circle cx="44" cy="0" r="7" fill="#28c840"/>
             </g>
         
-    <g transform="translate(9, 41)" clip-path="url(#terminal-274657708-clip-terminal)">
+    <g transform="translate(9, 41)" clip-path="url(#terminal-300020143-clip-terminal)">
     
-    <g class="terminal-274657708-matrix">
-    <text class="terminal-274657708-r1" x="0" y="20" textLength="951.6" clip-path="url(#terminal-274657708-line-0)">$&#160;session.new&#160;--profile&#160;screener;&#160;ask&#160;x3&#160;&#160;&#160;#&#160;limits:&#160;{turns:&#160;2},&#160;abort&#160;at&#160;100%</text><text class="terminal-274657708-r2" x="1268.8" y="20" textLength="12.2" clip-path="url(#terminal-274657708-line-0)">
-</text><text class="terminal-274657708-r2" x="0" y="44.4" textLength="866.2" clip-path="url(#terminal-274657708-line-1)">{&quot;event&quot;:&#160;&quot;AGENT_OUTPUT&quot;,&#160;&quot;source&quot;:&#160;&quot;model&quot;,&#160;&quot;text&quot;:&#160;&quot;Second&#160;question&quot;}</text><text class="terminal-274657708-r2" x="1268.8" y="44.4" textLength="12.2" clip-path="url(#terminal-274657708-line-1)">
-</text><text class="terminal-274657708-r2" x="0" y="68.8" textLength="1195.6" clip-path="url(#terminal-274657708-line-2)">{&quot;event&quot;:&#160;&quot;AGENT_OUTPUT&quot;,&#160;&quot;source&quot;:&#160;&quot;system&quot;,&#160;&quot;text&quot;:&#160;&quot;[budget[self-enforced]&#160;turns&#160;100%:&#160;abort]&quot;}</text><text class="terminal-274657708-r2" x="1268.8" y="68.8" textLength="12.2" clip-path="url(#terminal-274657708-line-2)">
-</text><text class="terminal-274657708-r2" x="0" y="93.2" textLength="744.2" clip-path="url(#terminal-274657708-line-3)">{&quot;event&quot;:&#160;&quot;SESSION_TERMINATED&quot;,&#160;&quot;reason&quot;:&#160;&quot;budget_exhausted&quot;}</text><text class="terminal-274657708-r2" x="1268.8" y="93.2" textLength="12.2" clip-path="url(#terminal-274657708-line-3)">
-</text><text class="terminal-274657708-r2" x="0" y="117.6" textLength="719.8" clip-path="url(#terminal-274657708-line-4)">{&quot;event&quot;:&#160;&quot;SESSION_TERMINATED&quot;,&#160;&quot;reason&quot;:&#160;&quot;client_request&quot;}</text><text class="terminal-274657708-r2" x="1268.8" y="117.6" textLength="12.2" clip-path="url(#terminal-274657708-line-4)">
-</text><text class="terminal-274657708-r2" x="1268.8" y="142" textLength="12.2" clip-path="url(#terminal-274657708-line-5)">
-</text><text class="terminal-274657708-r2" x="0" y="166.4" textLength="1037" clip-path="url(#terminal-274657708-line-6)">{&quot;prompt&quot;:&#160;&quot;Second&#160;question&quot;,&#160;&quot;raised&quot;:&#160;&quot;SessionEnded:&#160;session&#160;20260918_215247&#160;ended&#160;</text><text class="terminal-274657708-r2" x="1268.8" y="166.4" textLength="12.2" clip-path="url(#terminal-274657708-line-6)">
-</text><text class="terminal-274657708-r2" x="0" y="190.8" textLength="244" clip-path="url(#terminal-274657708-line-7)">(budget_exhausted)&quot;}</text><text class="terminal-274657708-r2" x="1268.8" y="190.8" textLength="12.2" clip-path="url(#terminal-274657708-line-7)">
+    <g class="terminal-300020143-matrix">
+    <text class="terminal-300020143-r1" x="0" y="20" textLength="951.6" clip-path="url(#terminal-300020143-line-0)">$&#160;session.new&#160;--profile&#160;screener;&#160;ask&#160;x3&#160;&#160;&#160;#&#160;limits:&#160;{turns:&#160;2},&#160;abort&#160;at&#160;100%</text><text class="terminal-300020143-r2" x="1268.8" y="20" textLength="12.2" clip-path="url(#terminal-300020143-line-0)">
+</text><text class="terminal-300020143-r2" x="0" y="44.4" textLength="866.2" clip-path="url(#terminal-300020143-line-1)">{&quot;event&quot;:&#160;&quot;AGENT_OUTPUT&quot;,&#160;&quot;source&quot;:&#160;&quot;model&quot;,&#160;&quot;text&quot;:&#160;&quot;Second&#160;question&quot;}</text><text class="terminal-300020143-r2" x="1268.8" y="44.4" textLength="12.2" clip-path="url(#terminal-300020143-line-1)">
+</text><text class="terminal-300020143-r2" x="0" y="68.8" textLength="1195.6" clip-path="url(#terminal-300020143-line-2)">{&quot;event&quot;:&#160;&quot;AGENT_OUTPUT&quot;,&#160;&quot;source&quot;:&#160;&quot;system&quot;,&#160;&quot;text&quot;:&#160;&quot;[budget[self-enforced]&#160;turns&#160;100%:&#160;abort]&quot;}</text><text class="terminal-300020143-r2" x="1268.8" y="68.8" textLength="12.2" clip-path="url(#terminal-300020143-line-2)">
+</text><text class="terminal-300020143-r2" x="0" y="93.2" textLength="744.2" clip-path="url(#terminal-300020143-line-3)">{&quot;event&quot;:&#160;&quot;SESSION_TERMINATED&quot;,&#160;&quot;reason&quot;:&#160;&quot;budget_exhausted&quot;}</text><text class="terminal-300020143-r2" x="1268.8" y="93.2" textLength="12.2" clip-path="url(#terminal-300020143-line-3)">
+</text><text class="terminal-300020143-r2" x="0" y="117.6" textLength="719.8" clip-path="url(#terminal-300020143-line-4)">{&quot;event&quot;:&#160;&quot;SESSION_TERMINATED&quot;,&#160;&quot;reason&quot;:&#160;&quot;client_request&quot;}</text><text class="terminal-300020143-r2" x="1268.8" y="117.6" textLength="12.2" clip-path="url(#terminal-300020143-line-4)">
+</text><text class="terminal-300020143-r2" x="1268.8" y="142" textLength="12.2" clip-path="url(#terminal-300020143-line-5)">
+</text><text class="terminal-300020143-r2" x="0" y="166.4" textLength="1037" clip-path="url(#terminal-300020143-line-6)">{&quot;prompt&quot;:&#160;&quot;Second&#160;question&quot;,&#160;&quot;raised&quot;:&#160;&quot;SessionEnded:&#160;session&#160;20260918_232854&#160;ended&#160;</text><text class="terminal-300020143-r2" x="1268.8" y="166.4" textLength="12.2" clip-path="url(#terminal-300020143-line-6)">
+</text><text class="terminal-300020143-r2" x="0" y="190.8" textLength="244" clip-path="url(#terminal-300020143-line-7)">(budget_exhausted)&quot;}</text><text class="terminal-300020143-r2" x="1268.8" y="190.8" textLength="12.2" clip-path="url(#terminal-300020143-line-7)">
 </text>
     </g>
     </g>

@@ -1,4 +1,4 @@
-<svg class="rich-terminal" viewBox="0 0 1287 1148.0" xmlns="http://www.w3.org/2000/svg">
+<svg class="rich-terminal" viewBox="0 0 1287 1318.8" xmlns="http://www.w3.org/2000/svg">
     <!-- Generated with Rich https://www.textualize.io -->
     <style>
 
@@ -19,216 +19,244 @@
         font-weight: 700;
     }
 
-    .terminal-1615847184-matrix {
+    .terminal-1482446021-matrix {
         font-family: Fira Code, monospace;
         font-size: 20px;
         line-height: 24.4px;
         font-variant-east-asian: full-width;
     }
 
-    .terminal-1615847184-title {
+    .terminal-1482446021-title {
         font-size: 18px;
         font-weight: bold;
         font-family: arial;
     }
 
-    .terminal-1615847184-r1 { fill: #c5c8c6;font-weight: bold }
-.terminal-1615847184-r2 { fill: #c5c8c6 }
+    .terminal-1482446021-r1 { fill: #c5c8c6;font-weight: bold }
+.terminal-1482446021-r2 { fill: #c5c8c6 }
     </style>
 
     <defs>
-    <clipPath id="terminal-1615847184-clip-terminal">
-      <rect x="0" y="0" width="1267.8" height="1097.0" />
+    <clipPath id="terminal-1482446021-clip-terminal">
+      <rect x="0" y="0" width="1267.8" height="1267.8" />
     </clipPath>
-    <clipPath id="terminal-1615847184-line-0">
+    <clipPath id="terminal-1482446021-line-0">
     <rect x="0" y="1.5" width="1268.8" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-1615847184-line-1">
+<clipPath id="terminal-1482446021-line-1">
     <rect x="0" y="25.9" width="1268.8" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-1615847184-line-2">
+<clipPath id="terminal-1482446021-line-2">
     <rect x="0" y="50.3" width="1268.8" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-1615847184-line-3">
+<clipPath id="terminal-1482446021-line-3">
     <rect x="0" y="74.7" width="1268.8" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-1615847184-line-4">
+<clipPath id="terminal-1482446021-line-4">
     <rect x="0" y="99.1" width="1268.8" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-1615847184-line-5">
+<clipPath id="terminal-1482446021-line-5">
     <rect x="0" y="123.5" width="1268.8" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-1615847184-line-6">
+<clipPath id="terminal-1482446021-line-6">
     <rect x="0" y="147.9" width="1268.8" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-1615847184-line-7">
+<clipPath id="terminal-1482446021-line-7">
     <rect x="0" y="172.3" width="1268.8" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-1615847184-line-8">
+<clipPath id="terminal-1482446021-line-8">
     <rect x="0" y="196.7" width="1268.8" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-1615847184-line-9">
+<clipPath id="terminal-1482446021-line-9">
     <rect x="0" y="221.1" width="1268.8" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-1615847184-line-10">
+<clipPath id="terminal-1482446021-line-10">
     <rect x="0" y="245.5" width="1268.8" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-1615847184-line-11">
+<clipPath id="terminal-1482446021-line-11">
     <rect x="0" y="269.9" width="1268.8" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-1615847184-line-12">
+<clipPath id="terminal-1482446021-line-12">
     <rect x="0" y="294.3" width="1268.8" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-1615847184-line-13">
+<clipPath id="terminal-1482446021-line-13">
     <rect x="0" y="318.7" width="1268.8" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-1615847184-line-14">
+<clipPath id="terminal-1482446021-line-14">
     <rect x="0" y="343.1" width="1268.8" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-1615847184-line-15">
+<clipPath id="terminal-1482446021-line-15">
     <rect x="0" y="367.5" width="1268.8" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-1615847184-line-16">
+<clipPath id="terminal-1482446021-line-16">
     <rect x="0" y="391.9" width="1268.8" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-1615847184-line-17">
+<clipPath id="terminal-1482446021-line-17">
     <rect x="0" y="416.3" width="1268.8" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-1615847184-line-18">
+<clipPath id="terminal-1482446021-line-18">
     <rect x="0" y="440.7" width="1268.8" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-1615847184-line-19">
+<clipPath id="terminal-1482446021-line-19">
     <rect x="0" y="465.1" width="1268.8" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-1615847184-line-20">
+<clipPath id="terminal-1482446021-line-20">
     <rect x="0" y="489.5" width="1268.8" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-1615847184-line-21">
+<clipPath id="terminal-1482446021-line-21">
     <rect x="0" y="513.9" width="1268.8" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-1615847184-line-22">
+<clipPath id="terminal-1482446021-line-22">
     <rect x="0" y="538.3" width="1268.8" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-1615847184-line-23">
+<clipPath id="terminal-1482446021-line-23">
     <rect x="0" y="562.7" width="1268.8" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-1615847184-line-24">
+<clipPath id="terminal-1482446021-line-24">
     <rect x="0" y="587.1" width="1268.8" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-1615847184-line-25">
+<clipPath id="terminal-1482446021-line-25">
     <rect x="0" y="611.5" width="1268.8" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-1615847184-line-26">
+<clipPath id="terminal-1482446021-line-26">
     <rect x="0" y="635.9" width="1268.8" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-1615847184-line-27">
+<clipPath id="terminal-1482446021-line-27">
     <rect x="0" y="660.3" width="1268.8" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-1615847184-line-28">
+<clipPath id="terminal-1482446021-line-28">
     <rect x="0" y="684.7" width="1268.8" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-1615847184-line-29">
+<clipPath id="terminal-1482446021-line-29">
     <rect x="0" y="709.1" width="1268.8" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-1615847184-line-30">
+<clipPath id="terminal-1482446021-line-30">
     <rect x="0" y="733.5" width="1268.8" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-1615847184-line-31">
+<clipPath id="terminal-1482446021-line-31">
     <rect x="0" y="757.9" width="1268.8" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-1615847184-line-32">
+<clipPath id="terminal-1482446021-line-32">
     <rect x="0" y="782.3" width="1268.8" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-1615847184-line-33">
+<clipPath id="terminal-1482446021-line-33">
     <rect x="0" y="806.7" width="1268.8" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-1615847184-line-34">
+<clipPath id="terminal-1482446021-line-34">
     <rect x="0" y="831.1" width="1268.8" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-1615847184-line-35">
+<clipPath id="terminal-1482446021-line-35">
     <rect x="0" y="855.5" width="1268.8" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-1615847184-line-36">
+<clipPath id="terminal-1482446021-line-36">
     <rect x="0" y="879.9" width="1268.8" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-1615847184-line-37">
+<clipPath id="terminal-1482446021-line-37">
     <rect x="0" y="904.3" width="1268.8" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-1615847184-line-38">
+<clipPath id="terminal-1482446021-line-38">
     <rect x="0" y="928.7" width="1268.8" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-1615847184-line-39">
+<clipPath id="terminal-1482446021-line-39">
     <rect x="0" y="953.1" width="1268.8" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-1615847184-line-40">
+<clipPath id="terminal-1482446021-line-40">
     <rect x="0" y="977.5" width="1268.8" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-1615847184-line-41">
+<clipPath id="terminal-1482446021-line-41">
     <rect x="0" y="1001.9" width="1268.8" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-1615847184-line-42">
+<clipPath id="terminal-1482446021-line-42">
     <rect x="0" y="1026.3" width="1268.8" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-1615847184-line-43">
+<clipPath id="terminal-1482446021-line-43">
     <rect x="0" y="1050.7" width="1268.8" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-1482446021-line-44">
+    <rect x="0" y="1075.1" width="1268.8" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-1482446021-line-45">
+    <rect x="0" y="1099.5" width="1268.8" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-1482446021-line-46">
+    <rect x="0" y="1123.9" width="1268.8" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-1482446021-line-47">
+    <rect x="0" y="1148.3" width="1268.8" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-1482446021-line-48">
+    <rect x="0" y="1172.7" width="1268.8" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-1482446021-line-49">
+    <rect x="0" y="1197.1" width="1268.8" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-1482446021-line-50">
+    <rect x="0" y="1221.5" width="1268.8" height="24.65"/>
             </clipPath>
     </defs>
 
-    <rect fill="#292929" stroke="rgba(255,255,255,0.35)" stroke-width="1" x="1" y="1" width="1285" height="1146" rx="8"/><text class="terminal-1615847184-title" fill="#c5c8c6" text-anchor="middle" x="642" y="27">validate:&#160;risk_class:&#160;high&#160;escalates&#160;every&#160;finding</text>
+    <rect fill="#292929" stroke="rgba(255,255,255,0.35)" stroke-width="1" x="1" y="1" width="1285" height="1316.8" rx="8"/><text class="terminal-1482446021-title" fill="#c5c8c6" text-anchor="middle" x="642" y="27">validate:&#160;risk_class:&#160;high&#160;escalates&#160;every&#160;finding</text>
             <g transform="translate(26,22)">
             <circle cx="0" cy="0" r="7" fill="#ff5f57"/>
             <circle cx="22" cy="0" r="7" fill="#febc2e"/>
             <circle cx="44" cy="0" r="7" fill="#28c840"/>
             </g>
         
-    <g transform="translate(9, 41)" clip-path="url(#terminal-1615847184-clip-terminal)">
+    <g transform="translate(9, 41)" clip-path="url(#terminal-1482446021-clip-terminal)">
     
-    <g class="terminal-1615847184-matrix">
-    <text class="terminal-1615847184-r1" x="0" y="20" textLength="610" clip-path="url(#terminal-1615847184-line-0)">$&#160;jaato-scaffold&#160;validate&#160;/srv/acme-support-triage</text><text class="terminal-1615847184-r2" x="1268.8" y="20" textLength="12.2" clip-path="url(#terminal-1615847184-line-0)">
-</text><text class="terminal-1615847184-r2" x="0" y="44.4" textLength="1195.6" clip-path="url(#terminal-1615847184-line-1)">[error]&#160;[workspace]&#160;triage:&#160;disclosure_absent:&#160;binds&#160;a&#160;persona&#160;and&#160;declares&#160;nothing&#160;about&#160;whether&#160;</text><text class="terminal-1615847184-r2" x="1268.8" y="44.4" textLength="12.2" clip-path="url(#terminal-1615847184-line-1)">
-</text><text class="terminal-1615847184-r2" x="0" y="68.8" textLength="1195.6" clip-path="url(#terminal-1615847184-line-2)">natural&#160;persons&#160;interact&#160;with&#160;it&#160;—&#160;set&#160;`regulatory.interacts_with_persons`&#160;(true:&#160;the&#160;framework&#x27;s&#160;</text><text class="terminal-1615847184-r2" x="1268.8" y="68.8" textLength="12.2" clip-path="url(#terminal-1615847184-line-2)">
-</text><text class="terminal-1615847184-r2" x="0" y="93.2" textLength="1268.8" clip-path="url(#terminal-1615847184-line-3)">disclosure&#160;piece&#160;and&#160;first-interaction&#160;announcement&#160;apply,&#160;Art.&#160;50(1);&#160;false:&#160;it&#160;is&#160;a&#160;component&#160;another&#160;</text><text class="terminal-1615847184-r2" x="1268.8" y="93.2" textLength="12.2" clip-path="url(#terminal-1615847184-line-3)">
-</text><text class="terminal-1615847184-r2" x="0" y="117.6" textLength="1183.4" clip-path="url(#terminal-1615847184-line-4)">system&#160;drives).&#160;&#160;Absent,&#160;nothing&#160;decides&#160;which.&#160;&#160;(error&#160;because&#160;regulatory.risk_class&#160;is&#160;high)&#160;@&#160;</text><text class="terminal-1615847184-r2" x="1268.8" y="117.6" textLength="12.2" clip-path="url(#terminal-1615847184-line-4)">
-</text><text class="terminal-1615847184-r2" x="0" y="142" textLength="231.8" clip-path="url(#terminal-1615847184-line-5)">regulatory.interact</text><text class="terminal-1615847184-r2" x="1268.8" y="142" textLength="12.2" clip-path="url(#terminal-1615847184-line-5)">
-</text><text class="terminal-1615847184-r2" x="0" y="166.4" textLength="1085.8" clip-path="url(#terminal-1615847184-line-6)">[error]&#160;[workspace]&#160;triage:&#160;high_risk_without_intended_purpose:&#160;risk_class:&#160;high&#160;with&#160;no&#160;</text><text class="terminal-1615847184-r2" x="1268.8" y="166.4" textLength="12.2" clip-path="url(#terminal-1615847184-line-6)">
-</text><text class="terminal-1615847184-r2" x="0" y="190.8" textLength="1268.8" clip-path="url(#terminal-1615847184-line-7)">`intended_purpose`&#160;—&#160;the&#160;sentence&#160;every&#160;Annex&#160;IV&#160;section&#160;and&#160;every&#160;deployer&#x27;s&#160;instructions&#160;for&#160;use&#160;start</text><text class="terminal-1615847184-r2" x="1268.8" y="190.8" textLength="12.2" clip-path="url(#terminal-1615847184-line-7)">
-</text><text class="terminal-1615847184-r2" x="0" y="215.2" textLength="671" clip-path="url(#terminal-1615847184-line-8)">from&#160;(Art.&#160;11,&#160;13(3)(b)).&#160;@&#160;regulatory.intended_purpose</text><text class="terminal-1615847184-r2" x="1268.8" y="215.2" textLength="12.2" clip-path="url(#terminal-1615847184-line-8)">
-</text><text class="terminal-1615847184-r2" x="0" y="239.6" textLength="1085.8" clip-path="url(#terminal-1615847184-line-9)">[error]&#160;[workspace]&#160;triage:&#160;high_risk_without_oversight_policy:&#160;risk_class:&#160;high&#160;with&#160;no&#160;</text><text class="terminal-1615847184-r2" x="1268.8" y="239.6" textLength="12.2" clip-path="url(#terminal-1615847184-line-9)">
-</text><text class="terminal-1615847184-r2" x="0" y="264" textLength="1220" clip-path="url(#terminal-1615847184-line-10)">`plugin_configs.permission.policy`&#160;—&#160;the&#160;permission&#160;gate&#160;is&#160;the&#160;framework&#x27;s&#160;human-oversight&#160;measure&#160;</text><text class="terminal-1615847184-r2" x="1268.8" y="264" textLength="12.2" clip-path="url(#terminal-1615847184-line-10)">
-</text><text class="terminal-1615847184-r2" x="0" y="288.4" textLength="1134.6" clip-path="url(#terminal-1615847184-line-11)">(Art.&#160;14(4)(d):&#160;the&#160;person&#160;can&#160;decide&#160;not&#160;to&#160;use,&#160;or&#160;override,&#160;an&#160;output).&#160;&#160;Declare&#160;a&#160;policy&#160;</text><text class="terminal-1615847184-r2" x="1268.8" y="288.4" textLength="12.2" clip-path="url(#terminal-1615847184-line-11)">
-</text><text class="terminal-1615847184-r2" x="0" y="312.8" textLength="1207.8" clip-path="url(#terminal-1615847184-line-12)">(defaultPolicy,&#160;whitelist,&#160;blacklist,&#160;an&#160;approval&#160;channel);&#160;`explain&#160;plugin&#160;permission`&#160;prints&#160;the&#160;</text><text class="terminal-1615847184-r2" x="1268.8" y="312.8" textLength="12.2" clip-path="url(#terminal-1615847184-line-12)">
-</text><text class="terminal-1615847184-r2" x="0" y="337.2" textLength="427" clip-path="url(#terminal-1615847184-line-13)">shape.&#160;@&#160;plugin_configs.permission.</text><text class="terminal-1615847184-r2" x="1268.8" y="337.2" textLength="12.2" clip-path="url(#terminal-1615847184-line-13)">
-</text><text class="terminal-1615847184-r2" x="0" y="361.6" textLength="1268.8" clip-path="url(#terminal-1615847184-line-14)">[error]&#160;[workspace]&#160;triage:&#160;high_risk_without_record_keeping:&#160;risk_class:&#160;high&#160;with&#160;no&#160;application&#160;trace</text><text class="terminal-1615847184-r2" x="1268.8" y="361.6" textLength="12.2" clip-path="url(#terminal-1615847184-line-14)">
-</text><text class="terminal-1615847184-r2" x="0" y="386" textLength="1232.2" clip-path="url(#terminal-1615847184-line-15)">configured&#160;—&#160;`trace.session_log`&#160;(or&#160;env&#160;JAATO_TRACE_LOG)&#160;is&#160;where&#160;every&#160;permission&#160;DECISION,&#160;budget&#160;</text><text class="terminal-1615847184-r2" x="1268.8" y="386" textLength="12.2" clip-path="url(#terminal-1615847184-line-15)">
-</text><text class="terminal-1615847184-r2" x="0" y="410.4" textLength="1220" clip-path="url(#terminal-1615847184-line-16)">rung&#160;and&#160;tool&#160;verdict&#160;is&#160;written,&#160;and&#160;Art.&#160;12&#160;requires&#160;those&#160;events&#160;recorded&#160;automatically&#160;over&#160;the&#160;</text><text class="terminal-1615847184-r2" x="1268.8" y="410.4" textLength="12.2" clip-path="url(#terminal-1615847184-line-16)">
-</text><text class="terminal-1615847184-r2" x="0" y="434.8" textLength="1220" clip-path="url(#terminal-1615847184-line-17)">system&#x27;s&#160;lifetime.&#160;&#160;Set&#160;`trace:&#160;{session_log:&#160;.jaato/logs/session_trace.jsonl}`.&#160;@&#160;trace.session_log</text><text class="terminal-1615847184-r2" x="1268.8" y="434.8" textLength="12.2" clip-path="url(#terminal-1615847184-line-17)">
-</text><text class="terminal-1615847184-r2" x="0" y="459.2" textLength="1220" clip-path="url(#terminal-1615847184-line-18)">[error]&#160;[workspace]&#160;triage:&#160;high_risk_without_retention:&#160;risk_class:&#160;high&#160;with&#160;no&#160;`record_keeping:`&#160;</text><text class="terminal-1615847184-r2" x="1268.8" y="459.2" textLength="12.2" clip-path="url(#terminal-1615847184-line-18)">
-</text><text class="terminal-1615847184-r2" x="0" y="483.6" textLength="1256.6" clip-path="url(#terminal-1615847184-line-19)">block&#160;—&#160;the&#160;record&#160;is&#160;written&#160;and&#160;nothing&#160;keeps&#160;it:&#160;`session.delete`&#160;and&#160;`workspace.delete`&#160;remove&#160;the&#160;</text><text class="terminal-1615847184-r2" x="1268.8" y="483.6" textLength="12.2" clip-path="url(#terminal-1615847184-line-19)">
-</text><text class="terminal-1615847184-r2" x="0" y="508" textLength="1244.4" clip-path="url(#terminal-1615847184-line-20)">workspace&#x27;s&#160;logs&#160;along&#160;with&#160;the&#160;conversation.&#160;&#160;Art.&#160;19(1)&#160;asks&#160;the&#160;provider&#160;to&#160;keep&#160;the&#160;automatically&#160;</text><text class="terminal-1615847184-r2" x="1268.8" y="508" textLength="12.2" clip-path="url(#terminal-1615847184-line-20)">
-</text><text class="terminal-1615847184-r2" x="0" y="532.4" textLength="1268.8" clip-path="url(#terminal-1615847184-line-21)">generated&#160;logs&#160;for&#160;at&#160;least&#160;six&#160;months&#160;(26(6)&#160;asks&#160;the&#160;same&#160;of&#160;the&#160;deployer).&#160;&#160;Declare&#160;`record_keeping:&#160;</text><text class="terminal-1615847184-r2" x="1268.8" y="532.4" textLength="12.2" clip-path="url(#terminal-1615847184-line-21)">
-</text><text class="terminal-1615847184-r2" x="0" y="556.8" textLength="85.4" clip-path="url(#terminal-1615847184-line-22)">{retent</text><text class="terminal-1615847184-r2" x="1268.8" y="556.8" textLength="12.2" clip-path="url(#terminal-1615847184-line-22)">
-</text><text class="terminal-1615847184-r2" x="0" y="581.2" textLength="1012.6" clip-path="url(#terminal-1615847184-line-23)">[error]&#160;[workspace]&#160;triage:&#160;high_risk_disclosure_suppressed:&#160;risk_class:&#160;high&#160;with&#160;</text><text class="terminal-1615847184-r2" x="1268.8" y="581.2" textLength="12.2" clip-path="url(#terminal-1615847184-line-23)">
-</text><text class="terminal-1615847184-r2" x="0" y="605.6" textLength="1232.2" clip-path="url(#terminal-1615847184-line-24)">`suppress_base_instructions`&#160;naming&#160;the&#160;`disclosure`&#160;piece&#160;—&#160;the&#160;model&#160;is&#160;no&#160;longer&#160;told&#160;to&#160;disclose&#160;</text><text class="terminal-1615847184-r2" x="1268.8" y="605.6" textLength="12.2" clip-path="url(#terminal-1615847184-line-24)">
-</text><text class="terminal-1615847184-r2" x="0" y="630" textLength="1159" clip-path="url(#terminal-1615847184-line-25)">that&#160;it&#160;is&#160;an&#160;AI&#160;system&#160;(Art.&#160;50(1),&#160;in&#160;force&#160;since&#160;2&#160;Aug&#160;2026).&#160;&#160;Remove&#160;`disclosure`&#160;from&#160;the&#160;</text><text class="terminal-1615847184-r2" x="1268.8" y="630" textLength="12.2" clip-path="url(#terminal-1615847184-line-25)">
-</text><text class="terminal-1615847184-r2" x="0" y="654.4" textLength="634.4" clip-path="url(#terminal-1615847184-line-26)">suppression.&#160;@&#160;suppress_base_instructions.disclosure</text><text class="terminal-1615847184-r2" x="1268.8" y="654.4" textLength="12.2" clip-path="url(#terminal-1615847184-line-26)">
-</text><text class="terminal-1615847184-r2" x="0" y="678.8" textLength="1268.8" clip-path="url(#terminal-1615847184-line-27)">[info]&#160;[workspace]&#160;triage:&#160;echo_is_a_test_double:&#160;provider&#160;&#x27;echo&#x27;&#160;is&#160;the&#160;framework&#x27;s&#160;deterministic&#160;test&#160;</text><text class="terminal-1615847184-r2" x="1268.8" y="678.8" textLength="12.2" clip-path="url(#terminal-1615847184-line-27)">
-</text><text class="terminal-1615847184-r2" x="0" y="703.2" textLength="1232.2" clip-path="url(#terminal-1615847184-line-28)">double&#160;—&#160;no&#160;credentials,&#160;no&#160;network,&#160;fixed&#160;responses.&#160;&#160;It&#160;is&#160;absent&#160;from&#160;`explain&#160;providers`&#160;(nobody&#160;</text><text class="terminal-1615847184-r2" x="1268.8" y="703.2" textLength="12.2" clip-path="url(#terminal-1615847184-line-28)">
-</text><text class="terminal-1615847184-r2" x="0" y="727.6" textLength="1268.8" clip-path="url(#terminal-1615847184-line-29)">should&#160;pick&#160;it&#160;for&#160;production)&#160;but&#160;it&#160;IS&#160;installed,&#160;and&#160;it&#160;is&#160;what&#160;the&#160;live&#160;conformance&#160;suite&#160;runs&#160;on.&#160;@</text><text class="terminal-1615847184-r2" x="1268.8" y="727.6" textLength="12.2" clip-path="url(#terminal-1615847184-line-29)">
-</text><text class="terminal-1615847184-r2" x="0" y="752" textLength="97.6" clip-path="url(#terminal-1615847184-line-30)">provider</text><text class="terminal-1615847184-r2" x="1268.8" y="752" textLength="12.2" clip-path="url(#terminal-1615847184-line-30)">
-</text><text class="terminal-1615847184-r2" x="0" y="776.4" textLength="1268.8" clip-path="url(#terminal-1615847184-line-31)">[warn]&#160;[workspace]&#160;triage:&#160;echo_reports_no_usage:&#160;echo&#160;is&#160;configured&#160;without&#160;`usage`,&#160;so&#160;it&#160;reports&#160;ZERO</text><text class="terminal-1615847184-r2" x="1268.8" y="776.4" textLength="12.2" clip-path="url(#terminal-1615847184-line-31)">
-</text><text class="terminal-1615847184-r2" x="0" y="800.8" textLength="1232.2" clip-path="url(#terminal-1615847184-line-32)">tokens&#160;every&#160;turn&#160;and&#160;a&#160;turn&#160;is&#160;entered&#160;in&#160;the&#160;usage&#160;ledger&#160;only&#160;when&#160;the&#160;provider&#160;reported&#160;tokens.&#160;&#160;</text><text class="terminal-1615847184-r2" x="1268.8" y="800.8" textLength="12.2" clip-path="url(#terminal-1615847184-line-32)">
-</text><text class="terminal-1615847184-r2" x="0" y="825.2" textLength="1268.8" clip-path="url(#terminal-1615847184-line-33)">Until&#160;#881&#160;that&#160;ledger&#160;also&#160;gated&#160;the&#160;post-turn&#160;hook&#160;—&#160;the&#160;one&#160;site&#160;emitting&#160;BOTH&#160;TurnCompletedEvent&#160;and</text><text class="terminal-1615847184-r2" x="1268.8" y="825.2" textLength="12.2" clip-path="url(#terminal-1615847184-line-33)">
-</text><text class="terminal-1615847184-r2" x="0" y="849.6" textLength="1244.4" clip-path="url(#terminal-1615847184-line-34)">SessionTerminatedEvent&#160;—&#160;so&#160;such&#160;a&#160;session&#160;did&#160;its&#160;work,&#160;delivered&#160;AgentCompletedEvent&#160;and&#160;emitted&#160;NO&#160;</text><text class="terminal-1615847184-r2" x="1268.8" y="849.6" textLength="12.2" clip-path="url(#terminal-1615847184-line-34)">
-</text><text class="terminal-1615847184-r2" x="0" y="874" textLength="36.6" clip-path="url(#terminal-1615847184-line-35)">ter</text><text class="terminal-1615847184-r2" x="1268.8" y="874" textLength="12.2" clip-path="url(#terminal-1615847184-line-35)">
-</text><text class="terminal-1615847184-r2" x="0" y="898.4" textLength="1195.6" clip-path="url(#terminal-1615847184-line-36)">[error]&#160;[workspace]&#160;triage:&#160;budget_control_absent:&#160;declares&#160;no&#160;budget_control,&#160;so&#160;this&#160;session&#160;is&#160;</text><text class="terminal-1615847184-r2" x="1268.8" y="898.4" textLength="12.2" clip-path="url(#terminal-1615847184-line-36)">
-</text><text class="terminal-1615847184-r2" x="0" y="922.8" textLength="1268.8" clip-path="url(#terminal-1615847184-line-37)">unbounded&#160;on&#160;every&#160;dimension&#160;(usd,&#160;tokens,&#160;seconds,&#160;tool_calls,&#160;turns)&#160;—&#160;nothing&#160;stops&#160;a&#160;tool-call&#160;loop,</text><text class="terminal-1615847184-r2" x="1268.8" y="922.8" textLength="12.2" clip-path="url(#terminal-1615847184-line-37)">
-</text><text class="terminal-1615847184-r2" x="0" y="947.2" textLength="1134.6" clip-path="url(#terminal-1615847184-line-38)">and&#160;the&#160;first&#160;sign&#160;is&#160;the&#160;provider&#160;bill.&#160;Declare&#160;a&#160;ceiling&#160;AND&#160;a&#160;rung&#160;that&#160;enforces&#160;it,&#160;e.g.&#160;</text><text class="terminal-1615847184-r2" x="1268.8" y="947.2" textLength="12.2" clip-path="url(#terminal-1615847184-line-38)">
-</text><text class="terminal-1615847184-r2" x="0" y="971.6" textLength="1268.8" clip-path="url(#terminal-1615847184-line-39)">budget_control:&#160;{limits:&#160;{tool_calls:&#160;200,&#160;usd:&#160;5.0},&#160;degrade:&#160;[{at:&#160;100,&#160;action:&#160;abort}]}.&#160;This&#160;profile</text><text class="terminal-1615847184-r2" x="1268.8" y="971.6" textLength="12.2" clip-path="url(#terminal-1615847184-line-39)">
-</text><text class="terminal-1615847184-r2" x="0" y="996" textLength="183" clip-path="url(#terminal-1615847184-line-40)">binds&#160;a&#160;default</text><text class="terminal-1615847184-r2" x="1268.8" y="996" textLength="12.2" clip-path="url(#terminal-1615847184-line-40)">
-</text><text class="terminal-1615847184-r2" x="0" y="1020.4" textLength="1256.6" clip-path="url(#terminal-1615847184-line-41)">[info]&#160;[workspace]&#160;triage:&#160;discovery_gated_tools:&#160;3&#160;tool(s)&#160;are&#160;discovery-gated&#160;—&#160;DEFERRED,&#160;not&#160;in&#160;the&#160;</text><text class="terminal-1615847184-r2" x="1268.8" y="1020.4" textLength="12.2" clip-path="url(#terminal-1615847184-line-41)">
-</text><text class="terminal-1615847184-r2" x="0" y="1044.8" textLength="1073.6" clip-path="url(#terminal-1615847184-line-42)">model&#x27;s&#160;initial&#160;schema&#160;(the&#160;model&#160;must&#160;call&#160;list_tools/get_tool_schemas&#160;to&#160;reach&#160;them):&#160;</text><text class="terminal-1615847184-r2" x="1268.8" y="1044.8" textLength="12.2" clip-path="url(#terminal-1615847184-line-42)">
-</text><text class="terminal-1615847184-r2" x="0" y="1069.2" textLength="1220" clip-path="url(#terminal-1615847184-line-43)">cli.cli_based_tool,&#160;memory.update_memory,&#160;memory.delete_memory.&#160;&#160;Add&#160;`&lt;plugin&gt;(preload)`&#160;to&#160;force&#160;a&#160;</text><text class="terminal-1615847184-r2" x="1268.8" y="1069.2" textLength="12.2" clip-path="url(#terminal-1615847184-line-43)">
-</text><text class="terminal-1615847184-r2" x="0" y="1093.6" textLength="378.2" clip-path="url(#terminal-1615847184-line-44)">plugin&#x27;s&#160;tools&#160;eager.&#160;@&#160;plugins</text><text class="terminal-1615847184-r2" x="1268.8" y="1093.6" textLength="12.2" clip-path="url(#terminal-1615847184-line-44)">
+    <g class="terminal-1482446021-matrix">
+    <text class="terminal-1482446021-r1" x="0" y="20" textLength="610" clip-path="url(#terminal-1482446021-line-0)">$&#160;jaato-scaffold&#160;validate&#160;/srv/acme-support-triage</text><text class="terminal-1482446021-r2" x="1268.8" y="20" textLength="12.2" clip-path="url(#terminal-1482446021-line-0)">
+</text><text class="terminal-1482446021-r2" x="0" y="44.4" textLength="1195.6" clip-path="url(#terminal-1482446021-line-1)">[error]&#160;[workspace]&#160;triage:&#160;disclosure_absent:&#160;binds&#160;a&#160;persona&#160;and&#160;declares&#160;nothing&#160;about&#160;whether&#160;</text><text class="terminal-1482446021-r2" x="1268.8" y="44.4" textLength="12.2" clip-path="url(#terminal-1482446021-line-1)">
+</text><text class="terminal-1482446021-r2" x="0" y="68.8" textLength="1195.6" clip-path="url(#terminal-1482446021-line-2)">natural&#160;persons&#160;interact&#160;with&#160;it&#160;—&#160;set&#160;`regulatory.interacts_with_persons`&#160;(true:&#160;the&#160;framework&#x27;s&#160;</text><text class="terminal-1482446021-r2" x="1268.8" y="68.8" textLength="12.2" clip-path="url(#terminal-1482446021-line-2)">
+</text><text class="terminal-1482446021-r2" x="0" y="93.2" textLength="1268.8" clip-path="url(#terminal-1482446021-line-3)">disclosure&#160;piece&#160;and&#160;first-interaction&#160;announcement&#160;apply,&#160;Art.&#160;50(1);&#160;false:&#160;it&#160;is&#160;a&#160;component&#160;another&#160;</text><text class="terminal-1482446021-r2" x="1268.8" y="93.2" textLength="12.2" clip-path="url(#terminal-1482446021-line-3)">
+</text><text class="terminal-1482446021-r2" x="0" y="117.6" textLength="1183.4" clip-path="url(#terminal-1482446021-line-4)">system&#160;drives).&#160;&#160;Absent,&#160;nothing&#160;decides&#160;which.&#160;&#160;(error&#160;because&#160;regulatory.risk_class&#160;is&#160;high)&#160;@&#160;</text><text class="terminal-1482446021-r2" x="1268.8" y="117.6" textLength="12.2" clip-path="url(#terminal-1482446021-line-4)">
+</text><text class="terminal-1482446021-r2" x="0" y="142" textLength="402.6" clip-path="url(#terminal-1482446021-line-5)">regulatory.interacts_with_persons</text><text class="terminal-1482446021-r2" x="1268.8" y="142" textLength="12.2" clip-path="url(#terminal-1482446021-line-5)">
+</text><text class="terminal-1482446021-r2" x="0" y="166.4" textLength="1085.8" clip-path="url(#terminal-1482446021-line-6)">[error]&#160;[workspace]&#160;triage:&#160;high_risk_without_intended_purpose:&#160;risk_class:&#160;high&#160;with&#160;no&#160;</text><text class="terminal-1482446021-r2" x="1268.8" y="166.4" textLength="12.2" clip-path="url(#terminal-1482446021-line-6)">
+</text><text class="terminal-1482446021-r2" x="0" y="190.8" textLength="1268.8" clip-path="url(#terminal-1482446021-line-7)">`intended_purpose`&#160;—&#160;the&#160;sentence&#160;every&#160;Annex&#160;IV&#160;section&#160;and&#160;every&#160;deployer&#x27;s&#160;instructions&#160;for&#160;use&#160;start</text><text class="terminal-1482446021-r2" x="1268.8" y="190.8" textLength="12.2" clip-path="url(#terminal-1482446021-line-7)">
+</text><text class="terminal-1482446021-r2" x="0" y="215.2" textLength="671" clip-path="url(#terminal-1482446021-line-8)">from&#160;(Art.&#160;11,&#160;13(3)(b)).&#160;@&#160;regulatory.intended_purpose</text><text class="terminal-1482446021-r2" x="1268.8" y="215.2" textLength="12.2" clip-path="url(#terminal-1482446021-line-8)">
+</text><text class="terminal-1482446021-r2" x="0" y="239.6" textLength="1085.8" clip-path="url(#terminal-1482446021-line-9)">[error]&#160;[workspace]&#160;triage:&#160;high_risk_without_oversight_policy:&#160;risk_class:&#160;high&#160;with&#160;no&#160;</text><text class="terminal-1482446021-r2" x="1268.8" y="239.6" textLength="12.2" clip-path="url(#terminal-1482446021-line-9)">
+</text><text class="terminal-1482446021-r2" x="0" y="264" textLength="1220" clip-path="url(#terminal-1482446021-line-10)">`plugin_configs.permission.policy`&#160;—&#160;the&#160;permission&#160;gate&#160;is&#160;the&#160;framework&#x27;s&#160;human-oversight&#160;measure&#160;</text><text class="terminal-1482446021-r2" x="1268.8" y="264" textLength="12.2" clip-path="url(#terminal-1482446021-line-10)">
+</text><text class="terminal-1482446021-r2" x="0" y="288.4" textLength="1134.6" clip-path="url(#terminal-1482446021-line-11)">(Art.&#160;14(4)(d):&#160;the&#160;person&#160;can&#160;decide&#160;not&#160;to&#160;use,&#160;or&#160;override,&#160;an&#160;output).&#160;&#160;Declare&#160;a&#160;policy&#160;</text><text class="terminal-1482446021-r2" x="1268.8" y="288.4" textLength="12.2" clip-path="url(#terminal-1482446021-line-11)">
+</text><text class="terminal-1482446021-r2" x="0" y="312.8" textLength="1207.8" clip-path="url(#terminal-1482446021-line-12)">(defaultPolicy,&#160;whitelist,&#160;blacklist,&#160;an&#160;approval&#160;channel);&#160;`explain&#160;plugin&#160;permission`&#160;prints&#160;the&#160;</text><text class="terminal-1482446021-r2" x="1268.8" y="312.8" textLength="12.2" clip-path="url(#terminal-1482446021-line-12)">
+</text><text class="terminal-1482446021-r2" x="0" y="337.2" textLength="500.2" clip-path="url(#terminal-1482446021-line-13)">shape.&#160;@&#160;plugin_configs.permission.policy</text><text class="terminal-1482446021-r2" x="1268.8" y="337.2" textLength="12.2" clip-path="url(#terminal-1482446021-line-13)">
+</text><text class="terminal-1482446021-r2" x="0" y="361.6" textLength="1268.8" clip-path="url(#terminal-1482446021-line-14)">[error]&#160;[workspace]&#160;triage:&#160;high_risk_without_record_keeping:&#160;risk_class:&#160;high&#160;with&#160;no&#160;application&#160;trace</text><text class="terminal-1482446021-r2" x="1268.8" y="361.6" textLength="12.2" clip-path="url(#terminal-1482446021-line-14)">
+</text><text class="terminal-1482446021-r2" x="0" y="386" textLength="1232.2" clip-path="url(#terminal-1482446021-line-15)">configured&#160;—&#160;`trace.session_log`&#160;(or&#160;env&#160;JAATO_TRACE_LOG)&#160;is&#160;where&#160;every&#160;permission&#160;DECISION,&#160;budget&#160;</text><text class="terminal-1482446021-r2" x="1268.8" y="386" textLength="12.2" clip-path="url(#terminal-1482446021-line-15)">
+</text><text class="terminal-1482446021-r2" x="0" y="410.4" textLength="1220" clip-path="url(#terminal-1482446021-line-16)">rung&#160;and&#160;tool&#160;verdict&#160;is&#160;written,&#160;and&#160;Art.&#160;12&#160;requires&#160;those&#160;events&#160;recorded&#160;automatically&#160;over&#160;the&#160;</text><text class="terminal-1482446021-r2" x="1268.8" y="410.4" textLength="12.2" clip-path="url(#terminal-1482446021-line-16)">
+</text><text class="terminal-1482446021-r2" x="0" y="434.8" textLength="1220" clip-path="url(#terminal-1482446021-line-17)">system&#x27;s&#160;lifetime.&#160;&#160;Set&#160;`trace:&#160;{session_log:&#160;.jaato/logs/session_trace.jsonl}`.&#160;@&#160;trace.session_log</text><text class="terminal-1482446021-r2" x="1268.8" y="434.8" textLength="12.2" clip-path="url(#terminal-1482446021-line-17)">
+</text><text class="terminal-1482446021-r2" x="0" y="459.2" textLength="1220" clip-path="url(#terminal-1482446021-line-18)">[error]&#160;[workspace]&#160;triage:&#160;high_risk_without_retention:&#160;risk_class:&#160;high&#160;with&#160;no&#160;`record_keeping:`&#160;</text><text class="terminal-1482446021-r2" x="1268.8" y="459.2" textLength="12.2" clip-path="url(#terminal-1482446021-line-18)">
+</text><text class="terminal-1482446021-r2" x="0" y="483.6" textLength="1256.6" clip-path="url(#terminal-1482446021-line-19)">block&#160;—&#160;the&#160;record&#160;is&#160;written&#160;and&#160;nothing&#160;keeps&#160;it:&#160;`session.delete`&#160;and&#160;`workspace.delete`&#160;remove&#160;the&#160;</text><text class="terminal-1482446021-r2" x="1268.8" y="483.6" textLength="12.2" clip-path="url(#terminal-1482446021-line-19)">
+</text><text class="terminal-1482446021-r2" x="0" y="508" textLength="1244.4" clip-path="url(#terminal-1482446021-line-20)">workspace&#x27;s&#160;logs&#160;along&#160;with&#160;the&#160;conversation.&#160;&#160;Art.&#160;19(1)&#160;asks&#160;the&#160;provider&#160;to&#160;keep&#160;the&#160;automatically&#160;</text><text class="terminal-1482446021-r2" x="1268.8" y="508" textLength="12.2" clip-path="url(#terminal-1482446021-line-20)">
+</text><text class="terminal-1482446021-r2" x="0" y="532.4" textLength="1268.8" clip-path="url(#terminal-1482446021-line-21)">generated&#160;logs&#160;for&#160;at&#160;least&#160;six&#160;months&#160;(26(6)&#160;asks&#160;the&#160;same&#160;of&#160;the&#160;deployer).&#160;&#160;Declare&#160;`record_keeping:&#160;</text><text class="terminal-1482446021-r2" x="1268.8" y="532.4" textLength="12.2" clip-path="url(#terminal-1482446021-line-21)">
+</text><text class="terminal-1482446021-r2" x="0" y="556.8" textLength="939.4" clip-path="url(#terminal-1482446021-line-22)">{retention_days:&#160;180}`;&#160;`explain&#160;audit`&#160;prints&#160;what&#160;is&#160;recorded&#160;and&#160;where.&#160;@&#160;</text><text class="terminal-1482446021-r2" x="1268.8" y="556.8" textLength="12.2" clip-path="url(#terminal-1482446021-line-22)">
+</text><text class="terminal-1482446021-r2" x="0" y="581.2" textLength="353.8" clip-path="url(#terminal-1482446021-line-23)">record_keeping.retention_days</text><text class="terminal-1482446021-r2" x="1268.8" y="581.2" textLength="12.2" clip-path="url(#terminal-1482446021-line-23)">
+</text><text class="terminal-1482446021-r2" x="0" y="605.6" textLength="1012.6" clip-path="url(#terminal-1482446021-line-24)">[error]&#160;[workspace]&#160;triage:&#160;high_risk_disclosure_suppressed:&#160;risk_class:&#160;high&#160;with&#160;</text><text class="terminal-1482446021-r2" x="1268.8" y="605.6" textLength="12.2" clip-path="url(#terminal-1482446021-line-24)">
+</text><text class="terminal-1482446021-r2" x="0" y="630" textLength="1232.2" clip-path="url(#terminal-1482446021-line-25)">`suppress_base_instructions`&#160;naming&#160;the&#160;`disclosure`&#160;piece&#160;—&#160;the&#160;model&#160;is&#160;no&#160;longer&#160;told&#160;to&#160;disclose&#160;</text><text class="terminal-1482446021-r2" x="1268.8" y="630" textLength="12.2" clip-path="url(#terminal-1482446021-line-25)">
+</text><text class="terminal-1482446021-r2" x="0" y="654.4" textLength="1159" clip-path="url(#terminal-1482446021-line-26)">that&#160;it&#160;is&#160;an&#160;AI&#160;system&#160;(Art.&#160;50(1),&#160;in&#160;force&#160;since&#160;2&#160;Aug&#160;2026).&#160;&#160;Remove&#160;`disclosure`&#160;from&#160;the&#160;</text><text class="terminal-1482446021-r2" x="1268.8" y="654.4" textLength="12.2" clip-path="url(#terminal-1482446021-line-26)">
+</text><text class="terminal-1482446021-r2" x="0" y="678.8" textLength="634.4" clip-path="url(#terminal-1482446021-line-27)">suppression.&#160;@&#160;suppress_base_instructions.disclosure</text><text class="terminal-1482446021-r2" x="1268.8" y="678.8" textLength="12.2" clip-path="url(#terminal-1482446021-line-27)">
+</text><text class="terminal-1482446021-r2" x="0" y="703.2" textLength="1268.8" clip-path="url(#terminal-1482446021-line-28)">[info]&#160;[workspace]&#160;triage:&#160;echo_is_a_test_double:&#160;provider&#160;&#x27;echo&#x27;&#160;is&#160;the&#160;framework&#x27;s&#160;deterministic&#160;test&#160;</text><text class="terminal-1482446021-r2" x="1268.8" y="703.2" textLength="12.2" clip-path="url(#terminal-1482446021-line-28)">
+</text><text class="terminal-1482446021-r2" x="0" y="727.6" textLength="1232.2" clip-path="url(#terminal-1482446021-line-29)">double&#160;—&#160;no&#160;credentials,&#160;no&#160;network,&#160;fixed&#160;responses.&#160;&#160;It&#160;is&#160;absent&#160;from&#160;`explain&#160;providers`&#160;(nobody&#160;</text><text class="terminal-1482446021-r2" x="1268.8" y="727.6" textLength="12.2" clip-path="url(#terminal-1482446021-line-29)">
+</text><text class="terminal-1482446021-r2" x="0" y="752" textLength="1268.8" clip-path="url(#terminal-1482446021-line-30)">should&#160;pick&#160;it&#160;for&#160;production)&#160;but&#160;it&#160;IS&#160;installed,&#160;and&#160;it&#160;is&#160;what&#160;the&#160;live&#160;conformance&#160;suite&#160;runs&#160;on.&#160;@</text><text class="terminal-1482446021-r2" x="1268.8" y="752" textLength="12.2" clip-path="url(#terminal-1482446021-line-30)">
+</text><text class="terminal-1482446021-r2" x="0" y="776.4" textLength="97.6" clip-path="url(#terminal-1482446021-line-31)">provider</text><text class="terminal-1482446021-r2" x="1268.8" y="776.4" textLength="12.2" clip-path="url(#terminal-1482446021-line-31)">
+</text><text class="terminal-1482446021-r2" x="0" y="800.8" textLength="1268.8" clip-path="url(#terminal-1482446021-line-32)">[warn]&#160;[workspace]&#160;triage:&#160;echo_reports_no_usage:&#160;echo&#160;is&#160;configured&#160;without&#160;`usage`,&#160;so&#160;it&#160;reports&#160;ZERO</text><text class="terminal-1482446021-r2" x="1268.8" y="800.8" textLength="12.2" clip-path="url(#terminal-1482446021-line-32)">
+</text><text class="terminal-1482446021-r2" x="0" y="825.2" textLength="1232.2" clip-path="url(#terminal-1482446021-line-33)">tokens&#160;every&#160;turn&#160;and&#160;a&#160;turn&#160;is&#160;entered&#160;in&#160;the&#160;usage&#160;ledger&#160;only&#160;when&#160;the&#160;provider&#160;reported&#160;tokens.&#160;&#160;</text><text class="terminal-1482446021-r2" x="1268.8" y="825.2" textLength="12.2" clip-path="url(#terminal-1482446021-line-33)">
+</text><text class="terminal-1482446021-r2" x="0" y="849.6" textLength="1268.8" clip-path="url(#terminal-1482446021-line-34)">Until&#160;#881&#160;that&#160;ledger&#160;also&#160;gated&#160;the&#160;post-turn&#160;hook&#160;—&#160;the&#160;one&#160;site&#160;emitting&#160;BOTH&#160;TurnCompletedEvent&#160;and</text><text class="terminal-1482446021-r2" x="1268.8" y="849.6" textLength="12.2" clip-path="url(#terminal-1482446021-line-34)">
+</text><text class="terminal-1482446021-r2" x="0" y="874" textLength="1244.4" clip-path="url(#terminal-1482446021-line-35)">SessionTerminatedEvent&#160;—&#160;so&#160;such&#160;a&#160;session&#160;did&#160;its&#160;work,&#160;delivered&#160;AgentCompletedEvent&#160;and&#160;emitted&#160;NO&#160;</text><text class="terminal-1482446021-r2" x="1268.8" y="874" textLength="12.2" clip-path="url(#terminal-1482446021-line-35)">
+</text><text class="terminal-1482446021-r2" x="0" y="898.4" textLength="1256.6" clip-path="url(#terminal-1482446021-line-36)">terminal&#160;event,&#160;hanging&#160;every&#160;driver&#160;awaiting&#160;the&#160;terminus&#160;(Session.complete/.ask/.stream).&#160;&#160;That&#160;gate&#160;</text><text class="terminal-1482446021-r2" x="1268.8" y="898.4" textLength="12.2" clip-path="url(#terminal-1482446021-line-36)">
+</text><text class="terminal-1482446021-r2" x="0" y="922.8" textLength="1268.8" clip-path="url(#terminal-1482446021-line-37)">now&#160;reads&#160;a&#160;lifecycle&#160;counter,&#160;so&#160;the&#160;session&#160;terminates&#160;normally;&#160;what&#160;is&#160;left&#160;is&#160;an&#160;accounting&#160;hole.&#160;&#160;</text><text class="terminal-1482446021-r2" x="1268.8" y="922.8" textLength="12.2" clip-path="url(#terminal-1482446021-line-37)">
+</text><text class="terminal-1482446021-r2" x="0" y="947.2" textLength="1256.6" clip-path="url(#terminal-1482446021-line-38)">This&#160;profile&#x27;s&#160;consumption&#160;report&#160;will&#160;read&#160;empty,&#160;and&#160;any&#160;budget_control&#160;ceiling&#160;on&#160;`tokens`&#160;or&#160;`usd`&#160;</text><text class="terminal-1482446021-r2" x="1268.8" y="947.2" textLength="12.2" clip-path="url(#terminal-1482446021-line-38)">
+</text><text class="terminal-1482446021-r2" x="0" y="971.6" textLength="1171.2" clip-path="url(#terminal-1482446021-line-39)">is&#160;fed&#160;zero&#160;and&#160;will&#160;never&#160;fire,&#160;so&#160;a&#160;run&#160;that&#160;looks&#160;capped&#160;is&#160;uncapped.&#160;&#160;Declare&#160;a&#160;spend,&#160;e.g.&#160;</text><text class="terminal-1482446021-r2" x="1268.8" y="971.6" textLength="12.2" clip-path="url(#terminal-1482446021-line-39)">
+</text><text class="terminal-1482446021-r2" x="0" y="996" textLength="1183.4" clip-path="url(#terminal-1482446021-line-40)">plugin_configs.echo.usage:&#160;{prompt_tokens:&#160;1000,&#160;output_tokens:&#160;200}.&#160;@&#160;plugin_configs.echo.usage</text><text class="terminal-1482446021-r2" x="1268.8" y="996" textLength="12.2" clip-path="url(#terminal-1482446021-line-40)">
+</text><text class="terminal-1482446021-r2" x="0" y="1020.4" textLength="1195.6" clip-path="url(#terminal-1482446021-line-41)">[error]&#160;[workspace]&#160;triage:&#160;budget_control_absent:&#160;declares&#160;no&#160;budget_control,&#160;so&#160;this&#160;session&#160;is&#160;</text><text class="terminal-1482446021-r2" x="1268.8" y="1020.4" textLength="12.2" clip-path="url(#terminal-1482446021-line-41)">
+</text><text class="terminal-1482446021-r2" x="0" y="1044.8" textLength="1268.8" clip-path="url(#terminal-1482446021-line-42)">unbounded&#160;on&#160;every&#160;dimension&#160;(usd,&#160;tokens,&#160;seconds,&#160;tool_calls,&#160;turns)&#160;—&#160;nothing&#160;stops&#160;a&#160;tool-call&#160;loop,</text><text class="terminal-1482446021-r2" x="1268.8" y="1044.8" textLength="12.2" clip-path="url(#terminal-1482446021-line-42)">
+</text><text class="terminal-1482446021-r2" x="0" y="1069.2" textLength="1134.6" clip-path="url(#terminal-1482446021-line-43)">and&#160;the&#160;first&#160;sign&#160;is&#160;the&#160;provider&#160;bill.&#160;Declare&#160;a&#160;ceiling&#160;AND&#160;a&#160;rung&#160;that&#160;enforces&#160;it,&#160;e.g.&#160;</text><text class="terminal-1482446021-r2" x="1268.8" y="1069.2" textLength="12.2" clip-path="url(#terminal-1482446021-line-43)">
+</text><text class="terminal-1482446021-r2" x="0" y="1093.6" textLength="1268.8" clip-path="url(#terminal-1482446021-line-44)">budget_control:&#160;{limits:&#160;{tool_calls:&#160;200,&#160;usd:&#160;5.0},&#160;degrade:&#160;[{at:&#160;100,&#160;action:&#160;abort}]}.&#160;This&#160;profile</text><text class="terminal-1482446021-r2" x="1268.8" y="1093.6" textLength="12.2" clip-path="url(#terminal-1482446021-line-44)">
+</text><text class="terminal-1482446021-r2" x="0" y="1118" textLength="1256.6" clip-path="url(#terminal-1482446021-line-45)">binds&#160;a&#160;default_agent,&#160;so&#160;it&#160;is&#160;built&#160;to&#160;be&#160;spawned&#160;by&#160;name&#160;—&#160;and&#160;a&#160;subagent&#160;is&#160;deliberately&#160;preserved&#160;</text><text class="terminal-1482446021-r2" x="1268.8" y="1118" textLength="12.2" clip-path="url(#terminal-1482446021-line-45)">
+</text><text class="terminal-1482446021-r2" x="0" y="1142.4" textLength="1268.8" clip-path="url(#terminal-1482446021-line-46)">when&#160;its&#160;parent&#160;shuts&#160;down,&#160;so&#160;an&#160;unbounded&#160;loop&#160;here&#160;outlives&#160;the&#160;session&#160;that&#160;could&#160;have&#160;noticed&#160;it.&#160;&#160;</text><text class="terminal-1482446021-r2" x="1268.8" y="1142.4" textLength="12.2" clip-path="url(#terminal-1482446021-line-46)">
+</text><text class="terminal-1482446021-r2" x="0" y="1166.8" textLength="756.4" clip-path="url(#terminal-1482446021-line-47)">(error&#160;because&#160;regulatory.risk_class&#160;is&#160;high)&#160;@&#160;budget_control</text><text class="terminal-1482446021-r2" x="1268.8" y="1166.8" textLength="12.2" clip-path="url(#terminal-1482446021-line-47)">
+</text><text class="terminal-1482446021-r2" x="0" y="1191.2" textLength="1256.6" clip-path="url(#terminal-1482446021-line-48)">[info]&#160;[workspace]&#160;triage:&#160;discovery_gated_tools:&#160;3&#160;tool(s)&#160;are&#160;discovery-gated&#160;—&#160;DEFERRED,&#160;not&#160;in&#160;the&#160;</text><text class="terminal-1482446021-r2" x="1268.8" y="1191.2" textLength="12.2" clip-path="url(#terminal-1482446021-line-48)">
+</text><text class="terminal-1482446021-r2" x="0" y="1215.6" textLength="1073.6" clip-path="url(#terminal-1482446021-line-49)">model&#x27;s&#160;initial&#160;schema&#160;(the&#160;model&#160;must&#160;call&#160;list_tools/get_tool_schemas&#160;to&#160;reach&#160;them):&#160;</text><text class="terminal-1482446021-r2" x="1268.8" y="1215.6" textLength="12.2" clip-path="url(#terminal-1482446021-line-49)">
+</text><text class="terminal-1482446021-r2" x="0" y="1240" textLength="1220" clip-path="url(#terminal-1482446021-line-50)">cli.cli_based_tool,&#160;memory.update_memory,&#160;memory.delete_memory.&#160;&#160;Add&#160;`&lt;plugin&gt;(preload)`&#160;to&#160;force&#160;a&#160;</text><text class="terminal-1482446021-r2" x="1268.8" y="1240" textLength="12.2" clip-path="url(#terminal-1482446021-line-50)">
+</text><text class="terminal-1482446021-r2" x="0" y="1264.4" textLength="378.2" clip-path="url(#terminal-1482446021-line-51)">plugin&#x27;s&#160;tools&#160;eager.&#160;@&#160;plugins</text><text class="terminal-1482446021-r2" x="1268.8" y="1264.4" textLength="12.2" clip-path="url(#terminal-1482446021-line-51)">
 </text>
     </g>
     </g>
