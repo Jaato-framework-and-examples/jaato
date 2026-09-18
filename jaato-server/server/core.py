@@ -411,6 +411,7 @@ def _dispatch_tool_output(hooks, payload, default_agent_id: str) -> None:
         mime_type=mime_type,
         data_b64=data_b64,
         final=bool(payload.get("final", False)),
+        generated_by=payload.get("generated_by"),
     )
 
 
@@ -4014,7 +4015,7 @@ class JaatoServer:
 
             def on_tool_output(self, agent_id, call_id, chunk,
                                stream_id="", sequence=None, mime_type=None,
-                               data_b64=None, final=False):
+                               data_b64=None, final=False, generated_by=None):
                 """Emit a tool-output chunk, formatting text but never bytes.
 
                 The formatter pipeline does syntax highlighting and marker
@@ -4050,6 +4051,7 @@ class JaatoServer:
                     mime_type=mime_type,
                     data_b64=data_b64,
                     final=final,
+                    generated_by=generated_by,
                 ))
 
             def on_agent_instruction_budget_updated(self, agent_id, budget_snapshot):

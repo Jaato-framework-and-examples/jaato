@@ -9417,6 +9417,25 @@ NOTES
                 getattr(self, "_model_media_utterance", 0) + 1)
         return f"model:{self._agent_id}:{getattr(self, '_model_media_utterance', 1)}"
 
+    def _model_provenance(self) -> Dict[str, Any]:
+        """The ``generated_by`` stamp for bytes THIS session's model produced.
+
+        ``{"kind": "ai", "provider", "model", "session_id", "agent_id"}``
+        (``jaato_sdk.events.ai_generated_by``), read from the active
+        binding -- the tier's provider when one is entered, the runtime's
+        otherwise -- so a stamp names the model that actually spoke.
+        """
+        from jaato_sdk.events import ai_generated_by
+        runtime = getattr(self, "_runtime", None)
+        provider = (getattr(self, "_active_provider_name", None)
+                    or getattr(runtime, "provider_name", None))
+        return ai_generated_by(
+            provider=provider,
+            model=getattr(self, "_model_name", None),
+            session_id=getattr(self, "_daemon_session_id", None),
+            agent_id=getattr(self, "_agent_id", None),
+        )
+
     def _deliver_model_media(self, delta: 'MediaDelta') -> None:
         """Deliver one chunk of MODEL-generated media to subscribed clients.
 
@@ -9441,6 +9460,12 @@ NOTES
         ``AGENT_OUTPUT``.  This method does not decide that; it forwards
         whatever the provider put on the delta.
 
+        Every chunk carries :meth:`_model_provenance` as ``generated_by``
+        -- the Art. 50(2) machine-readable marking, stamped HERE because
+        this is the one place that knows both that the bytes are the
+        model's and which binding produced them (a ``MediaDelta`` names
+        neither).
+
         Never raises -- a delivery failure must not abort generation.
         """
         hooks = getattr(self, "_ui_hooks", None)
@@ -9456,6 +9481,7 @@ NOTES
                 mime_type=delta.mime_type,
                 data_b64=_b64encode(delta.data).decode("ascii"),
                 final=delta.final,
+                generated_by=self._model_provenance(),
             )
         except Exception:  # noqa: BLE001
             self._trace(
@@ -9512,6 +9538,9 @@ NOTES
                     mime_type=mime_type,
                     data_b64=payload,
                     final=(index == last),
+                    # The producer's own claim, or nothing: a relayed file
+                    # is not AI-generated because an agent relayed it.
+                    generated_by=getattr(att, "generated_by", None),
                 )
             except Exception:  # noqa: BLE001
                 self._trace(

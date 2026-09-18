@@ -545,10 +545,17 @@ class Attachment:
         mime_type: MIME type of the data (e.g., 'image/png', 'application/pdf').
         data: Raw binary data.
         display_name: Optional name for referencing in the response.
+        generated_by: Provenance, when the tool that produced the bytes can
+            say who made them -- an image-generation tool stamps
+            ``jaato_sdk.events.ai_generated_by(...)``; a tool that fetched
+            or read a file leaves it ``None``, because relaying is not
+            generating.  Carried onto ``ToolOutputEvent.generated_by`` when
+            the attachment reaches a client (EU AI Act Art. 50(2)).
     """
     mime_type: str
     data: bytes
     display_name: Optional[str] = None
+    generated_by: Optional[Dict[str, Any]] = None
 
 
 @dataclass

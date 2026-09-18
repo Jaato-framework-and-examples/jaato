@@ -220,7 +220,17 @@ from pydantic import BaseModel, ConfigDict, Field
 # older client ignores the fields and never sends the verb; an older daemon
 # answers the verb with ``ErrorEvent("Unknown message type")``, a visible
 # failure, so there is no SDK minimum to refuse below.
-PROTOCOL_VERSION = "1.13"
+#
+# 1.14 -- ``ToolOutputEvent.generated_by``: provenance on model-generated
+# media (Regulation (EU) 2024/1689, Art. 50(2): the output of an AI system
+# must be marked in a machine-readable format as artificially generated).
+# The model's own speech and images, delivered under ``MODEL_MEDIA_CALL_ID``,
+# now carry ``{"kind": "ai", "provider", "model", "session_id", "agent_id"}``,
+# and a tool-result attachment carries whatever its producer stamped
+# (``Attachment.generated_by``); a chunk a tool merely relayed carries
+# nothing, because a fetched image is not AI-generated because an agent
+# fetched it.  Additive optional field: an older client ignores it.
+PROTOCOL_VERSION = "1.14"
 
 
 # =============================================================================
@@ -907,6 +917,17 @@ class ToolOutputEvent(Event):
         final: Last chunk of this stream, so a client can close its
             playback buffer or finish writing the file without waiting
             on a separate completion event.
+        generated_by: Provenance of the bytes, for the Art. 50(2) marking
+            (protocol 1.14).  The model's own media carries
+            :func:`ai_generated_by` -- ``{"kind": "ai", "provider",
+            "model", "session_id", "agent_id"}`` -- stamped at delivery by
+            the session that knows which binding produced it; a
+            tool-result attachment carries what its producer put on
+            ``Attachment.generated_by``; ``None`` means nothing is CLAIMED
+            about the bytes, which is what a tool that merely relayed a
+            file must say.  Machine-readable half of the marking; the
+            client-facing half (a visible label, a manifest sidecar) is
+            the consumer's, and this is what it reads.
 
     Note:
         When ``mime_type``/``data_b64`` are set the chunk MUST bypass the
@@ -922,6 +943,7 @@ class ToolOutputEvent(Event):
     mime_type: Optional[str] = None  # Tags the data_b64 payload
     data_b64: Optional[str] = None  # Base64 binary payload
     final: bool = False  # Last chunk of this stream
+    generated_by: Optional[Dict[str, Any]] = None  # Provenance (1.14)
 
     def is_media(self) -> bool:
         """Whether this event carries a binary payload.
@@ -941,6 +963,33 @@ class ToolOutputEvent(Event):
         rediscovers the literal ``"model-output"``.
         """
         return self.is_media() and self.call_id == MODEL_MEDIA_CALL_ID
+
+
+#: The ``generated_by.kind`` that says "an AI system produced these bytes".
+GENERATED_BY_AI = "ai"
+
+
+def ai_generated_by(
+    provider: Optional[str],
+    model: Optional[str],
+    session_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """The provenance stamp for bytes a MODEL produced (protocol 1.14).
+
+    One shape for every producer, so a client can branch on ``kind`` and
+    an archive can recompute who made what from the session record:
+    ``provider`` / ``model`` are the binding that answered, ``session_id``
+    the daemon's session, ``agent_id`` the agent within it.  Keys whose
+    value is unknown are omitted rather than sent as ``null`` -- absent is
+    "not measured here", never a claim.
+    """
+    stamp: Dict[str, Any] = {"kind": GENERATED_BY_AI}
+    for key, value in (("provider", provider), ("model", model),
+                       ("session_id", session_id), ("agent_id", agent_id)):
+        if value:
+            stamp[key] = value
+    return stamp
 
 
 class PermissionResponseOption(BaseModel):
