@@ -187,8 +187,8 @@ The gaps are narrower than the coverage but real:
   template is asked to stop politely before SIGTERM. `session.stop <id>`
   does the same for one session by the same cancellation path. That is
   14(4)(e)'s "halt in a safe state" and 26(5)'s "suspend the use of that
-  system"; what is missing is a sentence in the instructions for use
-  saying so, which §4.6 generates.
+  system"; what is missing is a surface that names them as such, which
+  §4.5 puts on `explain` and `jaato-doctor`.
 - **Reversal is partial by nature.** `file_edit` backs up, `rewind` restores
   history; a `cli` command, a `call_service` POST, a Telegram reply cannot be
   reversed by the framework. The honest mechanism is the *record* of effects,
@@ -459,7 +459,7 @@ Not a sixth store. A **contract over the stores that exist**:
   a chained file cannot be pruned from the front, so retention rotates whole
   segments.
 
-### 4.5 A stop button — already there, and left alone
+### 4.5 A stop button — already there; make the tools say so
 
 An earlier draft proposed a daemon-level `halt` verb: stop every loaded
 session, keep the daemon up, refuse new turns. It is not needed, and the
@@ -471,8 +471,31 @@ cancellation path. "Halt in a safe state" (14(4)(e)) is *cancelled at the
 next check point and persisted*, and both verbs do exactly that. What the
 draft's verb would have added — a daemon that stays up refusing turns — is
 an operational nicety nothing in the Act asks for, at the price of a new
-lifecycle state and a protocol bump. The deliverable is one line in the
-instructions for use naming the two verbs, and §4.6 generates it.
+lifecycle state and a protocol bump.
+
+What is missing is that no surface a deployer reads *names* them as the
+oversight measures, and the framework's rule for facts about itself is that
+they are computed, not written down (`explain` exists so that a documented
+order that disagrees with the loaded one cannot happen). So the deliverable
+is two small additions to the surfaces that already exist:
+
+- **`jaato-scaffold explain oversight`** — a topic rendered from the tree, in
+  the Act's own 14(4) vocabulary: the two stop verbs and what each persists
+  before it cancels; the permission policy in force for a named profile
+  (`defaultPolicy`, whitelist, approval channel) as the 14(4)(d) measure; the
+  budget ladder's `abort` rung and the orphan watchdog as the in-built
+  constraints "that cannot be overridden by the system itself"; and what is
+  reversible (`file_edit` backups, `rewind`) against what is not. Read from
+  the same helpers the daemon reads, so it cannot drift from them.
+- **`jaato-doctor`** — on a running deployment, one preflight line naming the
+  daemon's pidfile and the exact `--stop` invocation for it, and how many
+  sessions are loaded (`session.orphans` already answers the second half).
+  A person who has to stop a system they did not start should not have to
+  find the command by reading this document.
+
+The dossier (§4.6) then quotes the `explain oversight` output rather than
+restating it, which is the one way to keep the instructions for use and the
+running framework saying the same thing.
 
 ### 4.6 A generated technical dossier (Articles 11, 13, Annex IV, 25(4))
 
@@ -559,16 +582,17 @@ to the intended purpose" is the provider's call.
 | 2 | `disclosure` instruction piece + first-interaction announcement | 50(1), 50(5) | **now** | S | 1 |
 | 3 | `generated_by` stamp on outbound media and attachments | 50(2) | **now** (2 Dec 2026 for pre-existing systems) | S | — |
 | 4 | Ledger reaches disk | 12(1), 19(1) | now (a defect regardless) | S | — |
-| 5 | Audit-record contract, `record_keeping:` retention, `explain audit` | 12, 13(3)(f), 19, 26(6) | 2 Dec 2027 | M | 4 |
-| 6 | Dossier generator + the 25(4) component pack | 11, 13, 25(4), Annex IV | 2 Dec 2027 (the pack: now, for any commercial supply) | M | 1, 5 |
-| 7 | Incident register | 72, 73 | 2 Dec 2027 | M | 5 |
-| 8 | Output-marker trait + C2PA sidecar for files | 50(2) | now, feasibility-bounded | M | 3 |
-| 9 | Memory provenance + curation knob | 15(4) | 2 Dec 2027 | M | 3 |
-| 10 | Eval results → dossier | 15(3), 9(8) | 2 Dec 2027 | S | 6 |
-| 11 | `sha256-chain` integrity | 73(6), #507 | 2 Dec 2027 | S | 5 |
+| 5 | `explain oversight` topic + `jaato-doctor` stop line | 13(3)(d), 14(4) | now (small, computed) | S | — |
+| 6 | Audit-record contract, `record_keeping:` retention, `explain audit` | 12, 13(3)(f), 19, 26(6) | 2 Dec 2027 | M | 4 |
+| 7 | Dossier generator + the 25(4) component pack | 11, 13, 25(4), Annex IV | 2 Dec 2027 (the pack: now, for any commercial supply) | M | 1, 5, 6 |
+| 8 | Incident register | 72, 73 | 2 Dec 2027 | M | 6 |
+| 9 | Output-marker trait + C2PA sidecar for files | 50(2) | now, feasibility-bounded | M | 3 |
+| 10 | Memory provenance + curation knob | 15(4) | 2 Dec 2027 | M | 3 |
+| 11 | Eval results → dossier | 15(3), 9(8) | 2 Dec 2027 | S | 7 |
+| 12 | `sha256-chain` integrity | 73(6), #507 | 2 Dec 2027 | S | 6 |
 
-Items 1–4 are small, independent of each other, and two of them are overdue
-for any jaato application already talking to people in the EU. Items 5–7
+Items 1–5 are small, independent of each other, and two of them are overdue
+for any jaato application already talking to people in the EU. Items 6–8
 are the ones that let a deployer adopt a jaato application into an Annex III
 process without re-deriving what the framework does from its source, and
 they are the same items that make a production deployment debuggable, which
