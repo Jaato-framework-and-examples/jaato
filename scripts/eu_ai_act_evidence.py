@@ -331,7 +331,8 @@ def render(capture: Capture, out: Path, chromium: Optional[str]) -> None:
                       color_system="truecolor", file=io.StringIO())
     console.print(Text(f"$ {capture.command}", style="bold"))
     for line in capture.text.rstrip("\n").splitlines():
-        console.print(Text.from_ansi(line[:CAPTURE_WIDTH * 4]), soft_wrap=False)
+        # Bound only what a base64 blob could do to a capture; prose wraps at the width.
+        console.print(Text.from_ansi(line[:4000]), soft_wrap=False)
     svg = console.export_svg(title=capture.title)
     (out / f"{capture.slug}.svg").write_text(svg, encoding="utf-8")
     (out / f"{capture.slug}.txt").write_text(
