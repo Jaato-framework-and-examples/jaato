@@ -230,7 +230,24 @@ from pydantic import BaseModel, ConfigDict, Field
 # (``Attachment.generated_by``); a chunk a tool merely relayed carries
 # nothing, because a fetched image is not AI-generated because an agent
 # fetched it.  Additive optional field: an older client ignores it.
-PROTOCOL_VERSION = "1.14"
+#
+# 1.15 -- the FIRST-INTERACTION announcement (Art. 50(1)), and the client's
+# way of declining it.  ``SessionInfoEvent.disclosure_announcement`` carries
+# the text a profile declaring ``regulatory.interacts_with_persons: true``
+# owes the person, on the shape a client can read BEFORE any turn -- so a
+# voice client renders it in the medium the person is using rather than
+# after the first reply.  The same text also goes out as
+# ``AgentOutputEvent(source="system")``, which every client already renders.
+# ``PresentationContext.client_discloses_ai`` is the suppression: a client
+# that already shows an "AI assistant" badge asserts the Act's "unless this
+# is obvious" clause, which only the party that can see the screen is in a
+# position to assert.
+#
+# Additive optional fields in both directions: an older client ignores the
+# announcement (and is then a client that does not disclose, which is the
+# state it was already in), and an older daemon never reads the flag (and
+# then announces, which is the safe direction).  No SDK minimum.
+PROTOCOL_VERSION = "1.15"
 
 
 # =============================================================================
@@ -1766,6 +1783,15 @@ class SessionInfoEvent(Event):
     # ^ [{name, methods}, ...] for services command completions
     tool_id_mappings: Dict[str, str] = Field(default_factory=dict)
     # ^ {hash_id: human_name, ...} for resolving opaque tool/category IDs in display
+    # The Article 50(1) first-interaction announcement (protocol 1.15), or
+    # ``None`` when this session does not announce -- see
+    # ``shared.ai_disclosure.announcement_for``.  Carried HERE as well as on
+    # the ``AgentOutputEvent(source="system")`` that also goes out, because
+    # this is the shape a client can act on before a turn exists: a voice
+    # client owns the speaker and can say it aloud, which the framework
+    # cannot do for it (there is no TTS in the tree).  The event states the
+    # obligation; the medium is the client's.
+    disclosure_announcement: Optional[str] = None
 
 
 class SessionDescriptionUpdatedEvent(Event):
@@ -2945,6 +2971,9 @@ class PresentationContext(BaseModel):
             (the default) means the client can present none -- the honest
             answer for a plain terminal.
         client_type: The kind of client (see ``ClientType`` enum).
+        client_discloses_ai: Whether this client already tells the person
+            they are interacting with an AI system, so the framework
+            withholds its own Article 50(1) announcement.
     """
 
     # ── Dimensions ──────────────────────────────────────────────
@@ -2976,6 +3005,22 @@ class PresentationContext(BaseModel):
 
     # ── Client hint ─────────────────────────────────────────────
     client_type: ClientType = ClientType.TERMINAL
+
+    # ── Disclosure (Regulation (EU) 2024/1689, Art. 50(1)) ──────
+    # ``True`` when this client ALREADY tells the person they are talking
+    # to an AI -- a persistent badge, a product whose whole surface says
+    # so.  The framework then withholds its own first-interaction
+    # announcement, which is the Act's "unless this is obvious from the
+    # point of view of a natural person who is reasonably well-informed,
+    # observant and circumspect" clause.
+    #
+    # Asserted by the client because the client is the only party that can
+    # see the screen; and for the same reason it is deliberately NOT read
+    # by ``jaato-scaffold validate`` -- a per-connection assertion cannot
+    # answer a question about a profile, so ``disclosure_absent`` stays
+    # exactly as it is.  Default ``False``: a client that has not said it
+    # discloses has not disclosed.
+    client_discloses_ai: bool = False
 
     # ── Communication style ────────────────────────────────────
     # When None, inferred from client_type: CHAT → CONVERSATIONAL,

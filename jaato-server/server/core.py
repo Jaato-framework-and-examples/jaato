@@ -1111,6 +1111,33 @@ class JaatoServer:
                         "failed (%s)", exc,
                     )
 
+    def disclosure_announcement(self) -> Optional[str]:
+        """The Article 50(1) first-interaction announcement, or ``None``.
+
+        The session-scoped reading of
+        :func:`shared.ai_disclosure.announcement_for`: this server's
+        resolved profile supplies the ``regulatory:`` declaration, the
+        connected client's ``PresentationContext`` supplies the
+        "unless this is obvious" suppression.  Both halves live here and
+        nowhere else, which is why the daemon asks the server rather than
+        re-deriving the answer at the emit site.
+
+        Returns ``None`` -- announce nothing -- for a profile that has
+        not declared ``regulatory.interacts_with_persons: true``, for one
+        that declared it ``false``, and for a client that says it
+        discloses already.  Absent is not ``false``: a framework that
+        announced on behalf of a profile that made no determination would
+        put a legal statement in front of every existing workspace's
+        sessions.
+        """
+        from shared.ai_disclosure import announcement_for
+        text, _reason = announcement_for(
+            getattr(self._profile, "regulatory", None),
+            client_discloses_ai=bool(getattr(
+                self._presentation_context, "client_discloses_ai", False)),
+        )
+        return text
+
     def set_apparmor_confinement(
         self,
         confine_context: Callable,

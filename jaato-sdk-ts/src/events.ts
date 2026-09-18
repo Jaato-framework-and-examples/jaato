@@ -6321,6 +6321,7 @@ export type SandboxPaths = {
 export type Services = {
   [k: string]: unknown;
 }[];
+export type DisclosureAnnouncement = string | null;
 /**
  * All event types in the protocol.
  */
@@ -17247,6 +17248,7 @@ export interface SessionInfoEvent {
   sandbox_paths?: SandboxPaths;
   services?: Services;
   tool_id_mappings?: ToolIdMappings;
+  disclosure_announcement?: DisclosureAnnouncement;
 }
 export interface ToolIdMappings {
   [k: string]: string;

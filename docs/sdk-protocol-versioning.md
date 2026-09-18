@@ -77,6 +77,39 @@ won't see any field that was added after its minimum.
 (1.6 through 1.13 are recorded beside `PROTOCOL_VERSION` in
 `jaato-sdk/jaato_sdk/events.py`.)
 
+### 1.15 — the first-interaction announcement, and the client's way of declining it
+
+`SessionInfoEvent.disclosure_announcement` (optional): the sentence a
+profile declaring `regulatory.interacts_with_persons: true` owes the person
+under Regulation (EU) 2024/1689 Art. 50(1) — "designed and developed in
+such a way that the natural persons concerned are informed". The same text
+also goes out once, at session creation, as
+`AgentOutputEvent(source="system")`, which every client already renders.
+
+Two shapes because they answer different questions. The event is the
+**emission**: it fires once, on the create path only, and lands in the
+transcript. The field is the standing **statement of what this session
+owes**, so a client attaching later — a second person, a reconnect on
+another device, a voice client that owns a speaker the framework cannot
+reach — can render it in its own medium without having been present for
+the emission. The framework ships no TTS, so the medium is the client's;
+the obligation is not.
+
+`PresentationContext.client_discloses_ai` (optional, default `false`) is
+the suppression: a client that already shows an "AI assistant" badge
+asserts the Act's "unless this is obvious from the point of view of a
+natural person who is reasonably well-informed, observant and circumspect"
+clause. It is the client's to assert because the client is the only party
+that can see the screen — and for the same reason `jaato-scaffold validate`
+deliberately does not read it: a per-connection assertion cannot answer a
+question about a profile, so `disclosure_absent` is unchanged.
+
+Additive optional fields in both directions, and each degrades in the safe
+direction: an older client ignores the announcement and is then a client
+that does not disclose, which is the state it was already in; an older
+daemon never reads the flag and therefore announces. No SDK minimum to
+refuse below.
+
 ### 1.14 — model media carries provenance
 
 `ToolOutputEvent.generated_by` (optional): the machine-readable marking

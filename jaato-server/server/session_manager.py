@@ -857,6 +857,28 @@ def _stamp_session_id(event: Any, session_id: Optional[str]) -> None:
         pass
 
 
+def _disclosure_announcement_of(server: Optional[JaatoServer]) -> Optional[str]:
+    """This server's Article 50(1) announcement, or ``None``.
+
+    A free function, and duck-typed, for the reason
+    ``RunnerRPC._turns_ran_snapshot`` is (#881): a server double or an
+    out-of-tree server class that predates the accessor must get the
+    pre-1.15 behaviour -- no announcement -- rather than an
+    ``AttributeError`` inside the state snapshot every client waits on.
+    A real :class:`JaatoServer` never takes that path.
+    """
+    if server is None:
+        return None
+    accessor = getattr(server, "disclosure_announcement", None)
+    if not callable(accessor):
+        return None
+    try:
+        return accessor()
+    except Exception:  # noqa: BLE001 -- a snapshot must not fail on this
+        logger.debug("disclosure_announcement raised", exc_info=True)
+        return None
+
+
 def initialize_or_refuse(server: JaatoServer, session_id: str) -> bool:
     """Run ``server.initialize()`` — unless the runner hosts no session.
 
@@ -8152,7 +8174,60 @@ class SessionManager:
                 style="info",
             ))
 
+        self._announce_ai_interaction(client_id, session)
+
         return session_id
+
+    def _announce_ai_interaction(
+        self, client_id: str, session: "Session",
+    ) -> None:
+        """Emit the Article 50(1) first-interaction announcement, once.
+
+        Regulation (EU) 2024/1689 Art. 50(1) obliges the provider of a
+        system "intended to interact directly with natural persons" to
+        DESIGN it so those persons are informed they are talking to an AI.
+        The ``disclosure`` instruction piece makes the model answer
+        truthfully when asked; that is the fallback.  This is the design
+        half: the framework says it, unprompted, before the first turn.
+
+        Four properties, each attached to a way it could go wrong:
+
+        * **Once per session, never per turn.**  Called from
+          ``_create_session_impl`` and from nowhere else.
+        * **Never on a revive.**  ``_load_session`` / ``session.wake``
+          continue a conversation that was already disclosed to, so
+          re-announcing would tell a person something they were told
+          before the transcript they are looking at began.
+        * **Never for a subagent.**  A subagent talks to its parent, not
+          to a person.  Subagent sessions do not come through this path.
+        * **Not in history.**  It goes out as an event; it is a framework
+          message to the person, not a model turn, and putting it in
+          history would replay it to the model on every request and let
+          GC decide when the person stops having been told.
+
+        Best-effort by construction: a failure here must not fail a
+        session that is otherwise created and usable -- but it is logged at
+        WARNING, not DEBUG.  A disclosure that silently did not happen is
+        the state Art. 50(1) exists to prevent, so it is exactly the wrong
+        thing to hide in a debug line nobody reads; the posture every other
+        weakened boundary here takes (``scrub_secret_env: none``,
+        ``--ws-unsafe-no-auth``).
+        """
+        from jaato_sdk.events import AgentOutputEvent
+
+        try:
+            text = _disclosure_announcement_of(session.server)
+            if not text:
+                return
+            self._emit_to_client(client_id, AgentOutputEvent(
+                agent_id="main", source="system", text=text, mode="write",
+            ))
+        except Exception:  # noqa: BLE001 -- see the docstring
+            logger.warning(
+                "AI-disclosure announcement (Art. 50(1)) was NOT emitted for "
+                "session %s; the person was not informed by the framework",
+                getattr(session, "session_id", "?"), exc_info=True,
+            )
 
     # ------------------------------------------------------------------
     # Headless session creation (for daemon extensions / reactors)
@@ -12088,6 +12163,16 @@ class SessionManager:
             sandbox_paths=sandbox_paths_data,
             services=services_data,
             tool_id_mappings=tool_id_mappings,
+            # Art. 50(1) (protocol 1.15).  On the SNAPSHOT rather than only
+            # on the one-shot event, because the two answer different
+            # questions: the ``AgentOutputEvent`` below is the EMISSION and
+            # fires once, at creation; this field is the standing statement
+            # of what this session owes the person, so a client attaching
+            # later -- a second person, a reconnect on another device --
+            # can render it in its own medium without having been present
+            # for the emission.  ``None`` when the session does not
+            # announce.
+            disclosure_announcement=_disclosure_announcement_of(session.server),
         )
 
     def get_session(self, session_id: str) -> Optional[Session]:

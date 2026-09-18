@@ -5095,13 +5095,14 @@ wants its own change rather than riding this one.
 Regulation (EU) 2024/1689 addresses the **provider** and **deployer** of an
 AI system; a jaato *application* (profile + persona + tools + model binding)
 is the system and the framework is a component supplier. The assessment is
-[docs/design/eu-ai-act.md](docs/design/eu-ai-act.md). Five mechanisms exist
+[docs/design/eu-ai-act.md](docs/design/eu-ai-act.md). Six mechanisms exist
 in the tree, each the smallest shape that makes an obligation expressible:
 
 | Obligation | Mechanism |
 |---|---|
 | 6(4) document the risk determination | `regulatory:` profile block — `{intended_purpose, risk_class: minimal\|limited\|high, annex_iii, provider: {name, contact}, interacts_with_persons, disclosure_text}`. Declared, never inferred. `risk_class` inherits most-restrictive-wins, the rest child-replaces. Rides every ingress incl. the isolated-runner payload |
 | 50(1) say you are an AI | the `disclosure` instruction piece (`shared/ai_disclosure.py`), fourth beside `disk` / `constants` / `security`; kept by the blanket `suppress_base_instructions: true`, dropped only by name and then announced at WARNING (`ANNOUNCED_PIECES`) |
+| 50(1) *before* the first turn | the announcement `announcement_for()` decides and `SessionManager._announce_ai_interaction` emits once at session creation — `AgentOutputEvent(source="system")` plus `SessionInfoEvent.disclosure_announcement` (protocol 1.15) for a client that owns a medium the framework cannot reach. `PresentationContext.client_discloses_ai` is the "unless this is obvious" suppression, asserted by the only party that can see the screen |
 | 50(2) mark generated output | `ToolOutputEvent.generated_by` (protocol 1.14): `{"kind": "ai", provider, model, session_id, agent_id}` on the model's own media, stamped in `_deliver_model_media`; `Attachment.generated_by` for a producer's claim; nothing on a relayed file |
 | 12 / 19 keep the logs | `TokenLedger` appends per record to `LEDGER_PATH`; `trace.ledger` is the typed key (relative = per session); `write_ledger` flushes only what was not appended |
 | 14(4) human oversight | `jaato-scaffold explain oversight [<profile>]` — the two stop verbs, the permission gate, the built-in constraints, reversibility, read from their enforcers; `jaato-doctor` prints the exact `jaato-server --stop` for the running daemon |
@@ -5123,8 +5124,7 @@ validation and *undeclared* for documentation, because a framework that
 printed `minimal` for it would be asserting a determination nobody made.
 
 Deliberately not built yet, each named in the design doc with its reason:
-the first-interaction announcement a client renders (`disclosure_announcement`
-has the text; nothing emits it), the `TRAIT_OUTPUT_MARKER` hook, the
+the `TRAIT_OUTPUT_MARKER` hook, the
 audit-record schema with `record_keeping:` retention, the Annex IV dossier
 generator, the incident register.
 

@@ -3498,12 +3498,41 @@ _IRREVERSIBLE_SURFACES = ("cli", "interactive_shell", "mcp",
                           "service_connector", "web_fetch")
 
 
+#: What ``explain oversight <profile>`` prints when a profile does not
+#: announce, keyed by the reason :func:`~shared.ai_disclosure.announcement_for`
+#: gave.  Three reasons rather than one line saying "none": an author cannot
+#: otherwise tell a profile that DECLINED to declare from one that declared
+#: ``false``, and the remedy differs (write the key, or nothing).
+_ANNOUNCEMENT_REASONS: Dict[str, str] = {
+    "not_declared": ("interacts_with_persons is undeclared "
+                     "(validate reports this as disclosure_absent)"),
+    "declared_no_persons": "interacts_with_persons: false",
+    "client_discloses": "the connected client declares it discloses already",
+}
+
+
+def _announcement(prof: Any) -> Dict[str, Any]:
+    """Whether this profile announces under Art. 50(1), and with what text.
+
+    Reads :func:`shared.ai_disclosure.announcement_for` -- the SAME
+    predicate ``JaatoServer.disclosure_announcement`` calls -- so this page
+    cannot say a profile announces while its sessions stay silent.  The
+    per-connection half (``PresentationContext.client_discloses_ai``) is
+    unknowable here and is described rather than applied, which is why the
+    rendered line names it as a thing that can still withhold.
+    """
+    from shared.ai_disclosure import announcement_for
+    text, reason = announcement_for(getattr(prof, "regulatory", None))
+    return {"text": text, "withheld_reason": reason}
+
+
 def _profile_oversight(prof: Any) -> Dict[str, Any]:
     """What a RESOLVED profile has armed, measure by measure."""
     limits = getattr(prof, "runtime_limits", None)
     reg = getattr(prof, "regulatory", None)
     return {
         "regulatory": reg.to_dict() if reg is not None else None,
+        "announcement": _announcement(prof),
         "permission_policy": _permission_summary(prof),
         "budget_control": _budget_summary(prof),
         "wall_clock": {
@@ -3558,6 +3587,20 @@ def _gate_line(gates: List[Dict[str, Any]]) -> str:
     return f"  COMPLETION GATE    {shown}"
 
 
+def _announcement_lines(ann: Dict[str, Any]) -> List[str]:
+    """The Art. 50(1) announcement rows of ``explain oversight <profile>``."""
+    pad = " " * 28
+    if ann["text"]:
+        return [
+            f"  announcement              {ann['text']!r}",
+            f"{pad}emitted once at session creation; a client",
+            f"{pad}sending client_discloses_ai withholds it",
+        ]
+    why = _ANNOUNCEMENT_REASONS.get(
+        ann["withheld_reason"] or "", "no reason recorded")
+    return [f"  announcement              none -- {why}"]
+
+
 def _profile_oversight_lines(name: str, P: Dict[str, Any]) -> List[str]:
     """Render :func:`_profile_oversight`."""
     reg = P["regulatory"] or {}
@@ -3568,6 +3611,7 @@ def _profile_oversight_lines(name: str, P: Dict[str, Any]) -> List[str]:
         "",
         f"  regulatory.risk_class     {reg.get('risk_class') or 'undeclared'}{annex}",
         f"  interacts_with_persons    {reg.get('interacts_with_persons', 'undeclared')}",
+        *_announcement_lines(P["announcement"]),
         "",
         _permission_line(P["permission_policy"]),
         _budget_line(P["budget_control"]),

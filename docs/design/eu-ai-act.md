@@ -382,15 +382,32 @@ regulatory:
 
 ### 4.2 Disclosure of AI interaction (Article 50(1))
 
-> **Shipped: touches 1 and 3.** `PIECE_DISCLOSURE` in
+> **Shipped: all three touches.** Touches 1 and 3: `PIECE_DISCLOSURE` in
 > `shared/instruction_suppression.py`, the text in `shared/ai_disclosure.py`,
 > appended by `JaatoRuntime.get_system_instructions` beside the boundary and
 > announced at WARNING by the session when dropped (`ANNOUNCED_PIECES`);
 > `disclosure_absent` and `high_risk_disclosure_suppressed` in `validate`.
-> Guard: `shared/tests/test_ai_disclosure_piece.py`. **Not yet:** touch 2,
-> the first-interaction announcement — `disclosure_announcement()` renders
-> the text, but nothing emits it on session creation and
-> `PresentationContext.client_discloses_ai` does not exist.
+> Guard: `shared/tests/test_ai_disclosure_piece.py`.
+>
+> Touch 2 (#1116): `announcement_for()` is the ONE predicate —
+> `JaatoServer.disclosure_announcement` and `explain oversight <profile>`
+> both call it, so the page cannot say a profile announces while its
+> sessions stay silent. `SessionManager._announce_ai_interaction` emits
+> `AgentOutputEvent(source="system")` once, on the create path only, and
+> `SessionInfoEvent.disclosure_announcement` carries the same text on the
+> state snapshot (protocol 1.15) so a client attaching later can render it
+> in its own medium. `PresentationContext.client_discloses_ai` suppresses.
+> Guard: `shared/tests/test_first_interaction_announcement.py`.
+>
+> **Stated limit on the speaking-tier half.** §4.2's touch 2 proposed
+> routing the announcement through `ensure_spoken_part` so a voice bot
+> discloses in the medium the person is using. That function gives a
+> spoken-but-wordless turn a *text* part; it does not turn text into
+> speech, and the framework ships no TTS. So the division is: the
+> framework states what must be said and carries it on a shape readable
+> before turn 1, and the client that owns the speaker says it aloud.
+> Pretending otherwise would be a disclosure that does not reach the ears
+> it was written for.
 
 Three touches, one fact:
 
