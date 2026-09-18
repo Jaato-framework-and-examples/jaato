@@ -14,5 +14,6 @@
   "memories": [],
   "sandbox_paths": [],
   "services": [],
-  "tool_id_mappings": {}
+  "tool_id_mappings": {},
+  "disclosure_announcement": null
 }

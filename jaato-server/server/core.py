@@ -555,6 +555,86 @@ _PURE_NOTIFICATION_EVENTS = {
 }
 
 
+def _note_incident(
+    server: Any,
+    kind: str,
+    cause: str,
+    *,
+    site: str,
+    session_id: Optional[str] = None,
+) -> None:
+    """Record one incident and emit its typed event (#1122).
+
+    A free function, and duck-typed, for the reason
+    ``_disclosure_announcement_of`` is (#881) -- but the argument is
+    sharper here: **every call site is on a terminal path**.  A dying
+    session, a stopped run.  Anything that can raise there turns a
+    reported failure into an UNREPORTED one at the moment the record
+    matters most, so a server double that lacks ``emit`` must get the
+    pre-#1122 behaviour rather than an ``AttributeError``.
+
+    Wrapped throughout for the same reason: an incident recorded ABOUT a
+    failure must not be able to add one.
+    """
+    from shared.incidents import raise_incident
+
+    sid = session_id or getattr(server, "session_id", None) or None
+
+    def _emit(incident) -> None:
+        emit = getattr(server, "emit", None)
+        if not callable(emit):
+            return
+        from jaato_sdk.events import IncidentEvent
+        emit(IncidentEvent(
+            session_id=incident.session_id or sid or "",
+            kind=incident.kind, at=incident.at, cause=incident.cause,
+            site=incident.site, provider=incident.provider,
+            model=incident.model, tier=incident.tier,
+        ))
+
+    # The session-env overlay is NOT applied here: every call site is on a
+    # terminal path, and two of the three run inside ``model_thread``'s
+    # ``finally`` -- after ``_with_session_env`` has exited.  So the trace
+    # destination is read off the resolved session env this server holds,
+    # rather than off a process environment that has already reverted to
+    # the daemon's own.  ``_session_env`` is what the overlay WOULD have
+    # applied, including the typed ``trace:`` block.
+    env = getattr(server, "_session_env", None) or {}
+    try:
+        raise_incident(kind, cause, site=site, emit=_emit, session_id=sid,
+                       trace_path=env.get("JAATO_TRACE_LOG"),
+                       workspace_root=(env.get("JAATO_WORKSPACE_ROOT")
+                                       or getattr(server, "workspace_path", None)))
+    except Exception:  # noqa: BLE001 -- see the docstring
+        logger.debug("incident not recorded", exc_info=True)
+
+
+def _record_keeping_env(profile: Any) -> Dict[str, str]:
+    """The session env a profile's ``record_keeping:`` block seeds (#1120).
+
+    Today one variable: the ledger's INTEGRITY posture.  It rides an env
+    var for the same reason the trace paths do -- the ledger is
+    constructed before any profile is resolved, and the runner-side
+    session reads the session-scoped context rather than this object.
+    The env var is the WIRE, never the place an author writes it;
+    ``record_keeping.integrity`` is the typed home and the only thing
+    ``validate`` and ``explain audit`` read.
+
+    A free function rather than four lines inside
+    ``_resolve_session_env``, which is at the complexity ceiling: the
+    ratchet is a ratchet, and new logic goes in a helper or the function
+    gets split, never into a raised number.
+
+    Returns an empty dict for a profile that declares nothing, so the
+    session env is byte-identical to before for every existing workspace.
+    """
+    keeping = getattr(profile, "record_keeping", None) if profile else None
+    if keeping is None or not getattr(keeping, "chains", False):
+        return {}
+    from shared.token_accounting import LEDGER_INTEGRITY_ENV
+    return {LEDGER_INTEGRITY_ENV: "sha256-chain"}
+
+
 class JaatoServer:
     """Core server logic for Jaato - UI-agnostic.
 
@@ -1111,6 +1191,33 @@ class JaatoServer:
                         "failed (%s)", exc,
                     )
 
+    def disclosure_announcement(self) -> Optional[str]:
+        """The Article 50(1) first-interaction announcement, or ``None``.
+
+        The session-scoped reading of
+        :func:`shared.ai_disclosure.announcement_for`: this server's
+        resolved profile supplies the ``regulatory:`` declaration, the
+        connected client's ``PresentationContext`` supplies the
+        "unless this is obvious" suppression.  Both halves live here and
+        nowhere else, which is why the daemon asks the server rather than
+        re-deriving the answer at the emit site.
+
+        Returns ``None`` -- announce nothing -- for a profile that has
+        not declared ``regulatory.interacts_with_persons: true``, for one
+        that declared it ``false``, and for a client that says it
+        discloses already.  Absent is not ``false``: a framework that
+        announced on behalf of a profile that made no determination would
+        put a legal statement in front of every existing workspace's
+        sessions.
+        """
+        from shared.ai_disclosure import announcement_for
+        text, _reason = announcement_for(
+            getattr(self._profile, "regulatory", None),
+            client_discloses_ai=bool(getattr(
+                self._presentation_context, "client_discloses_ai", False)),
+        )
+        return text
+
     def set_apparmor_confinement(
         self,
         confine_context: Callable,
@@ -1463,6 +1570,9 @@ class JaatoServer:
         # vocabulary and pass through to jaato_sdk.trace untouched.
         if self._profile and getattr(self._profile, 'trace', None):
             self._session_env.update(self._profile.trace.as_env())
+
+        # Typed `record_keeping:` block (#1120).
+        self._session_env.update(_record_keeping_env(self._profile))
 
         # Highest precedence — post-auth wizard overrides everything.
         if self._env_overrides:
@@ -4315,6 +4425,22 @@ class JaatoServer:
             error_summary=error_summary,
             error_type=error_type,
         ))
+        # 3. The incident register (#1122).  Raised from the TERMINAL site
+        # rather than from wherever the error was first noticed, so one
+        # dying session is one incident -- the same rule that keeps a
+        # budget abort from being counted twice by its rung and its
+        # terminal.
+        # ``NudgeExhausted`` gets its OWN kind rather than a second call
+        # site: it reaches the terminal through exactly this path, and a
+        # second raiser would count one dying session twice.  The kind is
+        # derived from the error type, which is the only thing that
+        # distinguishes them here.
+        from shared.incidents import KIND_NUDGE_EXHAUSTED, KIND_SESSION_ERROR
+        kind = (KIND_NUDGE_EXHAUSTED if error_type == "NudgeExhausted"
+                else KIND_SESSION_ERROR)
+        _note_incident(
+            self, kind, f"{error_type}: {error_summary}",
+            site="server/core.py::_emit_error_termination", session_id=sid)
 
     def _emit_error_termination_from_exc(
         self,
@@ -5189,6 +5315,12 @@ class JaatoServer:
                 "usage": dict(result.get("budget_usage") or {}),
             },
         ))
+        # One abort, one incident (#1122): raised HERE and not from the
+        # rung, because a rung also fires for notify / finalize / escalate
+        # and only this site means the run was stopped.
+        _note_incident(
+            self, "budget_exhausted", reason_text,
+            site="server/core.py::_emit_budget_refusal_if_exhausted")
         return True
 
     def _build_send_message_notification_handler(self):

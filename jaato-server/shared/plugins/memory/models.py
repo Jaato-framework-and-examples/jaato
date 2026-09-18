@@ -15,7 +15,7 @@ system ("The School"):
 """
 
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 
 # Valid maturity states for the knowledge curation lifecycle.
@@ -60,6 +60,22 @@ ACTIVE_MATURITIES = frozenset({MATURITY_RAW, MATURITY_VALIDATED})
 #: things; the fix is a second name, not a smarter condition.
 PROMOTES_OUT_OF_RAW = frozenset({MATURITY_VALIDATED, MATURITY_ESCALATED})
 
+#: Maturities that mean a curator APPROVED the memory, so ``curated_by``
+#: should carry their stamp (#1123).
+#:
+#: A THIRD set, for the reason the comment above gives about the second:
+#: it answers its own question.  ``PROMOTES_OUT_OF_RAW`` asks *has the
+#: curator decided about this* -- which a DISMISSAL also answers, and a
+#: dismissal is precisely not an approval.  Reusing it would stamp
+#: ``curated_by`` on memories the curator rejected, and
+#: ``require_curation`` reads that field as permission to surface one.
+#:
+#: The two sets happen to have the same members today.  That is not a
+#: reason to share a name: they would diverge the moment a maturity is
+#: added that is a decision and not an approval, and the sharing would
+#: make the divergence silent.
+CURATED_MATURITIES = frozenset({MATURITY_VALIDATED, MATURITY_ESCALATED})
+
 
 @dataclass
 class Memory:
@@ -89,6 +105,25 @@ class Memory:
             or other observations that substantiate the memory.
         source_agent: Name or profile of the agent that created this memory.
         source_session: Session ID where this memory was created.
+        generated_by: WHICH MODEL wrote it -- ``{"kind": "ai", "provider",
+            "model", "session_id", "agent_id"}``, the shape
+            :func:`jaato_sdk.events.ai_generated_by` mints (#1123).
+            jaato's learning loop is this plugin: the model writes
+            memories during a session and they are re-injected into later
+            sessions' prompts, which is what Art. 15(4) means by a system
+            that "continues to learn after being placed on the market".
+            A memory that does not record which model wrote it cannot be
+            audited when that model turns out to have been wrong.
+            **Stamped by the PLUGIN, never by the model** -- provenance a
+            subject asserts about itself is not provenance -- and ``None``
+            on a record written before #1123, which reads as *provenance
+            unknown* and never as human-authored.
+        curated_by: WHO APPROVED it -- the curator's own stamp, set when a
+            raw memory is promoted.  A SECOND field rather than an
+            overwrite of ``generated_by``: who wrote it and who approved
+            it are two facts, and collapsing them loses the one an
+            auditor asks for.  ``None`` = never curated, which is what
+            ``plugin_configs.memory.require_curation`` gates on.
     """
     id: str
     content: str
@@ -103,6 +138,20 @@ class Memory:
     evidence: Optional[str] = None
     source_agent: Optional[str] = None
     source_session: Optional[str] = None
+    generated_by: Optional[Dict[str, Any]] = None
+    curated_by: Optional[Dict[str, Any]] = None
+
+    @property
+    def is_curated(self) -> bool:
+        """Whether a curator has approved this memory (Art. 15(4), #1123).
+
+        Read by the ``require_curation`` gate.  Deliberately NOT derived
+        from ``maturity``: ``validated`` and ``escalated`` are the
+        curator's own vocabulary and a deployment may set them by hand or
+        by script, while this asks the narrower question *did the
+        curation step run and leave its mark*.  Absent is not curated.
+        """
+        return bool(self.curated_by)
 
     @property
     def is_active(self) -> bool:

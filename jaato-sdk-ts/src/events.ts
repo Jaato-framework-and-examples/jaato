@@ -87,6 +87,7 @@ export type JaatoEvents =
   | MidTurnPromptQueuedEvent
   | MidTurnPromptInjectedEvent
   | BudgetRungFiredEvent
+  | IncidentEvent
   | MidTurnInterruptEvent
   | InterruptedTurnRecoveredEvent
   | WorkspaceListRequest
@@ -177,6 +178,7 @@ export type EventType =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -306,6 +308,7 @@ export type EventType1 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -440,6 +443,7 @@ export type EventType2 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -572,6 +576,7 @@ export type EventType3 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -703,6 +708,7 @@ export type EventType4 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -842,6 +848,7 @@ export type EventType5 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -978,6 +985,7 @@ export type EventType6 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -1113,6 +1121,7 @@ export type EventType7 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -1242,6 +1251,7 @@ export type EventType8 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -1375,6 +1385,7 @@ export type EventType9 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -1506,6 +1517,7 @@ export type EventType10 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -1646,6 +1658,7 @@ export type EventType11 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -1785,6 +1798,7 @@ export type EventType12 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -1923,6 +1937,7 @@ export type EventType13 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -2064,6 +2079,7 @@ export type EventType14 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -2200,6 +2216,7 @@ export type EventType15 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -2330,6 +2347,7 @@ export type EventType16 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -2463,6 +2481,7 @@ export type EventType17 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -2596,6 +2615,7 @@ export type EventType18 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -2735,6 +2755,7 @@ export type EventType19 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -2867,6 +2888,7 @@ export type EventType20 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -3003,6 +3025,7 @@ export type EventType21 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -3134,6 +3157,7 @@ export type EventType22 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -3266,6 +3290,7 @@ export type EventType23 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -3398,6 +3423,7 @@ export type EventType24 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -3528,6 +3554,7 @@ export type EventType25 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -3663,6 +3690,7 @@ export type EventType26 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -3794,6 +3822,7 @@ export type EventType27 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -3924,6 +3953,7 @@ export type EventType28 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -4062,6 +4092,7 @@ export type EventType29 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -4194,6 +4225,7 @@ export type EventType30 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -4327,6 +4359,7 @@ export type EventType31 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -4475,6 +4508,7 @@ export type EventType32 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -4604,6 +4638,7 @@ export type EventType33 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -4750,6 +4785,7 @@ export type EventType34 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -4883,6 +4919,7 @@ export type EventType35 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -5012,6 +5049,7 @@ export type EventType36 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -5149,6 +5187,7 @@ export type EventType37 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -5282,6 +5321,7 @@ export type EventType38 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -5412,6 +5452,7 @@ export type EventType39 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -5541,6 +5582,7 @@ export type EventType40 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -5674,6 +5716,7 @@ export type EventType41 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -5809,6 +5852,7 @@ export type EventType42 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -5942,6 +5986,7 @@ export type EventType43 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -6073,6 +6118,7 @@ export type EventType44 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -6214,6 +6260,7 @@ export type EventType45 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -6321,6 +6368,7 @@ export type SandboxPaths = {
 export type Services = {
   [k: string]: unknown;
 }[];
+export type DisclosureAnnouncement = string | null;
 /**
  * All event types in the protocol.
  */
@@ -6364,6 +6412,7 @@ export type EventType46 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -6495,6 +6544,7 @@ export type EventType47 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -6626,6 +6676,7 @@ export type EventType48 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -6757,6 +6808,7 @@ export type EventType49 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -6886,6 +6938,7 @@ export type EventType50 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -7040,6 +7093,7 @@ export type EventType51 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -7173,6 +7227,7 @@ export type EventType52 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -7306,6 +7361,7 @@ export type EventType53 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -7437,6 +7493,7 @@ export type EventType54 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -7566,6 +7623,7 @@ export type EventType55 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -7695,6 +7753,7 @@ export type EventType56 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -7825,6 +7884,7 @@ export type EventType57 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -7958,6 +8018,7 @@ export type EventType58 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -8087,6 +8148,7 @@ export type EventType59 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -8215,6 +8277,7 @@ export type EventType60 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -8346,6 +8409,7 @@ export type EventType61 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -8474,6 +8538,7 @@ export type EventType62 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -8606,6 +8671,7 @@ export type EventType63 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -8734,6 +8800,7 @@ export type EventType64 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -8863,6 +8930,7 @@ export type EventType65 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -8994,6 +9062,7 @@ export type EventType66 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -9125,6 +9194,7 @@ export type EventType67 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -9256,6 +9326,7 @@ export type EventType68 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -9385,6 +9456,7 @@ export type EventType69 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -9520,6 +9592,7 @@ export type EventType70 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -9658,6 +9731,7 @@ export type EventType71 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -9788,6 +9862,7 @@ export type EventType72 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -9917,6 +9992,7 @@ export type EventType73 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -10053,6 +10129,7 @@ export type EventType74 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -10138,8 +10215,13 @@ export type EventType74 =
   | "gates.snapshot";
 export type Timestamp74 = string;
 export type SessionId74 = string;
-export type PartialResponseChars = number;
-export type UserPromptPreview = string;
+export type Kind = string;
+export type At = number;
+export type Cause = string;
+export type Site = string | null;
+export type Provider1 = string | null;
+export type Model1 = string | null;
+export type Tier = string | null;
 /**
  * All event types in the protocol.
  */
@@ -10183,6 +10265,7 @@ export type EventType75 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -10268,9 +10351,8 @@ export type EventType75 =
   | "gates.snapshot";
 export type Timestamp75 = string;
 export type SessionId75 = string;
-export type AgentId35 = string;
-export type RecoveredCalls = number;
-export type ActionTaken = string;
+export type PartialResponseChars = number;
+export type UserPromptPreview = string;
 /**
  * All event types in the protocol.
  */
@@ -10314,6 +10396,7 @@ export type EventType76 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -10399,6 +10482,9 @@ export type EventType76 =
   | "gates.snapshot";
 export type Timestamp76 = string;
 export type SessionId76 = string;
+export type AgentId35 = string;
+export type RecoveredCalls = number;
+export type ActionTaken = string;
 /**
  * All event types in the protocol.
  */
@@ -10442,6 +10528,7 @@ export type EventType77 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -10527,10 +10614,6 @@ export type EventType77 =
   | "gates.snapshot";
 export type Timestamp77 = string;
 export type SessionId77 = string;
-export type Root = string;
-export type Workspaces = {
-  [k: string]: unknown;
-}[];
 /**
  * All event types in the protocol.
  */
@@ -10574,6 +10657,7 @@ export type EventType78 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -10659,7 +10743,10 @@ export type EventType78 =
   | "gates.snapshot";
 export type Timestamp78 = string;
 export type SessionId78 = string;
-export type Name3 = string;
+export type Root = string;
+export type Workspaces = {
+  [k: string]: unknown;
+}[];
 /**
  * All event types in the protocol.
  */
@@ -10703,6 +10790,7 @@ export type EventType79 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -10788,8 +10876,7 @@ export type EventType79 =
   | "gates.snapshot";
 export type Timestamp79 = string;
 export type SessionId79 = string;
-export type Name4 = string;
-export type Path = string;
+export type Name3 = string;
 /**
  * All event types in the protocol.
  */
@@ -10833,6 +10920,7 @@ export type EventType80 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -10918,7 +11006,8 @@ export type EventType80 =
   | "gates.snapshot";
 export type Timestamp80 = string;
 export type SessionId80 = string;
-export type Name5 = string;
+export type Name4 = string;
+export type Path = string;
 /**
  * All event types in the protocol.
  */
@@ -10962,6 +11051,7 @@ export type EventType81 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -11047,9 +11137,7 @@ export type EventType81 =
   | "gates.snapshot";
 export type Timestamp81 = string;
 export type SessionId81 = string;
-export type Name6 = string;
-export type Ok = boolean;
-export type Error7 = string;
+export type Name5 = string;
 /**
  * All event types in the protocol.
  */
@@ -11093,6 +11181,7 @@ export type EventType82 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -11178,7 +11267,9 @@ export type EventType82 =
   | "gates.snapshot";
 export type Timestamp82 = string;
 export type SessionId82 = string;
-export type Name7 = string;
+export type Name6 = string;
+export type Ok = boolean;
+export type Error7 = string;
 /**
  * All event types in the protocol.
  */
@@ -11222,6 +11313,7 @@ export type EventType83 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -11307,12 +11399,7 @@ export type EventType83 =
   | "gates.snapshot";
 export type Timestamp83 = string;
 export type SessionId83 = string;
-export type Workspace1 = string;
-export type Configured = boolean;
-export type Provider1 = string | null;
-export type Model1 = string | null;
-export type AvailableProviders = string[];
-export type MissingFields = string[];
+export type Name7 = string;
 /**
  * All event types in the protocol.
  */
@@ -11356,6 +11443,7 @@ export type EventType84 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -11441,9 +11529,12 @@ export type EventType84 =
   | "gates.snapshot";
 export type Timestamp84 = string;
 export type SessionId84 = string;
-export type Provider2 = string;
+export type Workspace1 = string;
+export type Configured = boolean;
+export type Provider2 = string | null;
 export type Model2 = string | null;
-export type ApiKey = string | null;
+export type AvailableProviders = string[];
+export type MissingFields = string[];
 /**
  * All event types in the protocol.
  */
@@ -11487,6 +11578,7 @@ export type EventType85 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -11572,11 +11664,9 @@ export type EventType85 =
   | "gates.snapshot";
 export type Timestamp85 = string;
 export type SessionId85 = string;
-export type Workspace2 = string;
 export type Provider3 = string;
 export type Model3 = string | null;
-export type Success3 = boolean;
-export type Error8 = string | null;
+export type ApiKey = string | null;
 /**
  * All event types in the protocol.
  */
@@ -11620,6 +11710,7 @@ export type EventType86 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -11705,9 +11796,11 @@ export type EventType86 =
   | "gates.snapshot";
 export type Timestamp86 = string;
 export type SessionId86 = string;
-export type Changes = {
-  [k: string]: string;
-}[];
+export type Workspace2 = string;
+export type Provider4 = string;
+export type Model4 = string | null;
+export type Success3 = boolean;
+export type Error8 = string | null;
 /**
  * All event types in the protocol.
  */
@@ -11751,6 +11844,7 @@ export type EventType87 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -11836,10 +11930,9 @@ export type EventType87 =
   | "gates.snapshot";
 export type Timestamp87 = string;
 export type SessionId87 = string;
-export type Files = {
+export type Changes = {
   [k: string]: string;
 }[];
-export type Total = number;
 /**
  * All event types in the protocol.
  */
@@ -11883,6 +11976,7 @@ export type EventType88 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -11968,11 +12062,10 @@ export type EventType88 =
   | "gates.snapshot";
 export type Timestamp88 = string;
 export type SessionId88 = string;
-export type Path1 = string;
-export type Ignored = boolean;
-export type Ok1 = boolean;
-export type Error9 = string;
-export type GitignorePath = string;
+export type Files = {
+  [k: string]: string;
+}[];
+export type Total = number;
 /**
  * All event types in the protocol.
  */
@@ -12016,6 +12109,7 @@ export type EventType89 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -12101,12 +12195,11 @@ export type EventType89 =
   | "gates.snapshot";
 export type Timestamp89 = string;
 export type SessionId89 = string;
-export type WorkspaceId = string;
-export type Name8 = string;
-export type Size = number;
-export type ContentType = string | null;
-export type Mode1 = number | null;
-export type Files1 = StagedFileSpec[];
+export type Path1 = string;
+export type Ignored = boolean;
+export type Ok1 = boolean;
+export type Error9 = string;
+export type GitignorePath = string;
 /**
  * All event types in the protocol.
  */
@@ -12150,6 +12243,7 @@ export type EventType90 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -12235,11 +12329,12 @@ export type EventType90 =
   | "gates.snapshot";
 export type Timestamp90 = string;
 export type SessionId90 = string;
-export type WorkspaceId1 = string;
-export type Staged = string[];
-export type Failed = {
-  [k: string]: string;
-}[];
+export type WorkspaceId = string;
+export type Name8 = string;
+export type Size = number;
+export type ContentType = string | null;
+export type Mode1 = number | null;
+export type Files1 = StagedFileSpec[];
 /**
  * All event types in the protocol.
  */
@@ -12283,6 +12378,7 @@ export type EventType91 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -12368,20 +12464,11 @@ export type EventType91 =
   | "gates.snapshot";
 export type Timestamp91 = string;
 export type SessionId91 = string;
-export type ServerId = string;
-export type ServerName = string;
-export type ServerVersion = string;
-export type ActiveSessions = number;
-export type ActiveAgents = number;
-export type AvailableProviders1 = string[];
-export type AvailableModels1 = string[];
-export type Tags = string[];
-export type CpuPercent = number;
-export type MemoryPercent = number;
-export type UptimeSeconds = number;
-export type TrustState = string;
-export type SuccessRate1H = number;
-export type EscalatedTools = number;
+export type WorkspaceId1 = string;
+export type Staged = string[];
+export type Failed = {
+  [k: string]: string;
+}[];
 /**
  * All event types in the protocol.
  */
@@ -12425,6 +12512,7 @@ export type EventType92 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -12510,17 +12598,20 @@ export type EventType92 =
   | "gates.snapshot";
 export type Timestamp92 = string;
 export type SessionId92 = string;
-export type RequestId22 = string;
-export type OriginServer = string;
-export type AgentName1 = string;
-export type Task = string;
-export type Context1 = string;
-export type ProfileJson = string;
-export type InlineConfigJson = string;
-export type WorkspaceGitUrl = string;
-export type WorkspaceBranch = string;
-export type WorkspaceCommit = string;
-export type WorkspaceTempBranch = string;
+export type ServerId = string;
+export type ServerName = string;
+export type ServerVersion = string;
+export type ActiveSessions = number;
+export type ActiveAgents = number;
+export type AvailableProviders1 = string[];
+export type AvailableModels1 = string[];
+export type Tags = string[];
+export type CpuPercent = number;
+export type MemoryPercent = number;
+export type UptimeSeconds = number;
+export type TrustState = string;
+export type SuccessRate1H = number;
+export type EscalatedTools = number;
 /**
  * All event types in the protocol.
  */
@@ -12564,6 +12655,7 @@ export type EventType93 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -12649,8 +12741,17 @@ export type EventType93 =
   | "gates.snapshot";
 export type Timestamp93 = string;
 export type SessionId93 = string;
-export type RequestId23 = string;
-export type RemoteAgentId = string;
+export type RequestId22 = string;
+export type OriginServer = string;
+export type AgentName1 = string;
+export type Task = string;
+export type Context1 = string;
+export type ProfileJson = string;
+export type InlineConfigJson = string;
+export type WorkspaceGitUrl = string;
+export type WorkspaceBranch = string;
+export type WorkspaceCommit = string;
+export type WorkspaceTempBranch = string;
 /**
  * All event types in the protocol.
  */
@@ -12694,6 +12795,7 @@ export type EventType94 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -12779,8 +12881,8 @@ export type EventType94 =
   | "gates.snapshot";
 export type Timestamp94 = string;
 export type SessionId94 = string;
-export type RequestId24 = string;
-export type Reason1 = string;
+export type RequestId23 = string;
+export type RemoteAgentId = string;
 /**
  * All event types in the protocol.
  */
@@ -12824,6 +12926,7 @@ export type EventType95 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -12909,10 +13012,8 @@ export type EventType95 =
   | "gates.snapshot";
 export type Timestamp95 = string;
 export type SessionId95 = string;
-export type RequestId25 = string;
-export type RemoteAgentId1 = string;
-export type Text4 = string;
-export type Source1 = string;
+export type RequestId24 = string;
+export type Reason1 = string;
 /**
  * All event types in the protocol.
  */
@@ -12956,6 +13057,7 @@ export type EventType96 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -13041,12 +13143,10 @@ export type EventType96 =
   | "gates.snapshot";
 export type Timestamp96 = string;
 export type SessionId96 = string;
-export type RequestId26 = string;
-export type RemoteAgentId2 = string;
-export type Success4 = boolean;
-export type Summary = string;
-export type Error10 = string;
-export type WorkspaceModified = boolean;
+export type RequestId25 = string;
+export type RemoteAgentId1 = string;
+export type Text4 = string;
+export type Source1 = string;
 /**
  * All event types in the protocol.
  */
@@ -13090,6 +13190,7 @@ export type EventType97 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -13175,8 +13276,12 @@ export type EventType97 =
   | "gates.snapshot";
 export type Timestamp97 = string;
 export type SessionId97 = string;
-export type RequestId27 = string;
-export type RemoteAgentId3 = string;
+export type RequestId26 = string;
+export type RemoteAgentId2 = string;
+export type Success4 = boolean;
+export type Summary = string;
+export type Error10 = string;
+export type WorkspaceModified = boolean;
 /**
  * All event types in the protocol.
  */
@@ -13220,6 +13325,7 @@ export type EventType98 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -13305,8 +13411,8 @@ export type EventType98 =
   | "gates.snapshot";
 export type Timestamp98 = string;
 export type SessionId98 = string;
-export type RequestId28 = string;
-export type RemoteAgentId4 = string;
+export type RequestId27 = string;
+export type RemoteAgentId3 = string;
 /**
  * All event types in the protocol.
  */
@@ -13350,6 +13456,7 @@ export type EventType99 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -13435,10 +13542,8 @@ export type EventType99 =
   | "gates.snapshot";
 export type Timestamp99 = string;
 export type SessionId99 = string;
-export type GateName = string;
-export type TenantId = string;
-export type Owner = string;
-export type AnnouncedAt = string;
+export type RequestId28 = string;
+export type RemoteAgentId4 = string;
 /**
  * All event types in the protocol.
  */
@@ -13482,6 +13587,7 @@ export type EventType100 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -13567,14 +13673,10 @@ export type EventType100 =
   | "gates.snapshot";
 export type Timestamp100 = string;
 export type SessionId100 = string;
-export type GateName1 = string;
-export type TenantId1 = string;
-export type Owner1 = string;
-export type Outcome = {
-  [k: string]: unknown;
-} | null;
-export type ReleasedAt = string;
-export type WasAnnounced = boolean;
+export type GateName = string;
+export type TenantId = string;
+export type Owner = string;
+export type AnnouncedAt = string;
 /**
  * All event types in the protocol.
  */
@@ -13618,6 +13720,7 @@ export type EventType101 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -13703,17 +13806,14 @@ export type EventType101 =
   | "gates.snapshot";
 export type Timestamp101 = string;
 export type SessionId101 = string;
-export type GateName2 = string;
-export type TenantId2 = string;
-export type State = string;
-export type Owner2 = string | null;
-export type Intent1 = {
+export type GateName1 = string;
+export type TenantId1 = string;
+export type Owner1 = string;
+export type Outcome = {
   [k: string]: unknown;
 } | null;
-export type AcquiredAt = string | null;
-export type ExpiresAt = string | null;
-export type Gates = GateState[];
-export type SnapshotAt = string;
+export type ReleasedAt = string;
+export type WasAnnounced = boolean;
 /**
  * All event types in the protocol.
  */
@@ -13757,6 +13857,7 @@ export type EventType102 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -13842,13 +13943,17 @@ export type EventType102 =
   | "gates.snapshot";
 export type Timestamp102 = string;
 export type SessionId102 = string;
-export type Text5 = string;
-export type SourceType = string;
-export type SourceId = string | null;
-export type Attachments1 = {
+export type GateName2 = string;
+export type TenantId2 = string;
+export type State = string;
+export type Owner2 = string | null;
+export type Intent1 = {
   [k: string]: unknown;
-}[];
-export type RequestId29 = string | null;
+} | null;
+export type AcquiredAt = string | null;
+export type ExpiresAt = string | null;
+export type Gates = GateState[];
+export type SnapshotAt = string;
 /**
  * All event types in the protocol.
  */
@@ -13892,6 +13997,7 @@ export type EventType103 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -13977,9 +14083,13 @@ export type EventType103 =
   | "gates.snapshot";
 export type Timestamp103 = string;
 export type SessionId103 = string;
-export type RequestId30 = string;
-export type Status3 = string;
-export type Detail = string | null;
+export type Text5 = string;
+export type SourceType = string;
+export type SourceId = string | null;
+export type Attachments1 = {
+  [k: string]: unknown;
+}[];
+export type RequestId29 = string | null;
 /**
  * All event types in the protocol.
  */
@@ -14023,6 +14133,7 @@ export type EventType104 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -14108,13 +14219,9 @@ export type EventType104 =
   | "gates.snapshot";
 export type Timestamp104 = string;
 export type SessionId104 = string;
-export type RequestId31 = string;
-export type Messages =
-  | {
-      [k: string]: unknown;
-    }[]
-  | null;
-export type TimeoutSeconds = number;
+export type RequestId30 = string;
+export type Status3 = string;
+export type Detail = string | null;
 /**
  * All event types in the protocol.
  */
@@ -14158,6 +14265,7 @@ export type EventType105 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -14243,9 +14351,13 @@ export type EventType105 =
   | "gates.snapshot";
 export type Timestamp105 = string;
 export type SessionId105 = string;
-export type RequestId32 = string;
-export type ResponseText = string;
-export type Error11 = string;
+export type RequestId31 = string;
+export type Messages =
+  | {
+      [k: string]: unknown;
+    }[]
+  | null;
+export type TimeoutSeconds = number;
 /**
  * All event types in the protocol.
  */
@@ -14289,6 +14401,7 @@ export type EventType106 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -14374,10 +14487,9 @@ export type EventType106 =
   | "gates.snapshot";
 export type Timestamp106 = string;
 export type SessionId106 = string;
-export type RequestId33 = string;
-export type AfterMessage = number | null;
-export type AfterToolCall = string | null;
-export type AfterTimestamp = string | null;
+export type RequestId32 = string;
+export type ResponseText = string;
+export type Error11 = string;
 /**
  * All event types in the protocol.
  */
@@ -14421,6 +14533,7 @@ export type EventType107 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -14506,9 +14619,10 @@ export type EventType107 =
   | "gates.snapshot";
 export type Timestamp107 = string;
 export type SessionId107 = string;
-export type RequestId34 = string;
-export type ForkIndex = number;
-export type Error12 = string;
+export type RequestId33 = string;
+export type AfterMessage = number | null;
+export type AfterToolCall = string | null;
+export type AfterTimestamp = string | null;
 /**
  * All event types in the protocol.
  */
@@ -14552,6 +14666,7 @@ export type EventType108 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -14637,11 +14752,9 @@ export type EventType108 =
   | "gates.snapshot";
 export type Timestamp108 = string;
 export type SessionId108 = string;
-export type WakeRef = string;
-export type Outcome1 = string;
-export type Detail1 = string;
-export type ExpiresAt1 = number;
-export type Endpoint = string;
+export type RequestId34 = string;
+export type ForkIndex = number;
+export type Error12 = string;
 /**
  * All event types in the protocol.
  */
@@ -14685,6 +14798,7 @@ export type EventType109 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -14770,8 +14884,11 @@ export type EventType109 =
   | "gates.snapshot";
 export type Timestamp109 = string;
 export type SessionId109 = string;
-export type WakeRef1 = string;
-export type Source2 = string;
+export type WakeRef = string;
+export type Outcome1 = string;
+export type Detail1 = string;
+export type ExpiresAt1 = number;
+export type Endpoint = string;
 /**
  * All event types in the protocol.
  */
@@ -14815,6 +14932,7 @@ export type EventType110 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -14900,8 +15018,8 @@ export type EventType110 =
   | "gates.snapshot";
 export type Timestamp110 = string;
 export type SessionId110 = string;
-export type Tools3 = string[];
-export type Patterns = string[];
+export type WakeRef1 = string;
+export type Source2 = string;
 /**
  * All event types in the protocol.
  */
@@ -14945,6 +15063,7 @@ export type EventType111 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -15030,8 +15149,8 @@ export type EventType111 =
   | "gates.snapshot";
 export type Timestamp111 = string;
 export type SessionId111 = string;
-export type Tools4 = string[];
-export type Patterns1 = string[];
+export type Tools3 = string[];
+export type Patterns = string[];
 /**
  * All event types in the protocol.
  */
@@ -15075,6 +15194,7 @@ export type EventType112 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -15160,9 +15280,8 @@ export type EventType112 =
   | "gates.snapshot";
 export type Timestamp112 = string;
 export type SessionId112 = string;
-export type Target = string;
-export type Tools5 = string[];
-export type Patterns2 = string[];
+export type Tools4 = string[];
+export type Patterns1 = string[];
 /**
  * All event types in the protocol.
  */
@@ -15206,6 +15325,7 @@ export type EventType113 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -15291,7 +15411,9 @@ export type EventType113 =
   | "gates.snapshot";
 export type Timestamp113 = string;
 export type SessionId113 = string;
-export type Target1 = string;
+export type Target = string;
+export type Tools5 = string[];
+export type Patterns2 = string[];
 /**
  * All event types in the protocol.
  */
@@ -15335,6 +15457,7 @@ export type EventType114 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -15420,7 +15543,7 @@ export type EventType114 =
   | "gates.snapshot";
 export type Timestamp114 = string;
 export type SessionId114 = string;
-export type Policy = string;
+export type Target1 = string;
 /**
  * All event types in the protocol.
  */
@@ -15464,6 +15587,7 @@ export type EventType115 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -15549,7 +15673,7 @@ export type EventType115 =
   | "gates.snapshot";
 export type Timestamp115 = string;
 export type SessionId115 = string;
-export type RequestId35 = string;
+export type Policy = string;
 /**
  * All event types in the protocol.
  */
@@ -15593,6 +15717,7 @@ export type EventType116 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -15678,15 +15803,7 @@ export type EventType116 =
   | "gates.snapshot";
 export type Timestamp116 = string;
 export type SessionId116 = string;
-export type RequestId36 = string;
-export type DefaultPolicy = string;
-export type SessionDefaultPolicy = string | null;
-export type WhitelistTools = string[];
-export type WhitelistPatterns = string[];
-export type BlacklistTools = string[];
-export type BlacklistPatterns = string[];
-export type SessionWhitelist = string[];
-export type SessionBlacklist = string[];
+export type RequestId35 = string;
 /**
  * All event types in the protocol.
  */
@@ -15730,6 +15847,7 @@ export type EventType117 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -15815,10 +15933,15 @@ export type EventType117 =
   | "gates.snapshot";
 export type Timestamp117 = string;
 export type SessionId117 = string;
-export type RequestId37 = string;
-export type User = string;
-export type TtlSeconds = number;
-export type SingleUse = boolean;
+export type RequestId36 = string;
+export type DefaultPolicy = string;
+export type SessionDefaultPolicy = string | null;
+export type WhitelistTools = string[];
+export type WhitelistPatterns = string[];
+export type BlacklistTools = string[];
+export type BlacklistPatterns = string[];
+export type SessionWhitelist = string[];
+export type SessionBlacklist = string[];
 /**
  * All event types in the protocol.
  */
@@ -15862,6 +15985,7 @@ export type EventType118 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -15947,13 +16071,10 @@ export type EventType118 =
   | "gates.snapshot";
 export type Timestamp118 = string;
 export type SessionId118 = string;
-export type RequestId38 = string;
-export type Status4 = string;
-export type Ticket = string;
-export type Qualified = string;
-export type AppId = string;
-export type ExpiresAt2 = string;
-export type Detail2 = string | null;
+export type RequestId37 = string;
+export type User = string;
+export type TtlSeconds = number;
+export type SingleUse = boolean;
 /**
  * All event types in the protocol.
  */
@@ -15997,6 +16118,7 @@ export type EventType119 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -16082,9 +16204,13 @@ export type EventType119 =
   | "gates.snapshot";
 export type Timestamp119 = string;
 export type SessionId119 = string;
-export type RequestId39 = string;
-export type Ticket1 = string;
-export type User1 = string;
+export type RequestId38 = string;
+export type Status4 = string;
+export type Ticket = string;
+export type Qualified = string;
+export type AppId = string;
+export type ExpiresAt2 = string;
+export type Detail2 = string | null;
 /**
  * All event types in the protocol.
  */
@@ -16128,6 +16254,7 @@ export type EventType120 =
   | "turn.progress"
   | "instruction_budget.updated"
   | "budget.rung_fired"
+  | "incident.raised"
   | "gc.config"
   | "gc"
   | "instruction_budget.request"
@@ -16213,6 +16340,138 @@ export type EventType120 =
   | "gates.snapshot";
 export type Timestamp120 = string;
 export type SessionId120 = string;
+export type RequestId39 = string;
+export type Ticket1 = string;
+export type User1 = string;
+/**
+ * All event types in the protocol.
+ */
+export type EventType121 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp121 = string;
+export type SessionId121 = string;
 export type RequestId40 = string;
 export type Status5 = string;
 export type Revoked = number;
@@ -17247,6 +17506,7 @@ export interface SessionInfoEvent {
   sandbox_paths?: SandboxPaths;
   services?: Services;
   tool_id_mappings?: ToolIdMappings;
+  disclosure_announcement?: DisclosureAnnouncement;
 }
 export interface ToolIdMappings {
   [k: string]: string;
@@ -17720,6 +17980,48 @@ export interface TierChanges {
   [k: string]: string;
 }
 /**
+ * Something happened that a person should look at (protocol 1.16).
+ *
+ * Article 73 gives a provider 15 days to report a serious incident from
+ * the moment it becomes AWARE of it -- 10 for a death, 2 for a
+ * widespread infringement.  All three clocks start from awareness, and
+ * the framework already knew when the events that could be one
+ * happened; it recorded none of them as such, each being a log line in
+ * a different format with no severity and no clock.
+ *
+ * **This event does not classify.**  Whether an entry IS a serious
+ * incident under Art. 3(49) is a determination about consequences --
+ * harm to a person, disruption of critical infrastructure -- that the
+ * framework cannot see.  It reports the fact and the clock; a person
+ * decides.  The absence of a ``severity`` field is that decision, not
+ * an omission.
+ *
+ * The same record goes to the application trace as an ``INCIDENT:``
+ * line (``shared.incidents``), which is what ``jaato-doctor
+ * --incidents`` reads and what a deployment gets without configuring
+ * anything.
+ *
+ * Attributes:
+ *     kind: One of ``shared.incidents.INCIDENT_KINDS``.
+ *     at: Unix timestamp of when the framework became aware.
+ *     cause: One line saying what happened.
+ *     site: ``file.py::function`` -- what noticed.
+ *     provider / model / tier: The binding that was serving, when
+ *         there was one.  Absent rather than ``null`` when unknown.
+ */
+export interface IncidentEvent {
+  type?: EventType74;
+  timestamp?: Timestamp74;
+  session_id?: SessionId74;
+  kind?: Kind;
+  at?: At;
+  cause?: Cause;
+  site?: Site;
+  provider?: Provider1;
+  model?: Model1;
+  tier?: Tier;
+}
+/**
  * Sent when streaming is interrupted to process a mid-turn user prompt.
  *
  * This notifies the client that the model's current generation was interrupted
@@ -17727,9 +18029,9 @@ export interface TierChanges {
  * The partial response is preserved and the user's prompt is being processed.
  */
 export interface MidTurnInterruptEvent {
-  type?: EventType74;
-  timestamp?: Timestamp74;
-  session_id?: SessionId74;
+  type?: EventType75;
+  timestamp?: Timestamp75;
+  session_id?: SessionId75;
   partial_response_chars?: PartialResponseChars;
   user_prompt_preview?: UserPromptPreview;
 }
@@ -17741,9 +18043,9 @@ export interface MidTurnInterruptEvent {
  * for any pending tool calls.
  */
 export interface InterruptedTurnRecoveredEvent {
-  type?: EventType75;
-  timestamp?: Timestamp75;
-  session_id?: SessionId75;
+  type?: EventType76;
+  timestamp?: Timestamp76;
+  session_id?: SessionId76;
   agent_id?: AgentId35;
   recovered_calls?: RecoveredCalls;
   action_taken?: ActionTaken;
@@ -17752,17 +18054,17 @@ export interface InterruptedTurnRecoveredEvent {
  * Client requests list of available workspaces.
  */
 export interface WorkspaceListRequest {
-  type?: EventType76;
-  timestamp?: Timestamp76;
-  session_id?: SessionId76;
+  type?: EventType77;
+  timestamp?: Timestamp77;
+  session_id?: SessionId77;
 }
 /**
  * Response to workspace.list - list of available workspaces.
  */
 export interface WorkspaceListEvent {
-  type?: EventType77;
-  timestamp?: Timestamp77;
-  session_id?: SessionId77;
+  type?: EventType78;
+  timestamp?: Timestamp78;
+  session_id?: SessionId78;
   root?: Root;
   workspaces?: Workspaces;
 }
@@ -17770,9 +18072,9 @@ export interface WorkspaceListEvent {
  * Client requests creation of a new workspace.
  */
 export interface WorkspaceCreateRequest {
-  type?: EventType78;
-  timestamp?: Timestamp78;
-  session_id?: SessionId78;
+  type?: EventType79;
+  timestamp?: Timestamp79;
+  session_id?: SessionId79;
   name?: Name3;
 }
 /**
@@ -17787,9 +18089,9 @@ export interface WorkspaceCreateRequest {
  * learned of a created workspace as one with no name.
  */
 export interface WorkspaceCreatedEvent {
-  type?: EventType79;
-  timestamp?: Timestamp79;
-  session_id?: SessionId79;
+  type?: EventType80;
+  timestamp?: Timestamp80;
+  session_id?: SessionId80;
   name?: Name4;
   path?: Path;
   workspace?: Workspace;
@@ -17804,9 +18106,9 @@ export interface Workspace {
  * ``WorkspaceDeletedEvent``.
  */
 export interface WorkspaceDeleteRequest {
-  type?: EventType80;
-  timestamp?: Timestamp80;
-  session_id?: SessionId80;
+  type?: EventType81;
+  timestamp?: Timestamp81;
+  session_id?: SessionId81;
   name?: Name5;
 }
 /**
@@ -17821,9 +18123,9 @@ export interface WorkspaceDeleteRequest {
  * gone and the deleting client's selection of it is cleared.
  */
 export interface WorkspaceDeletedEvent {
-  type?: EventType81;
-  timestamp?: Timestamp81;
-  session_id?: SessionId81;
+  type?: EventType82;
+  timestamp?: Timestamp82;
+  session_id?: SessionId82;
   name?: Name6;
   ok?: Ok;
   error?: Error7;
@@ -17832,22 +18134,22 @@ export interface WorkspaceDeletedEvent {
  * Client selects a workspace to use for the session.
  */
 export interface WorkspaceSelectRequest {
-  type?: EventType82;
-  timestamp?: Timestamp82;
-  session_id?: SessionId82;
+  type?: EventType83;
+  timestamp?: Timestamp83;
+  session_id?: SessionId83;
   name?: Name7;
 }
 /**
  * Response to workspace.select - configuration status of selected workspace.
  */
 export interface ConfigStatusEvent {
-  type?: EventType83;
-  timestamp?: Timestamp83;
-  session_id?: SessionId83;
+  type?: EventType84;
+  timestamp?: Timestamp84;
+  session_id?: SessionId84;
   workspace?: Workspace1;
   configured?: Configured;
-  provider?: Provider1;
-  model?: Model1;
+  provider?: Provider2;
+  model?: Model2;
   available_providers?: AvailableProviders;
   missing_fields?: MissingFields;
 }
@@ -17855,23 +18157,23 @@ export interface ConfigStatusEvent {
  * Client updates workspace configuration (provider, model, API key).
  */
 export interface ConfigUpdateRequest {
-  type?: EventType84;
-  timestamp?: Timestamp84;
-  session_id?: SessionId84;
-  provider?: Provider2;
-  model?: Model2;
+  type?: EventType85;
+  timestamp?: Timestamp85;
+  session_id?: SessionId85;
+  provider?: Provider3;
+  model?: Model3;
   api_key?: ApiKey;
 }
 /**
  * Response to config.update - configuration was updated.
  */
 export interface ConfigUpdatedEvent {
-  type?: EventType85;
-  timestamp?: Timestamp85;
-  session_id?: SessionId85;
+  type?: EventType86;
+  timestamp?: Timestamp86;
+  session_id?: SessionId86;
   workspace?: Workspace2;
-  provider?: Provider3;
-  model?: Model3;
+  provider?: Provider4;
+  model?: Model4;
   success?: Success3;
   error?: Error8;
 }
@@ -17889,9 +18191,9 @@ export interface ConfigUpdatedEvent {
  *     ``"deleted"``  – file was previously tracked and is now gone.
  */
 export interface WorkspaceFilesChangedEvent {
-  type?: EventType86;
-  timestamp?: Timestamp86;
-  session_id?: SessionId86;
+  type?: EventType87;
+  timestamp?: Timestamp87;
+  session_id?: SessionId87;
   changes?: Changes;
 }
 /**
@@ -17902,9 +18204,9 @@ export interface WorkspaceFilesChangedEvent {
  * replaying individual deltas.
  */
 export interface WorkspaceFilesSnapshotEvent {
-  type?: EventType87;
-  timestamp?: Timestamp87;
-  session_id?: SessionId87;
+  type?: EventType88;
+  timestamp?: Timestamp88;
+  session_id?: SessionId88;
   files?: Files;
   total?: Total;
 }
@@ -17937,9 +18239,9 @@ export interface WorkspaceFilesSnapshotEvent {
  *     gitignore_path: The file that was edited, so a client can name it.
  */
 export interface WorkspaceIgnoreResultEvent {
-  type?: EventType88;
-  timestamp?: Timestamp88;
-  session_id?: SessionId88;
+  type?: EventType89;
+  timestamp?: Timestamp89;
+  session_id?: SessionId89;
   path?: Path1;
   ignored?: Ignored;
   ok?: Ok1;
@@ -17986,9 +18288,9 @@ export interface WorkspaceIgnoreResultEvent {
  * already-existing workspace mid-session.
  */
 export interface StageFilesRequest {
-  type?: EventType89;
-  timestamp?: Timestamp89;
-  session_id?: SessionId89;
+  type?: EventType90;
+  timestamp?: Timestamp90;
+  session_id?: SessionId90;
   workspace_id?: WorkspaceId;
   files?: Files1;
 }
@@ -18036,9 +18338,9 @@ export interface StagedFileSpec {
  *   AppArmor refusal, ...).  ``error`` carries the OS message.
  */
 export interface StageFilesEvent {
-  type?: EventType90;
-  timestamp?: Timestamp90;
-  session_id?: SessionId90;
+  type?: EventType91;
+  timestamp?: Timestamp91;
+  session_id?: SessionId91;
   workspace_id?: WorkspaceId1;
   staged?: Staged;
   failed?: Failed;
@@ -18051,9 +18353,9 @@ export interface StageFilesEvent {
  * to expose cluster state to the model.
  */
 export interface PeerHeartbeatEvent {
-  type?: EventType91;
-  timestamp?: Timestamp91;
-  session_id?: SessionId91;
+  type?: EventType92;
+  timestamp?: Timestamp92;
+  session_id?: SessionId92;
   server_id?: ServerId;
   server_name?: ServerName;
   server_version?: ServerVersion;
@@ -18078,9 +18380,9 @@ export interface PeerHeartbeatEvent {
  * this spawn lifecycle.
  */
 export interface PeerSpawnRequestEvent {
-  type?: EventType92;
-  timestamp?: Timestamp92;
-  session_id?: SessionId92;
+  type?: EventType93;
+  timestamp?: Timestamp93;
+  session_id?: SessionId93;
   request_id?: RequestId22;
   origin_server?: OriginServer;
   agent_name?: AgentName1;
@@ -18100,9 +18402,9 @@ export interface PeerSpawnRequestEvent {
  * ephemeral session and is about to start processing.
  */
 export interface PeerSpawnAcceptedEvent {
-  type?: EventType93;
-  timestamp?: Timestamp93;
-  session_id?: SessionId93;
+  type?: EventType94;
+  timestamp?: Timestamp94;
+  session_id?: SessionId94;
   request_id?: RequestId23;
   remote_agent_id?: RemoteAgentId;
 }
@@ -18113,9 +18415,9 @@ export interface PeerSpawnAcceptedEvent {
  * capacity limits, missing provider, unknown profile).
  */
 export interface PeerSpawnRejectedEvent {
-  type?: EventType94;
-  timestamp?: Timestamp94;
-  session_id?: SessionId94;
+  type?: EventType95;
+  timestamp?: Timestamp95;
+  session_id?: SessionId95;
   request_id?: RequestId24;
   reason?: Reason1;
 }
@@ -18127,9 +18429,9 @@ export interface PeerSpawnRejectedEvent {
  * to the parent session via ``inject_prompt``.
  */
 export interface PeerAgentOutputEvent {
-  type?: EventType95;
-  timestamp?: Timestamp95;
-  session_id?: SessionId95;
+  type?: EventType96;
+  timestamp?: Timestamp96;
+  session_id?: SessionId96;
   request_id?: RequestId25;
   remote_agent_id?: RemoteAgentId1;
   text?: Text4;
@@ -18143,9 +18445,9 @@ export interface PeerAgentOutputEvent {
  * populated only when ``success`` is False.
  */
 export interface PeerAgentCompletedEvent {
-  type?: EventType96;
-  timestamp?: Timestamp96;
-  session_id?: SessionId96;
+  type?: EventType97;
+  timestamp?: Timestamp97;
+  session_id?: SessionId97;
   request_id?: RequestId26;
   remote_agent_id?: RemoteAgentId2;
   success?: Success4;
@@ -18160,9 +18462,9 @@ export interface PeerAgentCompletedEvent {
  * a previously spawned remote subagent.
  */
 export interface PeerStopRequestEvent {
-  type?: EventType97;
-  timestamp?: Timestamp97;
-  session_id?: SessionId97;
+  type?: EventType98;
+  timestamp?: Timestamp98;
+  session_id?: SessionId98;
   request_id?: RequestId27;
   remote_agent_id?: RemoteAgentId3;
 }
@@ -18170,9 +18472,9 @@ export interface PeerStopRequestEvent {
  * Confirmation that a remote peer received and processed the stop request.
  */
 export interface PeerStopAcknowledgedEvent {
-  type?: EventType98;
-  timestamp?: Timestamp98;
-  session_id?: SessionId98;
+  type?: EventType99;
+  timestamp?: Timestamp99;
+  session_id?: SessionId99;
   request_id?: RequestId28;
   remote_agent_id?: RemoteAgentId4;
 }
@@ -18185,9 +18487,9 @@ export interface PeerStopAcknowledgedEvent {
  * observe the spawned session's events.
  */
 export interface GateAnnouncedEvent {
-  type?: EventType99;
-  timestamp?: Timestamp99;
-  session_id?: SessionId99;
+  type?: EventType100;
+  timestamp?: Timestamp100;
+  session_id?: SessionId100;
   gate_name?: GateName;
   tenant_id?: TenantId;
   owner?: Owner;
@@ -18207,9 +18509,9 @@ export interface Intent {
  * on TTL expiry.
  */
 export interface GateReleasedEvent {
-  type?: EventType100;
-  timestamp?: Timestamp100;
-  session_id?: SessionId100;
+  type?: EventType101;
+  timestamp?: Timestamp101;
+  session_id?: SessionId101;
   gate_name?: GateName1;
   tenant_id?: TenantId1;
   owner?: Owner1;
@@ -18225,9 +18527,9 @@ export interface GateReleasedEvent {
  * the registry replays the live state once at subscription time.
  */
 export interface GatesSnapshotEvent {
-  type?: EventType101;
-  timestamp?: Timestamp101;
-  session_id?: SessionId101;
+  type?: EventType102;
+  timestamp?: Timestamp102;
+  session_id?: SessionId102;
   gates?: Gates;
   snapshot_at?: SnapshotAt;
 }
@@ -18278,9 +18580,9 @@ export interface GateState {
  * patterns via the priority dimension.
  */
 export interface InjectPromptRequest {
-  type?: EventType102;
-  timestamp?: Timestamp102;
-  session_id?: SessionId102;
+  type?: EventType103;
+  timestamp?: Timestamp103;
+  session_id?: SessionId103;
   text?: Text5;
   source_type?: SourceType;
   source_id?: SourceId;
@@ -18337,9 +18639,9 @@ export interface InjectPromptRequest {
  * absence is left checkable instead of forgeable.
  */
 export interface InjectPromptResultEvent {
-  type?: EventType103;
-  timestamp?: Timestamp103;
-  session_id?: SessionId103;
+  type?: EventType104;
+  timestamp?: Timestamp104;
+  session_id?: SessionId104;
   request_id?: RequestId30;
   status?: Status3;
   detail?: Detail;
@@ -18359,9 +18661,9 @@ export interface InjectPromptResultEvent {
  * flows compose this with ``resolve_fork_point``.
  */
 export interface ReplayMessagesRequest {
-  type?: EventType104;
-  timestamp?: Timestamp104;
-  session_id?: SessionId104;
+  type?: EventType105;
+  timestamp?: Timestamp105;
+  session_id?: SessionId105;
   request_id?: RequestId31;
   messages?: Messages;
   timeout_seconds?: TimeoutSeconds;
@@ -18370,9 +18672,9 @@ export interface ReplayMessagesRequest {
  * Server's response to :class:`ReplayMessagesRequest`.
  */
 export interface ReplayMessagesResultEvent {
-  type?: EventType105;
-  timestamp?: Timestamp105;
-  session_id?: SessionId105;
+  type?: EventType106;
+  timestamp?: Timestamp106;
+  session_id?: SessionId106;
   request_id?: RequestId32;
   response_text?: ResponseText;
   error?: Error11;
@@ -18393,9 +18695,9 @@ export interface ReplayMessagesResultEvent {
  * tool uses internally.
  */
 export interface ResolveForkPointRequest {
-  type?: EventType106;
-  timestamp?: Timestamp106;
-  session_id?: SessionId106;
+  type?: EventType107;
+  timestamp?: Timestamp107;
+  session_id?: SessionId107;
   request_id?: RequestId33;
   after_message?: AfterMessage;
   after_tool_call?: AfterToolCall;
@@ -18405,9 +18707,9 @@ export interface ResolveForkPointRequest {
  * Server's response to :class:`ResolveForkPointRequest`.
  */
 export interface ResolveForkPointResultEvent {
-  type?: EventType107;
-  timestamp?: Timestamp107;
-  session_id?: SessionId107;
+  type?: EventType108;
+  timestamp?: Timestamp108;
+  session_id?: SessionId108;
   request_id?: RequestId34;
   fork_index?: ForkIndex;
   error?: Error12;
@@ -18422,9 +18724,9 @@ export interface ResolveForkPointResultEvent {
  * binding's Unix expiry — the values the caller's waker keys on.
  */
 export interface WakeBindResultEvent {
-  type?: EventType108;
-  timestamp?: Timestamp108;
-  session_id?: SessionId108;
+  type?: EventType109;
+  timestamp?: Timestamp109;
+  session_id?: SessionId109;
   wake_ref?: WakeRef;
   outcome?: Outcome1;
   detail?: Detail1;
@@ -18451,9 +18753,9 @@ export interface WakeBindResultEvent {
  * notification is a signal to attach, not the untrusted payload).
  */
 export interface SessionWokenEvent {
-  type?: EventType109;
-  timestamp?: Timestamp109;
-  session_id?: SessionId109;
+  type?: EventType110;
+  timestamp?: Timestamp110;
+  session_id?: SessionId110;
   wake_ref?: WakeRef1;
   source?: Source2;
 }
@@ -18466,9 +18768,9 @@ export interface SessionWokenEvent {
  * additive.
  */
 export interface PermissionAddWhitelistRequest {
-  type?: EventType110;
-  timestamp?: Timestamp110;
-  session_id?: SessionId110;
+  type?: EventType111;
+  timestamp?: Timestamp111;
+  session_id?: SessionId111;
   tools?: Tools3;
   patterns?: Patterns;
 }
@@ -18480,9 +18782,9 @@ export interface PermissionAddWhitelistRequest {
  * both lists are additive.
  */
 export interface PermissionAddBlacklistRequest {
-  type?: EventType111;
-  timestamp?: Timestamp111;
-  session_id?: SessionId111;
+  type?: EventType112;
+  timestamp?: Timestamp112;
+  session_id?: SessionId112;
   tools?: Tools4;
   patterns?: Patterns1;
 }
@@ -18493,9 +18795,9 @@ export interface PermissionAddBlacklistRequest {
  * ``"blacklist"``.  Empty lists are no-ops.
  */
 export interface PermissionRemoveRequest {
-  type?: EventType112;
-  timestamp?: Timestamp112;
-  session_id?: SessionId112;
+  type?: EventType113;
+  timestamp?: Timestamp113;
+  session_id?: SessionId113;
   target?: Target;
   tools?: Tools5;
   patterns?: Patterns2;
@@ -18509,9 +18811,9 @@ export interface PermissionRemoveRequest {
  * session-level overrides.
  */
 export interface PermissionClearRequest {
-  type?: EventType113;
-  timestamp?: Timestamp113;
-  session_id?: SessionId113;
+  type?: EventType114;
+  timestamp?: Timestamp114;
+  session_id?: SessionId114;
   target?: Target1;
 }
 /**
@@ -18522,18 +18824,18 @@ export interface PermissionClearRequest {
  * the base default for this session only.
  */
 export interface PermissionSetDefaultRequest {
-  type?: EventType114;
-  timestamp?: Timestamp114;
-  session_id?: SessionId114;
+  type?: EventType115;
+  timestamp?: Timestamp115;
+  session_id?: SessionId115;
   policy?: Policy;
 }
 /**
  * Request a structured snapshot of the current permission policy.
  */
 export interface PermissionPolicySnapshotRequest {
-  type?: EventType115;
-  timestamp?: Timestamp115;
-  session_id?: SessionId115;
+  type?: EventType116;
+  timestamp?: Timestamp116;
+  session_id?: SessionId116;
   request_id?: RequestId35;
 }
 /**
@@ -18545,9 +18847,9 @@ export interface PermissionPolicySnapshotRequest {
  * the stringly-typed ``permissions check`` command.
  */
 export interface PermissionPolicySnapshotEvent {
-  type?: EventType116;
-  timestamp?: Timestamp116;
-  session_id?: SessionId116;
+  type?: EventType117;
+  timestamp?: Timestamp117;
+  session_id?: SessionId117;
   request_id?: RequestId36;
   default_policy?: DefaultPolicy;
   session_default_policy?: SessionDefaultPolicy;
@@ -18597,9 +18899,9 @@ export interface PermissionPolicySnapshotEvent {
  *         socket for a side channel, and a weaker posture either way.
  */
 export interface TicketBindRequest {
-  type?: EventType117;
-  timestamp?: Timestamp117;
-  session_id?: SessionId117;
+  type?: EventType118;
+  timestamp?: Timestamp118;
+  session_id?: SessionId118;
   request_id?: RequestId37;
   user?: User;
   ttl_seconds?: TtlSeconds;
@@ -18648,9 +18950,9 @@ export interface TicketBindRequest {
  *         say — a reader of ``"unknown"`` is back where they started.
  */
 export interface TicketBindResultEvent {
-  type?: EventType118;
-  timestamp?: Timestamp118;
-  session_id?: SessionId118;
+  type?: EventType119;
+  timestamp?: Timestamp119;
+  session_id?: SessionId119;
   request_id?: RequestId38;
   status?: Status4;
   ticket?: Ticket;
@@ -18688,9 +18990,9 @@ export interface TicketBindResultEvent {
  *         application instead.
  */
 export interface TicketRevokeRequest {
-  type?: EventType119;
-  timestamp?: Timestamp119;
-  session_id?: SessionId119;
+  type?: EventType120;
+  timestamp?: Timestamp120;
+  session_id?: SessionId120;
   request_id?: RequestId39;
   ticket?: Ticket1;
   user?: User1;
@@ -18717,9 +19019,9 @@ export interface TicketRevokeRequest {
  *         say.
  */
 export interface TicketRevokeResultEvent {
-  type?: EventType120;
-  timestamp?: Timestamp120;
-  session_id?: SessionId120;
+  type?: EventType121;
+  timestamp?: Timestamp121;
+  session_id?: SessionId121;
   request_id?: RequestId40;
   status?: Status5;
   revoked?: Revoked;
@@ -18785,6 +19087,7 @@ export const EventTypeValue = {
   TURN_PROGRESS: "turn.progress",
   INSTRUCTION_BUDGET_UPDATED: "instruction_budget.updated",
   BUDGET_RUNG_FIRED: "budget.rung_fired",
+  INCIDENT_RAISED: "incident.raised",
   GC_CONFIG: "gc.config",
   GC: "gc",
   INSTRUCTION_BUDGET_REQUEST: "instruction_budget.request",

@@ -341,8 +341,9 @@ what it does, where it lives, what it deliberately does not do.
 > `risk_class: high` and adds the five `high_risk_*` findings
 > (`shared/scaffold/validate.py`); `explain profile` renders it;
 > `explain oversight <profile>` reads it. Guard:
-> `shared/tests/test_regulatory_profile_block.py`. The dossier (§4.6) is
-> not built yet.
+> `shared/tests/test_regulatory_profile_block.py`. The dossier (§4.6) reads
+> it too -- and documents a profile that declares no block as **UNDECLARED**
+> rather than as `minimal`.
 
 ```yaml
 # .jaato/profiles/screener.yaml
@@ -382,15 +383,32 @@ regulatory:
 
 ### 4.2 Disclosure of AI interaction (Article 50(1))
 
-> **Shipped: touches 1 and 3.** `PIECE_DISCLOSURE` in
+> **Shipped: all three touches.** Touches 1 and 3: `PIECE_DISCLOSURE` in
 > `shared/instruction_suppression.py`, the text in `shared/ai_disclosure.py`,
 > appended by `JaatoRuntime.get_system_instructions` beside the boundary and
 > announced at WARNING by the session when dropped (`ANNOUNCED_PIECES`);
 > `disclosure_absent` and `high_risk_disclosure_suppressed` in `validate`.
-> Guard: `shared/tests/test_ai_disclosure_piece.py`. **Not yet:** touch 2,
-> the first-interaction announcement — `disclosure_announcement()` renders
-> the text, but nothing emits it on session creation and
-> `PresentationContext.client_discloses_ai` does not exist.
+> Guard: `shared/tests/test_ai_disclosure_piece.py`.
+>
+> Touch 2 (#1116): `announcement_for()` is the ONE predicate —
+> `JaatoServer.disclosure_announcement` and `explain oversight <profile>`
+> both call it, so the page cannot say a profile announces while its
+> sessions stay silent. `SessionManager._announce_ai_interaction` emits
+> `AgentOutputEvent(source="system")` once, on the create path only, and
+> `SessionInfoEvent.disclosure_announcement` carries the same text on the
+> state snapshot (protocol 1.15) so a client attaching later can render it
+> in its own medium. `PresentationContext.client_discloses_ai` suppresses.
+> Guard: `shared/tests/test_first_interaction_announcement.py`.
+>
+> **Stated limit on the speaking-tier half.** §4.2's touch 2 proposed
+> routing the announcement through `ensure_spoken_part` so a voice bot
+> discloses in the medium the person is using. That function gives a
+> spoken-but-wordless turn a *text* part; it does not turn text into
+> speech, and the framework ships no TTS. So the division is: the
+> framework states what must be said and carries it on a shape readable
+> before turn 1, and the client that owns the speaker says it aloud.
+> Pretending otherwise would be a disclosure that does not reach the ears
+> it was written for.
 
 Three touches, one fact:
 
@@ -422,14 +440,47 @@ find.
 
 ### 4.3 Provenance on generated output (Article 50(2))
 
-> **Shipped: touch 1.** `ToolOutputEvent.generated_by` (protocol 1.14),
-> `jaato_sdk.events.ai_generated_by`, `Attachment.generated_by`, stamped in
+> **Shipped: all three touches.** Touch 1: `ToolOutputEvent.generated_by`
+> (protocol 1.14), `jaato_sdk.events.ai_generated_by`,
+> `Attachment.generated_by`, stamped in
 > `JaatoSession._deliver_model_media` and carried through
 > `_emit_withheld_attachments_to_clients`, the runner frame and the daemon
 > dispatcher; TypeScript surface regenerated. Guard:
-> `shared/tests/test_generated_by_stamp.py`. **Not yet:** touch 2, the
-> `TRAIT_OUTPUT_MARKER` hook and its C2PA sidecar; and no in-tree tool
-> stamps an `Attachment` yet (there is no image-generation tool to stamp).
+> `shared/tests/test_generated_by_stamp.py`.
+>
+> Touch 2 (#1117): `TRAIT_OUTPUT_MARKER` in `jaato_sdk/plugins/base.py`,
+> the payload/result contract in `jaato_sdk/output_marking.py`, the
+> dispatcher `JaatoSession._mark_generated_output` invoked at both
+> delivery seams, and the in-tree `output_marker` plugin writing
+> `<file>.provenance.json`. Guard:
+> `shared/tests/test_output_marker_trait.py`. Touch 3 (#1118): the text
+> posture is below, and is rendered by `explain oversight` so a deployer
+> reads it off the framework rather than out of this file.
+>
+> **Three departures from the proposal, each deliberate.**
+>
+> 1. *The trait is a PLUGIN trait, not a tool trait.* §4.3 proposes
+>    `jaato-sdk/jaato_sdk/plugins/model_provider/types.py`, beside
+>    `TRAIT_FILE_WRITER` — but that module holds traits declared on a
+>    `ToolSchema`, and nothing there reads `plugin_traits`. It sits beside
+>    `TRAIT_AUTH_PROVIDER` and `TRAIT_SLOT_SCOPED` instead.
+> 2. *The sidecar is `<file>.provenance.json`, not `<file>.c2pa.json`.*
+>    It carries the IPTC `trainedAlgorithmicMedia` token and a C2PA-style
+>    actions assertion so a reader who knows C2PA recognises it, and it is
+>    **not signed** — signing needs a certificate the framework cannot hold
+>    for you. A file named `.c2pa.json` would be read as a manifest by
+>    anything looking for one and rejected by every verifier, while telling
+>    a deployer their output is C2PA-marked. `"conformance":
+>    "c2pa-shaped-unsigned"` and `"signature": null` say the same thing
+>    inside the document.
+> 3. *No in-tree producer marks a file yet, and that is the point.* The
+>    only in-tree `Attachment` constructor is `clarification` — a person's
+>    voice note answering a question, which is emphatically not
+>    AI-generated. So the deliverable is the CONTRACT plus an AST guard
+>    (`test_every_attachment_producer_either_stamps_or_is_a_declared_relay`)
+>    that fails any future producer which neither stamps nor is named in an
+>    explicit relays-only list. A guard written when the first generator
+>    ships is a guard written after the first unmarked output.
 
 The framework's boundary is the event protocol, and the event protocol is
 where a client learns what it is about to show a person. So:
@@ -456,22 +507,95 @@ where a client learns what it is about to show a person. So:
    practice names a standard. The instructions for use say so, and say that
    50(4)'s deployer-side disclosure ("text which is published with the
    purpose of informing the public") is a publishing decision the framework
-   cannot see.
+   cannot see. See *The text posture* below.
 
 The 2 December 2026 grace period is for systems already on the market; a
 jaato application put into service after 2 August 2026 has no grace at all,
 which is why the stamp is in the "now" tier of §5 even though the hook can
 follow.
 
+#### The text posture (Art. 50(2), 50(4), 50(7)) — #1118
+
+Three things are true about text provenance in this framework, and until
+#1118 none of them was stated on a surface a deployer reads. They are now
+rendered by `jaato-scaffold explain oversight` under **MARKING GENERATED
+OUTPUT**, computed from the tree — the protocol version that carries the
+stamp and the marker plugins this build actually has — rather than
+written down here and left to go stale.
+
+1. **`AgentOutputEvent.source` is the whole of it.** Text a model produced
+   arrives attributed (`agent`, `system`, `permission`, `user`, …), which
+   is machine-readable at the event layer and **stops at the client**. A
+   transcript pasted into a document carries nothing.
+2. **`generated_by` is media-only, on purpose.** Protocol 1.14 stamps the
+   model's own audio and images. Text is not stamped because there is
+   nothing to stamp it with: watermarking natural-language text is not a
+   solved problem, and the Article 50(7) code of practice has not named a
+   detection standard.
+3. **Art. 50(4) is a publishing decision the framework cannot see.** The
+   deployer-side duty to disclose that "text which is published with the
+   purpose of informing the public on matters of public interest" was
+   AI-generated attaches to an act of publication. Nothing in a session
+   tells the framework a transcript was published, and it does not guess.
+
+**Deliberately not done: a prefix on `AgentOutputEvent`.** A "this text was
+generated by AI" banner would be stripped by the first client that reflows
+output, would change every transcript in the tree, and — the sharper
+objection — would be a marking that certifies what it did not find: a
+reader who saw it on some text and not other text would conclude the
+unmarked text was human-written, which the framework has no basis to say.
+
+**The revisit trigger is external and specific**: publication of the
+Article 50(7) code of practice, or a harmonised standard for text
+provenance. Until one exists, the honest answer is the one above, said out
+loud, rather than a mechanism that looks like compliance.
+
 ### 4.4 One audit record, with a retention policy (Articles 12, 19, 26(6))
 
-> **Shipped: the ledger fix only.** `TokenLedger` appends per record to
-> `LEDGER_PATH` (explicit path > env; relative resolves against the session
-> workspace; an unwritable path never fails the round trip), `write_ledger`
-> flushes only what was not appended, and `trace.ledger` is the typed key,
-> closing the env catalog's entry. Guard:
-> `shared/tests/test_ledger_reaches_disk.py`. The schema, `record_keeping:`
-> and `sha256-chain` are not built.
+> **Shipped: the ledger fix, the schema, and `record_keeping:`.**
+> `TokenLedger` appends per record to `LEDGER_PATH` (#1109; explicit path >
+> env; relative resolves against the session workspace; an unwritable path
+> never fails the round trip), `write_ledger` flushes only what was not
+> appended, and `trace.ledger` is the typed key. Guard:
+> `shared/tests/test_ledger_reaches_disk.py`.
+>
+> #1119 added the contract and the clock: `jaato_sdk.audit.AUDIT_SCHEMA`
+> (the events, their fields, and which store each lands in),
+> `docs/audit-log.md`, `jaato-scaffold explain audit [<profile>]`, the
+> `record_keeping:` block through all six profile ingresses plus the
+> isolated-runner payload, `workspace.delete`'s retention refusal, and the
+> hourly retention pass on the #812 watchdog. Guard:
+> `shared/tests/test_audit_record_contract.py`.
+>
+> #1120 added `integrity: sha256-chain`:
+> `jaato_sdk.audit_chain` (stdlib, in the SDK so a file can be verified
+> by somebody who has the file and nothing else),
+> `TokenLedger._line` as the ONE place a record becomes bytes so both
+> write paths chain identically, and `jaato-doctor --audit-verify
+> <path>`. Guard: `shared/tests/test_audit_chain_integrity.py`.
+>
+> **The schema is ENFORCED, not described**, which is the difference
+> between a contract and a wish: a guard walks the writers named in
+> `AUDIT_SCHEMA` and fails when a field the schema promises stops being
+> written. It earned its keep immediately — it caught a writer name that
+> was wrong in the schema's first draft, and the reversion meta-guard then
+> caught the guard itself accepting a field found in *either* of two
+> sources, which certified a writer that had stopped writing it.
+>
+> **`workspace.delete` refuses rather than preserving or overriding.**
+> Preserving the audit files would leave orphans in a directory an operator
+> asked to be gone; overriding with a WARNING makes the policy something
+> any delete silently defeats. A refusal is visible, recoverable, and
+> cannot destroy a record somebody declared had to be kept. The message
+> names `session.delete` — remove the conversation, keep the record — as
+> the verb for the case.
+>
+> **The retention pass is what stops the block being a one-way ratchet.**
+> A policy that only ever keeps is its own problem under GDPR storage
+> limitation, so the #812 watchdog runs an hourly pass that lets go of
+> records past their minimum — on its own clock, and in its own try block,
+> because a slow filesystem must not be able to delay the wall-clock bound
+> that stops a runaway session.
 
 Not a sixth store. A **contract over the stores that exist**:
 
@@ -509,9 +633,11 @@ Not a sixth store. A **contract over the stores that exist**:
   and the daemon's lifetime sweep (#812) gains a retention pass.
 - **`integrity: sha256-chain`** links each record to the previous one's
   digest, the cheapest form of #507's tamper evidence. It proves that the
-  file was not edited in place; it does not prove who wrote it. Stated cost:
-  a chained file cannot be pruned from the front, so retention rotates whole
-  segments.
+  file was not edited in place; it does not prove who wrote it. The link is
+  read back off the FILE under an exclusive lock on every chained append, so
+  a restart and a shared absolute `trace.ledger` continue one chain instead
+  of each starting a rival one mid-file. Stated cost: a chained file cannot
+  be pruned from the front, so retention rotates whole files.
 
 ### 4.5 A stop button — already there; make the tools say so
 
@@ -560,6 +686,36 @@ running framework saying the same thing.
 
 ### 4.6 A generated technical dossier (Articles 11, 13, Annex IV, 25(4))
 
+> **Shipped (#1121).** `shared/scaffold/dossier.py` renders both documents,
+> `jaato-scaffold new dossier` writes them, and the Article 25(4) pack is
+> committed at [`docs/jaato-component-pack.md`](../jaato-component-pack.md)
+> as the first versioned instance -- a written agreement needs a document to
+> point at, and a generator nobody has run produces none.
+>
+> Four properties, each attached to a way a generated legal document goes
+> wrong. **Computed, never asserted**: every fact comes from the helper the
+> matching `explain` page reads, so the dossier cannot disagree with
+> `explain`, and the document is never the second source of truth about the
+> framework. **A `TODO` section is never silently omitted**: all nine Annex
+> IV headings are always present, and `new dossier` reads its own output
+> back to prove it, because an absent section in a legal document reads as
+> *nothing to declare*. **Side-effect free**, like `validate`: profiles are
+> located and parsed, never rendered -- rendering a persona runs its
+> `{{!py:...}}` prefetch. **Dated and stamped**: a fact about a tree is a
+> fact about a commit, and a dossier read six months later must say which.
+>
+> What the framework will not do for the provider is the part worth naming:
+> a profile with no `regulatory:` block is documented as **UNDECLARED**, not
+> as `minimal`. Article 6(4) makes the determination theirs, and a generated
+> document that printed a class would be one somebody relies on.
+>
+> The component pack's **non-guarantees are longer than its guarantees**, on
+> purpose: a limitations section a reader can finish quickly is one that
+> leaves them unable to tell what was considered from what was forgotten.
+> Each guarantee names the thing in the tree that ENFORCES it, because a
+> guarantee with no enforcer is a claim, and a claim in a 25(4) pack is what
+> gets relied on.
+
 `jaato-scaffold new dossier --profile <name>` writes an Annex IV skeleton
 computed from the installed framework and the resolved profile: system
 description (plugins with provenance, providers and models per tier, tool
@@ -586,6 +742,42 @@ high-risk, because it is also the honest instructions for use.
 
 ### 4.7 An incident register (Articles 72, 73, 26(5))
 
+> **Shipped (#1122).** `jaato_sdk.incidents` (the record, the vocabulary
+> and the parser -- in the SDK, because the READER is `jaato-doctor`,
+> which cannot import `shared`), `shared.incidents.raise_incident` (the
+> one writer, which needs a session), `IncidentEvent` (protocol 1.16),
+> an `INCIDENT` entry in `AUDIT_SCHEMA`, and `jaato-doctor --incidents
+> [--since 15d]`. Guard: `shared/tests/test_incident_register.py`.
+>
+> **A query over the audit log, not a second store.** An incident is one
+> more line in the application trace -- the one artefact every
+> deployment gets, since the ledger needs a ledger configured and the
+> event is opt-in. Scalars first, free-text `cause` last, the #968
+> grammar, so the line parses with a split.
+>
+> **It does not classify, and the absence of a `severity` field is that
+> decision rather than an omission.** Whether an entry IS a serious
+> incident under Art. 3(49) is a determination about *consequences* --
+> harm to a person, disruption of critical infrastructure -- that no log
+> line carries. All three Art. 73 windows (2 / 10 / 15 days) are
+> rendered beside every row and none is chosen.
+>
+> **Unreadable is not empty.** A trace file that could not be read is
+> reported as not read; answering "none" to a question the register
+> could not look at would tell a reader something false about a
+> reporting deadline.
+>
+> **Sites covered, each raising from the place that already knew:** the
+> terminal error and the budget terminal (`server/core.py`), nudge
+> exhaustion (*the same* terminal, with the kind derived from the error
+> type -- a second call site would count one dying session twice), the
+> #1023 confinement refusal (raised before the exception, because it
+> happens before any session exists and there is nobody above to notice
+> it), and the reliability plugin's circuit opening (gated on the same
+> `not was_blocked` as its hook, so one opening is one incident). An AST
+> guard over a LIST of sites fails when any stops raising, because the
+> failure this is about is a site nobody remembered.
+
 A typed `IncidentEvent` in the SDK and an `incident` record in the audit
 log, raised by the framework at the sites that already know: a session
 terminated with `error` or `budget_exhausted`, a circuit breaker opening, a
@@ -600,6 +792,30 @@ classifying.
 
 ### 4.8 Memory provenance and a curation gate (Article 15(4))
 
+> **Shipped (#1123).** `Memory.generated_by` stamped by
+> `MemoryPlugin._model_provenance` from the currently executing session
+> (never from the tool's arguments), `Memory.curated_by` as a separate
+> field, `plugin_configs.memory.require_curation` gating BOTH retrieval
+> paths, and `require_curation_without_curator` in `validate` — a
+> WORKSPACE check, because the curator is a separate profile by design.
+> Guard: `shared/tests/test_memory_provenance.py`.
+>
+> **Nothing is stashed on the plugin.** The instance is shared across
+> sibling subagents, so the stamp is read per execution off
+> `shared.session_context` — the way `_get_session_id` already reads the
+> session id, and for the reason its docstring records: PR-196 stashed a
+> value on `self` and every cascade session read `None`. An AST guard
+> pins the absence, because a `self._session = …` added later is
+> invisible to any behavioural test that does not happen to spawn two
+> siblings.
+>
+> **Withheld, never deleted, and the result says so.** A gate that
+> silently shortened the list would leave the model reasoning from a
+> subset it believes is everything, so the refusal carries
+> `withheld_uncurated` and says the memories are stored rather than lost.
+> Storage is not gated at all — writing is what leaves the curator
+> something to curate.
+
 Every memory the model writes records its author binding and session id
 (the `generated_by` stamp of §4.3, applied to storage), and the raw→curated
 promotion becomes a profile knob (`plugin_configs.memory.require_curation:
@@ -609,6 +825,40 @@ continuity pattern already describes the curator; the knob is what makes
 check and the dossier can print.
 
 ### 4.9 Eval results into the dossier (Article 15(3), 9(6)–(8))
+
+> **Shipped (#1124).** The results file became a **contract**
+> ([`docs/eval-results.md`](../eval-results.md)) rather than whatever
+> `ArmResult` happened to hold, because the reader may not import the
+> engine: `jaato_eval` imports `jaato_sdk` and nothing else from this tree,
+> so a consumer in `shared` that imported it would run that rule backwards.
+> Two fields exist for the reader and for nobody in the harness.
+>
+> `results_version` is what lets a refusal be possible at all. A file whose
+> declared version this reader does not know is refused **by name** --
+> naming the version found and the versions known -- rather than rendered
+> as far as it makes sense, because a half-understood accuracy table looks
+> exactly like a complete one, and an accuracy section is the part of a
+> dossier a reader quotes. **An absent version is an unknown version**, not
+> a version 1 record: the field has been written since the contract was
+> declared, so its absence says the file predates it.
+>
+> `caveats` carries the limits of the instruments that graded each arm, in
+> the words of the harness that measured them, and every one is rendered
+> **verbatim**. The alternative -- each consumer writing its own warning
+> about LLM judges -- is a second copy of a fact, and the copy that rots is
+> the one nothing executes: it goes on being quoted after the limit is
+> fixed, or misses one added later. So the adapter carries no caveat text of
+> its own, and a guard reads its source to keep it that way.
+>
+> Three reader rules travel with the numbers, each attached to a way they
+> mislead: `BLOCKED` leaves the pass-rate denominator (nothing was
+> exercised, so it is neither a pass nor a failure of the thing under
+> test, and a cell where everything blocked has **no** rate rather than
+> `0%`); a null is "we did not find out", never a zero; and the arm is the
+> unit, because repeats disagreeing IS the measurement. Every row's
+> **Threshold** is a `TODO` naming Article 15(3): which level is
+> appropriate to the intended purpose is the provider's call, and not a
+> measurement this harness can make.
 
 `jaato-eval` writes JSONL per arm. A small adapter renders the metrics of a
 named results file into the dossier's accuracy section, with the harness's

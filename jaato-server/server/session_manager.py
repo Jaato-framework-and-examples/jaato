@@ -67,6 +67,11 @@ from .session_lifetime import (
     resolve_unload_grace,
     unload_grace_remaining,
 )
+from .record_retention import (
+    DEFAULT_RETENTION_SWEEP_SECONDS,
+    describe_policy,
+    expired_paths,
+)
 from .session_workspace_index import SessionWorkspaceIndex
 from .wake_binding_registry import WakeBindingRegistry, BindOutcome
 
@@ -857,6 +862,28 @@ def _stamp_session_id(event: Any, session_id: Optional[str]) -> None:
         pass
 
 
+def _disclosure_announcement_of(server: Optional[JaatoServer]) -> Optional[str]:
+    """This server's Article 50(1) announcement, or ``None``.
+
+    A free function, and duck-typed, for the reason
+    ``RunnerRPC._turns_ran_snapshot`` is (#881): a server double or an
+    out-of-tree server class that predates the accessor must get the
+    pre-1.15 behaviour -- no announcement -- rather than an
+    ``AttributeError`` inside the state snapshot every client waits on.
+    A real :class:`JaatoServer` never takes that path.
+    """
+    if server is None:
+        return None
+    accessor = getattr(server, "disclosure_announcement", None)
+    if not callable(accessor):
+        return None
+    try:
+        return accessor()
+    except Exception:  # noqa: BLE001 -- a snapshot must not fail on this
+        logger.debug("disclosure_announcement raised", exc_info=True)
+        return None
+
+
 def initialize_or_refuse(server: JaatoServer, session_id: str) -> bool:
     """Run ``server.initialize()`` — unless the runner hosts no session.
 
@@ -1189,6 +1216,12 @@ class SessionManager:
         self._lifetime_watchdog: Optional[threading.Thread] = None
         self._lifetime_watchdog_stop = threading.Event()
         self._lifetime_sweep_interval = DEFAULT_SWEEP_INTERVAL_SECONDS
+        # The retention pass (#1119) rides the same thread on its own much
+        # coarser clock -- see :meth:`_maybe_sweep_retention`.  ``0.0``
+        # rather than ``now`` so the first pass runs at the first tick: a
+        # daemon restarted hourly would otherwise never sweep at all.
+        self._retention_sweep_interval = DEFAULT_RETENTION_SWEEP_SECONDS
+        self._last_retention_sweep: float = 0.0
 
         # Path H (cycle 10): serialize concurrent async saves so
         # parallel ToolCallStartEvents (parallel tool execution)
@@ -4982,6 +5015,191 @@ class SessionManager:
                     "session-lifetime sweep raised — the bound stays armed "
                     "and the next sweep re-derives its state",
                 )
+            try:
+                self._maybe_sweep_retention()
+            except Exception:  # noqa: BLE001 — same rule, separate pass
+                logger.exception(
+                    "record-retention sweep raised — the next pass "
+                    "re-derives its state",
+                )
+
+    def _maybe_sweep_retention(self) -> None:
+        """Run the retention pass, at its own much coarser cadence (#1119).
+
+        Rides the #812 thread because a second thread for a pass that runs
+        hourly is not worth its own lifecycle -- but on its OWN clock, not
+        the lifetime sweep's: the shortest retention anybody writes is a
+        day, and walking the filesystem every few seconds to ask a
+        question measured in days is the wrong shape.
+
+        Deliberately SEPARATE from ``sweep_session_lifetimes`` rather than
+        folded into it: that sweep is a pass over the loaded-session dict
+        and this one stats files, and a slow or failing filesystem must
+        not be able to delay the wall-clock bound that stops a runaway
+        session.  Hence the two independent try blocks above, too.
+        """
+        now = time.time()
+        if now - self._last_retention_sweep < self._retention_sweep_interval:
+            return
+        self._last_retention_sweep = now
+        self.sweep_record_retention(now=now)
+
+    def sweep_record_retention(self, now: Optional[float] = None) -> int:
+        """Remove audit files past their declared minimum (#1119).
+
+        Article 19(1) asks a provider to keep a high-risk system's logs
+        for at least six months; ``record_keeping.retention_days`` is
+        where a profile says so, and this is what eventually lets go of
+        them.  Without it the block would be a one-way ratchet -- records
+        kept forever -- which is its own compliance problem under GDPR
+        storage limitation.
+
+        Four properties, each attached to a way a deleting sweep goes
+        wrong:
+
+        * **It acts only on a DECLARED policy.**  A workspace whose
+          profiles declare no ``record_keeping:`` is never touched, which
+          is every workspace that existed before this.  A sweep that
+          removed files nobody asked it to remove would be the worst
+          possible version of this mechanism.
+        * **Only positive evidence expires a record.**  A path whose age
+          cannot be read is KEPT -- see
+          :func:`record_retention.judge`.  The cost of being wrong in
+          that direction is a record kept too long.
+        * **A LOADED session's workspace is skipped.**  Its logs are open
+          and being appended to; removing one mid-turn is a live session
+          failure with a delayed cause.
+        * **It says what it removed and what it kept.**  A retention pass
+          that only names deletions cannot answer an operator asking why
+          a record is still there.
+
+        Args:
+            now: The instant to judge against.  A parameter so a test
+                states the moment it means rather than betting on a
+                clock (#996).
+
+        Returns:
+            How many paths were removed.
+        """
+        from pathlib import Path
+
+        from .record_retention import conversation_minimum, declared_retentions
+
+        stamp = time.time() if now is None else now
+        with self._lock:
+            busy = {s.workspace_path for s in self._sessions.values()
+                    if s.workspace_path}
+            loaded_ids = set(self._sessions)
+        removed = 0
+        for workspace in self._retention_workspaces():
+            if workspace in busy:
+                continue
+            try:
+                entries = declared_retentions(workspace)
+            except Exception:  # noqa: BLE001 -- an unparseable workspace
+                logger.debug("retention sweep: could not resolve %s",
+                             workspace, exc_info=True)
+                continue
+
+            # PER PROFILE, under that profile's own clock.  Pooling every
+            # declaring profile's files under the longest retention meant
+            # a sibling's `retention_days: 0` -- an explicit "keep until
+            # something deletes it" -- was overruled and its record
+            # unlinked.
+            for entry in entries:
+                retention = getattr(entry.keeping, "retention_days", None)
+                if not retention or not entry.audit_paths:
+                    continue
+                expired, kept = expired_paths(entry.audit_paths, retention,
+                                              now=stamp)
+                for verdict in expired:
+                    try:
+                        Path(verdict.path).unlink()
+                        removed += 1
+                        logger.info(
+                            "record retention: removed %s (%s, profile %s)",
+                            verdict.path, verdict.reason, entry.profile)
+                    except OSError as exc:
+                        logger.warning(
+                            "record retention: could not remove %s (%s); it "
+                            "stays until the next pass", verdict.path, exc)
+                if kept:
+                    logger.debug(
+                        "record retention: %d file(s) kept for profile %s "
+                        "under %s", len(kept), entry.profile,
+                        describe_policy(entry.keeping))
+
+            removed += self._sweep_conversation_records(
+                workspace, conversation_minimum(workspace), loaded_ids, stamp)
+        return removed
+
+    def _sweep_conversation_records(
+        self,
+        workspace: str,
+        conversation_days: Optional[int],
+        loaded_ids: Set[str],
+        stamp: float,
+    ) -> int:
+        """Remove session records past ``conversation_retention_days``.
+
+        The SECOND clock, and the one that governs personal data: an
+        audit record answers "what did this system do", a conversation is
+        something a subject may ask to have erased.  Keeping the first
+        while dropping the second is what satisfies Art. 19(1) and GDPR
+        storage limitation at once -- and the field that says so was read
+        by a log line and nothing else, so a profile declaring it kept
+        every conversation forever while ``explain audit`` said otherwise.
+
+        A LOADED session is never removed, whatever its record's age: it
+        is open and being appended to.
+        """
+        import shutil
+
+        from .record_retention import expired_session_records
+
+        if not conversation_days:
+            return 0
+        try:
+            sessions_dir = self._session_storage_dir(workspace)
+        except Exception:  # noqa: BLE001 -- an unresolvable workspace
+            return 0
+        expired, kept = expired_session_records(
+            sessions_dir, conversation_days, now=stamp, keep_ids=loaded_ids)
+        removed = 0
+        for verdict in expired:
+            try:
+                shutil.rmtree(verdict.path)
+                removed += 1
+                logger.info("conversation retention: removed %s (%s)",
+                            verdict.path, verdict.reason)
+            except OSError as exc:
+                logger.warning(
+                    "conversation retention: could not remove %s (%s); it "
+                    "stays until the next pass", verdict.path, exc)
+        if kept:
+            logger.debug(
+                "conversation retention: %d record(s) kept under a %dd minimum",
+                len(kept), conversation_days)
+        return removed
+
+    def _retention_workspaces(self) -> List[str]:
+        """The workspaces the retention pass considers.
+
+        Every workspace a session has ever run in, as the daemon's own
+        index records it -- not a scan of the workspace root.  A scan
+        would give the pass an appetite for directories no session of
+        this daemon ever touched, which is not a set a retention policy
+        declared in a PROFILE has any business acting on.
+        """
+        try:
+            return sorted({
+                path for path in self._session_workspace_index.workspaces()
+                if path
+            })
+        except Exception:  # noqa: BLE001 -- best-effort, like the pass
+            logger.debug("retention sweep: workspace index unavailable",
+                         exc_info=True)
+            return []
 
     def _observe_session_lifetimes(
         self, now: float,
@@ -8152,7 +8370,60 @@ class SessionManager:
                 style="info",
             ))
 
+        self._announce_ai_interaction(client_id, session)
+
         return session_id
+
+    def _announce_ai_interaction(
+        self, client_id: str, session: "Session",
+    ) -> None:
+        """Emit the Article 50(1) first-interaction announcement, once.
+
+        Regulation (EU) 2024/1689 Art. 50(1) obliges the provider of a
+        system "intended to interact directly with natural persons" to
+        DESIGN it so those persons are informed they are talking to an AI.
+        The ``disclosure`` instruction piece makes the model answer
+        truthfully when asked; that is the fallback.  This is the design
+        half: the framework says it, unprompted, before the first turn.
+
+        Four properties, each attached to a way it could go wrong:
+
+        * **Once per session, never per turn.**  Called from
+          ``_create_session_impl`` and from nowhere else.
+        * **Never on a revive.**  ``_load_session`` / ``session.wake``
+          continue a conversation that was already disclosed to, so
+          re-announcing would tell a person something they were told
+          before the transcript they are looking at began.
+        * **Never for a subagent.**  A subagent talks to its parent, not
+          to a person.  Subagent sessions do not come through this path.
+        * **Not in history.**  It goes out as an event; it is a framework
+          message to the person, not a model turn, and putting it in
+          history would replay it to the model on every request and let
+          GC decide when the person stops having been told.
+
+        Best-effort by construction: a failure here must not fail a
+        session that is otherwise created and usable -- but it is logged at
+        WARNING, not DEBUG.  A disclosure that silently did not happen is
+        the state Art. 50(1) exists to prevent, so it is exactly the wrong
+        thing to hide in a debug line nobody reads; the posture every other
+        weakened boundary here takes (``scrub_secret_env: none``,
+        ``--ws-unsafe-no-auth``).
+        """
+        from jaato_sdk.events import AgentOutputEvent
+
+        try:
+            text = _disclosure_announcement_of(session.server)
+            if not text:
+                return
+            self._emit_to_client(client_id, AgentOutputEvent(
+                agent_id="main", source="system", text=text, mode="write",
+            ))
+        except Exception:  # noqa: BLE001 -- see the docstring
+            logger.warning(
+                "AI-disclosure announcement (Art. 50(1)) was NOT emitted for "
+                "session %s; the person was not informed by the framework",
+                getattr(session, "session_id", "?"), exc_info=True,
+            )
 
     # ------------------------------------------------------------------
     # Headless session creation (for daemon extensions / reactors)
@@ -12088,6 +12359,16 @@ class SessionManager:
             sandbox_paths=sandbox_paths_data,
             services=services_data,
             tool_id_mappings=tool_id_mappings,
+            # Art. 50(1) (protocol 1.15).  On the SNAPSHOT rather than only
+            # on the one-shot event, because the two answer different
+            # questions: the ``AgentOutputEvent`` below is the EMISSION and
+            # fires once, at creation; this field is the standing statement
+            # of what this session owes the person, so a client attaching
+            # later -- a second person, a reconnect on another device --
+            # can render it in its own medium without having been present
+            # for the emission.  ``None`` when the session does not
+            # announce.
+            disclosure_announcement=_disclosure_announcement_of(session.server),
         )
 
     def get_session(self, session_id: str) -> Optional[Session]:

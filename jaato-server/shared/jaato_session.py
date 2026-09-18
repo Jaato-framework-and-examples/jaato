@@ -9436,6 +9436,121 @@ NOTES
             agent_id=getattr(self, "_agent_id", None),
         )
 
+    def _output_markers(self) -> List[Any]:
+        """The enabled plugins declaring ``TRAIT_OUTPUT_MARKER``.
+
+        A snapshot of the ENABLED set, not the discovered one: the
+        registry is shared across a parent and its subagents (#938), and
+        a marker one profile enabled must not silently mark another
+        agent's output.  Iterating a snapshot rather than the live
+        container is the #938 rule -- a spawn exposing plugins while
+        this walks would otherwise raise inside the turn.
+
+        **``list_enabled``, never ``list_exposed``.**  A marker provides
+        no tools, so it is an ENRICHMENT plugin and the registry files it
+        under ``_enrichment_only``; ``list_exposed`` is the tool-bearing
+        subset and can never contain one.  Reading that set returned an
+        empty list for every profile that enabled a marker -- the
+        mechanism inert in the only configuration that uses it, with
+        `explain oversight` still reporting the marker as installed.
+
+        Empty is the normal state: no in-tree profile enables a marker,
+        and the framework's own machine-readable half
+        (``generated_by`` on the wire) is unaffected either way.
+        """
+        registry = getattr(getattr(self, "_runtime", None), "registry", None)
+        if registry is None:
+            return []
+        from jaato_sdk.plugins.base import TRAIT_OUTPUT_MARKER
+        markers: List[Any] = []
+        # A registry predating list_enabled (a double, an out-of-tree
+        # subclass) keeps the pre-change behaviour rather than raising.
+        # Resolved in two steps rather than as getattr's default, which
+        # is evaluated EAGERLY and so raises on exactly the object the
+        # fallback exists for.
+        lister = (getattr(registry, "list_enabled", None)
+                  or getattr(registry, "list_exposed", None))
+        if lister is None:
+            return []
+        for name in list(lister()):
+            plugin = registry.get_plugin(name)
+            if plugin is None:
+                continue
+            traits = getattr(plugin, "plugin_traits", frozenset())
+            if TRAIT_OUTPUT_MARKER in traits and hasattr(plugin, "mark_output"):
+                markers.append(plugin)
+        return markers
+
+    def _mark_generated_output(
+        self,
+        data: bytes,
+        mime_type: Optional[str],
+        generated_by: Optional[Dict[str, Any]],
+        path: Optional[str] = None,
+        display_name: Optional[str] = None,
+    ) -> bytes:
+        """Run every enabled marker over one AI-generated payload.
+
+        The Article 50(2) marking seam (#1117).  ``generated_by`` on the
+        wire is the machine-readable half and it stops at the event; a
+        marker is what puts the fact IN or BESIDE the payload so it
+        survives leaving jaato.
+
+        Three rules the framework enforces so a marker cannot get them
+        wrong:
+
+        * **A relayed payload is never marked.**  No ``generated_by``,
+          no marker call -- a fetched image is not AI-generated because
+          an agent fetched it.  This is the gate, and it is here rather
+          than in each marker.
+        * **A marker that fails must not lose the payload.**  Every call
+          is wrapped; a raising marker is traced and the ORIGINAL bytes
+          continue.  Refusing to deliver would be a stronger posture
+          than the Article asks for and would break every voice session
+          on a transient error.
+        * **Which marker ran is recorded.**  Each outcome traces
+          ``OUTPUT_MARKER: ...`` -- ran, declined with its reason, or
+          raised.  A declined marking and no marker configured are
+          different facts, and a deployment that could not tell them
+          apart would believe its output was marked because a marker was
+          installed.
+
+        Returns the bytes to deliver: rewritten by a marker that
+        rewrites them, otherwise the ones passed in.
+        """
+        if not data or not generated_by:
+            return data
+        markers = self._output_markers()
+        if not markers:
+            return data
+        from jaato_sdk.output_marking import OutputPayload
+        current = data
+        for marker in markers:
+            payload = OutputPayload(
+                data=current, mime_type=mime_type or "",
+                generated_by=dict(generated_by),
+                path=path, display_name=display_name,
+            )
+            try:
+                result = marker.mark_output(payload)
+            except Exception as exc:  # noqa: BLE001 -- see the docstring
+                self._trace(
+                    f"OUTPUT_MARKER: {getattr(marker, 'name', marker)!r} "
+                    f"RAISED on a {mime_type!r} payload ({exc}); delivered "
+                    f"unmarked"
+                )
+                continue
+            if result is None:
+                continue
+            self._trace(
+                f"OUTPUT_MARKER: {result.marker!r} "
+                f"{'marked' if result.marked else 'declined'} a "
+                f"{mime_type!r} payload -- {result.detail}"
+            )
+            if result.data:
+                current = result.data
+        return current
+
     def _deliver_model_media(self, delta: 'MediaDelta') -> None:
         """Deliver one chunk of MODEL-generated media to subscribed clients.
 
@@ -9472,6 +9587,14 @@ NOTES
         if hooks is None or not delta.data:
             return
         try:
+            provenance = self._model_provenance()
+            # Art. 50(2) marking seam (#1117).  ``generated_by`` below is
+            # the machine-readable half and it stops at the wire; a marker
+            # is what puts the fact IN the bytes so it survives a client
+            # saving them.  No marker enabled -> the bytes are unchanged
+            # and this is the pre-#1117 call.
+            marked = self._mark_generated_output(
+                delta.data, delta.mime_type, provenance)
             hooks.on_tool_output(
                 agent_id=self._agent_id,
                 call_id=MODEL_MEDIA_CALL_ID,
@@ -9479,9 +9602,9 @@ NOTES
                 stream_id=self._model_media_stream_id(delta),
                 sequence=delta.sequence,
                 mime_type=delta.mime_type,
-                data_b64=_b64encode(delta.data).decode("ascii"),
+                data_b64=_b64encode(marked).decode("ascii"),
                 final=delta.final,
-                generated_by=self._model_provenance(),
+                generated_by=provenance,
             )
         except Exception:  # noqa: BLE001
             self._trace(
@@ -9525,6 +9648,16 @@ NOTES
             if not data or not mime_type:
                 continue
             try:
+                # The producer's own claim, or nothing.  Only a stamped
+                # payload is eligible for marking (#1117): a fetched image
+                # is not AI-generated because an agent fetched it, and the
+                # gate is in ``_mark_generated_output`` rather than here so
+                # both seams cannot disagree about it.
+                stamp = getattr(att, "generated_by", None)
+                if isinstance(data, bytes):
+                    data = self._mark_generated_output(
+                        data, mime_type, stamp,
+                        display_name=getattr(att, "display_name", None))
                 payload = (
                     data if isinstance(data, str)
                     else _b64encode(data).decode("ascii")
@@ -9538,9 +9671,7 @@ NOTES
                     mime_type=mime_type,
                     data_b64=payload,
                     final=(index == last),
-                    # The producer's own claim, or nothing: a relayed file
-                    # is not AI-generated because an agent relayed it.
-                    generated_by=getattr(att, "generated_by", None),
+                    generated_by=stamp,
                 )
             except Exception:  # noqa: BLE001
                 self._trace(

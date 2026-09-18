@@ -543,6 +543,7 @@ def validate_profile(
 
     # --- budget_control (incl. its ABSENCE, #947) -----------------------
     _check_budget_control(profile, add)
+    _check_record_keeping(profile, add)
 
     # --- diagnostic log paths (trace: and the two env vars) -------------
     _check_trace_paths(profile, env_keys, add)
@@ -755,6 +756,13 @@ def _check_profile_identity(profile: Any, add) -> None:
 #: undisclosed AI are then compliance defects, not authoring conveniences.
 #: The set is a declared constant so ``explain`` can print it and a test
 #: can pin it.
+#: The retention floor Article 19(1) names for a high-risk system's logs
+#: ("a period appropriate to the intended purpose … of at least six
+#: months, unless provided otherwise").  Six months as days.  A constant
+#: rather than a literal in the message, so the page and the finding
+#: cannot disagree about the number.
+_ART_19_MINIMUM_DAYS = 180
+
 HIGH_RISK_ESCALATED_CODES = frozenset({
     "budget_control_absent",
     "budget_limits_without_abort",
@@ -857,6 +865,32 @@ def _check_high_risk_obligations(profile: Any, reg: Any, add) -> None:
             "the system's lifetime.  Set `trace: {session_log: "
             ".jaato/logs/session_trace.jsonl}`.", where="trace.session_log")
 
+    # Writing the record and KEEPING it are two obligations, and the second
+    # was not expressible before #1119.  Art. 19(1) asks a provider to keep
+    # the logs at least six months and 26(6) asks the same of the deployer;
+    # without the block, `session.delete` removes everything.
+    keeping = getattr(profile, "record_keeping", None)
+    if keeping is None or not keeping.declared:
+        add("error", "high_risk_without_retention",
+            "risk_class: high with no `record_keeping:` block — the record "
+            "is written and nothing keeps it: `session.delete` and "
+            "`workspace.delete` remove the workspace's logs along with the "
+            "conversation.  Art. 19(1) asks the provider to keep the "
+            "automatically generated logs for at least six months (26(6) "
+            "asks the same of the deployer).  Declare `record_keeping: "
+            "{retention_days: 180}`; `explain audit` prints what is "
+            "recorded and where.", where="record_keeping.retention_days")
+    elif (keeping.retention_days is not None
+            and 0 < keeping.retention_days < _ART_19_MINIMUM_DAYS):
+        add("warn", "retention_below_article_19",
+            f"record_keeping.retention_days is {keeping.retention_days}, "
+            f"below the {_ART_19_MINIMUM_DAYS} days Art. 19(1) names as a "
+            "minimum for a high-risk system's logs.  A shorter period may "
+            "be right where Union or national law says so — the Article "
+            "says 'unless otherwise provided' — which is why this is a "
+            "warning and not an error.",
+            where="record_keeping.retention_days")
+
     if PIECE_DISCLOSURE in (getattr(profile, "suppress_base_instructions", None) or ()):
         add("error", "high_risk_disclosure_suppressed",
             "risk_class: high with `suppress_base_instructions` naming the "
@@ -892,6 +926,63 @@ def _escalate_for_risk_class(profile: Any, out: List[Diagnostic]) -> None:
         if d.severity == "warn" and d.code in HIGH_RISK_ESCALATED_CODES:
             d.severity = "error"
             d.message += "  (error because regulatory.risk_class is high)"
+
+
+#: Substrings that mark a profile's persona as the curator of the memory
+#: store.  A heuristic, deliberately: the curator is a persona an author
+#: names, and there is no declaration for "this agent curates".  It can
+#: only ever WITHHOLD a warning, never produce one, so being wrong costs
+#: a missing nudge rather than a false finding.
+_CURATOR_AGENT_MARKERS = ("curator", "advisor", "curador")
+
+
+def _check_memory_curation(profiles, out) -> None:
+    """``require_curation`` with nothing in the workspace that could curate.
+
+    Article 15(4) is about systems that "continue to learn after being
+    placed on the market": feedback loops must be addressed so possibly
+    biased outputs do not feed back as inputs unmitigated.  jaato's
+    learning loop is the memory plugin, and
+    ``plugin_configs.memory.require_curation`` is the mitigation --
+    memories are stored as before, and only ones a curator marked are
+    re-injected.
+
+    With the knob on and no curator ANYWHERE in the workspace, the gate
+    withholds everything.  That is a safe state and almost certainly not
+    the one the author meant: they enabled a learning loop and then
+    closed it entirely.
+
+    **A WORKSPACE check, not a per-profile one.**  The curator is a
+    separate agent with its own profile
+    (``docs/design/agent-continuity.md``), so asking whether THIS profile
+    binds one would warn on every correct setup.
+
+    Warn, not error, for the reason the whole family warns: a deployment
+    may curate by a route this cannot see -- a script, a premium
+    extension, a person editing the store.
+    """
+    profiles = profiles or {}
+    curators = sorted(
+        name for name, prof in profiles.items()
+        if any(marker in (getattr(prof, "default_agent", None) or "").lower()
+               for marker in _CURATOR_AGENT_MARKERS))
+    if curators:
+        return
+    for name, prof in sorted(profiles.items()):
+        configs = getattr(prof, "plugin_configs", None) or {}
+        if not (configs.get("memory") or {}).get("require_curation"):
+            continue
+        out.append(Diagnostic(
+            "warn", "require_curation_without_curator",
+            "plugin_configs.memory.require_curation is on and no profile in "
+            "this workspace binds a curator persona — every stored memory is "
+            "withheld from retrieval, so the knob currently means 'never "
+            "re-inject anything'. Article 15(4) asks that a learning loop be "
+            "MITIGATED, not closed: add a curator agent that promotes raw "
+            "memories (docs/design/agent-continuity.md), or turn the knob "
+            "off.",
+            profile=name,
+            where="plugin_configs.memory.require_curation"))
 
 
 def _check_spawn_schema_wire_types(profiles, config_root: str, out) -> None:
@@ -1265,6 +1356,50 @@ def _check_modality_direction(key, kind, direction, where, add,
                if value == DIRECTION_BIDIRECTIONAL
                and _carries_inbound_modality(provider_name, kind) else ""),
             where=where)
+
+
+def _check_record_keeping(profile: Any, add) -> None:
+    """A ``record_keeping:`` block on a profile that writes no record.
+
+    The other half of ``high_risk_without_retention``, and it fires at any
+    risk class: a retention policy over stores nothing writes to keeps
+    nothing.  The two findings are the pair ``budget_control_absent`` and
+    ``budget_limits_without_abort`` are -- one says you declared nothing,
+    the other says what you declared cannot act -- and neither is useful
+    without the other.
+
+    **Warn, not error**, the posture the whole silent-config family takes:
+    a base profile in an ``inherits`` chain may legitimately carry the
+    block its children pair with a ``trace:`` block, and validation runs
+    on every discovered profile including those bases.
+
+    The ``session_record`` store is NOT counted.  It is written
+    unconditionally under the workspace, so a profile declaring only
+    ``conversation_retention_days`` governs something real and is not
+    inert.
+    """
+    keeping = getattr(profile, "record_keeping", None)
+    if keeping is None or not keeping.declared:
+        return
+    # Only the two audit clocks need a log to act on; a conversation
+    # retention acts on the session record, which always exists.
+    governs_logs = (keeping.retention_days is not None
+                    or keeping.integrity != "none")
+    if not governs_logs:
+        return
+    writes = any(where in ("trace.session_log", "env.JAATO_TRACE_LOG",
+                           "trace.ledger", "env.LEDGER_PATH",
+                           "trace.provider_log", "env.JAATO_PROVIDER_TRACE")
+                 for _v, where in _trace_path_sources(profile))
+    if not writes:
+        add("warn", "record_keeping_inert",
+            "declares `record_keeping:` and no `trace:` paths — the "
+            "retention and integrity settings govern stores this profile "
+            "never writes to, so they keep nothing and chain nothing. "
+            "Add `trace: {session_log: .jaato/logs/session_trace.jsonl, "
+            "ledger: .jaato/logs/ledger.jsonl}`; `explain audit <profile>` "
+            "prints which stores a profile writes and which it does not.",
+            where="record_keeping")
 
 
 def _check_budget_control(profile: Any, add) -> None:
@@ -2759,6 +2894,7 @@ def validate_workspace(
     _check_spawn_schema_wire_types(result.profiles, config_root, out)
     _check_completion_assets(result.profiles, ws, config_root, out)
     _check_default_agent_exists(result.profiles, ws, config_root, out)
+    _check_memory_curation(result.profiles, out)
     for d in out[_before:]:
         d.tier = "workspace"
     return out

@@ -1780,6 +1780,19 @@ class SubagentProfile:
         "provider.name and interacts_with_persons (Art. 50(1)).  risk_class "
         "inherits most-restrictive-wins, the other fields child-replaces.  "
         "Absent = undeclared (validated as minimal, documented as unknown)."})
+    record_keeping: Optional['RecordKeepingConfig'] = field(
+        default=None, metadata={
+        "description": "How long this session's records are kept and whether "
+        "they carry tamper evidence (EU AI Act Arts. 12, 19, 26(6)): "
+        "{retention_days, conversation_retention_days, integrity: "
+        "none|sha256-chain}.  Two clocks because two different things are "
+        "kept -- the audit record says what the system DID, the conversation "
+        "is personal data somebody may ask to have erased, and keeping the "
+        "first while dropping the second is what satisfies Art. 19(1) and "
+        "GDPR at once.  0 days = keep until deleted.  All three inherit "
+        "most-restrictive-wins (LONGER for the two minimums), and 0 cannot "
+        "win it.  Absent = delete removes everything, exactly as before -- "
+        "this block changes what DELETE MEANS, so it has no default."})
     gc: Optional[GCProfileConfig] = field(default=None, metadata={
         "description": "Garbage-collection strategy + thresholds for this "
         "session (type + threshold_percent / target / preserve_recent_turns). "
@@ -2729,6 +2742,224 @@ class RegulatoryProfileConfig:
         return out
 
 
+# ---------------------------------------------------------------------------
+# record_keeping: -- how long the audit record is kept (EU AI Act, Arts. 12, 19)
+# ---------------------------------------------------------------------------
+
+#: The integrity postures a profile may declare, least to most demanding.
+#: Ordered, because inheritance is most-restrictive-wins on this field for
+#: the same reason ``risk_class`` is: a base that asked for tamper evidence
+#: has made a determination a child cannot un-make.
+INTEGRITY_MODES: Tuple[str, ...] = ("none", "sha256-chain")
+_INTEGRITY_RANK: Dict[str, int] = {n: i for i, n in enumerate(INTEGRITY_MODES)}
+
+#: What a ``record_keeping:`` block may say.
+RECORD_KEEPING_KEYS: FrozenSet[str] = frozenset({
+    "retention_days", "conversation_retention_days", "integrity",
+})
+
+
+@dataclass(frozen=True)
+class RecordKeepingConfig:
+    """How long this session's records are kept -- the ``record_keeping:`` block.
+
+    Regulation (EU) 2024/1689 Art. 19(1) asks a provider of a high-risk
+    system to keep the logs its system automatically generates for at
+    least six months; 26(6) asks the same of the deployer.  Nothing in a
+    profile could say so: ``session.delete`` and ``workspace.delete``
+    removed everything including the ledger, and the #812 lifetime sweep
+    had no retention pass.
+
+    **Two clocks, because two different things are being kept.**  The
+    audit record answers "what did this system do"; the conversation is
+    personal data somebody may ask to have erased.  Keeping the first and
+    dropping the second is the shape that satisfies Art. 19(1) and GDPR
+    erasure at once, and it is not expressible with one number.
+
+    **Declared, never defaulted.**  Unlike ``max_orphan_seconds`` -- which
+    has a framework default precisely because the session that needs it is
+    the one whose profile declared nothing -- this block changes what
+    DELETE MEANS, and a default would change that for every existing
+    deployment on upgrade.  A profile with no block deletes exactly as it
+    always has.
+
+    Attributes:
+        retention_days: The MINIMUM days an audit record is kept after
+            the session it belongs to is deleted.  ``0`` means "keep
+            until something deletes it" -- the 0-disables spelling
+            ``max_session_seconds`` uses -- and, like
+            ``max_orphan_seconds``, 0 cannot win the inheritance
+            comparison: a child may keep longer than an ancestor, never
+            shorter, and may not disable a retention an ancestor set.
+        conversation_retention_days: The same for the session record --
+            the history, which may legitimately go sooner than the log
+            about it.  ``None`` = governed by nothing here, which is
+            today's behaviour.
+        integrity: ``none`` (default) or ``sha256-chain``.  See
+            :mod:`jaato_sdk.audit` and ``docs/audit-log.md``.
+    """
+
+    retention_days: Optional[int] = None
+    conversation_retention_days: Optional[int] = None
+    integrity: str = "none"
+
+    @property
+    def chains(self) -> bool:
+        """Whether records carry a tamper-evidence chain."""
+        return self.integrity == "sha256-chain"
+
+    @property
+    def declared(self) -> bool:
+        """Whether this block says anything at all.
+
+        An empty block is not a retention policy, and must not make
+        ``session.delete`` start keeping records: the knob that changes
+        what delete means has to be one somebody wrote.
+        """
+        return (self.retention_days is not None
+                or self.conversation_retention_days is not None
+                or self.integrity != "none")
+
+    @classmethod
+    def from_dict(cls, data: Any) -> 'RecordKeepingConfig':
+        """Build from a profile's ``record_keeping:`` block.
+
+        Raises:
+            ValueError: on a non-mapping block, an unknown key, a
+                negative or non-integer day count, or an integrity mode
+                outside :data:`INTEGRITY_MODES`.  Loud, for the reason
+                every block parser here is: a retention policy that is
+                quietly wrong is a record that is quietly gone.
+        """
+        if not isinstance(data, dict):
+            raise ValueError(
+                f"record_keeping: must be a mapping, got {type(data).__name__}")
+        unknown = set(data) - RECORD_KEEPING_KEYS
+        if unknown:
+            raise ValueError(
+                f"record_keeping: unknown key(s) {sorted(unknown)}. "
+                f"Allowed: {sorted(RECORD_KEEPING_KEYS)}")
+
+        def _days(key: str) -> Optional[int]:
+            value = data.get(key)
+            if value is None:
+                return None
+            # bool is an int subclass; `retention_days: true` is an author
+            # reaching for a switch, the #925 shape, and must not read as 1.
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError(
+                    f"record_keeping.{key} must be an integer number of "
+                    f"days, got {value!r}")
+            if value < 0:
+                raise ValueError(
+                    f"record_keeping.{key} must be >= 0 (0 = keep until "
+                    f"deleted), got {value}")
+            return value
+
+        integrity = data.get("integrity", "none")
+        if integrity is None:
+            integrity = "none"
+        if not isinstance(integrity, str) or integrity not in _INTEGRITY_RANK:
+            raise ValueError(
+                f"record_keeping.integrity must be one of "
+                f"{list(INTEGRITY_MODES)}, got {integrity!r}")
+
+        return cls(
+            retention_days=_days("retention_days"),
+            conversation_retention_days=_days("conversation_retention_days"),
+            integrity=integrity,
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        """The block in its FILE shape, unset keys omitted.
+
+        What :func:`profile_to_snapshot` persists and :meth:`from_dict`
+        reads back, so a snapshot round-trips through the same parser a
+        profile file does.
+        """
+        out: Dict[str, Any] = {}
+        if self.retention_days is not None:
+            out["retention_days"] = self.retention_days
+        if self.conversation_retention_days is not None:
+            out["conversation_retention_days"] = self.conversation_retention_days
+        if self.integrity != "none":
+            out["integrity"] = self.integrity
+        return out
+
+
+def parse_record_keeping_block(
+    data: Dict[str, Any],
+) -> Optional['RecordKeepingConfig']:
+    """Parse a profile dict's optional ``record_keeping:`` block.
+
+    Sixth sibling of the block parsers above, for the reason all of them
+    exist: every ingress that builds a ``SubagentProfile`` from a dict
+    calls this, so the block cannot be wired into five of the six and be
+    silently inert in the sixth.
+
+    Returns ``None`` when the block is absent or empty; raises
+    ``ValueError`` on an unusable one.
+    """
+    block = data.get('record_keeping')
+    if not block:
+        return None
+    return RecordKeepingConfig.from_dict(block)
+
+
+def merge_record_keeping(
+    child: 'SubagentProfile', parents: List['SubagentProfile'],
+) -> Optional['RecordKeepingConfig']:
+    """Merge ``record_keeping:`` across an ``inherits`` chain.
+
+    **Most-restrictive-wins on every field**, and the three fields spell
+    "most restrictive" two different ways:
+
+    * the two day counts are MINIMUMS, so restrictive means LONGER -- the
+      maximum across declaring layers.  And ``0`` ("keep until deleted")
+      cannot win it, the ``max_orphan_seconds`` rule inverted: a child may
+      keep longer than its base, never shorter, and may not disable a
+      retention an ancestor set;
+    * ``integrity`` is ranked, so restrictive means further along
+      :data:`INTEGRITY_MODES` -- the ``risk_class`` rule.
+
+    Returns ``None`` when no layer declares the block at all.
+    """
+    layers = [getattr(child, "record_keeping", None)] + [
+        getattr(p, "record_keeping", None) for p in parents]
+    declared = [layer for layer in layers if layer is not None]
+    if not declared:
+        return None
+
+    def _longest(name: str) -> Optional[int]:
+        values = [getattr(layer, name) for layer in declared
+                  if getattr(layer, name) is not None]
+        if not values:
+            return None
+        # 0 means "keep until deleted", which is the LEAST restrictive
+        # thing a layer can say here, so it loses to any real minimum --
+        # and wins only when every declaring layer said it.
+        bounded = [v for v in values if v > 0]
+        return max(bounded) if bounded else 0
+
+    modes = [layer.integrity for layer in declared]
+    return RecordKeepingConfig(
+        retention_days=_longest("retention_days"),
+        conversation_retention_days=_longest("conversation_retention_days"),
+        integrity=max(modes, key=_INTEGRITY_RANK.__getitem__),
+    )
+
+
+def _record_keeping_errors(data: Dict[str, Any]) -> List[str]:
+    """``validate_profile``'s view of the block: the parser's refusal, as text."""
+    if data.get("record_keeping") is None:
+        return []
+    try:
+        RecordKeepingConfig.from_dict(data["record_keeping"])
+    except ValueError as exc:
+        return [str(exc)]
+    return []
+
+
 def parse_regulatory_block(data: Dict[str, Any]) -> Optional['RegulatoryProfileConfig']:
     """Parse a profile dict's optional ``regulatory:`` block.
 
@@ -2837,6 +3068,7 @@ def build_inline_profile(
     gc_config = parse_gc_block(data)
     trace_config = parse_trace_block(data)
     regulatory = parse_regulatory_block(data)
+    record_keeping = parse_record_keeping_block(data)
 
     runtime_limits = None
     if data.get('runtime_limits'):
@@ -2929,6 +3161,7 @@ def build_inline_profile(
         quirks=quirks,
         scrub_secret_env=data.get('scrub_secret_env'),
         regulatory=regulatory,
+        record_keeping=record_keeping,
     )
 
 
@@ -3072,6 +3305,7 @@ def profile_to_snapshot(profile: 'SubagentProfile') -> Dict[str, Any]:
         "cache": _block(getattr(profile, "cache", None)),
         "trace": _block(getattr(profile, "trace", None)),
         "regulatory": _regulatory_to_dict(profile),
+        "record_keeping": _record_keeping_to_dict(profile),
         "gc": _block(getattr(profile, "gc", None)),
         "env": dict(profile.env or {}),
         # ``inherits`` is deliberately dropped: a snapshot is POST-merge, so
@@ -3117,6 +3351,16 @@ def _regulatory_to_dict(profile: 'SubagentProfile') -> Optional[Dict[str, Any]]:
     return reg.to_dict() if reg is not None else None
 
 
+def _record_keeping_to_dict(profile: 'SubagentProfile') -> Optional[Dict[str, Any]]:
+    """The ``record_keeping`` block in its file shape, or ``None``.
+
+    Sibling of :func:`_regulatory_to_dict`, and for the same reason:
+    :func:`profile_to_snapshot` is at its complexity baseline.
+    """
+    keeping = getattr(profile, "record_keeping", None)
+    return keeping.to_dict() if keeping is not None else None
+
+
 def _snapshot_blocks(data: Dict[str, Any]) -> Dict[str, Any]:
     """Re-parse a snapshot's five structured sub-blocks.
 
@@ -3152,6 +3396,7 @@ def _snapshot_blocks(data: Dict[str, Any]) -> Dict[str, Any]:
             "cache": parse_cache_block(data),
             "trace": parse_trace_block(data),
             "regulatory": parse_regulatory_block(data),
+            "record_keeping": parse_record_keeping_block(data),
             "runtime_limits": (
                 RuntimeLimits.from_dict(limits_raw) if limits_raw else None
             ),
@@ -3207,6 +3452,7 @@ def profile_from_snapshot(data: Dict[str, Any]) -> 'SubagentProfile':
         cache=blocks["cache"],
         trace=blocks["trace"],
         regulatory=blocks["regulatory"],
+        record_keeping=blocks["record_keeping"],
         gc=blocks["gc"],
         env=dict(data.get("env") or {}),
         inherits=None,
@@ -3859,6 +4105,10 @@ def _merge_profiles(
     # regulatory: child-replaces per field, most-restrictive-wins on
     # risk_class -- see :func:`merge_regulatory`.
     merged_regulatory = merge_regulatory(child, parents)
+    # record_keeping: most-restrictive-wins on every field, and "most
+    # restrictive" is LONGER for the two minimums -- see
+    # :func:`merge_record_keeping`.
+    merged_record_keeping = merge_record_keeping(child, parents)
 
     # runtime_limits: scalar-override for the ceilings (parents must
     # agree or child overrides; frozen dataclasses with the same field
@@ -4047,6 +4297,7 @@ def _merge_profiles(
         quirks=merged_quirks,
         scrub_secret_env=merged_scrub_secret_env,
         regulatory=merged_regulatory,
+        record_keeping=merged_record_keeping,
     )
 
 
@@ -4149,6 +4400,7 @@ PROFILE_FILE_KEYS = frozenset({
     'cache',
     'trace',
     'regulatory',
+    'record_keeping',
     'env',
     'inherits',
     'completion_payload_schema',
@@ -4254,6 +4506,7 @@ def _scan_profiles_dir(
             gc_config = parse_gc_block(data)
             trace_config = parse_trace_block(data)
             regulatory = parse_regulatory_block(data)
+            record_keeping = parse_record_keeping_block(data)
             env = parse_profile_env(data)
         except ValueError as exc:
             err = f"Invalid profile '{name}': {exc}"
@@ -4370,6 +4623,7 @@ def _scan_profiles_dir(
             quirks=quirks,
             scrub_secret_env=data.get('scrub_secret_env'),
             regulatory=regulatory,
+            record_keeping=record_keeping,
         )
         if data.get('system_instructions'):
             import warnings
@@ -4758,6 +5012,7 @@ def _discover_premium_profiles() -> Dict[str, 'SubagentProfile']:
             gc_config = parse_gc_block(data)
             trace_config = parse_trace_block(data)
             regulatory = parse_regulatory_block(data)
+            record_keeping = parse_record_keeping_block(data)
         except ValueError as exc:
             logger.warning("Skipping premium profile '%s': %s", name, exc)
             continue
@@ -4849,6 +5104,7 @@ def _discover_premium_profiles() -> Dict[str, 'SubagentProfile']:
             quirks=quirks,
             scrub_secret_env=data.get('scrub_secret_env'),
             regulatory=regulatory,
+            record_keeping=record_keeping,
         )
         profiles[name] = profile
         logger.debug("Discovered premium profile '%s' from %s", name, file_path)
@@ -4940,6 +5196,9 @@ def validate_profile(data: Any) -> Tuple[bool, List[str], List[str]]:
 
     # regulatory (EU AI Act): delegate to the block parser, one rule.
     errors.extend(_regulatory_errors(data))
+
+    # record_keeping (EU AI Act Arts. 12/19): same rule, same delegation.
+    errors.extend(_record_keeping_errors(data))
 
     # model: string or null
     model = data.get("model")
@@ -5121,6 +5380,7 @@ class SubagentConfig:
             gc_config = parse_gc_block(profile_data)
             trace_config = parse_trace_block(profile_data)
             regulatory = parse_regulatory_block(profile_data)
+            record_keeping = parse_record_keeping_block(profile_data)
 
             # Parse runtime_limits (cgroup-enforced + app-enforced caps).
             # Validation runs in __post_init__ — bad values raise here so
@@ -5182,6 +5442,7 @@ class SubagentConfig:
                 apparmor_fragments=_normalize_apparmor_fragments(profile_data.get('apparmor_fragments')),
                 scrub_secret_env=profile_data.get('scrub_secret_env'),
                 regulatory=regulatory,
+                record_keeping=record_keeping,
             )
 
         return cls(

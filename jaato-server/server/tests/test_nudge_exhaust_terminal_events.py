@@ -131,7 +131,13 @@ def test_core_py_emits_agent_status_done_for_backward_compat():
     compat with consumers that don't watch SessionTerminatedEvent.
     """
     src = _core_py_source()
-    marker_idx = src.index("NUDGE_EXHAUSTED")
+    # Anchored on the fall-through's own local rather than on
+    # "NUDGE_EXHAUSTED", which #1122 made ambiguous: the incident
+    # register's KIND_NUDGE_EXHAUSTED import now matches first, and the
+    # window landed a thousand lines from the code this is about.  A
+    # locator that can be the wrong one silently is worse than a
+    # slightly longer string.
+    marker_idx = src.index("nudge_exhaust_summary")
     window = src[marker_idx:marker_idx + 2500]
     assert "AgentStatusChangedEvent" in window, (
         "core.py must still emit AgentStatusChangedEvent on the "

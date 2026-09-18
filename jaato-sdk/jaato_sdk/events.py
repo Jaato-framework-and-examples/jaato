@@ -230,7 +230,40 @@ from pydantic import BaseModel, ConfigDict, Field
 # (``Attachment.generated_by``); a chunk a tool merely relayed carries
 # nothing, because a fetched image is not AI-generated because an agent
 # fetched it.  Additive optional field: an older client ignores it.
-PROTOCOL_VERSION = "1.14"
+#
+# 1.15 -- the FIRST-INTERACTION announcement (Art. 50(1)), and the client's
+# way of declining it.  ``SessionInfoEvent.disclosure_announcement`` carries
+# the text a profile declaring ``regulatory.interacts_with_persons: true``
+# owes the person, on the shape a client can read BEFORE any turn -- so a
+# voice client renders it in the medium the person is using rather than
+# after the first reply.  The same text also goes out as
+# ``AgentOutputEvent(source="system")``, which every client already renders.
+# ``PresentationContext.client_discloses_ai`` is the suppression: a client
+# that already shows an "AI assistant" badge asserts the Act's "unless this
+# is obvious" clause, which only the party that can see the screen is in a
+# position to assert.
+#
+# Additive optional fields in both directions: an older client ignores the
+# announcement (and is then a client that does not disclose, which is the
+# state it was already in), and an older daemon never reads the flag (and
+# then announces, which is the safe direction).  No SDK minimum.
+#
+# 1.16 -- ``IncidentEvent`` (``incident.raised``).  Art. 73 gives a provider
+# 15 days to report a serious incident from becoming AWARE of it (10 for a
+# death, 2 for a widespread infringement), and the framework already knew
+# when the events that could be one happened -- it recorded none of them as
+# such, each being a log line in a different format with no severity and no
+# clock.  The event carries ``kind``, ``at``, the binding, a one-line
+# ``cause`` and the ``site`` that raised it.
+#
+# It does NOT say whether the entry IS a serious incident under Art. 3(49):
+# that is a human determination about consequences the framework cannot
+# see.  A new EVENT degrades the way 1.8's did -- ``deserialize_event``
+# raises on an unrecognised type and the SDK reader logs and continues --
+# so an older client on a 1.16 daemon loses the event and logs a line.  No
+# SDK minimum: the direction is a NEW daemon emitting to an OLD client,
+# which cannot opt out, so a minimum would fail the wrong party.
+PROTOCOL_VERSION = "1.16"
 
 
 # =============================================================================
@@ -326,6 +359,10 @@ class EventType(str, Enum):
     # above.  The two are one keyword apart and the wrong one was already on
     # the wire, so the names are kept deliberately unalike (#1069).
     BUDGET_RUNG_FIRED = "budget.rung_fired"
+    # Something a PERSON should look at (Arts. 72, 73, 26(5)).  Emphatically
+    # not "a serious incident": whether an entry is one under Art. 3(49) is
+    # a human determination about consequences the framework cannot see.
+    INCIDENT_RAISED = "incident.raised"
     GC_CONFIG = "gc.config"
     GC = "gc"                       # GC lifecycle (phase-switched)
 
@@ -1766,6 +1803,15 @@ class SessionInfoEvent(Event):
     # ^ [{name, methods}, ...] for services command completions
     tool_id_mappings: Dict[str, str] = Field(default_factory=dict)
     # ^ {hash_id: human_name, ...} for resolving opaque tool/category IDs in display
+    # The Article 50(1) first-interaction announcement (protocol 1.15), or
+    # ``None`` when this session does not announce -- see
+    # ``shared.ai_disclosure.announcement_for``.  Carried HERE as well as on
+    # the ``AgentOutputEvent(source="system")`` that also goes out, because
+    # this is the shape a client can act on before a turn exists: a voice
+    # client owns the speaker and can say it aloud, which the framework
+    # cannot do for it (there is no TTS in the tree).  The event states the
+    # obligation; the medium is the client's.
+    disclosure_announcement: Optional[str] = None
 
 
 class SessionDescriptionUpdatedEvent(Event):
@@ -2945,6 +2991,9 @@ class PresentationContext(BaseModel):
             (the default) means the client can present none -- the honest
             answer for a plain terminal.
         client_type: The kind of client (see ``ClientType`` enum).
+        client_discloses_ai: Whether this client already tells the person
+            they are interacting with an AI system, so the framework
+            withholds its own Article 50(1) announcement.
     """
 
     # ── Dimensions ──────────────────────────────────────────────
@@ -2976,6 +3025,22 @@ class PresentationContext(BaseModel):
 
     # ── Client hint ─────────────────────────────────────────────
     client_type: ClientType = ClientType.TERMINAL
+
+    # ── Disclosure (Regulation (EU) 2024/1689, Art. 50(1)) ──────
+    # ``True`` when this client ALREADY tells the person they are talking
+    # to an AI -- a persistent badge, a product whose whole surface says
+    # so.  The framework then withholds its own first-interaction
+    # announcement, which is the Act's "unless this is obvious from the
+    # point of view of a natural person who is reasonably well-informed,
+    # observant and circumspect" clause.
+    #
+    # Asserted by the client because the client is the only party that can
+    # see the screen; and for the same reason it is deliberately NOT read
+    # by ``jaato-scaffold validate`` -- a per-connection assertion cannot
+    # answer a question about a profile, so ``disclosure_absent`` stays
+    # exactly as it is.  Default ``False``: a client that has not said it
+    # discloses has not disclosed.
+    client_discloses_ai: bool = False
 
     # ── Communication style ────────────────────────────────────
     # When None, inferred from client_type: CHAT → CONVERSATIONAL,
@@ -3267,6 +3332,46 @@ class BudgetRungFiredEvent(Event):
     usage: Optional[Dict[str, float]] = None
     driving_dimension: Optional[str] = None
     tier_changes: Dict[str, str] = Field(default_factory=dict)
+
+
+class IncidentEvent(Event):
+    """Something happened that a person should look at (protocol 1.16).
+
+    Article 73 gives a provider 15 days to report a serious incident from
+    the moment it becomes AWARE of it -- 10 for a death, 2 for a
+    widespread infringement.  All three clocks start from awareness, and
+    the framework already knew when the events that could be one
+    happened; it recorded none of them as such, each being a log line in
+    a different format with no severity and no clock.
+
+    **This event does not classify.**  Whether an entry IS a serious
+    incident under Art. 3(49) is a determination about consequences --
+    harm to a person, disruption of critical infrastructure -- that the
+    framework cannot see.  It reports the fact and the clock; a person
+    decides.  The absence of a ``severity`` field is that decision, not
+    an omission.
+
+    The same record goes to the application trace as an ``INCIDENT:``
+    line (``shared.incidents``), which is what ``jaato-doctor
+    --incidents`` reads and what a deployment gets without configuring
+    anything.
+
+    Attributes:
+        kind: One of ``shared.incidents.INCIDENT_KINDS``.
+        at: Unix timestamp of when the framework became aware.
+        cause: One line saying what happened.
+        site: ``file.py::function`` -- what noticed.
+        provider / model / tier: The binding that was serving, when
+            there was one.  Absent rather than ``null`` when unknown.
+    """
+    type: EventType = Field(default=EventType.INCIDENT_RAISED)
+    kind: str = ""
+    at: float = 0.0
+    cause: str = ""
+    site: Optional[str] = None
+    provider: Optional[str] = None
+    model: Optional[str] = None
+    tier: Optional[str] = None
 
 
 class MidTurnInterruptEvent(Event):
@@ -3580,6 +3685,7 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.MID_TURN_PROMPT_QUEUED.value: MidTurnPromptQueuedEvent,
     EventType.MID_TURN_PROMPT_INJECTED.value: MidTurnPromptInjectedEvent,
     EventType.BUDGET_RUNG_FIRED.value: BudgetRungFiredEvent,
+    EventType.INCIDENT_RAISED.value: IncidentEvent,
     EventType.MID_TURN_INTERRUPT.value: MidTurnInterruptEvent,
     EventType.INTERRUPTED_TURN_RECOVERED.value: InterruptedTurnRecoveredEvent,
     # Workspace management
