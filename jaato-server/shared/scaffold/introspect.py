@@ -687,8 +687,8 @@ def placeholders() -> List[Placeholder]:
             name=token,
             meaning=meaning,
             resolved_by="jaato_sdk.trace (the writer, per line)",
-            applies_to="trace.session_log / trace.provider_log and their env "
-                       "vars",
+            applies_to="trace.session_log / trace.provider_log / trace.ledger "
+                       "and their env vars",
         )
         for token, meaning in TRACE_PATH_PLACEHOLDERS.items()
     ]

@@ -2408,8 +2408,9 @@ def _trace_block_note() -> List[str]:
     """
     return [
         "",
-        "  trace: — the two diagnostic log paths, and the ONE knob whose value",
-        "  is a path the framework writes to.  Both keys take the same rules:",
+        "  trace: — the two diagnostic log paths plus the token LEDGER, the ONE",
+        "  knob whose value is a path the framework writes to.  All three keys",
+        "  take the same rules:",
         "    absolute   one file, shared by every session using this profile",
         "    relative   resolved against each session's own workspace by the",
         "               READER (jaato_sdk/trace.py) — one file per session",
@@ -2419,6 +2420,8 @@ def _trace_block_note() -> List[str]:
         "        trace:",
         "          provider_log: .jaato/logs/provider{agent_suffix}.jsonl",
         "          session_log:  .jaato/logs/session.jsonl",
+        "          ledger:       .jaato/logs/ledger.jsonl   # every round trip +",
+        "                                                  # permission verdict",
         "",
         "  A PROVIDER trace splits per agent whether or not you ask: with no",
         "  placeholder the agent id is appended before the extension",

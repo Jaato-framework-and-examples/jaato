@@ -22,9 +22,9 @@ if TYPE_CHECKING:
 #   from google import genai
 #   from shared.token_accounting import TokenLedger
 #   client = genai.Client(vertexai=True, project=..., location=...)
-#   ledger = TokenLedger()
+#   ledger = TokenLedger()            # or TokenLedger(path="ledger.jsonl")
 #   response = ledger.generate_with_accounting(client, model_name, prompt)
-#   ledger.write_ledger()
+#   ledger.write_ledger()             # flushes what per-record append did not
 #   summary = ledger.summarize()
 #
 # Note on **gen_kwargs in generate_with_accounting:
@@ -32,14 +32,118 @@ if TYPE_CHECKING:
 # This keeps TokenLedger focused on accounting (token counts, retries, logging)
 # while remaining automatically compatible with new / optional model arguments.
 
+#: The env var naming the ledger file.  Session-scoped; its typed home is the
+#: profile's ``trace.ledger`` key, which seeds it (``TRACE_ENV_VARS``).
+LEDGER_PATH_ENV = "LEDGER_PATH"
+
+
 class TokenLedger:
-    def __init__(self):
+    """The per-runtime record of every model round trip and permission verdict.
+
+    Every ``response`` (tokens, cost, the user the session runs as), every
+    ``permission-check`` (verdict, method, approver) and the auxiliary
+    stages land here through :meth:`_record`.  Until this change the only
+    way any of it reached DISK was :meth:`write_ledger`, and that method had
+    **no caller outside its tests** -- on the daemon path the ledger was an
+    in-memory list that died with the runner, so a ``permission-check`` row
+    carrying an approver existed nowhere after the process exited.  That is
+    the record-keeping gap ``docs/design/eu-ai-act.md`` §4.4 names first
+    (Regulation (EU) 2024/1689 Arts. 12 and 19 ask for logs that outlive
+    the run).
+
+    So a record is now APPENDED TO DISK THE MOMENT IT IS RECORDED, whenever
+    a path is configured -- ``path=`` at construction, else the
+    ``LEDGER_PATH`` env var, which a profile's ``trace.ledger`` key seeds
+    per session.  A process that dies mid-turn has written what it
+    recorded.  :meth:`write_ledger` survives as the flush of whatever was
+    NOT yet appended (a ledger with no path configured until the end), so
+    no record is written twice.
+
+    Lifecycle:
+        ``_record`` -> in-memory list -> (path configured) one JSONL line
+        appended and flushed -> ``_flushed`` advances.  ``write_ledger``
+        writes ``_events[_flushed:]`` and advances the same cursor.
+
+    Args:
+        path: Explicit ledger file.  Outranks the env var -- the inversion
+            where ``LEDGER_PATH`` beat the argument its caller passed is
+            gone.  ``""`` means "no ledger file", explicitly.
+    """
+
+    def __init__(self, path: Optional[str] = None):
         self._events: List[Dict[str, Any]] = []
+        self._path = path
+        #: How many leading events are already on disk.
+        self._flushed = 0
+        #: Whether an append failure has been reported -- once per ledger,
+        #: because a record is made per round trip and per tool call.
+        self._append_failed = False
+
+    def ledger_path(self) -> Optional[str]:
+        """Where records are appended, or ``None`` when nowhere.
+
+        ``path`` given at construction wins; else ``LEDGER_PATH``.  A
+        RELATIVE path resolves against ``JAATO_WORKSPACE_ROOT`` when the
+        framework has set it -- the rule ``jaato_sdk.trace`` applies to the
+        two trace paths, so ``trace.ledger: .jaato/logs/ledger.jsonl`` is
+        one file per session exactly as ``trace.session_log`` is.  An empty
+        value means "no ledger", not "the default name".
+        """
+        raw = self._path if self._path is not None else os.environ.get(LEDGER_PATH_ENV)  # env: output path for the token-accounting JSONL ledger
+        if not raw:
+            return None
+        if os.path.isabs(raw):
+            return raw
+        workspace = os.environ.get("JAATO_WORKSPACE_ROOT")
+        return os.path.join(workspace, raw) if workspace else raw
 
     def _record(self, stage: str, details: Dict[str, Any]) -> None:
         details["stage"] = stage
         details["ts"] = time.time()
         self._events.append(details)
+        self._append_to_disk()
+
+    @staticmethod
+    def _enrich(ev: Dict[str, Any], idx: int) -> Dict[str, Any]:
+        """The on-disk form of one event: ISO timestamp, index, derived tokens."""
+        enriched = dict(ev)
+        enriched["iso_ts"] = datetime.datetime.utcfromtimestamp(ev.get("ts", time.time())).isoformat() + "Z"
+        enriched["event_index"] = idx
+        if "prompt_tokens" in ev and "output_tokens" in ev and "total_tokens" in ev:
+            pt = ev.get("prompt_tokens") or 0
+            ot = ev.get("output_tokens") or 0
+            tt = ev.get("total_tokens") or 0
+            enriched["internal_tokens"] = tt - (pt + ot)
+        return enriched
+
+    def _append_to_disk(self) -> None:
+        """Append every not-yet-flushed event to the configured path, if any.
+
+        Best-effort and never raises: a ledger that cannot be written must
+        not fail the model round trip it is recording.  The failure is
+        logged once per ledger at WARNING and the cursor is left where it
+        was, so :meth:`write_ledger` can still flush the same events to a
+        path that works.  One ``flush()`` per append, no ``fsync`` -- a
+        record per tool call is the hot path; ``write_ledger`` fsyncs.
+        """
+        path = self.ledger_path()
+        if path is None or self._flushed >= len(self._events):
+            return
+        try:
+            parent = os.path.dirname(path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            with open(path, "a", encoding="utf-8") as f:
+                for idx in range(self._flushed, len(self._events)):
+                    f.write(json.dumps(self._enrich(self._events[idx], idx)) + "\n")
+                f.flush()
+            self._flushed = len(self._events)
+        except Exception as exc:  # noqa: BLE001
+            if not self._append_failed:
+                self._append_failed = True
+                logger.warning(
+                    "ledger: cannot append to %s (%s); records stay in memory "
+                    "until write_ledger() -- reported once", path, exc)
 
     def generate_with_accounting(self, client: 'Client', model_name: str, prompt: str, **gen_kwargs):
         """Generate content with token accounting.
@@ -162,27 +266,30 @@ class TokenLedger:
             "max_retry_attempt_index": max_attempt,
         }
 
-    def write_ledger(self, filepath: str = "token_events_ledger.jsonl") -> Optional[str]:
-        """Append all buffered events to the JSONL ledger.
+    def write_ledger(self, filepath: Optional[str] = None) -> Optional[str]:
+        """Flush every event NOT yet appended to the JSONL ledger.
 
         Each event is written as a single line.  After all events are
         written we flush + fsync so a process crash or power loss
         can't leave a partial line in the ledger (which would corrupt
         downstream JSONL parsers).
+
+        Args:
+            filepath: Where to write.  Given, it wins; else the configured
+                :meth:`ledger_path`; else the legacy default
+                ``token_events_ledger.jsonl`` in the working directory.
+
+        Returns:
+            The path written, or ``None`` on failure.  Writes only the
+            events :meth:`_append_to_disk` has not already landed, so a
+            ledger that appended per record has nothing left to flush and
+            a record is never on disk twice.
         """
-        path = os.environ.get("LEDGER_PATH", filepath)  # env: output path for the token-accounting JSONL ledger
+        path = filepath or self.ledger_path() or "token_events_ledger.jsonl"
         try:
             with open(path, "a", encoding="utf-8") as f:
-                for idx, ev in enumerate(self._events):
-                    enriched = dict(ev)
-                    enriched["iso_ts"] = datetime.datetime.utcfromtimestamp(ev.get("ts", time.time())).isoformat() + "Z"
-                    enriched["event_index"] = idx
-                    if "prompt_tokens" in ev and "output_tokens" in ev and "total_tokens" in ev:
-                        pt = ev.get("prompt_tokens") or 0
-                        ot = ev.get("output_tokens") or 0
-                        tt = ev.get("total_tokens") or 0
-                        enriched["internal_tokens"] = tt - (pt + ot) if (pt is not None and ot is not None and tt is not None) else None
-                    f.write(json.dumps(enriched) + "\n")
+                for idx in range(self._flushed, len(self._events)):
+                    f.write(json.dumps(self._enrich(self._events[idx], idx)) + "\n")
                 f.flush()
                 try:
                     os.fsync(f.fileno())
@@ -190,6 +297,7 @@ class TokenLedger:
                     # fsync may not be supported on every filesystem;
                     # the data is at least in the OS buffer cache.
                     pass
+            self._flushed = len(self._events)
             return path
         except Exception as exc:
             logger.error(f"Ledger write failed: {exc}", exc_info=True)

@@ -121,7 +121,8 @@ def _trace_wire_shape(profile: Any) -> Dict[str, Any]:
     trace = getattr(profile, 'trace', None)
     paths = {} if trace is None else {
         k: v for k, v in (("session_log", trace.session_log),
-                          ("provider_log", trace.provider_log)) if v}
+                          ("provider_log", trace.provider_log),
+                          ("ledger", trace.ledger)) if v}
     return {"trace": paths} if paths else {}
 
 

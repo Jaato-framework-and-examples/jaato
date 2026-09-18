@@ -979,6 +979,7 @@ class CacheProfileConfig:
 TRACE_ENV_VARS: Dict[str, str] = {
     "session_log": "JAATO_TRACE_LOG",
     "provider_log": "JAATO_PROVIDER_TRACE",
+    "ledger": "LEDGER_PATH",
 }
 
 #: Values that mean "on" to a human and nothing at all to a path reader.
@@ -1035,10 +1036,17 @@ class TraceProfileConfig:
             workspace.
         provider_log: Path for the provider request/response trace
             (``JAATO_PROVIDER_TRACE``).  Same resolution.
+        ledger: Path for the token ledger (``LEDGER_PATH``) -- every model
+            round trip and permission verdict, appended per record by
+            ``shared.token_accounting.TokenLedger``.  Same resolution.
+            The typed home of a var that was ``AWAITING_TYPED_KEY`` and,
+            until the ledger appended per record, seeded a file nothing
+            wrote to on the daemon path.
     """
 
     session_log: Optional[str] = None
     provider_log: Optional[str] = None
+    ledger: Optional[str] = None
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'TraceProfileConfig':
@@ -1100,7 +1108,8 @@ class TraceProfileConfig:
             TRACE_ENV_VARS[key]: expand_variables(
                 value, workspace_root_override=workspace_root_override)
             for key, value in (("session_log", self.session_log),
-                               ("provider_log", self.provider_log))
+                               ("provider_log", self.provider_log),
+                               ("ledger", self.ledger))
             if value
         }
 
@@ -1752,8 +1761,9 @@ class SubagentProfile:
         "a provider that cannot cache. plugin_configs.<provider> overrides "
         "this for mechanism-specific tuning (more specific wins)."})
     trace: Optional['TraceProfileConfig'] = field(default=None, metadata={
-        "description": "Diagnostic trace-log paths: {session_log, provider_log}. "
-        "Typed sibling of the JAATO_TRACE_LOG / JAATO_PROVIDER_TRACE env vars, "
+        "description": "Diagnostic trace-log paths: {session_log, provider_log, "
+        "ledger}. Typed sibling of the JAATO_TRACE_LOG / JAATO_PROVIDER_TRACE / "
+        "LEDGER_PATH env vars, "
         "which stay the lower-precedence default (this block outranks them). "
         "Absolute = one shared file; relative = one file per session, resolved "
         "against the workspace. Refuses a switch written into a path field -- "

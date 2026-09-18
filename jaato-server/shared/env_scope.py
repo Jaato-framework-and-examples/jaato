@@ -412,9 +412,9 @@ CATALOG: Dict[str, EnvClass] = {
     "JAATO_SSL_VERIFY": EnvClass(HOST, None,
         "TLS verification escape hatch for intercepting proxies; a host "
         "posture"),
-    "LEDGER_PATH": EnvClass(SESSION, None,
-        "overrides the caller's ledger path -- an env var that "
-        "outranks a typed argument"),
+    "LEDGER_PATH": EnvClass(SESSION, "trace.ledger",
+        "the token ledger's file; typed with the two trace paths, and the "
+        "ledger now appends per record so the file is actually written"),
     "MINGW_CHOST": EnvClass(AMBIENT, None,
         "MSYS2 environment detection"),
     "MINGW_PREFIX": EnvClass(AMBIENT, None,
@@ -924,11 +924,6 @@ AWAITING_TYPED_KEY: Dict[str, Awaiting] = {
     ),
     "JAATO_VISION_DIR": Awaiting(
         "B", "plugin_configs.mermaid_formatter.vision_dir",
-    ),
-    "LEDGER_PATH": Awaiting(
-        "B", "trace.ledger",
-        "same block; also fixes the inversion where the env var "
-        "outranks the filepath argument its caller passed",
     ),
 
     # ---- tier E: credentials + connection identity -----------
