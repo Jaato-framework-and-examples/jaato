@@ -5259,7 +5259,7 @@ in the tree, each the smallest shape that makes an obligation expressible:
 | 6(4) document the risk determination | `regulatory:` profile block — `{intended_purpose, risk_class: minimal\|limited\|high, annex_iii, provider: {name, contact}, interacts_with_persons, disclosure_text}`. Declared, never inferred. `risk_class` inherits most-restrictive-wins, the rest child-replaces. Rides every ingress incl. the isolated-runner payload |
 | 50(1) say you are an AI | the `disclosure` instruction piece (`shared/ai_disclosure.py`), fourth beside `disk` / `constants` / `security`; kept by the blanket `suppress_base_instructions: true`, dropped only by name and then announced at WARNING (`ANNOUNCED_PIECES`) |
 | 50(2) mark generated output | `ToolOutputEvent.generated_by` (protocol 1.14): `{"kind": "ai", provider, model, session_id, agent_id}` on the model's own media, stamped in `_deliver_model_media`; `Attachment.generated_by` for a producer's claim; nothing on a relayed file |
-| 12 / 19 keep the logs | `TokenLedger` appends per record to `LEDGER_PATH`; `trace.ledger` is the typed key (relative = per session); `write_ledger` flushes only what was not appended |
+| 12 / 19 keep the logs | `TokenLedger` appends per record to `LEDGER_PATH`; `trace.ledger` is the typed key (relative = per session); `write_ledger` flushes only what was not appended. The runner constructs its own ledger (see below) |
 | 14(4) human oversight | `jaato-scaffold explain oversight [<profile>]` — the two stop verbs, the permission gate, the built-in constraints, reversibility, read from their enforcers; `jaato-doctor` prints the exact `jaato-server --stop` for the running daemon |
 
 **`validate` reads the block.** `disclosure_absent` (warn) for a
@@ -5277,6 +5277,20 @@ covers: `high_risk_without_intended_purpose`,
 declares no class validates exactly as before: absent is `minimal` for
 validation and *undeclared* for documentation, because a framework that
 printed `minimal` for it would be asserting a determination nobody made.
+
+**A ledger the runner never held.** Everything above about the ledger was
+true of the in-process path and false of the default one. The runner's
+bootstrap passed `ledger=None` to `configure_plugins` — on the reading that
+token accounting is daemon-tier (§4.2 of the runner design) — while the
+daemon never receives a runner session's usage into *its* ledger. So a
+runner-served session wrote no `response` and no `permission-check` record
+anywhere, and `explain audit <profile>` said the ledger was written: a key
+parsed, validated, rendered and enforced by nothing, the #735 shape, found
+by driving a live daemon for the evidence manual. The runner now constructs
+its own `TokenLedger` (Step 9 of `server/runner/session.py`); the path and
+the integrity posture are read per record through the session-scoped env
+the bootstrap already applied, so it is one file per session as documented.
+Guard: `shared/tests/test_runner_session_holds_a_ledger.py`.
 
 Deliberately not built yet, each named in the design doc with its reason:
 the first-interaction announcement a client renders (`disclosure_announcement`

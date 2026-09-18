@@ -25,13 +25,16 @@ between Path C connect and ``_build_session``:
 7. ``registry.set_config_root(config_root)`` if non-None
 8. ``PermissionPlugin()`` + ``initialize(default policy)``
 9. ``runtime.configure_plugins(registry, permission_plugin,
-   ledger=None)``
+   TokenLedger())``
 
 Differences from daemon-side:
 
 - ``tier_filter="runner"`` — daemon-tier plugins (auth, gc_*,
   cache_*, session, background) must NOT load runner-side.
-- ``ledger=None`` — token accounting is daemon-tier per §4.2.
+- the runner constructs its own ``TokenLedger`` (it passed ``None``
+  until the EU AI Act record-keeping work found that the daemon never
+  received a runner session's records either, so the default path wrote
+  no ledger at all; see ``test_runner_session_holds_a_ledger.py``).
 - No ``on_progress`` callback — runner has no client event sink.
 - ``permission_plugin`` initialized with default policy only;
   profile overrides not yet propagated (backlog §3.3c.X).
@@ -50,7 +53,7 @@ Tests pin:
 
 - ``bootstrap_session`` calls ``configure_plugins`` on the runtime
 - The runtime receives a non-None registry + non-None
-  permission_plugin + None ledger
+  permission_plugin + a ``TokenLedger``
 - The registry was discovered with ``tier_filter="runner"`` (no
   daemon-tier plugins leak)
 - ``set_workspace_path`` is broadcast when ``envelope.workspace_path``
@@ -156,7 +159,7 @@ def _envelope(
 
 def test_configure_runtime_plugins_calls_runtime_configure_plugins() -> None:
     """Pin: helper calls ``runtime.configure_plugins(registry, perm,
-    None)``.  Layer 4 closure check."""
+    TokenLedger())``.  Layer 4 closure check."""
     stub = _StubRuntime()
     _configure_runtime_plugins(stub, _envelope())
     assert len(stub.configure_plugins_calls) == 1
@@ -165,8 +168,10 @@ def test_configure_runtime_plugins_calls_runtime_configure_plugins() -> None:
     assert call["permission_plugin"] is not None, (
         "permission_plugin must be passed"
     )
-    assert call["ledger"] is None, (
-        "ledger is daemon-tier per §4.2; runner passes None"
+    from shared.token_accounting import TokenLedger
+    assert isinstance(call["ledger"], TokenLedger), (
+        "the runner holds its own ledger; None here meant a runner-served "
+        "session recorded nothing (see test_runner_session_holds_a_ledger.py)"
     )
 
 
