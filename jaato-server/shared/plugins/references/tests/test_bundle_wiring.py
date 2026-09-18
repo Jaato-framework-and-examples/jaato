@@ -17,7 +17,7 @@ import pytest
 from shared.plugins.references.bundle import (
     EMBEDDING_CONFIG_FILENAME,
     ROOT_BUNDLE_NAME,
-    Bundle,
+    ReferenceBundle,
     metadata_hash,
 )
 from shared.plugins.references.embedding_types import (

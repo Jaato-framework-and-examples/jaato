@@ -17,7 +17,7 @@ import pytest
 
 from shared.plugins.references.bundle import (
     EMBEDDING_CONFIG_FILENAME,
-    Bundle,
+    ReferenceBundle,
     metadata_hash,
 )
 from shared.plugins.references.embedding_types import EmbeddingResult
@@ -72,7 +72,7 @@ def _build_bundle(
     model="mock-model",
     dim=4,
     sidecar="references.embeddings.npy",
-) -> Bundle:
+) -> ReferenceBundle:
     """Create an on-disk bundle with a pre-populated sidecar."""
     directory.mkdir(parents=True, exist_ok=True)
     (directory / EMBEDDING_CONFIG_FILENAME).write_text(json.dumps({
@@ -83,7 +83,7 @@ def _build_bundle(
     }))
     matrix = np.asarray(vectors, dtype=np.float32)
     np.save(directory / sidecar, matrix, allow_pickle=False)
-    return Bundle(
+    return ReferenceBundle(
         name=directory.name,
         directory=directory.resolve(),
         embedding_model=model,
@@ -224,7 +224,7 @@ class TestMergeCompatible:
         assert (target_dir / "s2.json").is_file()
 
         # Manifest updated.
-        manifest = json.loads(target.manifest_path.read_text())
+        manifest = json.loads(target.embedding_config_path.read_text())
         assert manifest["rows"] == ["t1", "s1", "s2"]
 
     def test_dry_run_does_not_touch_disk(self, tmp_path):
@@ -253,7 +253,7 @@ class TestMergeCompatible:
         # Source JSON not copied.
         assert not (target_dir / "s1.json").is_file()
         # Manifest unchanged.
-        manifest = json.loads(target.manifest_path.read_text())
+        manifest = json.loads(target.embedding_config_path.read_text())
         assert manifest["rows"] == ["t1"]
 
 

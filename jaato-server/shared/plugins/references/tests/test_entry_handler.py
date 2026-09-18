@@ -13,10 +13,8 @@ from typing import Any, Dict
 
 import pytest
 
-from shared.plugins.bundle_common.bundle import (
-    BUNDLE_TIER_WORKSPACE,
-    EMBEDDING_CONFIG_FILENAME,
-)
+from shared.plugins.bundle_common.bundle import BUNDLE_TIER_WORKSPACE
+from shared.plugins.references.bundle import EMBEDDING_CONFIG_FILENAME
 from shared.plugins.bundle_common.handler import (
     BundleEntry,
     BundleEntryHandler,

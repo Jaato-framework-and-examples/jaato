@@ -11,8 +11,8 @@ from shared.plugins.references.bundle import (
     BUNDLE_TIER_WORKSPACE,
     EMBEDDING_CONFIG_FILENAME,
     ROOT_BUNDLE_NAME,
-    Bundle,
     BundleRef,
+    ReferenceBundle,
     detect_drift,
     discover_bundles,
     find_bundle,
@@ -99,7 +99,7 @@ class TestDetectDrift:
     """detect_drift correctly categorizes missing/stale/orphan."""
 
     def _bundle(self, rows):
-        return Bundle(
+        return ReferenceBundle(
             name="",
             directory=Path("/tmp/fake"),
             embedding_model="m",
@@ -234,9 +234,15 @@ class TestDiscoverBundles:
 
         bundles = discover_bundles(refs)
 
-        assert [b.name for b in bundles] == [ROOT_BUNDLE_NAME, "good"]
+        # The corrupt config does not remove the directory from the
+        # catalog — the file is what MARKS a bundle, and its body is
+        # only the vector index.  ``broken`` loads without one.
+        assert [b.name for b in bundles] == [ROOT_BUNDLE_NAME, "broken", "good"]
+        broken = next(b for b in bundles if b.name == "broken")
+        assert broken.has_index is False
+        assert broken.embedding_rows == []
 
-    def test_manifest_missing_rows_is_skipped(self, tmp_path):
+    def test_manifest_missing_rows_loads_with_empty_rows(self, tmp_path):
         refs = tmp_path / "references"
         refs.mkdir()
         (refs / EMBEDDING_CONFIG_FILENAME).write_text(json.dumps({
@@ -245,7 +251,11 @@ class TestDiscoverBundles:
             "embedding_sidecar": "x.npy",
         }))
 
-        assert discover_bundles(refs) == []
+        bundles = discover_bundles(refs)
+
+        assert [b.name for b in bundles] == [ROOT_BUNDLE_NAME]
+        assert bundles[0].has_index is True
+        assert bundles[0].embedding_rows == []
 
     def test_reconcile_mode_default_and_override(self, tmp_path):
         refs = tmp_path / "references"
@@ -485,13 +495,13 @@ class TestFindBundle:
     """find_bundle resolves a BundleRef against a list of loaded bundles."""
 
     def _bundle(self, name, tier):
-        return Bundle(
+        return ReferenceBundle(
             name=name,
             directory=Path(f"/tmp/{tier}/{name or 'root'}"),
+            tier=tier,
             embedding_model="m",
             embedding_dimensions=4,
             embedding_sidecar="x.npy",
-            tier=tier,
         )
 
     def test_scope_qualified_picks_exact_tier(self):

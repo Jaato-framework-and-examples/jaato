@@ -38,7 +38,14 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from .bundle import Bundle, DriftReport, detect_drift, metadata_hash, write_manifest
+from .bundle import (
+    DriftReport,
+    ReferenceBundle,
+    detect_drift,
+    metadata_hash,
+    require_index_paths,
+    write_manifest,
+)
 from .embedding_types import EmbeddingProviderProtocol
 from .models import EmbeddingMetadata, ReferenceSource
 
@@ -205,7 +212,7 @@ def _embed_text_for(source: ReferenceSource) -> str:
 
 
 def reconcile_bundle(
-    bundle: Bundle,
+    bundle: ReferenceBundle,
     sources: List[ReferenceSource],
     provider: Optional[EmbeddingProviderProtocol],
 ) -> ReconcileResult:
@@ -233,6 +240,21 @@ def reconcile_bundle(
         A populated :class:`ReconcileResult`. ``bundle.embedding_rows`` and
         ``bundle.matcher`` reflect the new state on ``UPDATED``.
     """
+    if not bundle.has_index:
+        # A bundle may legitimately ship definitions and no vectors.
+        # There is no sidecar to rewrite and no dimensions to embed
+        # against, so decline by name instead of deriving a path from
+        # an empty filename (which resolves to the bundle DIRECTORY).
+        logger.debug(
+            "Bundle '%s': no vector index declared — nothing to reconcile",
+            bundle.display_name,
+        )
+        return ReconcileResult(
+            bundle_name=bundle.name,
+            status=ReconcileStatus.UNAVAILABLE,
+            final_row_count=0,
+        )
+
     drift = detect_drift(bundle, sources)
     if drift.is_clean():
         return ReconcileResult(
@@ -266,7 +288,8 @@ def reconcile_bundle(
             final_row_count=len(bundle.embedding_rows),
         )
 
-    lock = _try_acquire_lock(bundle.lock_path)
+    _, lock_path = require_index_paths(bundle)
+    lock = _try_acquire_lock(lock_path)
     if lock is None:
         logger.info(
             "Bundle '%s': reconcile already in progress elsewhere — skipping",
@@ -292,11 +315,11 @@ def reconcile_bundle(
             error=str(exc),
         )
     finally:
-        _release_lock(lock, bundle.lock_path)
+        _release_lock(lock, lock_path)
 
 
 def _reconcile_locked(
-    bundle: Bundle,
+    bundle: ReferenceBundle,
     sources: List[ReferenceSource],
     drift: DriftReport,
     provider: EmbeddingProviderProtocol,
@@ -330,15 +353,16 @@ def _reconcile_locked(
             new_ids.append(sid)
 
     # Load the current matrix so we can preserve rows for kept_ids.
+    sidecar_path, _ = require_index_paths(bundle)
     old_matrix = None
-    if bundle.sidecar_path.is_file():
+    if sidecar_path.is_file():
         try:
-            old_matrix = np.load(bundle.sidecar_path, allow_pickle=False)
+            old_matrix = np.load(sidecar_path, allow_pickle=False)
         except (OSError, ValueError) as e:
             logger.warning(
                 "Bundle '%s': failed to load existing sidecar %s: %s — "
                 "treating all rows as new",
-                bundle.display_name, bundle.sidecar_path, e,
+                bundle.display_name, sidecar_path, e,
             )
             old_matrix = None
             kept_ids = []
@@ -411,7 +435,7 @@ def _reconcile_locked(
     # fails the manifest still points at the previous rows; if the
     # manifest write fails the sidecar has new rows the manifest doesn't
     # know about — next reconcile will see them as orphans and prune.
-    _write_sidecar_atomic(bundle.sidecar_path, new_matrix)
+    _write_sidecar_atomic(sidecar_path, new_matrix)
     write_manifest(bundle, rows=final_rows)
 
     # Stamp each new/refreshed reference JSON with its new source_hash so

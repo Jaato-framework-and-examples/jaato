@@ -19,8 +19,11 @@ import pytest
 from shared.plugins.bundle_common.bundle import (
     BUNDLE_TIER_USER,
     BUNDLE_TIER_WORKSPACE,
-    EMBEDDING_CONFIG_FILENAME,
     Bundle,
+)
+from shared.plugins.references.bundle import (
+    EMBEDDING_CONFIG_FILENAME,
+    ReferenceBundle,
 )
 from shared.plugins.bundle_common.handler import (
     BundleEntry,
@@ -63,13 +66,13 @@ def _bundle(tmp_path, name="teammate", tier=BUNDLE_TIER_WORKSPACE):
         "rows": [],
     }))
     (bundle_dir / "vectors.npy").write_bytes(b"\x93NUMPY-FAKE")
-    return Bundle(
+    return ReferenceBundle(
         name=name,
         directory=bundle_dir.resolve(),
+        tier=tier,
         embedding_model="test-model",
         embedding_dimensions=4,
         embedding_sidecar="vectors.npy",
-        tier=tier,
     )
 
 

@@ -36,11 +36,12 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .bundle import (
+    BUNDLE_MARKER_FILENAMES,
     BUNDLE_TIER_USER,
     BUNDLE_TIER_WORKSPACE,
-    EMBEDDING_CONFIG_FILENAME,
     ROOT_BUNDLE_NAME,
     VALID_BUNDLE_TIERS,
+    is_bundle_directory,
 )
 from .handler import BundleEntryHandler, BundleEntryRegistry
 from .pack import (
@@ -263,10 +264,11 @@ def unpack_archive(
             kind_root = per_kind_roots[kind]
             staged_bundle = kind_root / ARCHIVE_BUNDLE_DIR
             staged_payload = kind_root / ARCHIVE_PAYLOAD_DIR
-            if not (staged_bundle / EMBEDDING_CONFIG_FILENAME).is_file():
+            if not is_bundle_directory(staged_bundle):
                 raise UnpackError(
-                    f"archive's kind={kind!r} subtree is missing "
-                    f"bundle/{EMBEDDING_CONFIG_FILENAME}"
+                    f"archive's kind={kind!r} subtree is missing a bundle "
+                    f"manifest (expected bundle/ to contain one of "
+                    f"{', '.join(BUNDLE_MARKER_FILENAMES)})"
                 )
 
             target_dir = _resolve_target_dir(
@@ -375,10 +377,7 @@ def _install_kind(
     callers should treat partial-install as "fix the cause and rerun
     with --overwrite" rather than a transactional concern.
     """
-    target_exists = (
-        target_dir.is_dir()
-        and (target_dir / EMBEDDING_CONFIG_FILENAME).is_file()
-    )
+    target_exists = target_dir.is_dir() and is_bundle_directory(target_dir)
     if target_exists and mode == UnpackMode.ERROR:
         raise UnpackError(
             f"target {target_dir} already contains a bundle (kind={kind!r}); "
@@ -415,7 +414,7 @@ def _install_kind(
 
     entry_count = sum(
         1 for p in target_dir.glob("*.json")
-        if p.name != EMBEDDING_CONFIG_FILENAME
+        if p.name not in BUNDLE_MARKER_FILENAMES
     )
     return KindUnpackResult(
         kind=kind,
@@ -494,9 +493,10 @@ def _safe_replace_bundle(target_dir: Path) -> None:
     """
     if not target_dir.is_dir():
         return
-    manifest = target_dir / EMBEDDING_CONFIG_FILENAME
-    if manifest.is_file():
-        manifest.unlink()
+    for marker_name in BUNDLE_MARKER_FILENAMES:
+        marker = target_dir / marker_name
+        if marker.is_file():
+            marker.unlink()
     for npy in target_dir.glob("*.npy"):
         npy.unlink()
     for npy_lock in target_dir.glob("*.npy.lock"):

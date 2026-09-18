@@ -80,10 +80,21 @@ Bundle name defaults to the directory name (`teammate-kb`). The root bundle
 has the name `""` (empty string) for internal bookkeeping and displays as
 `(root)`.
 
-A directory *is* a bundle if it contains an `embedding_config.json`. A
-directory without one is just a container for references that participate
-in the root bundle (this preserves the current flat layout for users who
-never ran the indexer).
+A directory *is* a bundle if it contains a **bundle manifest**. A directory
+without one is just a container for references that participate in the root
+bundle (this preserves the current flat layout for users who never ran the
+indexer).
+
+> **Updated 2026-09 (#1130).** "A bundle manifest" means `bundle.json` — the
+> domain-agnostic marker written by
+> `bundle_common.bundle.write_bundle_manifest`, whose every field is optional
+> — **or** `embedding_config.json`, still recognised so every bundle already
+> on disk keeps loading. The index below is a *references* concern: it lives
+> on `references.bundle.ReferenceBundle` rather than on the generic `Bundle`,
+> and a bundle that declares no index (`has_index is False`) is discovered,
+> listed and packed exactly like one that does. What has not changed is the
+> need for a manifest at all: a subdirectory without one is still ignored, so
+> dropping an unrelated directory into a tier root never pollutes the catalog.
 
 ### `embedding_config.json` schema (v2)
 
