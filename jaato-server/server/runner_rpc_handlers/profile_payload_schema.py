@@ -153,7 +153,7 @@ def validate_profile_payload(payload: Any) -> None:
 
     if "suppress_base_instructions" in payload:
         v = payload["suppress_base_instructions"]
-        # bool | mapping over {disk,constants,security} | list of piece names
+        # bool | mapping over SUPPRESSION_PIECES | list of piece names
         # (wire form).  normalize_suppression fails loud on an unknown piece
         # or unsupported type — surface that as the payload validation error.
         try:

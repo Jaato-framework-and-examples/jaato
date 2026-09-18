@@ -34,6 +34,7 @@ from shared.plugins.model_provider.base import KNOB_LAYERS
 # loader's module notes carry the decision and the rejected alternatives.
 from shared.spawn_schema_loader import unreachable_spawn_types
 from jaato_sdk.plugins.model_provider.types import DISCOVERABILITY_EAGER
+from shared.instruction_suppression import PIECE_DISCLOSURE
 from . import introspect
 
 # Layer names that nest under plugin_configs.<provider> as sub-dicts.
@@ -855,6 +856,14 @@ def _check_high_risk_obligations(profile: Any, reg: Any, add) -> None:
             "and Art. 12 requires those events recorded automatically over "
             "the system's lifetime.  Set `trace: {session_log: "
             ".jaato/logs/session_trace.jsonl}`.", where="trace.session_log")
+
+    if PIECE_DISCLOSURE in (getattr(profile, "suppress_base_instructions", None) or ()):
+        add("error", "high_risk_disclosure_suppressed",
+            "risk_class: high with `suppress_base_instructions` naming the "
+            "`disclosure` piece — the model is no longer told to disclose "
+            "that it is an AI system (Art. 50(1), in force since 2 Aug "
+            "2026).  Remove `disclosure` from the suppression.",
+            where="suppress_base_instructions.disclosure")
 
     plugins = getattr(profile, "plugins", None) or []
     if "interactive_shell" in plugins and not _shell_confinement_required(profile):

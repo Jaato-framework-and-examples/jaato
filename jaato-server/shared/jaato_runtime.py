@@ -424,6 +424,35 @@ def _framework_prompt_constants() -> List[str]:
     return [c for c in live if c]
 
 
+def _posture_pieces(include_security: bool, include_disclosure: bool) -> List[str]:
+    """The two instruction pieces whose removal is a posture change.
+
+    * The untrusted-content boundary (security baseline).  Included by
+      default -- web_fetch/web_search/MCP tools are deferred-loaded, so
+      gating on tool presence would drop the instruction for a tool the
+      model can still discover + call.  Teaches the model to treat
+      boundary-wrapped tool results as data, not instructions
+      (indirect-prompt-injection defense).  Dropped ONLY when a session
+      explicitly opts in via ``suppress_base_instructions: {security:
+      true}`` (never by the blanket ``true``).
+    * The AI-interaction disclosure (Regulation (EU) 2024/1689, Art.
+      50(1)).  Same posture: dropped ONLY by ``{disclosure: true}`` by
+      name -- dropping it is a legal posture change, not a token saving.
+
+    Its own function so :meth:`JaatoRuntime.get_system_instructions`
+    stays at its complexity baseline; the order (boundary, then
+    disclosure) is the order they are appended.
+    """
+    parts: List[str] = []
+    if include_security:
+        from jaato_sdk.plugins.model_provider.types import untrusted_boundary_instruction
+        parts.append(untrusted_boundary_instruction())
+    if include_disclosure:
+        from shared.ai_disclosure import disclosure_instruction
+        parts.append(disclosure_instruction())
+    return parts
+
+
 def _is_deferred_tools_enabled() -> bool:
     """Check if deferred tool loading is enabled.
 
@@ -1802,6 +1831,7 @@ class JaatoRuntime:
         include_base: bool = True,
         include_constants: bool = True,
         include_security: bool = True,
+        include_disclosure: bool = True,
     ) -> Optional[str]:
         """Get system instructions, optionally filtered by plugin names.
 
@@ -1818,6 +1848,8 @@ class JaatoRuntime:
         6. Framework-level task completion instruction
         7. Parallel tool guidance
         8. Turn-end summary guidance
+        9. The untrusted-content boundary, then the AI-interaction
+           disclosure (each dropped only by naming its piece)
 
         This ensures base behavioral rules (like transparency, no silent pauses)
         apply consistently to all agents (main and subagents).
@@ -1845,6 +1877,11 @@ class JaatoRuntime:
                               ``suppress_base_instructions: {security: true}``
                               (the blanket ``true`` keeps it — it is the
                               indirect-prompt-injection defense).
+            include_disclosure: When False, skip the AI-interaction disclosure
+                              piece (EU AI Act Art. 50(1)).  Driven only by
+                              an explicit ``suppress_base_instructions:
+                              {disclosure: true}``; the blanket ``true``
+                              keeps it, exactly as it keeps ``security``.
 
         Returns:
             Combined system instructions string, or None.
@@ -1932,17 +1969,10 @@ class JaatoRuntime:
         if include_constants:
             result_parts.extend(_framework_prompt_constants())
 
-        # 7. Untrusted-content boundary (security baseline).  Included by
-        # default — web_fetch/web_search/MCP tools are deferred-loaded, so
-        # gating on tool presence would drop the instruction for a tool the
-        # model can still discover + call.  Teaches the model to treat
-        # boundary-wrapped tool results as data, not instructions
-        # (indirect-prompt-injection defense).  Dropped ONLY when a session
-        # explicitly opts in via ``suppress_base_instructions: {security:
-        # true}`` (never by the blanket ``true``).
-        if include_security:
-            from jaato_sdk.plugins.model_provider.types import untrusted_boundary_instruction
-            result_parts.append(untrusted_boundary_instruction())
+        # 7-8. The two POSTURE pieces -- the untrusted-content boundary and
+        # the AI-interaction disclosure.  Each is included by default and
+        # dropped only by naming its piece; see :func:`_posture_pieces`.
+        result_parts.extend(_posture_pieces(include_security, include_disclosure))
 
         return "\n\n".join(result_parts)
 

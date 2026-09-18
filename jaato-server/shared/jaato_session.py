@@ -51,7 +51,9 @@ from .instruction_budget_builder import (
     apply_instruction_counts as _builder_apply_instruction_counts,
 )
 from .instruction_suppression import (
+    ANNOUNCED_PIECES,
     PIECE_CONSTANTS,
+    PIECE_DISCLOSURE,
     PIECE_DISK,
     PIECE_SECURITY,
     normalize_suppression,
@@ -184,6 +186,30 @@ TRUNCATION_RECOVERY_REASONS = frozenset({FinishReason.MAX_TOKENS})
 # loop.  Past the budget the turn ends exactly as it does today, with
 # the reason preserved.
 TRUNCATION_RECOVERY_BUDGET = 2
+
+
+def _announce_dropped_pieces(suppressed, agent_id: str) -> None:
+    """Log, at WARNING, each suppressed piece whose removal is a POSTURE change.
+
+    ``disk`` and ``constants`` are token savings and are dropped quietly.
+    ``security`` (the indirect-prompt-injection defense) and ``disclosure``
+    (the Article 50(1) "you are talking to an AI" instruction) are not:
+    each can be dropped only by naming it, and a weakened posture announces
+    itself here for the reason ``scrub_secret_env: none`` and
+    ``--ws-unsafe-no-auth`` do -- silence is how a session ends up running
+    without a boundary nobody remembers removing.  Read from
+    :data:`ANNOUNCED_PIECES`, so a piece added to that set is announced
+    without an edit here.
+    """
+    for piece in sorted(suppressed & ANNOUNCED_PIECES):
+        logger.warning(
+            "suppress_base_instructions drops the %r piece for agent %s -- "
+            "a posture change, not a token saving (%s)",
+            piece, agent_id,
+            "the untrusted-content boundary is off" if piece == "security"
+            else "the model is no longer told to disclose that it is an AI "
+                 "system, Regulation (EU) 2024/1689 Art. 50(1)",
+        )
 
 
 def _telemetry_json_default(obj: Any) -> str:
@@ -3259,7 +3285,9 @@ class JaatoSession:
                 include_base=PIECE_DISK not in _suppress,
                 include_constants=PIECE_CONSTANTS not in _suppress,
                 include_security=PIECE_SECURITY not in _suppress,
+                include_disclosure=PIECE_DISCLOSURE not in _suppress,
             )
+        _announce_dropped_pieces(_suppress, self._agent_id)
 
         # Dynamic-instructions expansion ({{!py:script.py}}).  Walks
         # the assembled system_instruction for placeholders and

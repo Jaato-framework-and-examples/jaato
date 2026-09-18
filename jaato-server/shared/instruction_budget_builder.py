@@ -147,9 +147,10 @@ def collect_instruction_texts(
         suppress_constants: Skip the framework prompt constants (task-completion,
             parallel guidance, turn-summary) so the budget matches a wire prompt
             assembled with ``include_constants=False``.  (The builder never
-            emits the security boundary, so there is no ``suppress_security``
-            knob here — the wire prompt's security block is simply uncounted,
-            as it was before this change.)
+            emits the security boundary or the AI-disclosure piece, so there
+            is no ``suppress_security`` / ``suppress_disclosure`` knob here —
+            the wire prompt's two posture blocks are simply uncounted, as
+            the security one was before this change.)
         pinned_references: Mapping of ref_id -> pinned reference (with
             ``content`` / ``ref_name`` attributes), promoted to SYSTEM.
         preloaded_plugins: Plugin names whose instructions are always

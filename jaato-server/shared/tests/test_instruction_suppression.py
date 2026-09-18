@@ -15,7 +15,9 @@ dict/list gives per-piece control; unknown pieces fail loud.
 import pytest
 
 from shared.instruction_suppression import (
+    ANNOUNCED_PIECES,
     PIECE_CONSTANTS,
+    PIECE_DISCLOSURE,
     PIECE_DISK,
     PIECE_SECURITY,
     SUPPRESSION_PIECES,
@@ -44,8 +46,17 @@ class TestNormalize:
 
     def test_dict_all_true_drops_everything_incl_security(self):
         assert normalize_suppression(
-            {"disk": True, "constants": True, "security": True}
+            {"disk": True, "constants": True, "security": True,
+             "disclosure": True}
         ) == SUPPRESSION_PIECES
+
+    def test_true_keeps_disclosure_like_security(self):
+        """Dropping the Art. 50(1) piece is a legal posture change: named
+        explicitly, never by the blanket ``true``."""
+        assert PIECE_DISCLOSURE not in normalize_suppression(True)
+        assert normalize_suppression({"disclosure": True}) == frozenset(
+            {PIECE_DISCLOSURE})
+        assert PIECE_DISCLOSURE in ANNOUNCED_PIECES
 
     def test_list_form_and_all_token(self):
         assert normalize_suppression(["disk", "constants"]) == frozenset(
@@ -183,6 +194,20 @@ class TestRuntimeAssemblyGating:
         assert _TASK_COMPLETION_INSTRUCTION in full
         assert _TASK_COMPLETION_INSTRUCTION not in gated
         assert "PERSONA" in gated
+
+    def test_include_disclosure_false_drops_the_ai_disclosure(self):
+        from shared.ai_disclosure import disclosure_instruction
+        piece = disclosure_instruction()
+        assert piece in self._assemble()
+        assert piece not in self._assemble(include_disclosure=False)
+        # And the blanket ``true`` keeps it, exactly like security.
+        supp = normalize_suppression(True)
+        assert piece in self._assemble(
+            include_base=PIECE_DISK not in supp,
+            include_constants=PIECE_CONSTANTS not in supp,
+            include_security=PIECE_SECURITY not in supp,
+            include_disclosure=PIECE_DISCLOSURE not in supp,
+        )
 
     def test_include_security_false_drops_boundary(self):
         from jaato_sdk.plugins.model_provider.types import untrusted_boundary_instruction

@@ -242,7 +242,8 @@ def _run(profile):
 
 def _ns(reg=None, **kw):
     base = dict(default_agent=None, system_instructions=None, plugins=[],
-                plugin_configs={}, trace=None, env={})
+                plugin_configs={}, trace=None, env={},
+                suppress_base_instructions=frozenset())
     base.update(kw)
     return SimpleNamespace(regulatory=reg, **base)
 
@@ -290,6 +291,9 @@ def test_the_high_risk_only_findings_fire_and_name_the_remedy():
         "high_risk_without_record_keeping",
         "high_risk_shell_unconfined",
     }
+    # And the fifth, when the disclosure piece is suppressed by name.
+    dropped = _run(_ns(reg, suppress_base_instructions=frozenset({"disclosure"})))
+    assert "high_risk_disclosure_suppressed" in {d.code for d in dropped}
     assert all(d.severity == "error" for d in found)
 
 

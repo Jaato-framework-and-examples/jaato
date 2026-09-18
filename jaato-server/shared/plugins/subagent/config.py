@@ -1693,8 +1693,11 @@ class SubagentProfile:
         "prompt (plugin + agent instructions always kept).  `true` drops the disk "
         "BASE layer (.jaato/instructions/*.md) AND the framework constants "
         "(task-completion, parallel guidance, turn-summary); the security "
-        "untrusted-content boundary is kept.  A dict gives granular control, e.g. "
-        "`{disk: true, constants: true, security: false}` (absent key = keep).  "
+        "untrusted-content boundary and the AI disclosure (EU AI Act Art. 50(1)) "
+        "are kept.  A dict gives granular control over the four pieces, e.g. "
+        "`{disk: true, constants: true, security: false}` (absent key = keep); "
+        "dropping `security` or `disclosure` is a posture change and is "
+        "announced at WARNING.  "
         "Saves ~3-5k tokens/turn for narrow goal-focused agents.  Default False.  "
         "Normalized to a canonical frozenset of piece names in __post_init__."})
     model: Optional[str] = field(default=None, metadata={
