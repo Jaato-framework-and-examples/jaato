@@ -2834,6 +2834,101 @@ Three properties follow, each attached to a way the old path went wrong:
 Nested payloads are deliberately not rendered into the view — handing an
 enricher a whole structured result is what the two traits above are for.
 
+### A Guard That Only Binds When Nothing Needs Bounding
+
+`references` expands a selection transitively: `selectReferences` runs a BFS
+from the chosen ids, discovering edges from each node's **body text** (a
+catalog id mentioned as a whole word, or a relative path that resolves to
+another LOCAL source). What it returns is the **reachable set** — the
+transitive closure's row — not a neighbourhood, and its only bound was
+`MAX_TRANSITIVE_DEPTH = 10`.
+
+Depth is a **logarithmic control over an exponential quantity**: a frontier
+of out-degree `d` reaches `d**k` nodes at depth `k`, so depth 10 binds only
+on catalogs larger than `d**10` — 59,049 at `d=3`. Measured on a 200-entry
+catalog, varying only how many other topics each document mentions:
+
+| mentions per document | resolved from ONE selection | depth actually binds? |
+|---|---|---|
+| 1 | 4 | yes |
+| 2 | 147 | no (saturates past 10) |
+| 3 | **200 — the whole catalog** | no (saturates at 9) |
+| 4 | 200 | no (saturates at 5) |
+
+**Three mentions per document is the cliff**, and that is a "see also"
+naming three siblings. The guard binds at out-degree 1 — a pure chain,
+which is the one shape that never needed bounding. Every resolved
+reference is manifested to the model *and* path-authorized, so this is a
+context and authorization-surface question, not only latency.
+
+An edge is a **mention**, not a link: nobody authors it. An index page, a
+changelog or a table of contents gives one node an out-degree of the whole
+catalog, and a DIRECTORY reference inherits every id mentioned anywhere
+beneath it (`_get_reference_content` rglobs and concatenates).
+
+**Three changes, and only the third alters behaviour.**
+
+| # | Change | Effect |
+|---|---|---|
+| 1 | `sorted()` on the frontier and on each node's discoveries | reproducible expansion |
+| 2 | one-pass id matching | 130x faster, identical results |
+| 3 | `max_transitive_references` + a truncation record | a bound that binds |
+
+**Sorting had to land before the bound, not with it.** `pending` and
+`new_mentions` are sets, so iteration order varies across processes
+(string hash randomisation). Unbounded that only shuffled the manifest;
+with a cap it decides **which** references survive — measured on the same
+catalog capped at 25, **six of the 25 differed** between two
+`PYTHONHASHSEED` values. Same argument this file already makes for sorting
+the `spawn_subagent` profile enum: the output reaches the prompt-cache
+prefix.
+
+**The matcher was O(catalog x content).** `_find_referenced_ids` built a
+word-boundary regex per catalog id and searched the whole body with each.
+On one 386,029-char directory reference against a 200-entry catalog:
+**1.5544s -> 0.0119s**, identical result sets. It now tokenises the content
+once on the pattern's own separator class and intersects. An id that
+*contains* a separator (`foo bar`, `a(b)`) is unreachable by tokenising and
+keeps the original per-id matcher — dropping those would silently narrow
+the graph for catalogs that use such ids. Equivalence is pinned against the
+original implementation, and by 400 randomised trials over an alphabet that
+includes the separator characters.
+
+**The bound defaults to UNBOUNDED, and is announced instead.** Capping by
+default would silently cut neighbourhoods every existing workspace relies
+on; the safe-by-default posture `scrub_secret_env` takes is right for a
+credential and wrong for a relevance heuristic nobody has measured against
+a real catalog. So the default is unchanged behaviour plus a WARNING, once
+per session, naming the knob when one expansion resolves 50+ references:
+
+```yaml
+plugin_configs:
+  references:
+    max_transitive_references: 25   # unset or 0 = unbounded
+```
+
+A malformed value falls back to unbounded, never to an invented ceiling —
+silently applying a limit nobody configured would cut a neighbourhood for a
+reason no operator could find.
+
+**A cut neighbourhood says so.** `selectReferences` returns a `truncated`
+record naming the limit, the count resolved and the depth it stopped at —
+and deliberately **no "dropped" figure**, because the walk stops early and
+how many more it would have found is unknown. A fabricated count is worse
+than an absent one. The note is the load-bearing part: a model handed a
+silently-cut neighbourhood reads absence as *"no such reference exists"*,
+which on a knowledge graph is exactly the wrong conclusion and is
+unfalsifiable from its side.
+
+**Deliberately not done.** Ranking the frontier — keep the *nearest* 25
+rather than the first 25. The machinery nearly exists (`score_sources`
+takes a vector and does not care where it came from), but it is reachable
+only where a vector index has been generated, and `initialize()` skips the
+embedding provider entirely otherwise. A bound has to work for everyone;
+ranking is a refinement for workspaces that have embeddings. Also not done:
+typed edges, which would let `rel` decide what counts as adjacency rather
+than "the string appeared".
+
 ### Plugin-Level Traits
 
 Plugins themselves can declare **plugin-level traits** via a `plugin_traits` class attribute (`FrozenSet[str]`). These work like tool traits but identify *plugin* capabilities rather than individual tool behaviors.
