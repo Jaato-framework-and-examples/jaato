@@ -27,9 +27,9 @@ from shared.plugins.subagent import config as cfg
 from shared.scaffold import validate
 
 
-#: Every function that reads keys out of a raw profile FILE dict.  The four
+#: Every function that reads keys out of a raw profile FILE dict.  The five
 #: block parsers are included because they are where ``cache`` / ``gc`` /
-#: ``trace`` / ``env`` are read — a scan of the builder alone would miss them
+#: ``trace`` / ``regulatory`` / ``env`` are read — a scan of the builder alone would miss them
 #: and report four working keys as unknown.
 _LOADER_FUNCS = (
     "_parse_profile_file",
@@ -37,6 +37,7 @@ _LOADER_FUNCS = (
     "parse_cache_block",
     "parse_gc_block",
     "parse_trace_block",
+    "parse_regulatory_block",
     "parse_profile_env",
 )
 

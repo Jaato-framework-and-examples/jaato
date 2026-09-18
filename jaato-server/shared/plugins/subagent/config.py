@@ -1756,6 +1756,17 @@ class SubagentProfile:
         "against the workspace. Refuses a switch written into a path field -- "
         "`env: {JAATO_PROVIDER_TRACE: \'1\'}` is a valid str and wrote every "
         "session\'s trace to a file named `1` (#775)."})
+    regulatory: Optional['RegulatoryProfileConfig'] = field(default=None, metadata={
+        "description": "What this application declares about itself under "
+        "the EU AI Act (Regulation (EU) 2024/1689): {intended_purpose, "
+        "risk_class: minimal|limited|high, annex_iii, provider: {name, "
+        "contact}, interacts_with_persons, disclosure_text}.  Declared, never "
+        "inferred -- whether a use is high-risk is the provider's own "
+        "determination (Art. 6(4)).  `validate` escalates its warnings to "
+        "errors under risk_class: high; the disclosure piece reads "
+        "provider.name and interacts_with_persons (Art. 50(1)).  risk_class "
+        "inherits most-restrictive-wins, the other fields child-replaces.  "
+        "Absent = undeclared (validated as minimal, documented as unknown)."})
     gc: Optional[GCProfileConfig] = field(default=None, metadata={
         "description": "Garbage-collection strategy + thresholds for this "
         "session (type + threshold_percent / target / preserve_recent_turns). "
@@ -2531,6 +2542,251 @@ def parse_profile_env(data: Dict[str, Any], key: str = 'env') -> Dict[str, str]:
     return env
 
 
+# ---------------------------------------------------------------------------
+# regulatory: -- the one fact only the author knows (EU AI Act, Art. 6(4))
+# ---------------------------------------------------------------------------
+
+#: The risk classes a profile may declare, least to most demanding.  The
+#: vocabulary is the Act's own (Regulation (EU) 2024/1689): ``high`` is an
+#: Annex III use, ``limited`` is one bound only by the Article 50
+#: transparency duties, ``minimal`` is everything else.  Ordered, because
+#: inheritance is most-restrictive-wins on this one field.
+RISK_CLASSES: Tuple[str, ...] = ("minimal", "limited", "high")
+_RISK_RANK: Dict[str, int] = {name: i for i, name in enumerate(RISK_CLASSES)}
+
+#: What a ``regulatory:`` block may say.  ``provider`` is a nested mapping of
+#: ``name`` / ``contact``; everything else is a scalar.
+REGULATORY_KEYS: FrozenSet[str] = frozenset({
+    "intended_purpose", "risk_class", "annex_iii", "provider",
+    "interacts_with_persons", "disclosure_text",
+})
+_REGULATORY_PROVIDER_KEYS: FrozenSet[str] = frozenset({"name", "contact"})
+
+
+@dataclass(frozen=True)
+class RegulatoryProfileConfig:
+    """What a profile declares about itself under the EU AI Act -- ``regulatory:``.
+
+    The one profile block whose content the framework CANNOT derive: whether
+    an application is high-risk is a legal determination the provider must
+    make and document (Art. 6(4)), and a framework that inferred it would be
+    making that determination silently on the author's behalf.  So every
+    field here is declared, never guessed, and an absent block means
+    exactly that -- ``jaato-scaffold validate`` treats it as ``minimal`` and
+    a generated dossier reports it as *undeclared*.
+
+    Three consumers read it:
+
+    * ``jaato-scaffold validate`` escalates its warnings to errors under
+      ``risk_class: high`` and adds the high-risk-only findings (no
+      permission policy, no record keeping, disclosure suppressed, an
+      unconfined shell) -- see ``shared/scaffold/validate.py``;
+    * the ``disclosure`` instruction piece and the first-interaction
+      announcement read ``provider_name`` / ``interacts_with_persons``
+      (Art. 50(1));
+    * ``explain profile`` renders it and the dossier is built from it.
+
+    Attributes:
+        intended_purpose: The use the provider intends the system for
+            (Art. 3(12)) -- the sentence every Annex IV section starts from.
+        risk_class: ``minimal`` / ``limited`` / ``high``; ``None`` = not
+            declared.
+        annex_iii: The Annex III point when ``high`` (``"4a"``); free text.
+        provider_name: The provider under the Act -- the organisation that
+            puts the application into service, which is never the
+            framework.
+        provider_contact: Where that provider can be reached.
+        interacts_with_persons: Whether natural persons talk to it directly
+            (Art. 50(1)).  ``None`` = not declared, which ``validate``
+            reports as ``disclosure_absent`` for a profile that binds a
+            persona.
+        disclosure_text: The announcement a client renders on first
+            interaction; ``None`` = rendered from ``provider_name``.
+    """
+
+    intended_purpose: Optional[str] = None
+    risk_class: Optional[str] = None
+    annex_iii: Optional[str] = None
+    provider_name: Optional[str] = None
+    provider_contact: Optional[str] = None
+    interacts_with_persons: Optional[bool] = None
+    disclosure_text: Optional[str] = None
+
+    @property
+    def is_high_risk(self) -> bool:
+        """``True`` only for an EXPLICIT ``risk_class: high``."""
+        return self.risk_class == "high"
+
+    @property
+    def effective_risk_class(self) -> str:
+        """The class validation applies: the declared one, else ``minimal``.
+
+        Documentation must not use this -- an undeclared class is
+        *undeclared*, and a dossier that printed ``minimal`` for it would
+        be asserting a determination nobody made.
+        """
+        return self.risk_class or RISK_CLASSES[0]
+
+    @classmethod
+    def from_dict(cls, data: Any) -> 'RegulatoryProfileConfig':
+        """Build from a profile's ``regulatory:`` block.
+
+        Raises:
+            ValueError: on a non-mapping block, an unknown key, a risk class
+                outside :data:`RISK_CLASSES`, a non-string scalar, a
+                non-boolean ``interacts_with_persons``, or a ``provider``
+                that is not a ``{name, contact}`` mapping.  Loud, for the
+                reason every block parser here is: a regulatory declaration
+                that is quietly wrong is a compliance record that is wrong.
+        """
+        if not isinstance(data, dict):
+            raise ValueError(
+                f"regulatory: must be a mapping, got {type(data).__name__}")
+        unknown = set(data) - REGULATORY_KEYS
+        if unknown:
+            raise ValueError(
+                f"regulatory: unknown key(s) {sorted(unknown)}. "
+                f"Allowed: {sorted(REGULATORY_KEYS)}")
+
+        def _opt_str(key: str, value: Any) -> Optional[str]:
+            if value is None:
+                return None
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(
+                    f"regulatory.{key} must be a non-empty string, "
+                    f"got {value!r}")
+            return value.strip()
+
+        risk = data.get("risk_class")
+        if risk is not None:
+            if not isinstance(risk, str) or risk not in _RISK_RANK:
+                raise ValueError(
+                    f"regulatory.risk_class must be one of "
+                    f"{list(RISK_CLASSES)}, got {risk!r}")
+        interacts = data.get("interacts_with_persons")
+        if interacts is not None and not isinstance(interacts, bool):
+            raise ValueError(
+                "regulatory.interacts_with_persons must be a boolean, "
+                f"got {interacts!r}")
+        provider = data.get("provider")
+        pname = pcontact = None
+        if provider is not None:
+            if not isinstance(provider, dict):
+                raise ValueError(
+                    "regulatory.provider must be a mapping of "
+                    f"{sorted(_REGULATORY_PROVIDER_KEYS)}, got "
+                    f"{type(provider).__name__}")
+            extra = set(provider) - _REGULATORY_PROVIDER_KEYS
+            if extra:
+                raise ValueError(
+                    f"regulatory.provider: unknown key(s) {sorted(extra)}. "
+                    f"Allowed: {sorted(_REGULATORY_PROVIDER_KEYS)}")
+            pname = _opt_str("provider.name", provider.get("name"))
+            pcontact = _opt_str("provider.contact", provider.get("contact"))
+        return cls(
+            intended_purpose=_opt_str(
+                "intended_purpose", data.get("intended_purpose")),
+            risk_class=risk,
+            annex_iii=_opt_str("annex_iii", data.get("annex_iii")),
+            provider_name=pname,
+            provider_contact=pcontact,
+            interacts_with_persons=interacts,
+            disclosure_text=_opt_str(
+                "disclosure_text", data.get("disclosure_text")),
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        """The block in its FILE shape (``provider`` nested), unset keys omitted.
+
+        What :func:`profile_to_snapshot` persists and
+        :meth:`from_dict` reads back, so a snapshot round-trips through
+        the same parser a profile file does.
+        """
+        out: Dict[str, Any] = {}
+        for key in ("intended_purpose", "risk_class", "annex_iii",
+                    "interacts_with_persons", "disclosure_text"):
+            value = getattr(self, key)
+            if value is not None:
+                out[key] = value
+        provider = {k: v for k, v in (("name", self.provider_name),
+                                      ("contact", self.provider_contact))
+                    if v is not None}
+        if provider:
+            out["provider"] = provider
+        return out
+
+
+def parse_regulatory_block(data: Dict[str, Any]) -> Optional['RegulatoryProfileConfig']:
+    """Parse a profile dict's optional ``regulatory:`` block.
+
+    Fifth sibling of the block parsers above, for the reason all of them
+    exist: every ingress that builds a ``SubagentProfile`` from a dict
+    calls this, so the block cannot be wired into five of the six and be
+    silently inert in the sixth.
+
+    Returns ``None`` when the block is absent or empty; raises
+    ``ValueError`` (from :meth:`RegulatoryProfileConfig.from_dict`) on an
+    unusable one.
+    """
+    block = data.get('regulatory')
+    if not block:
+        return None
+    return RegulatoryProfileConfig.from_dict(block)
+
+
+def merge_regulatory(
+    child: 'SubagentProfile', parents: List['SubagentProfile'],
+) -> Optional['RegulatoryProfileConfig']:
+    """Merge ``regulatory:`` across an ``inherits`` chain.
+
+    Scalars are child-replaces, then the first parent (in declaration
+    order) that declares the field -- so a base profile can carry the
+    organisation's ``provider`` block once and every child inherits it.
+    ``risk_class`` is MOST-RESTRICTIVE-WINS, the ``max_parallel_tools``
+    shape: a child may not declare itself ``minimal`` under a base that
+    says ``high``, because the base's author has made a determination the
+    child cannot un-make by omission or by contradiction.
+
+    Returns ``None`` when no layer declares the block at all.
+    """
+    layers = [getattr(child, "regulatory", None)] + [
+        getattr(p, "regulatory", None) for p in parents]
+    declared = [layer for layer in layers if layer is not None]
+    if not declared:
+        return None
+
+    def _first(name: str) -> Any:
+        for layer in declared:
+            value = getattr(layer, name)
+            if value is not None:
+                return value
+        return None
+
+    ranked = [layer.risk_class for layer in declared
+              if layer.risk_class is not None]
+    risk = max(ranked, key=_RISK_RANK.__getitem__) if ranked else None
+    return RegulatoryProfileConfig(
+        intended_purpose=_first("intended_purpose"),
+        risk_class=risk,
+        annex_iii=_first("annex_iii"),
+        provider_name=_first("provider_name"),
+        provider_contact=_first("provider_contact"),
+        interacts_with_persons=_first("interacts_with_persons"),
+        disclosure_text=_first("disclosure_text"),
+    )
+
+
+def _regulatory_errors(data: Dict[str, Any]) -> List[str]:
+    """``validate_profile``'s view of the block: the parser's refusal, as text."""
+    if data.get("regulatory") is None:
+        return []
+    try:
+        RegulatoryProfileConfig.from_dict(data["regulatory"])
+    except ValueError as exc:
+        return [str(exc)]
+    return []
+
+
 def build_inline_profile(
     data: Dict[str, Any],
     name: str = "<inline>",
@@ -2567,6 +2823,7 @@ def build_inline_profile(
     cache_config = parse_cache_block(data)
     gc_config = parse_gc_block(data)
     trace_config = parse_trace_block(data)
+    regulatory = parse_regulatory_block(data)
 
     runtime_limits = None
     if data.get('runtime_limits'):
@@ -2658,6 +2915,7 @@ def build_inline_profile(
         apparmor_fragments=_normalize_apparmor_fragments(data.get('apparmor_fragments')),
         quirks=quirks,
         scrub_secret_env=data.get('scrub_secret_env'),
+        regulatory=regulatory,
     )
 
 
@@ -2800,6 +3058,7 @@ def profile_to_snapshot(profile: 'SubagentProfile') -> Dict[str, Any]:
             profile, "max_completion_nudges", None),
         "cache": _block(getattr(profile, "cache", None)),
         "trace": _block(getattr(profile, "trace", None)),
+        "regulatory": _regulatory_to_dict(profile),
         "gc": _block(getattr(profile, "gc", None)),
         "env": dict(profile.env or {}),
         # ``inherits`` is deliberately dropped: a snapshot is POST-merge, so
@@ -2835,6 +3094,16 @@ def profile_to_snapshot(profile: 'SubagentProfile') -> Dict[str, Any]:
     }
 
 
+def _regulatory_to_dict(profile: 'SubagentProfile') -> Optional[Dict[str, Any]]:
+    """The ``regulatory`` block in its file shape, or ``None`` when undeclared.
+
+    Its own function so :func:`profile_to_snapshot` stays at its complexity
+    baseline; the shape is :meth:`RegulatoryProfileConfig.to_dict`'s.
+    """
+    reg = getattr(profile, "regulatory", None)
+    return reg.to_dict() if reg is not None else None
+
+
 def _snapshot_blocks(data: Dict[str, Any]) -> Dict[str, Any]:
     """Re-parse a snapshot's five structured sub-blocks.
 
@@ -2847,7 +3116,7 @@ def _snapshot_blocks(data: Dict[str, Any]) -> Dict[str, Any]:
         data: The snapshot dict.
 
     Returns:
-        ``{"gc", "cache", "trace", "runtime_limits", "budget_control"}``,
+        ``{"gc", "cache", "trace", "runtime_limits", "budget_control", "regulatory"}``,
         each either the parsed config or ``None``.
 
     Raises:
@@ -2869,6 +3138,7 @@ def _snapshot_blocks(data: Dict[str, Any]) -> Dict[str, Any]:
             "gc": parse_gc_block(data),
             "cache": parse_cache_block(data),
             "trace": parse_trace_block(data),
+            "regulatory": parse_regulatory_block(data),
             "runtime_limits": (
                 RuntimeLimits.from_dict(limits_raw) if limits_raw else None
             ),
@@ -2923,6 +3193,7 @@ def profile_from_snapshot(data: Dict[str, Any]) -> 'SubagentProfile':
         max_completion_nudges=data.get("max_completion_nudges"),
         cache=blocks["cache"],
         trace=blocks["trace"],
+        regulatory=blocks["regulatory"],
         gc=blocks["gc"],
         env=dict(data.get("env") or {}),
         inherits=None,
@@ -3572,6 +3843,9 @@ def _merge_profiles(
     # provider_log from another produces a split diagnosis nobody asked
     # for, which is the class of failure the block exists to prevent.
     merged_trace = _resolve_scalar('trace', child.trace)
+    # regulatory: child-replaces per field, most-restrictive-wins on
+    # risk_class -- see :func:`merge_regulatory`.
+    merged_regulatory = merge_regulatory(child, parents)
 
     # runtime_limits: scalar-override for the ceilings (parents must
     # agree or child overrides; frozen dataclasses with the same field
@@ -3759,6 +4033,7 @@ def _merge_profiles(
         apparmor_fragments=merged_apparmor_fragments,
         quirks=merged_quirks,
         scrub_secret_env=merged_scrub_secret_env,
+        regulatory=merged_regulatory,
     )
 
 
@@ -3860,6 +4135,7 @@ PROFILE_FILE_KEYS = frozenset({
     'gc',
     'cache',
     'trace',
+    'regulatory',
     'env',
     'inherits',
     'completion_payload_schema',
@@ -3964,6 +4240,7 @@ def _scan_profiles_dir(
             cache_config = parse_cache_block(data)
             gc_config = parse_gc_block(data)
             trace_config = parse_trace_block(data)
+            regulatory = parse_regulatory_block(data)
             env = parse_profile_env(data)
         except ValueError as exc:
             err = f"Invalid profile '{name}': {exc}"
@@ -4079,6 +4356,7 @@ def _scan_profiles_dir(
             apparmor_fragments=_normalize_apparmor_fragments(data.get('apparmor_fragments')),
             quirks=quirks,
             scrub_secret_env=data.get('scrub_secret_env'),
+            regulatory=regulatory,
         )
         if data.get('system_instructions'):
             import warnings
@@ -4466,6 +4744,7 @@ def _discover_premium_profiles() -> Dict[str, 'SubagentProfile']:
             cache_config = parse_cache_block(data)
             gc_config = parse_gc_block(data)
             trace_config = parse_trace_block(data)
+            regulatory = parse_regulatory_block(data)
         except ValueError as exc:
             logger.warning("Skipping premium profile '%s': %s", name, exc)
             continue
@@ -4556,6 +4835,7 @@ def _discover_premium_profiles() -> Dict[str, 'SubagentProfile']:
             apparmor_fragments=_normalize_apparmor_fragments(data.get('apparmor_fragments')),
             quirks=quirks,
             scrub_secret_env=data.get('scrub_secret_env'),
+            regulatory=regulatory,
         )
         profiles[name] = profile
         logger.debug("Discovered premium profile '%s' from %s", name, file_path)
@@ -4644,6 +4924,9 @@ def validate_profile(data: Any) -> Tuple[bool, List[str], List[str]]:
 
 
     errors.extend(_max_completion_nudges_errors(data))
+
+    # regulatory (EU AI Act): delegate to the block parser, one rule.
+    errors.extend(_regulatory_errors(data))
 
     # model: string or null
     model = data.get("model")
@@ -4824,6 +5107,7 @@ class SubagentConfig:
             cache_config = parse_cache_block(profile_data)
             gc_config = parse_gc_block(profile_data)
             trace_config = parse_trace_block(profile_data)
+            regulatory = parse_regulatory_block(profile_data)
 
             # Parse runtime_limits (cgroup-enforced + app-enforced caps).
             # Validation runs in __post_init__ — bad values raise here so
@@ -4884,6 +5168,7 @@ class SubagentConfig:
                 apparmor=bool(profile_data.get('apparmor', False)),
                 apparmor_fragments=_normalize_apparmor_fragments(profile_data.get('apparmor_fragments')),
                 scrub_secret_env=profile_data.get('scrub_secret_env'),
+                regulatory=regulatory,
             )
 
         return cls(

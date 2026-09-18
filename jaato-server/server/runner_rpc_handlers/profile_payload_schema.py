@@ -66,6 +66,7 @@ PROFILE_PAYLOAD_ALLOWED_KEYS: FrozenSet[str] = frozenset({
     "gc",
     "trace",
     "runtime_limits",
+    "regulatory",
 })
 
 
@@ -187,11 +188,31 @@ def validate_profile_payload(payload: Any) -> None:
         # coverage validates the field set + per-field types.
 
     _check_trace(payload.get("trace"))
+    _check_regulatory(payload.get("regulatory"))
 
 
 # ──────────────────────────────────────────────────────────────────
 # Per-key helpers
 # ──────────────────────────────────────────────────────────────────
+
+
+def _check_regulatory(value: Any) -> None:
+    """Validate a ``regulatory`` block at the runner->daemon boundary.
+
+    Same posture as :func:`_check_trace`: ``RegulatoryProfileConfig
+    .from_dict`` is the single rule, so the boundary re-runs it rather
+    than carrying a second vocabulary that could drift.  ``None`` means
+    the key was absent, which is legal -- an isolated subagent whose
+    profile declares nothing under the Act arrives with nothing.
+    """
+    from shared.plugins.subagent.config import RegulatoryProfileConfig
+
+    if value is None:
+        return
+    try:
+        RegulatoryProfileConfig.from_dict(value)
+    except ValueError as exc:
+        raise ValueError(f"profile_payload.regulatory invalid: {exc}") from exc
 
 
 def _check_trace(value: Any) -> None:

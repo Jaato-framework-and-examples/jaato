@@ -746,6 +746,14 @@ def _profile_field_constraints() -> Dict[str, str]:
     except Exception:
         pass
     try:
+        from shared.plugins.subagent import config as _pc
+        out["regulatory"] = (
+            f"risk_class: {' | '.join(_pc.RISK_CLASSES)} (most-restrictive-wins "
+            f"across inherits)  |  keys: {', '.join(sorted(_pc.REGULATORY_KEYS))}"
+            f"  |  provider: {{name, contact}}  |  absent = undeclared")
+    except Exception:
+        pass
+    try:
         from shared import budget_control as bc
         dims = ", ".join(sorted(bc.VALID_DIMENSIONS))
         actions = ", ".join(sorted(bc.VALID_ACTIONS))
