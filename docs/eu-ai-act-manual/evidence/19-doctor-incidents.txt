@@ -1,0 +1,10 @@
+$ jaato-doctor --incidents .jaato/logs/session_trace.jsonl --since 15d
+jaato SDK doctor
+────────────────────────────────────────────────────────────
+▲ WARN  incidents session_trace.jsonl  1 recorded in the last 15d.  what the framework noticed, with the Art. 73 clocks. It does NOT classify: whether any of these is a 'serious incident' under Art. 3(49) is a determination about consequences, and yours to make
+▲ WARN    budget_exhausted             0.0d ago  20260918_215247
+      budget_exhausted (self-enforced: turns 100%)
+      a session was stopped by its budget ceiling -- work was cut short, which for an agent acting on the world may leave a half-finished change
+      Art. 73 windows remaining: 2d: +2.0d; 10d: +10.0d; 15d: +15.0d
+────────────────────────────────────────────────────────────
+WARN: 0 fail, 2 warn, 2 checks

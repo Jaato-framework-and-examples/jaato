@@ -1,0 +1,7 @@
+$ retrieve_memories(tags=[refunds])   # plugin_configs.memory.require_curation: true
+BEFORE the curator promoted anything (one legacy record validated with no curated_by):
+{"status": "no_results", "count": 0, "matched": 1, "truncated": false, "withheld_uncurated": 1, "message": "1 memory/memories matched and were WITHHELD: this deployment sets require_curation, and none of them carries a curator's mark. They are stored, not lost -- a curator promoting them makes them retrievable."}
+
+AFTER the curator promoted the raw memory:
+{"status": "success", "count": 1, "matched": 2, "truncated": false, "message": "Returned 1 of 2 matching memories — truncated by limit=3. Call retrieve_memories again with a larger `limit` to see the rest.  1 further match(es) were withheld as uncurated (require_curation)."}
+  - mem_20260918_215335_7851  maturity=validated  Refund windows per plan

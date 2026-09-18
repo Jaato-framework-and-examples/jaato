@@ -1,0 +1,7 @@
+$ session.new --profile screener; ask x3   # limits: {turns: 2}, abort at 100%
+{"event": "AGENT_OUTPUT", "source": "model", "text": "Second question"}
+{"event": "AGENT_OUTPUT", "source": "system", "text": "[budget[self-enforced] turns 100%: abort]"}
+{"event": "SESSION_TERMINATED", "reason": "budget_exhausted"}
+{"event": "SESSION_TERMINATED", "reason": "client_request"}
+
+{"prompt": "Second question", "raised": "SessionEnded: session 20260918_215247 ended (budget_exhausted)"}

@@ -1,0 +1,127 @@
+<svg class="rich-terminal" viewBox="0 0 1287 489.2" xmlns="http://www.w3.org/2000/svg">
+    <!-- Generated with Rich https://www.textualize.io -->
+    <style>
+
+    @font-face {
+        font-family: "Fira Code";
+        src: local("FiraCode-Regular"),
+                url("https://cdnjs.cloudflare.com/ajax/libs/firacode/6.2.0/woff2/FiraCode-Regular.woff2") format("woff2"),
+                url("https://cdnjs.cloudflare.com/ajax/libs/firacode/6.2.0/woff/FiraCode-Regular.woff") format("woff");
+        font-style: normal;
+        font-weight: 400;
+    }
+    @font-face {
+        font-family: "Fira Code";
+        src: local("FiraCode-Bold"),
+                url("https://cdnjs.cloudflare.com/ajax/libs/firacode/6.2.0/woff2/FiraCode-Bold.woff2") format("woff2"),
+                url("https://cdnjs.cloudflare.com/ajax/libs/firacode/6.2.0/woff/FiraCode-Bold.woff") format("woff");
+        font-style: bold;
+        font-weight: 700;
+    }
+
+    .terminal-185517644-matrix {
+        font-family: Fira Code, monospace;
+        font-size: 20px;
+        line-height: 24.4px;
+        font-variant-east-asian: full-width;
+    }
+
+    .terminal-185517644-title {
+        font-size: 18px;
+        font-weight: bold;
+        font-family: arial;
+    }
+
+    .terminal-185517644-r1 { fill: #c5c8c6;font-weight: bold }
+.terminal-185517644-r2 { fill: #c5c8c6 }
+    </style>
+
+    <defs>
+    <clipPath id="terminal-185517644-clip-terminal">
+      <rect x="0" y="0" width="1267.8" height="438.2" />
+    </clipPath>
+    <clipPath id="terminal-185517644-line-0">
+    <rect x="0" y="1.5" width="1268.8" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-185517644-line-1">
+    <rect x="0" y="25.9" width="1268.8" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-185517644-line-2">
+    <rect x="0" y="50.3" width="1268.8" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-185517644-line-3">
+    <rect x="0" y="74.7" width="1268.8" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-185517644-line-4">
+    <rect x="0" y="99.1" width="1268.8" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-185517644-line-5">
+    <rect x="0" y="123.5" width="1268.8" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-185517644-line-6">
+    <rect x="0" y="147.9" width="1268.8" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-185517644-line-7">
+    <rect x="0" y="172.3" width="1268.8" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-185517644-line-8">
+    <rect x="0" y="196.7" width="1268.8" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-185517644-line-9">
+    <rect x="0" y="221.1" width="1268.8" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-185517644-line-10">
+    <rect x="0" y="245.5" width="1268.8" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-185517644-line-11">
+    <rect x="0" y="269.9" width="1268.8" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-185517644-line-12">
+    <rect x="0" y="294.3" width="1268.8" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-185517644-line-13">
+    <rect x="0" y="318.7" width="1268.8" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-185517644-line-14">
+    <rect x="0" y="343.1" width="1268.8" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-185517644-line-15">
+    <rect x="0" y="367.5" width="1268.8" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-185517644-line-16">
+    <rect x="0" y="391.9" width="1268.8" height="24.65"/>
+            </clipPath>
+    </defs>
+
+    <rect fill="#292929" stroke="rgba(255,255,255,0.35)" stroke-width="1" x="1" y="1" width="1285" height="487.2" rx="8"/><text class="terminal-185517644-title" fill="#c5c8c6" text-anchor="middle" x="642" y="27">explain&#160;oversight&#160;&lt;profile&gt;:&#160;what&#160;this&#160;profile&#160;armed</text>
+            <g transform="translate(26,22)">
+            <circle cx="0" cy="0" r="7" fill="#ff5f57"/>
+            <circle cx="22" cy="0" r="7" fill="#febc2e"/>
+            <circle cx="44" cy="0" r="7" fill="#28c840"/>
+            </g>
+        
+    <g transform="translate(9, 41)" clip-path="url(#terminal-185517644-clip-terminal)">
+    
+    <g class="terminal-185517644-matrix">
+    <text class="terminal-185517644-r1" x="0" y="20" textLength="524.6" clip-path="url(#terminal-185517644-line-0)">$&#160;jaato-scaffold&#160;explain&#160;oversight&#160;screener</text><text class="terminal-185517644-r2" x="1268.8" y="20" textLength="12.2" clip-path="url(#terminal-185517644-line-0)">
+</text><text class="terminal-185517644-r2" x="0" y="44.4" textLength="585.6" clip-path="url(#terminal-185517644-line-1)">human&#160;oversight,&#160;as&#160;ARMED&#160;by&#160;profile&#160;&#x27;screener&#x27;:</text><text class="terminal-185517644-r2" x="1268.8" y="44.4" textLength="12.2" clip-path="url(#terminal-185517644-line-1)">
+</text><text class="terminal-185517644-r2" x="1268.8" y="68.8" textLength="12.2" clip-path="url(#terminal-185517644-line-2)">
+</text><text class="terminal-185517644-r2" x="0" y="93.2" textLength="427" clip-path="url(#terminal-185517644-line-3)">&#160;&#160;regulatory.risk_class&#160;&#160;&#160;&#160;&#160;limited</text><text class="terminal-185517644-r2" x="1268.8" y="93.2" textLength="12.2" clip-path="url(#terminal-185517644-line-3)">
+</text><text class="terminal-185517644-r2" x="0" y="117.6" textLength="390.4" clip-path="url(#terminal-185517644-line-4)">&#160;&#160;interacts_with_persons&#160;&#160;&#160;&#160;True</text><text class="terminal-185517644-r2" x="1268.8" y="117.6" textLength="12.2" clip-path="url(#terminal-185517644-line-4)">
+</text><text class="terminal-185517644-r2" x="0" y="142" textLength="1244.4" clip-path="url(#terminal-185517644-line-5)">&#160;&#160;announcement&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#x27;You&#160;are&#160;interacting&#160;with&#160;an&#160;AI&#160;system&#160;operated&#160;by&#160;Acme&#160;Support&#160;GmbH,&#160;not&#160;</text><text class="terminal-185517644-r2" x="1268.8" y="142" textLength="12.2" clip-path="url(#terminal-185517644-line-5)">
+</text><text class="terminal-185517644-r2" x="0" y="166.4" textLength="244" clip-path="url(#terminal-185517644-line-6)">with&#160;a&#160;human&#160;being.&#x27;</text><text class="terminal-185517644-r2" x="1268.8" y="166.4" textLength="12.2" clip-path="url(#terminal-185517644-line-6)">
+</text><text class="terminal-185517644-r2" x="0" y="190.8" textLength="854" clip-path="url(#terminal-185517644-line-7)">&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;emitted&#160;once&#160;at&#160;session&#160;creation;&#160;a&#160;client</text><text class="terminal-185517644-r2" x="1268.8" y="190.8" textLength="12.2" clip-path="url(#terminal-185517644-line-7)">
+</text><text class="terminal-185517644-r2" x="0" y="215.2" textLength="829.6" clip-path="url(#terminal-185517644-line-8)">&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;&#160;sending&#160;client_discloses_ai&#160;withholds&#160;it</text><text class="terminal-185517644-r2" x="1268.8" y="215.2" textLength="12.2" clip-path="url(#terminal-185517644-line-8)">
+</text><text class="terminal-185517644-r2" x="1268.8" y="239.6" textLength="12.2" clip-path="url(#terminal-185517644-line-9)">
+</text><text class="terminal-185517644-r2" x="0" y="264" textLength="1268.8" clip-path="url(#terminal-185517644-line-10)">&#160;&#160;DECIDE&#160;/&#160;OVERRIDE&#160;&#160;NO&#160;permission&#160;policy&#160;declared&#160;--&#160;the&#160;runtime&#160;policy&#160;of&#160;the&#160;root&#160;session&#160;applies&#160;(a&#160;</text><text class="terminal-185517644-r2" x="1268.8" y="264" textLength="12.2" clip-path="url(#terminal-185517644-line-10)">
+</text><text class="terminal-185517644-r2" x="0" y="288.4" textLength="256.2" clip-path="url(#terminal-185517644-line-11)">subagent&#160;inherits&#160;it)</text><text class="terminal-185517644-r2" x="1268.8" y="288.4" textLength="12.2" clip-path="url(#terminal-185517644-line-11)">
+</text><text class="terminal-185517644-r2" x="0" y="312.8" textLength="939.4" clip-path="url(#terminal-185517644-line-12)">&#160;&#160;STOP&#160;(budget)&#160;&#160;&#160;&#160;&#160;&#160;limits&#160;{&#x27;turns&#x27;:&#160;2};&#160;ladder&#160;[100%-&gt;abort];&#160;STOPS&#160;the&#160;run</text><text class="terminal-185517644-r2" x="1268.8" y="312.8" textLength="12.2" clip-path="url(#terminal-185517644-line-12)">
+</text><text class="terminal-185517644-r2" x="0" y="337.2" textLength="1024.8" clip-path="url(#terminal-185517644-line-13)">&#160;&#160;STOP&#160;(watchdog)&#160;&#160;&#160;&#160;max_orphan_seconds=900&#160;(default)&#160;&#160;max_session_seconds=unbounded</text><text class="terminal-185517644-r2" x="1268.8" y="337.2" textLength="12.2" clip-path="url(#terminal-185517644-line-13)">
+</text><text class="terminal-185517644-r2" x="0" y="361.6" textLength="305" clip-path="url(#terminal-185517644-line-14)">&#160;&#160;COMPLETION&#160;GATE&#160;&#160;&#160;&#160;none</text><text class="terminal-185517644-r2" x="1268.8" y="361.6" textLength="12.2" clip-path="url(#terminal-185517644-line-14)">
+</text><text class="terminal-185517644-r2" x="0" y="386" textLength="732" clip-path="url(#terminal-185517644-line-15)">&#160;&#160;IRREVERSIBLE&#160;&#160;&#160;&#160;&#160;&#160;&#160;no&#160;subprocess&#160;or&#160;remote&#160;surface&#160;enabled</text><text class="terminal-185517644-r2" x="1268.8" y="386" textLength="12.2" clip-path="url(#terminal-185517644-line-15)">
+</text><text class="terminal-185517644-r2" x="1268.8" y="410.4" textLength="12.2" clip-path="url(#terminal-185517644-line-16)">
+</text><text class="terminal-185517644-r2" x="0" y="434.8" textLength="1110.2" clip-path="url(#terminal-185517644-line-17)">&#160;&#160;the&#160;two&#160;stop&#160;verbs&#160;apply&#160;to&#160;every&#160;profile&#160;alike&#160;--&#160;`explain&#160;oversight`&#160;(bare)&#160;names&#160;them.</text><text class="terminal-185517644-r2" x="1268.8" y="434.8" textLength="12.2" clip-path="url(#terminal-185517644-line-17)">
+</text>
+    </g>
+    </g>
+</svg>

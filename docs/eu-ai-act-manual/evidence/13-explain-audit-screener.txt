@@ -1,0 +1,21 @@
+$ jaato-scaffold explain audit screener
+the audit record, as WRITTEN by profile 'screener':
+
+  ledger           /srv/acme-support/.jaato/logs/ledger.jsonl
+  session trace    /srv/acme-support/.jaato/logs/session_trace.jsonl
+  provider trace   NOT WRITTEN -- this profile declares no trace.provider_log
+
+  retention_days   180
+  conversation     30   days the SESSION RECORD is kept
+  integrity        sha256-chain
+                   each record links to the previous one's
+                   digest.  Verify with `jaato-doctor
+                   --audit-verify <path>`.  It proves the file
+                   was not edited IN PLACE; it does NOT prove
+                   who wrote it -- a writer holding the file
+                   can re-chain from any point.  A chained
+                   file cannot be pruned from the front, so
+                   retention rotates whole segments.
+
+  `explain audit` (bare) is the schema: which events are recorded,
+  which fields each carries, and which store each lands in.

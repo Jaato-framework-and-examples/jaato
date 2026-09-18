@@ -1,0 +1,51 @@
+$ jaato-scaffold new dossier --workspace . --component && head -50 docs/jaato-component-pack.md
+# jaato as a component of a high-risk AI system
+
+Article 25(4) of Regulation (EU) 2024/1689, information pack.
+
+Both jaato distributions are licensed **`BUSL-1.1`**, which is source-available and not free and open-source. The carve-out in Article 25(4) — for third parties making components available under a free and open-source licence — therefore does not apply, and the Article's first sentence does: a supplier of tools, services, components or processes used in a high-risk AI system must specify, **by written agreement**, the information, capabilities, technical access and other assistance the provider needs to comply.
+
+This document is what such an agreement can point at. It is generated from the installed tree, so it describes the version you are running and not a release note.
+
+> *Computed from the installed framework at commit `c96faba` on 2026-09-18. Regenerate after any release or profile change; a stale computed section is worse than an absent one, because it reads as current.*
+
+## Installed
+
+- `jaato-sdk` 0.23.0
+- `jaato-server` 0.16.0
+
+## What the framework guarantees
+
+Each row names the thing that ENFORCES it. A guarantee with no enforcer is a claim, and a claim in this document is what gets relied on.
+
+**Provider capability declarations.** `PROVIDER_CAPABILITIES` per provider plugin. A capability a provider does not declare is not used: `jaato-scaffold validate` flags an outbound modality role on a provider that does not declare `output_media`, rather than letting it fail at runtime.
+
+**History pairing across every provider.** `shared/history_invariant.py` repairs the per-request copy at the one seam every `provider.complete()` call reads, so a cancelled batch, a GC pass, a rewind or a wire that streamed a tool call with no id cannot produce a request the upstream rejects.
+
+**One permission verdict, one exit.** `check_permission` is a single-exit wrapper: every terminal decision is traced with `asked=`, and an AST guard fails the build if a branch returns a verdict without recording one.
+
+**Per-thread confinement verification.** `verify_thread_confinement` walks `/proc/self/task/*/attr/current` and REFUSES the bootstrap on divergence. It fails closed, and only positive evidence counts — a label that could not be read proves nothing and does not refuse.
+
+**Enforcement mode, not merely attachment.** `shared/apparmor_label.py` is the one parser; `sandbox_mode` distinguishes `apparmor` from `apparmor-complain`, so a profile attached in complain mode is never recorded as a boundary.
+
+**Secret scrubbing on every model-driven subprocess.** ON by default since #863. `cli`, `interactive_shell` and `mcp` strip the framework secret set from the inherited environment; opting out is announced at WARNING.
+
+**The guards are live.** `test_every_guard_detects_its_own_reversion.py` puts each contract guard's defect back and fails the build if the guard still passes. It is the evidence that the rows above are enforced rather than described.
+
+## What the framework does NOT guarantee
+
+Longer than the list above, on purpose: a limitations section a reader can finish quickly is one that leaves them unable to tell what was considered from what was forgotten.
+
+**The prompt-injection boundary is defence in depth.** `TRAIT_UNTRUSTED_CONTENT` wraps third-party content so injected instructions read as data. It is not a proof: a sufficiently persuasive payload inside the boundary can still steer a model.
+
+**A notebook cell's in-process reach.** On the audit tier the containment is a PEP 578 hook in the same interpreter. It closes the accidental and opportunistic case; a cell that sets out to escape can attack the hook. AppArmor is the kernel answer, and the layering says so.
+
+**`finalize` and `escalate` are advice.** Of `budget_control`'s terminal actions only `abort` stops a run. A looping model can decline the other two, and has.
+
+**Text output is not marked.** Art. 50(2) marking covers model MEDIA. `AgentOutputEvent.source` attributes text at the event layer and stops at the client; no text watermark ships until the Art. 50(7) code of practice names one.
+
+**A chain proves no-edit-in-place, not authorship.** `record_keeping.integrity: sha256-chain` detects an in-place edit. A writer holding the file can re-chain from any point; signing is not built.
+
+**The session runs as the daemon's uid.** Peer entitlement (IPC) and connect tickets (WS) segregate IDENTITY and the paths a caller may name. They do not separate the OS principal.
+
+**`limits` without an `abort` rung enforce nothing.** `budget_control.limits` are observed; the degrade ladder is the only consumer of the usage fraction. `validate` warns.

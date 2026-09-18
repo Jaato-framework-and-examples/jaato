@@ -1,0 +1,71 @@
+<svg class="rich-terminal" viewBox="0 0 1287 147.6" xmlns="http://www.w3.org/2000/svg">
+    <!-- Generated with Rich https://www.textualize.io -->
+    <style>
+
+    @font-face {
+        font-family: "Fira Code";
+        src: local("FiraCode-Regular"),
+                url("https://cdnjs.cloudflare.com/ajax/libs/firacode/6.2.0/woff2/FiraCode-Regular.woff2") format("woff2"),
+                url("https://cdnjs.cloudflare.com/ajax/libs/firacode/6.2.0/woff/FiraCode-Regular.woff") format("woff");
+        font-style: normal;
+        font-weight: 400;
+    }
+    @font-face {
+        font-family: "Fira Code";
+        src: local("FiraCode-Bold"),
+                url("https://cdnjs.cloudflare.com/ajax/libs/firacode/6.2.0/woff2/FiraCode-Bold.woff2") format("woff2"),
+                url("https://cdnjs.cloudflare.com/ajax/libs/firacode/6.2.0/woff/FiraCode-Bold.woff") format("woff");
+        font-style: bold;
+        font-weight: 700;
+    }
+
+    .terminal-4201292664-matrix {
+        font-family: Fira Code, monospace;
+        font-size: 20px;
+        line-height: 24.4px;
+        font-variant-east-asian: full-width;
+    }
+
+    .terminal-4201292664-title {
+        font-size: 18px;
+        font-weight: bold;
+        font-family: arial;
+    }
+
+    .terminal-4201292664-r1 { fill: #c5c8c6;font-weight: bold }
+.terminal-4201292664-r2 { fill: #c5c8c6 }
+    </style>
+
+    <defs>
+    <clipPath id="terminal-4201292664-clip-terminal">
+      <rect x="0" y="0" width="1267.8" height="96.6" />
+    </clipPath>
+    <clipPath id="terminal-4201292664-line-0">
+    <rect x="0" y="1.5" width="1268.8" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-4201292664-line-1">
+    <rect x="0" y="25.9" width="1268.8" height="24.65"/>
+            </clipPath>
+<clipPath id="terminal-4201292664-line-2">
+    <rect x="0" y="50.3" width="1268.8" height="24.65"/>
+            </clipPath>
+    </defs>
+
+    <rect fill="#292929" stroke="rgba(255,255,255,0.35)" stroke-width="1" x="1" y="1" width="1285" height="145.6" rx="8"/><text class="terminal-4201292664-title" fill="#c5c8c6" text-anchor="middle" x="642" y="27">Dropping&#160;the&#160;piece&#160;by&#160;name&#160;is&#160;announced&#160;at&#160;WARNING</text>
+            <g transform="translate(26,22)">
+            <circle cx="0" cy="0" r="7" fill="#ff5f57"/>
+            <circle cx="22" cy="0" r="7" fill="#febc2e"/>
+            <circle cx="44" cy="0" r="7" fill="#28c840"/>
+            </g>
+        
+    <g transform="translate(9, 41)" clip-path="url(#terminal-4201292664-clip-terminal)">
+    
+    <g class="terminal-4201292664-matrix">
+    <text class="terminal-4201292664-r1" x="0" y="20" textLength="707.6" clip-path="url(#terminal-4201292664-line-0)">$&#160;grep&#160;WARNING&#160;.jaato/logs/session_*.log&#160;|&#160;grep&#160;disclosure</text><text class="terminal-4201292664-r2" x="1268.8" y="20" textLength="12.2" clip-path="url(#terminal-4201292664-line-0)">
+</text><text class="terminal-4201292664-r2" x="0" y="44.4" textLength="1268.8" clip-path="url(#terminal-4201292664-line-1)">2026-09-18&#160;21:53:03,900&#160;WARNING&#160;shared.jaato_session:&#160;suppress_base_instructions&#160;drops&#160;the&#160;&#x27;disclosure&#x27;&#160;</text><text class="terminal-4201292664-r2" x="1268.8" y="44.4" textLength="12.2" clip-path="url(#terminal-4201292664-line-1)">
+</text><text class="terminal-4201292664-r2" x="0" y="68.8" textLength="1244.4" clip-path="url(#terminal-4201292664-line-2)">piece&#160;for&#160;agent&#160;main&#160;--&#160;a&#160;posture&#160;change,&#160;not&#160;a&#160;token&#160;saving&#160;(the&#160;model&#160;is&#160;no&#160;longer&#160;told&#160;to&#160;disclose&#160;</text><text class="terminal-4201292664-r2" x="1268.8" y="68.8" textLength="12.2" clip-path="url(#terminal-4201292664-line-2)">
+</text><text class="terminal-4201292664-r2" x="0" y="93.2" textLength="756.4" clip-path="url(#terminal-4201292664-line-3)">that&#160;it&#160;is&#160;an&#160;AI&#160;system,&#160;Regulation&#160;(EU)&#160;2024/1689&#160;Art.&#160;50(1))</text><text class="terminal-4201292664-r2" x="1268.8" y="93.2" textLength="12.2" clip-path="url(#terminal-4201292664-line-3)">
+</text>
+    </g>
+    </g>
+</svg>
