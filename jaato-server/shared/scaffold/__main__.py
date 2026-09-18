@@ -150,6 +150,15 @@ _SCOPES = {
     "oversight": ExplainScope(_explain.oversight, "optional_named", "[<profile>]",
                               render_named=_explain.oversight_profile,
                               blurb="the HUMAN-OVERSIGHT measures (EU AI Act Art. 14)"),
+    # ``audit`` alone is the RECORD-KEEPING CONTRACT -- which events are
+    # recorded, what each carries and which store it lands in; with a name it
+    # is the concrete paths that profile writes to and what its
+    # ``record_keeping:`` block says.  Art. 13(3)(f) asks the instructions for
+    # use to describe exactly this, and five stores recorded without any of
+    # them saying what was guaranteed.
+    "audit": ExplainScope(_explain.audit, "optional_named", "[<profile>]",
+                          render_named=_explain.audit_profile,
+                          blurb="the AUDIT RECORD (EU AI Act Arts. 12, 19)"),
     "paths": ExplainScope(_explain.paths),
     "prefetch": ExplainScope(_explain.prefetch),
     "completion": ExplainScope(_explain.completion,

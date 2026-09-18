@@ -551,13 +551,45 @@ loud, rather than a mechanism that looks like compliance.
 
 ### 4.4 One audit record, with a retention policy (Articles 12, 19, 26(6))
 
-> **Shipped: the ledger fix only.** `TokenLedger` appends per record to
-> `LEDGER_PATH` (explicit path > env; relative resolves against the session
-> workspace; an unwritable path never fails the round trip), `write_ledger`
-> flushes only what was not appended, and `trace.ledger` is the typed key,
-> closing the env catalog's entry. Guard:
-> `shared/tests/test_ledger_reaches_disk.py`. The schema, `record_keeping:`
-> and `sha256-chain` are not built.
+> **Shipped: the ledger fix, the schema, and `record_keeping:`.**
+> `TokenLedger` appends per record to `LEDGER_PATH` (#1109; explicit path >
+> env; relative resolves against the session workspace; an unwritable path
+> never fails the round trip), `write_ledger` flushes only what was not
+> appended, and `trace.ledger` is the typed key. Guard:
+> `shared/tests/test_ledger_reaches_disk.py`.
+>
+> #1119 added the contract and the clock: `jaato_sdk.audit.AUDIT_SCHEMA`
+> (the events, their fields, and which store each lands in),
+> `docs/audit-log.md`, `jaato-scaffold explain audit [<profile>]`, the
+> `record_keeping:` block through all six profile ingresses plus the
+> isolated-runner payload, `workspace.delete`'s retention refusal, and the
+> hourly retention pass on the #812 watchdog. Guard:
+> `shared/tests/test_audit_record_contract.py`. **Not yet:**
+> `integrity: sha256-chain` — the vocabulary and the inheritance rule are
+> in place, and nothing writes a digest.
+>
+> **The schema is ENFORCED, not described**, which is the difference
+> between a contract and a wish: a guard walks the writers named in
+> `AUDIT_SCHEMA` and fails when a field the schema promises stops being
+> written. It earned its keep immediately — it caught a writer name that
+> was wrong in the schema's first draft, and the reversion meta-guard then
+> caught the guard itself accepting a field found in *either* of two
+> sources, which certified a writer that had stopped writing it.
+>
+> **`workspace.delete` refuses rather than preserving or overriding.**
+> Preserving the audit files would leave orphans in a directory an operator
+> asked to be gone; overriding with a WARNING makes the policy something
+> any delete silently defeats. A refusal is visible, recoverable, and
+> cannot destroy a record somebody declared had to be kept. The message
+> names `session.delete` — remove the conversation, keep the record — as
+> the verb for the case.
+>
+> **The retention pass is what stops the block being a one-way ratchet.**
+> A policy that only ever keeps is its own problem under GDPR storage
+> limitation, so the #812 watchdog runs an hourly pass that lets go of
+> records past their minimum — on its own clock, and in its own try block,
+> because a slow filesystem must not be able to delay the wall-clock bound
+> that stops a runaway session.
 
 Not a sixth store. A **contract over the stores that exist**:
 

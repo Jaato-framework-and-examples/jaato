@@ -67,6 +67,7 @@ PROFILE_PAYLOAD_ALLOWED_KEYS: FrozenSet[str] = frozenset({
     "trace",
     "runtime_limits",
     "regulatory",
+    "record_keeping",
 })
 
 
@@ -189,6 +190,7 @@ def validate_profile_payload(payload: Any) -> None:
 
     _check_trace(payload.get("trace"))
     _check_regulatory(payload.get("regulatory"))
+    _check_record_keeping(payload.get("record_keeping"))
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -213,6 +215,30 @@ def _check_regulatory(value: Any) -> None:
         RegulatoryProfileConfig.from_dict(value)
     except ValueError as exc:
         raise ValueError(f"profile_payload.regulatory invalid: {exc}") from exc
+
+
+def _check_record_keeping(value: Any) -> None:
+    """Validate a ``record_keeping`` block at the runner->daemon boundary.
+
+    Same posture as :func:`_check_regulatory`:
+    ``RecordKeepingConfig.from_dict`` is the single rule, so the boundary
+    re-runs it rather than carrying a second vocabulary that could drift.
+
+    The lockstep #1113 records applies here too -- producer, consumer and
+    this allow-list move together, or a block a profile declares is
+    dropped at the isolated-subagent boundary with nothing said.  A
+    retention policy that silently did not cross is a record silently not
+    kept.
+    """
+    from shared.plugins.subagent.config import RecordKeepingConfig
+
+    if value is None:
+        return
+    try:
+        RecordKeepingConfig.from_dict(value)
+    except ValueError as exc:
+        raise ValueError(
+            f"profile_payload.record_keeping invalid: {exc}") from exc
 
 
 def _check_trace(value: Any) -> None:

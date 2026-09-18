@@ -5167,7 +5167,7 @@ wants its own change rather than riding this one.
 Regulation (EU) 2024/1689 addresses the **provider** and **deployer** of an
 AI system; a jaato *application* (profile + persona + tools + model binding)
 is the system and the framework is a component supplier. The assessment is
-[docs/design/eu-ai-act.md](docs/design/eu-ai-act.md). Six mechanisms exist
+[docs/design/eu-ai-act.md](docs/design/eu-ai-act.md). Eight mechanisms exist
 in the tree, each the smallest shape that makes an obligation expressible:
 
 | Obligation | Mechanism |
@@ -5177,7 +5177,9 @@ in the tree, each the smallest shape that makes an obligation expressible:
 | 50(1) *before* the first turn | the announcement `announcement_for()` decides and `SessionManager._announce_ai_interaction` emits once at session creation — `AgentOutputEvent(source="system")` plus `SessionInfoEvent.disclosure_announcement` (protocol 1.15) for a client that owns a medium the framework cannot reach. `PresentationContext.client_discloses_ai` is the "unless this is obvious" suppression, asserted by the only party that can see the screen |
 | 50(2) mark generated output, on the wire | `ToolOutputEvent.generated_by` (protocol 1.14): `{"kind": "ai", provider, model, session_id, agent_id}` on the model's own media, stamped in `_deliver_model_media`; `Attachment.generated_by` for a producer's claim; nothing on a relayed file |
 | 50(2) mark it so it SURVIVES the wire | `TRAIT_OUTPUT_MARKER` + `JaatoSession._mark_generated_output` at both delivery seams; the in-tree `output_marker` plugin writes `<file>.provenance.json`. An AST guard fails any future `Attachment` producer that neither stamps nor is a declared relay |
-| 12 / 19 keep the logs | `TokenLedger` appends per record to `LEDGER_PATH`; `trace.ledger` is the typed key (relative = per session); `write_ledger` flushes only what was not appended |
+| 12 keep the logs | `TokenLedger` appends per record to `LEDGER_PATH`; `trace.ledger` is the typed key (relative = per session); `write_ledger` flushes only what was not appended |
+| 12 / 13(3)(f) say WHAT is logged | `jaato_sdk.audit.AUDIT_SCHEMA` — the events, their fields, the store each lands in — rendered by `jaato-scaffold explain audit [<profile>]` and enforced by a guard that walks the writers it names. Not a sixth store: a contract over the five that already record. `docs/audit-log.md` |
+| 19 / 26(6) keep them long enough | `record_keeping: {retention_days, conversation_retention_days, integrity}` — two clocks, because the audit record and the conversation are kept for different reasons. Declared, never defaulted: it changes what DELETE MEANS. `workspace.delete` refuses a held record; the #812 watchdog runs an hourly pass that lets go of records past their minimum |
 | 14(4) human oversight | `jaato-scaffold explain oversight [<profile>]` — the two stop verbs, the permission gate, the built-in constraints, reversibility, read from their enforcers; `jaato-doctor` prints the exact `jaato-server --stop` for the running daemon |
 
 **`validate` reads the block.** `disclosure_absent` (warn) for a
@@ -5197,9 +5199,9 @@ validation and *undeclared* for documentation, because a framework that
 printed `minimal` for it would be asserting a determination nobody made.
 
 Deliberately not built yet, each named in the design doc with its reason:
-the
-audit-record schema with `record_keeping:` retention, the Annex IV dossier
-generator, the incident register.
+`integrity: sha256-chain` (the vocabulary and the inheritance rule are in
+place; nothing writes a digest), the Annex IV dossier generator, the
+incident register.
 
 ### Approver Identity (#859)
 

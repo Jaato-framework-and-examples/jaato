@@ -67,6 +67,11 @@ from .session_lifetime import (
     resolve_unload_grace,
     unload_grace_remaining,
 )
+from .record_retention import (
+    DEFAULT_RETENTION_SWEEP_SECONDS,
+    describe_policy,
+    expired_paths,
+)
 from .session_workspace_index import SessionWorkspaceIndex
 from .wake_binding_registry import WakeBindingRegistry, BindOutcome
 
@@ -1211,6 +1216,12 @@ class SessionManager:
         self._lifetime_watchdog: Optional[threading.Thread] = None
         self._lifetime_watchdog_stop = threading.Event()
         self._lifetime_sweep_interval = DEFAULT_SWEEP_INTERVAL_SECONDS
+        # The retention pass (#1119) rides the same thread on its own much
+        # coarser clock -- see :meth:`_maybe_sweep_retention`.  ``0.0``
+        # rather than ``now`` so the first pass runs at the first tick: a
+        # daemon restarted hourly would otherwise never sweep at all.
+        self._retention_sweep_interval = DEFAULT_RETENTION_SWEEP_SECONDS
+        self._last_retention_sweep: float = 0.0
 
         # Path H (cycle 10): serialize concurrent async saves so
         # parallel ToolCallStartEvents (parallel tool execution)
@@ -5004,6 +5015,129 @@ class SessionManager:
                     "session-lifetime sweep raised — the bound stays armed "
                     "and the next sweep re-derives its state",
                 )
+            try:
+                self._maybe_sweep_retention()
+            except Exception:  # noqa: BLE001 — same rule, separate pass
+                logger.exception(
+                    "record-retention sweep raised — the next pass "
+                    "re-derives its state",
+                )
+
+    def _maybe_sweep_retention(self) -> None:
+        """Run the retention pass, at its own much coarser cadence (#1119).
+
+        Rides the #812 thread because a second thread for a pass that runs
+        hourly is not worth its own lifecycle -- but on its OWN clock, not
+        the lifetime sweep's: the shortest retention anybody writes is a
+        day, and walking the filesystem every few seconds to ask a
+        question measured in days is the wrong shape.
+
+        Deliberately SEPARATE from ``sweep_session_lifetimes`` rather than
+        folded into it: that sweep is a pass over the loaded-session dict
+        and this one stats files, and a slow or failing filesystem must
+        not be able to delay the wall-clock bound that stops a runaway
+        session.  Hence the two independent try blocks above, too.
+        """
+        now = time.time()
+        if now - self._last_retention_sweep < self._retention_sweep_interval:
+            return
+        self._last_retention_sweep = now
+        self.sweep_record_retention(now=now)
+
+    def sweep_record_retention(self, now: Optional[float] = None) -> int:
+        """Remove audit files past their declared minimum (#1119).
+
+        Article 19(1) asks a provider to keep a high-risk system's logs
+        for at least six months; ``record_keeping.retention_days`` is
+        where a profile says so, and this is what eventually lets go of
+        them.  Without it the block would be a one-way ratchet -- records
+        kept forever -- which is its own compliance problem under GDPR
+        storage limitation.
+
+        Four properties, each attached to a way a deleting sweep goes
+        wrong:
+
+        * **It acts only on a DECLARED policy.**  A workspace whose
+          profiles declare no ``record_keeping:`` is never touched, which
+          is every workspace that existed before this.  A sweep that
+          removed files nobody asked it to remove would be the worst
+          possible version of this mechanism.
+        * **Only positive evidence expires a record.**  A path whose age
+          cannot be read is KEPT -- see
+          :func:`record_retention.judge`.  The cost of being wrong in
+          that direction is a record kept too long.
+        * **A LOADED session's workspace is skipped.**  Its logs are open
+          and being appended to; removing one mid-turn is a live session
+          failure with a delayed cause.
+        * **It says what it removed and what it kept.**  A retention pass
+          that only names deletions cannot answer an operator asking why
+          a record is still there.
+
+        Args:
+            now: The instant to judge against.  A parameter so a test
+                states the moment it means rather than betting on a
+                clock (#996).
+
+        Returns:
+            How many paths were removed.
+        """
+        from pathlib import Path
+
+        from .record_retention import _declared_retention
+
+        stamp = time.time() if now is None else now
+        with self._lock:
+            busy = {s.workspace_path for s in self._sessions.values()
+                    if s.workspace_path}
+        removed = 0
+        for workspace in self._retention_workspaces():
+            if workspace in busy:
+                continue
+            try:
+                keeping, paths = _declared_retention(workspace)
+            except Exception:  # noqa: BLE001 -- an unparseable workspace
+                logger.debug("retention sweep: could not resolve %s",
+                             workspace, exc_info=True)
+                continue
+            retention = getattr(keeping, "retention_days", None)
+            if not retention or not paths:
+                continue
+            expired, kept = expired_paths(paths, retention, now=stamp)
+            for verdict in expired:
+                try:
+                    Path(verdict.path).unlink()
+                    removed += 1
+                    logger.info(
+                        "record retention: removed %s (%s)",
+                        verdict.path, verdict.reason)
+                except OSError as exc:
+                    logger.warning(
+                        "record retention: could not remove %s (%s); it "
+                        "stays until the next pass", verdict.path, exc)
+            if kept:
+                logger.debug(
+                    "record retention: %d file(s) kept under %s",
+                    len(kept), describe_policy(keeping))
+        return removed
+
+    def _retention_workspaces(self) -> List[str]:
+        """The workspaces the retention pass considers.
+
+        Every workspace a session has ever run in, as the daemon's own
+        index records it -- not a scan of the workspace root.  A scan
+        would give the pass an appetite for directories no session of
+        this daemon ever touched, which is not a set a retention policy
+        declared in a PROFILE has any business acting on.
+        """
+        try:
+            return sorted({
+                path for path in self._session_workspace_index.workspaces()
+                if path
+            })
+        except Exception:  # noqa: BLE001 -- best-effort, like the pass
+            logger.debug("retention sweep: workspace index unavailable",
+                         exc_info=True)
+            return []
 
     def _observe_session_lifetimes(
         self, now: float,

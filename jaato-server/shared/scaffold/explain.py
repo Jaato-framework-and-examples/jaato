@@ -3712,3 +3712,201 @@ def oversight_profile(name: str, workspace: str) -> Rendered:
     P = _profile_oversight(prof)
     P.update({"profile": name, "found": True})
     return P, "\n".join(_profile_oversight_lines(name, P))
+
+
+# ---------------------------------------------------------------------------
+# explain audit -- the record-keeping contract (EU AI Act Arts. 12, 13(3)(f), 19)
+# ---------------------------------------------------------------------------
+
+def _audit_schema_view() -> Dict[str, Any]:
+    """The declared audit record, as data.
+
+    Reads :data:`jaato_sdk.audit.AUDIT_SCHEMA` rather than restating it,
+    the rule every page here follows: a page that described the record
+    would be a second statement of it, and the two would disagree the
+    first time a writer changed.
+    """
+    from jaato_sdk import audit
+
+    return {
+        "schema_version": audit.AUDIT_SCHEMA_VERSION,
+        "stores": [
+            {
+                "key": s.key,
+                "path_source": s.path_source,
+                "format": s.fmt,
+                "description": s.description,
+                "retained": s.retained,
+            }
+            for s in audit.STORES
+        ],
+        "events": [
+            {
+                "kind": e.kind,
+                "article": e.article,
+                "store": e.store,
+                "written_by": e.written_by,
+                "note": e.note,
+                "fields": [
+                    {"name": f.name, "description": f.description,
+                     "guaranteed": f.guaranteed}
+                    for f in e.fields
+                ],
+            }
+            for e in audit.AUDIT_SCHEMA
+        ],
+    }
+
+
+def _audit_schema_lines(view: Dict[str, Any]) -> List[str]:
+    """Render :func:`_audit_schema_view`."""
+    lines = [
+        "the audit record  (Regulation (EU) 2024/1689, Arts. 12, 13(3)(f), 19)",
+        f"  schema version {view['schema_version']}",
+        "",
+        "  NOT a sixth store -- a CONTRACT over the stores that already record.",
+        "  13(3)(f) asks the instructions for use to describe the mechanisms a",
+        "  deployer collects, stores and interprets the logs with; this page is",
+        "  that description, computed rather than written down beside the code.",
+        "",
+        "STORES",
+    ]
+    for store in view["stores"]:
+        kept = "governed by retention_days" if store["retained"] else (
+            "governed by conversation_retention_days -- this is the "
+            "CONVERSATION, not the log about it")
+        lines.append(f"  {store['key']}")
+        lines.append(f"      where:  {store['path_source']}")
+        lines.append(f"      format: {store['format']}")
+        lines.extend(_wrap_bullet(store["description"], indent=6, glyph=" "))
+        lines.extend(_wrap_bullet(kept, indent=6, glyph=" "))
+    lines.append("")
+    lines.append("EVENTS")
+    for event in view["events"]:
+        lines.append(f"  {event['kind']}   -> {event['store']}")
+        lines.append(f"      {event['article']}")
+        lines.append(f"      written by {event['written_by']}")
+        for fld in event["fields"]:
+            mark = " " if fld["guaranteed"] else "?"
+            lines.append(f"      {mark} {fld['name']:<18} {fld['description']}")
+        if event["note"]:
+            lines.extend(_wrap_bullet(event["note"], indent=6, glyph="!"))
+    lines += [
+        "",
+        "  '?' marks a field present only when it was MEASURED.  Absent is not",
+        "  zero and is never written as null -- a provider that reported no",
+        "  cache must not read as a cache that never hit.",
+        "",
+        "  `explain audit <profile> --workspace DIR` shows the concrete paths",
+        "  THAT profile writes to and what its record_keeping: block says.",
+    ]
+    return lines
+
+
+def audit() -> Rendered:
+    """``explain audit`` -- the record-keeping contract.
+
+    Article 13(3)(f) asks a high-risk system's instructions for use to
+    describe "the mechanisms included within the AI system that allows
+    deployers to properly collect, store and interpret the logs".  Five
+    stores record and none said what is guaranteed, so that description
+    would have had to be reverse-engineered from five formats.
+    """
+    view = _audit_schema_view()
+    return view, "\n".join(_audit_schema_lines(view))
+
+
+def _audit_profile(prof: Any, workspace: Path) -> Dict[str, Any]:
+    """Which stores a RESOLVED profile writes to, and for how long."""
+    from jaato_sdk import audit as audit_schema
+
+    trace = getattr(prof, "trace", None)
+    keeping = getattr(prof, "record_keeping", None)
+    declared = bool(keeping is not None and keeping.declared)
+
+    def _resolved(value: Optional[str]) -> Optional[str]:
+        """A trace path as the session would write it.
+
+        Absolute stays absolute (one file shared by every session using
+        the profile); relative is resolved per session against the
+        WORKSPACE, so the page shows the pattern rather than pretending
+        to know a session id.
+        """
+        if not value:
+            return None
+        return value if Path(value).is_absolute() else str(workspace / value)
+
+    return {
+        "record_keeping": keeping.to_dict() if keeping is not None else None,
+        "record_keeping_declared": declared,
+        "paths": {
+            "ledger": _resolved(getattr(trace, "ledger", None)),
+            "session_trace": _resolved(getattr(trace, "session_log", None)),
+            "provider_trace": _resolved(getattr(trace, "provider_log", None)),
+        },
+        "schema_version": audit_schema.AUDIT_SCHEMA_VERSION,
+    }
+
+
+def _audit_profile_lines(name: str, P: Dict[str, Any]) -> List[str]:
+    """Render :func:`_audit_profile`."""
+    lines = [f"the audit record, as WRITTEN by profile {name!r}:", ""]
+    for key, label in (("ledger", "ledger"),
+                       ("session_trace", "session trace"),
+                       ("provider_trace", "provider trace")):
+        path = P["paths"][key]
+        if path:
+            lines.append(f"  {label:<16} {path}")
+        else:
+            lines.append(
+                f"  {label:<16} NOT WRITTEN -- this profile declares no "
+                f"trace.{'session_log' if key == 'session_trace' else key.replace('_trace', '_log')}")
+    lines.append("")
+    keeping = P["record_keeping"]
+    if not P["record_keeping_declared"]:
+        lines += [
+            "  record_keeping   UNDECLARED -- session.delete and "
+            "workspace.delete",
+            "                   remove everything, including whatever of the",
+            "                   above lives under the workspace.  Art. 19(1) "
+            "asks a",
+            "                   provider to keep the logs at least six months; "
+            "nothing",
+            "                   here does.",
+        ]
+    else:
+        retention = keeping.get("retention_days")
+        conv = keeping.get("conversation_retention_days")
+        lines.append(
+            f"  retention_days   {retention if retention is not None else 'unset'}"
+            + ("  (0 = keep until something deletes it)"
+               if retention == 0 else ""))
+        lines.append(
+            f"  conversation     {conv if conv is not None else 'unset'}"
+            "   days the SESSION RECORD is kept")
+        lines.append(
+            f"  integrity        {keeping.get('integrity', 'none')}")
+    lines += [
+        "",
+        "  `explain audit` (bare) is the schema: which events are recorded,",
+        "  which fields each carries, and which store each lands in.",
+    ]
+    return lines
+
+
+def audit_profile(name: str, workspace: str) -> Rendered:
+    """``explain audit <profile>`` -- where THIS profile's record lands."""
+    from shared.plugins.subagent.config import discover_profiles
+
+    ws = Path(workspace).resolve()
+    result = discover_profiles(
+        profiles_dir=".jaato/profiles", base_path=str(ws),
+        config_root=str(ws / ".jaato"),
+    )
+    prof = result.profiles.get(name)
+    if prof is None:
+        return ({"profile": name, "found": False, "error": "no such profile"},
+                f"no profile {name!r} under {ws}/.jaato/profiles/")
+    P = _audit_profile(prof, ws)
+    P.update({"profile": name, "found": True})
+    return P, "\n".join(_audit_profile_lines(name, P))

@@ -543,6 +543,7 @@ def validate_profile(
 
     # --- budget_control (incl. its ABSENCE, #947) -----------------------
     _check_budget_control(profile, add)
+    _check_record_keeping(profile, add)
 
     # --- diagnostic log paths (trace: and the two env vars) -------------
     _check_trace_paths(profile, env_keys, add)
@@ -755,6 +756,13 @@ def _check_profile_identity(profile: Any, add) -> None:
 #: undisclosed AI are then compliance defects, not authoring conveniences.
 #: The set is a declared constant so ``explain`` can print it and a test
 #: can pin it.
+#: The retention floor Article 19(1) names for a high-risk system's logs
+#: ("a period appropriate to the intended purpose … of at least six
+#: months, unless provided otherwise").  Six months as days.  A constant
+#: rather than a literal in the message, so the page and the finding
+#: cannot disagree about the number.
+_ART_19_MINIMUM_DAYS = 180
+
 HIGH_RISK_ESCALATED_CODES = frozenset({
     "budget_control_absent",
     "budget_limits_without_abort",
@@ -856,6 +864,32 @@ def _check_high_risk_obligations(profile: Any, reg: Any, add) -> None:
             "and Art. 12 requires those events recorded automatically over "
             "the system's lifetime.  Set `trace: {session_log: "
             ".jaato/logs/session_trace.jsonl}`.", where="trace.session_log")
+
+    # Writing the record and KEEPING it are two obligations, and the second
+    # was not expressible before #1119.  Art. 19(1) asks a provider to keep
+    # the logs at least six months and 26(6) asks the same of the deployer;
+    # without the block, `session.delete` removes everything.
+    keeping = getattr(profile, "record_keeping", None)
+    if keeping is None or not keeping.declared:
+        add("error", "high_risk_without_retention",
+            "risk_class: high with no `record_keeping:` block — the record "
+            "is written and nothing keeps it: `session.delete` and "
+            "`workspace.delete` remove the workspace's logs along with the "
+            "conversation.  Art. 19(1) asks the provider to keep the "
+            "automatically generated logs for at least six months (26(6) "
+            "asks the same of the deployer).  Declare `record_keeping: "
+            "{retention_days: 180}`; `explain audit` prints what is "
+            "recorded and where.", where="record_keeping.retention_days")
+    elif (keeping.retention_days is not None
+            and 0 < keeping.retention_days < _ART_19_MINIMUM_DAYS):
+        add("warn", "retention_below_article_19",
+            f"record_keeping.retention_days is {keeping.retention_days}, "
+            f"below the {_ART_19_MINIMUM_DAYS} days Art. 19(1) names as a "
+            "minimum for a high-risk system's logs.  A shorter period may "
+            "be right where Union or national law says so — the Article "
+            "says 'unless otherwise provided' — which is why this is a "
+            "warning and not an error.",
+            where="record_keeping.retention_days")
 
     if PIECE_DISCLOSURE in (getattr(profile, "suppress_base_instructions", None) or ()):
         add("error", "high_risk_disclosure_suppressed",
@@ -1265,6 +1299,50 @@ def _check_modality_direction(key, kind, direction, where, add,
                if value == DIRECTION_BIDIRECTIONAL
                and _carries_inbound_modality(provider_name, kind) else ""),
             where=where)
+
+
+def _check_record_keeping(profile: Any, add) -> None:
+    """A ``record_keeping:`` block on a profile that writes no record.
+
+    The other half of ``high_risk_without_retention``, and it fires at any
+    risk class: a retention policy over stores nothing writes to keeps
+    nothing.  The two findings are the pair ``budget_control_absent`` and
+    ``budget_limits_without_abort`` are -- one says you declared nothing,
+    the other says what you declared cannot act -- and neither is useful
+    without the other.
+
+    **Warn, not error**, the posture the whole silent-config family takes:
+    a base profile in an ``inherits`` chain may legitimately carry the
+    block its children pair with a ``trace:`` block, and validation runs
+    on every discovered profile including those bases.
+
+    The ``session_record`` store is NOT counted.  It is written
+    unconditionally under the workspace, so a profile declaring only
+    ``conversation_retention_days`` governs something real and is not
+    inert.
+    """
+    keeping = getattr(profile, "record_keeping", None)
+    if keeping is None or not keeping.declared:
+        return
+    # Only the two audit clocks need a log to act on; a conversation
+    # retention acts on the session record, which always exists.
+    governs_logs = (keeping.retention_days is not None
+                    or keeping.integrity != "none")
+    if not governs_logs:
+        return
+    writes = any(where in ("trace.session_log", "env.JAATO_TRACE_LOG",
+                           "trace.ledger", "env.LEDGER_PATH",
+                           "trace.provider_log", "env.JAATO_PROVIDER_TRACE")
+                 for _v, where in _trace_path_sources(profile))
+    if not writes:
+        add("warn", "record_keeping_inert",
+            "declares `record_keeping:` and no `trace:` paths — the "
+            "retention and integrity settings govern stores this profile "
+            "never writes to, so they keep nothing and chain nothing. "
+            "Add `trace: {session_log: .jaato/logs/session_trace.jsonl, "
+            "ledger: .jaato/logs/ledger.jsonl}`; `explain audit <profile>` "
+            "prints which stores a profile writes and which it does not.",
+            where="record_keeping")
 
 
 def _check_budget_control(profile: Any, add) -> None:

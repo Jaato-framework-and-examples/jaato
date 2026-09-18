@@ -139,6 +139,19 @@ def _regulatory_wire_shape(profile: Any) -> Dict[str, Any]:
     return {"regulatory": reg.to_dict()} if reg is not None else {}
 
 
+def _record_keeping_wire_shape(profile: Any) -> Dict[str, Any]:
+    """The ``profile_payload`` fragment carrying ``record_keeping:``.
+
+    Third sibling of :func:`_trace_wire_shape`, and the one #1113 is
+    about: producer, consumer and the daemon-side allow-list move in
+    LOCKSTEP.  A retention policy that a profile declares and this
+    function forgets is a record silently not kept on the one spawn path
+    that crosses a trust boundary.
+    """
+    keeping = getattr(profile, "record_keeping", None)
+    return {"record_keeping": keeping.to_dict()} if keeping is not None else {}
+
+
 def _apply_trace_env(profile: Any, saved: Dict[str, Optional[str]]) -> None:
     """Apply a profile's typed ``trace:`` block to ``os.environ``.
 
@@ -3070,6 +3083,7 @@ class SubagentPlugin(DaemonForwardingMixin):
         # it, so an isolated subagent must arrive declaring what its
         # profile declared.
         profile_payload.update(_regulatory_wire_shape(profile))
+        profile_payload.update(_record_keeping_wire_shape(profile))
         # GC config (optional).
         if profile.gc is not None:
             gc_obj = profile.gc
