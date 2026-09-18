@@ -5167,7 +5167,7 @@ wants its own change rather than riding this one.
 Regulation (EU) 2024/1689 addresses the **provider** and **deployer** of an
 AI system; a jaato *application* (profile + persona + tools + model binding)
 is the system and the framework is a component supplier. The assessment is
-[docs/design/eu-ai-act.md](docs/design/eu-ai-act.md). Eight mechanisms exist
+[docs/design/eu-ai-act.md](docs/design/eu-ai-act.md). Ten mechanisms exist
 in the tree, each the smallest shape that makes an obligation expressible:
 
 | Obligation | Mechanism |
@@ -5179,7 +5179,9 @@ in the tree, each the smallest shape that makes an obligation expressible:
 | 50(2) mark it so it SURVIVES the wire | `TRAIT_OUTPUT_MARKER` + `JaatoSession._mark_generated_output` at both delivery seams; the in-tree `output_marker` plugin writes `<file>.provenance.json`. An AST guard fails any future `Attachment` producer that neither stamps nor is a declared relay |
 | 12 keep the logs | `TokenLedger` appends per record to `LEDGER_PATH`; `trace.ledger` is the typed key (relative = per session); `write_ledger` flushes only what was not appended |
 | 12 / 13(3)(f) say WHAT is logged | `jaato_sdk.audit.AUDIT_SCHEMA` — the events, their fields, the store each lands in — rendered by `jaato-scaffold explain audit [<profile>]` and enforced by a guard that walks the writers it names. Not a sixth store: a contract over the five that already record. `docs/audit-log.md` |
+| 73(6) prove they were not altered | `record_keeping.integrity: sha256-chain` — each record carries `prev_digest` + `digest` over canonical bytes; `jaato-doctor --audit-verify <path>` walks a file with nothing but the stdlib. It proves the file was not edited IN PLACE and **not** who wrote it, which the verifier's own output says. An unchained file reports as unchained, never as intact. Stated cost: a chained file cannot be pruned from the front, so retention rotates whole segments |
 | 19 / 26(6) keep them long enough | `record_keeping: {retention_days, conversation_retention_days, integrity}` — two clocks, because the audit record and the conversation are kept for different reasons. Declared, never defaulted: it changes what DELETE MEANS. `workspace.delete` refuses a held record; the #812 watchdog runs an hourly pass that lets go of records past their minimum |
+| 15(4) don't feed bias back | `Memory.generated_by` (which model wrote it — stamped by the PLUGIN, never from the tool's arguments) + `curated_by` (who approved it: a second field, because who wrote it and who approved it are two facts) + `plugin_configs.memory.require_curation`, which withholds uncurated memories from BOTH retrieval paths and says how many. `validate` warns when the knob closes the learning loop instead of mitigating it |
 | 14(4) human oversight | `jaato-scaffold explain oversight [<profile>]` — the two stop verbs, the permission gate, the built-in constraints, reversibility, read from their enforcers; `jaato-doctor` prints the exact `jaato-server --stop` for the running daemon |
 
 **`validate` reads the block.** `disclosure_absent` (warn) for a
@@ -5199,9 +5201,7 @@ validation and *undeclared* for documentation, because a framework that
 printed `minimal` for it would be asserting a determination nobody made.
 
 Deliberately not built yet, each named in the design doc with its reason:
-`integrity: sha256-chain` (the vocabulary and the inheritance rule are in
-place; nothing writes a digest), the Annex IV dossier generator, the
-incident register.
+the Annex IV dossier generator, the incident register.
 
 ### Approver Identity (#859)
 

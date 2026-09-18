@@ -36,6 +36,15 @@ if TYPE_CHECKING:
 #: profile's ``trace.ledger`` key, which seeds it (``TRACE_ENV_VARS``).
 LEDGER_PATH_ENV = "LEDGER_PATH"
 
+#: The env var carrying the ledger's INTEGRITY posture.  Session-scoped,
+#: and seeded from the typed home ``record_keeping.integrity`` exactly as
+#: ``LEDGER_PATH`` is seeded from ``trace.ledger`` -- the env var is the
+#: transport, not the place an author writes it.  It is a transport at all
+#: because the ledger is constructed before any profile is resolved, and
+#: the runner-side session reads the same session-scoped context the path
+#: comes from.
+LEDGER_INTEGRITY_ENV = "JAATO_LEDGER_INTEGRITY"
+
 
 class TokenLedger:
     """The per-runtime record of every model round trip and permission verdict.
@@ -70,9 +79,22 @@ class TokenLedger:
             gone.  ``""`` means "no ledger file", explicitly.
     """
 
-    def __init__(self, path: Optional[str] = None):
+    def __init__(
+        self,
+        path: Optional[str] = None,
+        integrity: Optional[str] = None,
+    ):
         self._events: List[Dict[str, Any]] = []
         self._path = path
+        #: ``"sha256-chain"`` or ``None``/``"none"``.  Explicit argument
+        #: wins over :data:`LEDGER_INTEGRITY_ENV`, the inversion
+        #: ``ledger_path`` already avoids.
+        self._integrity = integrity
+        #: The previous chained record's digest, or ``None`` before the
+        #: first.  In memory only: a daemon restart starts a new SEGMENT,
+        #: which is the documented shape -- a chained file cannot be
+        #: pruned from the front, so retention rotates segments.
+        self._prev_digest: Optional[str] = None
         #: How many leading events are already on disk.
         self._flushed = 0
         #: Whether an append failure has been reported -- once per ledger,
@@ -99,6 +121,41 @@ class TokenLedger:
             return raw
         workspace = get_session_env("JAATO_WORKSPACE_ROOT")
         return os.path.join(workspace, raw) if workspace else raw
+
+    def chains(self) -> bool:
+        """Whether records carry tamper-evidence links (Art. 73(6), #1120).
+
+        Resolved the way :meth:`ledger_path` is: the constructor argument
+        wins, else the session-scoped env var seeded from the profile's
+        ``record_keeping.integrity``.  Anything other than
+        ``"sha256-chain"`` -- including a typo -- is ``none``, because the
+        only alternative is silently writing digests a verifier does not
+        expect, and an unchained file is reported as unchained rather
+        than as intact.
+        """
+        from .session_context import get_session_env
+        raw = (self._integrity if self._integrity is not None
+               else get_session_env(LEDGER_INTEGRITY_ENV))
+        return (raw or "none").strip().lower() == "sha256-chain"
+
+    def _line(self, index: int) -> str:
+        """The JSONL line for event ``index``.
+
+        The ONE place a record becomes bytes, so the per-record append
+        and :meth:`write_ledger`'s flush cannot chain differently -- the
+        failure #1120 names, since ``write_ledger`` exists precisely to
+        write records the append path did not.
+
+        Chaining advances :attr:`_prev_digest`, so this method is
+        ORDER-DEPENDENT and callers must walk indices in order.  Both do.
+        """
+        record = self._enrich(self._events[index], index)
+        if not self.chains():
+            return json.dumps(record)
+        from jaato_sdk.audit_chain import chain
+        chained = chain(record, self._prev_digest)
+        self._prev_digest = chained["digest"]
+        return json.dumps(chained)
 
     def _record(self, stage: str, details: Dict[str, Any]) -> None:
         details["stage"] = stage
@@ -138,7 +195,7 @@ class TokenLedger:
                 os.makedirs(parent, exist_ok=True)
             with open(path, "a", encoding="utf-8") as f:
                 for idx in range(self._flushed, len(self._events)):
-                    f.write(json.dumps(self._enrich(self._events[idx], idx)) + "\n")
+                    f.write(self._line(idx) + "\n")
                 f.flush()
             self._flushed = len(self._events)
         except Exception as exc:  # noqa: BLE001
@@ -292,7 +349,7 @@ class TokenLedger:
         try:
             with open(path, "a", encoding="utf-8") as f:
                 for idx in range(self._flushed, len(self._events)):
-                    f.write(json.dumps(self._enrich(self._events[idx], idx)) + "\n")
+                    f.write(self._line(idx) + "\n")
                 f.flush()
                 try:
                     os.fsync(f.fileno())

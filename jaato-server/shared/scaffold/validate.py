@@ -928,6 +928,63 @@ def _escalate_for_risk_class(profile: Any, out: List[Diagnostic]) -> None:
             d.message += "  (error because regulatory.risk_class is high)"
 
 
+#: Substrings that mark a profile's persona as the curator of the memory
+#: store.  A heuristic, deliberately: the curator is a persona an author
+#: names, and there is no declaration for "this agent curates".  It can
+#: only ever WITHHOLD a warning, never produce one, so being wrong costs
+#: a missing nudge rather than a false finding.
+_CURATOR_AGENT_MARKERS = ("curator", "advisor", "curador")
+
+
+def _check_memory_curation(profiles, out) -> None:
+    """``require_curation`` with nothing in the workspace that could curate.
+
+    Article 15(4) is about systems that "continue to learn after being
+    placed on the market": feedback loops must be addressed so possibly
+    biased outputs do not feed back as inputs unmitigated.  jaato's
+    learning loop is the memory plugin, and
+    ``plugin_configs.memory.require_curation`` is the mitigation --
+    memories are stored as before, and only ones a curator marked are
+    re-injected.
+
+    With the knob on and no curator ANYWHERE in the workspace, the gate
+    withholds everything.  That is a safe state and almost certainly not
+    the one the author meant: they enabled a learning loop and then
+    closed it entirely.
+
+    **A WORKSPACE check, not a per-profile one.**  The curator is a
+    separate agent with its own profile
+    (``docs/design/agent-continuity.md``), so asking whether THIS profile
+    binds one would warn on every correct setup.
+
+    Warn, not error, for the reason the whole family warns: a deployment
+    may curate by a route this cannot see -- a script, a premium
+    extension, a person editing the store.
+    """
+    profiles = profiles or {}
+    curators = sorted(
+        name for name, prof in profiles.items()
+        if any(marker in (getattr(prof, "default_agent", None) or "").lower()
+               for marker in _CURATOR_AGENT_MARKERS))
+    if curators:
+        return
+    for name, prof in sorted(profiles.items()):
+        configs = getattr(prof, "plugin_configs", None) or {}
+        if not (configs.get("memory") or {}).get("require_curation"):
+            continue
+        out.append(Diagnostic(
+            "warn", "require_curation_without_curator",
+            "plugin_configs.memory.require_curation is on and no profile in "
+            "this workspace binds a curator persona — every stored memory is "
+            "withheld from retrieval, so the knob currently means 'never "
+            "re-inject anything'. Article 15(4) asks that a learning loop be "
+            "MITIGATED, not closed: add a curator agent that promotes raw "
+            "memories (docs/design/agent-continuity.md), or turn the knob "
+            "off.",
+            profile=name,
+            where="plugin_configs.memory.require_curation"))
+
+
 def _check_spawn_schema_wire_types(profiles, config_root: str, out) -> None:
     """Flag a ``spawn_payload_schema`` that the IPC wire can never satisfy.
 
@@ -2837,6 +2894,7 @@ def validate_workspace(
     _check_spawn_schema_wire_types(result.profiles, config_root, out)
     _check_completion_assets(result.profiles, ws, config_root, out)
     _check_default_agent_exists(result.profiles, ws, config_root, out)
+    _check_memory_curation(result.profiles, out)
     for d in out[_before:]:
         d.tier = "workspace"
     return out

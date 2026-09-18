@@ -3884,8 +3884,19 @@ def _audit_profile_lines(name: str, P: Dict[str, Any]) -> List[str]:
         lines.append(
             f"  conversation     {conv if conv is not None else 'unset'}"
             "   days the SESSION RECORD is kept")
-        lines.append(
-            f"  integrity        {keeping.get('integrity', 'none')}")
+        integrity = keeping.get("integrity", "none")
+        lines.append(f"  integrity        {integrity}")
+        if integrity == "sha256-chain":
+            lines += [
+                "                   each record links to the previous one's",
+                "                   digest.  Verify with `jaato-doctor",
+                "                   --audit-verify <path>`.  It proves the file",
+                "                   was not edited IN PLACE; it does NOT prove",
+                "                   who wrote it -- a writer holding the file",
+                "                   can re-chain from any point.  A chained",
+                "                   file cannot be pruned from the front, so",
+                "                   retention rotates whole segments.",
+            ]
     lines += [
         "",
         "  `explain audit` (bare) is the schema: which events are recorded,",

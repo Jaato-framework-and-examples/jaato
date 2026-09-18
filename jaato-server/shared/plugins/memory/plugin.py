@@ -13,7 +13,7 @@ import tempfile
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from jaato_sdk.plugins.base import (
     CommandCompletion,
@@ -127,6 +127,12 @@ class MemoryPlugin(RunnerForwardingMixin):
         # discards a real memory, which for this plugin is the worst
         # available failure.  Opting in is the explicit act.
         self._reject_duplicates: bool = False
+        # Art. 15(4) (#1123).  OFF by default: on, it withholds every
+        # memory a curator has not marked, and a deployment that never ran
+        # a curator would silently lose its whole learning loop on upgrade.
+        # ``validate`` warns when it is set with no curator configured,
+        # because there the knob means "never re-inject anything".
+        self._require_curation: bool = False
         # What THIS plugin instance has written, oldest first.  The pool
         # that catches a runaway store loop on a store with nothing
         # curated yet — the incident in #973 was 83 writes inside a single
@@ -200,6 +206,36 @@ class MemoryPlugin(RunnerForwardingMixin):
             if sid:
                 return sid
         return self._session_id
+
+    def _model_provenance(self) -> Optional[Dict[str, Any]]:
+        """Which model is writing this memory (Art. 15(4), #1123).
+
+        Read PER EXECUTION off the currently executing session, the same
+        way :meth:`_get_session_id` reads the session id and for the same
+        reason: this plugin instance is SHARED across sibling subagents,
+        so anything stashed on ``self`` would be whichever sibling wrote
+        last.  ``JaatoSession._model_provenance`` is the one definition of
+        the stamp (#1109), so a memory and a piece of model media name
+        their binding identically.
+
+        Returns ``None`` when there is no session in context -- a
+        standalone unit test, a script -- which the record carries as
+        *provenance unknown*.  Never invented: a memory whose author
+        cannot be established must not claim one.
+        """
+        try:
+            from shared.session_context import get_current_session
+            session = get_current_session()
+        except LookupError:
+            return None
+        resolver = getattr(session, "_model_provenance", None)
+        if not callable(resolver):
+            return None
+        try:
+            return resolver()
+        except Exception:  # noqa: BLE001 -- a stamp must not fail a store
+            self._trace("store_memory: provenance unavailable")
+            return None
 
     def set_plugin_registry(self, registry: Any) -> None:
         """Auto-wiring hook called by the registry at
@@ -312,9 +348,11 @@ class MemoryPlugin(RunnerForwardingMixin):
         self._duplicate_threshold = resolve_threshold(
             config.get("duplicate_threshold"))
         self._reject_duplicates = bool(config.get("reject_duplicates", False))
+        self._require_curation = bool(config.get("require_curation", False))
         self._trace(
             f"initialize: duplicate_threshold={self._duplicate_threshold}, "
-            f"reject_duplicates={self._reject_duplicates}")
+            f"reject_duplicates={self._reject_duplicates}, "
+            f"require_curation={self._require_curation}")
         self._trace(f"initialize: allowed_scopes={sorted(self._allowed_scopes)}")
         # Server 0.6.168+ (real Bug B-class fix): read session_id
         # from config.  The registry's _augment_plugin_config
@@ -486,6 +524,22 @@ class MemoryPlugin(RunnerForwardingMixin):
                         "a fact with better wording is a real pattern. Turn "
                         "this on only with duplicate_threshold tuned against "
                         "your own store."
+                    ),
+                },
+                "require_curation": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Re-inject only memories a curator has marked "
+                        "(EU AI Act Art. 15(4): a system that continues to "
+                        "learn must not feed possibly biased outputs back as "
+                        "inputs unmitigated). Memories are STORED as before; "
+                        "retrieval withholds any without a `curated_by` "
+                        "stamp and says how many. OFF by default: on, a "
+                        "deployment that never ran a curator loses its whole "
+                        "learning loop -- which is why `jaato-scaffold "
+                        "validate` warns when this is set with no curator "
+                        "configured."
                     ),
                 },
             },
@@ -1360,6 +1414,12 @@ class MemoryPlugin(RunnerForwardingMixin):
             evidence=args.get("evidence"),
             source_agent=self._agent_name,
             source_session=self._get_session_id(),
+            # Art. 15(4) (#1123): WHICH MODEL wrote it.  Stamped here, by
+            # the plugin, and never taken from ``args`` -- provenance a
+            # subject asserts about itself is not provenance, and
+            # ``store_memory``'s schema deliberately has no such
+            # parameter for a model to fill in.
+            generated_by=self._model_provenance(),
         )
 
         # Is this something we already know?  Asked BEFORE the write, so
@@ -1658,30 +1718,19 @@ class MemoryPlugin(RunnerForwardingMixin):
                     "message": f"No memories found for tags: {tags}"
                 }
 
-        # Record usage BY ID, not by writing the object back.
-        #
-        # This used to be ``self._storage.update(mem)`` with the full
-        # retrieved object -- which routed on the maturity the memory had AT
-        # RETRIEVAL TIME.  Under parallel tool execution a curator decision
-        # landing between the read and this write-back was silently undone:
-        # a validation reverted (stale-raw upserted over it), a dismissal
-        # resurrected (stale object re-added via the "not anywhere yet"
-        # branch).  10 of 32 live decisions lost, and a re-decide livelock.
-        #
-        # It also wrote every memory through the PROJECT store regardless of
-        # which store it came from, so a global-store memory would have been
-        # copied into the project raw queue.  ``record_usage`` no-ops on a
-        # store that does not hold the id, so offering it to both is exact.
-        for mem in memories:
-            # The response reflects THIS read (the in-hand copy is display
-            # only -- it is never written back, so it cannot carry staleness
-            # anywhere).  Persistence goes through record_usage by id.
-            mem.usage_count += 1
-            mem.last_accessed = datetime.now().isoformat()
-            if self._storage:
-                self._storage.record_usage(mem.id)
-            if self._global_storage:
-                self._global_storage.record_usage(mem.id)
+        # Art. 15(4) (#1123): the CURATION GATE, applied to everything
+        # about to be handed back -- both the explicit-ids path and the
+        # tag search, because a gate on one of two paths is a gate the
+        # model routes around by asking for ids.
+        memories, withheld = self._apply_curation_gate(memories)
+        all_withheld = self._all_withheld_result(memories, withheld, matched)
+        if all_withheld is not None:
+            return all_withheld
+
+        # Record usage BY ID, not by writing the object back -- see
+        # ``_record_retrieval_usage`` for why that distinction cost 10 of
+        # 32 live curator decisions when it was the other way round.
+        self._record_retrieval_usage(memories)
 
         # Compute summary stats for telemetry
         maturities_retrieved = list({m.maturity for m in memories})
@@ -1693,7 +1742,8 @@ class MemoryPlugin(RunnerForwardingMixin):
             "count": len(memories),
             "matched": matched,
             "truncated": truncated,
-            "message": self._retrieval_message(len(memories), matched, limit),
+            "message": self._retrieval_message(len(memories), matched, limit)
+            + self._withheld_note(withheld),
             "memories": [
                 {
                     "id": m.id,
@@ -1716,8 +1766,126 @@ class MemoryPlugin(RunnerForwardingMixin):
                 "jaato.memory.maturities_retrieved": maturities_retrieved,
                 "jaato.memory.scopes_retrieved": scopes_retrieved,
                 "jaato.memory.avg_confidence": round(avg_confidence, 3),
+                "jaato.memory.withheld_uncurated": withheld,
             },
         }
+
+    def _record_retrieval_usage(self, memories: List[Memory]) -> None:
+        """Bump usage for everything a retrieval returned, BY ID.
+
+        Extracted from ``_execute_retrieve`` so that function stays at
+        its complexity baseline when the #1123 curation gate lands beside
+        it.  The behaviour and every reason for it are unchanged:
+
+        This used to be ``self._storage.update(mem)`` with the full
+        retrieved object -- which routed on the maturity the memory had AT
+        RETRIEVAL TIME.  Under parallel tool execution a curator decision
+        landing between the read and this write-back was silently undone:
+        a validation reverted (stale-raw upserted over it), a dismissal
+        resurrected (stale object re-added via the "not anywhere yet"
+        branch).  10 of 32 live decisions lost, and a re-decide livelock.
+
+        It also wrote every memory through the PROJECT store regardless of
+        which store it came from, so a global-store memory would have been
+        copied into the project raw queue.  ``record_usage`` no-ops on a
+        store that does not hold the id, so offering it to both is exact.
+
+        The in-hand copies are bumped too, because the response reflects
+        THIS read -- they are display only and never written back, so they
+        cannot carry staleness anywhere.
+        """
+        for mem in memories:
+            mem.usage_count += 1
+            mem.last_accessed = datetime.now().isoformat()
+            if self._storage:
+                self._storage.record_usage(mem.id)
+            if self._global_storage:
+                self._global_storage.record_usage(mem.id)
+
+    @staticmethod
+    def _withheld_note(withheld: int) -> str:
+        """The clause naming memories the curation gate held back.
+
+        Empty when none were, so a deployment that does not set
+        ``require_curation`` reads exactly the message it always did.
+        """
+        if not withheld:
+            return ""
+        return (f"  {withheld} further match(es) were withheld as uncurated "
+                f"(require_curation).")
+
+    def _all_withheld_result(
+        self, kept: List[Memory], withheld: int, matched: int,
+    ) -> Optional[Dict[str, Any]]:
+        """The result for a retrieval the gate emptied, or ``None``.
+
+        Its own method so ``_execute_retrieve`` stays at its complexity
+        baseline -- the ratchet is a ratchet, and new logic goes in a
+        helper rather than into a raised number.
+
+        ``no_results`` rather than an error: nothing went wrong, the
+        deployment's policy applied.  What the message must not do is
+        leave the model believing the store is empty, so it says how many
+        matched, that they are STORED, and what makes them retrievable.
+        """
+        if kept or not withheld:
+            return None
+        return {
+            "status": "no_results",
+            "count": 0,
+            "matched": matched,
+            "truncated": False,
+            "withheld_uncurated": withheld,
+            "message": (
+                f"{withheld} memory/memories matched and were WITHHELD: "
+                f"this deployment sets require_curation, and none of them "
+                f"carries a curator's mark. They are stored, not lost -- "
+                f"a curator promoting them makes them retrievable."),
+        }
+
+    def _apply_curation_gate(
+        self, memories: List[Memory],
+    ) -> Tuple[List[Memory], int]:
+        """Withhold uncurated memories when the deployment requires curation.
+
+        Article 15(4) is about systems that "continue to learn after being
+        placed on the market": feedback loops must be addressed so that
+        possibly biased outputs do not feed back as inputs without
+        mitigation.  jaato's learning loop is this plugin -- the model
+        writes memories during a session and they are re-injected into
+        later sessions.
+
+        The plugin's own docstring has always described the raw -> curated
+        lifecycle ("The School": agents store raw memories, an advisor
+        curates them), and nothing in a profile could REQUIRE it.  An
+        uncurated memory was re-injected exactly as a curated one, so
+        "this deployment's learning loop is reviewed" was not a statement
+        ``validate`` could check or a dossier could print.
+
+        Three properties:
+
+        * **Off by default.**  ``require_curation: false`` is
+          byte-identical to the behaviour before #1123, and the empty
+          ``withheld`` count costs a caller nothing.
+        * **Withheld, never deleted.**  The memory is stored and a
+          curator promoting it makes it retrievable; the result SAYS how
+          many were held back, because a silently shorter list is a model
+          reasoning from a subset it believes is the whole.
+        * **It gates RETRIEVAL, not storage.**  Writing continues, which
+          is what leaves the curator something to curate.
+
+        Returns:
+            ``(kept, withheld_count)``.
+        """
+        # ``getattr``: this method is reached by ``MemoryPlugin.__new__``
+        # doubles that never ran ``__init__``, the pattern this plugin's
+        # tests already use.  The default is the pre-#1123 behaviour --
+        # gate off -- which is the safe direction for an object that
+        # predates the attribute, the #881 rule.
+        if not getattr(self, "_require_curation", False):
+            return memories, 0
+        kept = [m for m in memories if m.is_curated]
+        return kept, len(memories) - len(kept)
 
     def _execute_list_tags(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute list_memory_tags tool.

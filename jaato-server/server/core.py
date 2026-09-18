@@ -555,6 +555,32 @@ _PURE_NOTIFICATION_EVENTS = {
 }
 
 
+def _record_keeping_env(profile: Any) -> Dict[str, str]:
+    """The session env a profile's ``record_keeping:`` block seeds (#1120).
+
+    Today one variable: the ledger's INTEGRITY posture.  It rides an env
+    var for the same reason the trace paths do -- the ledger is
+    constructed before any profile is resolved, and the runner-side
+    session reads the session-scoped context rather than this object.
+    The env var is the WIRE, never the place an author writes it;
+    ``record_keeping.integrity`` is the typed home and the only thing
+    ``validate`` and ``explain audit`` read.
+
+    A free function rather than four lines inside
+    ``_resolve_session_env``, which is at the complexity ceiling: the
+    ratchet is a ratchet, and new logic goes in a helper or the function
+    gets split, never into a raised number.
+
+    Returns an empty dict for a profile that declares nothing, so the
+    session env is byte-identical to before for every existing workspace.
+    """
+    keeping = getattr(profile, "record_keeping", None) if profile else None
+    if keeping is None or not getattr(keeping, "chains", False):
+        return {}
+    from shared.token_accounting import LEDGER_INTEGRITY_ENV
+    return {LEDGER_INTEGRITY_ENV: "sha256-chain"}
+
+
 class JaatoServer:
     """Core server logic for Jaato - UI-agnostic.
 
@@ -1490,6 +1516,9 @@ class JaatoServer:
         # vocabulary and pass through to jaato_sdk.trace untouched.
         if self._profile and getattr(self._profile, 'trace', None):
             self._session_env.update(self._profile.trace.as_env())
+
+        # Typed `record_keeping:` block (#1120).
+        self._session_env.update(_record_keeping_env(self._profile))
 
         # Highest precedence — post-auth wizard overrides everything.
         if self._env_overrides:

@@ -308,7 +308,7 @@ BASELINE: Dict[str, int] = {
     # 31 -> 19 (#982): the two-store tag search moved out to
     # _search_both_stores / _search_stores_for, which is also what made
     # an honest `matched` total possible.
-    "jaato-server/shared/plugins/memory/plugin.py::MemoryPlugin._execute_retrieve": 19,
+    "jaato-server/shared/plugins/memory/plugin.py::MemoryPlugin._execute_retrieve": 17,
     "jaato-server/shared/plugins/memory/plugin.py::MemoryPlugin._execute_update": 20,
     "jaato-server/shared/plugins/memory/plugin.py::MemoryPlugin._memory_edit": 23,
     "jaato-server/shared/plugins/memory/plugin.py::MemoryPlugin._validate_memory_schema": 24,

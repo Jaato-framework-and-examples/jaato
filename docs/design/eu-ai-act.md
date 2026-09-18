@@ -564,9 +564,14 @@ loud, rather than a mechanism that looks like compliance.
 > `record_keeping:` block through all six profile ingresses plus the
 > isolated-runner payload, `workspace.delete`'s retention refusal, and the
 > hourly retention pass on the #812 watchdog. Guard:
-> `shared/tests/test_audit_record_contract.py`. **Not yet:**
-> `integrity: sha256-chain` — the vocabulary and the inheritance rule are
-> in place, and nothing writes a digest.
+> `shared/tests/test_audit_record_contract.py`.
+>
+> #1120 added `integrity: sha256-chain`:
+> `jaato_sdk.audit_chain` (stdlib, in the SDK so a file can be verified
+> by somebody who has the file and nothing else),
+> `TokenLedger._line` as the ONE place a record becomes bytes so both
+> write paths chain identically, and `jaato-doctor --audit-verify
+> <path>`. Guard: `shared/tests/test_audit_chain_integrity.py`.
 >
 > **The schema is ENFORCED, not described**, which is the difference
 > between a contract and a wish: a guard walks the writers named in
@@ -717,6 +722,30 @@ human determination, and the tool says so in its output rather than
 classifying.
 
 ### 4.8 Memory provenance and a curation gate (Article 15(4))
+
+> **Shipped (#1123).** `Memory.generated_by` stamped by
+> `MemoryPlugin._model_provenance` from the currently executing session
+> (never from the tool's arguments), `Memory.curated_by` as a separate
+> field, `plugin_configs.memory.require_curation` gating BOTH retrieval
+> paths, and `require_curation_without_curator` in `validate` — a
+> WORKSPACE check, because the curator is a separate profile by design.
+> Guard: `shared/tests/test_memory_provenance.py`.
+>
+> **Nothing is stashed on the plugin.** The instance is shared across
+> sibling subagents, so the stamp is read per execution off
+> `shared.session_context` — the way `_get_session_id` already reads the
+> session id, and for the reason its docstring records: PR-196 stashed a
+> value on `self` and every cascade session read `None`. An AST guard
+> pins the absence, because a `self._session = …` added later is
+> invisible to any behavioural test that does not happen to spawn two
+> siblings.
+>
+> **Withheld, never deleted, and the result says so.** A gate that
+> silently shortened the list would leave the model reasoning from a
+> subset it believes is everything, so the refusal carries
+> `withheld_uncurated` and says the memories are stored rather than lost.
+> Storage is not gated at all — writing is what leaves the curator
+> something to curate.
 
 Every memory the model writes records its author binding and session id
 (the `generated_by` stamp of §4.3, applied to storage), and the raw→curated

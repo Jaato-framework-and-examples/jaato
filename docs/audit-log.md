@@ -137,6 +137,47 @@ The last two pair the way `budget_control_absent` and
 `budget_limits_without_abort` do: one says you declared nothing, the other
 says what you declared cannot act, and neither is useful without the other.
 
+## Tamper evidence: `integrity: sha256-chain`
+
+Article 73(6) asks that, after a serious incident, the logs used in the
+investigation not have been altered. With `integrity: sha256-chain`, each
+record carries `prev_digest` — the SHA-256 of the previous record's
+canonical bytes — and `digest`, its own. The first record of a segment
+chains to the literal `genesis`, so "segment start" and "somebody deleted
+the field" are different states on disk.
+
+```bash
+jaato-doctor --audit-verify .jaato/logs/ledger.jsonl
+```
+
+It needs nothing but the file and the standard library, reports the first
+record whose link broke and names the line, and **never fails the run** —
+`jaato-doctor` is documented as usable as a CI gate, and a broken chain is
+a finding for a person to act on rather than a build error.
+
+**What it proves and what it does not.** It proves the file was not edited
+in place after the fact. It does **not** prove who wrote it: a writer
+holding the file can re-chain from any point, and nothing here stops them.
+That distinction is exactly what an investigator needs, so it is printed in
+the verifier's own output rather than left to be inferred from the absence
+of a signature. Signing — a key the daemon holds — is the next step and is
+deliberately not built.
+
+**An unchained file reports as unchained, not as intact.** The question is
+whether this file was tampered with; for a file carrying no digests the
+true answer is that it is evidence of nothing either way, and answering
+"fine" would be answering a different question.
+
+**Both write paths chain identically.** `TokenLedger` appends per record
+and `write_ledger` flushes whatever the append path did not, so one file
+can be written by both. If only one chained, the file would break in the
+middle — which reads exactly like tampering.
+
+**Stated cost.** A chained file cannot be pruned from the front: removing a
+line breaks every link after it. Retention therefore rotates whole
+**segments** — a new file per period, each with its own genesis — rather
+than deleting lines. A daemon restart starts a new segment.
+
 ## What this does not do
 
 - **It does not sign anything.** `integrity: sha256-chain` proves a file
