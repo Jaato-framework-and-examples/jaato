@@ -88,6 +88,15 @@ class ArmResult:
             console groups by exactly this id, so persisting it turns every
             row into a join onto the provider's own record of the arm
             (request count, upstream, per-request cost, generation ids).
+            For a DRIVER arm (``harness.kind: driver``, jaato #1110), the
+            FIRST of ``session_ids`` — kept as a scalar so every consumer
+            that joins on one id keeps working.
+        session_ids: Every session this arm opened, in creation order.  A
+            session arm has exactly one; a driver arm has one per stage,
+            and the OpenRouter join is per stage, so the whole list is
+            recorded.  Empty when none is known — an arm blocked before
+            it opened anything — never ``None``: an absent key is an old
+            record, an empty list is a measured nothing.
         model: The model the daemon actually BOUND, from
             ``SessionInfoEvent.model_name``.  Not ``profile_set``, which is
             a naming convention rather than data — ``openrouter_gemini25flash``
@@ -139,6 +148,7 @@ class ArmResult:
     error: Optional[str] = None
     blocked_reason: Optional[str] = None
     session_id: Optional[str] = None
+    session_ids: List[str] = field(default_factory=list)
     model: Optional[str] = None
     provider: Optional[str] = None
     upstream_provider: Optional[str] = None
@@ -184,6 +194,7 @@ class ArmResult:
             # could not establish from a field a newer engine added, and an
             # omitted key looks like the latter.
             "session_id": self.session_id,
+            "session_ids": list(self.session_ids),
             "model": self.model,
             "provider": self.provider,
             "upstream_provider": self.upstream_provider,
