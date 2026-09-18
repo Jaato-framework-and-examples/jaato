@@ -221,19 +221,12 @@ def load_gc_from_file(
 
         gc_plugin = load_gc_plugin(gc_plugin_name, gc_init_config)
 
-        # Create GCConfig for the client
-        # Handle pressure_percent specially: 0 means continuous mode, use None
-        pressure_percent = data.get('pressure_percent')
-        if pressure_percent == 0:
-            pressure_percent = None
-
+        # Create GCConfig for the client.  Every trigger key is passed only
+        # when the FILE set it -- see ``_scalar_settings``.
         gc_config = GCConfig(
-            threshold_percent=data.get('threshold_percent', 80.0),
-            target_percent=data.get('target_percent', 60.0),
-            pressure_percent=pressure_percent,
             max_turns=data.get('max_turns'),
-            preserve_recent_turns=data.get('preserve_recent_turns', 5),
             plugin_config=data.get('plugin_config') or {},
+            **_scalar_settings(data),
             **_media_settings(data),
         )
 
@@ -249,6 +242,52 @@ def load_gc_from_file(
     except Exception as e:
         logger.warning("Error reading GC config file %s: %s", config_path, e)
         return None
+
+
+def _scalar_settings(data: Dict) -> Dict:
+    """The trigger keys of ``gc.json``, absent when the file omits them.
+
+    The same rule :func:`_media_settings` states, applied to the three keys
+    it left behind.  It was written for the media keys and the argument is
+    general: these defaults live on :class:`GCConfig` -- two of them behind
+    an env var -- so re-spelling them here makes every session that has a
+    ``gc.json`` **at all** silently override ``JAATO_GC_THRESHOLD`` and
+    ``JAATO_GC_TARGET``, whose own docstrings promise the opposite.
+
+    ``pressure_percent`` was worse than shadowed, because its default is not
+    a number.  ``data.get('pressure_percent')`` answers ``None`` for a file
+    that never mentions it, ``None`` is how :class:`GCConfig` spells
+    CONTINUOUS mode -- GC after every turn above ``target_percent`` -- and
+    passing it explicitly beat the env-derived 90.0.  So a ``gc.json``
+    omitting one key put the session into a mode nobody asked for, and the
+    ``== 0`` test right below the read is the proof it was not meant to:
+    that line exists to make ``0`` mean continuous, which is only worth
+    writing if *absent* does not.  The profile path never had this --
+    ``GCProfileConfig.pressure_percent`` defaults to ``90.0`` -- so the two
+    routes into the same dataclass disagreed about what an omitted key
+    means.  A literal ``0`` still selects continuous mode; that is the
+    documented opt-in and it is preserved here.
+
+    Args:
+        data: The parsed ``gc.json``.
+
+    Returns:
+        Kwargs for :class:`GCConfig`, carrying only the keys the file set.
+    """
+    settings: Dict = {}
+    if data.get('threshold_percent') is not None:
+        settings['threshold_percent'] = float(data['threshold_percent'])
+    if data.get('target_percent') is not None:
+        settings['target_percent'] = float(data['target_percent'])
+    if data.get('preserve_recent_turns') is not None:
+        settings['preserve_recent_turns'] = int(data['preserve_recent_turns'])
+    if 'pressure_percent' in data:
+        raw = data['pressure_percent']
+        # 0 (and an explicit null) is the documented continuous-mode opt-in.
+        settings['pressure_percent'] = (
+            None if raw is None or raw == 0 else float(raw)
+        )
+    return settings
 
 
 def _media_settings(data: Dict) -> Dict:

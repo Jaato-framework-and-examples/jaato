@@ -559,6 +559,9 @@ class WorkspaceManager:
         # Create empty .env file
         (path / ".env").touch()
 
+        # ...and a GC strategy, because without one there is none at all.
+        self._write_default_gc_config(path)
+
         ws_info = WorkspaceInfo(
             name=name,
             path=str(path),
@@ -572,6 +575,70 @@ class WorkspaceManager:
 
         logger.info("Created workspace: %s at %s (owner=%s)", name, path, owner or "-")
         return ws_info
+
+    #: What :meth:`create_workspace` writes to ``<workspace>/.jaato/gc.json``.
+    #:
+    #: ``type`` and nothing else, deliberately.  Every other key of that file
+    #: has a framework default -- several of them behind an env var
+    #: (``JAATO_GC_THRESHOLD`` / ``_TARGET`` / ``_PRESSURE`` /
+    #: ``_MEDIA_BYTES``) -- and ``shared.plugins.gc._media_settings`` states
+    #: the rule this follows: *omission has to mean "the dataclass decides",
+    #: not "the default I happened to type"*.  A generated file that
+    #: re-spelled today's 80.0 would outrank the env var for every workspace
+    #: created before the number next moves, and would freeze each one on the
+    #: value that was current the day it was made.
+    DEFAULT_GC_CONFIG: Dict[str, Any] = {"type": "budget"}
+
+    def _write_default_gc_config(self, path: Path) -> None:
+        """Give a new workspace a GC strategy.
+
+        A session gets its GC from its profile's ``gc:`` block, else from
+        ``<workspace>/.jaato/gc.json``, else from ``~/.jaato/gc.json`` -- and
+        if none of the three answers, ``JaatoServer.initialize`` leaves
+        ``gc_result`` at ``None`` and the session runs with **no context
+        garbage collection at all**.  A workspace created here is exactly
+        that case: it is driven by a bare ``session.new`` against the
+        ``JAATO_PROVIDER`` / ``MODEL_NAME`` pair in its ``.env``, with no
+        profile, so nothing selected a strategy and the history grew until
+        the pre-send guard refused it or the upstream did.
+
+        **Not settable from ``.env``**, which is where one would first reach
+        for it: there is no ``JAATO_GC_TYPE``.  The four ``JAATO_GC_*``
+        variables are read by ``GCConfig``'s field defaults, and that object
+        is only ever constructed once a strategy has been chosen -- so
+        writing a threshold into ``.env`` and stopping there configures
+        nothing, silently.  Choosing the strategy is the load-bearing act and
+        ``gc.json`` is where it is expressed.
+
+        ``budget`` rather than ``truncate`` because it dominates it: with an
+        ``InstructionBudget`` it removes by GC policy (enrichment first,
+        never LOCKED), and without one
+        :meth:`BudgetGCPlugin.collect` falls back to the same turn-based
+        truncation ``gc_truncate`` would have done.  There is no state in
+        which it is the worse choice.
+
+        Best-effort: a workspace that exists with no ``gc.json`` is the state
+        every workspace was in before this, so a failure here is logged and
+        the workspace is still created.  Existing workspaces are deliberately
+        NOT migrated -- writing into a directory whose owner may have made
+        their own choice is not this method's business, and the file is a
+        starting point the user is meant to edit.
+
+        Args:
+            path: The workspace root; ``<path>/.jaato`` already exists.
+        """
+        target = path / ".jaato" / "gc.json"
+        try:
+            target.write_text(
+                json.dumps(self.DEFAULT_GC_CONFIG, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            logger.warning(
+                "Could not write default GC config to %s: %s -- the workspace "
+                "is usable and its sessions will run with no GC until a "
+                "gc.json or a profile gc: block supplies one", target, exc,
+            )
 
     def delete_workspace(
         self,
