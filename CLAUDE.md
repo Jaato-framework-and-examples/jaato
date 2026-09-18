@@ -4069,6 +4069,82 @@ missing. Four properties:
   to be copy-paste reproducible, and without the flag the printed command
   re-ran to `missing required --provider / --model`.
 
+### A Workspace That Committed Its Sessions, or Lost Its Profiles
+
+`<workspace>/.jaato/` mixes two things a version-control rule must treat
+oppositely: **authored assets** (profiles, agents, instructions, the two
+payload schemas, prefetch scripts and completion processors, service
+specs, the template catalog) and **runtime state** (`sessions/`, `logs/`,
+`memories/`, caches, language-server data, and the `<provider>_auth.json`
+a stored credential lands in). The split was already written down — once,
+as the `audit deny .../.jaato/<x> wlk` rules in `server/apparmor.py` that
+name the "user-authored config subpaths" a confined runner may not
+rewrite, and in prose on `explain paths` — and expressed nowhere a
+repository could read. `new profile-set` ignored `.env` and nothing else,
+so a workspace either committed its session records and stored keys, or
+ignored `.jaato/` wholesale and lost the profiles its sessions ran under;
+the TUI's own `.jaato.example/README.md` documented the second posture as
+the default, with a hand-typed re-include list as the remedy.
+
+`shared/scaffold/gitignore.py` declares the split as data (`AUTHORED`,
+each entry carrying what it holds and whether the template write-denies
+it), and three consumers read it so they cannot disagree:
+
+| Consumer | What it does |
+|---|---|
+| every `new` archetype that writes under `.jaato/` (`profile-set`, `processor`, `sweep`) | merges the block into the workspace `.gitignore` — in the SAME write as the `.env` rule, one file and one plan entry, so `--dry-run` reports it truthfully instead of two helpers each reporting `create` |
+| `new gitignore --workspace DIR` | the block on its own, for a workspace written by hand; it reads the file back through the daemon's parser and fails if the block did not take |
+| `validate` | judges an existing `.gitignore` by **effect**, never by spelling: `gitignore_missing` (a repository root with none), `gitignore_hides_jaato_assets` (authored entries ignored), `gitignore_leaks_jaato_state` (state probes not ignored — a stored credential is named when it is one of them). All `warn`, each naming the command |
+
+```gitignore
+!.jaato/
+.jaato/*
+!.jaato/profiles/
+!.jaato/agents/
+!.jaato/completion_schemas/
+!.jaato/scripts/
+# … one re-include per authored entry …
+.jaato/**/__pycache__/
+```
+
+Three properties, each attached to a way it could go wrong:
+
+- **Ignored unless named.** The block is `.jaato/*` plus re-includes, never
+  a list of state directories to ignore, so state a later release adds —
+  or a credential file nobody anticipated — is never one `git add -A` from
+  a remote. The failure direction of an incomplete list is an asset that
+  needs `git add -f`, not a leak.
+- **A wholesale rule is neutralised, not edited.** Git cannot re-include
+  beneath an excluded directory, so on top of an author's `.jaato/` (or
+  `.*`) line every `!.jaato/<x>/` would be inert. The block opens with
+  `!.jaato/`, which un-excludes the directory before `.jaato/*` excludes
+  its children — last match wins, and the author's line stays where it
+  was. Verified against `git check-ignore` for each prior shape, and the
+  reason `validate` stays read-only (it is required to be side-effect
+  free): it reports, `new gitignore` writes.
+- **The two declarations of "authored" are guarded.**
+  `test_gitignore_authored_set_tracks_apparmor.py` reads the template's
+  write-deny rules out of its source and checks them against `AUTHORED`
+  in both directions, so a directory becomes committable the release it
+  is protected.
+
+**Judging by effect needed a parser that answers like git.** The daemon's
+`GitignoreParser` — what the workspace monitor's file panel reads — was an
+approximation in three ways that all bite on this one file: `*` crossed
+`/`, so `.jaato/*` swallowed every file beneath and no re-include could
+reach them; a multi-segment directory pattern was compared against each
+path SEGMENT on its own, so `!.jaato/profiles/` matched nothing at all;
+and a negated directory pattern un-ignored everything beneath the
+directory, where git un-excludes only the directory itself. It now
+compiles each rule to git's model (`*` stops at `/`, directory-only rules
+match directories, an excluded ancestor excludes everything beneath it)
+and agrees with `git check-ignore` on every probe in
+`test_gitignore_parser_honours_multi_segment_dirs.py`. `gitignore_missing`
+fires only at a repository root: a nested workspace with no file of its
+own sits under rules the validator cannot see, and reading their absence
+as "unignored" would warn on every eval workspace under an ignored
+parent.
+
 ### When the Introspection Tools Misreport Their Own Environment (#966, #823)
 
 Two findings of one shape, and it is the one thing a diagnostic must not do:

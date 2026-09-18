@@ -34,7 +34,7 @@ the list cannot disagree with the generator about what an archetype is.
 from __future__ import annotations
 
 import fnmatch
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Dict, Optional, Tuple
 
 from ._client_templates import PROVIDER_OPTIONAL, TEMPLATES
@@ -52,6 +52,15 @@ PROFILE_SET = "profile-set"
 #: entirely the author's, while a processor's hard part is the contract
 #: around the body.
 PROCESSOR = "processor"
+
+#: The workspace ``.gitignore`` archetype — neither a client nor a profile
+#: nor a processor: it writes nothing under ``.jaato/`` and exists so that
+#: what IS under it can be committed without its runtime state.  Every
+#: other archetype that writes there merges the same block as it goes (see
+#: ``build._ensure_gitignore``); this one is for a workspace whose assets
+#: were written by hand, and is the remedy ``validate``'s ``gitignore_*``
+#: findings name.
+GITIGNORE = "gitignore"
 
 #: Client archetypes, derived from the template registry so a new template is
 #: automatically an accepted archetype (and, via the guard, must be documented).
@@ -290,6 +299,36 @@ _CLIENT_NEXT = (
 # the processor that runs them, the schema without which there is nothing to
 # gate, and the profile carrying the two keys that connect them.
 
+#: The workspace ``.gitignore`` block, shared by every archetype that writes
+#: under ``.jaato/`` and by the ``gitignore`` archetype on its own.  One
+#: declaration, because the file is one file: a profile-set, a sweep gate
+#: and a processor all land beside the same ``sessions/`` and ``logs/``.
+_JAATO_GITIGNORE = EmittedFile(
+    path=".gitignore",
+    what="keeps .jaato/ runtime state out of git and its authored assets in",
+    status="merged",
+    detail=(
+        "`!.jaato/` + `.jaato/*`, then one `!.jaato/<x>` re-include per "
+        "authored entry — profiles/, agents/, instructions/, "
+        "completion_schemas/, spawn_schemas/, scripts/, services/, "
+        "references/, templates/, prompts/, and the config files "
+        "(gc.json, pricing.json, permissions.json, ...).  The set is "
+        "declared once in scaffold/gitignore.py and guarded against the "
+        "AppArmor template's own list of user-authored subpaths",
+        "everything else under .jaato/ stays ignored — sessions/, logs/, "
+        "memories/, caches, language-server data, <provider>_auth.json — "
+        "including state a later release adds: the block names what to "
+        "KEEP, so an omission costs a `git add -f`, never a leak",
+        "created, or appended to.  An existing wholesale `.jaato/` (or "
+        "`.*`) line is left in place and neutralised by the leading "
+        "`!.jaato/`, since git cannot re-include beneath an excluded "
+        "directory and rewriting an author's line is not the generator's "
+        "call",
+        "idempotent — a file already carrying the block is not touched, "
+        "and one carrying an older list gains only the missing lines",
+    ),
+)
+
 _GATE_WHEN = "unless --no-gate"
 
 _GATE_FILES: Tuple[EmittedFile, ...] = (
@@ -450,8 +489,13 @@ def _client(name: str, *, detail: Tuple[str, ...],
         summary=TEMPLATES[name][2],
         requires=(("--workspace",) if name in PROVIDER_OPTIONAL
                   else ("--workspace", "--provider", "--model")),
+        # A gated archetype writes under .jaato/ (the processor, the
+        # schema, the gate profile), so it also merges the .gitignore block —
+        # under the gate's own condition, since without the gate it writes
+        # nothing there.
         writes=((_client_script(detail), _CLIENT_ENV)
-                + (_GATE_FILES if gated else ())),
+                + ((_GATE_FILES + (replace(_JAATO_GITIGNORE, when=_GATE_WHEN),))
+                   if gated else ())),
         flags=_CLIENT_FLAGS + (_GATE_FLAGS if gated else ()),
         edit_before_running=edit + (_GATE_EDIT if gated else ()),
         generated_correct=(_CLIENT_GENERATED_CORRECT
@@ -524,16 +568,17 @@ ARCHETYPES: Dict[str, ArchetypeDoc] = {
                     "JAATO_PROFILE_SET already present is left alone",
                 ),
             ),
-            EmittedFile(
-                path=".gitignore",
-                what="ignores .env (keeps .env.example tracked)",
-                status="merged",
-                detail=(
-                    "created, or appended to if it exists and lacks the rule",
-                    "the credential now lives in .env; without this rule a live "
-                    "key is one `git add` from being published",
+            replace(
+                _JAATO_GITIGNORE,
+                what="keeps .jaato/ runtime state out of git and its authored "
+                     "assets in; ignores .env under --secrets env / none",
+                detail=_JAATO_GITIGNORE.detail + (
+                    "under --secrets env (default) or none, also `.env` + "
+                    "`!.env.example`: the credential now lives in .env, and "
+                    "without that rule a live key is one `git add` from "
+                    "being published.  A secret-URI mode adds no .env rule — "
+                    "the key is not in the workspace",
                 ),
-                when="--secrets env (default) or none",
             ),
             EmittedFile(
                 path=".jaato/scaffold.json",
@@ -718,6 +763,7 @@ ARCHETYPES: Dict[str, ArchetypeDoc] = {
                     "CHECKS_COMMAND at the top — the one blank to fill",
                 ),
             ),
+            _JAATO_GITIGNORE,
         ),
         flags=(
             ("--name NAME", "REQUIRED — the module stem, the entry's `name:`, "
@@ -754,6 +800,42 @@ ARCHETYPES: Dict[str, ArchetypeDoc] = {
             "set CHECKS_COMMAND, or delete _run_checks if the ledger check is "
             "all you want",
             "jaato-scaffold explain completion",
+        ),
+    ),
+
+    GITIGNORE: ArchetypeDoc(
+        name=GITIGNORE,
+        kind="workspace",
+        summary="The workspace .gitignore block that keeps .jaato/ runtime "
+                "state (sessions, logs, memories, stored credentials) out of "
+                "git and its authored assets (profiles, agents, schemas, "
+                "processors) in — the fix `validate`'s gitignore_* findings "
+                "name.",
+        requires=("--workspace",),
+        writes=(_JAATO_GITIGNORE,),
+        flags=(),
+        generated_correct=(
+            "the ORDER: `!.jaato/` before `.jaato/*` before the re-includes, "
+            "which is what lets the block sit on top of an existing wholesale "
+            "`.jaato/` or `.*` rule without editing it — git cannot "
+            "re-include beneath an excluded directory, so the directory is "
+            "un-excluded first",
+            "the direction of the default: everything under .jaato/ is "
+            "ignored UNLESS named, so a state directory a later release adds "
+            "(or a credential file nobody anticipated) is never one "
+            "`git add -A` from a remote",
+            "the authored set itself — the same list the AppArmor template "
+            "write-denies for a confined runner, guarded so the two cannot "
+            "drift",
+        ),
+        check="the file is read back through the daemon's own gitignore "
+              "parser — the assessment `validate` runs — and `new` fails if "
+              "an authored entry is still ignored or a state probe is still "
+              "committable",
+        next_steps=(
+            "git status — .jaato/profiles/ and friends show as untracked, "
+            "sessions/ and logs/ do not",
+            "jaato-scaffold validate <ws>",
         ),
     ),
 

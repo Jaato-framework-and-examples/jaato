@@ -235,10 +235,12 @@ def test_a_real_run_writes_only_documented_files(generated, name):
 
 
 def test_the_conditional_files_appear_under_their_condition(tmp_path):
-    """profile-set's two conditional files — .gitignore (env/none secrets) and
-    .jaato/scaffold.json (an explicit --secrets) — are declared conditional, so
-    the check above skips them.  Assert the condition actually produces them,
-    or 'conditional' becomes a place to hide undocumented output."""
+    """profile-set's conditional file — .jaato/scaffold.json (an explicit
+    --secrets) — is declared conditional, so the check above skips it.  Assert
+    the condition actually produces it, or 'conditional' becomes a place to
+    hide undocumented output.  .gitignore is asserted beside it because it
+    USED to be conditional (env/none secrets only) and is now unconditional —
+    the set's profiles land under .jaato/ whatever the secrets mode."""
     ws = tmp_path / "cond"
     assert _run(_args(archetype=A.PROFILE_SET, workspace=str(ws), set="s1",
                       agents="alpha", secrets="env")) == 0

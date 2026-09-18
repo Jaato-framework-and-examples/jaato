@@ -118,7 +118,12 @@ def test_uri_mode_emits_secret_uri_and_no_env_key(tmp_path):
     # (the provider var may still appear as a commented `# ...=` knob).
     env_lines = [ln.strip() for ln in (tmp_path / ".env").read_text().splitlines()]
     assert not any(ln.startswith("JAATO_OPENROUTER_API_KEY=") for ln in env_lines)
-    assert not (tmp_path / ".gitignore").exists()
+    # No .env RULE — the key is not in the workspace.  The .gitignore itself
+    # still lands, because the set's profiles are under .jaato/ beside the
+    # sessions/ and logs/ that must stay out of git whatever the secrets mode.
+    gi_lines = (tmp_path / ".gitignore").read_text().split()
+    assert ".env" not in gi_lines
+    assert ".jaato/*" in gi_lines and "!.jaato/profiles/" in gi_lines
 
 
 def test_uri_mode_custom_secret_path(tmp_path):

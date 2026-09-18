@@ -114,13 +114,22 @@ instead of the installed copy, which is why the doctor insists on the daemon's
 environment.
 
 Generate rather than hand-write. Archetypes: **`profile-set`, `cascade`,
-`client`, `fire`, `host-tools`, `observer`, `processor`, `sweep`.**
+`client`, `fire`, `host-tools`, `observer`, `processor`, `sweep`,
+`gitignore`.**
 
 ```
 jaato-scaffold new <archetype> --workspace DIR [--provider P --model M] [--recoverable]
 jaato-scaffold new <archetype> ... --dry-run   # the exact tree, written nowhere
+jaato-scaffold new gitignore --workspace DIR   # .jaato/: state ignored, authored assets committable
 jaato-scaffold validate <profile.yaml|workspace> [--set S]
 ```
+
+`.jaato/` mixes authored assets (profiles, agents, schemas, processors)
+with runtime state (sessions, logs, memories, stored credentials). Every
+archetype that writes under it merges the `.gitignore` block that keeps the
+first committable and the second out of git; `new gitignore` writes that
+block alone, and `validate` reports a `.gitignore` that hides the assets or
+leaks the state (`gitignore_*` findings, each naming the fix).
 
 `validate` catches the silent-ignore failures the runtime drops without a word:
 a mistyped `api_params.temprature`, an unknown plugin, a quirk the provider does
