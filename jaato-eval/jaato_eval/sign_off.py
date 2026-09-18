@@ -73,8 +73,13 @@ from typing import Optional
 MAX_COMPLETION_NUDGES = 2
 
 #: The terminal a DRIVER arm (``harness.kind: driver``, jaato #1110) ends
-#: in when its process exits with a code that is neither ``0`` nor
-#: ``EX_TEMPFAIL``.  Not a daemon ``error_type`` — the engine mints it,
+#: in when its process exits with a code IT CHOSE that is neither ``0``
+#: nor ``EX_TEMPFAIL``.  The endings the driver did not choose — a shell
+#: that could not run the command at all, a signal nobody here sent, the
+#: engine's own kill at the arm ceiling — are BLOCKED instead and never
+#: reach this terminal, because an environment fault graded through here
+#: would be an arm FAILed for something that never ran
+#: (:attr:`jaato_eval.driver.DriverOutcome.fault`).  Not a daemon ``error_type`` — the engine mints it,
 #: because a driver's exit code is the only account the engine has of how
 #: the run ended, and the exit-code vocabulary in :mod:`jaato_eval.driver`
 #: says such an exit means *ran and stopped short*: the tree on disk is

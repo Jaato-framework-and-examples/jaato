@@ -156,12 +156,31 @@ can refuse a table it does not understand:
 | `JAATO_EVAL_CONFIG_ROOT` | the task's read-only `.jaato/` |
 | `JAATO_EVAL_SOCKET` | the daemon the arm runs on — same rule as `GraderContext.socket_path`, so **absent** when the sweep uses the SDK default |
 | `JAATO_EVAL_CASCADE_ID` | **the arm's cid; every session the driver opens must be stamped with it** — this is what makes the pool, the observer and the per-stage records work |
+| `JAATO_EVAL_PYTHON` | the interpreter jaato-eval itself runs under, and therefore the one that **has `jaato_sdk`**. Absent only where an embedded interpreter cannot name itself |
 | `JAATO_EVAL_PARAM_<KEY>`, `JAATO_EVAL_PARAMS` | one variable per `input.params` entry, and the whole mapping as JSON — the encoding a `script` grader already receives, under the same names, because the driver and its scorer are talking about one arm |
+
+A new variable is additive and does not bump `JAATO_EVAL_CONTRACT`: a
+driver that has never heard of one behaves exactly as it did.
 
 The driver opens its sessions with `workspace_path=$JAATO_EVAL_WORKSPACE`,
 `config_root=$JAATO_EVAL_CONFIG_ROOT`, `env_file=".env"` and
 `cascade_driver_id=$JAATO_EVAL_CASCADE_ID`. `tasks/driver-probe` is a
 complete one.
+
+**Write `run` against `$JAATO_EVAL_PYTHON`, not `python`.** The command
+inherits the engine's `PATH` and nothing else, so `run: python driver.py`
+is a bet on what `python` means on that host — on a venv install it is
+`/bin/sh: 1: python: not found`, and the driver never runs at all. Say
+`run: '"$JAATO_EVAL_PYTHON" driver.py'` instead.
+
+**Credentials are not in the contract, and are not in the fixture.** The
+`.env` the engine writes into the arm's workspace carries
+`JAATO_PROFILE_SET` and nothing else, by design — the sweep's model axis is
+the only thing the engine has to say there. So a driver task's profiles
+must resolve their credential from a `pass://` / `vault://` URI in the
+profile's `env:` or `plugin_configs`, or from the **daemon's** own
+environment; a profile that expects `JAATO_<PROVIDER>_API_KEY` in the
+workspace `.env` finds none. It is the first thing a real driver hits.
 
 ### The exit-code vocabulary
 
@@ -173,12 +192,26 @@ Mirrors the one rule in `jaato_eval/sign_off.py`:
 | `75` (`EX_TEMPFAIL`) | environment fault — daemon unreachable, fixture unusable | BLOCKED, "we learned nothing" |
 | anything else | ran and stopped short | an **unsigned** arm: script graders run, payload-reading graders BLOCK naming the driver (`DriverStoppedShort`), the stderr tail becomes `termination_detail` |
 
-A driver killed at the per-arm ceiling (`--arm-timeout`) has no exit code
-of its own and is BLOCKED exactly as a session arm is. The kill is of the
-driver's whole process group, SIGTERM first (its chance to end its sessions)
-then SIGKILL, and the engine then sends `session.stop` for every session of
-the arm that has no terminal — a stage left behind would otherwise keep
-spending until the daemon's orphan sweep reached it.
+That table reads a code **the driver chose**. Three endings are not such a
+code, and each would otherwise put an environment fault into the pass-rate
+denominator as a FAIL:
+
+| ending | recorded as |
+|---|---|
+| `126` / `127` — the shell could not run `harness.run` | BLOCKED: no driver executed. (Measured: `run: python driver.py` on a venv install → exit 127, and the script grader then FAILed an arm in which nothing had happened) |
+| a **negative** return code — killed by a signal nobody here sent (an OOM kill, an operator's `kill`) | BLOCKED, **naming the signal** |
+| the per-arm ceiling (`--arm-timeout`) | BLOCKED, exactly as a session arm is — the engine's own kill leaves no exit code, which is what keeps it out of the vocabulary |
+
+`128+N` — what a shell that did not `exec` returns for a child it saw die
+of signal N — is deliberately read as the driver's own code: it is inside
+the range a driver may choose. A shell that `exec`s its only command is
+itself the signalled process, and that arrives as the negative code above.
+
+The ceiling kill is of the driver's whole process group, SIGTERM first (its
+chance to end its sessions) then SIGKILL, and the engine then sends
+`session.stop` for every session of the arm that has no terminal — a stage
+left behind would otherwise keep spending until the daemon's orphan sweep
+reached it.
 
 ### What the engine measures, and how it knows whose it is
 
