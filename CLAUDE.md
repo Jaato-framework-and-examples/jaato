@@ -5390,6 +5390,20 @@ path and the integrity posture are read per record through the session-scoped
 env the bootstrap already applied, so it is one file per session as
 documented. Guard: `shared/tests/test_runner_session_holds_a_ledger.py`.
 
+**And the controls are driven live in CI, not only unit-guarded.** Every
+mechanism above has a unit guard with a reversion, and #1139 shows what that
+layer cannot see: the ledger key was parsed, validated and rendered
+correctly, and no record ever reached disk on the default path. So
+`jaato_sdk/conformance/test_eu_ai_act_controls.py` (the `conformance`
+marker, in the "SDK + scaffold + conformance + eval" job) drives a real
+`echo` daemon through the SDK and asserts the artefacts a deployer would
+show an auditor: the announcement before the first turn (and its absence
+for a profile declaring nothing), the `disclosure` piece in the rendered
+prompt, a chained ledger that `verify` accepts intact and refuses edited,
+a budget stop reaching the incident register, and a memory record carrying
+`generated_by` behind a curation gate that holds. It is the layer that
+would have caught #1139 the day the runner path shipped.
+
 The two documents are **skeletons**, not compliance documents, and say so on
 their first line: what the framework can compute is a small part of Annex IV,
 and every part it cannot is left marked in the Article's own words rather than
