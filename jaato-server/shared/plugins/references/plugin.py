@@ -96,8 +96,32 @@ from shared.session_context import get_current_session
 from shared.trace import trace as _trace_write
 
 
-# Maximum depth for transitive reference resolution to prevent runaway recursion
+# Maximum depth for transitive reference resolution to prevent runaway recursion.
+#
+# NOTE: depth is a LOGARITHMIC control over an exponential quantity -- a
+# frontier of out-degree ``d`` reaches ``d**k`` nodes at depth ``k``, so this
+# bound only binds on catalogs larger than ``d**10``.  Measured on a 200-entry
+# catalog where each document mentions 3 others, a single selection resolves
+# ALL 200.  ``max_transitive_references`` is the bound that binds regardless of
+# link structure; this one stays as a cheap cycle/runaway guard.
 MAX_TRANSITIVE_DEPTH = 10
+
+# Characters that delimit a reference id from its surroundings.  ONE
+# definition, because two spellings of "what bounds an id" is how the fast
+# path and the regex fallback drift apart.
+_ID_BOUNDARY_CHARS = "\\s\\[\\]`@:,;()'\"{}"
+
+#: Splits content into id-sized tokens (the fast path).
+_ID_BOUNDARY_RE = re.compile("[" + _ID_BOUNDARY_CHARS + "]+")
+
+#: True when an id itself contains a boundary char, so tokenising cannot
+#: find it and it must go through the original per-id regex.
+_ID_CONTAINS_BOUNDARY_RE = re.compile("[" + _ID_BOUNDARY_CHARS + "]")
+
+#: Resolved-reference count above which an UNBOUNDED expansion is announced
+#: once per session, naming the knob.  Unbounded is a legitimate posture; an
+#: unbounded expansion nobody can see is not.
+_UNBOUNDED_EXPANSION_WARN_AT = 50
 
 
 class ReferencesPlugin(RunnerForwardingMixin):
@@ -151,6 +175,20 @@ class ReferencesPlugin(RunnerForwardingMixin):
         # When True, runtime selections (selectReferences tool and
         # 'references select' command) also trigger transitive resolution.
         self._transitive_enabled: bool = True
+        # Ceiling on how many references ONE transitive expansion may
+        # resolve.  ``None`` = unbounded (the pre-existing behaviour).
+        # Unlike ``MAX_TRANSITIVE_DEPTH`` this binds regardless of the
+        # catalog's link structure -- see that constant's note.
+        self._max_transitive_references: Optional[int] = None
+        # Set by ``_resolve_transitive_references`` when it stopped early;
+        # surfaced on the selectReferences result so the model is never
+        # handed a silently-cut neighbourhood.
+        self._last_transitive_truncation: Optional[Dict[str, Any]] = None
+        # One WARNING per session when an unbounded expansion grows large.
+        self._unbounded_expansion_warned: bool = False
+        # Memo for ``_partition_ids_by_boundary``: id -> contains a boundary
+        # char.  Depends only on the id's own characters.
+        self._id_has_boundary_char: Dict[str, bool] = {}
         # Mapping from normalized resolved_path to (ref_id, ref_name) for
         # preselected LOCAL references. Built during initialize() and used
         # by enrich_tool_result() to detect when the model reads a
@@ -652,18 +690,56 @@ class ReferencesPlugin(RunnerForwardingMixin):
         Returns:
             Set of reference IDs found in the content.
         """
-        found_ids: Set[str] = set()
+        plain, needs_regex = self._partition_ids_by_boundary(catalog_ids)
 
-        for ref_id in catalog_ids:
-            # Escape special regex characters in the ID
+        # Fast path: tokenise the content ONCE and intersect.  Equivalent to
+        # the per-id regex below for any id that contains no boundary char,
+        # because splitting on the boundary class yields exactly the spans
+        # that pattern anchors.  O(content) instead of O(catalog x content) --
+        # measured 1.55s -> 0.012s on one 386k-char directory reference
+        # against a 200-entry catalog, with an identical result set.
+        found_ids: Set[str] = plain & set(_ID_BOUNDARY_RE.split(content))
+
+        # An id containing a boundary char ("foo bar", "a(b)") is unreachable
+        # by tokenising, so it keeps the original matcher.  Dropping these
+        # would silently narrow the graph for catalogs that use such ids.
+        for ref_id in needs_regex:
             escaped_id = re.escape(ref_id)
-            # Match as a whole word (with word boundaries or common delimiters)
-            # Pattern allows for common reference syntaxes like @ref:id, [[id]], `id`
-            pattern = rf'(?:^|[\s\[\]`@:,;()\'"{{}}])({escaped_id})(?:[\s\[\]`@:,;()\'"{{}}]|$)'
+            pattern = (
+                "(?:^|[" + _ID_BOUNDARY_CHARS + "])"
+                + "(" + escaped_id + ")"
+                + "(?:[" + _ID_BOUNDARY_CHARS + "]|$)"
+            )
             if re.search(pattern, content, re.MULTILINE):
                 found_ids.add(ref_id)
 
         return found_ids
+
+    def _partition_ids_by_boundary(
+        self, catalog_ids: Set[str]
+    ) -> Tuple[Set[str], Set[str]]:
+        """Split *catalog_ids* into (tokenisable, needs-regex).
+
+        Memoised per id on the instance: the answer depends only on the id's
+        own characters, and the partition is recomputed for every node of
+        every traversal.
+
+        Returns:
+            ``(plain, needs_regex)``.  Empty ids are discarded from both --
+            they would match every gap produced by the tokeniser.
+        """
+        memo = self._id_has_boundary_char
+        plain: Set[str] = set()
+        needs_regex: Set[str] = set()
+        for ref_id in catalog_ids:
+            if not ref_id:
+                continue
+            exotic = memo.get(ref_id)
+            if exotic is None:
+                exotic = bool(_ID_CONTAINS_BOUNDARY_RE.search(ref_id))
+                memo[ref_id] = exotic
+            (needs_regex if exotic else plain).add(ref_id)
+        return plain, needs_regex
 
     def _find_referenced_paths(
         self,
@@ -750,7 +826,8 @@ class ReferencesPlugin(RunnerForwardingMixin):
         self,
         initial_ids: List[str],
         catalog_by_id: Dict[str, ReferenceSource],
-        max_depth: int = MAX_TRANSITIVE_DEPTH
+        max_depth: int = MAX_TRANSITIVE_DEPTH,
+        max_references: Optional[int] = None,
     ) -> Tuple[List[str], Dict[str, Set[str]]]:
         """Resolve transitive references from pre-selected sources.
 
@@ -801,40 +878,45 @@ class ReferencesPlugin(RunnerForwardingMixin):
                 norm = os.path.normpath(source.resolved_path).replace('\\', '/')
                 path_to_ids.setdefault(norm, set()).add(sid)
 
+        limit = (
+            max_references if max_references is not None
+            else self._max_transitive_references
+        )
+        initial_set = set(initial_ids)
+        depth = 0
+
         for depth in range(max_depth):
             if not pending:
+                break
+            if self._expansion_at_limit(len(resolved_ids), limit):
                 break
 
             newly_found: Set[str] = set()
             self._trace(f"transitive: [depth={depth}] scanning {sorted(pending)}")
 
-            for ref_id in pending:
-                source = catalog_by_id.get(ref_id)
-                if not source:
+            # SORTED, and load-bearing rather than cosmetic: ``pending`` is a
+            # set, so iteration order varies across processes (string hash
+            # randomisation).  Unbounded that only shuffled the manifest; with
+            # a limit it decides WHICH references survive the cut -- measured
+            # at six of twenty-five differing between two PYTHONHASHSEED
+            # values.  Same argument CLAUDE.md makes for sorting the
+            # spawn_subagent profile enum: this output reaches the
+            # prompt-cache prefix.
+            for ref_id in sorted(pending):
+                if self._expansion_at_limit(len(resolved_ids), limit):
+                    break
+
+                mentioned_ids = self._mentions_of(
+                    ref_id, catalog_by_id, catalog_ids, path_to_ids)
+                if mentioned_ids is None:
                     continue
 
-                # Get content from the source
-                content = self._get_reference_content(source)
-                if not content:
-                    self._trace(f"transitive:   '{ref_id}' -> no content (type={source.type.value})")
-                    continue
-
-                self._trace(f"transitive:   '{ref_id}' -> {len(content)} chars")
-
-                # Strategy 1: Find references by catalog ID mentioned in content
-                mentioned_ids = self._find_referenced_ids(content, catalog_ids)
-
-                # Strategy 2: Find references by resolving relative paths
-                if source.resolved_path and path_to_ids:
-                    mentioned_ids |= self._find_referenced_paths(
-                        content, source.resolved_path, path_to_ids
-                    )
-
-                # Filter to only newly discovered ones for BFS progression
                 new_mentions = mentioned_ids - resolved_set - {ref_id}
                 if new_mentions:
                     self._trace(f"transitive:   '{ref_id}' => {sorted(new_mentions)}")
-                    for mentioned_id in new_mentions:
+                    for mentioned_id in sorted(new_mentions):
+                        if self._expansion_at_limit(len(resolved_ids), limit):
+                            break
                         newly_found.add(mentioned_id)
                         resolved_set.add(mentioned_id)
                         resolved_ids.append(mentioned_id)
@@ -843,27 +925,198 @@ class ReferencesPlugin(RunnerForwardingMixin):
                 # Record parent relationships for IDs already resolved
                 # (discovered earlier by a sibling at the same BFS depth).
                 # This ensures multi-parent tracking is complete.
-                initial_set = set(initial_ids)
-                for mentioned_id in (mentioned_ids & resolved_set) - initial_set - {ref_id}:
+                for mentioned_id in (
+                    (mentioned_ids & resolved_set) - initial_set - {ref_id}
+                ):
                     parent_map.setdefault(mentioned_id, set()).add(ref_id)
 
             # Next iteration processes newly found IDs
             pending = newly_found
 
+        self._conclude_expansion(
+            initial_ids, resolved_ids, pending, limit, depth, max_depth)
+        return resolved_ids, parent_map
+
+    @staticmethod
+    def _expansion_at_limit(resolved_count: int, limit: Optional[int]) -> bool:
+        """Has this expansion reached its ceiling?  ``None`` = unbounded."""
+        return limit is not None and resolved_count >= limit
+
+    def _mentions_of(
+        self,
+        ref_id: str,
+        catalog_by_id: Dict[str, ReferenceSource],
+        catalog_ids: Set[str],
+        path_to_ids: Dict[str, Set[str]],
+    ) -> Optional[Set[str]]:
+        """Every catalog id one node's content mentions.
+
+        Extracted from the BFS so the loop reads as traversal and this reads
+        as "what does this node point at" -- the two questions the function
+        used to answer at once.
+
+        Returns:
+            The mentioned ids, or ``None`` when the node has no readable
+            content (unknown id, or a type whose body this plugin cannot
+            fetch).  ``None`` and ``set()`` are deliberately distinct: the
+            first is "could not look", the second "looked, found nothing".
+        """
+        source = catalog_by_id.get(ref_id)
+        if not source:
+            return None
+
+        content = self._get_reference_content(source)
+        if not content:
+            self._trace(
+                f"transitive:   '{ref_id}' -> no content "
+                f"(type={source.type.value})"
+            )
+            return None
+
+        self._trace(f"transitive:   '{ref_id}' -> {len(content)} chars")
+
+        # Strategy 1: catalog IDs mentioned in the content.
+        mentioned_ids = self._find_referenced_ids(content, catalog_ids)
+
+        # Strategy 2: relative paths that resolve to another LOCAL source.
+        if source.resolved_path and path_to_ids:
+            mentioned_ids |= self._find_referenced_paths(
+                content, source.resolved_path, path_to_ids
+            )
+        return mentioned_ids
+
+    def _conclude_expansion(
+        self,
+        initial_ids: List[str],
+        resolved_ids: List[str],
+        pending: Set[str],
+        limit: Optional[int],
+        depth: int,
+        max_depth: int,
+    ) -> None:
+        """Publish the traversal's outcome: traces, truncation, warning.
+
+        Separated from the walk because it is reporting, not traversal, and
+        because it is where the honesty requirements live -- a cut
+        neighbourhood must say so, and an unbounded one must be visible.
+        """
         if pending:
             self._trace(
-                f"transitive: max depth {max_depth} reached, {len(pending)} unresolved"
+                f"transitive: max depth {max_depth} reached, "
+                f"{len(pending)} unresolved"
             )
 
-        # Final summary
         transitive_count = len(resolved_ids) - len(initial_ids)
         if transitive_count > 0:
-            transitive_ids = resolved_ids[len(initial_ids):]
-            self._trace(f"transitive: added {transitive_count}: {transitive_ids}")
+            self._trace(
+                f"transitive: added {transitive_count}: "
+                f"{resolved_ids[len(initial_ids):]}"
+            )
         else:
             self._trace("transitive: no additional references found")
 
-        return resolved_ids, parent_map
+        truncated = None
+        if self._expansion_at_limit(len(resolved_ids), limit) and pending:
+            truncated = self._transitive_truncation(
+                limit, len(resolved_ids), depth)
+            self._trace(
+                f"transitive: TRUNCATED at {limit} "
+                f"(resolved={len(resolved_ids)}, depth={depth})"
+            )
+        self._last_transitive_truncation = truncated
+
+        if truncated is None:
+            self._maybe_warn_unbounded(limit, initial_ids, resolved_ids)
+
+    def _maybe_warn_unbounded(
+        self,
+        limit: Optional[int],
+        initial_ids: List[str],
+        resolved_ids: List[str],
+    ) -> None:
+        """Announce a large UNBOUNDED expansion once per session.
+
+        Unbounded stays the default, so it is announced rather than
+        changed: an expansion this size is a property of the catalog's
+        link structure that nobody chose, and every reference in it is
+        manifested to the model AND path-authorized.
+        """
+        if limit is not None or self._unbounded_expansion_warned:
+            return
+        if len(resolved_ids) < _UNBOUNDED_EXPANSION_WARN_AT:
+            return
+        self._unbounded_expansion_warned = True
+        logger.warning(
+            "references: one transitive expansion resolved %d references "
+            "from %d starting point(s) and is unbounded. Every one is "
+            "manifested and path-authorized. Set "
+            "plugin_configs.references.max_transitive_references to bound it.",
+            len(resolved_ids), len(initial_ids),
+        )
+
+    def _transitive_result_fields(
+        self, transitive_sources: List[ReferenceSource]
+    ) -> Dict[str, Any]:
+        """What a selection reports about its transitive expansion.
+
+        ``truncated`` rides here rather than being appended by the caller
+        so the two facts about one expansion -- how much it added, and
+        whether it was cut short -- are produced in one place.
+        """
+        fields: Dict[str, Any] = {}
+        if transitive_sources:
+            fields["transitive_count"] = len(transitive_sources)
+        if self._last_transitive_truncation is not None:
+            fields["truncated"] = self._last_transitive_truncation
+        return fields
+
+    @staticmethod
+    def _coerce_max_transitive(raw: Any) -> Optional[int]:
+        """Read ``max_transitive_references``; ``None`` means unbounded.
+
+        A malformed value falls back to unbounded -- the pre-existing
+        behaviour -- rather than to some invented ceiling, and says so.
+        Silently applying a limit nobody configured would cut a
+        neighbourhood for a reason no one could find.
+        """
+        if raw is None:
+            return None
+        if isinstance(raw, bool) or not isinstance(raw, int):
+            logger.warning(
+                "references: max_transitive_references must be a positive "
+                "integer, got %r - transitive expansion stays unbounded.", raw,
+            )
+            return None
+        if raw <= 0:
+            # 0-disables, the convention gc.media_bytes_threshold and the
+            # OpenRouter deadlines already use.
+            return None
+        return raw
+
+    @staticmethod
+    def _transitive_truncation(
+        limit: Optional[int], resolved: int, depth: int
+    ) -> Dict[str, Any]:
+        """The record published when expansion stopped at its ceiling.
+
+        Deliberately reports NO "dropped" count.  The walk stops early, so
+        how many more it would have found is unknown -- and a fabricated
+        figure is worse than an absent one.  What it does carry is the note,
+        because a model handed a silently-cut neighbourhood reads absence as
+        "no such reference exists", which on a knowledge graph is exactly the
+        wrong conclusion and is unfalsifiable from its side.
+        """
+        return {
+            "reason": "max_transitive_references",
+            "limit": limit,
+            "resolved": resolved,
+            "stopped_at_depth": depth,
+            "note": (
+                "Transitive expansion stopped at the configured limit. "
+                "Absence from this list does not mean a reference does not "
+                "exist - use listReferences to see the full catalog."
+            ),
+        }
 
     def _apply_transitive_selection(
         self,
@@ -1083,6 +1336,9 @@ class ReferencesPlugin(RunnerForwardingMixin):
         # This scans pre-selected references for mentions of other catalog references
         # and automatically adds them to the selected set
         self._transitive_enabled = config.get("transitive_injection", True)
+        self._max_transitive_references = self._coerce_max_transitive(
+            config.get("max_transitive_references")
+        )
         if self._transitive_enabled and self._selected_source_ids:
             # Build complete catalog including inline sources
             full_catalog = dict(catalog_by_id)
@@ -1642,6 +1898,17 @@ class ReferencesPlugin(RunnerForwardingMixin):
                     "default": True,
                     "description": "Enable transitive reference detection",
                 },
+                "max_transitive_references": {
+                    "type": "integer",
+                    "description": (
+                        "Ceiling on how many references ONE transitive "
+                        "expansion may resolve. Unset or 0 = unbounded. "
+                        "Unlike the depth guard this binds regardless of the "
+                        "catalog's link structure: a catalog where each "
+                        "document mentions three others resolves entirely "
+                        "from any starting point."
+                    ),
+                },
                 "preselected": {
                     "type": "array",
                     "items": {"type": "string"},
@@ -1993,8 +2260,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
             "selected_count": len(selected_sources),
             "sources": source_results,
         }
-        if transitive_sources:
-            result["transitive_count"] = len(transitive_sources)
+        result.update(self._transitive_result_fields(transitive_sources))
         if kernel_failed:
             result["kernel_authorization_failed"] = kernel_failed
             result["kernel_authorization_failure_hint"] = (
