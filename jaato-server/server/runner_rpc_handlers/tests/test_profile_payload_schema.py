@@ -99,7 +99,7 @@ class TestProducerRoundTrip:
             "name", "description", "model", "provider",
             "plugins", "plugin_configs", "system_instructions",
             "suppress_base_instructions", "env",
-            "gc", "trace", "runtime_limits",
+            "gc", "trace", "runtime_limits", "regulatory",
         }
         # Every producer-side key is allow-listed:
         assert producer_keys <= PROFILE_PAYLOAD_ALLOWED_KEYS, (
