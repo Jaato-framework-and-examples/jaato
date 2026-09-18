@@ -54,6 +54,10 @@ from typing import Dict, List, Optional, Tuple
 # Import the SDK's own path constants so the doctor diagnoses exactly the
 # files the real client uses — never a re-declared copy that could drift.
 from jaato_sdk.client.ipc import DEFAULT_SOCKET_PATH, DEFAULT_PID_FILE
+# The release check is DATA produced by one stdlib-only module; this
+# file and `jaato-scaffold explain releases` are two renderings of it,
+# never two opinions about what is newest.
+from jaato_sdk import release_channels as _releases
 
 PASS = "PASS"
 WARN = "WARN"
@@ -305,6 +309,120 @@ def check_dependency_coherence() -> List[Check]:
                       "shows the full picture.")]
     return [Check("dependency coherence", PASS,
                   ", ".join(seen) + " — metadata agrees with sources")]
+
+
+def _release_line(dist, status) -> str:
+    """One `name old → new` line for a channel that carries something newer."""
+    return (f"{dist.name} {dist.installed} → {status.latest}  "
+            f"({status.channel.label}, {status.channel.base_url})")
+
+
+def _unknown_reasons(report) -> List[str]:
+    """Why any channel declined to answer, de-duplicated across packages.
+
+    One unreachable index produces one reason per installed package, and a
+    check line that repeats "cannot reach https://pypi.org" four times is a
+    check line people stop reading.
+    """
+    return sorted({s.error for _, s in report.unknown if s.error})
+
+
+def _updates_detail(report) -> str:
+    """The notification itself: what is newer, where, and how to get it.
+
+    Grouped by CHANNEL rather than by package because the install command is
+    a property of the channel — a reader upgrading three packages from
+    TestPyPI should see that command once, not three times.
+    """
+    by_channel: Dict[str, List[str]] = {}
+    for dist, status in report.updates:
+        by_channel.setdefault(status.channel.name, []).append(
+            _release_line(dist, status))
+    lines = ["a newer build is published:"]
+    for channel in _releases.CHANNELS:
+        rows = by_channel.get(channel.name)
+        if not rows:
+            continue
+        lines += [f"  {row}" for row in rows]
+        # Every installer the channel documents, not just pip: a uv user told
+        # only the pip form has to translate it, and the candidate channel's
+        # translation is three flags rather than one (see `release_channels`).
+        lines.append("    install with either:")
+        lines += [f"      {command}" for _, command
+                  in channel.install_commands("<package>")]
+    reasons = _unknown_reasons(report)
+    if reasons:
+        # A partial answer presented as a whole one is the other way this
+        # check misleads, so the silent channel is named beside the news.
+        lines.append("  (not every channel answered: " + "; ".join(reasons) + ")")
+    return "\n".join(lines)
+
+
+def _clean_detail(report) -> str:
+    """Nothing newer — stating whether that is "current" or "ahead".
+
+    A checkout of this repository normally runs a build newer than either
+    channel, and telling its author they are up to date is how a check stops
+    being read, so the two are not collapsed.
+    """
+    seen = ", ".join(f"{d.name} {d.installed}" for d in report.distributions)
+    ahead = [d.name for d in report.distributions
+             if any(c.verdict == "ahead" for c in d.channels)]
+    if not ahead:
+        return f"{seen} — newest on both channels"
+    verb = "is" if len(ahead) == 1 else "are"
+    return (f"{seen} — nothing newer is published, and {', '.join(ahead)} "
+            f"{verb} AHEAD of both channels (an unreleased build, which is "
+            "normal in a checkout)")
+
+
+def check_package_releases(*, timeout: float = _releases.DEFAULT_TIMEOUT,
+                           refresh: bool = False,
+                           enabled: bool = True) -> List[Check]:
+    """Has either of our two indexes published something newer than this build?
+
+    jaato publishes production releases to PyPI and stages release candidates
+    on TestPyPI, and nothing in the framework ever asked either index — so the
+    only way to learn a release existed was to open the project page.  This is
+    the preflight half of the answer; ``jaato-scaffold explain releases``
+    renders the same :mod:`jaato_sdk.release_channels` report at length.  The
+    two are drawings of ONE report, never two opinions about what is newest.
+
+    WARN, never FAIL, in BOTH directions, and they are different arguments.  A
+    newer release is news rather than a defect, and a doctor that exits
+    non-zero because someone shipped would break every harness using it as the
+    gate it is documented to be.  An index that did not answer is not a local
+    fault at all — but it is also not a clean bill of health, so it is
+    reported as the unknown it is, in the wording ``check_mcp_sdk`` already
+    uses for "cannot check".
+
+    Args:
+        timeout: Per-index deadline in seconds.
+        refresh: Ignore the cached index answer and re-ask.
+        enabled: ``False`` for ``--no-release-check``; contacts nothing.
+    """
+    if not enabled:
+        return [Check("package releases", PASS,
+                      "skipped (--no-release-check, or "
+                      f"{_releases.ENV_SWITCH}=off) — no index was contacted")]
+
+    report = _releases.check_releases(timeout=timeout, refresh=refresh)
+    if not report.enabled:
+        return [Check("package releases", PASS,
+                      f"disabled by {_releases.ENV_SWITCH} — no index was "
+                      "contacted")]
+    if not report.distributions:
+        return [Check("package releases", WARN,
+                      "; ".join(report.errors)
+                      or "no jaato distributions are installed here")]
+    if report.updates:
+        return [Check("package releases", WARN, _updates_detail(report))]
+    if report.unknown:
+        return [Check("package releases", WARN,
+                      "cannot check: " + "; ".join(_unknown_reasons(report))
+                      + " — this is not a verdict about your version. Set "
+                      f"{_releases.ENV_SWITCH}=off to stop asking.")]
+    return [Check("package releases", PASS, _clean_detail(report))]
 
 
 def check_mcp_sdk() -> List[Check]:
@@ -1463,6 +1581,9 @@ def run_checks(
     auto_start: bool,
     web_socket: Optional[str] = None,
     ws_token_file: Optional[str] = None,
+    release_check: bool = True,
+    release_timeout: float = _releases.DEFAULT_TIMEOUT,
+    refresh_releases: bool = False,
 ) -> List[Check]:
     """Run every check and return the flat result list (in display order)."""
     info = probe_daemon(socket_path, pidfile)
@@ -1470,6 +1591,9 @@ def run_checks(
     checks += check_python_env()
     checks += check_premium_reactors()
     checks += check_dependency_coherence()
+    checks += check_package_releases(timeout=release_timeout,
+                                     refresh=refresh_releases,
+                                     enabled=release_check)
     checks += check_integrations()
     checks += check_mcp_sdk()
     checks += check_socket(info, auto_start=auto_start)
@@ -1554,6 +1678,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--ws-token-file", default=None,
                     help="override the WS bearer-token file path "
                          "(default: the daemon's ~/.jaato/ws.token)")
+    ap.add_argument("--no-release-check", action="store_true",
+                    help="do not ask PyPI / TestPyPI whether a newer jaato "
+                         "package is published (also: "
+                         f"{_releases.ENV_SWITCH}=off)")
+    ap.add_argument("--release-check-timeout", type=float,
+                    default=_releases.DEFAULT_TIMEOUT, metavar="SECONDS",
+                    help="per-index deadline for the release check "
+                         f"(default: {_releases.DEFAULT_TIMEOUT})")
+    ap.add_argument("--refresh-release-check", action="store_true",
+                    help="ignore the cached index answer and re-ask — for "
+                         "'I just published, is it visible?'")
     ap.add_argument("--session", default=None, metavar="ID",
                     help="RUNTIME diagnostic mode (instead of preflight): inspect a "
                          "recent session's logs under <workspace>/.jaato/logs — did "
@@ -1574,6 +1709,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             auto_start=not args.no_auto_start,
             web_socket=args.web_socket,
             ws_token_file=args.ws_token_file,
+            release_check=not args.no_release_check,
+            release_timeout=args.release_check_timeout,
+            refresh_releases=args.refresh_release_check,
         )
     return _print(checks)
 

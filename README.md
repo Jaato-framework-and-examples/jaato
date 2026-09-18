@@ -212,6 +212,19 @@ python3 -m venv .venv
 # bundle (Node 20+). From this checkout: cd jaato-web-coder-ui && npm install && npm run build
 ```
 
+With [uv](https://docs.astral.sh/uv/) instead — same packages, same extras.
+`uv venv` creates `.venv`, and `uv pip` finds it without the `.venv/bin/`
+prefix:
+
+```bash
+uv venv                                         # creates .venv
+
+uv pip install -e jaato-sdk/. -e "jaato-server/.[all]" -e "jaato-tui/.[all]"
+uv pip install jaato-sdk/
+uv pip install "jaato-server/.[dev]"
+uv pip install "jaato-tui/.[all]"
+```
+
 ### Configuration
 
 1. **Set up your AI provider** - Configure credentials for your chosen provider (see [Provider Setup Guides](https://jaato-framework-and-examples.github.io/jaato/web/api-reference/providers/index.html))

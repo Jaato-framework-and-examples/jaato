@@ -3243,6 +3243,21 @@ def prefetch() -> Rendered:
 
 # ---------------------------------------------------------- integrations
 
+def releases():
+    """What our two distribution channels carry, against what is installed.
+
+    Delegates to the renderer that wraps :mod:`jaato_sdk.release_channels`,
+    so this topic and ``jaato-doctor``'s preflight line are two drawings of
+    one report rather than two opinions about what is newest.
+
+    The one `explain` topic that reaches the NETWORK.  It is opt-out
+    (``JAATO_RELEASE_CHECK=off``), deadline-bounded and cached; `explain
+    dependencies` stays offline.
+    """
+    from . import releases as _rel
+    return _rel.releases()
+
+
 def integrations():
     """Tools this build can wire itself into, and where each one stands.
 

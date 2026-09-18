@@ -28,12 +28,14 @@ what an arm *is*, not which cell of the matrix it occupies.
 
 ```bash
 pip install jaato-eval
+# or:  uv pip install jaato-eval
 ```
 
 Or, from a checkout of the framework repo:
 
 ```bash
 pip install -e jaato-eval/
+# or:  uv pip install -e jaato-eval/
 ```
 
 `jaato-sdk` is a hard dependency now. It was an optional extra while the

@@ -42,6 +42,11 @@ from importlib.metadata import (
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+# One definition of "which distributions are ours", shared with the release
+# check.  jaato-server depends on jaato-sdk, so this direction is the allowed
+# one; the module is stdlib-only and imports nothing back.
+from jaato_sdk import release_channels as _release_channels
+
 FIRST_PARTY = {"shared", "server", "jaato_sdk", "jaato_embedded", "jaato_premium"}
 #: The jaato distributions this repository knows the names of.  It is a SEED,
 #: not the answer: :func:`framework_dists` unions it with whatever jaato-named
@@ -53,17 +58,18 @@ JAATO_DISTS = ("jaato-sdk", "jaato-server", "jaato-tui", "jaato-eval", "jaato-pr
 
 #: What makes a distribution one of jaato's own, matched against the
 #: NORMALISED name — so ``jaato_premium`` and ``Jaato-Premium`` both qualify.
-_JAATO_PREFIX = "jaato-"
+#: Re-exported from the module that applies it, never re-declared: the release
+#: check ranges over exactly this set (see :func:`installed_jaato_dists`).
+_JAATO_PREFIX = _release_channels._JAATO_PREFIX
 
 
 def _norm_dist(name: str) -> str:
     """PEP 503-ish normalisation of a distribution name, for comparison only.
 
-    Distributions are compared and de-duplicated by this form; they are
-    REPORTED under the name their own metadata spells, which is what an
-    operator types into ``pip install``.
+    Delegates, so this module and the release check cannot disagree about
+    which names are the same distribution — see :func:`installed_jaato_dists`.
     """
-    return (name or "").strip().lower().replace("_", "-")
+    return _release_channels.normalize_dist_name(name)
 
 
 @lru_cache(maxsize=None)
@@ -79,18 +85,21 @@ def installed_jaato_dists() -> Tuple[str, ...]:
     invisible, so the set is MEASURED from installed metadata instead — the
     same rule the rest of this module follows.
 
+    The scan itself lives in :mod:`jaato_sdk.release_channels`, which needs
+    the same answer to know which packages to ask the indexes about.  Two
+    scans applying "the same" jaato-prefix rule are one edit away from two
+    different sets, so there is one, and this is the tuple-of-names view of
+    it.  The ``lru_cache`` stays HERE because :func:`reset_metadata_caches`
+    clears it: a test that fakes an installed distribution must be able to
+    say so, and the delegate is deliberately uncached so there is no second
+    cache for it to miss.
+
     Returns:
         The distribution names as their metadata spells them, sorted.  Empty
         when metadata cannot be read at all; this is a diagnostic, and one
         that raises is worse than one that is vague.
     """
-    try:
-        from importlib.metadata import distributions
-        names = {(d.metadata["Name"] or "") for d in distributions()}
-    except Exception:      # noqa: BLE001 — metadata is best-effort here
-        return ()
-    return tuple(sorted({n for n in names
-                         if _norm_dist(n).startswith(_JAATO_PREFIX)}))
+    return tuple(sorted(_release_channels.installed_distributions()))
 
 
 @lru_cache(maxsize=None)
