@@ -11,35 +11,48 @@ under one of two tier roots:
 The exact ``<domain>`` (``references``, ``agents``, ``tasks``, ...) is
 chosen by the calling plugin via :func:`resolve_bundle_roots`. Within
 each tier root, the *root bundle* is the manifest at the top level;
-additional bundles are immediate subdirectories that contain their own
-``embedding_config.json``. Discovery walks the workspace tier first,
-then the user tier; when the same bundle name exists in both tiers the
-workspace copy **shadows** the user copy entirely (it is hidden from
-discovery), the same way ``.jaato/theme.json`` shadows
-``~/.jaato/theme.json``.
+additional bundles are immediate subdirectories that carry their own
+manifest. Discovery walks the workspace tier first, then the user tier;
+when the same bundle name exists in both tiers the workspace copy
+**shadows** the user copy entirely (it is hidden from discovery), the
+same way ``.jaato/theme.json`` shadows ``~/.jaato/theme.json``.
 
 This module owns the pieces that have no domain affinity:
 
-* :class:`Bundle` — dataclass holding the manifest + runtime state
+* :class:`Bundle` — ``name`` + ``directory`` + ``tier``, and nothing else
 * :data:`BUNDLE_TIER_WORKSPACE` / :data:`BUNDLE_TIER_USER` — tier ids
 * :func:`resolve_bundle_roots` — ordered ``(root, tier)`` list for discovery
 * :func:`discover_bundles` — scan one or more roots for bundles
 * :class:`BundleRef`, :func:`parse_bundle_ref`, :func:`find_bundle`,
   :exc:`AmbiguousBundleRefError` — the ``[<scope>:]<name>`` user
   reference syntax shared by every bundle-aware command
-* :func:`write_manifest` — atomic manifest write
+* :func:`write_bundle_manifest` — atomic write of the generic manifest
 
-The :class:`Bundle` dataclass currently carries embedding-specific
-fields (``embedding_model``, ``embedding_dimensions``, ``embedding_sidecar``,
-``embedding_rows``). They are populated by the references plugin's
-manifests; future generalization will make them optional or factor
-them into a sidecar metadata sub-object so non-embedded domains
-(profiles, services, agents, tasks) can use the same dataclass without
-fabricating dummy values.
+**What a bundle is, and what it is not.** A bundle is a *directory a
+domain claims*. Everything that describes the CONTENT of that directory
+— which entries it holds, whether it carries a vector index, how it is
+reconciled — belongs to the domain, not here. The references plugin's
+embedding fields (``embedding_model``, ``embedding_dimensions``,
+``embedding_sidecar``, ``embedding_rows``, ``reconcile_mode``) and its
+runtime state (``matcher``, ``owned_source_ids``) used to sit on
+:class:`Bundle`; they live on
+:class:`shared.plugins.references.bundle.ReferenceBundle` now. Three
+consequences follow, and each was a defect before the move:
 
-References-specific concepts that depend on ``ReferenceSource`` —
-``metadata_hash``, ``DriftReport``, ``detect_drift`` — remain in
-:mod:`shared.plugins.references.bundle` and are not re-exported here.
+* a domain with no vector index (``agents``, ``tasks``, ``profiles``,
+  ``services``) can describe a bundle without fabricating dummy
+  embedding values;
+* a references directory holding definitions and no sidecar is
+  discovered rather than silently dropped;
+* :func:`shared.plugins.bundle_common.pack.pack_bundle`, already
+  parametric over ``BundleEntryHandler``, is reachable for those
+  domains — its entry point no longer takes a type that cannot
+  express a vectorless bundle.
+
+**The anti-pollution guard is unchanged.** A subdirectory without a
+manifest is still ignored entirely, so dropping an unrelated directory
+into a tier root never accidentally pollutes the catalog. Only the
+manifest's *schema* changed, not the need for one.
 
 This module is deliberately numpy-free so bundle discovery and
 reference parsing work in environments without an embedding provider
@@ -50,7 +63,7 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import (
 
@@ -68,20 +81,29 @@ from typing import (
 logger = logging.getLogger(__name__)
 
 
-# Well-known filename for the per-bundle manifest. Today this is the
-# references-style ``embedding_config.json``; non-embedded domains will
-# eventually adopt a generic ``bundle.json`` (with the embedding section
-# moved into an optional ``embedding`` sub-object). Until that
-# generalization lands, the constant keeps the existing on-disk shape
-# stable so the references plugin can keep loading every bundle it has
-# already produced.
-EMBEDDING_CONFIG_FILENAME = "embedding_config.json"
+# Canonical filename for the generic per-bundle manifest. Its schema is
+# open: every key is optional and domain-agnostic (``name``,
+# ``description``). Its *presence* is what marks a directory as a
+# bundle — that is the whole of the anti-pollution guard.
+BUNDLE_MANIFEST_FILENAME = "bundle.json"
+
+# Filenames that also mark a directory as a bundle, for bundles written
+# before the generic manifest existed. ``embedding_config.json`` is the
+# references plugin's vector-index file (its CONTENTS are read by
+# :mod:`shared.plugins.references.bundle` and by nothing here); every
+# references bundle already on disk carries one and no ``bundle.json``,
+# so recognising it as a marker is what keeps those bundles loading.
+# This is a compatibility alias for a filename, not a domain field.
+LEGACY_BUNDLE_MARKER_FILENAMES: Tuple[str, ...] = ("embedding_config.json",)
+
+# Every filename that says "this directory is a bundle", most canonical
+# first. Discovery, pack and unpack all read this one tuple.
+BUNDLE_MARKER_FILENAMES: Tuple[str, ...] = (
+    (BUNDLE_MANIFEST_FILENAME,) + LEGACY_BUNDLE_MARKER_FILENAMES
+)
 
 # Sentinel name for the root bundle. Displayed as ``(root)`` to users.
 ROOT_BUNDLE_NAME = ""
-
-# Valid reconcile modes declared in a bundle manifest.
-_VALID_RECONCILE_MODES: Set[str] = {"eager", "lazy", "off"}
 
 # Tier identifiers. ``BUNDLE_TIER_WORKSPACE`` is per-project; the bundle
 # lives under ``<workspace>/.jaato/<domain>/`` and travels with the
@@ -94,18 +116,13 @@ VALID_BUNDLE_TIERS: Tuple[str, ...] = (BUNDLE_TIER_WORKSPACE, BUNDLE_TIER_USER)
 
 @dataclass
 class Bundle:
-    """One bundle — a cohesive unit of content + (optional) vector index.
+    """One bundle — a directory a domain claims, and where it lives.
 
-    Each bundle owns at most one sidecar matrix and one manifest. The
-    bundle's entries come from JSON files in its own directory and
-    nowhere else; cross-bundle overlap is handled at the plugin level
-    by namespacing.
-
-    The dataclass currently carries embedding-related fields populated
-    by the references plugin. Non-embedded domains (agents, tasks,
-    profiles, services) will populate them with placeholder / empty
-    values until a future commit makes them strictly optional via a
-    sidecar sub-object.
+    Three fields, all domain-agnostic. A domain that needs more about
+    its own bundles (a vector index, per-bundle runtime state, a
+    reconcile policy) subclasses this in its own package rather than
+    widening it here; see
+    :class:`shared.plugins.references.bundle.ReferenceBundle`.
 
     Attributes:
         name: Bundle identifier. The root bundle uses
@@ -114,40 +131,14 @@ class Bundle:
             multiple tiers, but discovery shadows the user-tier copy
             when a workspace-tier copy is present.
         directory: Absolute path to the directory that owns this
-            bundle's manifest, sidecar, and entry JSON files.
+            bundle's manifest and entry files.
         tier: Which tier root this bundle was discovered under — either
             :data:`BUNDLE_TIER_WORKSPACE` or :data:`BUNDLE_TIER_USER`.
             Drives presentation and the destination of write commands.
-        embedding_model: sentence-transformers model used to produce
-            the sidecar vectors. References-specific.
-        embedding_dimensions: Vector dimensionality. Must equal
-            ``matrix.shape[1]`` when the sidecar is loaded.
-        embedding_sidecar: Filename of the ``.npy`` file, relative to
-            ``directory``.
-        embedding_rows: Ordered list of entry ids — ``rows[i]`` is the
-            id whose vector lives at matrix row ``i``. Authoritative
-            mapping from row to id.
-        reconcile_mode: ``"eager"`` (reconcile during ``initialize``),
-            ``"lazy"`` (reconcile before the first semantic query), or
-            ``"off"`` (only reconcile when the operator runs reconcile
-            manually).
-        owned_source_ids: Cached set of ids the bundle claims in its
-            ``rows`` list. Populated on load; the live catalog is the
-            source of truth for which ids actually exist.
-        matcher: Attached semantic matcher instance; ``None`` when the
-            bundle has no compatible matcher (model mismatch, missing
-            provider, empty rows, load failure). Not serialized.
     """
 
     name: str
     directory: Path
-    embedding_model: str
-    embedding_dimensions: int
-    embedding_sidecar: str
-    embedding_rows: List[str] = field(default_factory=list)
-    reconcile_mode: str = "eager"
-    owned_source_ids: Set[str] = field(default_factory=set)
-    matcher: Optional[Any] = None
     tier: str = BUNDLE_TIER_WORKSPACE
 
     @property
@@ -167,93 +158,102 @@ class Bundle:
 
     @property
     def manifest_path(self) -> Path:
-        """Absolute path to this bundle's manifest file."""
-        return self.directory / EMBEDDING_CONFIG_FILENAME
+        """Where the generic manifest belongs — the path a writer uses.
 
-    @property
-    def sidecar_path(self) -> Path:
-        """Absolute path to this bundle's ``.npy`` sidecar matrix."""
-        return self.directory / self.embedding_sidecar
-
-    @property
-    def lock_path(self) -> Path:
-        """Advisory-lock filename used by the reconcile writer.
-
-        A sibling of the sidecar so concurrent daemons targeting the
-        same workspace serialize their rewrites.
+        Always ``<directory>/bundle.json``, whether or not that file
+        exists yet. To ask which marker a bundle *actually* has on
+        disk, use :attr:`existing_manifest_path`.
         """
-        return self.directory / (self.embedding_sidecar + ".lock")
+        return self.directory / BUNDLE_MANIFEST_FILENAME
+
+    @property
+    def existing_manifest_path(self) -> Optional[Path]:
+        """The marker file present on disk, or ``None`` if none is.
+
+        Returns the most canonical marker when several exist (a bundle
+        that has been migrated may carry both ``bundle.json`` and the
+        legacy ``embedding_config.json``).
+        """
+        return bundle_marker_path(self.directory)
 
 
-def _load_bundle_from_manifest(
-    manifest_path: Path,
+def bundle_marker_path(directory: Path) -> Optional[Path]:
+    """Return the manifest marking ``directory`` as a bundle, or ``None``.
+
+    Checks :data:`BUNDLE_MARKER_FILENAMES` in order, so the canonical
+    ``bundle.json`` wins over a legacy marker when both are present.
+
+    Args:
+        directory: Candidate bundle directory.
+
+    Returns:
+        Absolute path to the marker file, or ``None`` when ``directory``
+        is not a bundle (or is not readable).
+    """
+    for filename in BUNDLE_MARKER_FILENAMES:
+        candidate = directory / filename
+        try:
+            if candidate.is_file():
+                return candidate
+        except OSError:
+            # A denied directory is "not a bundle here" — the caller
+            # (discovery) already DEBUG-logs the tier it could not scan.
+            return None
+    return None
+
+
+def is_bundle_directory(directory: Path) -> bool:
+    """Whether ``directory`` carries a bundle manifest."""
+    return bundle_marker_path(directory) is not None
+
+
+def load_bundle(
+    directory: Path,
     *,
     name: str,
     tier: str = BUNDLE_TIER_WORKSPACE,
 ) -> Optional[Bundle]:
-    """Build a :class:`Bundle` from a manifest file on disk.
+    """Build a :class:`Bundle` for ``directory``, or ``None``.
 
-    Returns ``None`` when the file is missing, unreadable, or malformed.
-    Malformed bundles are logged but do not raise — a corrupt manifest
-    in one subdirectory must not prevent the rest of the catalog from
-    loading.
+    Returns ``None`` only when ``directory`` carries no manifest —
+    i.e. when it is not a bundle at all. A manifest that is present but
+    malformed still identifies a bundle: the file is the marker, and
+    refusing to load the directory because a domain could not parse its
+    own metadata is what made a definitions-only references directory
+    invisible. Malformed content is logged and otherwise ignored here;
+    the owning domain decides what a body it cannot read means.
 
     Args:
-        manifest_path: Absolute path to a manifest JSON file.
+        directory: Candidate bundle directory.
         name: Bundle name (``""`` for root, subdir name for sub-bundles).
         tier: Which tier root this bundle was discovered under. Stored
             on the resulting ``Bundle.tier`` so downstream commands
             know where the bundle physically lives.
 
     Returns:
-        The loaded :class:`Bundle`, or ``None`` on failure.
+        The loaded :class:`Bundle`, or ``None`` when ``directory`` is
+        not a bundle.
     """
-    if not manifest_path.is_file():
+    marker = bundle_marker_path(directory)
+    if marker is None:
         return None
 
-    try:
-        raw = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError) as e:
-        logger.warning(
-            "Bundle '%s': failed to read manifest %s: %s",
-            name or "(root)", manifest_path, e,
-        )
-        return None
-
-    if not isinstance(raw, dict):
-        logger.warning(
-            "Bundle '%s': manifest must be a JSON object: %s",
-            name or "(root)", manifest_path,
-        )
-        return None
-
-    model = raw.get("embedding_model")
-    dims = raw.get("embedding_dimensions")
-    sidecar = raw.get("embedding_sidecar")
-    rows = raw.get("rows")
-    reconcile_mode = raw.get("reconcile", "eager")
-
-    if not model or not dims or not sidecar:
-        logger.warning(
-            "Bundle '%s': manifest missing required fields "
-            "(embedding_model, embedding_dimensions, embedding_sidecar): %s",
-            name or "(root)", manifest_path,
-        )
-        return None
-
-    if not isinstance(rows, list) or not all(isinstance(r, str) for r in rows):
-        logger.warning(
-            "Bundle '%s': manifest 'rows' must be a list of entry ids: %s",
-            name or "(root)", manifest_path,
-        )
-        return None
-
-    if reconcile_mode not in _VALID_RECONCILE_MODES:
-        logger.warning(
-            "Bundle '%s': unknown reconcile mode %r, falling back to 'eager'",
-            name or "(root)", reconcile_mode,
-        )
-        reconcile_mode = "eager"
+    if marker.name == BUNDLE_MANIFEST_FILENAME:
+        # Read it only to report a corrupt file. Nothing in the generic
+        # manifest is required, so there is nothing to refuse over.
+        try:
+            raw = json.loads(marker.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning(
+                "Bundle '%s': failed to read manifest %s: %s",
+                name or "(root)", marker, e,
+            )
+        else:
+            if not isinstance(raw, dict):
+                logger.warning(
+                    "Bundle '%s': manifest must be a JSON object: %s",
+                    name or "(root)", marker,
+                )
 
     if tier not in VALID_BUNDLE_TIERS:
         logger.warning(
@@ -264,13 +264,7 @@ def _load_bundle_from_manifest(
 
     return Bundle(
         name=name,
-        directory=manifest_path.parent.resolve(),
-        embedding_model=str(model),
-        embedding_dimensions=int(dims),
-        embedding_sidecar=str(sidecar),
-        embedding_rows=list(rows),
-        reconcile_mode=reconcile_mode,
-        owned_source_ids=set(rows),
+        directory=directory.resolve(),
         tier=tier,
     )
 
@@ -381,7 +375,10 @@ def discover_bundles(
     discovered first, followed by each immediate subdirectory that
     contains its own manifest. Subdirectories without a manifest are
     ignored entirely so dropping an unrelated directory into a tier
-    root never accidentally pollutes the catalog.
+    root never accidentally pollutes the catalog. "A manifest" means
+    any of :data:`BUNDLE_MARKER_FILENAMES`; nothing about its *content*
+    is required, so a bundle that declares no vector index is
+    discovered exactly like one that does.
 
     Shadowing keys on bundle ``name`` (the root bundle name is the
     empty string :data:`ROOT_BUNDLE_NAME`); a workspace root manifest
@@ -428,11 +425,7 @@ def discover_bundles(
             )
             continue
 
-        root = _load_bundle_from_manifest(
-            refs_dir / EMBEDDING_CONFIG_FILENAME,
-            name=ROOT_BUNDLE_NAME,
-            tier=tier,
-        )
+        root = load_bundle(refs_dir, name=ROOT_BUNDLE_NAME, tier=tier)
         if root is not None:
             if root.name in seen_names:
                 logger.debug(
@@ -447,10 +440,7 @@ def discover_bundles(
         for child in children:
             if not child.is_dir():
                 continue
-            manifest = child / EMBEDDING_CONFIG_FILENAME
-            if not manifest.is_file():
-                continue
-            sub = _load_bundle_from_manifest(manifest, name=child.name, tier=tier)
+            sub = load_bundle(child, name=child.name, tier=tier)
             if sub is None:
                 continue
             if sub.name in seen_names:
@@ -621,31 +611,54 @@ def find_bundle(
     raise AmbiguousBundleRefError(ref, matches)
 
 
-def write_manifest(bundle: Bundle, *, rows: List[str]) -> None:
-    """Write the bundle's manifest to disk with an updated ``rows`` list.
+def write_bundle_manifest(
+    directory: Path,
+    *,
+    name: Optional[str] = None,
+    description: Optional[str] = None,
+    extra: Optional[Dict[str, Any]] = None,
+) -> Path:
+    """Write ``bundle.json`` into ``directory``, creating it if needed.
+
+    This is the minimum a domain has to do to declare a directory a
+    bundle. Every field is optional: the file's *presence* is the
+    marker, and its keys are informational. A domain with more to say
+    about its own bundles writes its own file beside this one (the
+    references plugin writes ``embedding_config.json``) rather than
+    adding keys here that only it understands.
 
     Uses an atomic write (``.tmp`` + rename) so a crash mid-write
-    cannot corrupt the manifest.
+    cannot leave a half-written manifest behind.
 
     Args:
-        bundle: Target bundle.
-        rows: New ordered list of entry ids. ``len(rows)`` must equal
-            the new sidecar matrix's row count.
-    """
-    payload: Dict[str, Any] = {
-        "embedding_model": bundle.embedding_model,
-        "embedding_dimensions": bundle.embedding_dimensions,
-        "embedding_sidecar": bundle.embedding_sidecar,
-        "rows": rows,
-    }
-    if bundle.reconcile_mode != "eager":
-        payload["reconcile"] = bundle.reconcile_mode
+        directory: Bundle directory. Created (with parents) if absent.
+        name: Informational bundle name. Discovery derives the real
+            name from the directory, so this is documentation for a
+            human reading the file, never authority. Omitted from the
+            payload when empty — :data:`ROOT_BUNDLE_NAME` IS the empty
+            string, and a root bundle has no name to record.
+        description: One-line description of what the bundle holds.
+        extra: Additional top-level keys to record. Domain-specific
+            keys do NOT belong here — this exists for envelope-level
+            metadata a future generic feature may add.
 
-    tmp = bundle.manifest_path.with_suffix(bundle.manifest_path.suffix + ".tmp")
+    Returns:
+        Absolute path to the written manifest.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    payload: Dict[str, Any] = {}
+    if name:
+        payload["name"] = name
+    if description is not None:
+        payload["description"] = description
+    if extra:
+        payload.update(extra)
+
+    target = directory / BUNDLE_MANIFEST_FILENAME
+    tmp = target.with_suffix(target.suffix + ".tmp")
     tmp.write_text(
         json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
-    tmp.replace(bundle.manifest_path)
-    bundle.embedding_rows = list(rows)
-    bundle.owned_source_ids = set(rows)
+    tmp.replace(target)
+    return target.resolve()

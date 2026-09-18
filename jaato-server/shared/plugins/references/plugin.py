@@ -42,13 +42,15 @@ from .config_loader import (
 )
 from .bundle import (
     AmbiguousBundleRefError,
+    BUNDLE_MARKER_FILENAMES,
     BUNDLE_TIER_USER,
     BUNDLE_TIER_WORKSPACE,
-    Bundle,
     BundleRef,
     EMBEDDING_CONFIG_FILENAME,
     ROOT_BUNDLE_NAME,
     VALID_BUNDLE_TIERS,
+    ReferenceBundle,
+    write_bundle_manifest,
     detect_drift,
     discover_bundles,
     find_bundle,
@@ -165,7 +167,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
         # Initialized during initialize() when embedding config is present
         # and sentence-transformers is installed.
         self._embedding_provider: Optional[EmbeddingProviderProtocol] = None
-        self._bundles: List[Bundle] = []
+        self._bundles: List[ReferenceBundle] = []
         # Cached initialize() config for lazy embedding provider load.
         # When ``_init_embedding_provider`` is skipped at initialize() time
         # (no bundles in the workspace), ``_execute_compute_embedding``
@@ -1280,7 +1282,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
         string. Sources from the user-tier root bundle are loaded here
         and likewise carry ``bundle_name = ""`` (the empty name is the
         root-bundle sentinel; tier disambiguation lives on the
-        :class:`Bundle` itself, not on individual references).
+        :class:`ReferenceBundle` itself, not on individual references).
         """
         self._bundles = []
 
@@ -1444,7 +1446,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
         )
 
     def _attach_matcher(
-        self, bundle: Bundle, provider_model: str,
+        self, bundle: ReferenceBundle, provider_model: str,
     ) -> Optional[SemanticMatcherProtocol]:
         """Build and wire a matcher for a single bundle.
 
@@ -2347,7 +2349,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
         """
         lines: List[Tuple[str, str]] = [("BUNDLES", "bold"), ("", "")]
         if not self._bundles:
-            lines.append(("    (no bundles — no embedding_config.json discovered)", ""))
+            lines.append(("    (no bundles — no bundle manifest discovered)", ""))
             return HelpLines(lines=lines)
 
         # Stable ordering: workspace tier first (matching discovery order),
@@ -2365,18 +2367,24 @@ class ReferencesPlugin(RunnerForwardingMixin):
                 1 for s in self._sources if s.bundle_name == bundle.name
             )
             drift = detect_drift(bundle, self._sources)
-            if bundle.matcher is None:
+            if not bundle.has_index:
+                status = "no index"
+            elif bundle.matcher is None:
                 status = "NO MATCHER"
             elif not drift.is_clean():
                 status = drift.summary()
             else:
                 status = "up-to-date"
+            index = (
+                f"model={bundle.embedding_model}  "
+                f"dim={bundle.embedding_dimensions}"
+                if bundle.has_index else "no vector index"
+            )
             lines.append((
                 f"  [{bundle.tier:<9}] "
                 f"{bundle.display_name:<18} "
                 f"{own_count:>3} refs  "
-                f"model={bundle.embedding_model}  "
-                f"dim={bundle.embedding_dimensions}  "
+                f"{index}  "
                 f"{status}",
                 "",
             ))
@@ -2501,16 +2509,16 @@ class ReferencesPlugin(RunnerForwardingMixin):
 
         bundle_dir = tier_root if name == ROOT_BUNDLE_NAME else tier_root / name
         bundle_dir.mkdir(parents=True, exist_ok=True)
-        manifest_path = bundle_dir / EMBEDDING_CONFIG_FILENAME
-        if manifest_path.is_file():
+        index_path = bundle_dir / EMBEDDING_CONFIG_FILENAME
+        if index_path.is_file():
             return {
                 "error": (
-                    f"manifest already exists at {manifest_path} — refusing "
+                    f"manifest already exists at {index_path} — refusing "
                     f"to overwrite. Use 'bundle delete' or pick a different name."
                 )
             }
         sidecar_name = "references.embeddings.npy"
-        manifest_path.write_text(
+        index_path.write_text(
             json.dumps({
                 "embedding_model": model_name,
                 "embedding_dimensions": int(dimensions),
@@ -2518,6 +2526,14 @@ class ReferencesPlugin(RunnerForwardingMixin):
                 "rows": [],
             }, indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",
+        )
+        # The generic marker too, so the bundle stays discoverable if its
+        # index is later removed — and so a bundle created today is
+        # declared by its own manifest rather than by the legacy alias.
+        write_bundle_manifest(
+            bundle_dir,
+            name=name,
+            description="references bundle",
         )
 
         # Re-discover so the new bundle is visible to subsequent ops.
@@ -2606,10 +2622,10 @@ class ReferencesPlugin(RunnerForwardingMixin):
             }
 
         # Non-emptiness check: any rows OR any *.json reference files
-        # (excluding the manifest itself).
+        # (excluding the bundle's own manifests).
         has_rows = bool(bundle.embedding_rows)
         has_ref_files = any(
-            p.name != EMBEDDING_CONFIG_FILENAME
+            p.name not in BUNDLE_MARKER_FILENAMES
             for p in bundle.directory.glob("*.json")
         )
         if (has_rows or has_ref_files) and not force:
@@ -2949,8 +2965,8 @@ class ReferencesPlugin(RunnerForwardingMixin):
         *,
         verb: str,
         ref_id: str,
-        source_bundle: Optional[Bundle],
-        target_bundle: Optional[Bundle],
+        source_bundle: Optional[ReferenceBundle],
+        target_bundle: Optional[ReferenceBundle],
     ) -> Dict[str, Any]:
         """Reconcile + reload after add / eject / remove.
 
@@ -3054,7 +3070,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
 
         The candidate directory is determined by ``bundle_name``:
 
-        * Bundled ref → the bundle's :attr:`Bundle.directory`.
+        * Bundled ref → the bundle's :attr:`~shared.plugins.bundle_common.bundle.Bundle.directory`.
         * Free ref → the workspace tier's references root
           (``<workspace>/.jaato/references/``). User-tier free
           references are not currently loaded by the catalog, so they
@@ -3078,7 +3094,7 @@ class ReferencesPlugin(RunnerForwardingMixin):
             return None
 
         for json_path in candidate_dir.glob("*.json"):
-            if json_path.name == EMBEDDING_CONFIG_FILENAME:
+            if json_path.name in BUNDLE_MARKER_FILENAMES:
                 continue
             try:
                 data = json.loads(json_path.read_text(encoding="utf-8"))
@@ -3405,14 +3421,14 @@ class ReferencesPlugin(RunnerForwardingMixin):
         # fallback also covers the cross-tier-same-name case where a
         # user bundle was shadowed by a workspace bundle of the same
         # name and isn't visible to find_bundle.
-        source_bundle: Optional[Bundle]
+        source_bundle: Optional[ReferenceBundle]
         source_sources: List[ReferenceSource]
         resolved_source_name: str
 
         # First, try bundle-ref resolution. parse_bundle_ref rejects
         # paths-with-colons that aren't valid scopes, so things like
         # ``./teammate:1.0`` won't be misinterpreted.
-        source_lookup: Optional[Bundle] = None
+        source_lookup: Optional[ReferenceBundle] = None
         try:
             source_ref = parse_bundle_ref(source_arg)
         except ValueError:

@@ -12,7 +12,7 @@ import pytest
 
 from shared.plugins.references.bundle import (
     EMBEDDING_CONFIG_FILENAME,
-    Bundle,
+    ReferenceBundle,
     metadata_hash,
 )
 from shared.plugins.references.models import (
@@ -51,7 +51,7 @@ def _bundle(tmp_path: Path, rows):
         "embedding_sidecar": "references.embeddings.npy",
         "rows": list(rows),
     }))
-    return Bundle(
+    return ReferenceBundle(
         name="",
         directory=refs.resolve(),
         embedding_model="mock-model",
@@ -175,7 +175,7 @@ class TestReconcileUpdatePath:
         assert matrix.shape == (1, 4)
 
         # Manifest has been rewritten.
-        raw = json.loads(bundle.manifest_path.read_text())
+        raw = json.loads(bundle.embedding_config_path.read_text())
         assert raw["rows"] == ["a"]
 
         # Reference JSON stamped with the new source_hash.

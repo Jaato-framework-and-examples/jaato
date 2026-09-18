@@ -35,11 +35,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 from ..bundle_common.bundle import (
-    BUNDLE_TIER_USER,
     BUNDLE_TIER_WORKSPACE,
-    Bundle,
+    write_bundle_manifest,
 )
 from ..bundle_common.handler import BundleEntry, BundleEntryHandler
+from .bundle import EMBEDDING_CONFIG_FILENAME, ReferenceBundle
 from .models import SourceType
 
 if TYPE_CHECKING:  # pragma: no cover - import only for type hints
@@ -98,7 +98,7 @@ class ReferencesEntryHandler(BundleEntryHandler):
             entries.append(self._build_entry(source.id, source.bundle_name, file_path))
         return entries
 
-    def list_bundles(self) -> List[Bundle]:
+    def list_bundles(self) -> List[ReferenceBundle]:
         """Return every references bundle (workspace + user tiers).
 
         Mirrors ``self._plugin._bundles``, which is already maintained
@@ -129,7 +129,7 @@ class ReferencesEntryHandler(BundleEntryHandler):
     # ------------------------------------------------------------------
 
     def move_entry_to_bundle(
-        self, entry: BundleEntry, target_bundle: Bundle,
+        self, entry: BundleEntry, target_bundle: ReferenceBundle,
     ) -> Path:
         """Relocate ``entry``'s JSON file into ``target_bundle.directory``.
 
@@ -201,7 +201,7 @@ class ReferencesEntryHandler(BundleEntryHandler):
             self._plugin._reload_catalog(self._plugin._workspace_path)
         self._plugin._discover_and_load_bundles()
 
-    def reconcile_bundle(self, bundle: Bundle):
+    def reconcile_bundle(self, bundle: ReferenceBundle):
         """Run the references-specific reconcile pass for ``bundle``.
 
         Also re-attaches the bundle's semantic matcher when an
@@ -235,7 +235,7 @@ class ReferencesEntryHandler(BundleEntryHandler):
                 self._plugin._semantic_matcher = bundle.matcher
         return result
 
-    def delete_bundle(self, bundle: Bundle, *, force: bool = False) -> None:
+    def delete_bundle(self, bundle: ReferenceBundle, *, force: bool = False) -> None:
         """Remove a references bundle's directory (or root contents).
 
         Honours the same non-empty-without-force contract documented
@@ -246,15 +246,15 @@ class ReferencesEntryHandler(BundleEntryHandler):
         window where state is inconsistent.
         """
         from ..bundle_common.bundle import (
-            EMBEDDING_CONFIG_FILENAME as _MANIFEST,
+            BUNDLE_MARKER_FILENAMES as _MARKERS,
             ROOT_BUNDLE_NAME as _ROOT,
         )
 
         # Non-emptiness check: any rows OR any *.json reference files
-        # (excluding the manifest itself).
+        # (excluding the bundle's own manifests).
         has_rows = bool(bundle.embedding_rows)
         has_ref_files = any(
-            p.name != _MANIFEST
+            p.name not in _MARKERS
             for p in bundle.directory.glob("*.json")
         )
         if (has_rows or has_ref_files) and not force:
@@ -295,7 +295,7 @@ class ReferencesEntryHandler(BundleEntryHandler):
         *,
         workspace_path: Optional[Path] = None,
         user_home: Optional[Path] = None,
-    ) -> Bundle:
+    ) -> ReferenceBundle:
         """Write a fresh references manifest at the chosen tier root.
 
         The bundle's embedding model and dimensions are inherited from
@@ -307,9 +307,7 @@ class ReferencesEntryHandler(BundleEntryHandler):
         coordinates.
         """
         from ..bundle_common.bundle import (
-            BUNDLE_TIER_USER as _USER,
             BUNDLE_TIER_WORKSPACE as _WS,
-            EMBEDDING_CONFIG_FILENAME as _MANIFEST,
             ROOT_BUNDLE_NAME as _ROOT,
             VALID_BUNDLE_TIERS as _TIERS,
         )
@@ -345,13 +343,13 @@ class ReferencesEntryHandler(BundleEntryHandler):
             tier_root = home / self.domain_subpath
         bundle_dir = tier_root if name == _ROOT else tier_root / name
         bundle_dir.mkdir(parents=True, exist_ok=True)
-        manifest_path = bundle_dir / _MANIFEST
-        if manifest_path.is_file():
+        index_path = bundle_dir / EMBEDDING_CONFIG_FILENAME
+        if index_path.is_file():
             raise FileExistsError(
-                f"manifest already exists at {manifest_path}"
+                f"embedding config already exists at {index_path}"
             )
         sidecar_name = "references.embeddings.npy"
-        manifest_path.write_text(
+        index_path.write_text(
             json.dumps({
                 "embedding_model": provider.model_name,
                 "embedding_dimensions": int(dimensions),
@@ -360,14 +358,22 @@ class ReferencesEntryHandler(BundleEntryHandler):
             }, indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",
         )
-        return Bundle(
+        # Also write the generic marker, so a bundle created today is
+        # discovered by its own manifest rather than by the legacy
+        # alias — and stays discovered if its index is later removed.
+        write_bundle_manifest(
+            bundle_dir,
+            name=name,
+            description=f"references bundle ({self.kind})",
+        )
+        return ReferenceBundle(
             name=name,
             directory=bundle_dir.resolve(),
+            tier=tier,
             embedding_model=provider.model_name,
             embedding_dimensions=int(dimensions),
             embedding_sidecar=sidecar_name,
             embedding_rows=[],
-            tier=tier,
         )
 
     # ------------------------------------------------------------------
@@ -466,7 +472,7 @@ class ReferencesEntryHandler(BundleEntryHandler):
         """Wrap the lookup of ``bundle_tier`` for an entry.
 
         Bundled entries inherit their tier from the owning
-        :class:`Bundle`. Free entries (``bundle_name == ""``) live at
+        :class:`ReferenceBundle`. Free entries (``bundle_name == ""``) live at
         the workspace tier today — the catalog only loads free refs
         from the workspace ``.jaato/references/`` directory.
         """

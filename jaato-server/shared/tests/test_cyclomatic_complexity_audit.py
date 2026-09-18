@@ -259,7 +259,6 @@ BASELINE: Dict[str, int] = {
     "jaato-server/shared/plugins/bundle/plugin.py::BundlePlugin._cmd_reconcile": 35,
     "jaato-server/shared/plugins/bundle/plugin.py::BundlePlugin._cmd_unpack": 41,
     "jaato-server/shared/plugins/bundle/plugin.py::BundlePlugin.get_command_completions": 108,
-    "jaato-server/shared/plugins/bundle_common/bundle.py::_load_bundle_from_manifest": 18,
     "jaato-server/shared/plugins/clarification/channels.py::ClarificationChannel._parse_answer": 20,
     "jaato-server/shared/plugins/clarification/channels.py::ConsoleChannel._ask_multiple_choice": 20,
     "jaato-server/shared/plugins/clarification/channels.py::QueueChannel.request_clarification": 19,

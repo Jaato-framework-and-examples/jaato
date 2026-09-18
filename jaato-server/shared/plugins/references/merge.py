@@ -53,9 +53,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from .bundle import (
+    BUNDLE_MARKER_FILENAMES,
     EMBEDDING_CONFIG_FILENAME,
-    Bundle,
+    ReferenceBundle,
     metadata_hash,
+    require_index_paths,
     write_manifest,
 )
 from .embedding_types import EmbeddingProviderProtocol
@@ -239,7 +241,7 @@ def _load_sources_from_dir(directory: Path) -> List[ReferenceSource]:
     for p in sorted(directory.iterdir()):
         if not p.is_file() or p.suffix != ".json":
             continue
-        if p.name == EMBEDDING_CONFIG_FILENAME:
+        if p.name in BUNDLE_MARKER_FILENAMES:
             continue
         try:
             raw = json.loads(p.read_text(encoding="utf-8"))
@@ -251,13 +253,16 @@ def _load_sources_from_dir(directory: Path) -> List[ReferenceSource]:
     return sources
 
 
-def _read_bundle_manifest(directory: Path) -> Optional[Bundle]:
-    """Build a Bundle from a directory's ``embedding_config.json``.
+def _read_bundle_manifest(directory: Path) -> Optional[ReferenceBundle]:
+    """Build a :class:`ReferenceBundle` from a directory's config.
 
-    Used when the source is a path rather than a loaded bundle. Unlike
-    :func:`bundle._load_bundle_from_manifest` this returns a Bundle
-    even with empty rows — an unindexed source bundle can still be
-    merged if ``--re-embed`` is set.
+    Used when the merge source is a path rather than a loaded bundle.
+    Unlike :func:`bundle.load_reference_bundle` this keys on the
+    embedding config alone rather than on a bundle manifest, because a
+    merge source is a directory an operator pointed at — it need not be
+    a discovered bundle at all. Returns a bundle even when the config
+    declares no complete index: an unindexed source can still be merged
+    if ``--re-embed`` is set.
     """
     manifest_path = directory / EMBEDDING_CONFIG_FILENAME
     if not manifest_path.is_file():
@@ -268,7 +273,7 @@ def _read_bundle_manifest(directory: Path) -> Optional[Bundle]:
         return None
     if not isinstance(raw, dict):
         return None
-    return Bundle(
+    return ReferenceBundle(
         name=directory.name,
         directory=directory.resolve(),
         embedding_model=str(raw.get("embedding_model", "")),
@@ -277,6 +282,64 @@ def _read_bundle_manifest(directory: Path) -> Optional[Bundle]:
         embedding_rows=list(raw.get("rows", []) or []),
         owned_source_ids=set(raw.get("rows", []) or []),
     )
+
+
+def _merge_preflight(
+    target: ReferenceBundle,
+    source_bundle: ReferenceBundle,
+    options: MergeOptions,
+) -> Optional[MergeResult]:
+    """Return the :class:`MergeResult` that refuses this merge, or ``None``.
+
+    Two preconditions, both cheap and both fatal:
+
+    * the flags themselves parse (``MergeOptions.validate``);
+    * the TARGET declares a vector index. Every path below rewrites the
+      target's sidecar and its ``embedding_config.json``; a target with
+      no index has neither, and no dimensions to embed the source
+      against. Without this check such a merge reaches
+      ``--re-embed`` and writes a matrix to the bundle directory.
+    """
+    err = options.validate()
+    if not err and not target.has_index:
+        err = (
+            f"Target bundle '{target.qualified_ref}' declares no vector "
+            f"index ({EMBEDDING_CONFIG_FILENAME} is missing or incomplete); "
+            f"create one before merging into it."
+        )
+    if not err:
+        return None
+    return MergeResult(
+        source_name=source_bundle.name,
+        target_name=target.name,
+        status=MergeStatus.ERROR,
+        error=err,
+    )
+
+
+def _source_sidecar(
+    source_bundle: ReferenceBundle,
+) -> Tuple[Optional[Path], Optional[str]]:
+    """Locate the source's sidecar, or say why it cannot be read.
+
+    Only reached when the merge is NOT re-embedding — that is the one
+    mode that copies the source's existing vectors rather than
+    recomputing them, so a source with no index is a refusal here and
+    perfectly mergeable with ``--re-embed``. Returns
+    ``(path, None)`` or ``(None, message)``.
+    """
+    sidecar = source_bundle.sidecar_path
+    if sidecar is None:
+        return None, (
+            f"Source bundle '{source_bundle.display_name}' declares no "
+            f"vector index; pass --re-embed to rebuild from metadata"
+        )
+    if not sidecar.is_file():
+        return None, (
+            f"Source sidecar {sidecar} not found; pass --re-embed to "
+            f"rebuild from metadata"
+        )
+    return sidecar, None
 
 
 def _resolve_conflicts(
@@ -370,8 +433,8 @@ def _copy_reference_json(
 
 def merge_bundle(
     *,
-    target: Bundle,
-    source_bundle: Bundle,
+    target: ReferenceBundle,
+    source_bundle: ReferenceBundle,
     source_sources: List[ReferenceSource],
     target_sources: List[ReferenceSource],
     provider: Optional[EmbeddingProviderProtocol],
@@ -397,14 +460,9 @@ def merge_bundle(
     Returns:
         A populated :class:`MergeResult`.
     """
-    err = options.validate()
-    if err:
-        return MergeResult(
-            source_name=source_bundle.name,
-            target_name=target.name,
-            status=MergeStatus.ERROR,
-            error=err,
-        )
+    preflight = _merge_preflight(target, source_bundle, options)
+    if preflight is not None:
+        return preflight
 
     # Determine whether we need to re-embed.
     model_matches = (
@@ -492,9 +550,10 @@ def merge_bundle(
             seen.add(sid)
 
     # Load target sidecar (or start empty) to preserve its rows.
-    if target.sidecar_path.is_file():
+    target_sidecar, target_lock = require_index_paths(target)
+    if target_sidecar.is_file():
         try:
-            target_matrix = np.load(target.sidecar_path, allow_pickle=False)
+            target_matrix = np.load(target_sidecar, allow_pickle=False)
         except (OSError, ValueError) as e:
             return MergeResult(
                 source_name=source_bundle.name,
@@ -510,18 +569,16 @@ def merge_bundle(
     # Build source vectors.
     source_matrix = None
     if not needs_reembed:
-        if not source_bundle.sidecar_path.is_file():
+        source_sidecar, problem = _source_sidecar(source_bundle)
+        if problem is not None:
             return MergeResult(
                 source_name=source_bundle.name,
                 target_name=target.name,
                 status=MergeStatus.ERROR,
-                error=(
-                    f"Source sidecar {source_bundle.sidecar_path} not found; "
-                    f"pass --re-embed to rebuild from metadata"
-                ),
+                error=problem,
             )
         try:
-            source_matrix = np.load(source_bundle.sidecar_path, allow_pickle=False)
+            source_matrix = np.load(source_sidecar, allow_pickle=False)
         except (OSError, ValueError) as e:
             return MergeResult(
                 source_name=source_bundle.name,
@@ -598,7 +655,7 @@ def merge_bundle(
         )
 
     # Commit: assemble + atomic swap, guarded by advisory lock.
-    lock = _try_acquire_lock(target.lock_path)
+    lock = _try_acquire_lock(target_lock)
     if lock is None:
         return MergeResult(
             source_name=source_bundle.name,
@@ -622,7 +679,7 @@ def merge_bundle(
 
         new_rows = list(target.embedding_rows) + list(added_ids)
 
-        _write_sidecar_atomic(target.sidecar_path, new_matrix)
+        _write_sidecar_atomic(target_sidecar, new_matrix)
         write_manifest(target, rows=new_rows)
 
         # Copy source JSONs into target dir; stamp fresh source_hash
@@ -672,4 +729,4 @@ def merge_bundle(
             error=str(e),
         )
     finally:
-        _release_lock(lock, target.lock_path)
+        _release_lock(lock, target_lock)

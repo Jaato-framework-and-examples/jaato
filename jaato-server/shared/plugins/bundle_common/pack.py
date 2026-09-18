@@ -41,7 +41,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from .bundle import (
-    EMBEDDING_CONFIG_FILENAME,
     Bundle,
     discover_bundles,
     resolve_bundle_roots,
@@ -60,8 +59,9 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 # Top-level archive members. v1 archives put ``bundle/`` and ``payload/``
-# directly at the root and use ``EMBEDDING_CONFIG_FILENAME`` as the
-# manifest. v2 archives nest everything under ``kinds/<kind>/``.
+# directly at the root; v2 archives nest everything under
+# ``kinds/<kind>/``. Either way the bundle directory is copied verbatim,
+# so whichever manifest marks it on disk is the one in the archive.
 ARCHIVE_ENVELOPE_FILENAME = "bundle_archive.json"
 ARCHIVE_KINDS_DIR = "kinds"
 ARCHIVE_BUNDLE_DIR = "bundle"

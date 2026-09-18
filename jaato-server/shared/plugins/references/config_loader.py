@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from shared.path_utils import normalize_path
+from ..bundle_common.bundle import BUNDLE_MARKER_FILENAMES
 from .models import ReferenceSource, SourceType, InjectionMode, VALID_CONTENTS_KEYS
 
 logger = logging.getLogger(__name__)
@@ -90,8 +91,12 @@ def discover_references(
         if file_path.suffix != '.json':
             continue
 
-        # Skip the embedding config file — it's metadata, not a reference
-        if file_path.name == EMBEDDING_CONFIG_FILENAME:
+        # Skip the bundle's own manifests — they are metadata, not
+        # references.  Every marker, not just the embedding config: a
+        # ``bundle.json`` carries a ``name`` and no ``id``, so leaving it
+        # in would log "missing required fields (id, name)" once per
+        # bundle on every catalog load.
+        if file_path.name in BUNDLE_MARKER_FILENAMES:
             continue
 
         try:

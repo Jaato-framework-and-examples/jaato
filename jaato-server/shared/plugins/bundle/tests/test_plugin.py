@@ -21,9 +21,9 @@ from shared.plugins.bundle.plugin import BundlePlugin
 from shared.plugins.bundle_common.bundle import (
     BUNDLE_TIER_USER,
     BUNDLE_TIER_WORKSPACE,
-    EMBEDDING_CONFIG_FILENAME,
     Bundle,
 )
+from shared.plugins.references.bundle import EMBEDDING_CONFIG_FILENAME
 from shared.plugins.bundle_common.handler import (
     BundleEntry,
     BundleEntryHandler,
@@ -119,9 +119,6 @@ def _bundle(name: str, tier: str = BUNDLE_TIER_WORKSPACE) -> Bundle:
     return Bundle(
         name=name,
         directory=Path(f"/tmp/{tier}/{name or 'root'}"),
-        embedding_model="m",
-        embedding_dimensions=4,
-        embedding_sidecar="x.npy",
         tier=tier,
     )
 

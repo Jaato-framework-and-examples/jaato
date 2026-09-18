@@ -150,13 +150,7 @@ class TestMutations:
     def test_delete_bundle_not_implemented(self, handler):
         # Pass a fake Bundle since list_bundles always returns empty.
         from shared.plugins.bundle_common.bundle import Bundle
-        bundle = Bundle(
-            name="foo",
-            directory=Path("/tmp/foo"),
-            embedding_model="x",
-            embedding_dimensions=1,
-            embedding_sidecar="x.npy",
-        )
+        bundle = Bundle(name="foo", directory=Path("/tmp/foo"))
         with pytest.raises(NotImplementedError, match="bundle delete"):
             handler.delete_bundle(bundle)
 
