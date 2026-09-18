@@ -318,6 +318,7 @@ def _rewrite(text: str, root: Path, daemon: Daemon) -> str:
     text = text.replace(str(root / "acme-support"), WORKSPACE_ALIAS)
     text = text.replace(str(root / "triage-uncontrolled"), WORKSPACE_ALIAS + "-triage")
     text = text.replace(str(root / "quiet"), WORKSPACE_ALIAS + "-quiet")
+    text = text.replace(str(root / "acme-new"), "/srv/acme-new")
     text = text.replace(daemon.socket, SOCKET_ALIAS).replace(daemon.pidfile, PIDFILE_ALIAS)
     text = text.replace(str(root), "/srv")
     return text
@@ -405,6 +406,38 @@ def collect(root: Path, ws: Dict[str, Path], daemon: Daemon) -> List[Capture]:
     add(Capture("04-validate-high-risk", "validate: risk_class: high escalates every finding",
                 f"jaato-scaffold validate {WORKSPACE_ALIAS}-triage", scaffold("validate", str(non)),
                 "regulatory"))
+
+    # ---- the authoring surface: what `new` emits, what `validate` says, what the skill lists
+    fresh = root / "acme-new"
+    fresh.mkdir()
+    scaffold("new", "profile-set", "--workspace", str(fresh), "--provider", "anthropic",
+             "--model", "claude-sonnet-4-5", "--set", "acme", "--agents", "collector,writer")
+    base = fresh / ".jaato" / "profiles" / "_base_collector.yaml"
+    add(Capture("30-new-profile-set-commented-block",
+                "new profile-set: the three blocks in the tier-1 base, commented out",
+                "jaato-scaffold new profile-set --workspace /srv/acme-new --provider anthropic "
+                "--model claude-sonnet-4-5 --set acme --agents collector,writer && "
+                "sed -n 1,24p .jaato/profiles/_base_collector.yaml",
+                "\n".join((base.read_text(encoding="utf-8") if base.is_file()
+                           else "(not written)").splitlines()[:24]), "regulatory"))
+    undeclared = "\n".join(l for l in scaffold("validate", str(fresh)).splitlines()
+                           if "budget_control_absent" not in l)
+    add(Capture("31-validate-regulatory-undeclared",
+                "validate: a workspace that declares nothing under the Act is told so",
+                "jaato-scaffold validate /srv/acme-new | grep -v budget_control_absent",
+                undeclared, "regulatory",
+                note="the four budget_control_absent warnings the same run prints are elided"))
+    scaffold("integration", "claude-code", "--workspace", str(fresh))
+    skill = fresh / ".claude" / "skills" / "jaato-sdk" / "SKILL.md"
+    hits = [f"{n}:{l}" for n, l in enumerate(
+        (skill.read_text(encoding="utf-8") if skill.is_file() else "").splitlines(), 1)
+        if any(k in l for k in ("oversight", "explain audit", "dossier", "regulatory", "record_keeping"))]
+    add(Capture("32-integration-skill-lists-the-verbs",
+                "The Claude Code integration skill names the verbs and the keys",
+                "jaato-scaffold integration claude-code --workspace /srv/acme-new && "
+                "grep -n 'oversight\\|explain audit\\|dossier\\|regulatory\\|record_keeping' "
+                ".claude/skills/jaato-sdk/SKILL.md",
+                "\n".join(hits) or "(no matches)", "regulatory"))
 
     # ---- Art. 50(1): the announcement, the instruction piece, the suppression WARNING
     screener = drive(acme, daemon.socket, "screener", ["Hello, is anyone there?", "Second question",

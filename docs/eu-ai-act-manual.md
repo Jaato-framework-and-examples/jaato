@@ -39,6 +39,7 @@ sessions on the credential-free `echo` provider, and the real
 | 9 | A system that keeps learning does not feed bias back unmitigated | 15(4) | memory provenance (`generated_by`, `curated_by`); the `require_curation` gate | 23, 25–26 |
 | 10 | Technical documentation | 11, Annex IV, 15(3) | `jaato-scaffold new dossier --profile`, with the accuracy section from `jaato-eval` results | 27–28 |
 | 11 | Information from a component supplier | 25(4) | `jaato-scaffold new dossier --component` | 29 |
+| 12 | The authoring surface says the keys exist | 6(4) (the determination has to be *made*) | `new profile-set` emits the blocks commented out; `validate` reports `regulatory_undeclared`; the Claude Code skill lists the verbs | 30–32 |
 
 The workspace every capture runs in is one profile, `screener`, a support
 ticket pre-screener that declares everything the controls read. It is shown in
@@ -75,6 +76,32 @@ policy, no application trace, no retention, and the disclosure piece
 suppressed.
 
 ![validate: high-risk escalation](eu-ai-act-manual/evidence/04-validate-high-risk.png)
+
+### 1.1 The authoring surface knows the keys
+
+A determination nobody was prompted to make is the same as none, so the
+three verbs an author meets first each say the keys exist. `new profile-set`
+writes the `regulatory:`, `trace:` and `record_keeping:` blocks into the
+tier-1 base every set inherits, **commented out**: a live `regulatory:` with
+no fields would be a determination nobody made, and a live `record_keeping:`
+changes what DELETE means.
+
+![new profile-set: the commented block](eu-ai-act-manual/evidence/30-new-profile-set-commented-block.png)
+
+`validate` on that fresh workspace says, once, that nothing in it declares
+the block, names what the declaration unlocks, and never infers a class:
+absent is *undeclared*, not `minimal`. Abstract bases are deliberately not
+exempt, because `validate <workspace>` with no `--set` sees exactly those
+and the base is where the block belongs.
+
+![validate: regulatory_undeclared](eu-ai-act-manual/evidence/31-validate-regulatory-undeclared.png)
+
+The `jaato-sdk` skill that `jaato-scaffold integration claude-code` installs
+for Claude Code lists `explain oversight`, `explain audit`, the `dossier`
+archetype and the keys the three verbs read, so an assistant authoring a
+workspace is told the same thing a person reading `explain profile` is.
+
+![the integration skill](eu-ai-act-manual/evidence/32-integration-skill-lists-the-verbs.png)
 
 ## 2. Telling people they are talking to an AI (Art. 50(1))
 
@@ -296,6 +323,8 @@ attempts to discharge, with the design doc's reason:
 - `triage-uncontrolled`: a persona-bound profile declaring `risk_class: high`
   and almost nothing else, for the validator;
 - `quiet`: a profile that drops the `disclosure` piece by name, for the WARNING.
+- `acme-new`: not built by the script but by `jaato-scaffold new profile-set`
+  itself, for the authoring-surface captures (§1.1).
 
 It starts a daemon on a private socket with the runner pool disabled, drives
 each session through the SDK with every event subscribed before the session
