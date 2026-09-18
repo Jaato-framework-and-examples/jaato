@@ -37,6 +37,7 @@ import json
 from typing import Any, Dict, List, Optional
 
 from ..manifest import GraderSpec
+from ..sign_off import describe_unsigned
 from ..verdict import FAIL, PASS, Verdict
 from .base import GraderContext, blocked
 
@@ -194,8 +195,8 @@ class JudgeGrader:
         if context.missing_sign_off:
             return blocked(
                 self.spec, claim,
-                f"the agent never called signal_completion "
-                f"({context.termination_error_type}), so the judge would be "
+                f"{describe_unsigned(context.termination_error_type)}, "
+                "so the judge would be "
                 "handed a workspace listing with no claim to score it "
                 "against — its workspace was still graded by the graders "
                 "that read the workspace")

@@ -16,7 +16,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from jaato_eval.report_html import (UNKNOWN, ReportDependencyError,
+from jaato_eval.report_html import (sessions_cell, UNKNOWN, ReportDependencyError,
                                     budget_cell, finish_cell, grader_ids,
                                     nudges_cell, render_html, row_cells,
                                     write_html, write_pdf)
@@ -237,6 +237,25 @@ class OutputCase(unittest.TestCase):
         else:
             self.assertTrue(
                 write_pdf([_rec()], self.root / "report.pdf").is_file())
+
+
+class SessionsCellCase(unittest.TestCase):
+    """A driver arm opened several; the column says how many (jaato #1110)."""
+
+    def test_a_driver_arm_counts_its_sessions(self):
+        self.assertEqual(sessions_cell(_rec(session_ids=["a", "b", "c"])), "3")
+
+    def test_a_session_arm_counts_one(self):
+        self.assertEqual(sessions_cell(_rec(session_ids=["sess-19-c"])), "1")
+
+    def test_a_record_predating_the_list_is_unknown_not_one(self):
+        record = _rec()
+        record.pop("session_ids", None)
+        self.assertEqual(sessions_cell(record), UNKNOWN)
+
+    def test_the_column_sits_beside_the_join_key(self):
+        cells = row_cells(_rec(session_ids=["sess-19-c", "sess-19-d"]), [])
+        self.assertEqual(cells[cells.index("sess-19-c") + 1], "2")
 
 
 if __name__ == "__main__":

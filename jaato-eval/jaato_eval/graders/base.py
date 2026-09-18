@@ -28,7 +28,10 @@ class GraderContext:
         workspace_path: The mutated scratch workspace.  Ground truth for
             anything the agent claims to have written.
         config_root: The read-only task definition (``.jaato/``).
-        agent_params: The persona parameters this arm ran with.
+        agent_params: The persona parameters this arm ran with — or, for
+            a driver arm, its ``input.params``: the same mapping the driver
+            was handed as ``JAATO_EVAL_PARAM_*``, so a script grader reads
+            the input the arm actually ran with under the same names.
         payload: The typed ``signal_completion`` payload, or ``None`` when
             the profile declared no schema or the agent never completed.
         ledger: Reconstructed tool-call ledger.  Check ``ledger.faithful``
@@ -42,15 +45,19 @@ class GraderContext:
         termination_reason: ``SessionTerminatedEvent.reason`` — the only
             place an abnormal stop names itself.  ``budget_exhausted``
             never reaches ``finish_reason`` at all, because the refusal
-            short-circuits before any turn runs.
+            short-circuits before any turn runs.  For a DRIVER arm
+            (``harness.kind: driver``) it is ``"exit <n>"``: the driver's
+            exit code is the one account the engine has of how the run
+            ended, and :mod:`jaato_eval.driver` says what each code means.
         termination_detail: The refusal prose / error summary that came
             with it, so a BLOCKED verdict can quote the mechanism.
         termination_error_type: The terminal's TYPE, when it had one
-            (``"NudgeExhausted"``, ``"RunnerCallError"``, ...).  Read it
-            through :attr:`missing_sign_off` rather than by comparing
-            strings — the set of terminals that leave a gradeable
-            workspace is one rule, and it lives in
-            :mod:`jaato_eval.sign_off`.
+            (``"NudgeExhausted"``, ``"RunnerCallError"``, ...; for a
+            driver arm that exited non-zero, the engine-minted
+            ``"DriverStoppedShort"``).  Read it through
+            :attr:`missing_sign_off` rather than by comparing strings —
+            the set of terminals that leave a gradeable workspace is one
+            rule, and it lives in :mod:`jaato_eval.sign_off`.
         completion_gap: ``TurnCompletedEvent.completion_gap`` (jaato #654).
             **In practice always ``None``** — jaato #771 established that no
             daemon delivers it: its sole writer runs after the turn event

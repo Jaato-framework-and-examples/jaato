@@ -14,12 +14,31 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import yaml
 
+from .params import param_env
+
 #: Grader kinds this engine knows how to run.  See ``graders/``.
 GRADER_KINDS = ("script", "processor", "judge")
+
+#: Harness kinds — what one arm IS (jaato #1110).
+#:
+#: ``session``: one jaato session, opened by the engine from
+#: ``harness.profile`` and sent ``input.prompt``.  The default when
+#: ``harness.kind`` is absent, and the only shape that existed before.
+#:
+#: ``driver``: a PROCESS the engine starts from ``harness.run``, which
+#: opens as many sessions as it likes — a backtest cell of ten stages in a
+#: fixed order, with market data as host tools in the driver's own process.
+#: The engine hands it a contract as environment (:mod:`jaato_eval.driver`)
+#: and reads its exit code; ``input.params`` is its input.
+#:
+#: One discriminator rather than mutually exclusive keys, the shape
+#: graders already have (``kind: script | processor | judge``), so the
+#: parser can name the variant a key does not belong to.
+HARNESS_KINDS = ("session", "driver")
 
 
 class ManifestError(ValueError):
@@ -72,20 +91,45 @@ class EnvironmentSpec:
 
 @dataclass(frozen=True)
 class InputSpec:
-    """What the agent is asked to do.
+    """What the agent — or the driver — is asked to do.
+
+    Which half is populated follows ``harness.kind``, and the parser
+    refuses a key that belongs to the other variant rather than ignoring
+    it: a ``prompt`` on a driver arm reaches nothing, and a task author
+    who wrote one believes it was sent.
 
     Attributes:
-        prompt: The instruction text.  Required — a task with no input is
-            not a task.
+        prompt: The instruction text.  Required and non-empty under
+            ``kind: session`` — a task with no input is not a task.
+            ``None`` under ``kind: driver``, whose input is ``params``.
         agent: Persona name (``.jaato/agents/<name>.md``), optional when
-            the profile carries its own.
+            the profile carries its own.  Session arms only.
         agent_params: ``{{param}}`` substitutions for the persona.  This is
             the parameterisation axis: one persona, many task instances.
+            Session arms only.
+        params: The driver's input, under ``kind: driver`` — exported to
+            the driver process as environment, one ``JAATO_EVAL_PARAM_<KEY>``
+            variable each, exactly as a ``script`` grader receives
+            ``agent_params`` (:mod:`jaato_eval.params`).  A driver arm's
+            graders receive this mapping AS their ``agent_params``, so the
+            scorer of a ``(ticker, date)`` cell reads the same two
+            variables the driver was given.
     """
 
-    prompt: str
+    prompt: Optional[str] = None
     agent: Optional[str] = None
     agent_params: Dict[str, Any] = field(default_factory=dict)
+    params: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def grader_params(self) -> Dict[str, Any]:
+        """The inputs a grader is handed as ``agent_params``.
+
+        ``agent_params`` for a session arm and ``params`` for a driver
+        arm — whichever the variant populated, and never both, so a
+        grader sees the mapping the arm actually ran with.
+        """
+        return dict(self.params) if self.params else dict(self.agent_params)
 
 
 @dataclass(frozen=True)
@@ -93,15 +137,32 @@ class HarnessSpec:
     """The configuration under test.
 
     Attributes:
+        kind: One of :data:`HARNESS_KINDS`.  ``session`` (the default when
+            absent) opens one session; ``driver`` runs a process.
         profile: Profile name resolved within the active profile set.
+            Required under ``kind: session``; refused under ``kind:
+            driver``, where the driver names its own profiles per stage
+            and a value here would bind nothing.
         profile_set: Default set (``<config_root>/profiles/<set>/``).  A
             sweep overrides this per arm — it is the model/provider axis,
             and swapping it is the whole "can I use a cheaper model?"
-            experiment.
+            experiment.  Both kinds: it reaches a session through the
+            engine's ``create_session``, and a driver through the
+            ``JAATO_PROFILE_SET`` the engine writes into the workspace
+            ``.env`` (:mod:`jaato_eval.fixture`).
+        run: The driver command line, run through the shell with the
+            workspace as its working directory.  Required under ``kind:
+            driver``; refused under ``kind: session``.
     """
 
-    profile: str
+    kind: str = "session"
+    profile: Optional[str] = None
     profile_set: Optional[str] = None
+    run: Optional[str] = None
+
+    @property
+    def is_driver(self) -> bool:
+        return self.kind == "driver"
 
 
 @dataclass(frozen=True)
@@ -248,6 +309,104 @@ def _mapping(value: Any, path: Path, where: str) -> Dict[str, Any]:
     return value
 
 
+def _parse_harness_and_input(raw: Dict[str, Any], path: Path
+                             ) -> Tuple[HarnessSpec, InputSpec]:
+    """Parse ``harness`` and ``input`` together, per ``harness.kind``.
+
+    Together because the two blocks share one discriminator: which
+    ``input`` keys are meaningful is decided by ``harness.kind``, and a
+    parser that validated them apart could only refuse the wrong keys by
+    guessing at the variant.
+    """
+    h_raw = _mapping(_require(raw, "harness", path, "top level"), path, "harness")
+    kind = str(_require(h_raw, "kind", path, "harness")) if "kind" in h_raw else "session"
+    if kind not in HARNESS_KINDS:
+        raise ManifestError(
+            path, f"harness.kind: unknown kind {kind!r}; expected one of {HARNESS_KINDS}")
+    if kind == "driver":
+        return _driver_variant(h_raw, raw, path)
+    return _session_variant(h_raw, raw, path)
+
+
+def _refuse_keys(block: Dict[str, Any], keys: Sequence[str], path: Path,
+                 where: str, kind: str) -> None:
+    """Refuse a key the other variant reads.
+
+    A key nothing reads is the silent-ignore shape the manifest parser
+    exists to prevent: ``input.prompt`` on a driver arm reaches no
+    session, ``harness.run`` on a session arm starts no process, and in
+    both cases the author believes otherwise.  The error names the
+    variant so the fix is to change ``kind`` or drop the key, not to
+    guess.
+    """
+    for key in keys:
+        if key in block:
+            raise ManifestError(
+                path, f"{where}.{key} is not read under harness.kind: {kind}; "
+                      f"drop it, or change the kind")
+
+
+def _session_variant(h_raw: Dict[str, Any], raw: Dict[str, Any],
+                     path: Path) -> Tuple[HarnessSpec, InputSpec]:
+    _refuse_keys(h_raw, ("run",), path, "harness", "session")
+    in_raw = _mapping(_require(raw, "input", path, "top level"), path, "input")
+    _refuse_keys(in_raw, ("params",), path, "input", "session")
+    prompt = str(_require(in_raw, "prompt", path, "input")).strip()
+    if not prompt:
+        raise ManifestError(path, "input.prompt is empty")
+    harness = HarnessSpec(
+        kind="session",
+        profile=str(_require(h_raw, "profile", path, "harness")),
+        profile_set=h_raw.get("profile_set"),
+    )
+    task_input = InputSpec(
+        prompt=prompt,
+        agent=in_raw.get("agent"),
+        agent_params=_mapping(in_raw.get("agent_params"), path, "input.agent_params"),
+    )
+    return harness, task_input
+
+
+def _driver_variant(h_raw: Dict[str, Any], raw: Dict[str, Any],
+                    path: Path) -> Tuple[HarnessSpec, InputSpec]:
+    _refuse_keys(h_raw, ("profile",), path, "harness", "driver")
+    run = str(_require(h_raw, "run", path, "harness")).strip()
+    if not run:
+        raise ManifestError(path, "harness.run is empty")
+    # ``input`` is optional here: a driver whose whole input is its command
+    # line has nothing to put in it, and forcing an empty block would be a
+    # default that hides nothing and helps nobody.
+    in_raw = _mapping(raw.get("input"), path, "input")
+    _refuse_keys(in_raw, ("prompt", "agent", "agent_params"), path, "input", "driver")
+    params = _mapping(in_raw.get("params"), path, "input.params")
+    # Refused HERE, before any arm is materialised: the export is what the
+    # driver receives and what its graders read, so a collision is an
+    # authoring error in the task, not a runtime condition of one arm.
+    _, collision = param_env(params)
+    if collision:
+        raise ManifestError(path, f"input.params: {collision}")
+    harness = HarnessSpec(kind="driver", run=run, profile_set=h_raw.get("profile_set"))
+    return harness, InputSpec(params=params)
+
+
+def _parse_graders(raw: Dict[str, Any], path: Path) -> List[GraderSpec]:
+    """The ``graders`` list: non-empty, each of a known kind."""
+    graders_raw = _require(raw, "graders", path, "top level")
+    if not isinstance(graders_raw, list) or not graders_raw:
+        raise ManifestError(path, "graders must be a non-empty list")
+    graders: List[GraderSpec] = []
+    for i, g in enumerate(graders_raw):
+        g = _mapping(g, path, f"graders[{i}]")
+        kind = str(_require(g, "kind", path, f"graders[{i}]"))
+        if kind not in GRADER_KINDS:
+            raise ManifestError(
+                path, f"graders[{i}]: unknown kind {kind!r}; expected one of {GRADER_KINDS}")
+        config = {k: v for k, v in g.items() if k not in ("kind", "weight")}
+        graders.append(GraderSpec(kind=kind, config=config,
+                                  weight=float(g.get("weight", 1.0))))
+    return graders
+
+
 def load_manifest(path: Path) -> TaskManifest:
     """Parse and validate one ``task.yaml``.
 
@@ -283,35 +442,9 @@ def load_manifest(path: Path) -> TaskManifest:
         if not resolved.is_dir():
             raise ManifestError(path, f"environment.{label} does not exist: {resolved}")
 
-    in_raw = _mapping(_require(raw, "input", path, "top level"), path, "input")
-    prompt = str(_require(in_raw, "prompt", path, "input")).strip()
-    if not prompt:
-        raise ManifestError(path, "input.prompt is empty")
-    task_input = InputSpec(
-        prompt=prompt,
-        agent=in_raw.get("agent"),
-        agent_params=_mapping(in_raw.get("agent_params"), path, "input.agent_params"),
-    )
+    harness, task_input = _parse_harness_and_input(raw, path)
 
-    h_raw = _mapping(_require(raw, "harness", path, "top level"), path, "harness")
-    harness = HarnessSpec(
-        profile=str(_require(h_raw, "profile", path, "harness")),
-        profile_set=h_raw.get("profile_set"),
-    )
-
-    graders_raw = _require(raw, "graders", path, "top level")
-    if not isinstance(graders_raw, list) or not graders_raw:
-        raise ManifestError(path, "graders must be a non-empty list")
-    graders: List[GraderSpec] = []
-    for i, g in enumerate(graders_raw):
-        g = _mapping(g, path, f"graders[{i}]")
-        kind = str(_require(g, "kind", path, f"graders[{i}]"))
-        if kind not in GRADER_KINDS:
-            raise ManifestError(
-                path, f"graders[{i}]: unknown kind {kind!r}; expected one of {GRADER_KINDS}")
-        config = {k: v for k, v in g.items() if k not in ("kind", "weight")}
-        graders.append(GraderSpec(kind=kind, config=config,
-                                  weight=float(g.get("weight", 1.0))))
+    graders = _parse_graders(raw, path)
 
     raw_budget = dict(_mapping(raw.get("budget"), path, "budget"))
     raw_degrade = raw_budget.pop("degrade", None) or []

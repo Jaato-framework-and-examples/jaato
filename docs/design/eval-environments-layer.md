@@ -170,6 +170,23 @@ graders:
 Three grader kinds, all of which already exist in some form. The manifest does
 not invent a grading language — it names existing artefacts.
 
+#### Two harness kinds
+
+`harness.kind: session` (the default) is the manifest above. `harness.kind:
+driver` (jaato #1110) makes the arm a **process** the engine starts from
+`harness.run`, which opens as many sessions as it likes — the
+driver-as-graph shape, where the orchestration is deterministic code and
+host tools live in the driver's process. The engine hands it the arm as a
+versioned environment contract (`JAATO_EVAL_CONTRACT=1`: workspace, config
+root, socket, **the arm's cascade id**, and `input.params` as
+`JAATO_EVAL_PARAM_*`), observes the cid from its own connection, and reads
+the exit code: `0` gradeable, `75` BLOCKED, anything else an unsigned arm.
+The alternatives set aside — an in-process callable, a driver that writes
+its own result, a driver run outside and fed to `report` — each either
+weakened "one arm blowing up must not take the sweep with it" or rebuilt
+the accounting this layer exists to centralise. `jaato-eval/README.md`
+carries the contract table.
+
 ### 2. Fixture materialisation
 
 Copy `fixture` → a fresh temp workspace per run; point `workspace_path` at the

@@ -22,13 +22,13 @@ grader follow the input by construction instead of by remembering.
 """
 from __future__ import annotations
 
-import json
 import os
-import re
 import subprocess
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import List
 
 from ..manifest import GraderSpec
+from ..params import param_env as _param_env
+from ..sign_off import describe_unsigned
 from ..verdict import FAIL, PASS, Verdict
 from .base import GraderContext, blocked
 
@@ -40,24 +40,6 @@ _COMMAND_NOT_FOUND = 127
 #: Cap on captured output kept as evidence, in lines from the tail.  A
 #: build log can be tens of thousands of lines; the failure is at the end.
 _EVIDENCE_LINES = 20
-
-#: Prefix for the per-parameter variables exported from ``agent_params``.
-#: Namespaced so a task's inputs cannot shadow anything the surrounding
-#: environment already means.
-_PARAM_PREFIX = "JAATO_EVAL_PARAM_"
-
-#: Variable carrying the whole ``agent_params`` mapping as JSON, under the
-#: authors' own key spellings.  It is what distinguishes "this task has no
-#: such parameter" from "the parameter is there and empty" — the per-key
-#: variables cannot, because an unset variable and an empty one read alike
-#: in a shell.  A grader that must be strict about a parameter it depends
-#: on can assert against this rather than passing vacuously.
-_PARAMS_JSON = "JAATO_EVAL_PARAMS"
-
-#: Characters an environment variable name cannot carry.  Parameter keys
-#: are YAML identifiers by convention but nothing enforces it, so
-#: ``issue-id`` and ``issue.id`` have to become something a shell can name.
-_NON_IDENTIFIER = re.compile(r"[^A-Z0-9_]")
 
 
 class ScriptGrader:
@@ -157,63 +139,11 @@ class ScriptGrader:
             # its siblings should know the agent never declared itself
             # done, because that is a real difference in how it behaved.
             verdict.note(
-                f"graded without a completion payload — the agent never "
-                f"called signal_completion ({context.termination_error_type})")
+                f"graded without a completion payload — "
+                f"{describe_unsigned(context.termination_error_type)}")
         for line in _tail(proc.stdout, proc.stderr):
             verdict.note(line)
         return verdict
-
-
-def _env_name(key: str) -> str:
-    """Environment variable name for one ``agent_params`` key."""
-    return _PARAM_PREFIX + _NON_IDENTIFIER.sub("_", key.upper())
-
-
-def _encode(value: Any) -> str:
-    """Render one parameter value for a shell.
-
-    Strings pass through verbatim — quoting them would mean every grader
-    had to unquote, and the common case is a bare identifier.  Everything
-    else is JSON, which is the only encoding that survives the round trip
-    for the values ``agent_params`` actually holds: a nested dict or list
-    has no other textual form a grader could parse back, ``True`` becomes
-    the ``true`` the manifest author wrote rather than Python's ``True``,
-    and ``None`` becomes ``null`` instead of the empty string that would
-    make an explicit null indistinguishable from an absent key.
-
-    ``default=str`` keeps an exotic value (a ``Path``, say) from raising
-    out of a grader — the adapter's contract is to describe what it can
-    do, never to explode inside the sweep driver.
-    """
-    if isinstance(value, str):
-        return value
-    return json.dumps(value, sort_keys=True, default=str)
-
-
-def _param_env(agent_params: Mapping[str, Any]) -> Tuple[Dict[str, str],
-                                                         Optional[str]]:
-    """Exported environment for ``agent_params``, or a reason it cannot be.
-
-    Returns ``(env, None)`` normally, and ``({}, reason)`` when two
-    parameter keys collapse onto one variable name (``issue-id`` and
-    ``issue_id`` both want ``$JAATO_EVAL_PARAM_ISSUE_ID``).  Picking a
-    winner there would hand the grader one input while the arm ran with
-    the other — precisely the silent disagreement this export exists to
-    remove — so the ambiguity is surfaced as BLOCKED and the task author
-    renames one key.
-    """
-    env = {_PARAMS_JSON: json.dumps(dict(agent_params), sort_keys=True,
-                                    default=str)}
-    origin: Dict[str, str] = {}
-    for key, value in agent_params.items():
-        name = _env_name(key)
-        if name in origin:
-            return {}, (f"agent_params keys {origin[name]!r} and {key!r} "
-                        f"both map to ${name}; rename one — grading "
-                        "against whichever won would be arbitrary")
-        origin[name] = key
-        env[name] = _encode(value)
-    return env, None
 
 
 def _tail(stdout: str, stderr: str) -> List[str]:
