@@ -34,7 +34,9 @@ Three findings shape everything below.
    2 August 2026 have until **2 December 2026** to carry the machine-readable
    marking of Article 50(2). So the two obligations that bind a jaato
    application *today* are the ones about talking to people — say that you are
-   an AI, mark what you generate — and jaato has no mechanism for either.
+   an AI, mark what you generate — and jaato had no mechanism for either
+   until the `disclosure` instruction piece (§4.2) and the `generated_by`
+   stamp on model media (§4.3) shipped with this document.
 
 3. **Most of the high-risk requirements are already half-built, as engineering.**
    Logging (Article 12), human oversight (Article 14), robustness and
@@ -47,8 +49,11 @@ Three findings shape everything below.
    written about it.
 
 The recommendation is a short list of mechanisms, ordered by when they bind
-(§5). The first three are small and are due now; the rest are what lets a
-deployer adopt a jaato application into a high-risk process in 2027 without
+(§5). Items 1–5 — the `regulatory:` block, the `disclosure` piece, the
+`generated_by` stamp, the ledger reaching disk, `explain oversight` — are
+implemented in the same change as this document, each marked **Shipped** in
+§4 with what it deliberately leaves for a follow-up; the rest are what lets
+a deployer adopt a jaato application into a high-risk process in 2027 without
 re-deriving the framework's behaviour from its source.
 
 ## Status & verification disclaimer
@@ -61,7 +66,8 @@ consolidated text was not retrievable here; the dates are consistent across
 four sources but should be checked against the OJ before anything is
 scheduled on them. Framework claims were verified against commit `982a0b3`
 (server 0.16.0, SDK 0.23.0) on 2026-09-18, and each names the file it was
-read from. Nothing here is legal advice; it is an engineering reading of a
+read from; the **Shipped** notes in §4 describe the same tree after the
+five changes that accompany this document. Nothing here is legal advice; it is an engineering reading of a
 legal text, written to decide what to build.
 
 ## 1. Where jaato sits in the Act's vocabulary
@@ -139,8 +145,11 @@ and the gap is almost always the same: the fact is *produced* but not
 
 Three gaps, in decreasing order of surprise:
 
-1. **The ledger never reaches disk on the daemon path.** `TokenLedger.write_ledger()`
-   is the only method that writes `LEDGER_PATH`, and it has no caller outside
+1. **The ledger never reached disk on the daemon path** — *fixed with this
+   document* (§4.4): a record is now appended the moment it is recorded, and
+   `trace.ledger` is the typed key for the file. As found:
+   `TokenLedger.write_ledger()`
+   was the only method that wrote `LEDGER_PATH`, and it had no caller outside
    tests (measured: `grep -rn "write_ledger(" --include=*.py .` returns the
    definition and its own docstring). `JaatoServer` constructs a ledger
    (`server/core.py:693`) and both writers append to it, so the `permission-check`
@@ -187,8 +196,10 @@ The gaps are narrower than the coverage but real:
   template is asked to stop politely before SIGTERM. `session.stop <id>`
   does the same for one session by the same cancellation path. That is
   14(4)(e)'s "halt in a safe state" and 26(5)'s "suspend the use of that
-  system"; what is missing is a surface that names them as such, which
-  §4.5 puts on `explain` and `jaato-doctor`.
+  system"; what was missing is a surface that names them as such, which
+  §4.5 puts on `explain` and `jaato-doctor` — *shipped*:
+  `jaato-scaffold explain oversight [<profile>]` and the doctor's
+  `stop button` line.
 - **Reversal is partial by nature.** `file_edit` backs up, `rewind` restores
   history; a `cli` command, a `call_service` POST, a Telegram reply cannot be
   reversed by the framework. The honest mechanism is the *record* of effects,
@@ -274,6 +285,9 @@ being an AI; a persona can be written to claim to be a person and nothing
 warns; there is no first-interaction announcement a chat or voice client can
 render; and `suppress_base_instructions: true` drops `constants` wholesale,
 so any disclosure instruction placed there would vanish with the rest.
+*Now* (§4.2): a fourth piece, `disclosure`, kept by the blanket `true` and
+dropped only by name with a WARNING; the first-interaction announcement a
+client renders is still to be wired.
 
 **50(2)** — outputs "marked in a machine-readable format and detectable as
 artificially generated", "effective, interoperable, robust and reliable as
@@ -289,7 +303,10 @@ nothing. For text, the AI Office's code of practice on marking is still being
 drawn up (50(7)); text has no interoperable marking standard today, and the
 obligation is bounded by "technically feasible" — so text is a documentation
 question until a standard exists, and audio and images are an engineering one
-now.
+now. *Now* (§4.3): `ToolOutputEvent.generated_by` (protocol 1.14) carries
+`{"kind": "ai", provider, model, session_id, agent_id}` on the model's own
+media and whatever a producer stamped on an `Attachment`; the client-facing
+marker hook is the follow-up.
 
 ### Article 4 — AI literacy
 
@@ -316,6 +333,16 @@ Each is stated as a contract the way the rest of this tree states them:
 what it does, where it lives, what it deliberately does not do.
 
 ### 4.1 A `regulatory:` block in the profile — the one fact only the author knows
+
+> **Shipped.** `RegulatoryProfileConfig` / `parse_regulatory_block`
+> (`shared/plugins/subagent/config.py`), wired into every profile ingress
+> including the isolated-runner payload; `validate` reports
+> `disclosure_absent`, escalates `HIGH_RISK_ESCALATED_CODES` to errors under
+> `risk_class: high` and adds the five `high_risk_*` findings
+> (`shared/scaffold/validate.py`); `explain profile` renders it;
+> `explain oversight <profile>` reads it. Guard:
+> `shared/tests/test_regulatory_profile_block.py`. The dossier (§4.6) is
+> not built yet.
 
 ```yaml
 # .jaato/profiles/screener.yaml
@@ -355,6 +382,16 @@ regulatory:
 
 ### 4.2 Disclosure of AI interaction (Article 50(1))
 
+> **Shipped: touches 1 and 3.** `PIECE_DISCLOSURE` in
+> `shared/instruction_suppression.py`, the text in `shared/ai_disclosure.py`,
+> appended by `JaatoRuntime.get_system_instructions` beside the boundary and
+> announced at WARNING by the session when dropped (`ANNOUNCED_PIECES`);
+> `disclosure_absent` and `high_risk_disclosure_suppressed` in `validate`.
+> Guard: `shared/tests/test_ai_disclosure_piece.py`. **Not yet:** touch 2,
+> the first-interaction announcement — `disclosure_announcement()` renders
+> the text, but nothing emits it on session creation and
+> `PresentationContext.client_discloses_ai` does not exist.
+
 Three touches, one fact:
 
 1. **A fourth named instruction piece, `disclosure`,** beside `disk`,
@@ -384,6 +421,15 @@ would be defeated by the first synonym and would certify what it did not
 find.
 
 ### 4.3 Provenance on generated output (Article 50(2))
+
+> **Shipped: touch 1.** `ToolOutputEvent.generated_by` (protocol 1.14),
+> `jaato_sdk.events.ai_generated_by`, `Attachment.generated_by`, stamped in
+> `JaatoSession._deliver_model_media` and carried through
+> `_emit_withheld_attachments_to_clients`, the runner frame and the daemon
+> dispatcher; TypeScript surface regenerated. Guard:
+> `shared/tests/test_generated_by_stamp.py`. **Not yet:** touch 2, the
+> `TRAIT_OUTPUT_MARKER` hook and its C2PA sidecar; and no in-tree tool
+> stamps an `Attachment` yet (there is no image-generation tool to stamp).
 
 The framework's boundary is the event protocol, and the event protocol is
 where a client learns what it is about to show a person. So:
@@ -418,6 +464,14 @@ which is why the stamp is in the "now" tier of §5 even though the hook can
 follow.
 
 ### 4.4 One audit record, with a retention policy (Articles 12, 19, 26(6))
+
+> **Shipped: the ledger fix only.** `TokenLedger` appends per record to
+> `LEDGER_PATH` (explicit path > env; relative resolves against the session
+> workspace; an unwritable path never fails the round trip), `write_ledger`
+> flushes only what was not appended, and `trace.ledger` is the typed key,
+> closing the env catalog's entry. Guard:
+> `shared/tests/test_ledger_reaches_disk.py`. The schema, `record_keeping:`
+> and `sha256-chain` are not built.
 
 Not a sixth store. A **contract over the stores that exist**:
 
@@ -460,6 +514,13 @@ Not a sixth store. A **contract over the stores that exist**:
   segments.
 
 ### 4.5 A stop button — already there; make the tools say so
+
+> **Shipped.** `jaato-scaffold explain oversight` (bare: the measures, read
+> from their enforcers; `<profile>`: what that profile armed, resolved
+> through `discover_profiles`) and the `stop button` line in `jaato-doctor`,
+> with the `--stop` invocation read off the running daemon's argv. Guards:
+> `shared/tests/test_explain_oversight.py`,
+> `shared/tests/test_doctor_names_the_stop_button.py`.
 
 An earlier draft proposed a daemon-level `halt` verb: stop every loaded
 session, keep the daemon up, refuse new turns. It is not needed, and the
@@ -592,7 +653,10 @@ to the intended purpose" is the provider's call.
 | 12 | `sha256-chain` integrity | 73(6), #507 | 2 Dec 2027 | S | 6 |
 
 Items 1–5 are small, independent of each other, and two of them are overdue
-for any jaato application already talking to people in the EU. Items 6–8
+for any jaato application already talking to people in the EU — which is
+why they ship with this document (each §4 entry says what it leaves out:
+the first-interaction announcement, the output-marker hook, the dossier).
+Items 6–8
 are the ones that let a deployer adopt a jaato application into an Annex III
 process without re-deriving what the framework does from its source, and
 they are the same items that make a production deployment debuggable, which
