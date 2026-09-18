@@ -3375,6 +3375,65 @@ def _oversight_measures() -> Dict[str, Any]:
                 "them"
             ),
         },
+        "output_marking": _output_marking_posture(),
+    }
+
+
+def _output_marking_posture() -> Dict[str, Any]:
+    """What the framework marks under Art. 50(2), and what it does not (#1118).
+
+    The section a deployer needs and could not get anywhere: three true
+    statements about text provenance, none of which was written down on
+    a surface anyone reads.  Stated here rather than only in the design
+    doc because this page is the computed statement of what the
+    framework does for a person on the other end -- and because it is
+    what an Annex IV dossier quotes.
+
+    Two of the three values are READ from the tree rather than asserted
+    (the protocol version that carries the stamp, and the marker plugins
+    installed), so the page cannot claim a marking the build does not
+    have.  The text posture is the one genuinely editorial line, and it
+    names its own revisit trigger.
+    """
+    from jaato_sdk.events import PROTOCOL_VERSION
+
+    markers: List[str] = []
+    try:
+        from jaato_sdk.plugins.base import TRAIT_OUTPUT_MARKER
+        for name, info in sorted(introspect.plugins().items()):
+            if TRAIT_OUTPUT_MARKER in (getattr(info, "plugin_traits", None)
+                                       or frozenset()):
+                markers.append(name)
+    except Exception:  # noqa: BLE001 -- a diagnostic must not raise
+        markers = []
+
+    return {
+        "media": (
+            "the model's own audio and images carry `generated_by` on the "
+            f"wire (protocol {PROTOCOL_VERSION}): kind, provider, model, "
+            "session_id, agent_id.  That field travels with the DELIVERY "
+            "EVENT and stops there -- a client that saves the bytes keeps "
+            "no record of it"
+        ),
+        "files": (
+            "a plugin declaring TRAIT_OUTPUT_MARKER puts the marking in or "
+            "beside the payload, so it survives leaving jaato.  Installed "
+            "here: " + (", ".join(markers) if markers else "none")
+        ),
+        "text": (
+            "NOT marked.  AgentOutputEvent.source attributes it at the "
+            "event layer (agent / system / permission / user) and that is "
+            "all; no text watermark ships until the Art. 50(7) code of "
+            "practice or a harmonised standard names one, because a "
+            "prefix a client strips is a marking that certifies what it "
+            "did not find"
+        ),
+        "deployer_publishing": (
+            "Art. 50(4) -- disclosing that text published to inform the "
+            "public on matters of public interest was AI-generated -- is a "
+            "PUBLISHING decision.  The framework cannot see that a "
+            "transcript was published, and does not attempt to"
+        ),
     }
 
 
@@ -3437,6 +3496,15 @@ def _oversight_lines(M: Dict[str, Any]) -> List[str]:
     lines.append("REVERSIBLE / NOT")
     lines.extend(_wrap_bullet(M["reversibility"]["reversible"], indent=2, glyph="+"))
     lines.extend(_wrap_bullet(M["reversibility"]["not_reversible"], indent=2, glyph="-"))
+    mark = M.get("output_marking")
+    if mark:
+        lines.append("")
+        lines.append("MARKING GENERATED OUTPUT  (Art. 50(2), 50(4))")
+        for key, label in (("media", "media"), ("files", "files"),
+                           ("text", "text"),
+                           ("deployer_publishing", "publishing")):
+            lines.append(f"  {label}")
+            lines.extend(_wrap_bullet(mark[key], indent=6, glyph=" "))
     lines += [
         "",
         "  `explain oversight <profile> --workspace DIR` shows which of these a",

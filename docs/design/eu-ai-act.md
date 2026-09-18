@@ -439,14 +439,47 @@ find.
 
 ### 4.3 Provenance on generated output (Article 50(2))
 
-> **Shipped: touch 1.** `ToolOutputEvent.generated_by` (protocol 1.14),
-> `jaato_sdk.events.ai_generated_by`, `Attachment.generated_by`, stamped in
+> **Shipped: all three touches.** Touch 1: `ToolOutputEvent.generated_by`
+> (protocol 1.14), `jaato_sdk.events.ai_generated_by`,
+> `Attachment.generated_by`, stamped in
 > `JaatoSession._deliver_model_media` and carried through
 > `_emit_withheld_attachments_to_clients`, the runner frame and the daemon
 > dispatcher; TypeScript surface regenerated. Guard:
-> `shared/tests/test_generated_by_stamp.py`. **Not yet:** touch 2, the
-> `TRAIT_OUTPUT_MARKER` hook and its C2PA sidecar; and no in-tree tool
-> stamps an `Attachment` yet (there is no image-generation tool to stamp).
+> `shared/tests/test_generated_by_stamp.py`.
+>
+> Touch 2 (#1117): `TRAIT_OUTPUT_MARKER` in `jaato_sdk/plugins/base.py`,
+> the payload/result contract in `jaato_sdk/output_marking.py`, the
+> dispatcher `JaatoSession._mark_generated_output` invoked at both
+> delivery seams, and the in-tree `output_marker` plugin writing
+> `<file>.provenance.json`. Guard:
+> `shared/tests/test_output_marker_trait.py`. Touch 3 (#1118): the text
+> posture is below, and is rendered by `explain oversight` so a deployer
+> reads it off the framework rather than out of this file.
+>
+> **Three departures from the proposal, each deliberate.**
+>
+> 1. *The trait is a PLUGIN trait, not a tool trait.* §4.3 proposes
+>    `jaato-sdk/jaato_sdk/plugins/model_provider/types.py`, beside
+>    `TRAIT_FILE_WRITER` — but that module holds traits declared on a
+>    `ToolSchema`, and nothing there reads `plugin_traits`. It sits beside
+>    `TRAIT_AUTH_PROVIDER` and `TRAIT_SLOT_SCOPED` instead.
+> 2. *The sidecar is `<file>.provenance.json`, not `<file>.c2pa.json`.*
+>    It carries the IPTC `trainedAlgorithmicMedia` token and a C2PA-style
+>    actions assertion so a reader who knows C2PA recognises it, and it is
+>    **not signed** — signing needs a certificate the framework cannot hold
+>    for you. A file named `.c2pa.json` would be read as a manifest by
+>    anything looking for one and rejected by every verifier, while telling
+>    a deployer their output is C2PA-marked. `"conformance":
+>    "c2pa-shaped-unsigned"` and `"signature": null` say the same thing
+>    inside the document.
+> 3. *No in-tree producer marks a file yet, and that is the point.* The
+>    only in-tree `Attachment` constructor is `clarification` — a person's
+>    voice note answering a question, which is emphatically not
+>    AI-generated. So the deliverable is the CONTRACT plus an AST guard
+>    (`test_every_attachment_producer_either_stamps_or_is_a_declared_relay`)
+>    that fails any future producer which neither stamps nor is named in an
+>    explicit relays-only list. A guard written when the first generator
+>    ships is a guard written after the first unmarked output.
 
 The framework's boundary is the event protocol, and the event protocol is
 where a client learns what it is about to show a person. So:
@@ -473,12 +506,48 @@ where a client learns what it is about to show a person. So:
    practice names a standard. The instructions for use say so, and say that
    50(4)'s deployer-side disclosure ("text which is published with the
    purpose of informing the public") is a publishing decision the framework
-   cannot see.
+   cannot see. See *The text posture* below.
 
 The 2 December 2026 grace period is for systems already on the market; a
 jaato application put into service after 2 August 2026 has no grace at all,
 which is why the stamp is in the "now" tier of §5 even though the hook can
 follow.
+
+#### The text posture (Art. 50(2), 50(4), 50(7)) — #1118
+
+Three things are true about text provenance in this framework, and until
+#1118 none of them was stated on a surface a deployer reads. They are now
+rendered by `jaato-scaffold explain oversight` under **MARKING GENERATED
+OUTPUT**, computed from the tree — the protocol version that carries the
+stamp and the marker plugins this build actually has — rather than
+written down here and left to go stale.
+
+1. **`AgentOutputEvent.source` is the whole of it.** Text a model produced
+   arrives attributed (`agent`, `system`, `permission`, `user`, …), which
+   is machine-readable at the event layer and **stops at the client**. A
+   transcript pasted into a document carries nothing.
+2. **`generated_by` is media-only, on purpose.** Protocol 1.14 stamps the
+   model's own audio and images. Text is not stamped because there is
+   nothing to stamp it with: watermarking natural-language text is not a
+   solved problem, and the Article 50(7) code of practice has not named a
+   detection standard.
+3. **Art. 50(4) is a publishing decision the framework cannot see.** The
+   deployer-side duty to disclose that "text which is published with the
+   purpose of informing the public on matters of public interest" was
+   AI-generated attaches to an act of publication. Nothing in a session
+   tells the framework a transcript was published, and it does not guess.
+
+**Deliberately not done: a prefix on `AgentOutputEvent`.** A "this text was
+generated by AI" banner would be stripped by the first client that reflows
+output, would change every transcript in the tree, and — the sharper
+objection — would be a marking that certifies what it did not find: a
+reader who saw it on some text and not other text would conclude the
+unmarked text was human-written, which the framework has no basis to say.
+
+**The revisit trigger is external and specific**: publication of the
+Article 50(7) code of practice, or a harmonised standard for text
+provenance. Until one exists, the honest answer is the one above, said out
+loud, rather than a mechanism that looks like compliance.
 
 ### 4.4 One audit record, with a retention policy (Articles 12, 19, 26(6))
 
