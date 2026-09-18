@@ -20,6 +20,7 @@ from shared.plugins.references.bundle import (
     BUNDLE_TIER_WORKSPACE,
     EMBEDDING_CONFIG_FILENAME,
     ROOT_BUNDLE_NAME,
+    write_bundle_manifest,
 )
 from shared.plugins.references.embedding_types import EmbeddingResult
 from shared.plugins.references.models import ReferenceSource
@@ -41,6 +42,7 @@ def _write_ref(directory: Path, sid: str, *, mode="selectable"):
 
 def _write_manifest(directory: Path, *, rows, model="mock-model", dim=4):
     directory.mkdir(parents=True, exist_ok=True)
+    write_bundle_manifest(directory, name=directory.name)
     (directory / EMBEDDING_CONFIG_FILENAME).write_text(json.dumps({
         "embedding_model": model,
         "embedding_dimensions": dim,

@@ -85,16 +85,40 @@ without one is just a container for references that participate in the root
 bundle (this preserves the current flat layout for users who never ran the
 indexer).
 
-> **Updated 2026-09 (#1130).** "A bundle manifest" means `bundle.json` — the
-> domain-agnostic marker written by
-> `bundle_common.bundle.write_bundle_manifest`, whose every field is optional
-> — **or** `embedding_config.json`, still recognised so every bundle already
-> on disk keeps loading. The index below is a *references* concern: it lives
-> on `references.bundle.ReferenceBundle` rather than on the generic `Bundle`,
+> **Updated 2026-09 (#1130).** "A bundle manifest" means `bundle.json`, and
+> means nothing else. It is the domain-agnostic marker written by
+> `bundle_common.bundle.write_bundle_manifest`, and every field in it is
+> optional — its *presence* is the claim. The layout above is therefore out
+> of date in one respect: a bundle is marked by `bundle.json`, not by the
+> index descriptor.
+>
+> **A bundle and an index are independent things.** `embedding_config.json`
+> describes a *references* vector index: it lives on
+> `references.bundle.ReferenceBundle` rather than on the generic `Bundle`,
 > and a bundle that declares no index (`has_index is False`) is discovered,
-> listed and packed exactly like one that does. What has not changed is the
-> need for a manifest at all: a subdirectory without one is still ignored, so
-> dropping an unrelated directory into a tier root never pollutes the catalog.
+> listed and packed exactly like one that does. In the other direction, an
+> index descriptor sitting on its own marks **nothing** — a directory is a
+> bundle because a domain claimed it, never because of what it happens to
+> contain. There is no second marker and no legacy alias: nothing was ever
+> shipped that relied on one, so recognising the index name would have kept
+> alive exactly the coupling this issue removed.
+>
+> What has not changed is the need for a manifest at all: a subdirectory
+> without one is still ignored, so dropping an unrelated directory into a
+> tier root never pollutes the catalog.
+>
+> Two consequences worth stating, because each was a defect before:
+>
+> - **Creating a bundle needs no embedding provider.** The generic
+>   `bundle create --kind references` writes `bundle.json` and no index; a
+>   later `references reconcile` adds one if the workspace has a provider.
+>   The references plugin's own `references bundle create` still builds an
+>   indexed bundle in one step, because that is a references verb.
+> - **The generic layer asks rather than knows.** `bundle.json` is its own
+>   file, so it skips that one; anything else a domain keeps beside it is
+>   named by the domain through `BundleEntryHandler.non_entry_filenames()`.
+>   That is how `embedding_config.json` stays out of an unpack's entry count
+>   without `bundle_common` holding a references filename.
 
 ### `embedding_config.json` schema (v2)
 

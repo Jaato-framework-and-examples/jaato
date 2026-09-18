@@ -39,7 +39,7 @@ from ..bundle_common.bundle import (
     write_bundle_manifest,
 )
 from ..bundle_common.handler import BundleEntry, BundleEntryHandler
-from .bundle import EMBEDDING_CONFIG_FILENAME, ReferenceBundle
+from .bundle import REFERENCE_NON_SOURCE_FILENAMES, ReferenceBundle
 from .models import SourceType
 
 if TYPE_CHECKING:  # pragma: no cover - import only for type hints
@@ -76,6 +76,19 @@ class ReferencesEntryHandler(BundleEntryHandler):
     @property
     def domain_subpath(self) -> Path:
         return _REFERENCES_DOMAIN_SUBPATH
+
+    def non_entry_filenames(self) -> Tuple[str, ...]:
+        """``embedding_config.json`` is an index, not a reference.
+
+        Both files in :data:`REFERENCE_NON_SOURCE_FILENAMES` are
+        ``*.json`` sitting in the bundle directory beside the reference
+        definitions, so anything counting or enumerating entries by
+        glob has to be told.  The generic layer skips its own
+        ``bundle.json`` and asks the domain for the rest (#1130) --
+        naming this file there would be the layer knowing about
+        references again.
+        """
+        return REFERENCE_NON_SOURCE_FILENAMES
 
     # ------------------------------------------------------------------
     # Enumeration
@@ -245,10 +258,9 @@ class ReferencesEntryHandler(BundleEntryHandler):
         :meth:`reload_catalog` is still safe but lets us minimize the
         window where state is inconsistent.
         """
-        from ..bundle_common.bundle import (
-            BUNDLE_MARKER_FILENAMES as _MARKERS,
-            ROOT_BUNDLE_NAME as _ROOT,
-        )
+        from ..bundle_common.bundle import ROOT_BUNDLE_NAME as _ROOT
+
+        _MARKERS = REFERENCE_NON_SOURCE_FILENAMES
 
         # Non-emptiness check: any rows OR any *.json reference files
         # (excluding the bundle's own manifests).
@@ -296,17 +308,23 @@ class ReferencesEntryHandler(BundleEntryHandler):
         workspace_path: Optional[Path] = None,
         user_home: Optional[Path] = None,
     ) -> ReferenceBundle:
-        """Write a fresh references manifest at the chosen tier root.
+        """Write a fresh bundle manifest at the chosen tier root.
 
-        The bundle's embedding model and dimensions are inherited from
-        the active embedding provider; without a provider the call
-        fails because a sidecar can't be written meaningfully. The
-        wrapped plugin is *not* required to be the workspace-loaded
+        Creating a bundle needs NO embedding provider (#1130).  A
+        bundle is a directory a domain claims; an index is a separate,
+        optional thing that may be generated later by ``reconcile``.
+        This used to demand a provider so it could stamp a model and
+        dimensions into ``embedding_config.json`` — which it wrote AS
+        the manifest — so a workspace without an embedding provider
+        could not create a bundle at all.
+
+        The wrapped plugin is *not* required to be the workspace-loaded
         instance — ``workspace_path`` resolves the tier root directly,
         making this method usable from any context that has the
         coordinates.
         """
         from ..bundle_common.bundle import (
+            BUNDLE_MANIFEST_FILENAME,
             BUNDLE_TIER_WORKSPACE as _WS,
             ROOT_BUNDLE_NAME as _ROOT,
             VALID_BUNDLE_TIERS as _TIERS,
@@ -316,21 +334,6 @@ class ReferencesEntryHandler(BundleEntryHandler):
             raise ValueError(
                 f"unknown tier {tier!r}; expected one of {', '.join(_TIERS)}"
             )
-        provider = self._plugin._embedding_provider
-        if provider is None:
-            raise RuntimeError(
-                "references kind requires an embedding provider to create "
-                "an empty bundle (the manifest declares model + dimensions)"
-            )
-        if not provider.available:
-            provider.load_model()
-        dimensions = getattr(provider, "dimensions", None)
-        if not isinstance(dimensions, int) or dimensions <= 0:
-            raise RuntimeError(
-                "embedding provider did not report a valid dimension; "
-                "cannot write a bundle manifest without it"
-            )
-
         # Resolve the destination directory.
         if tier == _WS:
             if workspace_path is None:
@@ -343,37 +346,24 @@ class ReferencesEntryHandler(BundleEntryHandler):
             tier_root = home / self.domain_subpath
         bundle_dir = tier_root if name == _ROOT else tier_root / name
         bundle_dir.mkdir(parents=True, exist_ok=True)
-        index_path = bundle_dir / EMBEDDING_CONFIG_FILENAME
-        if index_path.is_file():
+        manifest_path = bundle_dir / BUNDLE_MANIFEST_FILENAME
+        if manifest_path.is_file():
             raise FileExistsError(
-                f"embedding config already exists at {index_path}"
+                f"bundle manifest already exists at {manifest_path}"
             )
-        sidecar_name = "references.embeddings.npy"
-        index_path.write_text(
-            json.dumps({
-                "embedding_model": provider.model_name,
-                "embedding_dimensions": int(dimensions),
-                "embedding_sidecar": sidecar_name,
-                "rows": [],
-            }, indent=2, ensure_ascii=False) + "\n",
-            encoding="utf-8",
-        )
-        # Also write the generic marker, so a bundle created today is
-        # discovered by its own manifest rather than by the legacy
-        # alias — and stays discovered if its index is later removed.
         write_bundle_manifest(
             bundle_dir,
             name=name,
             description=f"references bundle ({self.kind})",
         )
+        # No index.  ``reconcile`` writes ``embedding_config.json`` and
+        # the sidecar if and when this workspace has an embedding
+        # provider; until then the bundle is a perfectly ordinary one
+        # that simply cannot be searched semantically.
         return ReferenceBundle(
             name=name,
             directory=bundle_dir.resolve(),
             tier=tier,
-            embedding_model=provider.model_name,
-            embedding_dimensions=int(dimensions),
-            embedding_sidecar=sidecar_name,
-            embedding_rows=[],
         )
 
     # ------------------------------------------------------------------

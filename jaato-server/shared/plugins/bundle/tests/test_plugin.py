@@ -19,9 +19,11 @@ import pytest
 
 from shared.plugins.bundle.plugin import BundlePlugin
 from shared.plugins.bundle_common.bundle import (
+    BUNDLE_MANIFEST_FILENAME,
     BUNDLE_TIER_USER,
     BUNDLE_TIER_WORKSPACE,
     Bundle,
+    write_bundle_manifest,
 )
 from shared.plugins.references.bundle import EMBEDDING_CONFIG_FILENAME
 from shared.plugins.bundle_common.handler import (
@@ -474,6 +476,7 @@ def _write_ref_json(directory: Path, sid: str) -> None:
 
 def _write_manifest(directory: Path, *, rows, model="mock-model", dim=4) -> None:
     directory.mkdir(parents=True, exist_ok=True)
+    write_bundle_manifest(directory, name=directory.name)
     (directory / EMBEDDING_CONFIG_FILENAME).write_text(json.dumps({
         "embedding_model": model,
         "embedding_dimensions": dim,
@@ -693,35 +696,15 @@ class TestUnpack:
 
 
 class TestCreate:
-    def test_create_writes_manifest(self, plugin_with_real_refs):
-        plugin, refs_plugin, ws = plugin_with_real_refs
+    def test_create_writes_the_generic_manifest(self, plugin_with_real_refs):
+        """``bundle create`` marks the directory and nothing else.
 
-        # references plugin requires an embedding provider for create;
-        # inject a fake one matching the bundles in the fixture.
-        from shared.plugins.references.tests.test_entry_handler import _write_ref  # noqa: E501
-        from shared.plugins.references.entry_handler import (
-            ReferencesEntryHandler as _RefHandler,
-        )
-
-        class _FakeProvider:
-            model_name = "mock-model"
-            dimensions = 4
-            available = True
-
-            def load_model(self):
-                return True
-
-            def embed_text(self, text):
-                from shared.plugins.references.embedding_types import EmbeddingResult
-                return EmbeddingResult(embedding=[0.0] * 4, model="mock-model", dimensions=4)
-
-            def embed_batch(self, texts):
-                return [self.embed_text(t) for t in texts]
-
-            def embed_text_as_array(self, text):
-                return [0.0] * 4
-
-        refs_plugin._embedding_provider = _FakeProvider()
+        The generic verb creates a BUNDLE -- a directory a domain claims.
+        Whether that bundle later carries a vector index is a separate,
+        optional fact about its contents (#1130), so creation writes
+        ``bundle.json`` and does not fabricate an index descriptor.
+        """
+        plugin, _refs_plugin, ws = plugin_with_real_refs
 
         result = plugin._execute_bundle_cmd({
             "subcommand": "create",
@@ -730,7 +713,30 @@ class TestCreate:
 
         assert result["status"] == "ok"
         new_dir = ws / ".jaato" / "references" / "newone"
-        assert (new_dir / EMBEDDING_CONFIG_FILENAME).is_file()
+        assert (new_dir / BUNDLE_MANIFEST_FILENAME).is_file()
+        assert not (new_dir / EMBEDDING_CONFIG_FILENAME).exists()
+
+    def test_create_needs_no_embedding_provider(self, plugin_with_real_refs):
+        """No provider is installed in this fixture, and create still works.
+
+        Before #1130 the references handler refused to create an empty
+        bundle without one, because the file it wrote as the manifest
+        was the index descriptor and that descriptor names a model and a
+        dimension count.  Marking a directory needs neither.
+        """
+        plugin, refs_plugin, ws = plugin_with_real_refs
+        refs_plugin._embedding_provider = None
+
+        result = plugin._execute_bundle_cmd({
+            "subcommand": "create",
+            "target": "vectorless --kind references",
+        })
+
+        assert result["status"] == "ok"
+        assert (
+            ws / ".jaato" / "references" / "vectorless"
+            / BUNDLE_MANIFEST_FILENAME
+        ).is_file()
 
     def test_create_requires_kind(self, plugin_with_real_refs):
         plugin, _refs, _ws = plugin_with_real_refs

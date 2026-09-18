@@ -13,7 +13,10 @@ from typing import Any, Dict
 
 import pytest
 
-from shared.plugins.bundle_common.bundle import BUNDLE_TIER_WORKSPACE
+from shared.plugins.bundle_common.bundle import (
+    BUNDLE_TIER_WORKSPACE,
+    write_bundle_manifest,
+)
 from shared.plugins.references.bundle import EMBEDDING_CONFIG_FILENAME
 from shared.plugins.bundle_common.handler import (
     BundleEntry,
@@ -40,6 +43,7 @@ def _write_ref(directory: Path, sid: str):
 
 def _write_manifest(directory: Path, *, rows, model="mock-model", dim=4):
     directory.mkdir(parents=True, exist_ok=True)
+    write_bundle_manifest(directory, name=directory.name)
     (directory / EMBEDDING_CONFIG_FILENAME).write_text(json.dumps({
         "embedding_model": model,
         "embedding_dimensions": dim,

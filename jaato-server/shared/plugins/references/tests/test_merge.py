@@ -19,6 +19,7 @@ from shared.plugins.references.bundle import (
     EMBEDDING_CONFIG_FILENAME,
     ReferenceBundle,
     metadata_hash,
+    write_bundle_manifest,
 )
 from shared.plugins.references.embedding_types import EmbeddingResult
 from shared.plugins.references.merge import (
@@ -75,6 +76,7 @@ def _build_bundle(
 ) -> ReferenceBundle:
     """Create an on-disk bundle with a pre-populated sidecar."""
     directory.mkdir(parents=True, exist_ok=True)
+    write_bundle_manifest(directory, name=directory.name)
     (directory / EMBEDDING_CONFIG_FILENAME).write_text(json.dumps({
         "embedding_model": model,
         "embedding_dimensions": dim,

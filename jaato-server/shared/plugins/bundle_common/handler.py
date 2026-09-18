@@ -126,6 +126,20 @@ class BundleEntryHandler(Protocol):
         """
         ...
 
+    def non_entry_filenames(self) -> Tuple[str, ...]:
+        """Files inside a bundle directory that are NOT entries.
+
+        The generic layer already knows to skip ``bundle.json`` -- that
+        is its own file.  A domain may keep further metadata beside it
+        (the references plugin's ``embedding_config.json`` index
+        descriptor), and only the domain knows those names.  #1130:
+        the generic layer must not name a domain's files, so it asks.
+
+        Returns:
+            Filenames, relative to the bundle directory.  Default: none.
+        """
+        return ()
+
     def list_entries(self) -> List[BundleEntry]:
         """Enumerate every entry this handler currently owns.
 

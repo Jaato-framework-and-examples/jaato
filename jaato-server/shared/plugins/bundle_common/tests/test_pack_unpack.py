@@ -20,6 +20,7 @@ from shared.plugins.bundle_common.bundle import (
     BUNDLE_TIER_USER,
     BUNDLE_TIER_WORKSPACE,
     Bundle,
+    write_bundle_manifest,
 )
 from shared.plugins.references.bundle import (
     EMBEDDING_CONFIG_FILENAME,
@@ -59,6 +60,7 @@ def _bundle(tmp_path, name="teammate", tier=BUNDLE_TIER_WORKSPACE):
     refs_dir = tmp_path / ".jaato" / "references"
     bundle_dir = refs_dir / name if name else refs_dir
     bundle_dir.mkdir(parents=True)
+    write_bundle_manifest(bundle_dir, name=name)
     (bundle_dir / EMBEDDING_CONFIG_FILENAME).write_text(json.dumps({
         "embedding_model": "test-model",
         "embedding_dimensions": 4,
