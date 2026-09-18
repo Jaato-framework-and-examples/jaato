@@ -127,6 +127,11 @@ _SCOPES = {
     "tiers": ExplainScope(_explain.tiers),
     "integrations": ExplainScope(_explain.integrations,
                                  blurb="tools jaato can wire into"),
+    # The only topic that reaches the network: our own indexes, asked what
+    # they carry.  Its own topic rather than a section of `dependencies`,
+    # which is an OFFLINE read of the installed tree and must stay one.
+    "releases": ExplainScope(_explain.releases,
+                             blurb="newer builds on PyPI / TestPyPI"),
     "sets": ExplainScope(_explain.sets, "workspace"),
     "agents": ExplainScope(_explain.agents, "workspace",
                            blurb="the PERSONA layer (.jaato/agents/)"),

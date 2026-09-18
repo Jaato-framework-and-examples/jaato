@@ -1049,6 +1049,104 @@ The server includes its package version (`server_version`) in the `ConnectedEven
 
 Each client declares its own minimum — e.g., the TUI sets `MIN_SERVER_VERSION = "0.2.27"` and refuses to connect if the server is older. If a client doesn't declare a minimum, no check is performed. `IncompatibleServerError` is classified as permanent by the recovery client (no retries).
 
+### A Release Nobody Was Told About
+
+jaato ships through two channels and, until now, asked neither anything:
+
+| channel | index | what a version there means |
+|---|---|---|
+| `pypi` | `https://pypi.org` | a **production release** — what `pip install -U <pkg>` gives you |
+| `testpypi` | `https://test.pypi.org` | a **release candidate** — a staging build of a release that has not shipped yet |
+
+So a production release or a staged candidate could sit on an index with
+nothing in the framework that would ever mention it; the only way to learn one
+existed was to open the project page. `shared/scaffold/dependencies.py` knew
+every installed jaato distribution and its version, and compared it only
+against the SOURCE TREE beside it (`dependency coherence`, the editable-install
+skew check) — never against what had been published.
+
+`jaato_sdk/release_channels.py` is the one place that asks. Two surfaces
+render it, and they are **drawings of one report, never two opinions about
+what is newest**:
+
+| Surface | Form |
+|---|---|
+| `jaato-doctor` | one preflight line — `package releases`, WARN when something newer is published |
+| `jaato-scaffold explain releases` | every channel's answer per package, with the command that installs each |
+
+**The index's own `latest` is the wrong answer, on the channel that matters.**
+PyPI pins a project's "latest" to the newest **stable** version whenever one
+exists — correct for `pip install`, and the reason the publish workflow stages
+every TestPyPI build as a pre-release in the first place. Measured 2026-09-18,
+with `jaato-sdk` 0.23.0rc4 published:
+
+```
+test.pypi.org   jaato-sdk   info.version = 0.21.0      actually newest: 0.23.0rc4
+```
+
+Reading that field reports the release-candidate channel as two releases
+*behind* the candidate it is carrying — silently, about the one channel the
+feature exists for. Versions are therefore computed from the release listing
+and ordered per channel, and a release with no files or with every file
+**yanked** is excluded: neither is installable, so offering either as "newer
+is available" sends a reader to a command that no-ops.
+
+**PEP 440 ordering is implemented here rather than imported.** jaato-sdk
+depends on `python-dotenv` and `pydantic`; `packaging` is not a dependency, so
+importing it would make the check work on the machines that happen to expose
+pip's vendored copy and silently do nothing on the others. A capability
+fallback is worse still — two orderings that can disagree about which release
+is newer is the bug the check would then be shipping. There is one
+implementation, and a version string outside PEP 440 is **refused** rather than
+approximated: `parse_version` returns `None`, the string is carried on
+`unparseable` and named in the output, never sorted as "older", which is how a
+notifier starts hiding the release it was asked about.
+
+Four rules, each attached to a way a version notifier stops being read:
+
+| Rule | Why |
+|---|---|
+| **an index that did not answer is `unknown`** | absence of evidence is not currency. A notifier that reads silence as "up to date" answers the question wrongly instead of declining to, and the reader now believes something false. WARN, in the wording `check_mcp_sdk` already uses for "cannot check" |
+| **a build newer than both channels is `ahead`, not `current`** | the normal state of a checkout of this repository. Telling a contributor on an unreleased build that they are up to date is how a check stops being read |
+| **never FAIL** | a release is news, not a defect, and `jaato-doctor` is documented as usable as a CI gate — exiting non-zero because somebody shipped would break every harness using it the documented way |
+| **a dead index is asked once per RUN, not once per package** | the deadline is per request; with several distributions and two channels each, re-learning "the network is down" per package is one deadline against eight. A connection-level failure retires its channel for the run; an HTTP answer (a 404 for one unpublished package) does not, because it says nothing about the next one |
+
+**On by default, because a notification nobody enables is a notification
+nobody gets** — which is the complaint this answers. It is bounded (a 3s
+per-index deadline), cached for 6h at `~/.jaato/release_check.json`, and
+switched off by `JAATO_RELEASE_CHECK=off` (also `0`/`no`/`false`/`none`/
+`never`). A value that is set and *unrecognised* reads as ON: the two failure
+directions are not equal, since a typo that silently disables the notifier
+reproduces the state being fixed and is invisible, while a typo that leaves it
+on costs one bounded request. `jaato-doctor` also takes
+`--no-release-check`, `--release-check-timeout SECONDS` and
+`--refresh-release-check` (for "I just published — is it visible?").
+
+**`explain releases` is its own topic rather than a section of `explain
+dependencies`.** That verb is an offline introspection of the installed tree,
+and quietly giving it an egress would change what running it means. What the
+two DO share is the distribution set: `installed_jaato_dists()` now delegates
+to `release_channels.installed_distributions()`, so "which distributions are
+ours" has one definition rather than two applying the same jaato-prefix rule —
+#966's measured-not-hardcoded rule, which is also what lets a separately
+shipped package (`jaato-premium` today) be release-checked with no edit here.
+
+`JAATO_RELEASE_CHECK` is read in **exactly one place**, the SDK module, and
+the `shared` surfaces honour it by calling that module rather than growing a
+second reader. That is also why it is absent from `shared/env_scope.py`: that
+catalog is re-derived by an AST scan of `server/` and `shared/`, so an
+SDK-only entry would be reported as stale in both directions.
+
+Tests: `jaato-sdk/jaato_sdk/tests/test_release_channels.py` (ordering
+cross-checked pairwise against `packaging` where it is installed, channel
+semantics, cache, offline degradation — no test touches the network or the
+real cache), `.../test_doctor_package_releases.py` (the preflight rendering),
+`jaato-server/shared/scaffold/tests/test_explain_releases.py`, and
+`jaato-server/shared/tests/test_release_check_notices_a_new_version.py`, which
+carries the four `REVERSIONS` — trusting `info.version`, reading unreachable
+as current, ordering versions as strings, and a check `run_checks` does not
+call.
+
 ### Proactive Garbage Collection
 
 The framework monitors token usage during streaming and automatically triggers GC when thresholds are exceeded:
@@ -7705,6 +7803,7 @@ covers it, where one exists. `jaato-scaffold explain env` renders the tags;
 | `JAATO_IPC_EVENT_QUEUE_MAX` | Per-client IPC event-queue bound (default 2048). Beyond it, lossy tool-output chunks are evicted oldest-first (media before text); essential lifecycle events are queued past the bound rather than dropped, because losing one desynchronises the client permanently. A non-numeric or non-positive value falls back to the default — "unbounded" is the bug this exists to fix. See [Binary Media Chunks](docs/design/binary-media-chunks.md). |
 | `JAATO_CREDENTIAL_LOCK_TIMEOUT` | Seconds a caller waits for another process to finish refreshing a rotating OAuth credential before giving up (default 60). Host-scoped for the reason `JAATO_RUNNER_ACK_TIMEOUT` is: what is bounded is contention on a FILE, and the contenders — daemon, runner subprocesses, pool slots — serve sessions that have no say in each other's timeouts. A non-numeric or non-positive value falls back to the default; "unbounded" is the bug this exists to fix. See [A Refresh Token That Rotates](#a-refresh-token-that-rotates-and-two-sessions-refreshing-it-683). |
 | `JAATO_OAUTH_REFRESH_MARGIN` | Seconds before real expiry at which an OAuth access token is treated as stale and refreshed (default 300 — the value each provider previously hardcoded). Host-scoped because every process sharing one credential file must agree on when that file's token is stale. Note what it does **not** do: a fixed margin does not disperse a thundering herd (every process crosses it at the same instant), it makes the refresh happen while the old token is still valid — which is what lets a transient failure fall back on it instead of logging the user out. |
+| `JAATO_RELEASE_CHECK` | Set to `off` (also `0`/`no`/`false`/`none`/`never`) to stop `jaato-doctor` and `jaato-scaffold explain releases` asking PyPI / TestPyPI whether a newer jaato package is published. On by default — a notification nobody enables is a notification nobody gets — and bounded: a 3s per-index deadline, cached 6h at `~/.jaato/release_check.json`, never a FAIL, and an index that does not answer is reported as UNKNOWN rather than as currency. An unrecognised value reads as ON, because a typo that silently disables the notifier reproduces the state it exists to fix. Read only in `jaato_sdk/release_channels.py`, which is why it is not in `shared/env_scope.py` (that catalog is derived by a scan of `server/` and `shared/`). See [A Release Nobody Was Told About](#a-release-nobody-was-told-about). |
 | `JAATO_AMBIGUOUS_WIDTH` | Width for East Asian Ambiguous chars in tables (`1` default, `2` for CJK terminals) |
 | `JAATO_SESSION_LOG_DIR` | Per-session log directory, relative to workspace (default: `.jaato/logs`) |
 | `JAATO_CGROUPS_ROOT` | Parent cgroup v2 directory for the WS server's per-session cgroup tree (default: `/sys/fs/cgroup/jaato`). Override when the host has subtree_control delegated under a different path. Must already exist with `memory`, `pids`, `cpu` in `cgroup.subtree_control`. |
