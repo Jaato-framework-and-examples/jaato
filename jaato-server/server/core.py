@@ -555,6 +555,49 @@ _PURE_NOTIFICATION_EVENTS = {
 }
 
 
+def _note_incident(
+    server: Any,
+    kind: str,
+    cause: str,
+    *,
+    site: str,
+    session_id: Optional[str] = None,
+) -> None:
+    """Record one incident and emit its typed event (#1122).
+
+    A free function, and duck-typed, for the reason
+    ``_disclosure_announcement_of`` is (#881) -- but the argument is
+    sharper here: **every call site is on a terminal path**.  A dying
+    session, a stopped run.  Anything that can raise there turns a
+    reported failure into an UNREPORTED one at the moment the record
+    matters most, so a server double that lacks ``emit`` must get the
+    pre-#1122 behaviour rather than an ``AttributeError``.
+
+    Wrapped throughout for the same reason: an incident recorded ABOUT a
+    failure must not be able to add one.
+    """
+    from shared.incidents import raise_incident
+
+    sid = session_id or getattr(server, "session_id", None) or None
+
+    def _emit(incident) -> None:
+        emit = getattr(server, "emit", None)
+        if not callable(emit):
+            return
+        from jaato_sdk.events import IncidentEvent
+        emit(IncidentEvent(
+            session_id=incident.session_id or sid or "",
+            kind=incident.kind, at=incident.at, cause=incident.cause,
+            site=incident.site, provider=incident.provider,
+            model=incident.model, tier=incident.tier,
+        ))
+
+    try:
+        raise_incident(kind, cause, site=site, emit=_emit, session_id=sid)
+    except Exception:  # noqa: BLE001 -- see the docstring
+        logger.debug("incident not recorded", exc_info=True)
+
+
 def _record_keeping_env(profile: Any) -> Dict[str, str]:
     """The session env a profile's ``record_keeping:`` block seeds (#1120).
 
@@ -4371,6 +4414,22 @@ class JaatoServer:
             error_summary=error_summary,
             error_type=error_type,
         ))
+        # 3. The incident register (#1122).  Raised from the TERMINAL site
+        # rather than from wherever the error was first noticed, so one
+        # dying session is one incident -- the same rule that keeps a
+        # budget abort from being counted twice by its rung and its
+        # terminal.
+        # ``NudgeExhausted`` gets its OWN kind rather than a second call
+        # site: it reaches the terminal through exactly this path, and a
+        # second raiser would count one dying session twice.  The kind is
+        # derived from the error type, which is the only thing that
+        # distinguishes them here.
+        from shared.incidents import KIND_NUDGE_EXHAUSTED, KIND_SESSION_ERROR
+        kind = (KIND_NUDGE_EXHAUSTED if error_type == "NudgeExhausted"
+                else KIND_SESSION_ERROR)
+        _note_incident(
+            self, kind, f"{error_type}: {error_summary}",
+            site="server/core.py::_emit_error_termination", session_id=sid)
 
     def _emit_error_termination_from_exc(
         self,
@@ -5245,6 +5304,12 @@ class JaatoServer:
                 "usage": dict(result.get("budget_usage") or {}),
             },
         ))
+        # One abort, one incident (#1122): raised HERE and not from the
+        # rung, because a rung also fires for notify / finalize / escalate
+        # and only this site means the run was stopped.
+        _note_incident(
+            self, "budget_exhausted", reason_text,
+            site="server/core.py::_emit_budget_refusal_if_exhausted")
         return True
 
     def _build_send_message_notification_handler(self):

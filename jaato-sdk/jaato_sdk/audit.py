@@ -280,6 +280,38 @@ AUDIT_SCHEMA: Tuple[AuditEvent, ...] = (
             "wired (#955)"),
     ),
     AuditEvent(
+        kind="INCIDENT",
+        article="Arts. 72, 73, 26(5) -- something a person should look at",
+        store="session_trace",
+        written_by="shared/incidents.py::raise_incident",
+        fields=(
+            AuditField("kind",
+                       "which of the framework's known incident kinds "
+                       "(shared.incidents.INCIDENT_KINDS)"),
+            AuditField("at",
+                       "when the framework became AWARE -- Art. 73's three "
+                       "reporting clocks all start here"),
+            AuditField("cause", "one line, LAST, so the line parses"),
+            AuditField("site", "file.py::function -- what noticed",
+                       guaranteed=False),
+            AuditField("session_id", "the session it happened in",
+                       guaranteed=False),
+            AuditField("provider", "the binding that was serving",
+                       guaranteed=False),
+            AuditField("model", "the model that was serving",
+                       guaranteed=False),
+            AuditField("tier", "the tier, on a tiered session",
+                       guaranteed=False),
+        ),
+        note=(
+            "Carries NO severity, and the absence is the decision rather "
+            "than an omission: whether an entry is a 'serious incident' "
+            "under Art. 3(49) is a determination about consequences -- "
+            "harm to a person, disruption of critical infrastructure -- "
+            "that no log line carries. `jaato-doctor --incidents` renders "
+            "all three Art. 73 windows beside each row and chooses none"),
+    ),
+    AuditEvent(
         kind="session record header",
         article="Art. 12(1) -- the session's own lifecycle",
         store="session_record",

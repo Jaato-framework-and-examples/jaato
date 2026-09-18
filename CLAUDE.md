@@ -5167,7 +5167,7 @@ wants its own change rather than riding this one.
 Regulation (EU) 2024/1689 addresses the **provider** and **deployer** of an
 AI system; a jaato *application* (profile + persona + tools + model binding)
 is the system and the framework is a component supplier. The assessment is
-[docs/design/eu-ai-act.md](docs/design/eu-ai-act.md). Ten mechanisms exist
+[docs/design/eu-ai-act.md](docs/design/eu-ai-act.md). Eleven mechanisms exist
 in the tree, each the smallest shape that makes an obligation expressible:
 
 | Obligation | Mechanism |
@@ -5182,6 +5182,7 @@ in the tree, each the smallest shape that makes an obligation expressible:
 | 73(6) prove they were not altered | `record_keeping.integrity: sha256-chain` — each record carries `prev_digest` + `digest` over canonical bytes; `jaato-doctor --audit-verify <path>` walks a file with nothing but the stdlib. It proves the file was not edited IN PLACE and **not** who wrote it, which the verifier's own output says. An unchained file reports as unchained, never as intact. Stated cost: a chained file cannot be pruned from the front, so retention rotates whole segments |
 | 19 / 26(6) keep them long enough | `record_keeping: {retention_days, conversation_retention_days, integrity}` — two clocks, because the audit record and the conversation are kept for different reasons. Declared, never defaulted: it changes what DELETE MEANS. `workspace.delete` refuses a held record; the #812 watchdog runs an hourly pass that lets go of records past their minimum |
 | 15(4) don't feed bias back | `Memory.generated_by` (which model wrote it — stamped by the PLUGIN, never from the tool's arguments) + `curated_by` (who approved it: a second field, because who wrote it and who approved it are two facts) + `plugin_configs.memory.require_curation`, which withholds uncurated memories from BOTH retrieval paths and says how many. `validate` warns when the knob closes the learning loop instead of mitigating it |
+| 72 / 73 know what to report | `IncidentEvent` (protocol 1.16) + an `INCIDENT:` line in the application trace, raised by `shared.incidents.raise_incident` from the five sites that already knew; `jaato-doctor --incidents [--since 15d]` renders all three Art. 73 windows beside each row. It carries **no severity**: whether an entry is a serious incident under Art. 3(49) is a determination about consequences no log line holds. Unreadable is reported as unread, never as "none" |
 | 14(4) human oversight | `jaato-scaffold explain oversight [<profile>]` — the two stop verbs, the permission gate, the built-in constraints, reversibility, read from their enforcers; `jaato-doctor` prints the exact `jaato-server --stop` for the running daemon |
 
 **`validate` reads the block.** `disclosure_absent` (warn) for a
@@ -5201,7 +5202,7 @@ validation and *undeclared* for documentation, because a framework that
 printed `minimal` for it would be asserting a determination nobody made.
 
 Deliberately not built yet, each named in the design doc with its reason:
-the Annex IV dossier generator, the incident register.
+the Annex IV dossier generator.
 
 ### Approver Identity (#859)
 

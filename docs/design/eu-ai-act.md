@@ -709,6 +709,42 @@ high-risk, because it is also the honest instructions for use.
 
 ### 4.7 An incident register (Articles 72, 73, 26(5))
 
+> **Shipped (#1122).** `jaato_sdk.incidents` (the record, the vocabulary
+> and the parser -- in the SDK, because the READER is `jaato-doctor`,
+> which cannot import `shared`), `shared.incidents.raise_incident` (the
+> one writer, which needs a session), `IncidentEvent` (protocol 1.16),
+> an `INCIDENT` entry in `AUDIT_SCHEMA`, and `jaato-doctor --incidents
+> [--since 15d]`. Guard: `shared/tests/test_incident_register.py`.
+>
+> **A query over the audit log, not a second store.** An incident is one
+> more line in the application trace -- the one artefact every
+> deployment gets, since the ledger needs a ledger configured and the
+> event is opt-in. Scalars first, free-text `cause` last, the #968
+> grammar, so the line parses with a split.
+>
+> **It does not classify, and the absence of a `severity` field is that
+> decision rather than an omission.** Whether an entry IS a serious
+> incident under Art. 3(49) is a determination about *consequences* --
+> harm to a person, disruption of critical infrastructure -- that no log
+> line carries. All three Art. 73 windows (2 / 10 / 15 days) are
+> rendered beside every row and none is chosen.
+>
+> **Unreadable is not empty.** A trace file that could not be read is
+> reported as not read; answering "none" to a question the register
+> could not look at would tell a reader something false about a
+> reporting deadline.
+>
+> **Sites covered, each raising from the place that already knew:** the
+> terminal error and the budget terminal (`server/core.py`), nudge
+> exhaustion (*the same* terminal, with the kind derived from the error
+> type -- a second call site would count one dying session twice), the
+> #1023 confinement refusal (raised before the exception, because it
+> happens before any session exists and there is nobody above to notice
+> it), and the reliability plugin's circuit opening (gated on the same
+> `not was_blocked` as its hook, so one opening is one incident). An AST
+> guard over a LIST of sites fails when any stops raising, because the
+> failure this is about is a site nobody remembered.
+
 A typed `IncidentEvent` in the SDK and an `incident` record in the audit
 log, raised by the framework at the sites that already know: a session
 terminated with `error` or `budget_exhausted`, a circuit breaker opening, a

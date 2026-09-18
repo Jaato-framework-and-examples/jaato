@@ -247,7 +247,23 @@ from pydantic import BaseModel, ConfigDict, Field
 # announcement (and is then a client that does not disclose, which is the
 # state it was already in), and an older daemon never reads the flag (and
 # then announces, which is the safe direction).  No SDK minimum.
-PROTOCOL_VERSION = "1.15"
+#
+# 1.16 -- ``IncidentEvent`` (``incident.raised``).  Art. 73 gives a provider
+# 15 days to report a serious incident from becoming AWARE of it (10 for a
+# death, 2 for a widespread infringement), and the framework already knew
+# when the events that could be one happened -- it recorded none of them as
+# such, each being a log line in a different format with no severity and no
+# clock.  The event carries ``kind``, ``at``, the binding, a one-line
+# ``cause`` and the ``site`` that raised it.
+#
+# It does NOT say whether the entry IS a serious incident under Art. 3(49):
+# that is a human determination about consequences the framework cannot
+# see.  A new EVENT degrades the way 1.8's did -- ``deserialize_event``
+# raises on an unrecognised type and the SDK reader logs and continues --
+# so an older client on a 1.16 daemon loses the event and logs a line.  No
+# SDK minimum: the direction is a NEW daemon emitting to an OLD client,
+# which cannot opt out, so a minimum would fail the wrong party.
+PROTOCOL_VERSION = "1.16"
 
 
 # =============================================================================
@@ -343,6 +359,10 @@ class EventType(str, Enum):
     # above.  The two are one keyword apart and the wrong one was already on
     # the wire, so the names are kept deliberately unalike (#1069).
     BUDGET_RUNG_FIRED = "budget.rung_fired"
+    # Something a PERSON should look at (Arts. 72, 73, 26(5)).  Emphatically
+    # not "a serious incident": whether an entry is one under Art. 3(49) is
+    # a human determination about consequences the framework cannot see.
+    INCIDENT_RAISED = "incident.raised"
     GC_CONFIG = "gc.config"
     GC = "gc"                       # GC lifecycle (phase-switched)
 
@@ -3314,6 +3334,46 @@ class BudgetRungFiredEvent(Event):
     tier_changes: Dict[str, str] = Field(default_factory=dict)
 
 
+class IncidentEvent(Event):
+    """Something happened that a person should look at (protocol 1.16).
+
+    Article 73 gives a provider 15 days to report a serious incident from
+    the moment it becomes AWARE of it -- 10 for a death, 2 for a
+    widespread infringement.  All three clocks start from awareness, and
+    the framework already knew when the events that could be one
+    happened; it recorded none of them as such, each being a log line in
+    a different format with no severity and no clock.
+
+    **This event does not classify.**  Whether an entry IS a serious
+    incident under Art. 3(49) is a determination about consequences --
+    harm to a person, disruption of critical infrastructure -- that the
+    framework cannot see.  It reports the fact and the clock; a person
+    decides.  The absence of a ``severity`` field is that decision, not
+    an omission.
+
+    The same record goes to the application trace as an ``INCIDENT:``
+    line (``shared.incidents``), which is what ``jaato-doctor
+    --incidents`` reads and what a deployment gets without configuring
+    anything.
+
+    Attributes:
+        kind: One of ``shared.incidents.INCIDENT_KINDS``.
+        at: Unix timestamp of when the framework became aware.
+        cause: One line saying what happened.
+        site: ``file.py::function`` -- what noticed.
+        provider / model / tier: The binding that was serving, when
+            there was one.  Absent rather than ``null`` when unknown.
+    """
+    type: EventType = Field(default=EventType.INCIDENT_RAISED)
+    kind: str = ""
+    at: float = 0.0
+    cause: str = ""
+    site: Optional[str] = None
+    provider: Optional[str] = None
+    model: Optional[str] = None
+    tier: Optional[str] = None
+
+
 class MidTurnInterruptEvent(Event):
     """Sent when streaming is interrupted to process a mid-turn user prompt.
 
@@ -3625,6 +3685,7 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.MID_TURN_PROMPT_QUEUED.value: MidTurnPromptQueuedEvent,
     EventType.MID_TURN_PROMPT_INJECTED.value: MidTurnPromptInjectedEvent,
     EventType.BUDGET_RUNG_FIRED.value: BudgetRungFiredEvent,
+    EventType.INCIDENT_RAISED.value: IncidentEvent,
     EventType.MID_TURN_INTERRUPT.value: MidTurnInterruptEvent,
     EventType.INTERRUPTED_TURN_RECOVERED.value: InterruptedTurnRecoveredEvent,
     # Workspace management

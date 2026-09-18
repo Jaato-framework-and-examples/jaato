@@ -749,6 +749,42 @@ def check_audit_chain(paths: List[str]) -> List[Check]:
     return checks
 
 
+def check_incidents(
+    paths: List[str], since_days: Optional[float] = None,
+) -> List[Check]:
+    """The incident register: what happened, and how long ago (#1122).
+
+    Article 73 gives a provider 15 days to report a serious incident from
+    becoming AWARE of it -- 10 for a death, 2 for a widespread
+    infringement.  All three clocks start from awareness, so the useful
+    thing to print beside each row is how much of each window is left.
+
+    **The tool does not classify.**  Whether an entry IS a serious
+    incident under Art. 3(49) is a determination about consequences the
+    framework cannot see, so all three windows are rendered and none is
+    chosen.  The header says so, rather than the rows carrying a
+    severity the framework is not in a position to assign.
+
+    **Unreadable is not empty.**  A workspace with no trace configured
+    is reported as one that could not be read -- absence of evidence is
+    not absence of incidents, and answering "none" to a question this
+    could not look at is the one thing a register must never do.  It is
+    the rule the release check already follows for an index that did not
+    answer.
+
+    Never FAILs: an incident is news for a person, and ``jaato-doctor``
+    is documented as usable as a CI gate.
+    """
+    from . import incidents_view
+
+    if not paths:
+        return [Check("incidents", WARN,
+                      "no trace file named — pass one or more paths, or set "
+                      "trace.session_log in the profile and pass that")]
+    return incidents_view.render(paths, since_days=since_days,
+                                 check=Check, pass_=PASS, warn=WARN)
+
+
 def check_home_match(info: DaemonInfo) -> List[Check]:
     """Compare the daemon's HOME to the caller's — the #1 pass:// trap.
 
@@ -1700,6 +1736,22 @@ def _print(checks: List[Check]) -> int:
     return 1 if n_fail else 0
 
 
+def _since_days(raw: Optional[str]) -> Optional[float]:
+    """``--since 15`` / ``--since 15d`` as days, or ``None``.
+
+    An unparseable value reads as ``None`` -- show everything -- rather
+    than as zero.  A register that silently showed nothing because its
+    filter did not parse would answer "no incidents" to a question it
+    never asked, which is the failure this whole verb exists to avoid.
+    """
+    if not raw:
+        return None
+    try:
+        return float(str(raw).strip().rstrip("dD"))
+    except ValueError:
+        return None
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     """CLI entry point: ``python -m jaato_sdk.doctor [options]``."""
     ap = argparse.ArgumentParser(
@@ -1742,6 +1794,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--refresh-release-check", action="store_true",
                     help="ignore the cached index answer and re-ask — for "
                          "'I just published, is it visible?'")
+    ap.add_argument("--incidents", nargs="+", default=None, metavar="PATH",
+                    help="REGISTER MODE (instead of preflight): list the "
+                         "incidents recorded in one or more application "
+                         "trace files, with the Art. 73 reporting clocks "
+                         "beside each. Does NOT classify: whether an entry "
+                         "is a serious incident under Art. 3(49) is a "
+                         "human determination.")
+    ap.add_argument("--since", default=None, metavar="DAYS",
+                    help="with --incidents: keep only entries this recent. "
+                         "Accepts '15' or '15d'.")
     ap.add_argument("--audit-verify", nargs="+", default=None, metavar="PATH",
                     help="VERIFY MODE (instead of preflight): walk chained "
                          "audit files (record_keeping.integrity: sha256-chain) "
@@ -1754,7 +1816,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                          "workspace=none? Use 'latest' for the newest session.")
     args = ap.parse_args(argv)
 
-    if args.audit_verify:
+    if args.incidents:
+        checks = check_incidents(args.incidents, _since_days(args.since))
+    elif args.audit_verify:
         checks = check_audit_chain(args.audit_verify)
     elif args.session:
         checks = check_session(args.session, args.workspace)
