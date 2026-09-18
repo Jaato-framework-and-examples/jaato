@@ -25,7 +25,7 @@ import json
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 import pytest
 
@@ -108,8 +108,19 @@ def act_daemon():
 
 # ------------------------------------------------------------- driving
 
-async def _run(daemon, profile: str, prompts: List[str], answer: str = "y") -> Dict[str, Any]:
-    """One session: subscribe BEFORE creation, ask, end (which persists it)."""
+async def _run(daemon, profile: str, prompts: List[str], answer: str = "y",
+               await_tool: Optional[str] = None) -> Dict[str, Any]:
+    """One session: subscribe BEFORE creation, ask, end (which persists it).
+
+    ``await_tool`` names a tool whose RESULT must be in the persisted record
+    before the session is ended; the record is returned under ``record``.
+    It is read while the session is still loaded, deliberately: the daemon
+    also persists on ``ToolCallStartEvent`` (crash recovery), and that
+    snapshot carries the call without its result -- reading after
+    ``end_session`` races the after-turn save against the runner's
+    teardown, which is how a CI runner handed the test the mid-turn
+    snapshot and nothing later.
+    """
     c = IPCClient(socket_path=daemon.socket_path, client_type=ClientType.API,
                   workspace_path=str(daemon.workspace), auto_start=False)
     assert await c.connect(timeout=60), "could not connect to the test daemon"
@@ -137,6 +148,10 @@ async def _run(daemon, profile: str, prompts: List[str], answer: str = "y") -> D
             except SessionEnded as exc:
                 outcome["ended"] = exc.reason
                 break
+        if await_tool is not None:
+            outcome["record"] = await asyncio.to_thread(
+                record, daemon, sid, 30.0, True,
+                lambda data: bool(tool_results(data, await_tool)))
         await asyncio.sleep(0.3)
         try:
             await c.end_session()
@@ -152,24 +167,37 @@ def run(daemon, profile, prompts, **kw):
     return asyncio.run(_run(daemon, profile, prompts, **kw))
 
 
-def record(daemon, sid: str, wait: float = 30.0, need_history: bool = True) -> Dict[str, Any]:
-    """The persisted session record.
+def record(daemon, sid: str, wait: float = 30.0, need_history: bool = True,
+           until: Optional[Callable[[Dict[str, Any]], bool]] = None) -> Dict[str, Any]:
+    """The persisted session record, once ``until`` holds on it.
 
-    The daemon writes the record at creation (rendered instructions included)
-    and again with the history when the session unloads after ``end_session``;
-    a reader of tool results waits for the second write, a reader of the
-    rendered prompt takes the first.
+    The daemon writes the record at creation (rendered instructions, no
+    history), on every ``ToolCallStartEvent`` (the history up to the CALL,
+    no result yet) and after each turn (the whole history).  So "has a
+    history" is not "has the tool result": a reader of tool results passes
+    an ``until`` that looks for the result, a reader of the rendered prompt
+    takes the first write.  On the deadline the error names what the last
+    snapshot held, so a wrong predicate is not reported as a missing file.
     """
     path = daemon.workspace / ".jaato" / "sessions" / f"{sid}.json"
     deadline = time.time() + wait
+    last: Optional[Dict[str, Any]] = None
     while time.time() < deadline:
         if path.is_file():
-            data = json.loads(path.read_text(encoding="utf-8"))
-            if data.get("history") or not need_history:
-                return data
+            try:
+                last = json.loads(path.read_text(encoding="utf-8"))
+            except ValueError:      # a write in progress
+                last = None
+            if last is not None and (last.get("history") or not need_history) \
+                    and (until is None or until(last)):
+                return last
         time.sleep(0.5)
-    raise AssertionError(f"session record {path} was not persisted"
-                         + (" with a history" if need_history else ""))
+    seen = "no record on disk" if last is None else "last snapshot held parts: " + repr(
+        [(p.get("type"), p.get("name")) for m in last.get("history", [])
+         for p in m.get("parts", [])])
+    raise AssertionError(f"session record {path} did not reach the awaited state"
+                         + (" (a history was required)" if need_history else "")
+                         + f"; {seen}")
 
 
 def tool_results(rec: Dict[str, Any], name: str) -> List[Dict[str, Any]]:
@@ -278,8 +306,9 @@ def test_the_learning_loop_records_provenance_and_the_gate_holds(act_daemon):
     with curated.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(legacy) + "\n")
 
-    before = run(act_daemon, "reader", ["what is the refund policy?"])
-    res = tool_results(record(act_daemon, before["session_id"]), "retrieve_memories")
+    before = run(act_daemon, "reader", ["what is the refund policy?"],
+                 await_tool="retrieve_memories")
+    res = tool_results(before["record"], "retrieve_memories")
     assert res and res[0].get("withheld_uncurated", 0) >= 1, res
     assert not [m for m in res[0].get("memories", []) if m["id"] == "mem_legacy_0001"]
 
@@ -293,7 +322,8 @@ def test_the_learning_loop_records_provenance_and_the_gate_holds(act_daemon):
     assert promoted and promoted[-1].get("curated_by", {}).get("session_id") == cur["session_id"], (
         "the promotion did not stamp the CURATOR's session as the approver")
 
-    after = run(act_daemon, "reader", ["what is the refund policy?"])
-    res = tool_results(record(act_daemon, after["session_id"]), "retrieve_memories")
+    after = run(act_daemon, "reader", ["what is the refund policy?"],
+                await_tool="retrieve_memories")
+    res = tool_results(after["record"], "retrieve_memories")
     assert res and any(m["id"] == raw["id"] for m in res[0].get("memories", [])), (
         "the curated memory is still withheld after the curator promoted it")
