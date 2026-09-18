@@ -60,6 +60,22 @@ ACTIVE_MATURITIES = frozenset({MATURITY_RAW, MATURITY_VALIDATED})
 #: things; the fix is a second name, not a smarter condition.
 PROMOTES_OUT_OF_RAW = frozenset({MATURITY_VALIDATED, MATURITY_ESCALATED})
 
+#: Maturities that mean a curator APPROVED the memory, so ``curated_by``
+#: should carry their stamp (#1123).
+#:
+#: A THIRD set, for the reason the comment above gives about the second:
+#: it answers its own question.  ``PROMOTES_OUT_OF_RAW`` asks *has the
+#: curator decided about this* -- which a DISMISSAL also answers, and a
+#: dismissal is precisely not an approval.  Reusing it would stamp
+#: ``curated_by`` on memories the curator rejected, and
+#: ``require_curation`` reads that field as permission to surface one.
+#:
+#: The two sets happen to have the same members today.  That is not a
+#: reason to share a name: they would diverge the moment a maturity is
+#: added that is a decision and not an approval, and the sharing would
+#: make the divergence silent.
+CURATED_MATURITIES = frozenset({MATURITY_VALIDATED, MATURITY_ESCALATED})
+
 
 @dataclass
 class Memory:

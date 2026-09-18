@@ -11,7 +11,7 @@ import os
 import subprocess
 import tempfile
 from dataclasses import asdict
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
@@ -26,6 +26,7 @@ from jaato_sdk.plugins.model_provider.types import ToolSchema, DISCOVERABILITY_E
 from .indexer import MemoryIndexer
 from .models import (
     ACTIVE_MATURITIES,
+    CURATED_MATURITIES,
     MATURITY_DISMISSED,
     MATURITY_ESCALATED,
     MATURITY_RAW,
@@ -2013,6 +2014,7 @@ class MemoryPlugin(RunnerForwardingMixin):
             new_maturity = args["maturity"]
             if new_maturity in VALID_MATURITIES:
                 memory.maturity = new_maturity
+                self._stamp_curation(memory, new_maturity)
             else:
                 return {"status": "error", "error": f"Invalid maturity: {new_maturity}"}
 
@@ -2047,6 +2049,46 @@ class MemoryPlugin(RunnerForwardingMixin):
             "confidence": memory.confidence,
             "message": f"Memory updated: {memory.description}",
         }
+
+    def _stamp_curation(self, memory: Any, maturity: str) -> None:
+        """Record WHO approved a memory, at the moment of approval (#1123).
+
+        ``curated_by`` is the second of the two provenance fields, and it
+        answers a different question from ``generated_by``: who WROTE
+        this, and who APPROVED it.  Approval happens exactly here --
+        ``update_memory`` promoting a memory into a curated maturity is
+        the promotion path the plugin's own instructions and
+        ``validate``'s ``require_curation_without_curator`` remedy both
+        name -- so this is where the stamp belongs.
+
+        Without it nothing in the tree ever wrote the field, so
+        ``Memory.is_curated`` was ``False`` for every memory that would
+        ever exist and ``require_curation: true`` withheld the entire
+        corpus, permanently, with the model told that a curator promoting
+        them would make them retrievable.
+
+        **A withdrawn approval is withdrawn.**  Demoting out of a curated
+        maturity CLEARS the stamp rather than leaving it: a dismissed
+        memory still carrying ``curated_by`` reads as approved to
+        ``is_curated``, which is the gate deciding what the model sees.
+
+        The stamp is the CURATOR's provenance -- the session running the
+        promotion -- never the author's, which ``generated_by`` already
+        holds.  ``None`` when no session is in context: a promotion whose
+        approver cannot be established still promotes, and records the
+        approval without claiming an approver it did not observe.
+        """
+        if maturity not in CURATED_MATURITIES:
+            memory.curated_by = None
+            return
+        stamp: Dict[str, Any] = {"at": datetime.now(timezone.utc).isoformat()}
+        provenance = self._model_provenance()
+        if provenance:
+            stamp.update(provenance)
+        agent = self._agent_name
+        if agent:
+            stamp.setdefault("agent", agent)
+        memory.curated_by = stamp
 
     def _execute_delete(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute delete_memory tool.

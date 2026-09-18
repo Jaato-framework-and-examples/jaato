@@ -29,6 +29,7 @@ F. `workspace.delete` refuses rather than destroying a held record.
 from __future__ import annotations
 
 import ast
+import os
 import time
 from pathlib import Path
 
@@ -60,6 +61,30 @@ _SESSION = "jaato-server/shared/jaato_session.py"
 _DAY = 86400.0
 
 REVERSIONS = [
+    Reversion(
+        target="jaato-server/server/record_retention.py",
+        find="        out.append(ProfileRetention(profile=name, keeping=keeping,\n"
+             "                                    audit_paths=sorted(set(paths))))",
+        replace="        out.append(ProfileRetention(profile=name, keeping=keeping,\n"
+                "                                    audit_paths=[]))",
+        because=(
+            "a profile's own files must be judged under its own clock; "
+            "pooling them let a sibling's 30-day retention unlink a record "
+            "whose profile said keep until deleted"
+        ),
+        test="test_a_sibling_keep_forever_is_not_overruled",
+    ),
+    Reversion(
+        target="jaato-server/server/record_retention.py",
+        find='        siblings = candidate.parent.glob(f"{candidate.stem}_*{candidate.suffix}")',
+        replace="        siblings = []",
+        because=(
+            "a provider trace splits per agent, so judging only the literal "
+            "path left every sibling accumulating forever while the pass "
+            "reported nothing kept and nothing removed"
+        ),
+        test="test_the_per_agent_siblings_of_a_trace_are_judged",
+    ),
     Reversion(
         target=_SESSION,
         find="        record = {\n            'prompt_tokens': response.usage.prompt_tokens,",
@@ -431,3 +456,153 @@ def test_workspace_delete_refuses_a_held_record(tmp_path):
     with pytest.raises(ValueError, match="under retention"):
         mgr.delete_workspace("held")
     assert ws.exists(), "nothing may be removed before the refusal"
+
+
+# ----------------------------- G. each profile's clock governs its own files
+
+def _two_profiles(tmp_path):
+    """One profile keeping 30 days, one keeping until deleted."""
+    profiles = tmp_path / ".jaato" / "profiles"
+    logs = tmp_path / ".jaato" / "logs"
+    profiles.mkdir(parents=True)
+    logs.mkdir(parents=True)
+    for name, days, ledger in (("a", 30, "a.jsonl"), ("b", 0, "b.jsonl")):
+        (profiles / f"{name}.yaml").write_text(
+            f"name: {name}\ndescription: d\nmodel: m\nprovider: anthropic\n"
+            "plugins: []\n"
+            f"record_keeping:\n  retention_days: {days}\n"
+            f"trace:\n  ledger: .jaato/logs/{ledger}\n")
+        (logs / ledger).write_text("{}")
+    return tmp_path
+
+
+def test_a_sibling_keep_forever_is_not_overruled(tmp_path):
+    """`retention_days: 0` means KEEP, and a louder sibling cannot undo it.
+
+    The paths were pooled and judged under the strictest declaration in
+    the workspace, so profile A's 30-day clock reached profile B's
+    ledger and the sweep unlinked a record whose own profile said to
+    keep it until something deleted it.  A policy that silently governs
+    another profile's files is not a policy.
+    """
+    from server.record_retention import declared_retentions
+
+    ws = _two_profiles(tmp_path)
+    entries = {e.profile: e for e in declared_retentions(str(ws))}
+    assert set(entries) == {"a", "b"}
+    assert [p.name for p in entries["a"].audit_paths] == ["a.jsonl"]
+    assert [p.name for p in entries["b"].audit_paths] == ["b.jsonl"]
+    assert entries["b"].keeping.retention_days == 0, (
+        "B's own declaration must survive the read, or nothing downstream "
+        "can honour it")
+
+
+def test_the_per_agent_siblings_of_a_trace_are_judged(tmp_path):
+    """A provider trace is not one file.
+
+    It splits per agent -- implicitly (`p.jsonl` -> `p_subagent_1.jsonl`)
+    and explicitly (`p{agent_suffix}.jsonl`) -- so judging the literal
+    string left every sibling accumulating forever while the pass
+    reported nothing kept and nothing removed: the one-way ratchet the
+    module exists to prevent, through the back door.
+    """
+    from server.record_retention import declared_retentions
+
+    profiles = tmp_path / ".jaato" / "profiles"
+    logs = tmp_path / ".jaato" / "logs"
+    profiles.mkdir(parents=True)
+    logs.mkdir(parents=True)
+    (profiles / "p.yaml").write_text(
+        "name: p\ndescription: d\nmodel: m\nprovider: anthropic\n"
+        "plugins: []\n"
+        "record_keeping:\n  retention_days: 30\n"
+        "trace:\n  provider_log: .jaato/logs/prov{agent_suffix}.jsonl\n"
+        "  session_log: .jaato/logs/sess.jsonl\n")
+    for name in ("prov.jsonl", "prov_subagent_1.jsonl", "prov_subagent_2.jsonl",
+                 "sess.jsonl", "sess_subagent_1.jsonl"):
+        (logs / name).write_text("{}")
+
+    [entry] = declared_retentions(str(tmp_path))
+    names = {p.name for p in entry.audit_paths}
+    assert names == {"prov.jsonl", "prov_subagent_1.jsonl",
+                     "prov_subagent_2.jsonl",
+                     "sess.jsonl", "sess_subagent_1.jsonl"}, names
+
+
+# ------------------------------- H. the conversation clock actually deletes
+
+def _sessions_dir(tmp_path, *, age_days, record_id="20260101_abc"):
+    sessions = tmp_path / ".jaato" / "sessions" / record_id
+    sessions.mkdir(parents=True)
+    record = sessions / "session.json"
+    record.write_text("{}")
+    stamp = time.time() - age_days * _DAY
+    os.utime(record, (stamp, stamp))
+    return tmp_path / ".jaato" / "sessions"
+
+
+def test_an_old_conversation_expires(tmp_path):
+    """The field governed nothing: it was read by a log line and no more.
+
+    ``jaato_sdk.audit`` and ``explain audit`` both said it decides when
+    the session record is deleted, so a profile declaring it to satisfy
+    GDPR storage limitation kept every conversation forever while the
+    tools reported a policy in force.
+    """
+    from server.record_retention import expired_session_records
+
+    root = _sessions_dir(tmp_path, age_days=40)
+    expired, kept = expired_session_records(root, 30)
+    assert [Path(v.path).name for v in expired] == ["20260101_abc"]
+    assert kept == []
+
+
+def test_a_young_conversation_is_kept(tmp_path):
+    from server.record_retention import expired_session_records
+
+    root = _sessions_dir(tmp_path, age_days=5)
+    expired, kept = expired_session_records(root, 30)
+    assert expired == []
+    assert [Path(v.path).name for v in kept] == ["20260101_abc"]
+
+
+def test_a_loaded_session_is_never_removed(tmp_path):
+    """Its record is open and being appended to.
+
+    Removing one under a running daemon is a live session failure with a
+    delayed cause -- the same reason the audit half skips a busy
+    workspace.
+    """
+    from server.record_retention import expired_session_records
+
+    root = _sessions_dir(tmp_path, age_days=400)
+    expired, _kept = expired_session_records(
+        root, 30, keep_ids={"20260101_abc"})
+    assert expired == []
+
+
+def test_no_conversation_clock_removes_nothing(tmp_path):
+    from server.record_retention import expired_session_records
+
+    root = _sessions_dir(tmp_path, age_days=4000)
+    assert expired_session_records(root, None) == ([], [])
+    assert expired_session_records(root, 0) == ([], [])
+
+
+def test_the_conversation_clock_is_the_longest_in_the_workspace(tmp_path):
+    """One record per SESSION, not per profile, so one clock.
+
+    Unlike ``retention_days``, which governs the files a profile names,
+    a session record is named by no profile -- so the only safe reading
+    of several declarations is the longest.
+    """
+    from server.record_retention import conversation_minimum
+
+    profiles = tmp_path / ".jaato" / "profiles"
+    profiles.mkdir(parents=True)
+    for name, days in (("a", 7), ("b", 90)):
+        (profiles / f"{name}.yaml").write_text(
+            f"name: {name}\ndescription: d\nmodel: m\nprovider: anthropic\n"
+            "plugins: []\n"
+            f"record_keeping:\n  conversation_retention_days: {days}\n")
+    assert conversation_minimum(str(tmp_path)) == 90

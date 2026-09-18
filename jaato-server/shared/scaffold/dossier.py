@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import subprocess
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -80,20 +81,66 @@ def _now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
-def _commit() -> str:
-    """The commit the computed sections describe, or ``"unknown"``.
+def _framework_checkout() -> Optional[Path]:
+    """The framework's own git checkout, or ``None`` for an installed wheel.
 
-    A fact about a tree is a fact about a COMMIT.  Best-effort: a
-    tarball install is not a git checkout, and a dossier generated there
-    says so rather than failing.
+    The discriminator is ``check_checkout_skew``'s (#823): a CHECKOUT has
+    the distribution's ``pyproject.toml`` beside the package directory,
+    an install in ``site-packages`` does not.  Asked of the package this
+    module lives in, so the answer is about the framework rather than
+    about whatever directory the operator happened to run from.
     """
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        if (parent / "pyproject.toml").is_file() and (parent / ".git").exists():
+            return parent
+        if (parent.parent / ".git").exists() and (parent / "pyproject.toml").is_file():
+            return parent.parent
+    return None
+
+
+@lru_cache(maxsize=1)
+def _commit() -> str:
+    """What version of the framework the computed sections describe.
+
+    A fact about a tree is a fact about a COMMIT -- and about the RIGHT
+    tree.  Run in the process CWD, ``git rev-parse`` answered with the
+    commit of whatever repository the operator was standing in: an
+    operator generating a dossier from their own project, with jaato
+    installed from a wheel, got THEIR commit stamped as the framework's,
+    in the one field that exists to make the document auditable six
+    months later.
+
+    So the checkout is resolved from this module's own location, and an
+    installed wheel -- which has no commit and must not borrow one --
+    reports its distribution versions instead.  That is the fact a wheel
+    install can actually state.
+
+    Memoised: ``_stamp()`` is called once per section, and a subprocess
+    per section of a nine-section document is nine subprocesses to answer
+    one question that cannot change during a run.
+    """
+    checkout = _framework_checkout()
+    if checkout is not None:
+        try:
+            out = subprocess.run(
+                ["git", "rev-parse", "--short", "HEAD"],
+                cwd=str(checkout),
+                capture_output=True, text=True, timeout=5, check=False)
+            if out.stdout.strip():
+                return out.stdout.strip()
+        except Exception:  # noqa: BLE001 -- a diagnostic must not raise
+            pass
     try:
-        out = subprocess.run(
-            ["git", "rev-parse", "--short", "HEAD"],
-            capture_output=True, text=True, timeout=5, check=False)
-        return out.stdout.strip() or "unknown"
-    except Exception:  # noqa: BLE001 -- a diagnostic must not raise
-        return "unknown"
+        from jaato_sdk.release_channels import installed_distributions
+        installed = installed_distributions()
+        if installed:
+            return "installed " + ", ".join(
+                f"{name} {version}"
+                for name, version in sorted(installed.items()))
+    except Exception:  # noqa: BLE001
+        pass
+    return "unknown"
 
 
 def _stamp() -> str:

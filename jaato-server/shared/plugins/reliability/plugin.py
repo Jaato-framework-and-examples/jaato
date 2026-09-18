@@ -960,6 +960,14 @@ class ReliabilityPlugin(RunnerForwardingMixin):
 
         Wrapped throughout, like every other raiser: an incident recorded
         ABOUT a failure must not be able to add one.
+
+        **It names its session.**  The plugin holds one, and a register
+        row reading ``no session`` cannot be attributed -- on a daemon
+        serving two, the row is indistinguishable between them, so the
+        operator asking "what happened in session B in the last 15 days"
+        gets an answer that names neither.  The BINDING (provider, model,
+        tier) is genuinely not something this plugin holds, and stays
+        absent: absent is not zero.
         """
         try:
             from shared.incidents import KIND_CIRCUIT_OPENED, raise_incident
@@ -967,6 +975,7 @@ class ReliabilityPlugin(RunnerForwardingMixin):
                 KIND_CIRCUIT_OPENED,
                 f"{tool_name} blocked: {reason}",
                 site="shared/plugins/reliability/plugin.py::_update_trust_state",
+                session_id=getattr(self, "_session_id", None),
             )
         except Exception:  # noqa: BLE001 -- see the docstring
             pass

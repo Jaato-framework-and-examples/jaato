@@ -113,16 +113,38 @@ own problem under GDPR storage limitation. The daemon's lifetime watchdog
 because the shortest retention anybody writes is a day — removing audit
 files past their minimum.
 
-Four properties, each attached to a way a deleting sweep goes wrong:
+It removes both things the block governs, on their two clocks: audit files
+past `retention_days`, and session records past
+`conversation_retention_days`.
+
+Six properties, each attached to a way a deleting sweep goes wrong:
 
 - **it acts only on a declared policy** — a workspace whose profiles
   declare no `record_keeping:` is never touched;
 - **only positive evidence expires a record** — a path whose age cannot be
   read is kept;
-- **a loaded session's workspace is skipped** — its logs are open;
+- **a loaded session's workspace is skipped** — its logs are open — and a
+  loaded session's own record is never removed whatever its age;
+- **each profile's files are judged under that profile's own clock.**
+  Pooling them under the strictest declaration in the workspace let one
+  profile's 30-day retention unlink a sibling's record whose own profile
+  said `retention_days: 0`. A policy that silently governs another
+  profile's files is not a policy;
+- **a trace path is expanded, not taken literally.** The provider channel
+  splits per agent — `prov.jsonl` becomes `prov_subagent_1.jsonl`, and
+  `prov{agent_suffix}.jsonl` says so explicitly — so the siblings are
+  globbed. Judging the literal string left them accumulating forever while
+  the pass reported nothing kept and nothing removed;
 - **it names what it kept, not only what it removed** — a pass that only
   logs deletions cannot answer an operator asking why a record is still
   there.
+
+The two clocks resolve differently across profiles, because they govern
+different objects. `retention_days` governs the files a profile **names**,
+so each profile's declaration reaches only its own. A session record is
+named by no profile — one directory per session, whichever profile ran it —
+so the workspace has **one** conversation clock, and the only safe reading
+of several declarations is the longest.
 
 ## What `validate` says
 
@@ -142,8 +164,8 @@ says what you declared cannot act, and neither is useful without the other.
 Article 73(6) asks that, after a serious incident, the logs used in the
 investigation not have been altered. With `integrity: sha256-chain`, each
 record carries `prev_digest` — the SHA-256 of the previous record's
-canonical bytes — and `digest`, its own. The first record of a segment
-chains to the literal `genesis`, so "segment start" and "somebody deleted
+canonical bytes — and `digest`, its own. The first record of a FILE chains
+to the literal `genesis`, so "the start of the chain" and "somebody deleted
 the field" are different states on disk.
 
 ```bash
@@ -173,10 +195,25 @@ and `write_ledger` flushes whatever the append path did not, so one file
 can be written by both. If only one chained, the file would break in the
 middle — which reads exactly like tampering.
 
+**The chain belongs to the FILE, not to the process writing it.** Every
+chained append takes an exclusive lock on the target, reads the last
+record's digest back off disk, and links to that. So a daemon restart, a
+second session sharing an absolute `trace.ledger`, and two processes
+appending concurrently all continue the one chain — rather than each
+beginning a rival one and leaving a `genesis` link in the middle of a file
+that nobody touched. Holding the pointer in memory alone was exactly that
+defect, and its symptom was the mechanism accusing its own normal
+deployment.
+
+A file that already holds UNCHAINED records and then gets chained appends
+is announced once at WARNING: the older half verifies as *carries no chain
+fields*, which is evidence of nothing either way rather than of tampering,
+and a reader should know which half is which.
+
 **Stated cost.** A chained file cannot be pruned from the front: removing a
 line breaks every link after it. Retention therefore rotates whole
-**segments** — a new file per period, each with its own genesis — rather
-than deleting lines. A daemon restart starts a new segment.
+**files** — a new file per period, each starting at `genesis` — rather than
+deleting lines from one.
 
 ## What this does not do
 

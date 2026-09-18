@@ -45,6 +45,12 @@ LEDGER_PATH_ENV = "LEDGER_PATH"
 #: comes from.
 LEDGER_INTEGRITY_ENV = "JAATO_LEDGER_INTEGRITY"
 
+#: How much of a ledger's tail is read to recover the chain pointer.
+#: One record is a few hundred bytes, so this is generous by two
+#: orders of magnitude and still bounded -- a ledger grows without
+#: limit and this runs per chained append.
+_TAIL_READ_BYTES = 65536
+
 
 class TokenLedger:
     """The per-runtime record of every model round trip and permission verdict.
@@ -91,15 +97,23 @@ class TokenLedger:
         #: ``ledger_path`` already avoids.
         self._integrity = integrity
         #: The previous chained record's digest, or ``None`` before the
-        #: first.  In memory only: a daemon restart starts a new SEGMENT,
-        #: which is the documented shape -- a chained file cannot be
-        #: pruned from the front, so retention rotates segments.
+        #: first.  A CACHE of what this instance last wrote, never the
+        #: authority: the chain belongs to the FILE, so every chained
+        #: append re-reads the tail digest off disk under the lock (see
+        #: :meth:`_tail_digest`).  Holding it in memory alone was the
+        #: #1120 defect -- a daemon restart, or a second session sharing
+        #: an absolute ``trace.ledger``, appended a record linked to
+        #: ``genesis`` in the middle of a file, and the verifier
+        #: correctly reported an untouched file as tampered.
         self._prev_digest: Optional[str] = None
         #: How many leading events are already on disk.
         self._flushed = 0
         #: Whether an append failure has been reported -- once per ledger,
         #: because a record is made per round trip and per tool call.
         self._append_failed = False
+        #: Whether "this file's existing records are not chained" has been
+        #: said.  Once per ledger, for the same reason.
+        self._unchained_tail_reported = False
 
     def ledger_path(self) -> Optional[str]:
         """Where records are appended, or ``None`` when nowhere.
@@ -148,6 +162,12 @@ class TokenLedger:
 
         Chaining advances :attr:`_prev_digest`, so this method is
         ORDER-DEPENDENT and callers must walk indices in order.  Both do.
+        It is also WRITE-dependent: the pointer it leaves behind names a
+        record the caller has not written yet, so a caller whose write
+        fails must not reuse it.  Both callers go through
+        :meth:`_write_pending`, which re-reads the pointer from the file
+        on every chained append -- so a failed write self-heals rather
+        than chaining the retry to a record that reached no disk.
         """
         record = self._enrich(self._events[index], index)
         if not self.chains():
@@ -176,6 +196,104 @@ class TokenLedger:
             enriched["internal_tokens"] = tt - (pt + ot)
         return enriched
 
+    def _tail_digest(self, path: str) -> Optional[str]:
+        """The digest of the last chained record already in ``path``.
+
+        The chain is a property of the FILE, not of whichever process is
+        appending, so this is where a chained append gets its link:
+        without it a restart or a second writer begins a fresh chain
+        mid-file and the verifier -- rightly, on the evidence it has --
+        reports the file as tampered with.
+
+        Reads the tail only (:data:`_TAIL_READ_BYTES`), because a ledger
+        grows without bound and this runs per chained append.  ``None``
+        means *nothing to link to*: an absent or empty file (the first
+        record, which links to ``genesis``), or a tail that carries no
+        chain fields -- an unchained file being appended to with chaining
+        now on, which is announced, because the verifier will report the
+        older half as carrying no evidence either way.
+        """
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            return None
+        if size == 0:
+            return None
+        try:
+            with open(path, "rb") as fh:
+                if size > _TAIL_READ_BYTES:
+                    fh.seek(size - _TAIL_READ_BYTES)
+                    fh.readline()          # drop the partial first line
+                tail = fh.read().decode("utf-8", errors="replace")
+        except OSError:
+            return None
+        for raw in reversed(tail.splitlines()):
+            text = raw.strip()
+            if not text:
+                continue
+            try:
+                record = json.loads(text)
+            except ValueError:
+                continue
+            if isinstance(record, dict) and record.get("digest"):
+                return str(record["digest"])
+            break
+        if not self._unchained_tail_reported:
+            self._unchained_tail_reported = True
+            logger.warning(
+                "ledger: %s already holds records with no chain fields; the "
+                "records appended from now on are chained and the earlier "
+                "ones will verify as 'carries no chain fields' -- evidence "
+                "of nothing either way, rather than of tampering", path)
+        return None
+
+    def _write_pending(self, path: str, *, fsync: bool) -> None:
+        """Append every not-yet-flushed event to ``path``.  May raise.
+
+        The ONE writer, so the per-record append and
+        :meth:`write_ledger`'s flush cannot chain or advance differently
+        -- the same argument :meth:`_line` makes about rendering.
+
+        Two properties the chained path depends on:
+
+        * **The link comes from the file, under an exclusive lock.**  A
+          restart, a second session on a shared absolute ``trace.ledger``
+          and two concurrent appenders all continue the one chain instead
+          of starting rival ones.  The lock is the #683 primitive, so
+          there is one flock mechanism in the tree rather than two.
+        * **The cursors advance PER LINE, after that line is flushed.**
+          Advancing them for the whole batch up front meant a failure on
+          line 3 of 5 left lines 1-2 on disk and unrecorded, so the retry
+          wrote them again -- with different digests, since the pointer
+          had moved.  A duplicated record in an audit log is the thing
+          the log exists to make impossible.
+        """
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        if not self.chains():
+            self._flush_lines(path, fsync=fsync)
+            return
+        from .credential_lock import credential_lock
+        with credential_lock(path):
+            self._prev_digest = self._tail_digest(path)
+            self._flush_lines(path, fsync=fsync)
+
+    def _flush_lines(self, path: str, *, fsync: bool) -> None:
+        """Render and write each pending event, advancing as each lands."""
+        with open(path, "a", encoding="utf-8") as f:
+            for idx in range(self._flushed, len(self._events)):
+                f.write(self._line(idx) + "\n")
+                f.flush()
+                self._flushed = idx + 1
+            if fsync:
+                try:
+                    os.fsync(f.fileno())
+                except OSError:
+                    # Not supported on every filesystem; the data is at
+                    # least in the OS buffer cache.
+                    pass
+
     def _append_to_disk(self) -> None:
         """Append every not-yet-flushed event to the configured path, if any.
 
@@ -183,21 +301,14 @@ class TokenLedger:
         not fail the model round trip it is recording.  The failure is
         logged once per ledger at WARNING and the cursor is left where it
         was, so :meth:`write_ledger` can still flush the same events to a
-        path that works.  One ``flush()`` per append, no ``fsync`` -- a
+        path that works.  One ``flush()`` per record, no ``fsync`` -- a
         record per tool call is the hot path; ``write_ledger`` fsyncs.
         """
         path = self.ledger_path()
         if path is None or self._flushed >= len(self._events):
             return
         try:
-            parent = os.path.dirname(path)
-            if parent:
-                os.makedirs(parent, exist_ok=True)
-            with open(path, "a", encoding="utf-8") as f:
-                for idx in range(self._flushed, len(self._events)):
-                    f.write(self._line(idx) + "\n")
-                f.flush()
-            self._flushed = len(self._events)
+            self._write_pending(path, fsync=False)
         except Exception as exc:  # noqa: BLE001
             if not self._append_failed:
                 self._append_failed = True
@@ -347,17 +458,7 @@ class TokenLedger:
         """
         path = filepath or self.ledger_path() or "token_events_ledger.jsonl"
         try:
-            with open(path, "a", encoding="utf-8") as f:
-                for idx in range(self._flushed, len(self._events)):
-                    f.write(self._line(idx) + "\n")
-                f.flush()
-                try:
-                    os.fsync(f.fileno())
-                except OSError:
-                    # fsync may not be supported on every filesystem;
-                    # the data is at least in the OS buffer cache.
-                    pass
-            self._flushed = len(self._events)
+            self._write_pending(path, fsync=True)
             return path
         except Exception as exc:
             logger.error(f"Ledger write failed: {exc}", exc_info=True)

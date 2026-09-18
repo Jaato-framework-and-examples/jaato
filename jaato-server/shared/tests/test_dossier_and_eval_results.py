@@ -92,6 +92,19 @@ REVERSIONS = [
                 "half a provider relies on when deciding what they still owe",
     ),
 
+    Reversion(
+        target="jaato-server/shared/scaffold/dossier.py",
+        find="                cwd=str(checkout),\n",
+        replace="",
+        because=(
+            "the framework's commit read from the process CWD -- an "
+            "operator generating a dossier from their own project gets "
+            "THEIR commit stamped as the framework's, in the one field "
+            "that exists to make the document auditable later"
+        ),
+        test="test_the_commit_stamp_describes_the_FRAMEWORK",
+    ),
+
     # ---------------------------------------------- #1124, the eval adapter
     Reversion(
         target="jaato-server/shared/scaffold/eval_results.py",
@@ -246,6 +259,66 @@ def test_the_computed_sections_are_stamped(workspace):
     text = dossier.render_dossier("worker", str(workspace))
     assert "Computed from the installed framework at commit" in text
     assert "Regenerate" in text
+
+
+def test_the_commit_stamp_describes_the_FRAMEWORK(tmp_path, monkeypatch):
+    """Not whatever repository the operator was standing in.
+
+    ``git rev-parse`` inherits the process CWD, so an operator generating
+    a dossier from their own project -- with jaato installed from a wheel
+    -- had THEIR commit stamped as the framework's, in the one field that
+    exists to make the document auditable six months later.  A wrong fact
+    presented as provenance is worse than an absent one.
+    """
+    from shared.scaffold import dossier as D
+
+    foreign = tmp_path / "someone-elses-repo"
+    foreign.mkdir()
+    monkeypatch.chdir(foreign)
+    D._commit.cache_clear()
+    try:
+        stamp = D._commit()
+    finally:
+        D._commit.cache_clear()
+
+    checkout = D._framework_checkout()
+    assert checkout is not None, "this tree IS a checkout; the probe is broken"
+    assert checkout.resolve() == ROOT.resolve()
+    assert stamp != "unknown"
+    assert str(foreign) not in stamp
+
+
+def test_the_commit_is_resolved_once_per_run():
+    """One subprocess, not one per section.
+
+    ``_stamp()`` is called per Annex IV section, so an unmemoised probe
+    spawned nine `git` processes -- each with its own timeout -- to
+    answer a question that cannot change during a run.
+    """
+    from shared.scaffold import dossier as D
+
+    assert hasattr(D._commit, "cache_clear"), (
+        "_commit must be memoised for the run")
+
+
+def test_a_wheel_install_states_versions_rather_than_borrowing_a_commit(
+        monkeypatch):
+    """No checkout means no commit, and no commit means say so.
+
+    Falling through to a bare `git rev-parse` is exactly how somebody
+    else's commit ends up in the document; the honest answer a wheel
+    install can give is which distributions are installed.
+    """
+    from shared.scaffold import dossier as D
+
+    monkeypatch.setattr(D, "_framework_checkout", lambda: None)
+    D._commit.cache_clear()
+    try:
+        stamp = D._commit()
+    finally:
+        D._commit.cache_clear()
+    assert stamp.startswith("installed ") or stamp == "unknown"
+    assert "jaato" in stamp or stamp == "unknown"
 
 
 def test_the_dossier_never_renders_a_persona():

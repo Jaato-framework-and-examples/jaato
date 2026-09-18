@@ -5083,41 +5083,103 @@ class SessionManager:
         """
         from pathlib import Path
 
-        from .record_retention import _declared_retention
+        from .record_retention import conversation_minimum, declared_retentions
 
         stamp = time.time() if now is None else now
         with self._lock:
             busy = {s.workspace_path for s in self._sessions.values()
                     if s.workspace_path}
+            loaded_ids = set(self._sessions)
         removed = 0
         for workspace in self._retention_workspaces():
             if workspace in busy:
                 continue
             try:
-                keeping, paths = _declared_retention(workspace)
+                entries = declared_retentions(workspace)
             except Exception:  # noqa: BLE001 -- an unparseable workspace
                 logger.debug("retention sweep: could not resolve %s",
                              workspace, exc_info=True)
                 continue
-            retention = getattr(keeping, "retention_days", None)
-            if not retention or not paths:
-                continue
-            expired, kept = expired_paths(paths, retention, now=stamp)
-            for verdict in expired:
-                try:
-                    Path(verdict.path).unlink()
-                    removed += 1
-                    logger.info(
-                        "record retention: removed %s (%s)",
-                        verdict.path, verdict.reason)
-                except OSError as exc:
-                    logger.warning(
-                        "record retention: could not remove %s (%s); it "
-                        "stays until the next pass", verdict.path, exc)
-            if kept:
-                logger.debug(
-                    "record retention: %d file(s) kept under %s",
-                    len(kept), describe_policy(keeping))
+
+            # PER PROFILE, under that profile's own clock.  Pooling every
+            # declaring profile's files under the longest retention meant
+            # a sibling's `retention_days: 0` -- an explicit "keep until
+            # something deletes it" -- was overruled and its record
+            # unlinked.
+            for entry in entries:
+                retention = getattr(entry.keeping, "retention_days", None)
+                if not retention or not entry.audit_paths:
+                    continue
+                expired, kept = expired_paths(entry.audit_paths, retention,
+                                              now=stamp)
+                for verdict in expired:
+                    try:
+                        Path(verdict.path).unlink()
+                        removed += 1
+                        logger.info(
+                            "record retention: removed %s (%s, profile %s)",
+                            verdict.path, verdict.reason, entry.profile)
+                    except OSError as exc:
+                        logger.warning(
+                            "record retention: could not remove %s (%s); it "
+                            "stays until the next pass", verdict.path, exc)
+                if kept:
+                    logger.debug(
+                        "record retention: %d file(s) kept for profile %s "
+                        "under %s", len(kept), entry.profile,
+                        describe_policy(entry.keeping))
+
+            removed += self._sweep_conversation_records(
+                workspace, conversation_minimum(workspace), loaded_ids, stamp)
+        return removed
+
+    def _sweep_conversation_records(
+        self,
+        workspace: str,
+        conversation_days: Optional[int],
+        loaded_ids: Set[str],
+        stamp: float,
+    ) -> int:
+        """Remove session records past ``conversation_retention_days``.
+
+        The SECOND clock, and the one that governs personal data: an
+        audit record answers "what did this system do", a conversation is
+        something a subject may ask to have erased.  Keeping the first
+        while dropping the second is what satisfies Art. 19(1) and GDPR
+        storage limitation at once -- and the field that says so was read
+        by a log line and nothing else, so a profile declaring it kept
+        every conversation forever while ``explain audit`` said otherwise.
+
+        A LOADED session is never removed, whatever its record's age: it
+        is open and being appended to.
+        """
+        import shutil
+
+        from .record_retention import expired_session_records
+
+        if not conversation_days:
+            return 0
+        try:
+            sessions_dir = self._session_storage_dir(workspace)
+        except Exception:  # noqa: BLE001 -- an unresolvable workspace
+            return 0
+        expired, kept = expired_session_records(
+            sessions_dir, conversation_days, now=stamp, keep_ids=loaded_ids)
+        removed = 0
+        for verdict in expired:
+            try:
+                shutil.rmtree(verdict.path)
+                removed += 1
+                logger.info("conversation retention: removed %s (%s)",
+                            verdict.path, verdict.reason)
+            except OSError as exc:
+                logger.warning(
+                    "conversation retention: could not remove %s (%s); it "
+                    "stays until the next pass", verdict.path, exc)
+        if kept:
+            logger.debug(
+                "conversation retention: %d record(s) kept under a %dd minimum",
+                len(kept), conversation_days)
         return removed
 
     def _retention_workspaces(self) -> List[str]:

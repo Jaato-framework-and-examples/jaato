@@ -592,8 +592,19 @@ def _note_incident(
             model=incident.model, tier=incident.tier,
         ))
 
+    # The session-env overlay is NOT applied here: every call site is on a
+    # terminal path, and two of the three run inside ``model_thread``'s
+    # ``finally`` -- after ``_with_session_env`` has exited.  So the trace
+    # destination is read off the resolved session env this server holds,
+    # rather than off a process environment that has already reverted to
+    # the daemon's own.  ``_session_env`` is what the overlay WOULD have
+    # applied, including the typed ``trace:`` block.
+    env = getattr(server, "_session_env", None) or {}
     try:
-        raise_incident(kind, cause, site=site, emit=_emit, session_id=sid)
+        raise_incident(kind, cause, site=site, emit=_emit, session_id=sid,
+                       trace_path=env.get("JAATO_TRACE_LOG"),
+                       workspace_root=(env.get("JAATO_WORKSPACE_ROOT")
+                                       or getattr(server, "workspace_path", None)))
     except Exception:  # noqa: BLE001 -- see the docstring
         logger.debug("incident not recorded", exc_info=True)
 

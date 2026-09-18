@@ -243,13 +243,88 @@ def workspace_retention_hold(
     )
 
 
-def _declared_retention(workspace: Any) -> Tuple[Any, List[Path]]:
-    """The strictest ``record_keeping:`` in a workspace, and the files it governs.
+@dataclass(frozen=True)
+class ProfileRetention:
+    """One profile's declared policy and the paths it governs.
 
-    Strictest rather than first: a workspace may hold several profiles,
-    and the one with the longest minimum is the one a delete would
-    violate.  Only paths that EXIST are returned, so a declared-but-never
-    written trace holds nothing.
+    A LIST of these rather than one "strictest" policy plus a pooled path
+    set, because pooling violates the very declaration it is reading.
+    Profile A keeping its ledger 30 days beside profile B keeping its own
+    "until deleted" (``retention_days: 0``) yielded A's clock over BOTH
+    sets of files, so the sweep unlinked B's record on day 31 -- against
+    an explicit instruction not to.  A policy that silently governs
+    somebody else's files is not a policy.
+
+    Attributes:
+        profile: Whose block this is, for the log line.
+        keeping: The ``RecordKeepingConfig``.
+        audit_paths: The files ``retention_days`` governs, expanded --
+            see :func:`_expand_trace_paths`.
+    """
+
+    profile: str
+    keeping: Any
+    audit_paths: List[Path]
+
+
+def _expand_trace_paths(root: Path, value: str) -> List[Path]:
+    """Every file one declared trace path actually names.
+
+    A trace path is not one file.  The PROVIDER channel splits per agent
+    -- ``provider.jsonl`` becomes ``provider_subagent_1.jsonl`` with no
+    placeholder at all, and ``provider{agent_suffix}.jsonl`` with one --
+    so judging the literal string either found nothing or found one file
+    of many, and the siblings accumulated forever while the pass reported
+    nothing kept and nothing removed.  That is the one-way ratchet this
+    module exists to prevent, arriving through the back door.
+
+    Both forms are globbed:
+
+    * a path naming ``{agent}`` / ``{agent_suffix}`` -> the token becomes
+      ``*``, because at retention time there is no current agent and the
+      question is *which files did this path ever produce*;
+    * a path naming none -> the literal, plus the implicit
+      ``<stem>_*<suffix>`` the provider channel appends.
+
+    The glob is scoped to the directory the profile named, so the widest
+    thing it can reach is a file whose name starts with the declared
+    stem.  Stated rather than hidden: that is the price of the implicit
+    suffix being a naming convention rather than a recorded fact.
+    """
+    from jaato_sdk.trace import TRACE_PATH_PLACEHOLDERS
+
+    candidate = Path(value)
+    if not candidate.is_absolute():
+        candidate = root / value
+    text = str(candidate)
+
+    if any(token in text for token in TRACE_PATH_PLACEHOLDERS):
+        for token in TRACE_PATH_PLACEHOLDERS:
+            text = text.replace(token, "*")
+        pattern = Path(text)
+        try:
+            return sorted(p for p in pattern.parent.glob(pattern.name)
+                          if p.is_file())
+        except (OSError, ValueError):       # an unglobbable pattern
+            return []
+
+    found = [candidate] if candidate.is_file() else []
+    try:
+        siblings = candidate.parent.glob(f"{candidate.stem}_*{candidate.suffix}")
+        found.extend(p for p in siblings if p.is_file())
+    except (OSError, ValueError):
+        pass
+    return sorted(set(found))
+
+
+def declared_retentions(workspace: Any) -> List[ProfileRetention]:
+    """Every profile in a workspace that declares ``record_keeping:``.
+
+    Per profile, under ITS OWN policy.  See :class:`ProfileRetention` for
+    why there is no "strictest" shortcut.  A profile declaring the block
+    with no ``retention_days`` -- integrity only, or an explicit ``0`` --
+    is still returned, so a caller can see that its files are governed
+    and governed by *nothing expiring them*.
     """
     from shared.plugins.subagent.config import discover_profiles
 
@@ -258,25 +333,125 @@ def _declared_retention(workspace: Any) -> Tuple[Any, List[Path]]:
         profiles_dir=".jaato/profiles", base_path=str(root),
         config_root=str(root / ".jaato"),
     )
-    strictest = None
-    paths: List[Path] = []
-    for profile in (result.profiles or {}).values():
+    out: List[ProfileRetention] = []
+    for name, profile in sorted((result.profiles or {}).items()):
         keeping = getattr(profile, "record_keeping", None)
         if keeping is None or not getattr(keeping, "declared", False):
             continue
-        days = getattr(keeping, "retention_days", None)
-        if days and (strictest is None
-                     or days > getattr(strictest, "retention_days", 0)):
-            strictest = keeping
         trace = getattr(profile, "trace", None)
+        paths: List[Path] = []
         for value in (getattr(trace, "ledger", None),
                       getattr(trace, "session_log", None),
                       getattr(trace, "provider_log", None)):
-            if not value:
+            if value:
+                paths.extend(_expand_trace_paths(root, value))
+        out.append(ProfileRetention(profile=name, keeping=keeping,
+                                    audit_paths=sorted(set(paths))))
+    return out
+
+
+def conversation_minimum(workspace: Any) -> Optional[int]:
+    """The longest ``conversation_retention_days`` declared in a workspace.
+
+    STRICTEST here, and per-profile above, because the two clocks govern
+    different objects.  ``retention_days`` governs files a profile NAMES,
+    so each profile's declaration reaches only its own.  A session record
+    is not named by any profile -- it is one directory under
+    ``<workspace>/.jaato/sessions/`` per session, whichever profile ran
+    it -- so the whole workspace has one conversation clock, and the only
+    safe reading of several is the longest.
+
+    ``None`` when nothing declares one; ``0`` is a declaration and means
+    *kept until something deletes it*, so it never expires anything.
+    """
+    longest: Optional[int] = None
+    for entry in declared_retentions(workspace):
+        days = getattr(entry.keeping, "conversation_retention_days", None)
+        if days is None:
+            continue
+        longest = days if longest is None else max(longest, days)
+    return longest
+
+
+def expired_session_records(
+    sessions_dir: Any,
+    conversation_days: Optional[int],
+    now: Optional[float] = None,
+    keep_ids: Optional[Iterable[str]] = None,
+) -> Tuple[List[RetentionVerdict], List[RetentionVerdict]]:
+    """Split a workspace's session records into (expired, kept).
+
+    ``conversation_retention_days`` was parsed, validated, inherited,
+    rendered by ``explain audit`` and described by ``jaato_sdk.audit`` as
+    the field that governs when a session record is deleted -- and read
+    by one log line.  A profile declaring it to satisfy GDPR storage
+    limitation kept every conversation forever while the tools said
+    otherwise, which is the #735 shape: a key that does everything except
+    the thing it is for.
+
+    The record is a DIRECTORY per session, judged by its own mtime, so a
+    session written to recently is young however old its directory node
+    is.  ``keep_ids`` are the sessions currently LOADED: removing one
+    under a running daemon is a live failure with a delayed cause.
+    """
+    expired: List[RetentionVerdict] = []
+    kept: List[RetentionVerdict] = []
+    root = Path(sessions_dir)
+    if not conversation_days or not root.is_dir():
+        return expired, kept
+    protected = set(keep_ids or ())
+    for entry in sorted(root.iterdir()):
+        if not entry.is_dir() or entry.name in protected:
+            continue
+        # Judged on its newest FILE, reported as the DIRECTORY: the age
+        # belongs to the content and the removal to the record.
+        inner = judge(_newest_mtime(entry), conversation_days, now=now)
+        verdict = RetentionVerdict(
+            path=str(entry), expired=inner.expired,
+            kept_days=inner.kept_days, age_days=inner.age_days,
+            reason=inner.reason.replace(str(_newest_mtime(entry)), str(entry)))
+        (expired if verdict.expired else kept).append(verdict)
+    return expired, kept
+
+
+def _newest_mtime(directory: Path) -> Path:
+    """The most recently touched file in ``directory``, else the directory.
+
+    A record's age is the age of its NEWEST part: a conversation appended
+    to yesterday is a day old whatever its directory node says, and
+    judging the container would expire a live conversation.
+    """
+    newest = directory
+    best = -1.0
+    try:
+        for child in directory.rglob("*"):
+            if not child.is_file():
                 continue
-            candidate = Path(value)
-            if not candidate.is_absolute():
-                candidate = root / value
-            if candidate.exists():
-                paths.append(candidate)
-    return strictest, paths
+            stamp = child.stat().st_mtime
+            if stamp > best:
+                best, newest = stamp, child
+    except OSError:
+        return directory
+    return newest
+
+
+def _declared_retention(workspace: Any) -> Tuple[Any, List[Path]]:
+    """The strictest ``record_keeping:`` in a workspace, and its own files.
+
+    Retained for :func:`workspace_retention_hold`, which asks a
+    whole-workspace question -- *may this tree be deleted* -- where the
+    strictest declaration is the right answer and pooling is not a
+    problem, because the verdict is one refusal rather than a set of
+    unlinks.  The SWEEP uses :func:`declared_retentions`, which keeps
+    each profile's files under each profile's own clock.
+    """
+    strictest = None
+    paths: List[Path] = []
+    for entry in declared_retentions(workspace):
+        days = getattr(entry.keeping, "retention_days", None)
+        if days and (strictest is None
+                     or days > getattr(strictest, "retention_days", 0)):
+            strictest = entry.keeping
+        if days:
+            paths.extend(entry.audit_paths)
+    return strictest, sorted(set(paths))

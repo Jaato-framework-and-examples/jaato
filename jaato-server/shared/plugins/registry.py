@@ -1268,8 +1268,36 @@ class PluginRegistry:
         return dict(self._plugin_sources)
 
     def list_exposed(self) -> List[str]:
-        """List currently exposed plugin names."""
+        """List currently exposed plugin names.
+
+        The TOOL-bearing subset.  An enrichment plugin is enabled by the
+        same ``plugins:`` list and is deliberately absent here, because
+        this set feeds ``get_exposed_tool_schemas`` /
+        ``get_plugin_for_tool``, which must never call
+        ``get_tool_schemas()`` on a plugin that has none.  Anything
+        asking "which plugins did this session ENABLE" wants
+        :meth:`list_enabled` instead.
+        """
         return list(self._exposed)
+
+    def list_enabled(self) -> List[str]:
+        """Every plugin this session enabled -- tool-bearing AND enrichment.
+
+        The union ``self._exposed | self._enrichment_only`` was already
+        spelled out at six call sites; naming it is what stopped a
+        seventh reaching for :meth:`list_exposed` and silently missing
+        every enrichment plugin.  That is exactly how the #1117 output
+        marker came to be looked up in a set it can never be in: it
+        declares ``PLUGIN_KIND = "enrichment"``, so a profile listing it
+        produced an empty marker list and every AI-generated payload was
+        delivered unmarked, with `explain oversight` still reporting the
+        marker as installed.
+
+        A snapshot (#938): the registry is shared with subagents, and a
+        spawn mutating either set while a caller iterates it would raise
+        inside that caller's turn.
+        """
+        return list(self._exposed | self._enrichment_only)
 
     def all_plugins(self) -> Dict[str, Any]:
         """Snapshot of every DISCOVERED plugin instance, by name.

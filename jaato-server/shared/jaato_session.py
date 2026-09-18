@@ -9439,12 +9439,20 @@ NOTES
     def _output_markers(self) -> List[Any]:
         """The enabled plugins declaring ``TRAIT_OUTPUT_MARKER``.
 
-        A snapshot of the EXPOSED set, not the discovered one: the
+        A snapshot of the ENABLED set, not the discovered one: the
         registry is shared across a parent and its subagents (#938), and
         a marker one profile enabled must not silently mark another
         agent's output.  Iterating a snapshot rather than the live
         container is the #938 rule -- a spawn exposing plugins while
         this walks would otherwise raise inside the turn.
+
+        **``list_enabled``, never ``list_exposed``.**  A marker provides
+        no tools, so it is an ENRICHMENT plugin and the registry files it
+        under ``_enrichment_only``; ``list_exposed`` is the tool-bearing
+        subset and can never contain one.  Reading that set returned an
+        empty list for every profile that enabled a marker -- the
+        mechanism inert in the only configuration that uses it, with
+        `explain oversight` still reporting the marker as installed.
 
         Empty is the normal state: no in-tree profile enables a marker,
         and the framework's own machine-readable half
@@ -9455,7 +9463,16 @@ NOTES
             return []
         from jaato_sdk.plugins.base import TRAIT_OUTPUT_MARKER
         markers: List[Any] = []
-        for name in list(registry.list_exposed()):
+        # A registry predating list_enabled (a double, an out-of-tree
+        # subclass) keeps the pre-change behaviour rather than raising.
+        # Resolved in two steps rather than as getattr's default, which
+        # is evaluated EAGERLY and so raises on exactly the object the
+        # fallback exists for.
+        lister = (getattr(registry, "list_enabled", None)
+                  or getattr(registry, "list_exposed", None))
+        if lister is None:
+            return []
+        for name in list(lister()):
             plugin = registry.get_plugin(name)
             if plugin is None:
                 continue

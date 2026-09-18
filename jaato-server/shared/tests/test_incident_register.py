@@ -61,8 +61,12 @@ _DAY = 86400.0
 REVERSIONS = [
     Reversion(
         target=_CORE,
-        find='''        self._raise_incident(
-            kind, f"{error_type}: {error_summary}",
+        # ``_note_incident`` is a module-level free function rather than a
+        # method: every call site is on a terminal path, so a server double
+        # lacking ``emit`` must get the pre-#1122 behaviour rather than an
+        # AttributeError.  The anchor moved with it.
+        find='''        _note_incident(
+            self, kind, f"{error_type}: {error_summary}",
             site="server/core.py::_emit_error_termination", session_id=sid)''',
         replace="        pass  # reversion: the terminal raises no incident",
         because=(
@@ -83,6 +87,18 @@ REVERSIONS = [
             "above to notice it"
         ),
         test="test_every_named_site_raises",
+    ),
+    Reversion(
+        target=_CORE,
+        find='                       trace_path=env.get("JAATO_TRACE_LOG"),',
+        replace="",
+        because=(
+            "the daemon raises from model_thread's `finally`, after the "
+            "session-env overlay is popped -- so reading the ambient "
+            "JAATO_TRACE_LOG put session_error and nudge_exhausted in the "
+            "daemon's own trace and `--incidents <workspace>` said none"
+        ),
+        test="test_the_daemon_writes_where_the_profile_said",
     ),
     Reversion(
         target=_SDK,
@@ -369,3 +385,102 @@ def test_an_unparseable_since_shows_everything_rather_than_nothing():
     assert _since_days("last tuesday") is None, (
         "a filter that did not parse must not silently hide every row")
     assert _since_days(None) is None
+
+
+# --------------------------- G. the daemon writes into the PROFILE's trace
+
+def test_the_daemon_writes_where_the_profile_said(tmp_path, monkeypatch):
+    """Not into the daemon's own process-wide trace.
+
+    ``_note_incident`` has no session to write through, and the fallback
+    read ``JAATO_TRACE_LOG`` off the process environment -- but two of
+    its three call sites run inside ``model_thread``'s ``finally``, AFTER
+    ``_with_session_env`` has popped the overlay.  So ``session_error``
+    and ``nudge_exhausted`` went to the daemon's trace (or ``/tmp``) and
+    ``jaato-doctor --incidents <workspace>/.jaato/logs/...`` reported
+    "none recorded" for exactly the kinds the daemon raises.
+    ``budget_exhausted`` is raised while the overlay IS applied, which is
+    what made the inconsistency hard to see.
+    """
+    from types import SimpleNamespace
+
+    from server.core import _note_incident
+
+    profile_trace = tmp_path / "ws" / ".jaato" / "logs" / "session_trace.jsonl"
+    daemon_trace = tmp_path / "daemon.jsonl"
+    # The overlay is GONE, exactly as it is on the terminal path.
+    monkeypatch.setenv("JAATO_TRACE_LOG", str(daemon_trace))
+
+    server = SimpleNamespace(
+        session_id="20260101_x",
+        emit=lambda _e: None,
+        workspace_path=str(tmp_path / "ws"),
+        _session_env={"JAATO_TRACE_LOG": ".jaato/logs/session_trace.jsonl",
+                      "JAATO_WORKSPACE_ROOT": str(tmp_path / "ws")},
+    )
+    _note_incident(server, KIND_SESSION_ERROR, "boom",
+                   site="server/core.py::_emit_error_termination")
+
+    assert profile_trace.is_file(), (
+        "the incident must land in the trace the PROFILE declared")
+    assert "INCIDENT" in profile_trace.read_text()
+    assert not daemon_trace.exists(), (
+        "and not in the daemon's process-wide trace")
+
+
+def test_an_agent_placeholder_is_substituted_not_written_literally(
+        tmp_path, monkeypatch):
+    """`{agent}` in a trace path is a token, not a directory name.
+
+    ``resolve_trace_path`` does no substitution -- that lives in
+    ``jaato_sdk.trace`` -- so this route created a literal ``{agent}``
+    directory, which is the #775 shape one module over.
+    """
+    from types import SimpleNamespace
+
+    from server.core import _note_incident
+
+    ws = tmp_path / "ws"
+    monkeypatch.delenv("JAATO_TRACE_LOG", raising=False)
+    server = SimpleNamespace(
+        session_id="s", emit=lambda _e: None, workspace_path=str(ws),
+        _session_env={"JAATO_TRACE_LOG": ".jaato/logs/{agent}/trace.jsonl",
+                      "JAATO_WORKSPACE_ROOT": str(ws)},
+    )
+    _note_incident(server, KIND_SESSION_ERROR, "boom", site="x::y")
+
+    assert not (ws / ".jaato" / "logs" / "{agent}").exists(), (
+        "an unsubstituted token became a real directory")
+    assert (ws / ".jaato" / "logs" / "main" / "trace.jsonl").is_file()
+
+
+def test_the_confinement_refusal_still_uses_the_environment():
+    """It has no session, no profile and no workspace yet.
+
+    The environment fallback is RIGHT for that caller -- which is why the
+    fix is an explicit path from the caller that has one, rather than
+    removing the fallback.
+    """
+    import inspect
+
+    from server.runner import bootstrap
+
+    source = inspect.getsource(bootstrap._raise_confinement_incident)
+    assert "trace_path" not in source, (
+        "the pre-session caller must not be made to invent a path it "
+        "cannot know")
+
+
+# --------------------------------------------- H. a row names its session
+
+def test_the_circuit_incident_names_its_session():
+    """A register row reading `no session` cannot be attributed.
+
+    On a daemon serving two, the row is indistinguishable between them,
+    so an operator asking "what happened in session B in the last 15
+    days" gets an answer naming neither.  The plugin holds the id.
+    """
+    assert "session_id" in _calls_in(_RELIABILITY, "_raise_block_incident") or (
+        "session_id=getattr(self, \"_session_id\", None)"
+        in Path(_RELIABILITY).read_text()), (
+        "the reliability raiser must pass the session id it holds")

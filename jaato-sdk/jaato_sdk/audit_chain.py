@@ -9,7 +9,7 @@ answered); this is the INTEGRITY half.
 
 ``record_keeping.integrity: sha256-chain`` turns it on.  Each record then
 carries ``prev_digest`` -- the SHA-256 of the previous record's canonical
-bytes -- and ``digest``, its own; the first record of a segment chains to
+bytes -- and ``digest``, its own; the first record of a FILE chains to
 :data:`GENESIS`.
 
 **What it proves, and what it does not.**  It proves the file was not
@@ -37,8 +37,8 @@ import json
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-#: What the first record of a segment chains to.  A literal rather than
-#: an empty string, so "this is a segment start" and "somebody deleted
+#: What the first record of a FILE chains to.  A literal rather than
+#: an empty string, so "this is the start of the chain" and "somebody deleted
 #: the field" are different states on disk.
 GENESIS = "genesis"
 
@@ -83,7 +83,7 @@ def chain(record: Dict[str, Any], prev_digest: Optional[str]) -> Dict[str, Any]:
     Args:
         record: The record as its writer built it.
         prev_digest: The previous record's ``digest``, or ``None`` for
-            the first record of a segment (which chains to
+            the first record of a file (which chains to
             :data:`GENESIS`).
 
     Returns:

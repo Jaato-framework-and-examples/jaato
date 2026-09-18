@@ -102,16 +102,40 @@ REVERSIONS = [
         ),
         test="test_the_sidecar_names_the_stamp",
     ),
+    Reversion(
+        target="jaato-server/shared/jaato_session.py",
+        find='''        lister = (getattr(registry, "list_enabled", None)
+                  or getattr(registry, "list_exposed", None))''',
+        replace='''        lister = (getattr(registry, "list_exposed", None)
+                  or getattr(registry, "list_enabled", None))''',
+        because=(
+            "the marker looked up in the TOOL-bearing set, which an "
+            "enrichment plugin can never be in -- every AI-generated "
+            "payload delivered unmarked while `explain oversight` reports "
+            "the marker as installed"
+        ),
+        test="test_a_real_registry_surfaces_an_enrichment_marker",
+    ),
 ]
 
 
 # --------------------------------------------------------------- helpers
 
 class _Registry:
+    """A registry stub that answers the accessor the seam actually reads.
+
+    It deliberately does NOT implement ``list_exposed``: a marker is an
+    enrichment plugin and can never be in that set, so a stub offering it
+    would let the seam read the wrong one and still pass -- which is how
+    the defect this file guards against survived its own test suite.
+    ``test_a_real_registry_surfaces_an_enrichment_marker`` is the other
+    half: it drives a real ``PluginRegistry`` with the real plugin.
+    """
+
     def __init__(self, plugins):
         self._plugins = plugins
 
-    def list_exposed(self):
+    def list_enabled(self):
         return list(self._plugins)
 
     def get_plugin(self, name):
@@ -424,3 +448,44 @@ def test_the_guard_is_not_vacuous():
     # for the wrong reason.
     assert _attachment_construction_sites(), (
         "no Attachment construction site found -- the scan is broken")
+
+
+# ------------------------------------------- the seam, through a REAL registry
+
+def test_a_real_registry_surfaces_an_enrichment_marker():
+    """The marker must be findable through the registry a session holds.
+
+    Every other test here fabricates the registry, which is right for
+    asking what the seam DOES with a marker and useless for asking
+    whether it can FIND one.  The defect this closes lived exactly in
+    that gap: ``output_marker`` declares ``PLUGIN_KIND = "enrichment"``,
+    so ``PluginRegistry`` files it under ``_enrichment_only`` and it is
+    absent from ``list_exposed()`` by construction -- a profile enabling
+    it got an empty marker list, forever, with no error and no trace
+    line.
+
+    So this one builds the real registry, registers the real plugin, and
+    asks the real accessor.
+    """
+    from shared.jaato_session import JaatoSession
+    from shared.plugins.registry import PluginRegistry
+
+    registry = PluginRegistry()
+    plugin = create_plugin()
+    registry.register_plugin(plugin, enrichment_only=True)
+    registry.expose_tool(plugin.name)
+
+    assert plugin.name not in registry.list_exposed(), (
+        "an enrichment plugin in the tool-bearing set would mean the "
+        "registry changed and this test is now asking nothing")
+    assert plugin.name in registry.list_enabled()
+
+    sess = JaatoSession.__new__(JaatoSession)
+    sess._runtime = type("RT", (), {"registry": registry})()
+    sess.traced = []
+    sess._trace = sess.traced.append
+
+    found = sess._output_markers()
+    assert [getattr(m, "name", None) for m in found] == [plugin.name], (
+        "the marker a profile enabled was not found -- Article 50(2) "
+        "marking is inert in the one configuration that asks for it")

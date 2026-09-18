@@ -53,6 +53,8 @@ def raise_incident(
     session_id: Optional[str] = None,
     emit: Any = None,
     now: Optional[float] = None,
+    trace_path: Optional[str] = None,
+    workspace_root: Optional[str] = None,
 ) -> Optional[Incident]:
     """Record an incident, everywhere it belongs.  Never raises.
 
@@ -82,6 +84,16 @@ def raise_incident(
             event.  Optional: the trace line is what every deployment
             gets, and the event is what a client can branch on.
         now: The instant (#996).
+        trace_path: Where to write when there is no session to write
+            through.  A caller OUTSIDE the session-env overlay must pass
+            it: the fallback reads ``JAATO_TRACE_LOG`` from the process
+            environment, and the daemon raises its incidents from the
+            ``finally`` of the model thread, after the overlay has been
+            popped -- so the line went to the daemon's own trace and
+            ``jaato-doctor --incidents <workspace>/...`` reported "none
+            recorded" for every kind the daemon raises.
+        workspace_root: What a RELATIVE ``trace_path`` resolves against,
+            for the same reason.
 
     Returns:
         The :class:`Incident`, or ``None`` when nothing could be
@@ -97,7 +109,7 @@ def raise_incident(
         if callable(tracer):
             tracer(incident.to_trace())
         else:
-            _trace_without_a_session(incident)
+            _trace_without_a_session(incident, trace_path, workspace_root)
     except Exception:  # noqa: BLE001
         pass
 
@@ -137,13 +149,30 @@ def _build(
     )
 
 
-def _trace_without_a_session(incident: Incident) -> None:
+def _trace_without_a_session(
+    incident: Incident,
+    trace_path: Optional[str] = None,
+    workspace_root: Optional[str] = None,
+) -> None:
     """Write the line when there is no session to write it through.
 
     A confinement refusal happens BEFORE any session exists, which is
     exactly when the record matters -- so the register must not be
     reachable only from inside a session.
+
+    **A caller that HAS the path passes it.**  The environment fallback
+    below is right for the confinement refusal, which has no session, no
+    profile and no workspace yet; it is wrong for the daemon, which has
+    all three and raises from a point where the session-env overlay has
+    already been popped.  Reading the ambient variable there sent the
+    line to the daemon's process-wide trace, and left ``{agent}``
+    unsubstituted -- a literal directory of that name, the #775 shape.
     """
-    from jaato_sdk.trace import resolve_trace_path, trace_write
-    path = resolve_trace_path("JAATO_TRACE_LOG")
+    from jaato_sdk.trace import (
+        resolve_agent_trace_path, resolve_trace_path, trace_write)
+    if trace_path is not None:
+        path = resolve_agent_trace_path(trace_path, workspace_root)
+    else:
+        path = resolve_agent_trace_path(
+            resolve_trace_path("JAATO_TRACE_LOG"), workspace_root)
     trace_write("INCIDENT", incident.to_trace(), path)

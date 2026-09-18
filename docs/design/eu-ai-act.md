@@ -633,9 +633,11 @@ Not a sixth store. A **contract over the stores that exist**:
   and the daemon's lifetime sweep (#812) gains a retention pass.
 - **`integrity: sha256-chain`** links each record to the previous one's
   digest, the cheapest form of #507's tamper evidence. It proves that the
-  file was not edited in place; it does not prove who wrote it. Stated cost:
-  a chained file cannot be pruned from the front, so retention rotates whole
-  segments.
+  file was not edited in place; it does not prove who wrote it. The link is
+  read back off the FILE under an exclusive lock on every chained append, so
+  a restart and a shared absolute `trace.ledger` continue one chain instead
+  of each starting a rival one mid-file. Stated cost: a chained file cannot
+  be pruned from the front, so retention rotates whole files.
 
 ### 4.5 A stop button — already there; make the tools say so
 

@@ -67,6 +67,18 @@ REVERSIONS = [
         test="test_the_gate_withholds_an_uncurated_memory",
     ),
     Reversion(
+        target=_PLUGIN,
+        find=("                memory.maturity = new_maturity\n"
+              "                self._stamp_curation(memory, new_maturity)"),
+        replace="                memory.maturity = new_maturity",
+        because=(
+            "the promotion path not stamping curated_by -- every field of "
+            "the gate correct and nothing ever writing the one it reads, "
+            "so require_curation withholds the whole corpus forever"
+        ),
+        test="test_the_promotion_path_stamps_the_approval",
+    ),
+    Reversion(
         target=_VALIDATE,
         find="    _check_memory_curation(result.profiles, out)\n",
         replace="",
@@ -75,7 +87,10 @@ REVERSIONS = [
             "anything' -- a learning loop CLOSED rather than mitigated, "
             "which is not what Art. 15(4) asks for"
         ),
-        test="test_validate_warns_when_the_knob_closes_the_loop",
+        # The WIRING, not the check: a test calling the helper directly
+        # passes with the call site deleted, which is what the reversion
+        # meta-guard caught this declaring.
+        test="test_the_validator_actually_runs_the_curation_check",
     ),
 ]
 
@@ -265,6 +280,98 @@ def test_the_result_says_how_many_were_withheld(tmp_path):
     assert "stored, not lost" in result["message"]
 
 
+def test_the_promotion_path_stamps_the_approval(tmp_path):
+    """raw -> validated -> retrievable, driven through the plugin.
+
+    The whole loop, because every part of it was individually correct
+    and nothing joined them: ``curated_by`` was declared, ``is_curated``
+    read it, the gate read THAT -- and no code in the tree ever wrote
+    the field.  So ``require_curation: true`` withheld the entire corpus
+    forever, while the model was told a curator promoting a memory
+    would make it retrievable and ``validate``'s own remedy named that
+    promotion.
+
+    Asserted end to end rather than on ``_stamp_curation`` directly: a
+    unit test of the stamp would have passed on the broken tree too,
+    since the stamp is not what was missing -- its CALL was.
+    """
+    plugin = _plugin(tmp_path, require_curation=True)
+    with _in_session(_Session()):
+        stored = plugin._execute_store({
+            "content": "c", "description": "d", "tags": ["build"]})
+    memory_id = stored["memory_id"]
+
+    withheld = plugin._execute_retrieve({"ids": [memory_id]})
+    assert withheld["status"] == "no_results", (
+        "a freshly stored memory is raw, so the gate must withhold it")
+
+    with _in_session(_Session()):
+        promoted = plugin._execute_update({"id": memory_id,
+                                           "maturity": "validated"})
+    assert promoted["status"] == "success"
+
+    after = plugin._execute_retrieve({"ids": [memory_id]})
+    assert after["status"] == "success", (
+        "the promotion path is the documented way to open the gate; if it "
+        "does not stamp, require_curation closes the learning loop entirely")
+    assert [m["id"] for m in after["memories"]] == [memory_id]
+
+
+def test_a_withdrawn_approval_is_withdrawn(tmp_path):
+    """Demoting out of a curated maturity CLEARS the stamp.
+
+    ``is_curated`` is what the gate reads, and it is deliberately not
+    derived from ``maturity`` -- so a memory demoted back to ``raw``
+    while still carrying ``curated_by`` reads as approved and keeps being
+    surfaced, the curator's withdrawal silently undone by the field that
+    recorded their approval.
+
+    Demotion to ``raw`` rather than to ``dismissed`` because a dismissed
+    memory is unlinked from storage entirely (``MemoryStore.update``), so
+    that path has nothing left to mislead anyone with; ``raw`` is the one
+    that stays readable.
+    """
+    plugin = _plugin(tmp_path, require_curation=True)
+    with _in_session(_Session()):
+        memory_id = plugin._execute_store({
+            "content": "c", "description": "d", "tags": ["build"]})["memory_id"]
+        plugin._execute_update({"id": memory_id, "maturity": "validated"})
+    assert plugin._execute_retrieve({"ids": [memory_id]})["status"] == "success"
+
+    with _in_session(_Session()):
+        plugin._execute_update({"id": memory_id, "maturity": "raw"})
+
+    stored = plugin._storage.get_by_id(memory_id)
+    assert stored is not None
+    assert stored.curated_by is None
+    assert stored.is_curated is False
+    assert plugin._execute_retrieve({"ids": [memory_id]})["status"] == "no_results"
+
+
+def test_the_approval_records_the_curator_not_the_author(tmp_path):
+    """Two fields, two sessions, two answers.
+
+    The point of ``curated_by`` being a second field is that it can name
+    a different party from ``generated_by``; stamping the author's
+    binding at promotion time would make it a slower copy of the first.
+    """
+    plugin = _plugin(tmp_path, require_curation=True)
+    author = _Session({"kind": "ai", "model": "author-model"})
+    curator = _Session({"kind": "ai", "model": "curator-model"})
+
+    with _in_session(author):
+        memory_id = plugin._execute_store({
+            "content": "c", "description": "d", "tags": ["build"]})["memory_id"]
+    with _in_session(curator):
+        plugin._execute_update({"id": memory_id, "maturity": "validated"})
+
+    stored = (plugin._storage.get_by_id(memory_id)
+              or plugin._global_storage.get_by_id(memory_id))
+    assert stored.generated_by["model"] == "author-model"
+    assert stored.curated_by["model"] == "curator-model"
+    assert stored.curated_by.get("at"), "an approval with no time is not a record"
+
+
 def test_a_curated_memory_comes_back(tmp_path):
     plugin = _plugin(tmp_path, require_curation=True)
     plugin._storage.save(_memory(id="ok_1", curated_by={"agent": "curator"}))
@@ -342,6 +449,36 @@ def test_validate_warns_when_the_knob_closes_the_loop():
     assert [d.code for d in out] == ["require_curation_without_curator"]
     assert out[0].severity == "warn"
     assert "MITIGATED, not closed" in out[0].message
+
+
+def test_the_validator_actually_runs_the_curation_check(tmp_path):
+    """Through ``validate_workspace``, not the helper.
+
+    Every other test here calls ``_check_memory_curation`` directly,
+    which asks whether the CHECK is right and cannot see whether it is
+    WIRED -- so deleting its one call site in ``validate_workspace``
+    left the whole suite green.  The meta-guard said so, and this is the
+    half that makes the reversion bite.
+    """
+    from shared.scaffold.validate import validate_workspace
+
+    profiles = tmp_path / ".jaato" / "profiles"
+    profiles.mkdir(parents=True)
+    (profiles / "learner.yaml").write_text(
+        "name: learner\n"
+        "description: a learner\n"
+        "provider: nebius\n"
+        "model: m\n"
+        "plugins: [memory]\n"
+        "plugin_configs:\n"
+        "  memory:\n"
+        "    require_curation: true\n",
+        encoding="utf-8")
+
+    codes = [d.code for d in validate_workspace(str(tmp_path))]
+    assert "require_curation_without_curator" in codes, (
+        "the knob with no curator anywhere closes the learning loop rather "
+        "than mitigating it, and the validator must be the thing that says so")
 
 
 def test_a_curator_sibling_satisfies_it():

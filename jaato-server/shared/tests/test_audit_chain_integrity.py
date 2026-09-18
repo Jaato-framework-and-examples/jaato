@@ -49,6 +49,18 @@ _DOCTOR = "jaato-sdk/jaato_sdk/doctor.py"
 
 REVERSIONS = [
     Reversion(
+        target="jaato-server/shared/token_accounting.py",
+        find="            self._prev_digest = self._tail_digest(path)",
+        replace="            pass",
+        because=(
+            "the chain pointer held per instance instead of read off the "
+            "file -- a restart or a second session sharing an absolute "
+            "trace.ledger writes a genesis link mid-file, and the verifier "
+            "reports an untouched audit log as tampered with"
+        ),
+        test="test_a_second_writer_continues_the_chain",
+    ),
+    Reversion(
         target=_CHAIN,
         find='    body = {k: v for k, v in record.items() if k != DIGEST_FIELD}',
         replace=('    body = {k: v for k, v in record.items()\n'
@@ -61,13 +73,22 @@ REVERSIONS = [
         test="test_the_digest_covers_the_link",
     ),
     Reversion(
-        target=_LEDGER,
-        find="                for idx in range(self._flushed, len(self._events)):\n                    f.write(self._line(idx) + \"\\n\")\n                f.flush()\n                try:",
-        replace="                for idx in range(self._flushed, len(self._events)):\n                    f.write(json.dumps(self._enrich(self._events[idx], idx)) + \"\\n\")\n                f.flush()\n                try:",
+        target="jaato-server/shared/token_accounting.py",
+        # Both paths go through ``_write_pending`` now, so the way to
+        # separate them is to give ``write_ledger`` its own writer again
+        # -- which is exactly the shape that used to break a file in the
+        # middle, at the handover between the two.
+        find="            self._write_pending(path, fsync=True)",
+        replace=("            with open(path, \"a\", encoding=\"utf-8\") as f:\n"
+                 "                for idx in range(self._flushed, len(self._events)):\n"
+                 "                    f.write(json.dumps(\n"
+                 "                        self._enrich(self._events[idx], idx)) + \"\\n\")\n"
+                 "                f.flush()\n"
+                 "            self._flushed = len(self._events)"),
         because=(
-            "both write paths must chain identically -- write_ledger exists "
-            "to flush what the append path did not, so a file it writes "
-            "unchained is a file that breaks at the handover"
+            "write_ledger flushes what the append path did not, so one "
+            "file is written by both; if only one chains, the file breaks "
+            "in the middle -- which reads exactly like tampering"
         ),
         test="test_both_write_paths_chain_identically",
     ),
@@ -229,6 +250,123 @@ def test_a_record_is_never_written_twice(tmp_path):
     ledger._record("response", {"total_tokens": 1})
     ledger.write_ledger()
     assert len(target.read_text().strip().splitlines()) == 1
+
+
+def test_a_second_writer_continues_the_chain(tmp_path):
+    """A restart, and a shared absolute ``trace.ledger``, are the SAME case.
+
+    ``_prev_digest`` used to be per-instance and in memory only, so the
+    second ``TokenLedger`` over one file wrote a record linked to
+    ``genesis`` in the middle of it and ``verify`` reported an untouched
+    file as tampered -- the mechanism accusing its own normal
+    deployment.  Two sessions sharing one file is not an exotic
+    configuration: it is what an ABSOLUTE ``trace.ledger`` means.
+
+    The chain belongs to the file, so the link is read back from the
+    file.
+    """
+    target = tmp_path / "shared.jsonl"
+    first = TokenLedger(path=str(target), integrity="sha256-chain")
+    first._record("response", {"total_tokens": 1})
+    first._record("response", {"total_tokens": 2})
+
+    second = TokenLedger(path=str(target), integrity="sha256-chain")
+    second._record("response", {"total_tokens": 3})
+
+    intact, breaks = verify(target.read_text().splitlines())
+    assert intact is True, [b.reason for b in breaks]
+    assert len(target.read_text().strip().splitlines()) == 3
+
+
+def test_two_writers_interleaved_keep_one_chain(tmp_path):
+    """Concurrent appenders serialise on the link rather than racing it.
+
+    Each chained append takes the lock, re-reads the tail and writes --
+    so records interleave in whatever order they arrive and every one of
+    them links to the record actually before it.  Without the re-read,
+    each writer chains to the last record IT wrote and every handover is
+    a break.
+    """
+    target = tmp_path / "both.jsonl"
+    a = TokenLedger(path=str(target), integrity="sha256-chain")
+    b = TokenLedger(path=str(target), integrity="sha256-chain")
+    for i in range(4):
+        (a if i % 2 == 0 else b)._record("response", {"total_tokens": i})
+
+    intact, breaks = verify(target.read_text().splitlines())
+    assert intact is True, [b.reason for b in breaks]
+    assert len(target.read_text().strip().splitlines()) == 4
+
+
+def test_the_chain_still_detects_an_edit_after_a_handover(tmp_path):
+    """Non-vacuity: reading the link off the file must not make verify blind.
+
+    A fix that recovered the pointer by trusting whatever the file says
+    would report every file as intact, which passes the two tests above
+    for the wrong reason.
+    """
+    target = tmp_path / "edit.jsonl"
+    TokenLedger(path=str(target), integrity="sha256-chain")._record(
+        "response", {"total_tokens": 1})
+    TokenLedger(path=str(target), integrity="sha256-chain")._record(
+        "response", {"total_tokens": 2})
+
+    lines = target.read_text().splitlines()
+    tampered = json.loads(lines[0])
+    tampered["total_tokens"] = 999
+    lines[0] = json.dumps(tampered)
+
+    intact, breaks = verify(lines)
+    assert intact is False
+    assert any("edited in place" in b.reason for b in breaks)
+
+
+def test_a_failed_write_does_not_duplicate_what_landed(tmp_path):
+    """Cursors advance per line, after that line is flushed.
+
+    Advancing for the whole batch meant a failure on line 3 of 5 left
+    lines 1-2 on disk and UNRECORDED, so the retry wrote them again --
+    with different digests, because the pointer had moved.  A duplicated
+    record in an audit log is the thing the log exists to rule out.
+    """
+    target = tmp_path / "partial.jsonl"
+    ledger = TokenLedger(path="", integrity="sha256-chain")
+    for i in range(5):
+        ledger._record("response", {"total_tokens": i})
+
+    real_write = TokenLedger._flush_lines
+    calls = {"n": 0}
+
+    def _fail_on_the_third(self, path, *, fsync):
+        class _Boom(Exception):
+            pass
+
+        with open(path, "a", encoding="utf-8") as f:
+            for idx in range(self._flushed, len(self._events)):
+                calls["n"] += 1
+                if calls["n"] == 3:
+                    raise _Boom("disk full")
+                f.write(self._line(idx) + "\n")
+                f.flush()
+                self._flushed = idx + 1
+
+    ledger._path = str(target)
+    TokenLedger._flush_lines = _fail_on_the_third
+    try:
+        ledger.write_ledger()
+    finally:
+        TokenLedger._flush_lines = real_write
+
+    landed = len(target.read_text().strip().splitlines())
+    assert landed == 2, "the two lines that reached disk should be recorded"
+    assert ledger._flushed == 2
+
+    # The retry writes only what is missing, and the file still verifies.
+    ledger.write_ledger()
+    lines = target.read_text().strip().splitlines()
+    assert len(lines) == 5, "a retry must not rewrite what already landed"
+    intact, breaks = verify(lines)
+    assert intact is True, [b.reason for b in breaks]
 
 
 def test_the_first_record_chains_to_a_named_genesis(tmp_path):
