@@ -51,8 +51,15 @@ export function normalizeSessionList(raw: unknown): SessionSummary[] {
   return raw.map(normalizeSessionSummary).filter((s): s is SessionSummary => s !== null);
 }
 
-/** One line per session, the TUI's ``session list`` rendering. */
-export function formatSessionList(sessions: SessionSummary[]): string {
+/**
+ * One line per session, the TUI's ``session list`` rendering -- plus, on its
+ * own ``↳`` line, whatever note THIS person wrote about that session
+ * (``app/notes.ts``).  Someone who types the command expects to see it.
+ *
+ * Read-only by nature, and that is right: this is a snapshot printed into a
+ * transcript, not a management surface, and it should not grow affordances.
+ */
+export function formatSessionList(sessions: SessionSummary[], notes: Record<string, { text: string }> = {}): string {
   if (sessions.length === 0) return "No sessions available.\nUse 'session new' to create one.";
   const lines = ["Sessions:", "  Use 'session attach <id>' to switch sessions", ""];
   for (const s of sessions) {
@@ -66,6 +73,8 @@ export function formatSessionList(sessions: SessionSummary[]): string {
     ];
     lines.push(parts.join(""));
     if (s.workspacePath) lines.push(`      ${s.workspacePath}`);
+    const note = notes[s.id]?.text;
+    if (note) for (const line of note.split("\n")) lines.push(`      ↳ ${line}`);
   }
   lines.push("", "  ▶ current  ● loaded  ○ on disk");
   return lines.join("\n");

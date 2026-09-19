@@ -714,3 +714,27 @@ test("files attached on the session picker are in the workspace when the session
   await page.getByRole("button", { name: "Toggle workspace changes (Alt+W)" }).click();
   await expect(page.getByRole("region", { name: "Files" }).getByText("+ brief.txt")).toBeVisible();
 });
+
+test("a note written on the exit plate survives Escape, is kept, and is the rail's copy too", async ({ page }) => {
+  // The whole loop in a real browser, with no BFF -- which is the shape a
+  // local `npx @jaato/web-coder-ui` has, so the store behind it is this
+  // browser's and the UI has to SAY so rather than imply a shared one.
+  await openSession(page);
+  await page.getByRole("button", { name: EXIT }).click();
+  const plate = page.getByRole("group", { name: "Exit options" });
+  const field = plate.getByLabel("Note to self");
+  await field.fill("waiting on the grace period answer, then re-run e2e");
+  // Escape inside the field leaves the field, never the session: it used to
+  // answer `r` unconditionally and take the half-typed note with it.
+  await field.press("Escape");
+  await expect(plate).toBeVisible();
+  await expect(field).toHaveValue(/grace period/);
+  await plate.getByRole("button", { name: /Return/ }).click();
+  await expect(plate).toHaveCount(0);
+
+  // Same note, read from the rail -- one store, four mount points.
+  await page.getByRole("button", { name: "Toggle your sessions and their notes" }).click();
+  const rail = page.getByRole("region", { name: "Sessions" });
+  await expect(rail.getByLabel("This session")).toHaveValue(/grace period/);
+  await expect(rail.getByText("Notes are kept in this browser only", { exact: false })).toBeVisible();
+});
