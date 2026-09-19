@@ -7,7 +7,7 @@ name = "jaato-sdk"
 version = "0.23.0"
 description = "Jaato SDK - Protocol and client library for jaato server"
 readme = "PKG_README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 license = "BUSL-1.1"
 authors = [
     {name = "apanoia"}
@@ -17,8 +17,6 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
