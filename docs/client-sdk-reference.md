@@ -26,7 +26,7 @@ JAATO ships two official client SDKs that provide programmatic access to `jaato-
 
 | SDK | Package | Version | Language | Transport |
 |-----|---------|---------|----------|-----------|
-| Python | `jaato-sdk` | 0.3.4 | Python 3.10+ | IPC (Unix socket / Windows named pipe) + WebSocket |
+| Python | `jaato-sdk` | 0.3.4 | Python 3.12+ | IPC (Unix socket / Windows named pipe) + WebSocket |
 | TypeScript | `@jaato/sdk` | 0.1.0 | TypeScript 5.4+ / JavaScript | WebSocket only |
 
 Both SDKs expose the same wire protocol and the same set of typed methods. The Python SDK additionally supports local IPC transport (for TUI/desktop clients), while the TS SDK is WebSocket-only (for browser and Node.js consumers).
@@ -657,7 +657,7 @@ On Windows, if `wait_for()` cancels a coroutine after `create_pipe_connection()`
 | `jaato_sdk/tests/test_events_wire_format.py` | Wire format baseline tests |
 | `jaato_sdk/tests/test_helpers.py` | Helper function tests |
 | `jaato_sdk/tests/test_sdk_parity_methods.py` | Cross-SDK method parity tests |
-| `pyproject.toml` | Package metadata (v0.3.4, Python 3.10+, pydantic, python-dotenv) |
+| `pyproject.toml` | Package metadata (v0.3.4, Python 3.12+, pydantic, python-dotenv) |
 
 ### TypeScript SDK (`jaato-sdk-ts/`)
 

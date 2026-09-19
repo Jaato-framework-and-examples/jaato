@@ -7,7 +7,7 @@ name = "jaato-tui"
 version = "0.6.0"
 description = "Jaato TUI - Terminal user interface for jaato server"
 readme = "PKG_README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 license = "BUSL-1.1"
 authors = [
     {name = "apanoia"}
@@ -17,12 +17,12 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
-    "jaato-sdk",  # SDK protocol: IPC client, event types, server communication
+    # Floor = the SDK version this repo ships (#1055); see
+    # jaato-server/shared/tests/test_sdk_floor_is_the_sdk_we_ship.py.
+    "jaato-sdk>=0.23.0",  # SDK protocol: IPC client, event types, server communication
     "prompt_toolkit>=3.0.0",  # Interactive terminal UI: input handling, keybindings, command history, multi-line editing
     "rich>=13.0.0",  # Terminal rendering: syntax highlighting, tables, panels, markdown, themed output formatting
     "python-dotenv",  # Environment loading: .env file support for client configuration

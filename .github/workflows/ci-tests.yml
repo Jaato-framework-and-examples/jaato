@@ -94,7 +94,10 @@ jobs:
             jaato-server/shared/tests/test_a_dead_stream_is_not_a_finished_turn.py \
             jaato-server/shared/tests/test_env_scope_catalog.py \
             jaato-server/shared/tests/test_docs_do_not_contradict_the_tree.py \
-            jaato-server/shared/tests/test_ci_runs_every_test_file.py
+            jaato-server/shared/tests/test_ci_runs_every_test_file.py \
+            jaato-server/shared/tests/test_declared_python_floor_is_tested.py \
+            jaato-server/shared/tests/test_sdk_floor_is_the_sdk_we_ship.py \
+            jaato-server/shared/tests/test_templates_handle_a_session_that_ended.py
 
   # ---------------------------------------------------------------
   # The reversion meta-guard, alone, because it is not like the guards

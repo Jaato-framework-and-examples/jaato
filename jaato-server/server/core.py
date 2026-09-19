@@ -3129,8 +3129,14 @@ class JaatoServer:
                 # 6.6.4.3b (the daemon-side _session is no longer the live
                 # one for the model loop), so propagating the GC plugin to
                 # the daemon-side session was dead-weight.  The runner's
-                # SessionInitEnvelope already carries the GC plugin spec
-                # for runner-side install at bootstrap time.  Daemon-side
+                # SessionInitEnvelope carries the GC plugin spec and
+                # ``server.runner.session._install_gc`` installs it at
+                # bootstrap.  That second sentence was an ASSERTION with no
+                # implementation until #1133 — the envelope carried the
+                # field and nothing under ``server/runner/`` read it, so
+                # every runner-served session ran with no GC plugin while
+                # the reads below kept filling the UI readout from this
+                # same resolution.  Daemon-side
                 # ``gc_threshold`` / ``gc_strategy`` / ``gc_target_percent``
                 # / ``gc_continuous_mode`` reads below stay daemon-tier
                 # (they feed AgentState UI fields, not the GC trigger path).

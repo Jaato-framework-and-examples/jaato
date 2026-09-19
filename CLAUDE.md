@@ -1275,6 +1275,69 @@ from `.jaato/gc.json`; both layers pass a key only when it is present, so
 omitting one leaves the framework default (and `JAATO_GC_MEDIA_BYTES`) in
 charge rather than silently overriding it.
 
+### A Strategy Resolved, Carried, Rendered — and Installed on Nobody (#1133)
+
+`JaatoSession._gc_plugin` has two writers, both inside `set_gc_plugin` /
+`remove_gc_plugin`, and its callers were the **embedded** client and
+**in-process subagents**. Nothing under `server/runner/` called it, and nothing
+there read `envelope.gc` either — so on the **runner-served path, the default**,
+a session had no GC plugin whatever its profile declared. Every collection site
+opens `if not self._gc_plugin or not self._gc_config: return`, so nothing
+collected; meanwhile `core.py` kept resolving the same config to fill the
+`gc_threshold` / `gc_strategy` readouts in the TUI status bar and the web rail.
+A strategy displayed and never run — worse than showing nothing, because the
+readout is the thing an operator checks.
+
+Measured before the fix: `_build_session` received **17 kwargs** and `gc` was
+none of them. The control — handing that same session a plugin the way the
+embedded path does — showed it immediately, so `None` was the absence of an
+install rather than a blind probe.
+
+**The producer was broken too, and that is what makes it two fixes.**
+
+```python
+gc_config = getattr(gc_obj, "config", None) or {}   # GCProfileConfig has no .config
+gc_dict   = {"type": gc_type, **dict(gc_config)}    # → always just {"type": ...}
+```
+
+So the envelope could only ever carry the strategy NAME. Wiring the consumer
+alone would have installed `budget` at **framework defaults** and discarded
+every number the profile declared — the same silent-ignore shape one layer up,
+wearing the fix as a disguise.
+
+Three write-sides for one dataclass existed and each had drifted differently:
+the producer (1 field of 12), the session-snapshot serializer (10 of 12,
+missing `target_percent` and `pressure_percent`, so a revived session lost how
+far a collection goes and when PRESERVABLE may be touched), and `from_dict`
+(12 — the only complete one, and the only one with no symmetric partner).
+
+| Change | Where |
+|--------|-------|
+| `GCProfileConfig.to_dict()` — derived from the dataclass fields, so it cannot be edited out of date | `subagent/config.py` |
+| the producer and both halves of the snapshot serializer call it | `runner_spawn.py`, `subagent/serializer.py` |
+| `_install_gc` resolves and installs at bootstrap | `server/runner/session.py` |
+
+`_install_gc` adds a **caller, not a second definition**: precedence is the
+daemon's — profile `gc:` first, then `<workspace>/.jaato/gc.json` — through the
+same `gc_profile_to_plugin_config` an in-process subagent uses and the same
+`load_gc_from_file` the daemon uses. The runner resolves rather than receiving
+a built plugin because a plugin is not serializable: the envelope carries the
+declaration and the side that will own the object constructs it.
+
+It is **best-effort and audible**. A session that fails to install GC is every
+pre-#1133 session, so raising would turn a silent degradation into a refused
+bootstrap; the failure logs at WARNING instead, because a GC strategy that does
+not install is exactly what this issue is about and must not become invisible
+twice. A successful install logs the strategy and its thresholds.
+
+The guard is `server/tests/test_envelope_carries_gc.py`, third in the family
+with `test_envelope_carries_budget_control.py` and
+`test_envelope_carries_runtime_limits.py`. Its consumer test asserts the **call
+site** by AST walk, not the installer's behaviour: a test that imports
+`_install_gc` and calls it passes on the broken tree, since the broken tree's
+defect was precisely that the resolution existed and nothing invoked it. The
+reversion meta-guard caught that weakness in the first draft of this very file.
+
 ### A Workspace With No GC, and a File That Overrode What It Did Not Say
 
 Two halves of one question — *what does a session get when nobody chose a GC
@@ -8530,6 +8593,45 @@ required `contract-guards` job:
   must name exactly the providers whose `PROVIDER_CAPABILITIES` declare the
   row's capability, so adding `pdf_input` to a provider means updating that
   row.
+
+### The Declared Python Floor Is One CI Runs (#1076)
+
+Every workflow here pins a single interpreter — `python-version: "3.12"`,
+no matrix — while the four published distributions declared
+`requires-python = ">=3.10"`. So pip installed them on 3.10, 3.11, 3.13 and
+3.14 and **nothing in CI had ever run a test on any of them**. The dev venv
+was 3.11, so it did not reproduce in development either: the metadata was a
+promise the build did not check, and the class of defect it hides is the one
+whose only trigger is a version nobody runs.
+
+#1076 offers two honest resolutions — test the declared range, or declare
+the tested range. This tree takes the second. The floor is **`>=3.12`** in
+all four published `pyproject.toml` files, the 3.10 / 3.11 classifiers are
+gone, and `jaato-server/shared/tests/test_declared_python_floor_is_tested.py`
+(in the required `contract-guards` job) is what stops the two drifting apart
+again. It asserts four things and nothing more:
+
+| Property | Why it is separate |
+|---|---|
+| the four distributions declare **one** floor | they install into one interpreter, so a disagreement is not a range — it is the highest of them, silently |
+| that floor is installed by a **commit-triggered** job that runs `pytest` | `workflow_dispatch`-only publish workflows do not count: a version only a manual run touches is in practice never run (#736) |
+| every version **any** workflow installs satisfies the floor | the reverse drift, and the worse one — a floor above the CI pin makes pip refuse the repo's own editable installs |
+| no classifier names a version below the floor, and the floor's own is named | pip does not read classifiers, so that is where a stale claim outlives a corrected `requires-python`, on the PyPI project page |
+
+**The ceiling is still a promise nobody checks, and that is said out loud
+rather than implied.** `>=3.12` has no upper bound, so it still claims 3.13
+and 3.14 and CI runs neither. Closing that needs a test matrix or an upper
+bound; asserting an upper bound the project has not chosen would be a test
+file inventing policy. So #1076's floor half is closed here and its ceiling
+half is not.
+
+**A consequence for contributors: the dev venv must be 3.12 or newer.** On
+3.11 `pip install -e jaato-server/` is now refused by pip, which is the
+point — the refusal is the promise being kept.
+
+`out-of-tree-plugins/moon-phase` is deliberately outside the check. It is an
+example of a third party's package, it is never published from here, and its
+floor is its author's to choose.
 
 ### The Reversion Meta-Guard Never Writes to Your Checkout (#995)
 

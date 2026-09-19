@@ -202,6 +202,50 @@ def transports() -> Rendered:
 
 # --------------------------------------------------------------- clients
 
+def _terminus_block() -> List[str]:
+    """What a turn verb does when the session ends under it (#1007/#1044).
+
+    READ FROM THE FACADE, not restated here: the clean-reason set and both
+    graces are imported from :mod:`jaato_sdk.client.convenience`, which is
+    the module that acts on them.  #1063 is exactly what a restatement
+    becomes — ``explain clients`` described the pre-#1007 rule as fact for
+    two releases, because nothing tied the prose to the code.
+
+    Degrades to nothing rather than to a guess: an SDK too old to carry
+    these names renders no block, which is honest, where a hardcoded copy
+    would describe a facade that is not installed.
+    """
+    try:
+        from jaato_sdk.client import convenience as _facade
+        clean = sorted(_facade.CLEAN_TERMINAL_REASONS)
+        settle = _facade.SETTLE_GRACE
+        terminus = _facade.TERMINUS_GRACE
+    except Exception:
+        return []
+
+    return [
+        "",
+        "  WHEN THE SESSION ENDS UNDER A TURN — a plain turn CAN end the",
+        "  session (a budget_control ceiling does exactly that), so this is",
+        "  not only a completion-gated concern:",
+        "",
+        "    SessionEnded(reason, details)   raised by ask/stream when a",
+        "        terminal cut the turn short, and by all three on not_found.",
+        "        AgentError still wins where both apply — it is the richer type.",
+        f"    clean endings                   {', '.join(clean)}",
+        "        An ALLOW-list: these return the turn normally.  A reason that",
+        "        does not exist yet raises rather than passing quietly.",
+        "    Session.terminus                (reason, details, session_ended)",
+        "        Recorded by all three verbs, and the only place the ending",
+        "        survives when complete() returns None.",
+        f"    settle graces                   {settle}s per agent, {terminus}s per terminus",
+        "        The first asks 'is this agent going to take another turn';",
+        "        the second, 'did the daemon emit a terminal in the same",
+        "        breath as this turn event'.  The second expiring costs",
+        "        information, never correctness.",
+    ]
+
+
 def _turn_method_block() -> List[str]:
     """The ask/complete/stream decision, rendered at the FRONT DOOR.
 
@@ -215,11 +259,18 @@ def _turn_method_block() -> List[str]:
     :data:`~archetypes.TURN_METHOD_RULE` — the SAME object the archetype page
     renders, so the two cannot drift into disagreeing wordings.
     """
-    rows = [
-        f"    {m.name:10} {m.settles_on:20} {m.returns:25} "
-        f"{'YES' if m.ends_session else 'no'}"
-        for m in _archetypes.TURN_METHODS
-    ]
+    rows = []
+    for m in _archetypes.TURN_METHODS:
+        rows.append(
+            f"    {m.name:10} {m.settles_on:20} {m.returns:25} "
+            f"{'YES' if m.ends_session else 'no'}"
+        )
+        if m.on_session_end:
+            # The column above answers "is ending the session this verb's
+            # JOB".  #1007 made the other question load-bearing — what the
+            # driver sees when a terminal arrives the verb did not ask for —
+            # and a bool cannot carry it, so it rides beneath its own row.
+            rows.append(f"    {'':10} session ends under it: {m.on_session_end}")
     lines = [
         "",
         "  WHICH TURN METHOD — the question is whether the session is",
@@ -231,11 +282,14 @@ def _turn_method_block() -> List[str]:
     lines += rows
     lines.append("")
     lines += _wrap_bullet(_archetypes.TURN_METHOD_RULE, indent=4, glyph=" ")
+    lines += _terminus_block()
     lines += [
         "",
         "    Getting it wrong does not fail loudly.  complete() returns None when",
-        "    the profile declared no schema or the model never completed — there",
-        "    is no payload to capture — and otherwise waits for a termination a",
+        "    the profile declared no schema, the model never completed, or a",
+        "    budget ceiling stopped the session — three different endings with",
+        "    one return value, which is what Session.terminus above tells apart",
+        "    — and otherwise waits for a termination a",
         "    conversational session may never reach.  Conversely a completed",
         "    session is a session that ENDED: keep driving it and you replay a",
         "    history whose tool_calls never got responses.",
@@ -382,7 +436,8 @@ def clients() -> Rendered:
     timeouts = _timeouts_block()
     data["turn_methods"] = [
         {"name": m.name, "settles_on": m.settles_on, "returns": m.returns,
-         "ends_session": m.ends_session, "use_for": m.use_for}
+         "ends_session": m.ends_session, "use_for": m.use_for,
+         "on_session_end": m.on_session_end}
         for m in _archetypes.TURN_METHODS
     ]
     data["turn_method_rule"] = _archetypes.TURN_METHOD_RULE

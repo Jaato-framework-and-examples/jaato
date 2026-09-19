@@ -197,6 +197,16 @@ returns the typed payload. A plain session's turn IS its terminus, so use
 that stops in prose without signalling is re-prompted and keeps going, so the
 turn event fires mid-flight.
 
+**A plain turn can still end the session**, so "its turn IS the terminus" is
+not "the session survives whatever happens". A `budget_control` ceiling ends it
+mid-turn, and since #1007 `ask()`/`stream()` then raise `SessionEnded` (with
+`reason` and `details`) instead of returning text — except for the endings that
+were meant (`natural`, `client_request`, `stopped`), which return the turn
+normally. All three verbs record `Session.terminus`, which is the only place
+the reason survives when `complete()` returns `None`. Catch `SessionEnded`
+wherever you use a turn verb; `jaato-scaffold explain clients` prints the
+current rule, read from the facade rather than restated.
+
 ## Three ways a harness goes wrong with nothing logged
 
 Traps 2 and 3 end the same way — the daemon is content and your driver sits

@@ -246,17 +246,25 @@ class TurnMethod:
     returns: str
     ends_session: bool
     use_for: str
+    #: What the verb does when the session ends UNDER it.  ``ends_session``
+    #: answers "is ending the session this verb's job"; this answers the
+    #: different question #1007 made load-bearing — what a driver sees when
+    #: a terminal arrives that the verb did not ask for.
+    on_session_end: str = ""
 
 
 #: The three turn methods, in the order a reader meets them.
 TURN_METHODS: Tuple[TurnMethod, ...] = (
     TurnMethod("ask", "TURN_COMPLETED", "the text of that turn", False,
-               "a conversation — the session survives, ask again"),
+               "a conversation — the session survives, ask again",
+               "raises SessionEnded unless the reason is clean"),
     TurnMethod("stream", "TURN_COMPLETED", "the text, chunk by chunk", False,
-               "the same turn, rendered as it arrives"),
+               "the same turn, rendered as it arrives",
+               "yields what it had, then raises SessionEnded"),
     TurnMethod("complete", "SESSION_TERMINATED", "AGENT_COMPLETED.payload",
                True,
-               "a cascade stage that produces one typed artifact and stops"),
+               "a cascade stage that produces one typed artifact and stops",
+               "returns the payload; the ending is on Session.terminus"),
 )
 
 #: The decision rule itself — ONE definition, two renderings.  It was only
@@ -264,8 +272,10 @@ TURN_METHODS: Tuple[TurnMethod, ...] = (
 #: is not scaffolding that archetype never meets it (jaato #909).
 TURN_METHOD_RULE = (
     "WHICH turn method: ask/stream for a NON-GATED session (its turn IS the "
-    "terminus; they wait on first-of {TURN_COMPLETED, SESSION_TERMINATED} "
-    "because a plain turn never self-terminates), complete() for a "
+    "terminus; the turn event PROPOSES one, that agent's next status event "
+    "CONFIRMS it, and SESSION_TERMINATED settles unconditionally — one rule "
+    "parameterised by span since #1007, not first-of a pair), complete() "
+    "for a "
     "COMPLETION-GATED one (an agent that ends a turn without "
     "signal_completion is re-prompted and keeps working, so the turn event "
     "fires mid-flight — jaato #767).  complete() also RETURNS the typed "

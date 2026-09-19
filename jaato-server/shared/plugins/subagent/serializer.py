@@ -55,23 +55,19 @@ def serialize_subagent_state(session_info: Dict[str, Any]) -> Dict[str, Any]:
             profile_data['inherits'] = profile.inherits
         # Serialize GC config if present
         if profile.gc:
-            profile_data['gc'] = {
-                'type': profile.gc.type,
-                'threshold_percent': profile.gc.threshold_percent,
-                'preserve_recent_turns': profile.gc.preserve_recent_turns,
-                'notify_on_gc': profile.gc.notify_on_gc,
-                'summarize_middle_turns': profile.gc.summarize_middle_turns,
-                'max_turns': profile.gc.max_turns,
-                # Carried so a revived session keeps the media policy it was
-                # created under (#850): a profile that turned eviction OFF
-                # would otherwise start purging the moment it woke.  Each is
-                # ``None`` unless the profile set it, and restores as ``None``,
-                # so the framework default stays in charge either way.
-                'media_bytes_threshold': profile.gc.media_bytes_threshold,
-                'evict_consumed_media': profile.gc.evict_consumed_media,
-                'media_evict_mime_prefixes': profile.gc.media_evict_mime_prefixes,
-                'plugin_config': profile.gc.plugin_config,
-            }
+            # ``to_dict`` rather than a key list written out here (#1133).
+            # The list this replaces carried ten of twelve fields, omitting
+            # ``target_percent`` and ``pressure_percent`` — so a revived
+            # session lost how far a collection goes and when PRESERVABLE
+            # may be touched, and an omitted ``pressure_percent`` restores
+            # as the dataclass default rather than as what the profile said.
+            #
+            # The media keys (#850) are carried as before, and for the same
+            # reason: a profile that turned eviction OFF would otherwise
+            # start purging the moment it woke.  Each is ``None`` unless the
+            # profile set it and restores as ``None``, so the framework
+            # default stays in charge either way.
+            profile_data['gc'] = profile.gc.to_dict()
 
     # Convert datetimes to ISO strings
     created_at = session_info.get('created_at')
@@ -122,19 +118,14 @@ def deserialize_subagent_state(data: Dict[str, Any]) -> Dict[str, Any]:
 
         gc_config = None
         if profile_data.get('gc'):
-            gc_data = profile_data['gc']
-            gc_config = GCProfileConfig(
-                type=gc_data.get('type', 'truncate'),
-                threshold_percent=gc_data.get('threshold_percent', 80.0),
-                preserve_recent_turns=gc_data.get('preserve_recent_turns', 5),
-                notify_on_gc=gc_data.get('notify_on_gc', True),
-                summarize_middle_turns=gc_data.get('summarize_middle_turns'),
-                max_turns=gc_data.get('max_turns'),
-                media_bytes_threshold=gc_data.get('media_bytes_threshold'),
-                evict_consumed_media=gc_data.get('evict_consumed_media'),
-                media_evict_mime_prefixes=gc_data.get('media_evict_mime_prefixes'),
-                plugin_config=gc_data.get('plugin_config', {}),
-            )
+            # ``from_dict`` rather than a second key list (#1133): it is
+            # the symmetric half of the ``to_dict`` the writer now uses,
+            # so a field added to the dataclass survives a snapshot
+            # round trip without either side being edited.  A record
+            # written before this carries ten keys; the two it lacks
+            # fall back to the dataclass defaults, which is what the old
+            # constructor call did for them anyway.
+            gc_config = GCProfileConfig.from_dict(profile_data['gc'])
 
         profile = SubagentProfile(
             name=profile_data.get('name', ''),

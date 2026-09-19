@@ -177,7 +177,7 @@ For the complete reference, see the **[Plugin Documentation](https://jaato-frame
 
 ### Prerequisites
 
-- Python 3.10+
+- Python 3.12+
 - An AI provider account (any of the 24 supported providers) — or a local engine (Ollama / LM Studio / vLLM) that needs no account
 
 ### Installation

@@ -164,7 +164,7 @@ BASELINE: Dict[str, int] = {
     "jaato-server/server/runner/tests/test_session_send_message_rpc.py::test_send_message_fires_post_turn_notifications_in_order": 26,
     "jaato-server/server/runner_rpc_client.py::RunnerRPCClient._read_loop": 23,
     "jaato-server/server/runner_rpc_handlers/spawn_isolated_runner.py::SpawnIsolatedRunnerHandler.handle": 26,
-    "jaato-server/server/runner_spawn.py::build_session_envelope": 37,
+    "jaato-server/server/runner_spawn.py::build_session_envelope": 36,
     "jaato-server/server/runner_spawn.py::spawn_session_runner": 16,
     "jaato-server/server/session_manager.py::SessionManager._build_isolated_envelope": 21,
     "jaato-server/server/session_manager.py::SessionManager._build_session_info_event": 22,
