@@ -430,3 +430,120 @@ rather than a receipt. Phase 3 is the payload width.
   sender identity, and the `budget_control` terminator all apply unchanged.
 - Workspace resolution for a cold target stays server-owned (the index),
   never caller-supplied.
+
+---
+
+## 8. The five verbs, side by side
+
+Columns are the four verbs that exist and the one proposed in §4; rows are
+the characteristics on which they differ.
+
+| | `send_to_sibling` | `session.send` | `session.wake` | `inject_prompt` | proposed `send_to_session` / `session.message` |
+|---|---|---|---|---|---|
+| **Who calls it** | the model (tool, daemon-forwarded) | an operator or script (client verb) | a client, cron, or the signed HTTP wake ingress | an SDK client or a daemon extension (reactor, webhook) | the model (tool) and an SDK client (verb) |
+| **Authorization** | sender and target must share a cid | transport auth only | transport auth only, plus the Ed25519 signature on the ingress route | transport auth only | `same_group(sender, target)` over `{cid, created_by}`; `None` never matches `None` |
+| **Sender identity** | daemon-stamped from its own table | the constant `operator` | caller-supplied `source` tag | caller-supplied `source_id` | daemon-stamped |
+| **Addressing** | `sibling_name` within the cid | `cascade_driver_id` + `sibling_name` | `session_id` only | `session_id` | `session_id`, or `sibling_name` within a cid group; an ambiguous name is refused |
+| **Target scope** | same cascade, same workspace | same cascade | any session the workspace index knows | any loaded session | any group member, across workspaces |
+| **Cold target** | refused `sibling_cold` | refused `sibling_cold` | revived from disk, runner respawned | refused `no_session` | revived and driven |
+| **Deferred-turn gate** | n/a | n/a | yes, when a cid is passed and no client is attached; parks in the single-slot `_pending_wakes` | n/a | none for a peer sender; headless drive, stated in the receipt |
+| **Terminal target** | `terminated` | `terminated` | driven anyway | `terminated` | `terminated`, never woken |
+| **Payload** | text, 8 KiB cap | text, no cap | text + inline base64 attachments | text + inline attachments | text (8 KiB), text attachments (32 KiB inline), binary attachments, file references |
+| **Attachments on a busy target** | n/a | n/a | takes the user-send path | refused `busy`, nothing enqueued | spooled to the inbox, driven at the next turn boundary |
+| **Priority tier** | `SIBLING` (idle-only, drained at turn end) | `USER` (mid-turn) | `USER` turn | caller-chosen, any of the six tiers | `SIBLING` |
+| **Untrusted-content wrap** | yes, `sibling:<name>` | no | yes, `wake:<source>`, with an attachment manifest | no | yes, `peer:<address>`, with attachment and file manifests |
+| **Permission / clarification grammar refused** | yes | yes | no | no | yes |
+| **Rate caps** | 8 KiB, 20 pending per target, 200 per cid | none | none (1 MiB body on the ingress) | none | the sibling caps, generalised per group key |
+| **Idempotency** | none | none | `event_id` claim, released on failure | none | `event_id`, reusing the wake mechanism |
+| **Durability if the target unloads before draining** | lost (runner-side queue) | lost | lost if deferred and the daemon restarts | lost | persisted inbox, drained on load and at turn end, retried by the watchdog |
+| **Answer to the caller** | receipt dict: `accepted` / `queued` / `no_such_sibling` / `sibling_cold` / `refused` | a `SystemMessageEvent` string, or `ErrorEvent(SessionSendError)` | `WakeOutcome` enum; on the wire only an `ErrorEvent(WakeError)` on failure, silence on success | `InjectPromptResultEvent` with the `message_delivery` vocabulary when a `request_id` is sent | typed `SessionMessageResultEvent`: status, `message_id`, `woken`, `spooled`, `headless`, per-file dispositions |
+| **Trace line** | `SIBLING_DELIVERY` | `DELIVERY_*` only | none specific | `DELIVERY_*` | `GROUP_DELIVERY` |
+| **Protocol** | n/a | current | 1.5 for attachments | 1.3 for the result event, 1.5 for attachments | 1.18 |
+
+Three things the table makes visible.
+
+**No existing verb combines authorization, wake, and untrusted framing.**
+The two peer verbs have the framing and refuse to wake. The wake verb wakes
+and checks nothing per session. The inject verb has neither. The proposed
+verb is the first column filled on all three rows at once, which is why it
+is a new verb rather than a flag on one of them.
+
+**Payload width today depends on which branch a message takes, not on the
+verb.** Attachments ride only the drive branch on every verb that accepts
+them. The inbox is what removes that dependency: bytes that cannot ride the
+queue are spooled and re-issued, so "can I attach a file" stops depending on
+whether the target happened to be busy.
+
+**Two of the four existing verbs are untouched, and two get a shared fix.**
+`send_to_sibling` and `session.send` keep their contracts, including cold
+refusal. `session.wake` keeps its contract too, but folding `_pending_wakes`
+into the inbox fixes its single-slot overwrite and its loss on daemon
+restart. `inject_prompt` keeps its contract and gains nothing: a daemon
+extension that wants durability or wake calls the new method.
+
+---
+
+## 9. Which internal blocks they share
+
+A tick means the verb goes through that code today; the last column says
+what the proposed verb does with the block.
+
+| Internal block | Where | `send_to_sibling` | `session.send` | `session.wake` | `inject_prompt` | proposed verb |
+|---|---|---|---|---|---|---|
+| **Sender identity from the daemon's own table** (`_sessions[sid]`, via the daemon-forwarded tool path in `daemon_forwarding` / `runner_forwarding`) | `session_manager`, subagent plugin executor | ✓ | operator constant | caller tag | caller tag | ✓ reuses the forwarded-tool path |
+| **Transport auth + `get_client_user`** | `command_router`, `event_sink` | n/a | ✓ | ✓ | ✓ | ✓ for the client verb; `created_by` feeds `same_group` |
+| **Member resolution, live ∪ cold** (`_resolve_sibling`, `_cascade_storage_workspace`, `_get_persisted_sessions`) | `session_manager` | ✓ | ✓ | no, id only | no, loaded only | generalised to group scope, across workspaces |
+| **`SessionWorkspaceIndex.resolve`** (cold id → workspace, ambiguous refused) | `session_workspace_index.py` | | | ✓ | | ✓, extended with owner and name |
+| **Grammar refusal** (`_sibling_grammar_violation`) | `session_manager` | ✓ | ✓ | | | ✓ |
+| **Untrusted-content wrap** (`wrap_untrusted_content`; `_wrap_wake_content` for the attachment manifest) | `jaato_sdk...types`, `session_manager` | ✓ `sibling:` | | ✓ `wake:` | | ✓ `peer:`, manifest extended with file refs |
+| **Caps** (`_sibling_pending`, `_sibling_exchanges`, 8 KiB) | `session_manager` | ✓ | | | | ✓, keyed per group |
+| **Idempotency** (`_wake_seen_event_ids` claim / release) | `session_manager` | | | ✓ | | ✓ |
+| **Queue-or-drive decision** (`deliver_prompt_to_session` → runner `session_offer_message` → `JaatoSession.offer_message` under `_delivery_lock`) | `session_manager`, `runner/rpc.py`, `jaato_session.py`, `shared/message_delivery.py` | ✓ | ✓ | no, drives directly | ✓ | ✓ loaded branch |
+| **Drive a turn** (`send_message_to_session` → `handle_request(_HEADLESS_CLIENT_ID, SendMessageRequest)` → `server.send_message` → runner `session.send_message`) | `session_manager`, `core.py`, `runner/rpc.py` | ✓ via the drive branch | ✓ via the drive branch | ✓ | ✓ via the drive branch | ✓ both branches |
+| **Runner-side queue and drain** (`MessageQueue` tiers, `_drain_child_messages`, `_handle_pending_mid_turn_prompt`) | `shared/message_queue.py`, `jaato_session.py` | ✓ `SIBLING` | ✓ `USER` | ✓ `USER` when busy | ✓ chosen tier | ✓ `SIBLING` |
+| **Attachment normalisation and parts** (`IPCClient._normalize_attachments`, `_parts_from_user_message`, `media_identity`) | SDK client, `jaato_session.py` | | | ✓ | ✓ | ✓ plus the spool |
+| **Cold revive** (`resume_session` → `_load_session` → `_provision_ipc_apparmor_and_spawn_runner` → `spawn_session_runner`, then `_apply_client_config_to_server(_HEADLESS_CLIENT_ID)`) | `session_manager`, `runner_spawn.py`, `runner_pool.py` | | | ✓ | | ✓ |
+| **Deferred wake** (`_pending_wakes`, `drive_pending_wake`, `_emit_session_woken` → cascade observers via `_emit_to_session`) | `session_manager` | | | ✓ | | replaced by the inbox; the event is reused and also routed by owner |
+| **Delivery status vocabulary** (`message_delivery.ACCEPTED` / `QUEUED` / `BUSY` / …) | `shared/message_delivery.py` | ✓ mapped into the receipt | ✓ | no, `WakeOutcome` | ✓ `InjectPromptResultEvent` | ✓ plus `spooled`, `ambiguous` |
+| **Budget on the target** (`_budget_observe_*`, `_accumulate_cascade_budget`) | `jaato_session.py`, `session_manager` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| **Persisted identity fields** (`created_by`, `cascade_driver_id`, `sibling_name` on `SessionState`, record 2.9 / 2.10) | `shared/plugins/session/*` | ✓ cid, name | ✓ cid, name | cid on the binding | | ✓ all three |
+| **Lifetime after the turn** (`unload_grace_seconds`, the `_ever_attached` orphan exemption) | `session_lifetime.py`, `session_manager` | | | ✓ for a woken target | | ✓ |
+| **Staging write path** (`_materialize_staged_files`, the staging caps) | `websocket.py` | | | | | ✓ for the cross-workspace file copy |
+
+The shape that falls out is one spine, with the verbs entering at different
+heights:
+
+```
+authorization      same_group ──────────────────────────────┐
+resolution         _resolve_sibling / index ────────────────┤
+framing            grammar refusal + untrusted wrap ────────┤
+                                                            ▼
+target loaded?  ── no ──► resume_session ► spawn runner ► send_message_to_session
+      │                                                        ▲
+     yes                                                       │ needs_turn
+      └──► deliver_prompt_to_session ► offer_message ─┬─ queued ─► runner MessageQueue ► drain
+                                                       └─ busy   ─► (inbox spool, §4.4)
+```
+
+`send_to_sibling` and `session.send` enter at resolution and stop at "target
+loaded". `session.wake` skips resolution and framing except the wrap, skips
+`offer_message` entirely, and is the only one that uses the left branch.
+`inject_prompt` enters at `deliver_prompt_to_session` with nothing above it.
+The proposed verb is the first to walk the whole spine, and the only code it
+adds above the existing blocks is the group predicate, the owner and name
+columns in the index, the inbox, and the file copy. Everything below the
+"target loaded?" line is reused unchanged.
+
+Two consequences of that sharing to hold to when implementing:
+
+- **`offer_message` is the one place busy-versus-idle is decided**, so the
+  proposed verb must not read the daemon-side `_model_running` replica.
+  `session.wake` gets away with skipping the offer because it always drives,
+  and a busy target then queues on the `USER` tier inside the runner. A
+  `SIBLING`-tier message cannot take that shortcut, since it must not
+  interrupt a turn.
+- **The drive path attaches `_HEADLESS_CLIENT_ID`**, and every verb that
+  drives a cold or clientless target inherits its consequences: policy-only
+  permissions, no host tools, and the unload grace rather than the orphan
+  bound. The receipt's `headless` flag is how the proposed verb makes that
+  inheritance visible instead of implicit.
