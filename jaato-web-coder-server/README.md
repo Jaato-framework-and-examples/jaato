@@ -78,7 +78,7 @@ published build matches the checkout. If a sibling's source changed since
 its last publish, bump its version and publish it first; otherwise the
 caret range resolves to the stale build. The bind channel needs
 `@jaato/sdk` **0.7.0 or later** (the token provider and the header fix for
-Node's built-in WebSocket); the 0.6.0 on npm predates both.
+Node's built-in WebSocket).
 
 ## Configuration
 
