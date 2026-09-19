@@ -1131,6 +1131,24 @@ class CommandRouter:
             # no protocol bump and an older client simply ignores them.
             "orphaned": s.orphaned,
             "runner": s.runner,
+            # #1138: which session is WAITING ON YOU, and since when.  The
+            # listing is the only channel that can answer it -- a
+            # ``PermissionRequestedEvent`` reaches
+            # ``session.attached_clients`` and ``_client_to_session`` is
+            # 1:1, so a client working in session A never learns that B is
+            # blocked.  Carried here and not only computed: a field
+            # resolved, rendered and reaching no client is #1133.
+            #
+            # These two DO carry a protocol bump (1.17) where #812's pair
+            # did not, and the difference is what a client does with them:
+            # ``orphaned`` / ``runner`` are diagnostics a human reads,
+            # while ``awaiting`` gates whether a client interrupts a
+            # person.  A client that cannot tell "nothing is waiting" from
+            # "this daemon never says" reports the first when the truth is
+            # the second, and ``ConnectedEvent.protocol_version`` is the
+            # only way to ask.
+            "awaiting": s.awaiting,
+            "awaiting_since": s.awaiting_since,
         } for s in sessions]
 
         self._event_sink.send_event(client_id, SessionListEvent(sessions=session_data))

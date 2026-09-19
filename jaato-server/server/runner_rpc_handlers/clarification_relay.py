@@ -49,9 +49,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any, Callable, Dict, List, Optional
 
 from jaato_sdk.events import ClarificationBatchEvent
+
+from server.awaiting import oldest
 
 
 logger = logging.getLogger(__name__)
@@ -110,7 +113,44 @@ class ClarificationRelayHandler:
         # runner that will silently drop it.  Same lifetime as the
         # future: registered in ``handle``, dropped in its ``finally``.
         self._question_counts: Dict[str, int] = {}
+        # request_id -> the wall-clock instant the batch was raised (#1138).
+        # THIS handler is where a clarification is pending on the DEFAULT
+        # (runner-served) path -- the clarification plugin is
+        # ``PLUGIN_TIER = "runner"``, so the daemon-side hook that writes
+        # ``JaatoServer._pending_clarification_request_id`` is not in the
+        # loop and that field stays ``None``.
+        # ``SessionManager.list_sessions`` asks here instead, through
+        # :meth:`has_pending_prompt` / :meth:`pending_since`.
+        #
+        # Same lifetime as the future and as ``_question_counts`` above --
+        # registered on the next line, dropped in the same ``finally``.
+        self._raised_at: Dict[str, float] = {}
         self._closed = False
+
+    def has_pending_prompt(self) -> bool:
+        """Whether any clarification batch relayed here is unanswered."""
+        return bool(self._pending)
+
+    def pending_since(self) -> Optional[float]:
+        """Epoch seconds at which the OLDEST in-flight batch was raised.
+
+        ``None`` when nothing is in flight, and also when what is in flight
+        carries no stamp -- "not measured" rather than "just now".
+        """
+        # A SNAPSHOT, never the live containers.  This is read from the
+        # listing thread while ``handle`` registers and drops entries on the
+        # daemon's asyncio loop, so iterating either dict directly is the
+        # #938 shape -- ``RuntimeError: dictionary changed size during
+        # iteration``, raised inside a listing, for a fact the listing is
+        # only reporting.  ``.get`` for the same reason: a key can vanish
+        # between the snapshot and the lookup, and a prompt that finished
+        # while we were counting is one that is no longer pending.
+        stamps = self._raised_at
+        return oldest([
+            stamp for stamp in
+            (stamps.get(request_id) for request_id in list(self._pending))
+            if stamp is not None
+        ])
 
     async def handle(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """RPC handler entry point.
@@ -139,6 +179,7 @@ class ClarificationRelayHandler:
         fut: "asyncio.Future[Dict[str, Any]]" = loop.create_future()
         self._pending[request_id] = fut
         self._question_counts[request_id] = len(questions)
+        self._raised_at[request_id] = time.time()
 
         event = ClarificationBatchEvent(
             agent_id=str(args.get("agent_id", "") or ""),
@@ -160,6 +201,7 @@ class ClarificationRelayHandler:
         except Exception:
             self._pending.pop(request_id, None)
             self._question_counts.pop(request_id, None)
+            self._raised_at.pop(request_id, None)
             raise
 
         try:
@@ -171,6 +213,7 @@ class ClarificationRelayHandler:
         finally:
             self._pending.pop(request_id, None)
             self._question_counts.pop(request_id, None)
+            self._raised_at.pop(request_id, None)
 
     def pending_question_count(self, request_id: str) -> Optional[int]:
         """How many questions the pending batch *request_id* asked.
@@ -240,6 +283,7 @@ class ClarificationRelayHandler:
             return
         self._closed = True
         self._question_counts.clear()
+        self._raised_at.clear()
         for request_id, fut in list(self._pending.items()):
             if not fut.done():
                 fut.set_exception(

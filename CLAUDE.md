@@ -3990,6 +3990,105 @@ Out of scope, per the issue: terminate-on-client-loss (#812 records the
 decision not to have it), `proxy` mode in `jaato-web-coder-server`, and the
 §11.5 logout gap.
 
+### A Session Waiting on a Human, Invisible from Every Other One (#1138)
+
+#812 asked which session nothing is consuming. This is the opposite state:
+a session that is blocked because it is consuming **you**. One session
+raises a permission ASK or a `request_clarification` while you work in
+another, and the turn stays blocked until you happen to attach to it and
+find the prompt sitting there.
+
+No client could fix it. Prompt events go to `session.attached_clients` and
+`_client_to_session` is **1:1**, so a browser attached to A is not in B's
+set and B's `PermissionRequestedEvent` never reaches it;
+`SessionManager.broadcast_event` is not the escape hatch either — its
+docstring reserves it for events that are *not* tied to a specific session.
+
+So the fact rides the listing every client already polls. `session.list`
+rows gain **`awaiting`** (`permission` / `clarification` / absent) and
+**`awaiting_since`** (ISO-8601 UTC). Protocol **1.17**.
+
+**`is_processing` could not carry it.** A session blocked on a prompt is
+still processing; telling *working* from *waiting on you* is the whole
+point, and one boolean cannot.
+
+**The issue named the wrong two fields, and implemented literally the
+change would have been inert on the default path.** It reads
+`JaatoServer._pending_permission_request_id` /
+`_pending_clarification_request_id` and calls this "the same read, one
+field over" from `is_processing`. Those are written by the **daemon-side**
+hooks in `_setup_permission_hooks` / `_setup_clarification_hooks`, and
+`permission`, `clarification` and `references` are all
+`PLUGIN_TIER = "runner"` — so on a runner-served session the plugin that
+raises the prompt is in the runner process and the daemon-side hook is not
+in the loop. `PromptOperatorHandler`'s own comments say so: *"that path is
+dead post-§7c since the runner-side permission plugin is the one in the
+loop"*. Measured: with a relayed ASK in flight, the relay holds the request
+id and `_pending_permission_request_id` is `None`.
+
+| Path | Where the prompt is pending |
+|---|---|
+| runner-served (**the default**) | `_prompt_operator_handler` / `_clarification_relay_handler` |
+| embedded, standalone-WS, legacy Path 2 | `_pending_*_request_id` + their `_since` twins |
+
+`JaatoServer.awaiting_prompt()` reads **both**, so the field is not a
+strategy resolved and installed on nobody (#1133) or a cap that silently
+does not apply (#735).
+
+Four properties, each attached to a way it could mislead:
+
+- **The pair describes the OLDEST unanswered prompt.** Both kinds can be in
+  flight at once — tool execution is 8-wide — and the pair has room for
+  one. Oldest-first is the question a reader is actually asking, and it
+  needs no invented ranking between the kinds; the vocabulary order is the
+  tiebreak only, for prompts the clock cannot separate.
+- **`awaiting_since` is a SECOND field, never a widening of `awaiting`.**
+  The degradation argument depends on `awaiting` staying a scalar an older
+  client can ignore. The clock is not a nicety: the listing is a **poll**,
+  so without it a client can only date the wait from when *it* first saw
+  the flag — which under-reports every wait that predates the client and
+  resets to zero on every reconnect. Wall clock, not monotonic, because its
+  only consumer is a browser subtracting it from its own.
+- **In-memory branch only.** A persisted-only row has no `server`, and a
+  session that is not loaded cannot be waiting on anything.
+- **The vocabulary is closed AT THE BOUNDARY.** `awaiting_of` accepts any
+  duck-typed server (the `_turns_ran_snapshot` precedent, #881), so
+  `awaiting_fields` drops a kind outside `AWAITING_KINDS` and a `since`
+  that is not a real number. A listing that raised because one session's
+  server answered oddly would be worse than the fact it was reporting.
+
+**No poll cadence knob.** `session.list` is client-initiated, so a
+daemon-side interval would be advice a client can ignore — the
+`finalize`/`escalate` shape — and the cost that actually bounds the cadence
+is `list_sessions`' parse, which is #1137's to fix. The client has a better
+trigger than a timer anyway: refresh on window focus.
+
+**The protocol bump, where #812's `orphaned` / `runner` took none on this
+same free-form dict.** The difference is what a client does with the field:
+those two are diagnostics a human reads, this one gates whether a client
+interrupts a person. "Can this daemon tell me?" is a question a client will
+ask, `ConnectedEvent.protocol_version` is the only way to ask it, and a
+client that cannot distinguish *no session is waiting* from *this daemon
+never says* reports the first when the truth is the second. Additive in
+both directions, so no SDK minimum to refuse below.
+
+**Not widened to a third kind.** `_pending_reference_selection_request_id`
+is a fourth holder of the same shape, and `references` has **no** relay
+handler — so on the runner path a `selectReferences` prompt has no daemon
+side at all. That is its own gap; adding `"reference"` here would widen a
+vocabulary the issue closed while fixing nothing on the path that matters.
+
+The client half is #1135's Sessions rail: a second marker beside the
+`●`/`○` glyph, never a recolouring of it — that glyph is `is_loaded` and
+the two facts are orthogonal. The TUI has the same blind spot and now the
+same field; it renders `SessionListEvent` already, so what it needs is a
+render change rather than a daemon one.
+
+Guard: `shared/tests/test_a_session_waiting_on_a_human_is_visible_1138.py`,
+six reversions. The relay cases drive the real `handle()` coroutine rather
+than poking the handlers' dicts — a case that registered the future by hand
+would pass against a handler that never stamped.
+
 ### Configuring a Plugin and Enabling It Are Two Decisions (#950)
 
 `plugin_configs.<name>` and `plugins:` answer different questions — *how does

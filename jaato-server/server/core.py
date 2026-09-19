@@ -15,6 +15,7 @@ import sys
 import pathlib
 import queue
 import threading
+import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, TYPE_CHECKING
 
@@ -277,6 +278,13 @@ class AgentState:
         self.pending_formatter_feedback: Optional[str] = None
 
 
+from server.awaiting import (
+    AWAITING_CLARIFICATION,
+    AWAITING_PERMISSION,
+    PendingPrompt,
+    pending_prompt,
+    resolve_awaiting,
+)
 from shared.completion_nudge import resolve_max_completion_nudges
 from shared.model_tiers import (bound_model_for_profile,
                                 bound_provider_for_profile)
@@ -932,6 +940,17 @@ class JaatoServer:
         self._channel_input_queue: queue.Queue[str] = queue.Queue()
         self._waiting_for_channel_input: bool = False
         self._pending_permission_request_id: Optional[str] = None
+        # When that ASK was raised, epoch seconds (#1138).  Set and cleared
+        # on the same lines as the id above, so the pair cannot drift.
+        #
+        # This is the DAEMON-LOCAL ASK path (the embedded client, a
+        # standalone-WS session, the pre-§7c fallback).  On the default,
+        # runner-served path the permission plugin is ``PLUGIN_TIER =
+        # "runner"``, so neither this field nor the id above is ever
+        # written -- the ASK is pending in ``_prompt_operator_handler``
+        # instead.  :meth:`awaiting_prompt` reads BOTH holders for exactly
+        # that reason.
+        self._pending_permission_since: Optional[float] = None
         # Edited arguments from client-side editing (set before "e" is put in queue)
         self._pending_edited_arguments: Optional[Dict[str, Any]] = None
         # Daemon-authenticated user of the client whose response is in the
@@ -940,6 +959,10 @@ class JaatoServer:
         # the resolved hook when it fires for that request_id.
         self._pending_permission_user_id: Optional[str] = None
         self._pending_clarification_request_id: Optional[str] = None
+        # When that clarification was raised, epoch seconds (#1138); the
+        # daemon-local twin of ``_prompt_operator_handler``'s stamp, with
+        # the same caveat as ``_pending_permission_since`` above.
+        self._pending_clarification_since: Optional[float] = None
         self._pending_reference_selection_request_id: Optional[str] = None
 
         # Track which agent is currently executing a tool (for permission/clarification routing)
@@ -4511,6 +4534,7 @@ class JaatoServer:
                                     tool_args: dict, response_options: list,
                                     call_id: Optional[str] = None):
             server._pending_permission_request_id = request_id
+            server._pending_permission_since = time.time()
             server._waiting_for_channel_input = True
 
             # Convert response options to dicts
@@ -4645,6 +4669,7 @@ class JaatoServer:
             # StateError ("Unknown permission request: ...").
             if request_id and server._pending_permission_request_id == request_id:
                 server._pending_permission_request_id = None
+                server._pending_permission_since = None
                 server._waiting_for_channel_input = False
                 # Legacy daemon-side ASK (#859): the QueueChannel cannot
                 # carry the responder's identity, so respond_to_permission
@@ -4699,6 +4724,7 @@ class JaatoServer:
         def on_clarification_requested(tool_name: str, prompt_lines: list):
             request_id = f"clarify_{datetime.now(timezone.utc).timestamp()}"
             server._pending_clarification_request_id = request_id
+            server._pending_clarification_since = time.time()
             server._waiting_for_channel_input = True
 
             # Emit context content as AgentOutputEvent (flows through main output)
@@ -4714,6 +4740,7 @@ class JaatoServer:
         def on_clarification_resolved(tool_name: str, qa_pairs: list):
             request_id = server._pending_clarification_request_id or ""
             server._pending_clarification_request_id = None
+            server._pending_clarification_since = None
             server._waiting_for_channel_input = False
             # Convert qa_pairs from list of tuples to list of lists for JSON serialization
             qa_pairs_serializable = [[q, a] for q, a in qa_pairs] if qa_pairs else []
@@ -6953,6 +6980,71 @@ class JaatoServer:
     def is_processing(self) -> bool:
         """Check if model is currently processing."""
         return self._model_running
+
+    def awaiting_prompt(self) -> Optional[PendingPrompt]:
+        """The unanswered human-facing prompt blocking this session (#1138).
+
+        The read behind ``RuntimeSessionInfo.awaiting`` /
+        ``.awaiting_since``, so a client listing sessions can tell *working*
+        from *waiting on you*.  ``is_processing`` above cannot carry it: a
+        session blocked on a prompt is still processing, which is the whole
+        point.
+
+        FOUR HOLDERS, TWO PATHS -- and the issue named only the daemon-local
+        two.  ``permission``, ``clarification`` and ``references`` are all
+        ``PLUGIN_TIER = "runner"``, so on the DEFAULT (runner-served) path
+        the plugin that raises the prompt lives in the runner process and
+        the daemon-side hooks in :meth:`_setup_permission_hooks` /
+        :meth:`_setup_clarification_hooks` are not in the loop -- the same
+        "that path is dead post-§7c" the prompt-operator handler's own
+        comments record.  Reading only ``_pending_permission_request_id``
+        and ``_pending_clarification_request_id`` would therefore report
+        ``None`` for exactly the sessions this exists for: a mechanism
+        resolved, carried, rendered and armed on nobody (#1133), and the
+        #735 shape of a cap that silently does not apply.
+
+        ====================  ===============================================
+        Path                  Where the prompt is pending
+        ====================  ===============================================
+        runner-served         ``_prompt_operator_handler`` (permission),
+                              ``_clarification_relay_handler``
+                              (clarification)
+        daemon-local          ``_pending_permission_request_id`` /
+                              ``_pending_clarification_request_id``, with
+                              their ``_since`` twins
+        ====================  ===============================================
+
+        Both are read, so an embedded or standalone-WS deployment is covered
+        by the same field as the daemon everyone else runs.
+
+        This method does not raise.  It is called once per loaded session
+        per listing, from a path that already holds the ``SessionManager``
+        lock, and a listing that dies because one session's relay was being
+        torn down concurrently would be a worse failure than the one it
+        reports on -- so every holder is reached through ``getattr`` and a
+        collaborator that answers nothing simply contributes no candidate.
+
+        Returns:
+            The oldest unanswered prompt as a
+            :class:`~server.awaiting.PendingPrompt`, or ``None`` when this
+            session is not waiting on a human.
+        """
+        return resolve_awaiting([
+            prompt for prompt in (
+                pending_prompt(
+                    getattr(self, "_prompt_operator_handler", None),
+                    self._pending_permission_request_id,
+                    self._pending_permission_since,
+                    AWAITING_PERMISSION,
+                ),
+                pending_prompt(
+                    getattr(self, "_clarification_relay_handler", None),
+                    self._pending_clarification_request_id,
+                    self._pending_clarification_since,
+                    AWAITING_CLARIFICATION,
+                ),
+            ) if prompt is not None
+        ])
 
     # Phase 3 §7c step 6.6.3.6: ``JaatoServer.get_session()``
     # was removed.  Pre-§7c-step-6.6.3.6 it returned the

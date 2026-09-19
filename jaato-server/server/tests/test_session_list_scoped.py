@@ -23,10 +23,14 @@ from server.command_router import CommandRouter
 
 
 def _sess(sid, workspace, created_by=None):
+    # Mirrors ``RuntimeSessionInfo``: the row builder reads each field by
+    # name, so a stand-in that omits one fails loudly rather than shipping a
+    # listing key nothing fills.  ``awaiting`` / ``awaiting_since`` are #1138.
     return SimpleNamespace(
         session_id=sid, name=sid, description="", model_provider="", model_name="",
         is_loaded=True, client_count=0, turn_count=0, workspace_path=workspace,
         created_by=created_by, orphaned=False, runner=None,
+        awaiting=None, awaiting_since=None,
     )
 
 
