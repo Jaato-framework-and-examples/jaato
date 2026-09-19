@@ -37,6 +37,13 @@ export interface LauncherConfig {
    * always exist beside a ticket URL, this one is opt-in.
    */
   credentialsUrl?: string;
+  /**
+   * Where the backend keeps this user's session notes (``app/notes.ts``).
+   * Named only by a backend that has the store; absent means notes are kept
+   * in this browser instead, and the UI says which.  Opt-in for the same
+   * reason ``credentialsUrl`` is, so it is not derived from ``ticketUrl``.
+   */
+  notesUrl?: string;
   autoConnect?: boolean;
 }
 
@@ -51,6 +58,7 @@ export function parseLauncherConfig(raw: unknown): LauncherConfig {
   if (typeof o.sessionUrl === "string" && o.sessionUrl) out.sessionUrl = o.sessionUrl;
   if (typeof o.logoutUrl === "string" && o.logoutUrl) out.logoutUrl = o.logoutUrl;
   if (typeof o.credentialsUrl === "string" && o.credentialsUrl) out.credentialsUrl = o.credentialsUrl;
+  if (typeof o.notesUrl === "string" && o.notesUrl) out.notesUrl = o.notesUrl;
   if (typeof o.autoConnect === "boolean") out.autoConnect = o.autoConnect;
   return out;
 }

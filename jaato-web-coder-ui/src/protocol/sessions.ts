@@ -24,6 +24,19 @@ export interface SessionSummary {
   turnCount: number;
   workspacePath: string;
   createdBy?: string;
+  /**
+   * ``"permission"`` / ``"clarification"`` when that session is blocked on
+   * an unanswered human prompt (protocol 1.17), undefined otherwise.
+   *
+   * It is the ONLY way a client working in session A learns that B wants
+   * it: prompt events go to that session's attached clients and a client
+   * is attached to one at a time.  Absent means "nothing is waiting, as
+   * far as this daemon says" -- never a positive no, since a daemon below
+   * 1.17 sends nothing and an unloaded session is never reported.
+   */
+  awaiting?: string;
+  /** When that prompt was raised, ISO-8601 UTC.  Absent means NOT MEASURED, never "just now". */
+  awaitingSince?: string;
 }
 
 export function normalizeSessionSummary(raw: unknown): SessionSummary | null {
@@ -43,6 +56,8 @@ export function normalizeSessionSummary(raw: unknown): SessionSummary | null {
     turnCount: Number(o.turn_count ?? 0) || 0,
     workspacePath: String(o.workspace_path ?? ""),
     createdBy: o.created_by ? String(o.created_by) : undefined,
+    awaiting: typeof o.awaiting === "string" && o.awaiting ? o.awaiting : undefined,
+    awaitingSince: typeof o.awaiting_since === "string" && o.awaiting_since ? o.awaiting_since : undefined,
   };
 }
 
@@ -51,8 +66,15 @@ export function normalizeSessionList(raw: unknown): SessionSummary[] {
   return raw.map(normalizeSessionSummary).filter((s): s is SessionSummary => s !== null);
 }
 
-/** One line per session, the TUI's ``session list`` rendering. */
-export function formatSessionList(sessions: SessionSummary[]): string {
+/**
+ * One line per session, the TUI's ``session list`` rendering -- plus, on its
+ * own ``↳`` line, whatever note THIS person wrote about that session
+ * (``app/notes.ts``).  Someone who types the command expects to see it.
+ *
+ * Read-only by nature, and that is right: this is a snapshot printed into a
+ * transcript, not a management surface, and it should not grow affordances.
+ */
+export function formatSessionList(sessions: SessionSummary[], notes: Record<string, { text: string }> = {}): string {
   if (sessions.length === 0) return "No sessions available.\nUse 'session new' to create one.";
   const lines = ["Sessions:", "  Use 'session attach <id>' to switch sessions", ""];
   for (const s of sessions) {
@@ -60,12 +82,15 @@ export function formatSessionList(sessions: SessionSummary[]): string {
     const desc = s.description || s.name;
     const parts = [
       `  ${status} ${s.id}${desc && desc !== s.id ? ` - ${desc}` : ""}`,
+      s.awaiting ? ` [waiting: ${s.awaiting}]` : "",
       s.provider ? ` [${s.provider}/${s.model}]` : "",
       s.clientCount ? `, ${s.clientCount} client(s)` : "",
       s.turnCount ? `, ${s.turnCount} turns` : "",
     ];
     lines.push(parts.join(""));
     if (s.workspacePath) lines.push(`      ${s.workspacePath}`);
+    const note = notes[s.id]?.text;
+    if (note) for (const line of note.split("\n")) lines.push(`      ↳ ${line}`);
   }
   lines.push("", "  ▶ current  ● loaded  ○ on disk");
   return lines.join("\n");

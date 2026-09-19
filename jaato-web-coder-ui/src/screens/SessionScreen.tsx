@@ -24,6 +24,7 @@ import { ReferenceSelectionPrompt } from "@/components/prompts/ReferenceSelectio
 import { PlanPanel, planProgress } from "@/components/panels/PlanPanel";
 import { BudgetPanel } from "@/components/panels/BudgetPanel";
 import { WorkspacePanel } from "@/components/panels/WorkspacePanel";
+import { SessionRow, SessionsPanel, notedSummary } from "@/components/panels/SessionsPanel";
 import { AgentTabs } from "@/components/panels/AgentTabs";
 import { StatusBar } from "@/components/layout/StatusBar";
 import { Plate } from "@/components/layout/Plate";
@@ -92,12 +93,15 @@ function Rail({ agentId }: { agentId: string }) {
   const plan = useJaato((s) => s.plan[agentId]);
   const ctx = useJaato((s) => s.context[agentId]);
   const changed = useJaato((s) => Object.keys(s.workspaceFiles).length);
+  const sessions = useJaato((s) => s.sessions);
+  const notes = useJaato((s) => s.notes);
   const budget = ctx?.usage.cost_usd != null ? `$${Number(ctx.usage.cost_usd).toFixed(4)}` : ctx?.percentUsed != null ? `${ctx.percentUsed.toFixed(0)}%` : null;
   return (
     <aside className="hidden md:flex shrink-0 border-l hairline bg-surface flex-col min-h-0 overflow-auto" style={{ width: ui.railWidth }} aria-label="Session rail">
       <RailSection title="Plan" value={planProgress(plan)} open={ui.showPlan} onToggle={() => toggle("showPlan")}><PlanPanel agentId={agentId} /></RailSection>
       <RailSection title="Budget" value={budget} open={ui.showBudget} onToggle={() => toggle("showBudget")}><BudgetPanel agentId={agentId} /></RailSection>
       <RailSection title="Files" value={changed ? `${changed} changed` : null} open={ui.showWorkspace} onToggle={() => toggle("showWorkspace")}><WorkspacePanel /></RailSection>
+      <RailSection title="Sessions" value={notedSummary(sessions, notes)} open={ui.showSessions} onToggle={() => toggle("showSessions")}><SessionsPanel /></RailSection>
     </aside>
   );
 }
@@ -157,16 +161,12 @@ function ProfilePicker({ onPick, onAttach, onAuth, onSkip }: {
               <div className="px-5 py-4 flex flex-col gap-2.5" aria-label="Resume a session">
                 <div className="kicker kicker-muted text-[12px]">Resume</div>
                 <div className="flex flex-col max-h-72 overflow-auto">
-                  {resumable.map((sess) => (
-                    <button key={sess.id} type="button" onClick={() => onAttach(sess.id)} aria-label={`Resume session ${sess.id}`} className={row}>
-                      <span className={sess.isLoaded ? "text-success" : "text-text-muted"}>{sess.isLoaded ? "●" : "○"}</span>
-                      <span className="min-w-0 flex-1">
-                        <span className="block font-mono text-[13px]">{sess.id}</span>
-                        <span className="block text-[13px] text-text-muted truncate">{[sess.description || sess.name, sess.provider ? `${sess.provider}/${sess.model}` : "", sess.turnCount ? `${sess.turnCount} turns` : ""].filter(Boolean).join(" · ")}</span>
-                      </span>
-                      <span className={`btn btn-sm self-center ${sess.isLoaded ? "btn-steel" : "btn-quiet"}`}>Attach</span>
-                    </button>
-                  ))}
+                  {/* Editable here too, and not read-only as first drawn: if
+                      you forgot to write a note on the way out, the picker is
+                      exactly where you notice, and attaching just to add one
+                      costs a runner spawn -- the cost going BFF-side was
+                      meant to avoid. */}
+                  {resumable.map((sess) => <SessionRow key={sess.id} sess={sess} onAttach={onAttach} />)}
                 </div>
               </div>
               <div className="hidden md:block bg-divider" aria-hidden="true" />

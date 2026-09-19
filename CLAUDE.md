@@ -5844,6 +5844,111 @@ answers. With no `credentials:` block nothing changes, and the daemon's
 `~/.jaato/<provider>_auth.json` tiers stay as they are for mono-user
 installs. Design: [web-server-bff.md §12](docs/design/web-server-bff.md).
 
+### A Note the Model Never Sees
+
+Running several sessions at once, you lose track of what each one still
+needs from **you**. A day later the picker says what the session *is* and
+nothing about what you were going to do next; *"waiting on an answer about
+the grace period, then re-run the e2e suite"* lives in your head or nowhere.
+Two session fields exist and neither is this: `Session.name` is free text and
+**create-only** (there is no rename verb anywhere in the tree), and
+`Session.description` is **model-written** — it arrives as
+`description_updated` from the runner and is what the picker shows as the row
+name, so a note put there is overwritten by the next turn. The picker tells
+you what the *agent* thought the session was about; what was missing is what
+*you* meant to do about it.
+
+**Application state in the BFF**, the call [A Key Typed Once Per
+Workspace](#a-key-typed-once-per-workspace) already made. A note is per
+signed-in user, never read by the model and never read by the daemon, so a
+`session.note` verb would sit in the protocol for one client and the TUI
+would carry it and never call it — **no daemon change, no protocol bump**.
+Being BFF-side is also what makes "for the human" mean what it says: a note
+in the workspace tree would be `readFile`-reachable by the agent, so it would
+only be *not injected into the prompt* rather than unreachable.
+
+`jaato-web-coder-server/src/notes.ts` reuses the credential envelope rather
+than introducing a second storage posture in one process — AES-256-GCM, HKDF
+from the same 0600 secret file under its own info string, owner and session
+id bound into the AAD, atomic temp-file-plus-rename at mode 0600. The owner
+is the OIDC **`sub`**, not the display claim (`subject_claim` is
+configurable, `sub` is stable), with the consequence worth stating: a note on
+a session you did not create is *your* note about their session. The note's
+text is never logged. **The session id is opaque to the BFF** — it stores
+text under a key, and the browser joins that key against the `session.list`
+listing it already holds; nothing there models a session.
+
+**Without a backend it still works, and says so.** A local
+`npx @jaato/web-coder-ui` against a daemon has no server at all, so notes go
+to `localStorage`. That is worth having and worth SAYING — they are then per
+browser, and "next time I look" from another device loses them — so
+`NotesApi.scope` is `backend` or `local` and the rail renders the difference.
+A silent fallback is a promise the storage does not keep.
+
+**One editor, four mount points.** A note is reachable from the exit prompt,
+the resume picker's row, the rail for **this** session and the same rail for
+another one, so the debounce, the save, the cap, the error rendering and the
+placeholder live in `app/useNote.ts` + `components/panels/NoteEditor.tsx`
+rather than in each — otherwise there are four behaviours, four bugs, and
+`saved 12:04` in three dialects. The placeholder is the most valuable string
+in the feature (*"What should you pick up next time?"*): an empty box gets
+skipped, a question gets answered.
+
+**The exit prompt is where a note actually gets written**, because that is
+the instant you know what needs doing next. A textarea inside a plate whose
+whole interaction model is keystrokes collides four ways, and each is decided
+rather than left to chance:
+
+| Key | |
+|---|---|
+| a letter (`d`/`e`/`r`) | free — the composer forwards keys only while IT has focus |
+| `Tab` | already guarded by `inField`; cycling options from inside the field would be a trap |
+| `Escape` | **guarded too.** It answered `r` unconditionally, so dismissing the field discarded a half-typed note *and* left the session. First Escape blurs, second returns |
+| `Enter` | inserts a newline, so this plate is never `as="form"` |
+
+And the one that outranks them: **the save completes before the exit action
+runs.** A failed `PUT` while the client detaches anyway loses the note
+silently, which is the single outcome this feature cannot have — so a failure
+keeps the plate open with the reason, and the draft is never cleared on
+failure because what was typed is then the only copy left. `End session`
+forgets the note instead of stranding it, best-effort: the session is being
+deleted either way, and blocking the exit on a note nobody will read again
+trades the cheap failure for the expensive one.
+
+**The rail's Sessions section supersedes a Notes section.** `SessionScreen`
+shows its picker only when no session is held, and `session list` renders
+inert transcript text that scrolls away carrying no affordances — so there
+was no surface on which to survey your sessions while working in one, which
+is exactly the reported situation. The listing is cross-workspace, so a row
+carries its workspace: two `20260917_090428`-shaped ids from different trees
+would otherwise read as the same session. The note gets its **own** line
+(`✎ …`) rather than a fourth `·` segment, because that line is already the
+agent's voice and telling yours apart from its is the whole point; the pencil
+is always drawn, never hover-gated, the lesson the Files panel's `hide` /
+`ignore` actions already taught.
+
+**And the daemon answers the other half of that question.** #1138's `awaiting`
+/ `awaiting_since` (protocol 1.17) is the only way a client working in session
+A learns that B is blocked on a permission ASK or a clarification — prompt
+events go to that session's attached clients, and a client is attached to one
+at a time — so the row carries it as a `⚠` and a `waiting 4 min: permission`
+line, and the section header counts **what needs a person** ahead of what
+carries a note. Two rules the renderer holds to, both of them the protocol's
+own wording: an absent `awaiting_since` is *not measured*, so the duration is
+dropped rather than rendered as "just now"; and an absent `awaiting` is
+"nothing is waiting as far as this daemon says", never a positive no — an
+unloaded session is never reported, and a daemon below 1.17 sends nothing.
+
+Tests: `test/notes.test.ts` + `test/routes.test.ts` (BFF), `app/notes.test.ts`
+(both stores, and the text normalisation the two sides must agree on), and
+`components/prompts/ExitPrompt.test.tsx`, which is deliberately two cases and
+a control — **Escape inside the field does not answer the prompt** and **a
+failed save keeps the plate open** — because everything else about that
+component is markup, and a test asserting markup pins only the markup. Both
+were verified to fail against their own reversion. Not done, deliberately:
+`session.rename` (framework-side, its own issue) and sorting the picker by
+"has a note". Design: [web-server-bff.md §13](docs/design/web-server-bff.md).
+
 ### The Web Client on a Blueprint
 
 The web client was a faithful port of the terminal UI: rounded cards, one

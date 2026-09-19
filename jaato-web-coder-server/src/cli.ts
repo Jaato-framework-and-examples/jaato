@@ -71,6 +71,16 @@ ticket:
 credentials:
   file: credentials.json
   key_file: credentials.key
+
+# A note the person writes to their future self about one session -- what
+# they meant to pick up next time -- read by them and by nothing else: never
+# by the model, never by the daemon.  Encrypted at rest under its own key
+# (pointing key_file at credentials.key is fine; the two stores derive
+# different keys from it).  Remove the block and the page keeps notes in the
+# browser instead, per device.
+notes:
+  file: notes.json
+  key_file: notes.key
 `;
 }
 
@@ -84,6 +94,7 @@ export function runInit(argv: string[]): number {
     ["app.credential", credential + "\n", 0o600],
     ["session.secret", randomBytes(48).toString("base64url") + "\n", 0o600],
     ["credentials.key", randomBytes(48).toString("base64url") + "\n", 0o600],
+    ["notes.key", randomBytes(48).toString("base64url") + "\n", 0o600],
     ["server.yaml", configTemplate(appId), 0o600],
   ];
   for (const [name] of files) {
@@ -93,7 +104,7 @@ export function runInit(argv: string[]): number {
     }
   }
   for (const [name, content, mode] of files) writeFileSync(join(dir, name), content, { mode });
-  process.stdout.write(`wrote ${dir}/{app.credential,session.secret,credentials.key,server.yaml} (mode 0600)
+  process.stdout.write(`wrote ${dir}/{app.credential,session.secret,credentials.key,notes.key,server.yaml} (mode 0600)
 
 Daemon side — put this in the file named by --ws-app-credentials (mode 0600):
   {"${appId}": "${credential}"}

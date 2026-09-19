@@ -128,6 +128,9 @@ export function ConnectScreen() {
       // A property of the page load, like the rest of the launcher config;
       // the configure form reads it from the store.
       useJaato.getState().setCredentialsUrl(cfg.credentialsUrl ?? null);
+      // Likewise for notes -- and ``null`` is not a failure here: it selects
+      // the ``localStorage`` store instead, which the editor says out loud.
+      useJaato.getState().setNotesUrl(cfg.notesUrl ?? null);
       if (!cfg.daemon && !cfg.token && !cfg.ticketUrl) return;
       const nextUrl = cfg.daemon ?? url;
       setUrl(nextUrl);

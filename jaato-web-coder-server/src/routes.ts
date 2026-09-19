@@ -14,12 +14,18 @@
  * | ``/api/credentials`` | POST | store one ``{provider, secret, label?}`` (same-origin only) |
  * | ``/api/credentials/<id>/reveal`` | POST | the secret behind one entry, for the page to forward to the daemon (same-origin only) |
  * | ``/api/credentials/<id>`` | DELETE | forget one entry (same-origin only) |
+ * | ``/api/notes`` | GET | every note this user has written, ``{sessionId, text, updatedAt}`` |
+ * | ``/api/notes/<session_id>`` | PUT | write one (same-origin only); an empty body forgets it |
+ * | ``/api/notes/<session_id>`` | DELETE | forget one (same-origin only) |
  * | anything else | GET | the bundle (``@jaato/web-coder-ui``'s static handler) |
  *
  * The four credential routes exist only when the config carries a
  * ``credentials:`` block (``src/credentials.ts``); otherwise they are 404
  * like any other unknown ``/api/`` path and ``config.json`` names no
- * ``credentialsUrl``.
+ * ``credentialsUrl``.  The three note routes answer to a ``notes:`` block
+ * (``src/notes.ts``) the same way, and their absence is not an error the
+ * page reports: with no ``notesUrl`` it keeps notes in ``localStorage``
+ * instead, and says which it is doing.
  *
  * Every route is relative to the mount point: the bundle asks for
  * ``./config.json`` and ``./api/ticket`` relative to itself, so serving the
@@ -30,6 +36,7 @@ import { createStaticHandler, DIST_DIR } from "@jaato/web-coder-ui";
 import type { ServerConfig } from "./config.js";
 import { BindChannel, BindRefusedError, BindUnavailableError } from "./bind-channel.js";
 import { CredentialError, type CredentialStore, validateProvider } from "./credentials.js";
+import { NoteError, type NoteStore, validateSessionId } from "./notes.js";
 import { type IdentityProvider, SignInRefusedError } from "./auth/identity.js";
 import { parseCookies, sessionCookie, SessionStore } from "./session.js";
 
@@ -40,6 +47,8 @@ export interface RouterDeps {
   bind: BindChannel;
   /** The per-user key store; absent = the credential routes do not exist. */
   credentials?: CredentialStore;
+  /** The per-user session-note store; absent = the note routes do not exist. */
+  notes?: NoteStore;
   /** Serve the bundle from here; defaults to the installed @jaato/web-coder-ui dist. */
   distDir?: string;
   log?: (msg: string) => void;
@@ -94,7 +103,7 @@ async function readBody(req: IncomingMessage, limit = 64 * 1024): Promise<string
 }
 
 export function createRouter(deps: RouterDeps): Handler {
-  const { config, idp, sessions, bind, credentials } = deps;
+  const { config, idp, sessions, bind, credentials, notes } = deps;
   const log = deps.log ?? (() => undefined);
   const secure = config.publicUrl.startsWith("https://");
   const pendingLogins = new Map<string, PendingLogin>();
@@ -107,6 +116,9 @@ export function createRouter(deps: RouterDeps): Handler {
       daemon: config.daemon.url, ticketUrl: "./api/ticket", loginUrl: "./auth/login", autoConnect: true,
       // Named only when the store exists: the bundle shows the combobox iff this key is present.
       ...(credentials ? { credentialsUrl: "./api/credentials" } : {}),
+      // Likewise: named only when the store exists, so the page knows
+      // whether notes are shared across devices or local to this browser.
+      ...(notes ? { notesUrl: "./api/notes" } : {}),
     },
     allowedHosts: null,
   }) as Handler;
@@ -157,6 +169,52 @@ export function createRouter(deps: RouterDeps): Handler {
       return text(res, 404, "not found");
     } catch (e) {
       if (e instanceof CredentialError) return json(res, e.status, { error: e.message });
+      throw e;
+    }
+  };
+
+  /**
+   * ``/api/notes`` and below.  Same shape as the credential handler: the
+   * cookie for every route, same-origin for the mutating ones, owner is the
+   * session's OIDC ``sub``.  Unlike a credential, the TEXT comes back on
+   * ``GET`` -- reading it is the whole feature.
+   */
+  const handleNotes = async (req: IncomingMessage, res: ServerResponse, method: string, rest: string[]): Promise<void> => {
+    if (!notes) return text(res, 404, "not found");
+    const s = sessions.resolve(parseCookies(req.headers.cookie).get(cookieName));
+    if (!s) return json(res, 401, { error: "not signed in", loginUrl: "./auth/login" });
+    const sameOrigin = () => isSameOrigin(req, config.publicUrl);
+    try {
+      if (rest.length === 0) {
+        if (method === "GET") return json(res, 200, { notes: notes.list(s.sub) });
+        return text(res, 405, "GET", { Allow: "GET" });
+      }
+      if (rest.length !== 1) return text(res, 404, "not found");
+      const sessionId = validateSessionId(rest[0]);
+      if (method === "PUT") {
+        if (!sameOrigin()) return json(res, 403, { error: "cross-site request refused" });
+        let body: Record<string, unknown>;
+        try { body = JSON.parse(await readBody(req)) as Record<string, unknown>; }
+        catch { return json(res, 400, { error: "body must be JSON" }); }
+        if (!body || typeof body !== "object") return json(res, 400, { error: "body must be a JSON object" });
+        const note = notes.put(s.sub, sessionId, body.text as string);
+        // The note's TEXT is never logged: it is the one thing here written
+        // for a person and read by nobody else, and a log is somebody else.
+        log(note ? `note saved for ${s.user}: session=${sessionId}` : `note cleared for ${s.user}: session=${sessionId}`);
+        return json(res, 200, { note });
+      }
+      if (method === "DELETE") {
+        if (!sameOrigin()) return json(res, 403, { error: "cross-site request refused" });
+        // Idempotent on purpose: ExitPrompt's "End session" deletes the note
+        // beside the session, and a session that never had one is not an error.
+        notes.remove(s.sub, sessionId);
+        log(`note deleted for ${s.user}: session=${sessionId}`);
+        res.writeHead(204, { "Cache-Control": "no-store" }); res.end();
+        return;
+      }
+      return text(res, 405, "PUT or DELETE", { Allow: "PUT, DELETE" });
+    } catch (e) {
+      if (e instanceof NoteError) return json(res, e.status, { error: e.message });
       throw e;
     }
   };
@@ -254,6 +312,10 @@ export function createRouter(deps: RouterDeps): Handler {
 
       if (path === "/api/credentials" || path.startsWith("/api/credentials/")) {
         return await handleCredentials(req, res, url, method, path.slice("/api/credentials".length).split("/").filter(Boolean));
+      }
+
+      if (path === "/api/notes" || path.startsWith("/api/notes/")) {
+        return await handleNotes(req, res, method, path.slice("/api/notes".length).split("/").filter(Boolean));
       }
 
       if (path.startsWith("/api/") || path.startsWith("/auth/")) return text(res, 404, "not found");

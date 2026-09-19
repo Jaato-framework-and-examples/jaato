@@ -16,6 +16,22 @@ import { summarizeToolCalls } from "@/protocol/turnStats";
 import { formatSessionList, normalizeSessionList, type SessionSummary } from "@/protocol/sessions";
 import { formatHistoryListing, historyBlocks } from "@/protocol/history";
 import { clampRailWidth, loadRailWidth, saveRailWidth } from "@/store/railWidth";
+import type { SessionNote } from "@/app/notes";
+
+/**
+ * What the note editor says about the last save, rendered in the section's
+ * ``value`` slot so a failure is visible without a toast.
+ *
+ * ``signed-out`` is deliberately not folded into ``error``: BFF-side storage
+ * means the cookie can expire mid-session, and "signed out" is a different
+ * thing to tell somebody than "could not save".
+ */
+export type NoteStatus =
+  | { state: "idle" }
+  | { state: "saving" }
+  | { state: "saved"; at: number }
+  | { state: "error"; message: string }
+  | { state: "signed-out"; loginUrl: string };
 import { BUSY_STATUS } from "@/store/phase";
 import type {
   StagedUpload,
@@ -59,6 +75,21 @@ export interface JaatoState {
    * offer previously used keys instead of asking for the key again.
    */
   credentialsUrl: string | null;
+  /**
+   * The sign-in backend's per-user session-note store (``config.json``'s
+   * ``notesUrl``, see ``app/notes.ts``), or ``null`` when the page was
+   * served without one -- in which case notes are kept in this browser
+   * instead, which the UI says rather than pretending otherwise.
+   */
+  notesUrl: string | null;
+  /**
+   * The notes THIS person has written, by session id.  Not part of
+   * ``emptySessionState``: a note outlives the session being attached,
+   * detached or swapped, and the listing it joins onto is cross-workspace.
+   */
+  notes: Record<string, SessionNote>;
+  /** Per session: what the editor should say about the last save. */
+  noteStatus: Record<string, NoteStatus>;
   /**
    * The sign-in backend behind this page, when ``config.json`` named a
    * ticket URL: where "Sign out" goes and who the backend says is signed
@@ -160,6 +191,8 @@ export interface JaatoState {
     showBudget: boolean;
     showWorkspace: boolean;
     showTools: boolean;
+    /** The Sessions rail section: survey every session and note it without leaving this one. */
+    showSessions: boolean;
     theme: string;
     /** Tool call currently pinned in the live-output popup. */
     popupCallId?: string | null;
@@ -173,6 +206,12 @@ export interface JaatoState {
   setUrl: (url: string) => void;
   setScreen: (s: Screen) => void;
   setCredentialsUrl: (url: string | null) => void;
+  setNotesUrl: (url: string | null) => void;
+  /** Replace the whole set, from one listing. */
+  setNotes: (notes: SessionNote[]) => void;
+  /** Upsert one, or drop it when ``null`` (an emptied note is a forgotten one). */
+  setNote: (sessionId: string, note: SessionNote | null) => void;
+  setNoteStatus: (sessionId: string, status: NoteStatus) => void;
   setBackend: (b: { logoutUrl: string; user: string | null } | null) => void;
   setWorkspaceMode: (m: JaatoState["workspace"]["mode"]) => void;
   selectWorkspace: (name: string | undefined) => void;
@@ -206,7 +245,7 @@ export interface JaatoState {
   dismissClarification: (requestId: string) => void;
   dismissReferenceSelection: (requestId: string) => void;
   dismissPostAuth: () => void;
-  toggleUi: (key: "showPlan" | "showBudget" | "showWorkspace" | "showTools") => void;
+  toggleUi: (key: "showPlan" | "showBudget" | "showWorkspace" | "showTools" | "showSessions") => void;
   /** The TUI's Ctrl+T: expand or collapse every tool block, and new ones follow. */
   setToolsExpanded: (expanded: boolean) => void;
   /** Add (``+1``, before a silent request) or give back (``-1``, when it failed to send) one silent reply. */
@@ -560,7 +599,7 @@ export function reduce(s: JaatoState, raw: JaatoEvent): JaatoState {
       s.sessions = list;
       if (s.sessionListSilent > 0) { s.sessionListSilent -= 1; break; }
       const id = s.selectedAgentId;
-      setBlocks(s, id, [...(s.blocks[id] ?? []), { id: nextId(), kind: "system", agentId: id, text: formatSessionList(list), style: "help" }]);
+      setBlocks(s, id, [...(s.blocks[id] ?? []), { id: nextId(), kind: "system", agentId: id, text: formatSessionList(list, s.notes), style: "help" }]);
       break;
     }
     case EventTypeValue.HISTORY: {
@@ -903,6 +942,9 @@ export const useJaato = create<JaatoState>()((set, get) => ({
   url: "",
   screen: "connect",
   credentialsUrl: null,
+  notesUrl: null,
+  notes: {},
+  noteStatus: {},
   backend: null,
   workspace: { mode: "unknown", list: [] },
   profiles: [],
@@ -912,7 +954,7 @@ export const useJaato = create<JaatoState>()((set, get) => ({
   commands: mergeCommandSpecs([]),
   uploads: [],
   ...emptySessionState(),
-  ui: { showPlan: false, showBudget: false, showWorkspace: false, showTools: false, theme: "light", popupCallId: null, railWidth: loadRailWidth() },
+  ui: { showPlan: false, showBudget: false, showWorkspace: false, showTools: false, showSessions: false, theme: "light", popupCallId: null, railWidth: loadRailWidth() },
 
   dispatch: (events) =>
     set((state) => {
@@ -924,6 +966,15 @@ export const useJaato = create<JaatoState>()((set, get) => ({
   setUrl: (url) => set({ url }),
   setScreen: (screen) => set({ screen }),
   setCredentialsUrl: (credentialsUrl) => set({ credentialsUrl }),
+  setNotesUrl: (notesUrl) => set({ notesUrl }),
+  setNotes: (list) => set({ notes: Object.fromEntries(list.map((n) => [n.sessionId, n])) }),
+  setNote: (sessionId, note) =>
+    set((st) => {
+      const notes = { ...st.notes };
+      if (note) notes[sessionId] = note; else delete notes[sessionId];
+      return { notes };
+    }),
+  setNoteStatus: (sessionId, status) => set((st) => ({ noteStatus: { ...st.noteStatus, [sessionId]: status } })),
   setBackend: (backend) => set({ backend }),
   setWorkspaceMode: (mode) => set((st) => ({ workspace: { ...st.workspace, mode } })),
   selectWorkspace: (name) => set((st) => ({ workspace: { ...st.workspace, selected: name } })),

@@ -129,7 +129,10 @@ test("`session list` prints the daemon's listing; `session attach` completes ids
   await composer(page).fill("session list");
   await composer(page).press("Enter");
   await expect(page.getByText("▶ current  ● loaded  ○ on disk")).toBeVisible();
-  await expect(page.getByText(/● 20260916_090000 - fix the budget panel \[anthropic\/claude-sonnet-4\]/)).toBeVisible();
+  // The waiting marker sits between the description and the model, because
+  // #1138 added `awaiting` to the listing precisely so this command answers
+  // "which of these wants me" and not only "which of these exist".
+  await expect(page.getByText(/● 20260916_090000 - fix the budget panel \[waiting: permission\] \[anthropic\/claude-sonnet-4\]/)).toBeVisible();
 
   // Third-level completion: the ids the daemon listed, filtered as you type.
   await composer(page).fill("session attach 2026091");
@@ -713,4 +716,40 @@ test("files attached on the session picker are in the workspace when the session
   await expect(page.getByText("Staged into the workspace: brief.txt")).toBeVisible();
   await page.getByRole("button", { name: "Toggle workspace changes (Alt+W)" }).click();
   await expect(page.getByRole("region", { name: "Files" }).getByText("+ brief.txt")).toBeVisible();
+});
+
+test("a note written on the exit plate survives Escape, is kept, and is the rail's copy too", async ({ page }) => {
+  // The whole loop in a real browser, with no BFF -- which is the shape a
+  // local `npx @jaato/web-coder-ui` has, so the store behind it is this
+  // browser's and the UI has to SAY so rather than imply a shared one.
+  await openSession(page);
+  await page.getByRole("button", { name: EXIT }).click();
+  const plate = page.getByRole("group", { name: "Exit options" });
+  const field = plate.getByLabel("Note to self");
+  await field.fill("waiting on the grace period answer, then re-run e2e");
+  // Escape inside the field leaves the field, never the session: it used to
+  // answer `r` unconditionally and take the half-typed note with it.
+  await field.press("Escape");
+  await expect(plate).toBeVisible();
+  await expect(field).toHaveValue(/grace period/);
+  await plate.getByRole("button", { name: /Return/ }).click();
+  await expect(plate).toHaveCount(0);
+
+  // Same note, read from the rail -- one store, four mount points.
+  await page.getByRole("button", { name: "Toggle your sessions and their notes" }).click();
+  const rail = page.getByRole("region", { name: "Sessions" });
+  await expect(rail.getByLabel("This session")).toHaveValue(/grace period/);
+  await expect(rail.getByText("Notes are kept in this browser only", { exact: false })).toBeVisible();
+});
+
+test("a session blocked on a person says so in the rail, from another session", async ({ page }) => {
+  // The one fact the rail exists for that a note cannot supply: prompt
+  // events reach only that session's attached clients, so working in one
+  // session is exactly when you cannot otherwise learn another wants you.
+  await openSession(page);
+  await page.getByRole("button", { name: "Toggle your sessions and their notes" }).click();
+  const rail = page.getByRole("region", { name: "Sessions" });
+  await expect(rail.getByText(/waiting 4 min: permission/)).toBeVisible();
+  // And the header counts what needs a person ahead of what carries a note.
+  await expect(page.getByText("1 waiting on you")).toBeVisible();
 });

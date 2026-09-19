@@ -54,6 +54,12 @@ export interface ServerConfig {
    * plain key field it always had.
    */
   credentials?: { file: string; key: string };
+  /**
+   * The per-user store of session notes (``src/notes.ts``).  Absent = the
+   * feature is off: ``config.json`` names no ``notesUrl`` and the routes
+   * answer 404, so the bundle falls back to ``localStorage`` and says so.
+   */
+  notes?: { file: string; key: string };
 }
 
 const DEFAULT_TTL = "8h";
@@ -178,6 +184,20 @@ export function configFromObject(raw: unknown, baseDir: string): ServerConfig {
     credentials = { file, key };
   }
 
+  let notes: ServerConfig["notes"];
+  if (o.notes !== undefined && o.notes !== null) {
+    const n = o.notes;
+    if (typeof n !== "object") throw new ConfigError("notes must be a mapping with file and key_file");
+    const file = rel(str(req(n.file, "notes.file"), "notes.file"));
+    // Deliberately its own key_file rather than reusing the credential one
+    // by default: an operator may want notes and not the key vault, or the
+    // reverse.  Pointing both at ONE file is fine -- the two stores derive
+    // different AES keys from it through different HKDF info strings.
+    const key = readSecretFile(rel(str(req(n.key_file, "notes.key_file"), "notes.key_file")), "note key");
+    if (key.length < 32) throw new ConfigError("note key must be at least 32 characters");
+    notes = { file, key };
+  }
+
   return {
     listen: parseListen(o.listen),
     publicUrl,
@@ -187,6 +207,7 @@ export function configFromObject(raw: unknown, baseDir: string): ServerConfig {
     session,
     ticket: { ttlSeconds: ticketTtl },
     credentials,
+    notes,
   };
 }
 

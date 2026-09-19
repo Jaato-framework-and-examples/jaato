@@ -8,6 +8,7 @@ import { createServer, type Server } from "node:http";
 import { BindChannel } from "./bind-channel.js";
 import type { ServerConfig } from "./config.js";
 import { FileCredentialStore } from "./credentials.js";
+import { FileNoteStore } from "./notes.js";
 import { type IdentityProvider } from "./auth/identity.js";
 import { OidcProvider } from "./auth/oidc.js";
 import { createRouter } from "./routes.js";
@@ -43,8 +44,10 @@ export async function startServer(config: ServerConfig, opts: StartOptions = {})
   // Opt-in: without the block the bundle gets the plain key field it always had.
   const credentials = config.credentials ? new FileCredentialStore(config.credentials.file, config.credentials.key) : undefined;
   log(credentials ? `credential store at ${config.credentials!.file}` : "credential store not configured (no credentials: block)");
+  const notes = config.notes ? new FileNoteStore(config.notes.file, config.notes.key) : undefined;
+  log(notes ? `session-note store at ${config.notes!.file}` : "session-note store not configured (no notes: block); the page will keep notes in the browser");
 
-  const server = createServer(createRouter({ config, idp, sessions, bind, credentials, distDir: opts.distDir, log }));
+  const server = createServer(createRouter({ config, idp, sessions, bind, credentials, notes, distDir: opts.distDir, log }));
   await new Promise<void>((ok, fail) => server.once("error", fail).listen(config.listen.port, config.listen.host, ok));
   const addr = server.address();
   log(`listening on ${typeof addr === "string" ? addr : `${addr?.address}:${addr?.port}`}; public URL ${config.publicUrl}; browsers connect to ${config.daemon.url}`);

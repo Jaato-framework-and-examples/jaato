@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { useJaato } from "@/store/store";
+import { useLoadNotes } from "@/app/useNote";
 import { applyTheme, loadThemePreference } from "@/theme/themes";
 import { ConnectScreen } from "@/screens/ConnectScreen";
 import { WorkspaceScreen } from "@/screens/WorkspaceScreen";
@@ -11,6 +12,10 @@ export default function App() {
   const setTheme = useJaato((s) => s.setTheme);
   useEffect(() => { setTheme(loadThemePreference()); }, [setTheme]);
   useEffect(() => { applyTheme(theme); }, [theme]);
+  // Loaded once for the whole page: the picker, the rail and the exit prompt
+  // all read one set, keyed by session id, and it is not session state --
+  // a note outlives the session being attached, detached or swapped.
+  useLoadNotes();
   if (screen === "connect") return <ConnectScreen />;
   if (screen === "workspaces") return <WorkspaceScreen />;
   return <SessionScreen />;
