@@ -7,7 +7,7 @@ import os
 import re
 import sys
 import threading
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Dict, FrozenSet, List, Optional, Protocol, Tuple, Union
 from typing import runtime_checkable
@@ -1345,9 +1345,45 @@ class GCProfileConfig:
         """True if continuous GC is enabled (pressure_percent is 0 or None)."""
         return not self.pressure_percent
 
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize to a JSON-safe dict — the half ``from_dict`` lacked.
+
+        Derived from the dataclass fields, deliberately, rather than
+        written out key by key.  Three hand-written write-sides existed
+        before this and **each had drifted differently** (#1133):
+
+        * the runner envelope producer read ``.config`` — an attribute
+          this class does not have — so it emitted ``{"type": ...}``
+          and dropped every declared knob;
+        * the session-snapshot serializer listed ten of the twelve
+          fields, omitting ``target_percent`` and ``pressure_percent``,
+          so a revived session lost the two numbers that decide how far
+          a collection goes and when PRESERVABLE may be touched;
+        * ``from_dict`` — the only complete one — reads all twelve.
+
+        A list that has to be edited whenever a field is added is the
+        defect, not the individual omissions, so this one cannot be
+        edited out of date.
+
+        Returns:
+            Every field, with ``media_evict_mime_prefixes`` normalised
+            from a tuple to a list so the result survives ``json.dumps``
+            and compares equal after a round trip.
+        """
+        data = asdict(self)
+        prefixes = data.get('media_evict_mime_prefixes')
+        if isinstance(prefixes, tuple):
+            data['media_evict_mime_prefixes'] = list(prefixes)
+        return data
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'GCProfileConfig':
-        """Create GCProfileConfig from a dictionary."""
+        """Create GCProfileConfig from a dictionary.
+
+        The symmetric half of :meth:`to_dict`: every key it writes is
+        read here, and an absent key falls back to this class's own
+        default rather than to a literal typed at the call site.
+        """
         return cls(
             type=data.get('type', 'truncate'),
             threshold_percent=data.get('threshold_percent', 80.0),

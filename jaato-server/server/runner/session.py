@@ -1348,6 +1348,21 @@ def bootstrap_session(
                 "to session; plugin reads will fall back to os.environ",
             )
 
+    # ---- 3a. Install the GC plugin (#1133).
+    #
+    # This is the step that did not exist.  ``SessionInitEnvelope.gc``
+    # was populated, serialized, deserialized and documented, and no
+    # file under ``server/runner/`` read it — so on the runner-served
+    # path, the default, ``JaatoSession._gc_plugin`` stayed ``None``
+    # whatever the profile declared.  Measured against ``main`` @
+    # ``e81225ca``: ``_build_session`` received 17 kwargs and ``gc``
+    # was none of them.  Every collection site begins ``if not
+    # self._gc_plugin or not self._gc_config: return``, so nothing
+    # collected, while ``core.py`` kept resolving the same config to
+    # populate the TUI and web-rail readouts — a strategy displayed
+    # and never run.
+    _install_gc(session, envelope)
+
     # ---- 3b. Stamp the daemon session_id onto the runner-side session.
     # Pre-this, ``_daemon_session_id`` was set ONLY daemon-side (by
     # ``JaatoClient``), so the runner-side JaatoSession carried None.
@@ -1531,6 +1546,82 @@ def _extract_plugin_specs(
         if scope:
             tool_scopes[name] = list(scope)
     return tool_names, preloaded, tool_scopes
+
+
+def _install_gc(session: "JaatoSession", envelope: SessionInitEnvelope) -> None:
+    """Give the runner-side session the GC strategy it was configured with.
+
+    Precedence matches the daemon's (``core.py``, where the same two
+    helpers resolve the same config for the UI readout): the profile's
+    ``gc:`` block first, then ``<workspace>/.jaato/gc.json``.  Both
+    calls are the framework's existing resolvers —
+    ``gc_profile_to_plugin_config`` is what an in-process subagent
+    already uses, ``load_gc_from_file`` is what the daemon already
+    uses — so this adds a CALLER, not a second definition of what a
+    ``gc:`` block means.
+
+    The runner resolves rather than receiving an already-built plugin
+    because a plugin is not serializable: the envelope carries the
+    declaration, and the side that will own the object constructs it.
+    That also keeps the runner able to bootstrap without the daemon
+    having read the workspace.
+
+    Best-effort by construction.  A session that fails to install GC
+    is the session every runner-served session already was, so a
+    raise here would turn a silent degradation into a refused
+    bootstrap — strictly worse than the defect being fixed.  The
+    failure is logged at WARNING because a GC strategy that does not
+    install is exactly the thing #1133 is about, and it must not
+    become invisible a second time.
+
+    Args:
+        session: The freshly built runner-side session.
+        envelope: Its init envelope; ``gc`` carries the profile block
+            (complete since #1133 — it previously carried only
+            ``type``) and ``workspace_path`` locates ``gc.json``.
+    """
+    from shared.plugins.gc import load_gc_from_file
+    from shared.plugins.subagent.config import (
+        GCProfileConfig, gc_profile_to_plugin_config,
+    )
+
+    try:
+        gc_result = None
+        source = None
+        if envelope.gc:
+            gc_result = gc_profile_to_plugin_config(
+                GCProfileConfig.from_dict(envelope.gc),
+                agent_name=envelope.agent_id or None,
+            )
+            source = "profile"
+        if not gc_result and envelope.workspace_path:
+            gc_result = load_gc_from_file(
+                workspace_root=envelope.workspace_path,
+                agent_name=envelope.agent_id or None,
+            )
+            source = "gc.json"
+        if not gc_result:
+            logger.debug(
+                "runner-session bootstrap: no GC strategy declared "
+                "(no profile gc: block, no gc.json) — none installed",
+            )
+            return
+
+        gc_plugin, gc_config = gc_result
+        session.set_gc_plugin(gc_plugin, gc_config)
+        logger.info(
+            "runner-session bootstrap: GC installed from %s — "
+            "strategy=%s threshold=%s%% target=%s%% continuous=%s",
+            source, getattr(gc_plugin, "name", "gc"),
+            gc_config.threshold_percent, gc_config.target_percent,
+            gc_config.continuous_mode,
+        )
+    except Exception:  # noqa: BLE001 — must not fail the bootstrap
+        logger.warning(
+            "runner-session bootstrap: GC install failed; this session "
+            "will not collect. Declared config: %r",
+            envelope.gc, exc_info=True,
+        )
 
 
 def _build_session(

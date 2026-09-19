@@ -932,12 +932,24 @@ def build_session_envelope(
         system_instructions = getattr(profile, "system_instructions", None)
         gc_obj = getattr(profile, "gc", None)
         if gc_obj is not None:
-            # GCProfileConfig has ``type`` + ``config`` (dict).  Flatten
-            # to a single dict for the envelope.
-            gc_type = getattr(gc_obj, "type", None)
-            gc_config = getattr(gc_obj, "config", None) or {}
-            if gc_type:
-                gc_dict = {"type": gc_type, **dict(gc_config)}
+            # #1133: this read ``getattr(gc_obj, "config", None)`` — an
+            # attribute ``GCProfileConfig`` does not have — so it always
+            # resolved to ``{}`` and the envelope carried nothing but
+            # ``{"type": ...}``.  Every declared knob (threshold,
+            # target, pressure, preserve_recent_turns, the three #850
+            # media keys) was dropped here, silently, before the
+            # consumer ever saw it.  ``to_dict`` is the complete half.
+            # No partial path, deliberately.  The previous code had one —
+            # it kept ``type`` and whatever ``.config`` held — and a
+            # partial carry is indistinguishable from a complete one at
+            # the consumer, which is how a block reduced to its strategy
+            # name travelled for as long as it did.  An object that
+            # cannot serialize itself carries NOTHING, and the consumer
+            # then falls back to ``gc.json`` rather than installing a
+            # strategy at defaults the profile never asked for.
+            to_dict = getattr(gc_obj, "to_dict", None)
+            if callable(to_dict):
+                gc_dict = to_dict()
         env_overrides = dict(getattr(profile, "env", {}) or {})
 
     # Profile-less fallback: read ``MODEL_NAME`` / ``JAATO_PROVIDER``

@@ -370,28 +370,54 @@ def test_plugin_configs_for_unlisted_plugin_carried_through() -> None:
 # ----------------------------------------------------------------------
 
 
-def test_gc_config_flattened_into_envelope() -> None:
-    """GCProfileConfig is structurally ``{type, config: {...}}``;
-    the envelope flattens to a single dict ``{type, ...config}``."""
-    gc = SimpleNamespace(type="budget", config={"threshold_percent": 80.0})
-    profile = _stub_profile(
-        provider="anthropic",
-        model="m",
-        gc=gc,
+def test_gc_config_carried_whole_into_envelope() -> None:
+    """The envelope carries the profile's GC block in full (#1133).
+
+    This test used to assert the opposite, and passed for the life of
+    the defect, because it built its own stand-in:
+
+        gc = SimpleNamespace(type="budget", config={...})
+
+    ``GCProfileConfig`` has no ``.config`` — its knobs are flat fields —
+    so the fabricated shape satisfied a producer that read ``.config``
+    while every real profile hit ``getattr(..., "config", None) or {}``
+    and had every declared number dropped.  The docstring asserted the
+    structure too (*"GCProfileConfig is structurally {type, config}"*),
+    which is how a false premise survived review.
+
+    So this uses the real class.  A stand-in cannot fail this way again
+    because a stand-in without ``to_dict`` now carries nothing at all.
+    """
+    from shared.plugins.subagent.config import GCProfileConfig
+
+    gc = GCProfileConfig(
+        type="budget", threshold_percent=80.0, target_percent=45.0,
+        preserve_recent_turns=7,
     )
+    profile = _stub_profile(provider="anthropic", model="m", gc=gc)
     env = _build_session_envelope(
         server=_stub_server(profile=profile),
         session_id="s",
         workspace_path="/tmp/ws",
         profile_name="x",
     )
-    assert env.gc == {"type": "budget", "threshold_percent": 80.0}
+
+    assert env.gc == gc.to_dict()
+    assert env.gc["threshold_percent"] == 80.0
+    assert env.gc["target_percent"] == 45.0
+    assert env.gc["preserve_recent_turns"] == 7
 
 
-def test_gc_with_no_type_skipped() -> None:
-    """A GC config object without a type field doesn't synthesize
-    a partial envelope.gc — it stays None."""
-    gc = SimpleNamespace(type=None, config={"k": "v"})
+def test_gc_object_that_cannot_serialize_itself_carries_nothing() -> None:
+    """No partial carry — the envelope is all of the block or none of it.
+
+    A partial one is indistinguishable from a complete one at the
+    consumer, which installs a strategy either way; that is how a block
+    reduced to its strategy name travelled unnoticed (#1133).  Carrying
+    nothing instead lets the consumer fall through to ``gc.json``
+    rather than running at defaults the profile never asked for.
+    """
+    gc = SimpleNamespace(type="budget", threshold_percent=80.0)
     profile = _stub_profile(provider="anthropic", model="m", gc=gc)
     env = _build_session_envelope(
         server=_stub_server(profile=profile),
