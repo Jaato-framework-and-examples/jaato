@@ -195,7 +195,14 @@ export interface Agent {
   type: string;
   parentId?: string | null;
   profile?: string | null;
-  status: string; // idle | processing | awaiting_permission | finished | error …
+  /**
+   * The daemon's own word, verbatim: ``active`` | ``idle`` | ``done`` |
+   * ``error`` | ``cancelled`` (``AgentStatusChangedEvent``).  The client
+   * invents none of its own -- what to SHOW is derived in
+   * ``store/phase.ts``, which reads this beside the pending prompts and
+   * the open tool calls.
+   */
+  status: string;
   error?: string | null;
 }
 

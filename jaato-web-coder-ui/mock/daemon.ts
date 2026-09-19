@@ -148,7 +148,12 @@ async function turn(c: Client, text: string, agentId = "main"): Promise<void> {
   // The daemon echoes the prompt to every attached client before the model
   // speaks -- the same ``agent.output`` shape, with source ``user``.
   send(c, { type: "agent.output", agent_id: agentId, source: "user", text, mode: "write" });
-  send(c, { type: "agent.status_changed", agent_id: agentId, status: "processing" });
+  // ``active`` is the daemon's own word for a turn under way
+  // (``jaato_sdk/events.py``: active | idle | done | error).  The mock
+  // used to say "processing", which is a word the CLIENT invented and
+  // no daemon emits -- so the e2e suite certified an indicator that
+  // could not work against a real daemon.
+  send(c, { type: "agent.status_changed", agent_id: agentId, status: "active" });
   await sleep(50);
 
   if (lower.includes("subagent")) {

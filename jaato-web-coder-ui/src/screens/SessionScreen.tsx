@@ -14,6 +14,7 @@ import { getClient } from "@/sdk/connection";
 import { OutputPane } from "@/components/output/OutputPane";
 import { ToolOutputPopup } from "@/components/output/ToolOutputPopup";
 import { Composer } from "@/components/input/Composer";
+import { PhaseLine } from "@/components/panels/PhaseLine";
 import { AttachStrip } from "@/components/input/AttachStrip";
 import { PermissionPrompt } from "@/components/prompts/PermissionPrompt";
 import { ExitPrompt } from "@/components/prompts/ExitPrompt";
@@ -221,7 +222,6 @@ export function SessionScreen() {
   const references = useJaato((s) => s.referenceSelections);
   const postAuth = useJaato((s) => s.postAuth);
   const wsConfig = useJaato((s) => s.workspace.config);
-  const processing = useJaato((s) => s.processing[selected] ?? false);
   const [picking, setPicking] = useState(true);
   const [creating, setCreating] = useState(false);
   const booted = useRef(false);
@@ -311,9 +311,7 @@ export function SessionScreen() {
             {postAuth && selected === "main" && <PostAuthSetupPrompt p={postAuth} alreadyConfigured={alreadyConfigured} onRespond={(a) => { respondPostAuth(postAuth.requestId, a).catch((err) => useJaato.getState().addSystemBlock(selected, String(err), "error")); }} />}
           </div>
           <div className="px-5 pb-3 pt-2.5 border-t hairline">
-            {processing && !captureMode && (
-              <div className="kicker kicker-muted text-[12px] tracking-[0.1em] mb-1.5 flex items-center gap-2"><span className="pulse text-primary">●</span> Agent working — type to queue a follow-up · <span className="font-mono normal-case tracking-normal">stop</span> or Ctrl+C to interrupt</div>
-            )}
+            {!captureMode && <PhaseLine agentId={selected} />}
             <Composer commands={commands} history={inputHistory} captureMode={captureMode} onSubmit={(t, v) => { submitInput(t, v).catch((err) => useJaato.getState().addSystemBlock(selected, String(err), "error")); }} />
           </div>
           <ToolOutputPopup agentId={selected} />

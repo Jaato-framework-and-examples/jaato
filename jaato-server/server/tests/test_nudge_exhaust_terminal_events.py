@@ -125,10 +125,17 @@ def test_core_py_nudge_exhaust_distinguishing_condition():
     )
 
 
+# Since #1139 every status report goes through ``JaatoServer.emit_agent_status``
+# (record, then emit) rather than constructing the event inline, so this guard
+# matches the DOOR as well as the event class: what it is about is that a
+# status still reaches clients on this path, not how the call is spelled.
+_STATUS_REPORT = re.compile(r"AgentStatusChangedEvent|emit_agent_status\(")
+
+
 def test_core_py_emits_agent_status_done_for_backward_compat():
-    """AgentStatusChangedEvent(status="done") still fires on the
-    nudge-exhaust path AFTER the new terminal events, for backward
-    compat with consumers that don't watch SessionTerminatedEvent.
+    """A ``done`` status still fires on the nudge-exhaust path AFTER the
+    new terminal events, for backward compat with consumers that don't
+    watch SessionTerminatedEvent.
     """
     src = _core_py_source()
     # Anchored on the fall-through's own local rather than on
@@ -139,19 +146,19 @@ def test_core_py_emits_agent_status_done_for_backward_compat():
     # slightly longer string.
     marker_idx = src.index("nudge_exhaust_summary")
     window = src[marker_idx:marker_idx + 2500]
-    assert "AgentStatusChangedEvent" in window, (
-        "core.py must still emit AgentStatusChangedEvent on the "
-        "nudge-exhaust fall-through for back-compat.  See PR #179."
+    status = _STATUS_REPORT.search(window)
+    assert status, (
+        "core.py must still report an agent status on the nudge-exhaust "
+        "fall-through for back-compat.  See PR #179."
     )
     # Order check: the terminal-event chokepoint call must appear BEFORE
-    # AgentStatusChangedEvent in the window (terminal events first, then the
+    # the status report in the window (terminal events first, then the
     # back-compat status change).
     st_idx = window.find("_emit_error_termination(")
-    asc_idx = window.find("AgentStatusChangedEvent")
-    assert st_idx >= 0 and asc_idx >= 0, "both the chokepoint call and the status event must be present"
-    assert st_idx < asc_idx, (
+    assert st_idx >= 0, "the chokepoint call must be present"
+    assert st_idx < status.start(), (
         "the _emit_error_termination chokepoint (terminal signal) must be "
-        "invoked BEFORE AgentStatusChangedEvent on the nudge-exhaust path so "
+        "invoked BEFORE the status report on the nudge-exhaust path so "
         "observers receive the terminal signal first."
     )
 

@@ -16,6 +16,7 @@ import { summarizeToolCalls } from "@/protocol/turnStats";
 import { formatSessionList, normalizeSessionList, type SessionSummary } from "@/protocol/sessions";
 import { formatHistoryListing, historyBlocks } from "@/protocol/history";
 import { clampRailWidth, loadRailWidth, saveRailWidth } from "@/store/railWidth";
+import { BUSY_STATUS } from "@/store/phase";
 import type {
   StagedUpload,
   ExitChoice,
@@ -144,7 +145,13 @@ export interface JaatoState {
   uploads: StagedUpload[];
   /** ``PermissionStatusEvent``: the effective default policy and, when suspended, the scope. */
   permissionStatus?: { effectiveDefault: string; suspensionScope: string | null } | null;
-  processing: Record<string, boolean>;
+  /**
+   * When each agent became busy, for the phase indicator's elapsed clock.
+   * Set the moment the daemon reports ``active`` (or the composer sends,
+   * whichever is first) and dropped when the turn ends.  Absent = not busy;
+   * ``store/phase.ts`` is what reads it.
+   */
+  busySince: Record<string, number>;
   /** The open exit confirmation, or ``null`` (``app/exitChoice.ts``). */
   exitChoice: ExitChoice | null;
 
@@ -171,6 +178,21 @@ export interface JaatoState {
   selectWorkspace: (name: string | undefined) => void;
   selectAgent: (id: string) => void;
   addUserBlock: (agentId: string, text: string) => void;
+  /**
+   * The composer sent; the agent counts as busy until the daemon's first
+   * word about it arrives, so the indicator does not go dark over the
+   * round trip.  This is the ONLY optimistic piece of the phase --
+   * everything else is the daemon's own account.  ``clearSending`` gives
+   * it back when the send failed, so a refused send does not leave the
+   * indicator claiming work is under way.
+   *
+   * It replaces a fabricated ``AgentStatusChangedEvent`` the client used
+   * to dispatch at itself carrying ``status: "processing"`` -- a word no
+   * daemon emits, which the real ``active`` then read as "not busy" and
+   * switched the indicator back OFF one round trip later.
+   */
+  markSending: (agentId: string) => void;
+  clearSending: (agentId: string) => void;
   addSystemBlock: (agentId: string, text: string, style?: string) => void;
   clearOutput: (agentId: string) => void;
   toggleTool: (agentId: string, blockId: string) => void;
@@ -232,9 +254,22 @@ const emptySessionState = () => ({
   workspaceIgnored: {} as Record<string, boolean>,
   workspaceNotice: null as { text: string; error?: boolean } | null,
   permissionStatus: null,
-  processing: {} as Record<string, boolean>,
+  busySince: {} as Record<string, number>,
   exitChoice: null as ExitChoice | null,
 });
+
+/** Drop one key, returning a new record (React identity) — or the same one. */
+function without<T>(rec: Record<string, T>, key: string): Record<string, T> {
+  if (!(key in rec)) return rec;
+  const next = { ...rec };
+  delete next[key];
+  return next;
+}
+
+/** Stamp ``key`` with now, unless it is already stamped (the clock must not restart). */
+function startedAt(rec: Record<string, number>, key: string): Record<string, number> {
+  return key in rec ? rec : { ...rec, [key]: Date.now() };
+}
 
 function agentOf(ev: AnyEvent): string {
   const a = ev.agent_id;
@@ -299,8 +334,9 @@ function upsertPermission(s: JaatoState, ev: AnyEvent, inputMode: boolean): void
   s.permissions = existing
     ? s.permissions.map((p) => (p.requestId === requestId ? merged : p))
     : [...s.permissions, merged];
-  const a = s.agents[merged.agentId];
-  if (a) s.agents = { ...s.agents, [merged.agentId]: { ...a, status: "awaiting_permission" } };
+  // A prompt is the one thing that cannot wait behind an unknown agent: it
+  // blocks that agent's turn until somebody answers, so give it a tab.
+  ensureAgent(s, merged.agentId);
 }
 
 /**
@@ -374,9 +410,14 @@ export function reduce(s: JaatoState, raw: JaatoEvent): JaatoState {
       const id = agentOf(ev);
       ensureAgent(s, id);
       const a = s.agents[id]!;
+      // The daemon's word, verbatim: active | idle | done | error | cancelled.
+      // The client invents no status of its own -- ``store/phase.ts`` derives
+      // what to show from this plus the pending prompts and the open tools.
       const status = String(ev.status ?? a.status);
       s.agents = { ...s.agents, [id]: { ...a, status, error: (ev.error as string | null | undefined) ?? null } };
-      s.processing = { ...s.processing, [id]: status === "processing" || status === "running" };
+      // The daemon has spoken: its word replaces the composer's optimism,
+      // whichever way the status went.
+      s.busySince = status === BUSY_STATUS ? startedAt(s.busySince, id) : without(s.busySince, id);
       break;
     }
     case EventTypeValue.AGENT_COMPLETED:
@@ -385,8 +426,10 @@ export function reduce(s: JaatoState, raw: JaatoEvent): JaatoState {
       ensureAgent(s, id);
       const a = s.agents[id]!;
       const isErr = ev.type === EventTypeValue.AGENT_ERROR;
-      s.agents = { ...s.agents, [id]: { ...a, status: isErr ? "error" : "finished", error: isErr ? String(ev.error ?? "") : null } };
-      s.processing = { ...s.processing, [id]: false };
+      // ``done``, not a locally-invented ``finished``: the daemon emits a
+      // ``done`` status beside this event and the two must not disagree.
+      s.agents = { ...s.agents, [id]: { ...a, status: isErr ? "error" : "done", error: isErr ? String(ev.error ?? "") : null } };
+      s.busySince = without(s.busySince, id);
       if (isErr) {
         const list = [...(s.blocks[id] ?? [])];
         list.push({ id: nextId(), kind: "system", agentId: id, text: String(ev.error ?? "agent error"), style: "error" });
@@ -497,11 +540,11 @@ export function reduce(s: JaatoState, raw: JaatoEvent): JaatoState {
       upsertPermission(s, ev, true);
       break;
     case EventTypeValue.PERMISSION_RESOLVED: {
+      // Dropping the pending record is the whole of it: the agent's status
+      // is still the ``active`` the daemon set before it asked, so the phase
+      // goes straight back to whatever the turn is doing.
       const rid = String(ev.request_id ?? "");
       s.permissions = s.permissions.filter((p) => p.requestId !== rid);
-      const id = agentOf(ev);
-      const a = s.agents[id];
-      if (a && a.status === "awaiting_permission") s.agents = { ...s.agents, [id]: { ...a, status: "processing" } };
       break;
     }
     case EventTypeValue.PERMISSION_STATUS:
@@ -673,9 +716,7 @@ export function reduce(s: JaatoState, raw: JaatoEvent): JaatoState {
           },
         },
       };
-      s.processing = { ...s.processing, [id]: false };
-      const a = s.agents[id];
-      if (a && a.status === "processing") s.agents = { ...s.agents, [id]: { ...a, status: "idle" } };
+      s.busySince = without(s.busySince, id);
       break;
     }
     case EventTypeValue.SYSTEM_MESSAGE: {
@@ -887,6 +928,11 @@ export const useJaato = create<JaatoState>()((set, get) => ({
   setWorkspaceMode: (mode) => set((st) => ({ workspace: { ...st.workspace, mode } })),
   selectWorkspace: (name) => set((st) => ({ workspace: { ...st.workspace, selected: name } })),
   selectAgent: (id) => set({ selectedAgentId: id }),
+  markSending: (agentId) => set((st) => ({ busySince: startedAt(st.busySince, agentId) })),
+  clearSending: (agentId) =>
+    // Only what the send itself claimed: a turn the daemon has since
+    // confirmed is ``active`` is not this send's to cancel.
+    set((st) => (st.agents[agentId]?.status === BUSY_STATUS ? {} : { busySince: without(st.busySince, agentId) })),
   addUserBlock: (agentId, text) =>
     set((st) => ({ blocks: { ...st.blocks, [agentId]: [...(st.blocks[agentId] ?? []), { id: nextId(), kind: "user", agentId, text }] } })),
   addSystemBlock: (agentId, text, style = "info") =>

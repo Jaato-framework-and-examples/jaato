@@ -13,7 +13,6 @@
  * The composer's ``verbatim`` flag (Escape on the proposal) is threaded
  * through to ``parseUserInput`` so a dismissed command word ships as text.
  */
-import { EventTypeValue } from "@jaato/sdk";
 import { attachmentFooter } from "@/protocol/attachments";
 import { parseUserInput } from "@/protocol/commands";
 import { MAIN_AGENT, useJaato } from "@/store/store";
@@ -289,8 +288,17 @@ export async function submitInput(text: string, verbatim: boolean): Promise<void
       // the same text the daemon will echo.
       const body = (parsed.text ?? text) + attachmentFooter(st.takeUploads());
       st.addUserBlock(agentId, body);
-      st.dispatch([{ type: EventTypeValue.AGENT_STATUS_CHANGED, agent_id: agentId, status: "processing" } as never]);
-      await client.sendMessage(body);
+      // Optimistic only until the daemon speaks.  This used to dispatch a
+      // fabricated ``agent.status_changed`` carrying a status the daemon
+      // never emits -- which the daemon's real ``active`` then read as "not
+      // busy" and switched back off, one round trip later.
+      st.markSending(agentId);
+      try {
+        await client.sendMessage(body);
+      } catch (err) {
+        st.clearSending(agentId);
+        throw err;
+      }
       return;
     }
   }

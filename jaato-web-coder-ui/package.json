@@ -1,6 +1,6 @@
 {
   "name": "@jaato/web-coder-ui",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "description": "Browser client for jaato-server — the web counterpart of jaato-tui. `npx @jaato/web-coder-ui` serves the bundle and opens it against a daemon started with --web-socket.",
   "license": "BUSL-1.1",
   "author": "apanoia",

@@ -28,6 +28,7 @@
 import { EventTypeValue } from "@jaato/sdk";
 import type { ExitOption } from "@/store/types";
 import { useJaato } from "@/store/store";
+import { anyBusy } from "@/store/phase";
 import { disconnect, getClient, isConnected } from "@/sdk/connection";
 import { markExited } from "./exitIntent";
 
@@ -65,7 +66,7 @@ export function endDestination(workspaceMode: "unknown" | "enabled" | "disabled"
 export async function requestExit(): Promise<void> {
   const st = useJaato.getState();
   if (!st.sessionId) return detach();
-  const running = Object.values(st.processing).some(Boolean);
+  const running = anyBusy(st);
   st.openExitChoice(running, exitOptions(running));
 }
 

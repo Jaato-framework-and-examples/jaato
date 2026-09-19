@@ -181,6 +181,10 @@ class _StubServer:
 
     send_message = JaatoServer.send_message
     _emit_attachment_dropped = JaatoServer._emit_attachment_dropped
+    # Borrowed too (#1139): every status report goes through the one door
+    # that records it, so the stub must carry the door rather than a second
+    # spelling of it.
+    emit_agent_status = JaatoServer.emit_agent_status
 
     def __init__(self, outcome="needs_turn", model_running=False,
                  honour_require_idle=True):
