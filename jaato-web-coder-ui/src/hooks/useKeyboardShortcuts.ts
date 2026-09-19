@@ -5,6 +5,7 @@
  */
 import { useEffect } from "react";
 import { useJaato } from "@/store/store";
+import { isBusy } from "@/store/phase";
 import { getClient, isConnected } from "@/sdk/connection";
 
 export function useKeyboardShortcuts(): void {
@@ -29,7 +30,7 @@ export function useKeyboardShortcuts(): void {
       }
       else if (mod && k === "c" && !(e.target as HTMLElement | null)?.matches?.("textarea,input") && !window.getSelection()?.toString()) {
         // Ctrl+C with nothing selected = stop, like the TUI (copy still works with a selection).
-        if (isConnected() && st.processing[st.selectedAgentId]) { e.preventDefault(); getClient().stop().catch(() => undefined); }
+        if (isConnected() && isBusy(st, st.selectedAgentId)) { e.preventDefault(); getClient().stop().catch(() => undefined); }
       }
     };
     window.addEventListener("keydown", onKey);

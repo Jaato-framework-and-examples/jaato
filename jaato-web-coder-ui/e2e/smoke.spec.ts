@@ -214,6 +214,22 @@ test("a permission ASK with no prompt content falls back to the tool arguments",
   await expect(page.getByText("Written (you answered")).toBeVisible();
 });
 
+test("the agent tab says what that agent is doing, including a prompt waiting on you", async ({ page }) => {
+  // The glyph is the whole point of a tab you are NOT looking at, and it
+  // is keyed on the daemon's own status vocabulary (active | idle | done |
+  // error | cancelled).  It used to key on four words no daemon emits, so
+  // every tab read "idle" whatever the agent was doing -- and the mock
+  // emitted one of those invented words, which is why this suite was green.
+  await openSession(page);
+  const main = page.getByRole("tab", { name: "main" });
+  await expect(main).toHaveAttribute("title", /idle/);
+  await composer(page).fill("permit");
+  await composer(page).press("Enter");
+  await expect(main).toHaveAttribute("title", /Waiting for you/);
+  await page.getByRole("button", { name: /^yes y$/ }).click();
+  await expect(main).toHaveAttribute("title", /idle/);
+});
+
 test("batch clarification walks its questions and replies once", async ({ page }) => {
   await openSession(page);
   await composer(page).fill("ask");
@@ -526,7 +542,7 @@ test("with a turn in flight the question offers Cancel task and exit first, and 
   await openSession(page);
   await composer(page).fill("hang");
   await composer(page).press("Enter");
-  await expect(page.getByText("Agent working")).toBeVisible();
+  await expect(page.getByRole("status")).toContainText("Thinking");
   await page.getByRole("button", { name: EXIT }).click();
   const plate = page.getByRole("group", { name: "Exit options" });
   await expect(plate.getByText("Task in progress")).toBeVisible();

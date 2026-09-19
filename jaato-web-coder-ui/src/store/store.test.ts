@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { useJaato, MAIN_AGENT } from "./store";
+import { agentPhase, anyBusy, isBusy } from "./phase";
 import type { JaatoEvent } from "@jaato/sdk";
 
 const ev = (o: Record<string, unknown>) => o as unknown as JaatoEvent;
@@ -91,7 +92,9 @@ describe("reduce — prompts", () => {
     expect(p[0]).toMatchObject({ requestId: "r1", inputMode: true, callId: "c9", formatHint: "diff" });
     expect(p[0]).toMatchObject({ warnings: "careful", warningLevel: "warning", promptLines: ["+x"] });
     expect(p[0]!.options).toEqual([{ key: "y", label: "yes", description: "allow this call" }]);
-    expect(useJaato.getState().agents[MAIN_AGENT]!.status).toBe("awaiting_permission");
+    // The agent's status stays the daemon's word; that a person is being
+    // waited on is the PHASE, derived from the pending record itself.
+    expect(agentPhase(useJaato.getState(), MAIN_AGENT)).toMatchObject({ kind: "waiting", on: "permission", toolName: "write" });
     d([ev({ type: "permission.resolved", agent_id: "main", request_id: "r1", granted: true })]);
     expect(useJaato.getState().permissions).toHaveLength(0);
   });
@@ -409,5 +412,106 @@ describe("uploads: the attachment strip's state", () => {
     st.resetSessionState();
     expect(useJaato.getState().uploads.map((u) => u.id)).toEqual(["u9"]);
     useJaato.getState().removeUpload("u9");
+  });
+});
+
+/**
+ * The indicator's own defect, and the two shapes around it.
+ *
+ * Every case here fails against the flag this replaced: ``processing`` was
+ * written from ``status === "processing" || status === "running"`` and the
+ * daemon emits neither word, so the real ``active`` read as "not busy".
+ */
+describe("phase — what the agent is doing", () => {
+  const d = () => useJaato.getState().dispatch;
+
+  it("reads the daemon's own status word: active means busy", () => {
+    d()([ev({ type: "agent.status_changed", agent_id: "main", status: "active" })]);
+    expect(isBusy(useJaato.getState(), MAIN_AGENT)).toBe(true);
+    expect(agentPhase(useJaato.getState(), MAIN_AGENT).kind).toBe("thinking");
+  });
+
+  it("is busy for a turn this client did not start", () => {
+    // An attach to a running session, a wake, an injected prompt: no
+    // composer, no optimistic flag, only the daemon's replayed status.
+    d()([ev({ type: "agent.status_changed", agent_id: "sub-1", status: "active" })]);
+    expect(isBusy(useJaato.getState(), "sub-1")).toBe(true);
+    expect(anyBusy(useJaato.getState())).toBe(true);
+  });
+
+  it("goes idle on every status the daemon can end a turn with", () => {
+    for (const status of ["idle", "done", "error", "cancelled"]) {
+      d()([ev({ type: "agent.status_changed", agent_id: "main", status: "active" })]);
+      expect(isBusy(useJaato.getState(), MAIN_AGENT)).toBe(true);
+      d()([ev({ type: "agent.status_changed", agent_id: "main", status })]);
+      expect(agentPhase(useJaato.getState(), MAIN_AGENT)).toEqual({ kind: "idle" });
+    }
+  });
+
+  it("names the open tool, counts the batch, and keeps the oldest clock", () => {
+    d()([ev({ type: "agent.status_changed", agent_id: "main", status: "active" })]);
+    d()([ev({ type: "tool.call_start", agent_id: "main", tool_name: "cli_based_tool", call_id: "c1" })]);
+    d()([ev({ type: "tool.call_start", agent_id: "main", tool_name: "readFile", call_id: "c2" })]);
+    const p = agentPhase(useJaato.getState(), MAIN_AGENT);
+    expect(p).toMatchObject({ kind: "tool", toolName: "cli_based_tool", running: 2 });
+    d()([ev({ type: "tool.call_end", agent_id: "main", call_id: "c1", success: true })]);
+    expect(agentPhase(useJaato.getState(), MAIN_AGENT)).toMatchObject({ kind: "tool", toolName: "readFile", running: 1 });
+    d()([ev({ type: "tool.call_end", agent_id: "main", call_id: "c2", success: true })]);
+    expect(agentPhase(useJaato.getState(), MAIN_AGENT).kind).toBe("thinking");
+  });
+
+  it("a tool call whose end never arrived cannot pin the indicator", () => {
+    // The reconnect case: the block stays ``running`` in the transcript,
+    // but the phase is reachable only while the daemon says the agent is.
+    d()([ev({ type: "agent.status_changed", agent_id: "main", status: "active" })]);
+    d()([ev({ type: "tool.call_start", agent_id: "main", tool_name: "cli_based_tool", call_id: "c1" })]);
+    d()([ev({ type: "turn.completed", agent_id: "main" })]);
+    expect(agentPhase(useJaato.getState(), MAIN_AGENT)).toEqual({ kind: "idle" });
+  });
+
+  it("a prompt outranks the work it interrupted", () => {
+    d()([ev({ type: "agent.status_changed", agent_id: "main", status: "active" })]);
+    d()([ev({ type: "tool.call_start", agent_id: "main", tool_name: "writeNewFile", call_id: "c1" })]);
+    d()([ev({ type: "permission.requested", agent_id: "main", request_id: "r1", tool_name: "writeNewFile" })]);
+    expect(agentPhase(useJaato.getState(), MAIN_AGENT)).toMatchObject({ kind: "waiting", on: "permission" });
+    d()([ev({ type: "permission.resolved", agent_id: "main", request_id: "r1", granted: true })]);
+    // Answered, and the turn carries on: back to the tool, not to idle.
+    expect(agentPhase(useJaato.getState(), MAIN_AGENT)).toMatchObject({ kind: "tool", toolName: "writeNewFile" });
+  });
+
+  it("a subagent's prompt gets a tab of its own", () => {
+    d()([ev({ type: "permission.requested", agent_id: "sub-9", request_id: "r2", tool_name: "run" })]);
+    expect(useJaato.getState().agentOrder).toContain("sub-9");
+    expect(agentPhase(useJaato.getState(), "sub-9")).toMatchObject({ kind: "waiting" });
+  });
+
+  it("the composer's optimistic flag is given back by the daemon's first word", () => {
+    useJaato.getState().markSending(MAIN_AGENT);
+    expect(agentPhase(useJaato.getState(), MAIN_AGENT).kind).toBe("sending");
+    d()([ev({ type: "agent.status_changed", agent_id: "main", status: "active" })]);
+    expect(agentPhase(useJaato.getState(), MAIN_AGENT).kind).toBe("thinking");
+    d()([ev({ type: "agent.status_changed", agent_id: "main", status: "idle" })]);
+    expect(agentPhase(useJaato.getState(), MAIN_AGENT)).toEqual({ kind: "idle" });
+  });
+
+  it("a refused send does not leave the indicator claiming work", () => {
+    useJaato.getState().markSending(MAIN_AGENT);
+    useJaato.getState().clearSending(MAIN_AGENT);
+    expect(agentPhase(useJaato.getState(), MAIN_AGENT)).toEqual({ kind: "idle" });
+  });
+
+  it("the busy clock does not restart while the turn runs", async () => {
+    d()([ev({ type: "agent.status_changed", agent_id: "main", status: "active" })]);
+    const first = useJaato.getState().busySince[MAIN_AGENT];
+    await new Promise((r) => setTimeout(r, 5));
+    d()([ev({ type: "agent.status_changed", agent_id: "main", status: "active" })]);
+    expect(useJaato.getState().busySince[MAIN_AGENT]).toBe(first);
+  });
+
+  it("agent.completed ends the turn in the daemon's vocabulary", () => {
+    d()([ev({ type: "agent.status_changed", agent_id: "sub-1", status: "active" })]);
+    d()([ev({ type: "agent.completed", agent_id: "sub-1", success: true })]);
+    expect(useJaato.getState().agents["sub-1"]!.status).toBe("done");
+    expect(isBusy(useJaato.getState(), "sub-1")).toBe(false);
   });
 });

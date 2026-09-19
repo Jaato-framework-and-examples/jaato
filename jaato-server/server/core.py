@@ -2013,6 +2013,42 @@ class JaatoServer:
         asyncio.run_coroutine_threadsafe(_fill(), loop)
         return True
 
+    def emit_agent_status(
+        self,
+        agent_id: str,
+        status: str,
+        error: Optional[str] = None,
+    ) -> None:
+        """Record an agent's status AND tell every attached client.
+
+        The two halves belong together and were not.  ``AgentState.status``
+        is read in exactly one place -- the attach replay, which tells a
+        client arriving mid-session what each agent is doing -- and the
+        MAIN agent's six status emits called ``emit()`` directly, so that
+        field never left the ``"idle"`` it is constructed with.  A client
+        attaching to a session whose model thread was running was therefore
+        told the agent was idle, and stayed told until the turn ended: a
+        second browser tab, a reconnect, a re-attach after a detach.  The
+        subagent path had it right all along (``on_agent_status_changed``
+        stamps the field before emitting), which is why only the main
+        agent's indicator went dark.
+
+        Anything that reports a status goes through here, so the record and
+        the wire cannot disagree about an agent again.
+        """
+        # ``getattr``: recording is best effort and emitting is not.  A
+        # duck-typed ``self`` (the send_message stubs) carries no agent
+        # registry, and a status dropped because the RECORD was missing
+        # would be this defect with the fix on top of it.
+        agent = getattr(self, "_agents", {}).get(agent_id)
+        if agent is not None:
+            agent.status = status
+        self.emit(AgentStatusChangedEvent(
+            agent_id=agent_id,
+            status=status,
+            error=error,
+        ))
+
     def emit(self, event: Event) -> None:
         """Emit an event to all subscribed clients and to the EventBus.
 
@@ -3765,13 +3801,7 @@ class JaatoServer:
                         ))
 
             def on_agent_status_changed(self, agent_id, status, error=None):
-                if agent_id in server._agents:
-                    server._agents[agent_id].status = status
-                server.emit(AgentStatusChangedEvent(
-                    agent_id=agent_id,
-                    status=status,
-                    error=error,
-                ))
+                server.emit_agent_status(agent_id, status, error)
 
             def on_agent_completed(self, agent_id, completed_at, success,
                                    token_usage=None, turns_used=None, error="",
@@ -5230,10 +5260,7 @@ class JaatoServer:
         ))
 
         # Signal main agent is active
-        self.emit(AgentStatusChangedEvent(
-            agent_id=self._main_agent_id,
-            status="active",
-        ))
+        self.emit_agent_status(self._main_agent_id, "active")
 
         # Start model in background.  Attachments (client-expanded base64 dicts)
         # ride the first send to the runner session's multimodal path.
@@ -5373,10 +5400,7 @@ class JaatoServer:
                             f"CONTINUATION: Child messages drained "
                             f"({len(child_messages)} chars), triggering new turn",
                         )
-                        server.emit(AgentStatusChangedEvent(
-                            agent_id=server._main_agent_id,
-                            status="active",
-                        ))
+                        server.emit_agent_status(server._main_agent_id, "active")
                         server._start_model_thread(child_messages)
                     else:
                         # Stash for the model_thread finally block to pick up.
@@ -5959,10 +5983,7 @@ class JaatoServer:
                         "  <- MULTIPLE: pre-#623 this lost all but the last"
                         if len(stashed) > 1 else "",
                     )
-                    server.emit(AgentStatusChangedEvent(
-                        agent_id=server._main_agent_id,
-                        status="active",
-                    ))
+                    server.emit_agent_status(server._main_agent_id, "active")
                     # An empty list is wire-identical to None here: the send
                     # RPC adds an ``attachments`` key only ``if attachments``,
                     # so a text continuation's request is unchanged.
@@ -6013,10 +6034,7 @@ class JaatoServer:
                             f"send that raced the turn wind-down "
                             f"({len(drained)} chars)",
                         )
-                        server.emit(AgentStatusChangedEvent(
-                            agent_id=server._main_agent_id,
-                            status="active",
-                        ))
+                        server.emit_agent_status(server._main_agent_id, "active")
                         server._start_model_thread(drained)
                         clear_logging_context()
                         return  # new thread handles idle/done status
@@ -6171,10 +6189,7 @@ class JaatoServer:
                         "decision and evidence. Please proceed with one of "
                         "those two paths."
                     )
-                    server.emit(AgentStatusChangedEvent(
-                        agent_id=server._main_agent_id,
-                        status="active",
-                    ))
+                    server.emit_agent_status(server._main_agent_id, "active")
                     server._start_model_thread(nudge)
                     clear_logging_context()
                     return  # new thread handles idle/done status
@@ -6236,10 +6251,7 @@ class JaatoServer:
                         error_summary=nudge_exhaust_summary,
                     )
 
-                server.emit(AgentStatusChangedEvent(
-                    agent_id=server._main_agent_id,
-                    status=status,
-                ))
+                server.emit_agent_status(server._main_agent_id, status)
                 clear_logging_context()
 
             try:

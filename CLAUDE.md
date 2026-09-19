@@ -5974,6 +5974,89 @@ code is what a dropped socket reports). Verified non-vacuous: with the
 re-assert neutralised the reconnect test fails on the daemon's refusal, and
 with the create reset neutralised two of the three unit cases fail.
 
+### A Spinner Keyed on a Word Nobody Says
+
+Reported as *"the thinking indicator does not follow what happens in
+reality, sometimes it does not even show"*. Three defects, one in each
+layer, and the middle one is why the suite could not see the first.
+
+**The client tested for a status vocabulary the daemon does not have.**
+`AgentStatusChangedEvent.status` is `active` | `idle` | `done` | `error`
+(the docstring) plus `cancelled` from the subagent plugin — five words,
+emitted from nine sites. The web store computed its `processing` flag as
+`status === "processing" || status === "running"`. Nothing upstream
+produces either word. The only producer was **the client itself**, which
+dispatched a fabricated `AgentStatusChangedEvent` at its own store before
+awaiting `sendMessage`, and because the assignment is unconditional the
+daemon's real `active` — emitted immediately before `_start_model_thread`
+— evaluated false and switched the indicator back **off**. So it lived for
+exactly one round trip per turn, and a turn the composer did not start (an
+attach to a running session, a subagent, `session.wake`, an injected
+prompt, a reconnect mid-turn) never lit it at all.
+
+Two more consumers read the same flag, so both were wrong in the same
+direction and neither announced it: **Ctrl+C was dead** whenever the flag
+was wrongly false (`useKeyboardShortcuts` gates `stop()` on it), and the
+exit question offered the wrong option set (`exitChoice` reads it to
+decide whether to lead with *Cancel task and exit*). `AgentTabs` keyed its
+glyph map on `processing` / `running` / `awaiting_permission` / `finished`
+— four invented words — so every agent tab fell through to the idle glyph
+whatever the agent was doing.
+
+**And the mock spoke the client's vocabulary.** `mock/daemon.ts` emitted
+`status: "processing"`, so 38 e2e tests certified an indicator that could
+not work against a real daemon. Same shape as the clarification, permission
+and budget-panel defects before it, which is why the mock is now the
+daemon's word and an e2e case asserts a tab's own title.
+
+**The flag is replaced by a derived phase, not corrected.** A second copy
+of "is it busy", written from four places and read from four more, is what
+fell out of step; `store/phase.ts` computes the phase from facts the store
+already holds for other reasons:
+
+| Phase | Derived from | Priority |
+|---|---|---|
+| `waiting` | a pending permission / clarification / reference for that agent | a person is blocked — outranks everything |
+| `tool` | an open `tool.call_start` with no end, oldest first, plus the batch count | names what is running |
+| `thinking` | the daemon's `active` | |
+| `sending` | `busySince` stamped by the composer, no daemon word yet | the one optimistic piece |
+| `idle` | — | |
+
+`busySince` is the busy predicate rather than the status string: it is
+stamped by the two events that START a turn and dropped by every event
+that ENDS one (a non-active status, `turn.completed`, `agent.completed`,
+`agent.error`). That is what makes it **self-healing** where a flag was
+not — a tool call whose `call_end` was lost to a reconnect leaves a
+`running` block in the transcript and cannot pin the indicator, because
+the `tool` phase is reachable only inside a turn the daemon still owns.
+The client now invents no status of its own: `Agent.status` is the
+daemon's word verbatim, the locally-written `awaiting_permission` /
+`processing` / `finished` are gone, and the indicator carries the phase,
+the tool's name and an elapsed clock (`Running cli_based_tool — 2:14` is
+the difference between a session that is working and one that is wedged).
+
+**The third defect is the daemon's, and it is the other half of "does not
+even show" (#1139).** `AgentState.status` has exactly one reader — the
+attach replay, which tells a client arriving mid-session what each agent
+is doing — and the MAIN agent's six status emits called `emit()`
+directly, never touching the field, so it stayed at the `"idle"` it is
+constructed with for the life of the session. The subagent path had it
+right (`on_agent_status_changed` stamps before emitting), which is why
+only the main agent went dark. A second browser tab, a reconnect, a
+re-attach after a detach: told `idle` about an agent mid-turn, and told it
+until the turn ended. `JaatoServer.emit_agent_status` is the one door —
+record, then emit — and an AST guard fails the build on an
+`AgentStatusChangedEvent` constructed around it, because the defect is a
+call site nobody thought of and a behavioural test can only exercise one
+somebody did. The replay is excluded by construction: it passes
+`status=agent.status`, a read of the record rather than a new claim about
+it.
+
+Verified non-vacuous on both sides: restoring the old vocabulary in
+`phase.ts` fails 6 of the 11 new store cases, and the two declared
+reversions in `test_an_agent_status_the_record_did_not_keep.py` fail their
+named tests.
+
 ### A Key the Web Files Panel Did Not Have
 
 The TUI's workspace panel (Ctrl+W) binds two keys to the entry under the
