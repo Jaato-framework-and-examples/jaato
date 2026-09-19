@@ -756,6 +756,7 @@ _SDK_IMPORT_CANDIDATES = (
     "EventType",            # low-level subscribe() alongside the facade
     "SessionCreateFailed",  # create_session raises; it does not return None
     "AgentError",           # the facade re-raises an error terminal typed
+    "SessionEnded",         # a terminal cut the turn short (#1007/#1044)
     "TurnTimeout",          # a per-job wall clock expired
     "truncation_reason",    # "did this session end where it meant to?"
 )

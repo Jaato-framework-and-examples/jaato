@@ -47,12 +47,22 @@ The facade offers three, and the archetypes divide on the one question that
 matters: **is the turn the terminus?**
 
 ``ask`` / ``stream`` — for a NON-GATED session, whose single turn IS the
-terminus.  They wait on first-of ``{TURN_COMPLETED, SESSION_TERMINATED}``: a
-completion-gated session emits ``SESSION_TERMINATED`` with the rich reason, a
-PLAIN turn emits only ``TURN_COMPLETED`` and then goes IDLE (a headless
-session does NOT self-terminate), so waiting on ``SESSION_TERMINATED`` alone
-would block forever.  ``client`` / ``fire`` / ``host-tools`` ship an inline,
-schema-less profile spec, so this is right for them.
+terminus.  A PLAIN turn emits only ``TURN_COMPLETED`` and then goes IDLE (a
+headless session does NOT self-terminate), so waiting on
+``SESSION_TERMINATED`` alone would block forever.  ``client`` / ``fire`` /
+``host-tools`` ship an inline, schema-less profile spec, so this is right for
+them.
+
+Since #1007/#1044 the settle rule is ONE rule parameterised by span, not
+first-of a pair: the turn event PROPOSES a terminus, that agent's next status
+event CONFIRMS it, and ``SESSION_TERMINATED`` settles unconditionally.  The
+consequence a driver must handle is that **a plain turn CAN end the session** —
+a ``budget_control`` ceiling does exactly that — and then ``ask`` / ``stream``
+raise ``SessionEnded`` (carrying ``reason`` and ``details``) instead of
+returning text.  ``CLEAN_TERMINAL_REASONS`` is the exception: an ending that
+was meant (``natural``, ``client_request``, ``stopped``) returns the turn
+normally.  Either way the ending is recorded on ``Session.terminus``, which is
+where a driver reads it when ``complete`` returns ``None``.
 
 ``complete`` — for a COMPLETION-GATED session, whose terminus is
 ``signal_completion``.  Point a session at a profile carrying a
@@ -172,6 +182,14 @@ async def main() -> int:
         # error_summary and the facade re-raises them typed.
         print(f"error: {exc.error_type}: {exc.error_summary}")
         return 1
+    except SessionEnded as exc:
+        # A plain turn CAN end the session — a budget_control ceiling does —
+        # and then the turn verb raises rather than returning partial text
+        # (#1007).  An ending that was MEANT (natural / client_request /
+        # stopped) returns normally instead, so reaching here is always an
+        # ending worth naming.
+        print(f"session ended mid-turn: {exc.reason}: {exc.details}")
+        return 1
     return 0
 
 
@@ -228,7 +246,11 @@ WORKLIST = [
 
 
 async def _run_stage(cascade_id, profile, agent, prompt):
-    """Run one stage to its terminus; return the stage's typed PAYLOAD.
+    """Run one stage to its terminus; return ``(payload, terminus)``.
+
+    The PAYLOAD is the stage's typed answer and is ``None`` for several
+    different endings; the TERMINUS is what tells them apart, and it does
+    not outlive the session object below (#1007).
 
     Each stage MUST be completion-gated — its persona calls
     ``signal_completion`` as its last action.  That is what produces the
@@ -253,7 +275,13 @@ async def _run_stage(cascade_id, profile, agent, prompt):
     """
     async with _open_session(profile=profile, agent=agent,
                              cascade_driver_id=cascade_id) as stage:
-        return await stage.complete(prompt)
+        payload = await stage.complete(prompt)
+        # Return the TERMINUS alongside the payload: the session object dies
+        # with this context manager, and ``Session.terminus`` is the only
+        # place the ending's reason survives (#1007).  ``complete`` returns
+        # None for several different endings and the payload cannot tell
+        # them apart.
+        return payload, stage.terminus
 
 
 async def main() -> int:
@@ -261,7 +289,8 @@ async def main() -> int:
     cascade_id = uuid.uuid4().hex   # one ID per cascade; stages reuse the slot
     for i, (profile, agent, prompt) in enumerate(WORKLIST, 1):
         try:
-            payload = await _run_stage(cascade_id, profile, agent, prompt)
+            payload, terminus = await _run_stage(
+                cascade_id, profile, agent, prompt)
         except ConnectionError as exc:
             print(f"stage {i}: could not connect — run the doctor: {exc}")
             return 1
@@ -273,9 +302,16 @@ async def main() -> int:
         except AgentError as exc:
             print(f"stage {i}: error: {exc.error_type}: {exc.error_summary}")
             return 1
-        # ``None`` means the stage's profile declared no completion schema —
-        # it ran and ended, it just had no typed answer to give.
-        print(f"stage {i}: {payload if payload is not None else 'completed'}")
+        if payload is not None:
+            print(f"stage {i}: {payload}")
+            continue
+        # ``None`` is several different endings and the payload cannot tell
+        # them apart: the profile declared no completion schema, the model
+        # never signalled, or a budget_control ceiling stopped the stage
+        # mid-flight.  ``Session.terminus`` is what distinguishes them —
+        # dropping it here is exactly the loss #1007 made avoidable.
+        reason = terminus.reason if terminus is not None else "unknown"
+        print(f"stage {i}: completed with no payload ({reason})")
     return 0
 
 
@@ -393,6 +429,11 @@ async def main() -> int:
     except AgentError as exc:
         print(f"error: {exc.error_type}: {exc.error_summary}")
         return 1
+    except SessionEnded as exc:
+        # ask() raises when a terminal cuts the turn short (#1007); a clean
+        # ending returns the turn and records it on Session.terminus.
+        print(f"session ended mid-turn: {exc.reason}: {exc.details}")
+        return 1
     return 0
 
 
@@ -487,22 +528,25 @@ async def _run_job(owner_cid, name, profile, agent, prompt) -> dict:
     Never raises: a sweep whose jobs can kill each other is not a sweep.
     Every failure mode below is caught and returned as a BLOCKED row.
     """
-    # The two facts ``complete()`` does not return, read off the SAME
-    # connection.  ``s.client`` is the low-level client the facade wraps, and
-    # listeners added there persist across turns and are independent of the
-    # ones ``complete`` installs and removes for itself.
+    # ``finish_reason`` is the ONE fact ``complete()`` still does not return,
+    # so it is still read off the SAME connection.  ``s.client`` is the
+    # low-level client the facade wraps, and listeners added there persist
+    # across turns and are independent of the ones ``complete`` installs and
+    # removes for itself.
+    #
+    # THE TERMINATION IS NOT READ THIS WAY ANY MORE.  Before #1007 a driver
+    # had to hand-roll a SESSION_TERMINATED listener to learn why a job
+    # stopped; ``Session.terminus`` now carries ``reason`` and ``details``
+    # for every one of the three verbs, so subscribing for it would be a
+    # second source of one fact -- which is how a driver ends up believing
+    # the older one.
     state = {}
 
     def _on_turn(ev):
         state["finish_reason"] = getattr(ev, "finish_reason", None)
 
-    def _on_terminated(ev):
-        state["termination_reason"] = getattr(ev, "reason", None)
-        state["termination_detail"] = getattr(ev, "error", None)
-
     def _watch(s):
         s.client.subscribe(EventType.TURN_COMPLETED, _on_turn)
-        s.client.subscribe(EventType.SESSION_TERMINATED, _on_terminated)
 
     try:
         async with _open_session(profile=profile, agent=agent,
@@ -516,6 +560,10 @@ async def _run_job(owner_cid, name, profile, agent, prompt) -> dict:
             # unchanged across two spawns while a job ran past sixteen
             # minutes.  The pool is coherent; it is simply not a timeout.
             payload = await s.complete(prompt, timeout=JOB_TIMEOUT_S)
+            # Read INSIDE the context manager: the terminus dies with the
+            # session object, and it is what tells a budget stop apart from
+            # a job that simply produced no payload (#1007).
+            terminus = s.terminus
     except ConnectionError as exc:
         return {"job": name, "outcome": "BLOCKED",
                 "detail": f"could not connect/autostart the daemon: {exc}"}
@@ -539,8 +587,8 @@ async def _run_job(owner_cid, name, profile, agent, prompt) -> dict:
     why = truncation_reason(
         finish_reason=state.get("finish_reason"),
         payload=payload,
-        termination_reason=state.get("termination_reason"),
-        termination_detail=state.get("termination_detail"),
+        termination_reason=terminus.reason if terminus else None,
+        termination_detail=terminus.details if terminus else None,
     )
     if why is not None:
         return {"job": name, "outcome": "BLOCKED", "detail": why}
