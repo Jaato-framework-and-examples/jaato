@@ -1,0 +1,226 @@
+[
+  {
+    "slug": "01-profile-regulatory-block",
+    "title": "The regulatory: block",
+    "control": "regulatory",
+    "command": "cat .jaato/profiles/screener.yaml",
+    "note": ""
+  },
+  {
+    "slug": "02-explain-profile-schema",
+    "title": "explain profile: the three EU AI Act keys",
+    "control": "regulatory",
+    "command": "jaato-scaffold explain profile",
+    "note": ""
+  },
+  {
+    "slug": "03-validate-compliant",
+    "title": "validate: the compliant workspace",
+    "control": "regulatory",
+    "command": "jaato-scaffold validate /srv/acme-support",
+    "note": ""
+  },
+  {
+    "slug": "04-validate-high-risk",
+    "title": "validate: risk_class: high escalates every finding",
+    "control": "regulatory",
+    "command": "jaato-scaffold validate /srv/acme-support-triage",
+    "note": ""
+  },
+  {
+    "slug": "30-new-profile-set-commented-block",
+    "title": "new profile-set: the three blocks in the tier-1 base, commented out",
+    "control": "regulatory",
+    "command": "jaato-scaffold new profile-set --workspace /srv/acme-new --provider anthropic --model claude-sonnet-4-5 --set acme --agents collector,writer && sed -n 1,24p .jaato/profiles/_base_collector.yaml",
+    "note": ""
+  },
+  {
+    "slug": "31-validate-regulatory-undeclared",
+    "title": "validate: a workspace that declares nothing under the Act is told so",
+    "control": "regulatory",
+    "command": "jaato-scaffold validate /srv/acme-new | grep -v budget_control_absent",
+    "note": "the four budget_control_absent warnings the same run prints are elided"
+  },
+  {
+    "slug": "32-integration-skill-lists-the-verbs",
+    "title": "The Claude Code integration skill names the verbs and the keys",
+    "control": "regulatory",
+    "command": "jaato-scaffold integration claude-code --workspace /srv/acme-new && grep -n 'oversight\\|explain audit\\|dossier\\|regulatory\\|record_keeping' .claude/skills/jaato-sdk/SKILL.md",
+    "note": ""
+  },
+  {
+    "slug": "05-announcement-events",
+    "title": "The first-interaction announcement, on the wire",
+    "control": "disclosure",
+    "command": "session.new --profile screener   # events as the SDK receives them",
+    "note": ""
+  },
+  {
+    "slug": "06-disclosure-instruction-piece",
+    "title": "The disclosure piece inside the rendered system prompt",
+    "control": "disclosure",
+    "command": "jq -r .rendered_instructions .jaato/sessions/20260918_232854.json | grep -A3 'AI DISCLOSURE'",
+    "note": ""
+  },
+  {
+    "slug": "07-disclosure-suppressed-warning",
+    "title": "Dropping the piece by name is announced at WARNING",
+    "control": "disclosure",
+    "command": "grep WARNING .jaato/logs/session_*.log | grep disclosure",
+    "note": ""
+  },
+  {
+    "slug": "08-explain-oversight",
+    "title": "explain oversight: the measures, read from their enforcers",
+    "control": "oversight",
+    "command": "jaato-scaffold explain oversight",
+    "note": ""
+  },
+  {
+    "slug": "09-explain-oversight-screener",
+    "title": "explain oversight <profile>: what this profile armed",
+    "control": "oversight",
+    "command": "jaato-scaffold explain oversight screener",
+    "note": ""
+  },
+  {
+    "slug": "10-doctor-stop-button",
+    "title": "jaato-doctor names the stop button for the running daemon",
+    "control": "oversight",
+    "command": "jaato-doctor --no-release-check",
+    "note": ""
+  },
+  {
+    "slug": "11-budget-stop-events",
+    "title": "A budget ceiling stops the run, and the client is told why",
+    "control": "oversight",
+    "command": "session.new --profile screener; ask x3   # limits: {turns: 2}, abort at 100%",
+    "note": ""
+  },
+  {
+    "slug": "12-explain-audit",
+    "title": "explain audit: the record contract, computed",
+    "control": "audit",
+    "command": "jaato-scaffold explain audit",
+    "note": ""
+  },
+  {
+    "slug": "13-explain-audit-screener",
+    "title": "explain audit <profile>: the files this profile writes",
+    "control": "audit",
+    "command": "jaato-scaffold explain audit screener",
+    "note": ""
+  },
+  {
+    "slug": "14-ledger-records",
+    "title": "The ledger on disk after the session, chained",
+    "control": "audit",
+    "command": "cat .jaato/logs/ledger.jsonl",
+    "note": ""
+  },
+  {
+    "slug": "15-audit-verify-intact",
+    "title": "jaato-doctor --audit-verify on the untouched file",
+    "control": "audit",
+    "command": "jaato-doctor --audit-verify .jaato/logs/ledger.jsonl",
+    "note": ""
+  },
+  {
+    "slug": "16-audit-verify-tampered",
+    "title": "The same file after one number was edited in place",
+    "control": "audit",
+    "command": "sed -i '2s/\"output_tokens\": 7/\"output_tokens\": 700/' ledger.jsonl && jaato-doctor --audit-verify ledger.jsonl",
+    "note": ""
+  },
+  {
+    "slug": "17-retention-sweep",
+    "title": "record_keeping: the retention pass, per profile and per clock",
+    "control": "audit",
+    "command": "python -c 'from server.record_retention import ...'   # a sweep over backdated files",
+    "note": ""
+  },
+  {
+    "slug": "18-incident-trace-line",
+    "title": "The INCIDENT record in the application trace",
+    "control": "incidents",
+    "command": "grep 'INCIDENT:' .jaato/logs/session_trace.jsonl",
+    "note": ""
+  },
+  {
+    "slug": "19-doctor-incidents",
+    "title": "jaato-doctor --incidents: the register with the Art. 73 clocks",
+    "control": "incidents",
+    "command": "jaato-doctor --incidents .jaato/logs/session_trace.jsonl --since 15d",
+    "note": ""
+  },
+  {
+    "slug": "20-marking-posture",
+    "title": "explain oversight: what is marked, and what is not",
+    "control": "marking",
+    "command": "jaato-scaffold explain oversight   # MARKING GENERATED OUTPUT",
+    "note": ""
+  },
+  {
+    "slug": "21-marker-sidecar",
+    "title": "The output_marker plugin writes a provenance sidecar",
+    "control": "marking",
+    "command": "python -c '...mark_output(OutputPayload(chart.png, image/png, generated_by=...))'",
+    "note": ""
+  },
+  {
+    "slug": "22-generated-by-wire",
+    "title": "generated_by on the delivery event (protocol 1.14)",
+    "control": "marking",
+    "command": "python -c 'from jaato_sdk.events import ToolOutputEvent, ai_generated_by; ...'",
+    "note": "constructed: the stamp is set in JaatoSession._deliver_model_media; echo emits no media"
+  },
+  {
+    "slug": "23-memory-generated-by",
+    "title": "A stored memory records which model wrote it",
+    "control": "memory",
+    "command": "cat .jaato/memories/raw/mem_20260918_232940_9806.json",
+    "note": ""
+  },
+  {
+    "slug": "24-permission-gate",
+    "title": "The permission gate in front of update_memory (Art. 14(4)(d))",
+    "control": "oversight",
+    "command": "session.new --profile curator; ask   # PERMISSION_REQUESTED as the client receives it",
+    "note": ""
+  },
+  {
+    "slug": "25-memory-curated-by",
+    "title": "After promotion: who wrote it, and who approved it",
+    "control": "memory",
+    "command": "grep <id> .jaato/memories/curated.jsonl | jq '{id, maturity, generated_by, curated_by}'",
+    "note": ""
+  },
+  {
+    "slug": "26-memory-retrieval-gate",
+    "title": "require_curation: the same retrieval before and after the curator",
+    "control": "memory",
+    "command": "retrieve_memories(tags=[refunds])   # plugin_configs.memory.require_curation: true",
+    "note": ""
+  },
+  {
+    "slug": "27-dossier-annex-iv",
+    "title": "jaato-scaffold new dossier --profile: the Annex IV skeleton",
+    "control": "dossier",
+    "command": "jaato-scaffold new dossier --workspace . --profile screener --eval-results results.jsonl && head -60 docs/annex-iv-screener.md",
+    "note": ""
+  },
+  {
+    "slug": "28-dossier-accuracy-section",
+    "title": "The accuracy section, from a jaato-eval results file, caveat verbatim",
+    "control": "dossier",
+    "command": "sed -n '/^## 4/,/^## 5/p' docs/annex-iv-screener.md",
+    "note": ""
+  },
+  {
+    "slug": "29-component-pack",
+    "title": "jaato-scaffold new dossier --component: the Art. 25(4) pack",
+    "control": "dossier",
+    "command": "jaato-scaffold new dossier --workspace . --component && head -50 docs/jaato-component-pack.md",
+    "note": ""
+  }
+]

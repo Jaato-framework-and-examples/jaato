@@ -5334,7 +5334,7 @@ expressible:
 | 50(1) *before* the first turn | the announcement `announcement_for()` decides and `SessionManager._announce_ai_interaction` emits once at session creation — `AgentOutputEvent(source="system")` plus `SessionInfoEvent.disclosure_announcement` (protocol 1.15) for a client that owns a medium the framework cannot reach. `PresentationContext.client_discloses_ai` is the "unless this is obvious" suppression, asserted by the only party that can see the screen |
 | 50(2) mark generated output, on the wire | `ToolOutputEvent.generated_by` (protocol 1.14): `{"kind": "ai", provider, model, session_id, agent_id}` on the model's own media, stamped in `_deliver_model_media`; `Attachment.generated_by` for a producer's claim; nothing on a relayed file |
 | 50(2) mark it so it SURVIVES the wire | `TRAIT_OUTPUT_MARKER` + `JaatoSession._mark_generated_output` at both delivery seams; the in-tree `output_marker` plugin writes `<file>.provenance.json`. The seam walks `registry.list_enabled()`, **never `list_exposed()`** — a marker provides no tools, so it is an ENRICHMENT plugin and can never be in the tool-bearing set; reading that one made the mechanism inert in the only configuration that uses it. An AST guard fails any future `Attachment` producer that neither stamps nor is a declared relay |
-| 12 keep the logs | `TokenLedger` appends per record to `LEDGER_PATH`; `trace.ledger` is the typed key (relative = per session); `write_ledger` flushes only what was not appended |
+| 12 keep the logs | `TokenLedger` appends per record to `LEDGER_PATH`; `trace.ledger` is the typed key (relative = per session); `write_ledger` flushes only what was not appended — and the runner holds a ledger of its own (see *A ledger the runner never held*, below) |
 | 12 / 13(3)(f) say WHAT is logged | `jaato_sdk.audit.AUDIT_SCHEMA` — the events, their fields, the store each lands in — rendered by `jaato-scaffold explain audit [<profile>]` and enforced by a guard that walks the writers it names. Not a sixth store: a contract over the five that already record. `docs/audit-log.md` |
 | 73(6) prove they were not altered | `record_keeping.integrity: sha256-chain` — each record carries `prev_digest` + `digest` over canonical bytes; `jaato-doctor --audit-verify <path>` walks a file with nothing but the stdlib. It proves the file was not edited IN PLACE and **not** who wrote it, which the verifier's own output says. An unchained file reports as unchained, never as intact. The chain belongs to the FILE: every chained append takes an exclusive lock, reads the tail digest back off disk and links to THAT, so a restart, a shared absolute `trace.ledger` and two concurrent appenders continue one chain rather than each starting a rival one — holding the pointer in memory alone made the mechanism accuse its own normal deployment. Stated cost: a chained file cannot be pruned from the front, so retention rotates whole files |
 | 19 / 26(6) keep them long enough | `record_keeping: {retention_days, conversation_retention_days, integrity}` — two clocks, because the audit record and the conversation are kept for different reasons, and they resolve differently across profiles: `retention_days` governs the files a profile NAMES, so **each profile's files are judged under its own clock** (pooling them let one profile's 30 days unlink a sibling's `retention_days: 0` record), while a session record is named by no profile, so the workspace has ONE conversation clock and the only safe reading of several is the longest. A trace path is EXPANDED, not taken literally — the provider channel splits per agent, so the siblings are globbed. Declared, never defaulted: it changes what DELETE MEANS. `workspace.delete` refuses a held record; the #812 watchdog runs an hourly pass that removes audit files past `retention_days` and session records past `conversation_retention_days`, never a loaded session's own |
@@ -5359,6 +5359,50 @@ covers: `high_risk_without_intended_purpose`,
 declares no class validates exactly as before: absent is `minimal` for
 validation and *undeclared* for documentation, because a framework that
 printed `minimal` for it would be asserting a determination nobody made.
+
+**The authoring surface knows the keys, all three verbs of it.** `explain
+profile` documented `regulatory:`, `trace.ledger` and `record_keeping:` and
+`validate` checked them once declared — and `new profile-set` emitted none of
+them, so a workspace scaffolded the documented way got a clean bill from
+`validate` (only `budget_control_absent`) while declaring nothing under the
+Act: `disclosure_absent` needs a persona-bound profile and the `high_risk_*`
+errors a declared class. Now the tier-1 base carries the three blocks
+**commented out** (a live `regulatory:` with no fields is a determination
+nobody made; a live `record_keeping:` changes what DELETE means), `validate`
+says once per workspace that nothing declares it (`regulatory_undeclared`,
+warn — the `budget_control_absent` posture, and never inferring `minimal`),
+and the Claude Code integration skill lists `explain oversight`, `explain
+audit` and the `dossier` archetype. Guard:
+`shared/tests/test_scaffold_surfaces_know_the_compliance_keys.py`, which also
+checks that every topic and archetype the skill lists is one the CLI has.
+
+**A ledger the runner never held.** Everything above about the ledger was
+true of the in-process path and false of the default one. The runner's
+bootstrap passed `ledger=None` to `configure_plugins` — on the reading that
+token accounting is daemon-tier (§4.2 of the runner design) — while the
+daemon never receives a runner session's usage into *its* ledger. So a
+runner-served session wrote no `response` and no `permission-check` record
+anywhere, and `explain audit <profile>` said the ledger was written: a key
+parsed, validated, rendered and enforced by nothing, the #735 shape, found
+by driving a live daemon for the evidence manual (#1139). The runner now
+constructs its own `TokenLedger` (Step 9 of `server/runner/session.py`); the
+path and the integrity posture are read per record through the session-scoped
+env the bootstrap already applied, so it is one file per session as
+documented. Guard: `shared/tests/test_runner_session_holds_a_ledger.py`.
+
+**And the controls are driven live in CI, not only unit-guarded.** Every
+mechanism above has a unit guard with a reversion, and #1139 shows what that
+layer cannot see: the ledger key was parsed, validated and rendered
+correctly, and no record ever reached disk on the default path. So
+`jaato_sdk/conformance/test_eu_ai_act_controls.py` (the `conformance`
+marker, in the "SDK + scaffold + conformance + eval" job) drives a real
+`echo` daemon through the SDK and asserts the artefacts a deployer would
+show an auditor: the announcement before the first turn (and its absence
+for a profile declaring nothing), the `disclosure` piece in the rendered
+prompt, a chained ledger that `verify` accepts intact and refuses edited,
+a budget stop reaching the incident register, and a memory record carrying
+`generated_by` behind a curation gate that holds. It is the layer that
+would have caught #1139 the day the runner path shipped.
 
 The two documents are **skeletons**, not compliance documents, and say so on
 their first line: what the framework can compute is a small part of Annex IV,
@@ -8525,6 +8569,7 @@ This is not optional cleanup — treat missing or inaccurate docstrings as a def
 - [The audit log](docs/audit-log.md) - Which of the five stores records what, the three rules a reader of them must apply, and what `record_keeping:` changes about DELETE. Plus the tamper-evidence contract: a `sha256-chain` proves no edit in place, never authorship.
 - [The jaato-eval results contract](docs/eval-results.md) - What a reader outside `jaato-eval` may rely on in a results file: `results_version` (and why an absent one is an unknown one, refused by name), `caveats` (rendered verbatim, because a second copy of a caveat is the copy that rots), and the three reader rules that keep the numbers from misleading.
 - [jaato as a component](docs/jaato-component-pack.md) - The Article 25(4) information pack, generated by `jaato-scaffold new dossier --component` and committed as the first versioned instance: what the framework guarantees with the thing that enforces each, what it does not, and the versioned surfaces a written agreement can cite.
+- [EU AI Act evidence manual](docs/eu-ai-act-manual.md) - One section per control, with a capture of each doing its job on a live daemon. Regenerated, never edited: `python scripts/eu_ai_act_evidence.py` rebuilds every picture under `docs/eu-ai-act-manual/evidence/` from a real run (echo provider, private socket), so a mechanism that goes inert shows up as a picture that says so — which is how #1139 was found.
 - [EU AI Act](docs/design/eu-ai-act.md) - What Regulation (EU) 2024/1689 asks of a jaato *application* (the AI system is the profile + persona + tools + model binding; jaato is a component supplier under Art. 25(4), and BUSL-1.1 is not a free and open-source licence, so neither Art. 2(12) nor the 25(4) carve-out applies), which obligations bind when after the Digital Omnibus (Art. 50 disclosure and marking since 2 Aug 2026; Annex III high-risk from 2 Dec 2027), and the mechanisms in order. Every mechanism it names is shipped: the `regulatory:` profile block, the `disclosure` piece and the first-interaction announcement, `generated_by` plus the `TRAIT_OUTPUT_MARKER` hook, one audit-record contract with `record_keeping:` retention and a sha256 chain, the incident register, memory provenance, and the Annex IV dossier generator with its `jaato-eval` accuracy section. What remains is recorded there as a decision rather than a gap. See [EU AI Act Mechanisms](#eu-ai-act-mechanisms).
 - [AppArmor Setup](docs/apparmor-setup.md) - Kernel-enforced workspace isolation. WS deployments confine automatically when AppArmor is available; IPC clients opt in via `IPCClient(..., apparmor=True)` (defaults to `False`).
 - [GCP Setup Guide](docs/gcp-setup.md) - Setting up GCP project for Vertex AI

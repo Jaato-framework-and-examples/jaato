@@ -317,8 +317,15 @@ def _configure_runtime_plugins(
        cache_*, session, background) must NOT load runner-side; they
        live on the daemon and any session.* RPC that needs them
        crosses the wire.
-    2. ``ledger=None`` passed to ``configure_plugins`` — token
-       accounting is daemon-tier per §4.2.
+    2. The runner constructs its OWN :class:`TokenLedger` and passes it
+       to ``configure_plugins``.  It used to pass ``None`` on the
+       reading that token accounting is daemon-tier (§4.2) -- but the
+       daemon never receives a runner session's usage into ITS ledger,
+       so on the default path no ``response`` or ``permission-check``
+       record was ever written anywhere, while ``explain audit
+       <profile>`` said the ledger was.  The ledger is per-session
+       workspace state (``trace.ledger`` resolves against the session's
+       own workspace), which is §4.2's criterion 3: runner-tier.
     3. No ``on_progress`` callback on ``expose_all`` — runner has no
        client event sink for per-plugin init progress (the daemon's
        ``_emit_init_progress`` doesn't apply).
@@ -519,10 +526,20 @@ def _configure_runtime_plugins(
         permission_plugin = PermissionPlugin()
         permission_plugin.initialize(permission_init_config)
 
-    # Step 9: wire onto the runtime.  ``ledger=None`` because token
-    # accounting is daemon-tier per §4.2.
+    # Step 9: wire onto the runtime, with a ledger of the runner's own.
+    # ``None`` here was the reason a runner-served session -- the default
+    # path -- wrote no ``response`` and no ``permission-check`` record:
+    # ``JaatoSession._record_token_usage`` returns on a missing ledger
+    # and ``ToolExecutor`` is built with ``ledger=self._runtime.ledger``,
+    # so ``trace.ledger`` and ``record_keeping.integrity`` were parsed,
+    # validated, rendered and enforced by nothing (the #735 shape).  The
+    # path and the integrity posture are read per record through the
+    # session-scoped env this bootstrap already applied, so one ledger
+    # per runtime is one file per session exactly as ``explain audit``
+    # states.  The daemon keeps its own ledger for the in-process path.
+    from shared.token_accounting import TokenLedger
     with timer.stage("configure_plugins"):
-        runtime.configure_plugins(registry, permission_plugin, None)
+        runtime.configure_plugins(registry, permission_plugin, TokenLedger())
 
     # Bootstrap timing report (when enabled).  Mirrors daemon-side
     # `server/core.py:2213-2245` format so operators see the same

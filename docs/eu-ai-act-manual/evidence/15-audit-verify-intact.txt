@@ -1,0 +1,6 @@
+$ jaato-doctor --audit-verify .jaato/logs/ledger.jsonl
+jaato SDK doctor
+────────────────────────────────────────────────────────────
+✔ PASS  audit chain ledger.jsonl  2 record(s), chain intact -- the file was not edited in place.  It does NOT prove who wrote it: a writer holding the file can re-chain from any point.
+────────────────────────────────────────────────────────────
+OK: 0 fail, 0 warn, 1 checks

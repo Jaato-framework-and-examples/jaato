@@ -1,0 +1,3 @@
+$ cat .jaato/logs/ledger.jsonl
+{"prompt_tokens": 12, "output_tokens": 7, "total_tokens": 19, "user_id": "root", "stage": "response", "ts": 1789774143.6695824, "iso_ts": "2026-09-18T23:29:03.669582Z", "event_index": 0, "internal_tokens": 0, "prev_digest": "genesis", "digest": "3b780de0a309f557e6544128d75a91b3d140002478fc0c01665ceba8e5e2d405"}
+{"prompt_tokens": 12, "output_tokens": 7, "total_tokens": 19, "user_id": "root", "stage": "response", "ts": 1789774143.7204533, "iso_ts": "2026-09-18T23:29:03.720453Z", "event_index": 1, "internal_tokens": 0, "prev_digest": "3b780de0a309f557e6544128d75a91b3d140002478fc0c01665ceba8e5e2d405", "digest": "eb82b9690cb4204e1611b78233f53ca2f0720a6db9c8e94ee12dc2f2386bad4a"}

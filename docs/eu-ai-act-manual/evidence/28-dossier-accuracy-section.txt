@@ -1,0 +1,18 @@
+$ sed -n '/^## 4/,/^## 5/p' docs/annex-iv-screener.md
+## 4. Description of the appropriateness of the performance metrics
+
+Measured by `jaato-eval` from `/srv/eval-results.jsonl` (results format `1`, 4 arms).
+
+> The `judge` grader is one language model scoring another's output, and it is not a calibrated instrument.
+
+| Task | Profile set | Graders | Arms | Exercised | Pass rate | Pass | Fail | Blocked | Threshold |
+|---|---|---|---|---|---|---|---|---|---|
+| ticket-triage | screener | `script`, `judge` | 4 | 4 | 75% | 3 | 1 | 0 | **TODO** |
+
+_Pass rate excludes blocked arms from its denominator: a blocked arm was never exercised, so it is neither a pass nor a failure of the system under test. A rate of `—` means every arm in that cell blocked, which is not `0%`._
+
+> **TODO — the framework cannot supply this.** Every row's **Threshold** is the accuracy level you declare as appropriate to the intended purpose (Article 15(3)); choosing it, and choosing which metrics are the relevant ones, is the provider's call and not a measurement this harness can make. State the threshold beside each metric and say what happens when a run falls below it.
+>
+> Left in rather than omitted: an absent section in a legal document reads as *nothing to declare*.
+
+Produced by: `jaato-sdk 0.23.0` from `/srv/venv/jaato_sdk/__init__.py`.

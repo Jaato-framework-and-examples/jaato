@@ -1,0 +1,8 @@
+$ jaato-scaffold integration claude-code --workspace /srv/acme-new && grep -n 'oversight\|explain audit\|dossier\|regulatory\|record_keeping' .claude/skills/jaato-sdk/SKILL.md
+75:jaato-scaffold explain oversight [<profile>] # the HUMAN-OVERSIGHT measures (EU AI Act Art. 14), read from their enforcers
+76:jaato-scaffold explain audit [<profile>]     # the AUDIT RECORD contract (Arts. 12, 19): what is logged, where, kept how long
+124:`gitignore`, `dossier`.**
+147:`regulatory:` (the Art. 6(4) determination, the provider, whether persons
+148:interact with it), `trace.ledger` and `record_keeping:` (Arts. 12 and 19) are
+151:`record_keeping_inert`, `regulatory_undeclared`), and read back by `explain
+152:oversight <profile>` and `explain audit <profile>`. `new dossier --profile

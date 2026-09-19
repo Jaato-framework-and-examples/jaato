@@ -1,0 +1,21 @@
+$ grep <id> .jaato/memories/curated.jsonl | jq '{id, maturity, generated_by, curated_by}'
+{
+  "id": "mem_20260918_232940_9806",
+  "maturity": "validated",
+  "generated_by": {
+    "kind": "ai",
+    "provider": "echo",
+    "model": "echo",
+    "session_id": "20260918_232935",
+    "agent_id": "main"
+  },
+  "curated_by": {
+    "at": "2026-09-18T23:29:54.140359+00:00",
+    "kind": "ai",
+    "provider": "echo",
+    "model": "echo",
+    "session_id": "20260918_232948",
+    "agent_id": "main",
+    "agent": "main"
+  }
+}

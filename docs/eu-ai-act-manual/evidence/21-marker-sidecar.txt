@@ -1,0 +1,42 @@
+$ python -c '...mark_output(OutputPayload(chart.png, image/png, generated_by=...))'
+marked=True  provenance sidecar written to /srv/marker/chart.png.provenance.json
+
+$ cat chart.png.provenance.json
+{
+  "assertions": [
+    {
+      "data": {
+        "actions": [
+          {
+            "action": "c2pa.created",
+            "digitalSourceType": "http://cv.iptc.org/newscodes/digitalsourcetype/trainedAlgorithmicMedia"
+          }
+        ]
+      },
+      "label": "c2pa.actions"
+    }
+  ],
+  "conformance": "c2pa-shaped-unsigned",
+  "framework": {
+    "name": "jaato",
+    "version": "0.16.0"
+  },
+  "generated_by": {
+    "agent_id": "main",
+    "kind": "ai",
+    "model": "openai/gpt-image-1",
+    "provider": "openrouter",
+    "session_id": "20260918_212513"
+  },
+  "jaato_output_marker": "1",
+  "marked_at": "2026-09-18T23:29:35Z",
+  "signature": null,
+  "subject": {
+    "media_type": "image/png",
+    "name": "chart.png",
+    "sha256": "497790947d4666760ce38f3c00e852c71fdb66cae849bae8e9ede352719e1581",
+    "size": 70
+  }
+}
+
+text/plain -> marked=False  mime 'text/plain' is outside this marker's set ['image/', 'application/pdf']

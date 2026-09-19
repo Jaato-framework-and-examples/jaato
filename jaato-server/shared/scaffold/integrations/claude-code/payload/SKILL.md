@@ -72,6 +72,12 @@ jaato-scaffold explain provider <name>       # capabilities, knobs BY LAYER, qui
 jaato-scaffold explain profile               # every profile key + its INHERITANCE rule
 jaato-scaffold explain completion            # the completion-gate contract (output side)
 jaato-scaffold explain prefetch              # the {{!py:...}} contract (input side)
+jaato-scaffold explain oversight [<profile>] # the HUMAN-OVERSIGHT measures (EU AI Act Art. 14), read from their enforcers
+jaato-scaffold explain audit [<profile>]     # the AUDIT RECORD contract (Arts. 12, 19): what is logged, where, kept how long
+jaato-scaffold explain env [<filter>]        # every env var the daemon + plugins READ, with its typed profile key
+jaato-scaffold explain events [<filter>]     # the client/server event protocol
+jaato-scaffold explain agents --workspace DIR   # the PERSONA layer (.jaato/agents/)
+jaato-scaffold explain services --workspace DIR # named HTTP APIs (.jaato/services/)
 jaato-scaffold explain sets --workspace DIR  # profile sets present + what each pins
 jaato-scaffold explain clients               # IPCClient vs IPCRecoveryClient
 jaato-scaffold explain transports            # IPC vs WS, daemon flags, auth contract
@@ -115,7 +121,7 @@ environment.
 
 Generate rather than hand-write. Archetypes: **`profile-set`, `cascade`,
 `client`, `fire`, `host-tools`, `observer`, `processor`, `sweep`,
-`gitignore`.**
+`gitignore`, `dossier`.**
 
 ```
 jaato-scaffold new <archetype> --workspace DIR [--provider P --model M] [--recoverable]
@@ -136,6 +142,18 @@ a mistyped `api_params.temprature`, an unknown plugin, a quirk the provider does
 not honour. `new` runs its own output back through `validate` (profiles) or a
 compile check (clients), so generated output is valid by construction. `--json`
 on any verb for machine consumption.
+
+**The EU AI Act keys are profile keys, and the tools already know them.**
+`regulatory:` (the Art. 6(4) determination, the provider, whether persons
+interact with it), `trace.ledger` and `record_keeping:` (Arts. 12 and 19) are
+documented by `explain profile`, emitted commented-out by `new profile-set`,
+checked by `validate` (`disclosure_absent`, the `high_risk_*` errors,
+`record_keeping_inert`, `regulatory_undeclared`), and read back by `explain
+oversight <profile>` and `explain audit <profile>`. `new dossier --profile
+<name>` writes the Annex IV skeleton from them; `--component` writes the
+Art. 25(4) pack for jaato itself. `jaato-doctor --incidents` and
+`--audit-verify` read the records a session wrote. The manual with a capture
+of each control is `docs/eu-ai-act-manual.md` in the framework repository.
 
 **Never reverse-engineer the generator.** `explain archetype <name>` states what
 `new` writes, what is placeholder versus recipe, and `--dry-run` shows the exact

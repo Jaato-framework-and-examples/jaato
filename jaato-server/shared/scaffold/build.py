@@ -1802,7 +1802,46 @@ def _base_profile_yaml(agent: str) -> str:
         f"name: _base_{agent}\n"
         f"description: {agent} stage (base; bind provider/model in a set).\n"
         f"plugins: []  # choose plugins — see `jaato-scaffold explain plugins`\n"
+        + "\n".join(_compliance_example()) + "\n"
     )
+
+
+def _compliance_example() -> List[str]:
+    """The EU AI Act keys, emitted COMMENTED OUT in the tier-1 base — and why.
+
+    A workspace scaffolded the documented way used to start with no
+    ``regulatory:`` declaration, no ledger and no retention, and ``validate``
+    had nothing to say about it: ``disclosure_absent`` fires on a
+    persona-bound profile and ``high_risk_*`` under a declared class, and a
+    fresh set is neither.  The only surface that would have told the author
+    the keys exist was ``explain profile``, which they have to think to run
+    -- the same discoverability gap ``api_params`` and ``model_tiers`` earn
+    their commented examples for.
+
+    Commented rather than live, and it has to be: a live ``regulatory:``
+    with no fields is a determination nobody made (Art. 6(4) makes it the
+    provider's, and the framework never infers one), and a live
+    ``record_keeping:`` changes what DELETE means for the workspace.  The
+    tier-1 base is the right home because the block describes the
+    APPLICATION, not the model binding a set profile carries.
+    """
+    return [
+        "# EU AI Act (Regulation (EU) 2024/1689) — declare, never inferred.",
+        "# Uncomment and fill in; `jaato-scaffold validate` then checks it and",
+        "# `explain oversight <profile>` / `explain audit <profile>` say what it armed.",
+        "# regulatory:",
+        "#   intended_purpose: <one sentence: what this system is for>",
+        "#   risk_class: minimal          # minimal | limited | high (Art. 6(4), yours to determine)",
+        "#   interacts_with_persons: true # true: the AI announces itself (Art. 50(1))",
+        "#   provider: {name: <your organisation>, contact: <email>}",
+        "# trace:",
+        "#   ledger: .jaato/logs/ledger.jsonl            # every model round trip + verdict (Art. 12)",
+        "#   session_log: .jaato/logs/session_trace.jsonl",
+        "# record_keeping:",
+        "#   retention_days: 180                   # Art. 19(1): keep the logs; 0 = until deleted",
+        "#   conversation_retention_days: 30       # the session record may go sooner",
+        "#   integrity: sha256-chain               # tamper evidence; `jaato-doctor --audit-verify`",
+    ]
 
 
 def _temperature_example(provider: str) -> List[str]:
@@ -1967,7 +2006,8 @@ def _report_revalidation(diags) -> int:
     for d in diags:
         loc = f" @ {d.where}" if d.where else ""
         tier = f"[{d.tier}] " if getattr(d, "tier", None) else ""
-        print(f"  [{d.severity}] {tier}{d.profile}: {d.code}: {d.message}{loc}")
+        who = f"{d.profile}: " if getattr(d, "profile", None) else ""
+        print(f"  [{d.severity}] {tier}{who}{d.code}: {d.message}{loc}")
     if theirs:
         print(f"\nnote: {len(theirs)} finding(s) above are in your USER tier "
               "(~/.jaato/profiles), not in the generated set — shown for "

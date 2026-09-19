@@ -2271,7 +2271,7 @@ The Path C fix closed the `_connected` guard.  The next guard fires immediately 
 | 6. `registry.set_workspace_path(...)` | **MISSING** | Broadcast to plugins (CLI, LSP, MCP, file_edit, etc. all consume).  Only call if `envelope.workspace_path` is non-None (headless sessions skip). |
 | 7. `registry.set_config_root(...)` | **MISSING** | Same shape; only call if `envelope.config_root` is non-None. |
 | 8. `PermissionPlugin()` + `initialize(...)` | **MISSING** | Construct permission plugin with `policy: {defaultPolicy: "ask", whitelist/blacklist: empty}` — the daemon's default.  Profile-supplied `plugin_configs["permission"]` overrides aren't currently in the envelope; this is a **secondary gap** (see Q5 below). |
-| 9. `runtime.configure_plugins(registry, permission_plugin, ledger=None)` | **MISSING** | The Layer-4 trigger.  Ledger is daemon-side per §4.2; pass `None` runner-side.  Reliability plugin similarly daemon-side; pass `None`. |
+| 9. `runtime.configure_plugins(registry, permission_plugin, ledger=None)` | **MISSING** | The Layer-4 trigger.  Ledger is daemon-side per §4.2; pass `None` runner-side.  *(Superseded: the runner now constructs its own `TokenLedger` — the daemon never received a runner session's records, so `None` meant no ledger at all; see `server/runner/session.py` Step 9.)*  Reliability plugin similarly daemon-side; pass `None`. |
 
 **Q4 — Are the dependencies tractable inside `bootstrap_session`?**
 

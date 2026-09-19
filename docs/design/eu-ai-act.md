@@ -58,6 +58,10 @@ re-deriving the framework's behaviour from its source.
 
 ## Status & verification disclaimer
 
+> The mechanisms below are shown doing their job, with a capture of each from a
+> live run, in [the evidence manual](../eu-ai-act-manual.md).
+
+
 The Act was read from the Official Journal text at EUR-Lex
 (CELEX:32024R1689, English), fetched 2026-09-18; article quotations below are
 from that text. The Omnibus amendments are taken from secondary sources (law
