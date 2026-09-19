@@ -21,7 +21,12 @@ classifiers = [
 ]
 dependencies = [
     # --- Core (always installed) ---
-    "jaato-sdk",  # SDK protocol: base plugin classes, type system (Message, ToolSchema, ProviderResponse), event definitions
+    # Floor = the SDK version this repo ships, not the oldest that happens to
+    # work: jaato-server imports SDK symbols unconditionally from seven
+    # provider modules, so a resolver picking an older SDK fails at provider
+    # import with an error naming neither package (#1055).  Guarded by
+    # shared/tests/test_sdk_floor_is_the_sdk_we_ship.py.
+    "jaato-sdk>=0.23.0",  # SDK protocol: base plugin classes, type system (Message, ToolSchema, ProviderResponse), event definitions
     "requests",  # HTTP fallback client: OAuth token flows, permission/reference/todo channels, Kerberos proxy support
     "mcp[cli]",  # MCP plugin: stdio-based MCP client for connecting to external MCP tool servers
     "google-api-core",  # Core error handling: retry_utils.py rate-limit detection, token_accounting.py

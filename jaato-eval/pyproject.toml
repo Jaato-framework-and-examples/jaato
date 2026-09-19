@@ -40,7 +40,9 @@ dependencies = [
     # require a daemon, so the offline half — manifest, fixture, script and
     # processor graders, results, report — remains testable without one;
     # what changed is that it needs the library, not a running server.
-    "jaato-sdk",
+    # Floor = the SDK version this repo ships (#1055); see
+    # jaato-server/shared/tests/test_sdk_floor_is_the_sdk_we_ship.py.
+    "jaato-sdk>=0.23.0",
 ]
 
 [project.optional-dependencies]
