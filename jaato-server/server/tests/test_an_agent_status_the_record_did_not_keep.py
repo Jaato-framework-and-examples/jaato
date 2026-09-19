@@ -137,12 +137,40 @@ def test_the_error_rides_along() -> None:
 # ----------------------------------------------------------------------
 
 
+def _is_emit_call(node: ast.AST) -> bool:
+    """Is this a call to ``.emit(...)`` / ``emit(...)``?"""
+    if not isinstance(node, ast.Call):
+        return False
+    fn = node.func
+    name = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", "")
+    return name == "emit"
+
+
+def _claims_a_new_status(call: ast.Call) -> bool:
+    """Does this emit call CONSTRUCT a status rather than re-read one?
+
+    The attach replay passes ``status=agent.status`` -- a read of the record,
+    not a new claim about it -- so it is excluded by construction rather than
+    by being named.
+    """
+    for arg in call.args:
+        if not isinstance(arg, ast.Call):
+            continue
+        if getattr(arg.func, "id", "") != "AgentStatusChangedEvent":
+            continue
+        status = {k.arg: k.value for k in arg.keywords}.get("status")
+        if isinstance(status, ast.Attribute) and status.attr == "status":
+            continue
+        return True
+    return False
+
+
 def _status_emits_outside_the_door(source: str | None = None) -> List[int]:
     """Lines constructing an ``AgentStatusChangedEvent`` inside an emit call.
 
-    ``emit_agent_status``'s own body is the one legitimate site, and the
-    attach replay is excluded by construction: it does not CONSTRUCT a new
-    status, it re-reads the record through a per-client emitter.
+    ``emit_agent_status``'s own body is the one legitimate site; everything
+    else that reports a status must go through it, or the record and the wire
+    can disagree about an agent again (#1139).
     """
     tree = ast.parse(source if source is not None else CORE.read_text())
     door = next(
@@ -150,28 +178,13 @@ def _status_emits_outside_the_door(source: str | None = None) -> List[int]:
         if isinstance(n, ast.FunctionDef) and n.name == "emit_agent_status"
     )
     inside = {id(n) for n in ast.walk(door)}
-
-    offenders: List[int] = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        fn = node.func
-        name = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", "")
-        if name not in {"emit"}:
-            continue
-        if id(node) in inside:
-            continue
-        for arg in node.args:
-            if (isinstance(arg, ast.Call)
-                    and getattr(arg.func, "id", "") == "AgentStatusChangedEvent"):
-                # The replay passes ``status=agent.status`` -- a read of the
-                # record, not a new claim about it.
-                kws = {k.arg: k.value for k in arg.keywords}
-                st = kws.get("status")
-                if isinstance(st, ast.Attribute) and st.attr == "status":
-                    continue
-                offenders.append(node.lineno)
-    return offenders
+    return [
+        node.lineno
+        for node in ast.walk(tree)
+        if _is_emit_call(node)
+        and id(node) not in inside
+        and _claims_a_new_status(node)
+    ]
 
 
 def test_every_status_report_goes_through_the_door() -> None:
