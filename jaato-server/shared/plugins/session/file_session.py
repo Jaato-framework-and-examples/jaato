@@ -14,7 +14,9 @@ from typing import Any, Callable, Dict, List, Optional
 from jaato_sdk.plugins.base import ToolPlugin, UserCommand, CommandParameter, CommandCompletion, PromptEnrichmentResult
 from jaato_sdk.plugins.model_provider.types import ToolSchema
 from shared.session_id import validate_session_id
+from . import listing_cache
 from .base import SessionPlugin, SessionConfig, SessionState, SessionInfo
+from .listing_cache import SessionListingCache
 from .serializer import (
     serialize_session_state,
     deserialize_session_state,
@@ -63,6 +65,13 @@ class FileSessionPlugin:
 
         # Callback for description changes (for notifying SessionManager)
         self._on_description_changed: Optional[Callable[[str, str], None]] = None
+
+        # Memo of each record's header, keyed on the bytes it was parsed
+        # from (#1137).  Built here rather than in ``initialize()`` because
+        # it is valid before any configuration arrives: every entry is
+        # validated against a ``stat``, so it cannot outlive the record it
+        # describes whatever storage path is set later.
+        self._listing_cache = SessionListingCache()
 
     @property
     def name(self) -> str:
@@ -131,7 +140,11 @@ class FileSessionPlugin:
 
     def shutdown(self) -> None:
         """Clean up resources."""
-        pass
+        # The listing memo (#1137) is the one resource this plugin holds.
+        # Every entry is re-validated against a ``stat``, so keeping it
+        # would be correct rather than stale -- it is dropped because
+        # nothing will read it again, not because it could mislead.
+        self._listing_cache.clear()
 
     def reset_for_next_session(self) -> None:
         """Clear per-session state for the cascade-sharing arc (Phase 1).
@@ -154,6 +167,13 @@ class FileSessionPlugin:
         - ``_config``: plugin config from profile YAML.
         - ``_client``: re-wired by next session's ``set_client()`` hook.
         - callbacks (``_on_description_changed``): re-wired by next session.
+        - ``_listing_cache``: describes the RECORDS ON DISK, not this
+          session, and the next stage of a cascade lists the same directory
+          -- exactly the litmus test above.  Clearing it would make every
+          stage boundary pay a cold listing to re-derive headers that had
+          not moved, which is the cost #1137 is about.  It cannot go stale
+          across the boundary either: every entry is re-validated against a
+          ``stat`` before it is served.
 
         Note: ``initialize()`` already resets these same attributes; this
         method exists as a NAMED contract for the cascade-sharing pool
@@ -285,27 +305,103 @@ class FileSessionPlugin:
 
         Returns:
             List of SessionInfo objects, sorted by updated_at descending.
+
+        Note:
+            Each record is parsed only while its bytes are new to this
+            plugin instance.  Parsing a record reads the WHOLE file to keep
+            a header of nine scalars, so the cost of a listing tracks
+            transcript length and nothing bounds it (#1137) -- measured at
+            1.43 s for 50 sessions of 900 turns.  A listing is asked for far
+            more often than a record changes, so a ``stat``-keyed memo
+            (:class:`~.listing_cache.SessionListingCache`) answers for every
+            record whose bytes it has already parsed.  The parse itself is
+            unchanged, and a memo miss does exactly what this method always
+            did, so the record on disk stays the only place a header lives.
         """
         target_dir = storage_dir or self._storage_path
-        sessions = []
+        sessions: List[SessionInfo] = []
 
         if not target_dir.exists():
             return sessions
 
+        directory = str(target_dir)
+        seen: List[str] = []
         for file_path in target_dir.glob("*.json"):
             try:
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                info = deserialize_session_info(data)
-                sessions.append(info)
-            except (json.JSONDecodeError, KeyError, ValueError) as e:
-                # Skip corrupted files
-                print(f"[SessionPlugin] Warning: skipping corrupted session file {file_path}: {e}")
+                st = file_path.stat()
+            except OSError:
+                # Vanished between the glob and the stat (a concurrent
+                # ``delete``).  It is not in the listing and not in the memo.
                 continue
+            seen.append(file_path.name)
+            cached = self._listing_cache.lookup(directory, file_path.name, st)
+            if cached is not listing_cache.MISS:
+                # ``None`` is a remembered FAILED parse, not an absent entry:
+                # the record was read, could not be used, and has not changed
+                # since.  Re-reading it every poll bought nothing but a
+                # repeated warning.
+                if cached is not None:
+                    sessions.append(cached)
+                continue
+            info = self._read_session_info(file_path, directory)
+            if info is not None:
+                sessions.append(info)
+
+        # Bound the memo by what is on disk: a record this listing did not
+        # find is one this directory no longer holds.
+        self._listing_cache.retain(directory, seen)
 
         # Sort by updated_at descending (most recent first)
         sessions.sort(key=lambda s: s.updated_at, reverse=True)
         return sessions
+
+    def _read_session_info(
+        self,
+        file_path: Path,
+        directory: str,
+    ) -> Optional[SessionInfo]:
+        """Parse one record's header and memoise the outcome.
+
+        Both outcomes are memoised, because they are different facts about
+        the same bytes and a poll should re-derive neither: a parsed header,
+        or ``None`` for a record that could not be parsed.
+
+        The stamp comes from ``fstat`` on the OPEN HANDLE rather than from a
+        ``stat`` of the path, so it names the inode this call actually read:
+        :meth:`save` renames a fresh file into position, so the path can
+        name a different inode a moment later, and a verdict recorded
+        against bytes nobody parsed is exactly the stale answer the stamp
+        exists to prevent.  The observation clock is sampled BEFORE the read
+        for the same reason: it must not make an entry look older, and so
+        safer, than it is.
+
+        Args:
+            file_path: The record to read.
+            directory: Storage directory, as the caller spells it -- the
+                memo's first key.
+
+        Returns:
+            The parsed :class:`SessionInfo`, or ``None`` when the record is
+            corrupt (already reported, and skipped by the listing).
+        """
+        observed_ns = listing_cache.now_ns()
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                st = os.fstat(f.fileno())
+                data = json.load(f)
+            info = deserialize_session_info(data)
+        except OSError:
+            # Vanished, or unreadable, between the caller's stat and this
+            # open.  NOTHING is memoised: this call never identified the
+            # bytes it failed on, so it has no verdict to record about them.
+            return None
+        except (json.JSONDecodeError, KeyError, ValueError) as e:
+            # Skip corrupted files
+            print(f"[SessionPlugin] Warning: skipping corrupted session file {file_path}: {e}")
+            self._listing_cache.store(directory, file_path.name, st, observed_ns, None)
+            return None
+        self._listing_cache.store(directory, file_path.name, st, observed_ns, info)
+        return info
 
     def delete(
         self,
