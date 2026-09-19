@@ -5927,6 +5927,18 @@ agent's voice and telling yours apart from its is the whole point; the pencil
 is always drawn, never hover-gated, the lesson the Files panel's `hide` /
 `ignore` actions already taught.
 
+**And the daemon answers the other half of that question.** #1138's `awaiting`
+/ `awaiting_since` (protocol 1.17) is the only way a client working in session
+A learns that B is blocked on a permission ASK or a clarification — prompt
+events go to that session's attached clients, and a client is attached to one
+at a time — so the row carries it as a `⚠` and a `waiting 4 min: permission`
+line, and the section header counts **what needs a person** ahead of what
+carries a note. Two rules the renderer holds to, both of them the protocol's
+own wording: an absent `awaiting_since` is *not measured*, so the duration is
+dropped rather than rendered as "just now"; and an absent `awaiting` is
+"nothing is waiting as far as this daemon says", never a positive no — an
+unloaded session is never reported, and a daemon below 1.17 sends nothing.
+
 Tests: `test/notes.test.ts` + `test/routes.test.ts` (BFF), `app/notes.test.ts`
 (both stores, and the text normalisation the two sides must agree on), and
 `components/prompts/ExitPrompt.test.tsx`, which is deliberately two cases and

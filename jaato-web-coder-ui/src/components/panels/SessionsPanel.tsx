@@ -27,6 +27,22 @@ import { useJaato } from "@/store/store";
 import type { SessionSummary } from "@/protocol/sessions";
 import { NoteEditor } from "./NoteEditor";
 
+/**
+ * ``waiting 4 min`` for a session blocked on a human, from the row's own
+ * ``awaiting_since``.
+ *
+ * An ABSENT ``awaiting_since`` is not "just now" -- the daemon documents it
+ * as not measured -- so the duration is dropped rather than rendered as
+ * zero, and what survives is the kind, which is the actionable half.
+ */
+export function awaitingLabel(kind: string, since: string | undefined, now: number = Date.now()): string {
+  const ms = since ? now - Date.parse(since) : NaN;
+  if (!Number.isFinite(ms) || ms < 0) return `waiting: ${kind}`;
+  const mins = Math.floor(ms / 60000);
+  const span = mins < 1 ? "just now" : mins < 60 ? `${mins} min` : `${Math.floor(mins / 60)}h ${mins % 60}m`;
+  return `waiting ${span}: ${kind}`;
+}
+
 /** The last path segment, which is what tells two same-shaped ids apart. */
 export function workspaceLabel(workspacePath: string): string {
   const parts = workspacePath.split(/[\\/]/).filter(Boolean);
@@ -58,11 +74,15 @@ export function SessionRow({ sess, onAttach, showWorkspace = false }: SessionRow
   const note = useJaato((s) => s.notes[sess.id]?.text);
   const first = noteFirstLine(note);
   const ws = showWorkspace ? workspaceLabel(sess.workspacePath) : "";
+  // The one fact this panel exists for that the note cannot supply: the
+  // daemon says THIS session is blocked on a person (protocol 1.17), and
+  // a client attached to another session learns it no other way.
+  const waiting = sess.awaiting ? awaitingLabel(sess.awaiting, sess.awaitingSince) : "";
   const subtitle = [sess.description || sess.name, ws, sess.provider ? `${sess.provider}/${sess.model}` : "", sess.turnCount ? `${sess.turnCount} turns` : ""].filter(Boolean).join(" · ");
   return (
     <div className="border-t hairline">
       <div className="flex gap-3 py-2.5 items-start">
-        <span className={`pt-0.5 ${sess.isLoaded ? "text-success" : "text-text-muted"}`} aria-hidden="true">{sess.isLoaded ? "●" : "○"}</span>
+        <span className={`pt-0.5 ${waiting ? "text-warning" : sess.isLoaded ? "text-success" : "text-text-muted"}`} aria-hidden="true">{waiting ? "⚠" : sess.isLoaded ? "●" : "○"}</span>
         {/* The row's own aria-label used to override its content, so a screen
             reader was told the id and nothing else.  The label names the
             action; the text under it is readable in its own right. */}
@@ -74,6 +94,7 @@ export function SessionRow({ sess, onAttach, showWorkspace = false }: SessionRow
           className="min-w-0 flex-1 text-left disabled:cursor-default"
         >
           <span className="block font-mono text-[13px]">{sess.id}</span>
+          {waiting && <span className="block text-[13px] text-warning">{waiting}</span>}
           {subtitle && <span className="block text-[13px] text-text-muted truncate">{subtitle}</span>}
           {first && <span className="block chrome text-[13px] truncate" title={note}>✎ {first}</span>}
         </button>
@@ -127,9 +148,19 @@ export function SessionsPanel() {
   );
 }
 
-/** ``2 of 5 noted`` for the section header's ``value`` slot, or ``null`` when there is nothing to count. */
+/**
+ * The section header's ``value`` slot: how many sessions want a PERSON when
+ * any do, else how many carry a note.
+ *
+ * Waiting outranks noted because it is the question with a deadline -- a
+ * session blocked on a permission ASK is spending nothing and finishing
+ * nothing until somebody answers, and the rail is where that is visible
+ * from inside another session.
+ */
 export function notedSummary(sessions: SessionSummary[], notes: Record<string, { text: string }>): string | null {
   if (sessions.length === 0) return null;
+  const waiting = sessions.filter((s) => s.awaiting).length;
+  if (waiting > 0) return `${waiting} waiting on you`;
   const noted = sessions.filter((s) => noteFirstLine(notes[s.id]?.text)).length;
   return `${noted} of ${sessions.length} noted`;
 }

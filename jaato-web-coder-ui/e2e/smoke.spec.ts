@@ -129,7 +129,10 @@ test("`session list` prints the daemon's listing; `session attach` completes ids
   await composer(page).fill("session list");
   await composer(page).press("Enter");
   await expect(page.getByText("▶ current  ● loaded  ○ on disk")).toBeVisible();
-  await expect(page.getByText(/● 20260916_090000 - fix the budget panel \[anthropic\/claude-sonnet-4\]/)).toBeVisible();
+  // The waiting marker sits between the description and the model, because
+  // #1138 added `awaiting` to the listing precisely so this command answers
+  // "which of these wants me" and not only "which of these exist".
+  await expect(page.getByText(/● 20260916_090000 - fix the budget panel \[waiting: permission\] \[anthropic\/claude-sonnet-4\]/)).toBeVisible();
 
   // Third-level completion: the ids the daemon listed, filtered as you type.
   await composer(page).fill("session attach 2026091");
@@ -737,4 +740,16 @@ test("a note written on the exit plate survives Escape, is kept, and is the rail
   const rail = page.getByRole("region", { name: "Sessions" });
   await expect(rail.getByLabel("This session")).toHaveValue(/grace period/);
   await expect(rail.getByText("Notes are kept in this browser only", { exact: false })).toBeVisible();
+});
+
+test("a session blocked on a person says so in the rail, from another session", async ({ page }) => {
+  // The one fact the rail exists for that a note cannot supply: prompt
+  // events reach only that session's attached clients, so working in one
+  // session is exactly when you cannot otherwise learn another wants you.
+  await openSession(page);
+  await page.getByRole("button", { name: "Toggle your sessions and their notes" }).click();
+  const rail = page.getByRole("region", { name: "Sessions" });
+  await expect(rail.getByText(/waiting 4 min: permission/)).toBeVisible();
+  // And the header counts what needs a person ahead of what carries a note.
+  await expect(page.getByText("1 waiting on you")).toBeVisible();
 });

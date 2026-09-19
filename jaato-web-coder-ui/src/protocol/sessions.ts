@@ -24,6 +24,19 @@ export interface SessionSummary {
   turnCount: number;
   workspacePath: string;
   createdBy?: string;
+  /**
+   * ``"permission"`` / ``"clarification"`` when that session is blocked on
+   * an unanswered human prompt (protocol 1.17), undefined otherwise.
+   *
+   * It is the ONLY way a client working in session A learns that B wants
+   * it: prompt events go to that session's attached clients and a client
+   * is attached to one at a time.  Absent means "nothing is waiting, as
+   * far as this daemon says" -- never a positive no, since a daemon below
+   * 1.17 sends nothing and an unloaded session is never reported.
+   */
+  awaiting?: string;
+  /** When that prompt was raised, ISO-8601 UTC.  Absent means NOT MEASURED, never "just now". */
+  awaitingSince?: string;
 }
 
 export function normalizeSessionSummary(raw: unknown): SessionSummary | null {
@@ -43,6 +56,8 @@ export function normalizeSessionSummary(raw: unknown): SessionSummary | null {
     turnCount: Number(o.turn_count ?? 0) || 0,
     workspacePath: String(o.workspace_path ?? ""),
     createdBy: o.created_by ? String(o.created_by) : undefined,
+    awaiting: typeof o.awaiting === "string" && o.awaiting ? o.awaiting : undefined,
+    awaitingSince: typeof o.awaiting_since === "string" && o.awaiting_since ? o.awaiting_since : undefined,
   };
 }
 
@@ -67,6 +82,7 @@ export function formatSessionList(sessions: SessionSummary[], notes: Record<stri
     const desc = s.description || s.name;
     const parts = [
       `  ${status} ${s.id}${desc && desc !== s.id ? ` - ${desc}` : ""}`,
+      s.awaiting ? ` [waiting: ${s.awaiting}]` : "",
       s.provider ? ` [${s.provider}/${s.model}]` : "",
       s.clientCount ? `, ${s.clientCount} client(s)` : "",
       s.turnCount ? `, ${s.turnCount} turns` : "",

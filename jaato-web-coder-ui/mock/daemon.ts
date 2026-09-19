@@ -86,7 +86,11 @@ function finishStaging(c: Client): void {
 /** What ``session.list`` answers: the daemon's free-form per-session dicts. */
 function sessionListing(c: Client): Record<string, unknown>[] {
   return [
-    { id: "20260916_090000", name: "", description: "fix the budget panel", model_provider: "anthropic", model_name: "claude-sonnet-4", is_loaded: true, is_current: c.sessionId === "20260916_090000", client_count: 1, turn_count: 3, workspace_path: "/srv/workspaces/project-a" },
+    // `awaiting` / `awaiting_since` are protocol 1.17: the one way a client
+    // working in session A learns that B is blocked on a person.  Sent here
+    // in the daemon's own spelling, because a mock that speaks the client's
+    // vocabulary certifies a reading no real daemon produces.
+    { id: "20260916_090000", name: "", description: "fix the budget panel", model_provider: "anthropic", model_name: "claude-sonnet-4", is_loaded: true, is_current: c.sessionId === "20260916_090000", client_count: 1, turn_count: 3, workspace_path: "/srv/workspaces/project-a", awaiting: "permission", awaiting_since: new Date(Date.now() - 4 * 60_000).toISOString() },
     { id: "20260915_170000", name: "old notes", description: "", model_provider: "", model_name: "", is_loaded: false, is_current: false, client_count: 0, turn_count: 1, workspace_path: "/srv/workspaces/project-b" },
     ...(c.sessionId && !c.sessionId.startsWith("2026") ? [{ id: c.sessionId, name: "mock session", description: "", model_provider: "mock", model_name: "mock-1", is_loaded: true, is_current: true, client_count: 1, turn_count: 0, workspace_path: "/work" }] : []),
   ];
