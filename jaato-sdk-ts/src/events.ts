@@ -17415,6 +17415,24 @@ export interface RetryEvent {
 }
 /**
  * List of available sessions - for user display.
+ *
+ * Each row is a free-form dict.  Two of its keys are worth naming here
+ * because a client BRANCHES on them rather than displaying them:
+ *
+ * ``awaiting`` (protocol 1.17)
+ *     ``"permission"`` / ``"clarification"`` when that session is blocked
+ *     on an unanswered human prompt, absent otherwise.  It is the only
+ *     way a client attached to session A learns that session B wants it:
+ *     prompt events go to ``session.attached_clients``, and a client is
+ *     attached to one session at a time.  Absent on a row that is not
+ *     loaded, and on any daemon below 1.17 -- so absent means "nothing
+ *     is waiting, as far as this daemon says", never a positive "no".
+ *
+ * ``awaiting_since`` (protocol 1.17)
+ *     When that prompt was raised, ISO-8601 UTC, so a client can render
+ *     "waiting 4 min" instead of "waiting".  A separate key rather than
+ *     a widening of ``awaiting``, which stays a scalar an older client
+ *     can ignore.  Absent means NOT MEASURED, never "just now".
  */
 export interface SessionListEvent {
   type?: EventType43;

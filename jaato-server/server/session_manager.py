@@ -54,6 +54,7 @@ from shared.instruction_token_cache import InstructionTokenCache
 from shared.runtime_limits import RuntimeLimits, apply_isolated_defaults
 from shared.session_envelope import BootstrapEnvelope
 from shared.instruction_suppression import normalize_suppression
+from .awaiting import awaiting_of
 from .core import JaatoServer
 from .session_logging import set_logging_context, clear_logging_context, get_session_handler
 from .session_identity import RunnerIdentity, identity_from_server
@@ -323,6 +324,28 @@ class RuntimeSessionInfo:
     #: executing this session.  ``None`` when nothing was ever recorded;
     #: carries ``stale: True`` when it names a previous process lifetime.
     runner: Optional[Dict[str, Any]] = None
+    # #1138.  Which session is WAITING ON YOU, answered on the listing
+    # every client already polls rather than by an event that cannot reach
+    # a client attached to a different session.
+    #: ``"permission"`` / ``"clarification"`` when an unanswered prompt is
+    #: blocking this session, else ``None``.  A closed vocabulary
+    #: (:data:`server.awaiting.AWAITING_KINDS`), always ``None`` for a
+    #: persisted-only row -- a session that is not loaded cannot be waiting
+    #: on anything.
+    #:
+    #: Orthogonal to ``is_processing``, which stays ``True`` throughout: a
+    #: blocked session IS processing, and telling *working* from *waiting
+    #: on you* is what one boolean could not do.
+    awaiting: Optional[str] = None
+    #: When that prompt was raised, ISO-8601 UTC -- the same rendering as
+    #: ``created_at`` / ``last_activity`` on this row, so a client can
+    #: subtract it from its own clock and say "waiting 4 min".
+    #:
+    #: A SECOND field rather than ``awaiting`` widening into an object:
+    #: the degradation argument depends on ``awaiting`` staying a scalar an
+    #: older client can ignore.  ``None`` means NOT MEASURED (an undated
+    #: holder), never "just now".
+    awaiting_since: Optional[str] = None
 
 
 @dataclass
@@ -12253,6 +12276,14 @@ class SessionManager:
         # Overlay in-memory sessions (have more current info)
         with self._lock:
             for session in self._sessions.values():
+                # #1138: the same read as ``is_processing`` below, on the
+                # same object -- but NOT on the two fields the issue named.
+                # Those are written only by the DAEMON-side permission /
+                # clarification hooks, and all three prompt-raising plugins
+                # are ``PLUGIN_TIER = "runner"``, so on the default path the
+                # prompt is pending in the runner-RPC relay instead.
+                # ``awaiting_of`` asks the server, which reads both.
+                awaiting, awaiting_since = awaiting_of(session.server)
                 result[session.session_id] = RuntimeSessionInfo(
                     session_id=session.session_id,
                     name=session.name,
@@ -12275,6 +12306,8 @@ class SessionManager:
                         session.runner_identity.to_dict()
                         if session.runner_identity is not None else None
                     ),
+                    awaiting=awaiting,
+                    awaiting_since=awaiting_since,
                 )
 
         # Sort by last activity

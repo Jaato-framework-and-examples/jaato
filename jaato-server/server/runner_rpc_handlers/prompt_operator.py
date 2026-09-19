@@ -34,10 +34,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any, Awaitable, Callable, Dict, Optional
 
 from jaato_sdk.events import PermissionInputModeEvent, PermissionRequestedEvent
 
+from server.awaiting import oldest
 from shared.plugins.permission.types import PromptPayload, PromptResponse
 
 
@@ -104,7 +106,45 @@ class PromptOperatorHandler:
         self._emit_event = emit_event
         self._prompt_timeout = prompt_timeout
         self._pending: Dict[str, "asyncio.Future[PromptResponse]"] = {}
+        # request_id -> the wall-clock instant the ASK was raised (#1138).
+        # THIS handler is where a permission ASK is pending on the DEFAULT
+        # (runner-served) path -- the runner-side permission plugin is the
+        # one in the loop, so ``JaatoServer._pending_permission_request_id``
+        # is never written there.  ``SessionManager.list_sessions`` asks
+        # here, via :meth:`has_pending_prompt` / :meth:`pending_since`, so a
+        # session blocked on a human is visible from every other session.
+        #
+        # Same lifetime as the future, registered and dropped on the same
+        # lines -- the pattern ``ClarificationRelayHandler._question_counts``
+        # already establishes for a fact that belongs to one in-flight
+        # request.
+        self._raised_at: Dict[str, float] = {}
         self._closed = False
+
+    def has_pending_prompt(self) -> bool:
+        """Whether any permission ASK relayed through here is unanswered."""
+        return bool(self._pending)
+
+    def pending_since(self) -> Optional[float]:
+        """Epoch seconds at which the OLDEST in-flight ASK was raised.
+
+        ``None`` when nothing is in flight, and also when what is in flight
+        carries no stamp -- "not measured" rather than "just now".
+        """
+        # A SNAPSHOT, never the live containers.  This is read from the
+        # listing thread while ``handle`` registers and drops entries on the
+        # daemon's asyncio loop, so iterating either dict directly is the
+        # #938 shape -- ``RuntimeError: dictionary changed size during
+        # iteration``, raised inside a listing, for a fact the listing is
+        # only reporting.  ``.get`` for the same reason: a key can vanish
+        # between the snapshot and the lookup, and a prompt that finished
+        # while we were counting is one that is no longer pending.
+        stamps = self._raised_at
+        return oldest([
+            stamp for stamp in
+            (stamps.get(request_id) for request_id in list(self._pending))
+            if stamp is not None
+        ])
 
     async def handle(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """RPC handler entry point.
@@ -131,6 +171,7 @@ class PromptOperatorHandler:
         loop = asyncio.get_running_loop()
         fut: "asyncio.Future[PromptResponse]" = loop.create_future()
         self._pending[payload.request_id] = fut
+        self._raised_at[payload.request_id] = time.time()
 
         # Build + emit the event.  The event-emit may throw — we
         # catch and clean the futures dict so a transport-level
@@ -193,6 +234,7 @@ class PromptOperatorHandler:
             self._emit_event(input_mode_event)
         except Exception:
             self._pending.pop(payload.request_id, None)
+            self._raised_at.pop(payload.request_id, None)
             raise
 
         try:
@@ -203,6 +245,7 @@ class PromptOperatorHandler:
             return response.to_dict()
         finally:
             self._pending.pop(payload.request_id, None)
+            self._raised_at.pop(payload.request_id, None)
 
     def resolve_response(
         self,
@@ -257,6 +300,7 @@ class PromptOperatorHandler:
         if self._closed:
             return
         self._closed = True
+        self._raised_at.clear()
         for request_id, fut in list(self._pending.items()):
             if not fut.done():
                 fut.set_exception(

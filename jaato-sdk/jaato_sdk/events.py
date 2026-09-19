@@ -263,7 +263,45 @@ from pydantic import BaseModel, ConfigDict, Field
 # so an older client on a 1.16 daemon loses the event and logs a line.  No
 # SDK minimum: the direction is a NEW daemon emitting to an OLD client,
 # which cannot opt out, so a minimum would fail the wrong party.
-PROTOCOL_VERSION = "1.16"
+#
+# 1.17 -- ``awaiting`` / ``awaiting_since`` on a ``session.list`` row.  A
+# session that raises a permission ASK or a ``request_clarification`` is
+# BLOCKED until a human answers, and that fact reached only the clients
+# attached to THAT session: events go to ``session.attached_clients`` and
+# ``_client_to_session`` is 1:1, so a browser working in session A never
+# learned that session B wanted it.  ``SessionManager.broadcast_event`` is
+# not the answer either -- its docstring reserves it for events that are
+# not tied to a specific session.  So the fact rides the listing every
+# client already polls: ``awaiting`` is ``"permission"`` /
+# ``"clarification"`` / absent, and ``awaiting_since`` is when the prompt
+# was raised, ISO-8601 UTC.
+#
+# ``is_processing`` could not carry it.  A session blocked on a prompt is
+# still processing; telling WORKING from WAITING ON YOU is the whole point
+# and one boolean cannot.
+#
+# TWO fields rather than ``awaiting`` widening into ``{kind, since}``: the
+# degradation argument depends on ``awaiting`` staying a scalar, so a
+# reader doing ``typeof row.awaiting === "string"`` keeps working and a
+# reader that wants the clock opts into one more key.  The clock is not a
+# nicety -- the listing is a POLL, so without it a client can only date the
+# wait from when IT first saw the flag, which under-reports every wait that
+# predates the client and resets to zero on every reconnect.
+#
+# Additive optional fields on an already free-form row, both directions: an
+# older client ignores two keys; a newer client against an older daemon
+# reads absent, which is "nothing is waiting" -- today's behaviour, and
+# visibly no worse than today.  So no SDK minimum to refuse below.
+#
+# WHY A BUMP HERE WHEN #812's ``orphaned`` / ``runner`` TOOK NONE, on this
+# very dict: what a client DOES with the field.  Those two are diagnostics
+# a human reads.  This one gates whether a client interrupts a person, so
+# "can this daemon tell me?" is a question a client will actually ask, and
+# ``ConnectedEvent.protocol_version`` is the only way to ask it.  A client
+# that cannot distinguish "no session is waiting" from "this daemon never
+# says" reports the first when the truth is the second -- the
+# absence-of-evidence rule this tree applies everywhere else.
+PROTOCOL_VERSION = "1.17"
 
 
 # =============================================================================
@@ -1726,7 +1764,26 @@ class RetryEvent(Event):
 
 
 class SessionListEvent(Event):
-    """List of available sessions - for user display."""
+    """List of available sessions - for user display.
+
+    Each row is a free-form dict.  Two of its keys are worth naming here
+    because a client BRANCHES on them rather than displaying them:
+
+    ``awaiting`` (protocol 1.17)
+        ``"permission"`` / ``"clarification"`` when that session is blocked
+        on an unanswered human prompt, absent otherwise.  It is the only
+        way a client attached to session A learns that session B wants it:
+        prompt events go to ``session.attached_clients``, and a client is
+        attached to one session at a time.  Absent on a row that is not
+        loaded, and on any daemon below 1.17 -- so absent means "nothing
+        is waiting, as far as this daemon says", never a positive "no".
+
+    ``awaiting_since`` (protocol 1.17)
+        When that prompt was raised, ISO-8601 UTC, so a client can render
+        "waiting 4 min" instead of "waiting".  A separate key rather than
+        a widening of ``awaiting``, which stays a scalar an older client
+        can ignore.  Absent means NOT MEASURED, never "just now".
+    """
     type: EventType = Field(default=EventType.SESSION_LIST)
     sessions: List[Dict[str, Any]] = Field(default_factory=list)
     # ^ List of {id: str, name: str, created_at: str, last_active: str, ...}
