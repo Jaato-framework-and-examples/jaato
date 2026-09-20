@@ -55,6 +55,44 @@ def _decode_wake_request(
     return session_id, text, source, event_id, attachments
 
 
+
+def _json_safe(data: Any) -> Any:
+    """A rendering's structured half, reduced to what the wire can carry.
+
+    ``explain`` renderers build dicts for a CLI that prints them with
+    ``json.dumps(..., default=str)``, so a value the wire cannot encode — a
+    ``Path``, an enum, a dataclass — is normal rather than exceptional here.
+    Encoding with that same fallback and decoding back is what makes the
+    daemon's ``--json`` output the CLI's own, instead of a frame the
+    serialiser refuses and a caller left waiting for a reply that never
+    comes.
+
+    The SHAPE is preserved, never normalised: ``explain profile`` renders an
+    array, and turning it into an object here would make the daemon's
+    ``--json`` differ from the same command's local ``--json``.  Only a value
+    that cannot be encoded at all degrades, to an empty object, because a
+    frame that is never written leaves the caller waiting.
+    """
+    import json
+    try:
+        return json.loads(json.dumps(data, default=str))
+    except Exception:                             # pragma: no cover - defensive
+        return {}
+
+
+def _daemon_version() -> str:
+    """This daemon's ``jaato-server`` version, for a remote rendering's byline.
+
+    Best-effort: an answer that could not name the install is still a useful
+    answer, and a diagnostic verb must not fail on its own provenance line.
+    """
+    try:
+        from importlib.metadata import version as pkg_version
+        return pkg_version("jaato-server")
+    except Exception:                             # pragma: no cover - defensive
+        return ""
+
+
 class CommandRouter:
     """Transport-agnostic command dispatcher for the Jaato daemon.
 
@@ -432,6 +470,10 @@ class CommandRouter:
             self._handle_workspace_ignore(
                 client_id, args, workspace_path, session_id=session_id)
             return True
+        if cmd == "scaffold.explain":
+            self._handle_scaffold_explain(
+                client_id, args, workspace_path, session_id=session_id)
+            return True
         return False
 
     def _resolve_caller_workspace(
@@ -547,6 +589,91 @@ class CommandRouter:
         logger.info("workspace.ignore: client=%s %s %r in %s", client_id,
                     "added" if ignored else "removed", pattern, gitignore_path)
         answer(ok=True, ignored=ignored, gitignore_path=gitignore_path)
+
+    def _handle_scaffold_explain(
+        self, client_id: str, args: list, client_workspace: Optional[str],
+        session_id: Optional[str] = None,
+    ) -> None:
+        """Handle ``scaffold.explain [topic] [name]`` (protocol 1.18).
+
+        ``jaato-scaffold explain`` introspects the framework installed in the
+        CALLING process.  That is the whole answer while the CLI and the
+        daemon share a virtualenv, and silently wrong the moment they do not
+        — the normal shape of a deployed application: ``jaato-sdk`` in the
+        application's own ``.venv``, driving a daemon owned by a different
+        user.  There are then TWO installs, and a topic contributed through
+        ``jaato.scaffold_topics`` by a package only the daemon has (today:
+        jaato-premium's ``reactors``) exists in one of them.  The CLI's
+        refusal reads as *no such topic exists*, which sends a reader looking
+        for a feature they already have.  This verb is how the other process
+        is asked.
+
+        **One dispatch, not two.**  It calls
+        :func:`shared.scaffold.__main__.render_topic` — the same function the
+        CLI calls — so the daemon cannot grow a second opinion about what a
+        topic answers, which is the failure this seam exists to remove rather
+        than one to reproduce over a socket.
+
+        The answer always carries ``topics``: the catalog THIS install can
+        render.  A refusal that only says "unknown" is exactly as unhelpful
+        remotely as it was locally, and the caller's own catalog is by
+        construction the wrong one to list.
+
+        Every outcome answers with one ``ScaffoldExplainEvent`` — the caller
+        is blocked on a reply, so a refusal that emitted nothing would be
+        indistinguishable from a daemon that does not serve the verb, which
+        is the state the protocol floor exists to keep visible.
+        """
+        from jaato_sdk.events import ScaffoldExplainEvent
+
+        topic = (args[0] if len(args) > 0 else "") or None
+        name = (args[1] if len(args) > 1 else "") or None
+        topics: list = []
+
+        def answer(**fields: Any) -> None:
+            # `topics` rides EVERY outcome, which is what makes the event's
+            # own promise true: "which topics does this daemon have" is
+            # precisely the question a failed lookup raises, and it is the
+            # one question the caller's own catalog cannot answer.
+            self._event_sink.send_event(
+                client_id,
+                ScaffoldExplainEvent(topic=topic or "",
+                                     topics=topics,
+                                     server_version=_daemon_version(),
+                                     **fields))
+
+        try:
+            from shared.scaffold.__main__ import render_topic, scope_catalog
+        except Exception as exc:
+            # jaato-server is what serves this daemon, so the import failing
+            # is a broken install rather than a missing optional extra — but
+            # a diagnostic verb that raises is worse than one that says so.
+            logger.warning("scaffold.explain: client=%s cannot load the "
+                           "scaffold renderer: %s", client_id, exc)
+            answer(ok=False,
+                   error=f"scaffold.explain: this daemon cannot load its own "
+                         f"scaffold renderer: {exc}")
+            return
+
+        try:
+            topics = list(scope_catalog())
+        except Exception:                         # pragma: no cover - defensive
+            topics = []
+
+        workspace, _sources = self._resolve_caller_workspace(
+            client_id, client_workspace, session_id)
+
+        try:
+            ok, data, text, error = render_topic(topic, name, workspace or ".")
+        except Exception as exc:                  # pragma: no cover - defensive
+            logger.warning("scaffold.explain: client=%s topic=%r raised: %s",
+                           client_id, topic, exc)
+            answer(ok=False, error=f"scaffold.explain {topic!r}: {exc}")
+            return
+
+        logger.info("scaffold.explain: client=%s topic=%r ok=%s", client_id,
+                    topic, ok)
+        answer(ok=ok, text=text, data=_json_safe(data), error=error)
 
     def _dispatch_cascade_command(
         self, cmd: str, client_id: str, args: list, payload: Any = None,

@@ -406,12 +406,137 @@ def _scope_renderer(scope: str):
     return None
 
 
+def render_topic(
+    scope: Optional[str], name: Optional[str] = None, workspace: str = ".",
+) -> "tuple[bool, Dict[str, Any], str, str]":
+    """Render one topic — the ONE dispatch, with no printing and no exit code.
+
+    Two callers, deliberately: ``_cmd_explain`` prints it, and the daemon's
+    ``scaffold.explain`` handler puts it on the wire for a CLI whose own
+    virtualenv does not have the extension that contributes the topic.  A
+    second dispatch for the remote case would be free to disagree with this
+    one about what a topic answers, which is the failure the seam exists to
+    remove rather than one to reproduce over a socket.
+
+    Args:
+        scope: The topic, or ``None`` for the overview.
+        name: The topic's argument, when it takes one.
+        workspace: What a workspace-reading topic reads.
+
+    Returns:
+        ``(ok, data, text, error)``.  ``ok`` is ``False`` for an unknown
+        topic, a usage error (a topic that requires a name, given none) and
+        a renderer that raised; ``error`` then carries the message and
+        ``data`` / ``text`` are empty.  A renderer that RAISES is reported
+        rather than propagated: one broken contributed topic must not take
+        down the verb, or the daemon serving it.
+    """
+    if scope is None:
+        data, text = _explain.overview()
+        return True, data, text, ""
+    render = _scope_renderer(scope)
+    if render is None:
+        return False, {}, "", (
+            f"unknown explain scope {scope!r} — one of: {_all_scopes_help()}")
+    try:
+        data, text = render(scope, name, workspace)
+        # Contributed SECTIONS append to whatever rendered — a built-in or a
+        # contributed topic alike — so two packages can answer about one
+        # subject without either having to know the other exists.
+        data, text = _append_topic_extensions(scope, name, workspace, data, text)
+    except _ScopeUsageError as exc:
+        return False, {}, "", exc.message
+    except Exception as exc:                      # pragma: no cover - defensive
+        return False, {}, "", f"explain {scope}: renderer failed: {exc}"
+    return True, data, text, ""
+
+
+def _render_from_daemon(
+    asked: Optional[str],
+    scope: Optional[str],
+    name: Optional[str],
+    args,
+    *,
+    required: bool,
+) -> "tuple[Optional[int], str]":
+    """Ask a running daemon to render *scope*, and print what it says.
+
+    ``jaato-scaffold`` introspects the framework in the CALLING process.  When
+    the CLI and the daemon share a virtualenv that is the whole answer; when
+    they do not — ``jaato-sdk`` in an application's own ``.venv`` driving a
+    daemon owned by another user — the topic a premium extension contributes
+    exists in the daemon's install and in no other, and the local refusal is
+    indistinguishable from *no such topic exists*.
+
+    Args:
+        asked: The socket the reader named with ``--connect``; ``None`` on the
+            fallback path, where the SDK default is used.
+        scope: The topic, or ``None`` for the overview.
+        name: The topic's argument, when it takes one.
+        args: The parsed namespace, read for ``--json``.
+        required: ``True`` when the reader asked for the daemon, so an
+            unreachable one is this command's failure and is reported.
+            ``False`` on the fallback, where an unreachable daemon means only
+            that nobody could be asked — the caller then prints its own local
+            refusal, which is the honest answer on a machine with no daemon.
+
+    Returns:
+        ``(rc, note)``.  ``rc`` is an exit code, or ``None`` when the caller
+        should print its own local refusal instead; ``note`` is a line to
+        print after it, empty unless there is something to add.
+    """
+    from . import remote as _remote
+
+    if not required and not _remote.daemon_is_listening(
+            _remote.default_socket_path()):
+        return None, ""
+
+    answer = _remote.ask_daemon(asked if isinstance(asked, str) else None,
+                                scope, name)
+    if not answer.reached:
+        if not required:
+            return None, ""
+        print(answer.unreachable, file=sys.stderr)
+        return 2, ""
+
+    if not answer.ok:
+        if required:
+            # The reader named this daemon, so its refusal IS the answer —
+            # including its topic list, which is the one they asked about.
+            print(answer.error or f"unknown explain scope {scope!r}",
+                  file=sys.stderr)
+            print(_remote.attribution(answer), file=sys.stderr)
+            return 2, ""
+        # On the FALLBACK, the daemon's refusal must not replace the local
+        # one: its list is the DAEMON's topics, and a reader shown that list
+        # concludes a topic their own install has does not exist.  The local
+        # refusal is the one they can act on without a socket, so it prints,
+        # and the note below keeps "we asked and it is not there either"
+        # distinguishable from "nobody looked" — the distinction `reached`
+        # exists to preserve, one layer out.
+        return None, (f"(also asked the daemon at {answer.socket_path} "
+                      f"(jaato-server "
+                      f"{answer.server_version or 'unknown version'}): it "
+                      f"does not serve that topic either)")
+
+    if args.json:
+        print(json.dumps(answer.data, indent=2, default=str))
+    else:
+        print(answer.text)
+        print()
+        print(_remote.attribution(answer))
+    return 0, ""
+
+
 def _cmd_explain(args) -> int:
     """Render one `explain` topic.
 
-    Every topic is looked up in :data:`_SCOPES` and invoked through the handler
-    its ``kind`` names, so the set of topics this dispatches is by construction
-    the set the help line advertises (#994).
+    Every topic is looked up through :func:`_scope_renderer` and invoked
+    through the handler its ``kind`` names, so the set of topics this
+    dispatches is by construction the set the help line advertises (#994).
+
+    A topic this CLI's own virtualenv cannot answer is not the end of the
+    question: see :func:`_consult_daemon`.
     """
     scope, name, deps = _take_deps_word(
         args.scope, args.name, getattr(args, "extra", None))
@@ -421,22 +546,26 @@ def _cmd_explain(args) -> int:
         data, text = _deps.render(scope, name)
         print(json.dumps(data, indent=2) if args.json else text)
         return 0
-    render = None if scope is None else _scope_renderer(scope)
-    if scope is None:
-        data, text = _explain.overview()
-    elif render is not None:
-        try:
-            data, text = render(scope, name, ws)
-        except _ScopeUsageError as exc:
-            print(exc.message, file=sys.stderr)
-            return exc.code
-        # Contributed SECTIONS append to whatever rendered — a built-in or a
-        # contributed topic alike — so two packages can answer about one
-        # subject without either having to know the other exists.
-        data, text = _append_topic_extensions(scope, name, ws, data, text)
-    else:
-        print(f"unknown explain scope {scope!r} — one of: {_all_scopes_help()}",
-              file=sys.stderr)
+
+    asked = getattr(args, "connect", None)
+    if asked:
+        rc, _note = _render_from_daemon(asked, scope, name, args, required=True)
+        return rc
+
+    ok, data, text, error = render_topic(scope, name, ws)
+    if not ok:
+        # Only a topic this venv does not HAVE is worth a socket: a usage
+        # error is about the caller's own command line, and asking a daemon
+        # would answer a question nobody posed.
+        note = ""
+        if _scope_renderer(scope) is None:
+            rc, note = _render_from_daemon(
+                None, scope, name, args, required=False)
+            if rc is not None:
+                return rc
+        print(error, file=sys.stderr)
+        if note:
+            print(note, file=sys.stderr)
         return 2
     print(json.dumps(data, indent=2, default=str) if args.json else text)
     return 0
@@ -826,6 +955,11 @@ def main(argv=None) -> int:
                          "of any scope: what it needs, what is installed, and "
                          "whether this environment agrees with itself")
     pe.add_argument("--workspace", help=_workspace_arg_help())
+    pe.add_argument("--connect", nargs="?", const=True, metavar="SOCKET",
+                    help="ask a running daemon to render the topic instead of "
+                         "this virtualenv — for a CLI installed beside an "
+                         "application, whose daemon holds extensions this "
+                         "install does not (default socket when no path given)")
     pe.add_argument("--json", action="store_true")
     pe.set_defaults(func=_cmd_explain)
 
