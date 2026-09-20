@@ -1,0 +1,12 @@
+{
+  "type": "scaffold.explain.result",
+  "timestamp": "<TIMESTAMP>",
+  "session_id": "",
+  "topic": "",
+  "ok": true,
+  "text": "",
+  "data": {},
+  "topics": [],
+  "error": "",
+  "server_version": ""
+}

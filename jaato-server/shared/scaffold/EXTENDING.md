@@ -162,3 +162,41 @@ fact is a consequence of two behaviours, **probe it** and render the result.
 Anything you genuinely cannot compute should say so rather than guess — a
 reader told something the engine does not do loses more time than one told
 nothing.
+
+### Two virtualenvs, and the one that has your package
+
+`explain` introspects the framework installed in the **calling** process, so a
+topic you contribute exists in whichever venv holds your distribution.  That is
+the whole answer while the CLI and the daemon share one, and silently wrong on
+the shape a deployed application actually has: `jaato-sdk` in the application's
+own `.venv`, driving a daemon owned by another user.  There are then two
+installs, and the CLI's refusal —
+
+```
+$ jaato-scaffold explain reactors
+unknown explain scope 'reactors' — one of: plugins | plugin <name> | ...
+```
+
+— is indistinguishable from *no such topic exists*, so it sends a reader
+looking for a feature they already have.
+
+Nothing extra is asked of a topic author.  The daemon serves
+`scaffold.explain` (protocol 1.18) through the **same** `render_topic` the CLI
+calls, contributed topics included, so a CLI that cannot resolve a topic asks
+the daemon and prints what it says, marked with whose install produced it:
+
+```
+$ jaato-scaffold explain reactors            # no daemon flag typed
+reactors — rules that watch the event bus and run a script (premium)
+...
+[answered by the daemon at /tmp/jaato.sock (jaato-server 0.16.0) — not this venv]
+```
+
+`--connect [SOCKET]` asks a specific daemon; without it, the socket is only
+consulted for a topic this venv genuinely does not have.  When *neither* has
+it, the LOCAL refusal prints — its topic list is the one the reader can act on
+without a socket — followed by a note that the daemon was asked too.  A topic the caller
+*can* answer is still answered locally with nothing touched — quietly giving an
+offline introspection an egress changes what running it means — and the probe
+never starts a daemon, because a report about a process the report created is a
+report about the wrong process.

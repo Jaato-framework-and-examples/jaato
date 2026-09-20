@@ -520,6 +520,7 @@ await client.create_session(profile="researcher")
 - `session.stop <id>` — stop ANY loaded session by id, not just the caller's own
 - `session.reload_env [id]` — re-resolve a LIVE session's `.env` and credentials and rebuild its provider (see [A Credential Stored After the Runner Booted](#a-credential-stored-after-the-runner-booted))
 - `workspace.ignore <path>` — toggle one exact entry in the caller's workspace `.gitignore` (→ `WorkspaceIgnoreResultEvent`; protocol 1.12, see [A Key the Web Files Panel Did Not Have](#a-key-the-web-files-panel-did-not-have))
+- `scaffold.explain [topic] [name]` — render one `jaato-scaffold explain` topic **on the daemon**, so a CLI whose own virtualenv lacks the extension contributing it can still be told (→ `ScaffoldExplainEvent`; protocol 1.18, see [A Topic the CLI Could Not Answer and the Daemon Could](#a-topic-the-cli-could-not-answer-and-the-daemon-could))
 - `workspace.delete` (a `WorkspaceDeleteRequest`, WS only) — delete a workspace the caller may see: its directory, its sessions, its registry row (→ `WorkspaceDeletedEvent`; protocol 1.13, see [A Workspace Everyone Could See](#a-workspace-everyone-could-see))
 
 **Flow:** Client sends `session.new --profile researcher` → server discovers profiles from `.jaato/profiles/` → resolves `SubagentProfile` → `JaatoServer` applies profile overrides (model, provider, plugins, plugin_configs, GC) during `initialize()`.
@@ -3155,6 +3156,131 @@ and `output_marker` are capabilities rather than lifetimes.
 **Defining a new plugin trait:**
 1. Add a `TRAIT_*` constant in `shared/plugins/base.py` with a docstring documenting the contract
 2. Update consumers (server, daemon) to query `getattr(plugin, 'plugin_traits', frozenset())`
+
+### A Topic the CLI Could Not Answer and the Daemon Could
+
+`jaato-scaffold explain` introspects the framework installed in the **calling
+process**. That is the whole answer while the CLI and the daemon share a
+virtualenv, and silently wrong the moment they do not — which is the normal
+shape of a deployed application: `jaato-sdk` (and `jaato-server`) in the
+application's own `.venv`, driving a daemon owned by a different user over
+IPC. There are then TWO installs, and the CLI was answering about the one that
+is not serving the sessions.
+
+Measured on exactly that pair, with `jaato-server 0.17.0` present and
+`jaato_premium` absent from the CLI's venv:
+
+```
+$ jaato-scaffold explain reactors
+unknown explain scope 'reactors' — one of: plugins | plugin <name> | ...
+```
+
+`reactors` is contributed through `jaato.scaffold_topics` by jaato-premium,
+which is installed in the DAEMON's venv. The refusal is indistinguishable from
+*no such topic exists*, so it sends a reader looking for a feature they already
+have — the failure the entry-point seam exists to remove, one process over.
+**The seam is not the gap**: it works, in the process that has the package.
+What was missing was a way to ask the other process.
+
+**One dispatch, asked over a socket.** `scaffold.explain` (protocol **1.18**,
+answered by one `ScaffoldExplainEvent`) calls
+`shared.scaffold.__main__.render_topic` — the SAME function the CLI calls,
+contributed topics and contributed `extends` sections included. A second
+dispatch daemon-side would be free to disagree with the CLI's about what a
+topic answers, which is this defect reproduced over a socket rather than fixed;
+the guard is an AST scan, not a behavioural probe, because a second dispatch
+agrees right up until somebody edits one of them.
+
+| When | What happens |
+|---|---|
+| a topic this venv HAS | rendered locally, **no socket touched** |
+| a topic it does not, daemon reachable | the daemon's rendering, plus a line saying whose install produced it |
+| a topic neither has | **the LOCAL refusal**, plus a note that the daemon was asked and does not serve it either |
+| a topic it does not, no daemon | the local refusal, unchanged |
+| `--connect [SOCKET]` | that daemon, always — including its refusal, and an unreachable one is this command's failure |
+
+**The second row is a correction, and the first draft had it wrong.** Letting
+the daemon's refusal replace the local one looks symmetrical and is a WRONG
+ANSWER: the two refusals list different topic sets, and the daemon's omits
+every topic the reader's own install has. A reader who typos on a machine that
+happens to run a daemon was shown that list and would conclude a topic they can
+use does not exist. So on the fallback the local list prints — it is the one
+they can act on without a socket — and the note keeps *asked and not there
+either* distinguishable from *nobody looked*, which is the `reached`/`ok`
+distinction one layer out. `--connect` is the deliberate exception: there the
+reader named that daemon, so its list is the one they asked about. It surfaced
+as a pre-existing test whose outcome changed depending on whether a daemon
+happened to be running on the machine — the suite is now green with one running
+and with none.
+
+**A working local answer never grows an egress.** Quietly giving an offline
+introspection a network call changes what running it means — the argument
+`explain releases` already makes about being its own topic rather than a facet
+of `explain dependencies` — so the fallback is gated on
+`_scope_renderer(scope) is None`. A usage error (a topic that needs a name,
+given none) is about the caller's own command line and is never taken to a
+daemon: it would answer a question nobody posed. Measured: three
+locally-answerable topics add **zero** `scaffold.explain` lines to the daemon
+log; one unknown topic adds exactly one.
+
+Four properties, each attached to a way asking could mislead:
+
+- **`reached` is not `ok`.** *The daemon answered and does not have it either*
+  and *no daemon could be asked* are different facts — one says the topic does
+  not exist, the other says nobody looked — and collapsing them reproduces the
+  confusion this removes. `RemoteAnswer` carries both, and `error` stays empty
+  when nothing was said rather than manufacturing a refusal nobody made.
+- **Every answer names the install that produced it.** On this deployment the
+  two installs are two machines' worth of different packages, and a reader who
+  cannot tell them apart cannot tell which one to change. The byline is never
+  omitted; a daemon that named no version degrades it to `unknown version`
+  rather than dropping it.
+- **The probe never STARTS a daemon** (`auto_start=False`). A report about a
+  process the report just created is a report about the wrong process — and on
+  this deployment that process is not even the same user's. Verified: with no
+  daemon, the command exits 2 with the local refusal and creates no socket.
+- **An old daemon is refused, not waited out.** The 1.7 rule applied to a verb:
+  a daemon below 1.18 ignores `scaffold.explain` silently, the caller would
+  wait out its deadline and report the topic missing — the original defect
+  arriving through the fix. Both the refusal and its wording name what the
+  daemon *speaks*, because the remedy is upgrading a process the reader may not
+  own.
+
+**`ScaffoldExplainEvent.data` is deliberately not typed as an object.** The
+in-tree `profile` topic renders an ARRAY of field rows, and wrapping it to
+satisfy a narrower field would make the daemon's `--json` differ from the same
+command's local `--json` — two installs disagreeing about one topic, which is
+what the event exists to stop. The daemon re-encodes with `default=str` (the
+CLI's own fallback) so a `Path` or an enum in a rendering cannot produce a
+frame the serialiser refuses and a caller waiting for a reply that never comes.
+`topics` — the catalog THIS daemon can render — rides **every** outcome,
+bound once in the handler's one `answer` door rather than per call site,
+because "which topics does the daemon have" is precisely the question a failed
+lookup raises and the caller's own catalog is by construction the wrong one.
+
+**There is no `workspace` parameter**, deliberately. A workspace-reading topic
+reads the caller's own workspace, resolved daemon-side from the session it is
+attached to or the workspace it declared — both entitlement-checked at the
+handshake ([Two Principals on One Socket](#two-principals-on-one-socket)).
+Letting a read-only report name a directory would add a second, unchecked path
+ingress for the sake of a diagnostic.
+
+Guards: `shared/tests/test_explain_asks_the_daemon_that_has_the_topic.py`
+(four reversions) and
+`jaato-sdk/jaato_sdk/tests/test_explain_topic_refuses_an_old_daemon.py`. Two
+drafts of the `auto_start` guard were decorative and the reversion meta-guard
+caught both, which is worth recording because they failed differently:
+`inspect.getsource` reads the module the editable install pins — the real
+checkout, whatever the interpreter's cwd — so it never saw the sabotage; and a
+substring test for `auto_start=False` was then satisfied by the *comment* two
+lines above the call. It asserts the call by AST now. **A guard on prose is a
+guard on nothing.**
+
+Not addressed here: `validate` has no extension seam at all, so a package that
+contributes a topic still cannot contribute a *finding* — `jaato-scaffold
+validate . --set drive` reports nothing about reactor rules however wrong they
+are, in either venv. That is its own change, and the entry-point group
+`jaato.premium_reactors` the report names has never existed.
 
 ### An Integration Declares Its Own Paths, and Its Own Harness
 

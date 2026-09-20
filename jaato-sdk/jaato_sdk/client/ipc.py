@@ -2141,6 +2141,71 @@ class IPCClient:
             args=[path],
         ))
 
+    MIN_SCAFFOLD_EXPLAIN_PROTOCOL = "1.18"
+
+    async def explain_topic(
+        self,
+        topic: Optional[str] = None,
+        name: Optional[str] = None,
+    ) -> None:
+        """Ask the daemon to render one ``jaato-scaffold explain`` topic.
+
+        ``jaato-scaffold`` introspects the framework installed in the CALLING
+        process, which is the right answer only while the CLI and the daemon
+        share a virtualenv.  A deployed application has two: ``jaato-sdk`` in
+        its own ``.venv``, driving a daemon owned by a different user whose
+        install carries extensions — the ``jaato.scaffold_topics`` entry
+        points a package like jaato-premium contributes — that the caller's
+        install does not.  The CLI's refusal is then indistinguishable from
+        *no such topic exists*, which sends a reader looking for a feature
+        they already have.
+
+        The daemon answers with one ``ScaffoldExplainEvent`` whatever
+        happened: ``ok`` with ``text`` / ``data``, or ``ok=False`` with
+        ``error`` and the ``topics`` its OWN install can answer — the list
+        that makes a refusal actionable.  ``server_version`` is carried so a
+        caller can say whose install produced the rendering; two installs
+        answering differently about one topic is the normal state here, not
+        an anomaly.
+
+        Args:
+            topic: The topic name, or ``None`` for the daemon's overview and
+                its topic catalog.
+            name: The topic's argument, where it takes one.
+
+        There is deliberately **no workspace parameter**.  A workspace-reading
+        topic reads the caller's own workspace, which the daemon resolves from
+        the session the caller is attached to or the workspace it declared —
+        both already entitlement-checked at the handshake.  Letting this verb
+        name a directory would add a second, unchecked path ingress for the
+        sake of a read-only report.
+
+        Raises:
+            ValueError: Against a daemon below
+                :attr:`MIN_SCAFFOLD_EXPLAIN_PROTOCOL`, which would ignore the
+                command silently — and silence is exactly the answer this
+                verb exists to stop being read as "there is no such topic".
+        """
+        if not _protocol_compatible(
+                self.server_protocol_version,
+                self.MIN_SCAFFOLD_EXPLAIN_PROTOCOL):
+            spoken = self.server_protocol_version or "unknown (not connected)"
+            raise ValueError(
+                f"explain_topic: this daemon speaks protocol {spoken} and does "
+                f"not serve scaffold.explain (needs >= "
+                f"{self.MIN_SCAFFOLD_EXPLAIN_PROTOCOL}).  It would ignore the "
+                f"command silently, which is indistinguishable from the topic "
+                f"not existing.  Upgrade the daemon, or run jaato-scaffold in "
+                f"the daemon's own virtualenv."
+            )
+        # Both positions are always sent, with "" for absent: dropping an
+        # absent one shifts the rest, so `explain_topic(name=X)` would put an
+        # argument where the handler reads a topic name.
+        await self._send_event(CommandRequest(
+            command="scaffold.explain",
+            args=[topic or "", name or ""],
+        ))
+
     async def list_profiles(self) -> None:
         """Request list of available agent profiles.
 

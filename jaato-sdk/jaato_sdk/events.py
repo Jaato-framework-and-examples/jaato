@@ -301,7 +301,33 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 # that cannot distinguish "no session is waiting" from "this daemon never
 # says" reports the first when the truth is the second -- the
 # absence-of-evidence rule this tree applies everywhere else.
-PROTOCOL_VERSION = "1.17"
+#
+# 1.18 -- ``scaffold.explain`` + ``ScaffoldExplainEvent``.  A new VERB, so
+# the 1.7 rule applies: an older daemon ignores an unknown command
+# silently, and silence here is indistinguishable from "that topic does
+# not exist", which is the exact confusion the verb exists to remove.  The
+# SDK therefore refuses below ``MIN_SCAFFOLD_EXPLAIN_PROTOCOL`` rather than
+# waiting out a reply nobody will send.
+#
+# ``jaato-scaffold explain`` introspects the framework installed in the
+# CALLING process.  That is right whenever the CLI and the daemon share a
+# virtualenv, and silently wrong the moment they do not -- an application
+# with ``jaato-sdk`` in its own venv, driving a daemon owned by another
+# user over IPC, has TWO installs and the CLI was answering about the one
+# that is not serving its sessions.  Topics an extension contributes to the
+# DAEMON's venv (premium's ``reactors``) came back as ``unknown explain
+# scope``, which reads as "no such topic" and sends a reader looking for a
+# feature they already have.
+#
+# The daemon answers about ITSELF -- the same merged dispatch, including
+# its own ``jaato.scaffold_topics`` entry points -- and the answer carries
+# ``server_version`` so a client reports WHOSE install spoke.  The CLI asks
+# only when it cannot answer locally, or when told to with ``--connect``:
+# a topic the caller's own venv serves is still answered with no socket
+# touched, because quietly giving an offline introspection an egress would
+# change what running it means (the argument ``explain releases`` already
+# makes about being its own topic).
+PROTOCOL_VERSION = "1.18"
 
 
 # =============================================================================
@@ -496,6 +522,7 @@ class EventType(str, Enum):
     WORKSPACE_FILES_CHANGED = "workspace.files_changed"  # Incremental delta
     WORKSPACE_FILES_SNAPSHOT = "workspace.files_snapshot"  # Full state on reconnect
     WORKSPACE_IGNORE_RESULT = "workspace.ignore.result"  # Answer to `workspace.ignore <path>` (1.12)
+    SCAFFOLD_EXPLAIN_RESULT = "scaffold.explain.result"  # Answer to `scaffold.explain <topic>` (1.18)
 
     # External events (Client -> Server, from web components)
     EVENT_EXTERNAL = "event.external"
@@ -2111,6 +2138,58 @@ class WorkspaceIgnoreResultEvent(Event):
     ok: bool = True
     error: str = ""
     gitignore_path: str = ""
+
+
+class ScaffoldExplainEvent(Event):
+    """One ``jaato-scaffold explain`` topic, rendered by the DAEMON (1.18).
+
+    ``explain`` introspects the framework installed in the CALLING process,
+    which is right when the CLI and the daemon share a virtualenv and wrong
+    the moment they do not.  An application that installs ``jaato-sdk`` into
+    its own venv and drives a daemon owned by another user over IPC has two
+    installs: the CLI's, and the one actually serving its sessions.  Topics
+    contributed by an extension that only the DAEMON has — premium's
+    ``reactors`` is the worked case — were then reported as
+    ``unknown explain scope``, which is indistinguishable from *no such
+    topic exists* and sends a reader to look for a feature they have.
+
+    So the daemon answers about itself.  It renders the topic through the
+    same merged dispatch the CLI uses, including every topic its own
+    ``jaato.scaffold_topics`` entry points contribute, and the CLI prints
+    the result marked with where it came from — a reader must never have to
+    guess which of the two installs an answer describes.
+
+    Fields:
+        topic: The topic asked for, echoed so a client can correlate.
+        ok: Whether the topic rendered.
+        text: The human rendering, as the CLI would print it.
+        data: The structured rendering — what ``--json`` prints, VERBATIM.
+            Usually an object, and deliberately not typed as one: the
+            in-tree ``profile`` topic renders an array of field rows, and
+            wrapping it to satisfy a narrower field would make the daemon's
+            ``--json`` differ from the same command's local ``--json`` —
+            two installs disagreeing about one topic, which is the failure
+            this event exists to remove rather than one to introduce.  A
+            reader branching on keys must check the shape first.
+        topics: Every topic THIS daemon serves, as ``scope_catalog`` rows
+            (``scope`` / ``arg`` / ``blurb`` / ``contributed_by`` / ...).
+            Always populated, including when ``ok`` is ``False``, because
+            "which topics does the daemon have" is exactly the question a
+            failed lookup raises.
+        error: Why not, when ``ok`` is ``False`` — no such topic on the
+            daemon either, a usage error (a topic needing a name, given
+            none), or the renderer raised.
+        server_version: The daemon's jaato-server version, so a client can
+            report WHOSE install answered rather than implying its own.
+    """
+    type: EventType = Field(default=EventType.SCAFFOLD_EXPLAIN_RESULT)
+    topic: str = ""
+    ok: bool = True
+    text: str = ""
+    data: Any = Field(default_factory=dict)
+    topics: List[Dict[str, Any]] = Field(default_factory=list)
+    error: str = ""
+    server_version: str = ""
 
 
 # =============================================================================
@@ -3783,6 +3862,7 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.WORKSPACE_FILES_CHANGED.value: WorkspaceFilesChangedEvent,
     EventType.WORKSPACE_FILES_SNAPSHOT.value: WorkspaceFilesSnapshotEvent,
     EventType.WORKSPACE_IGNORE_RESULT.value: WorkspaceIgnoreResultEvent,
+    EventType.SCAFFOLD_EXPLAIN_RESULT.value: ScaffoldExplainEvent,
     # Workspace file staging (multi-frame: TEXT request + N BINARY blobs)
     EventType.WORKSPACE_FILES_STAGE_REQUEST.value: StageFilesRequest,
     EventType.WORKSPACE_FILES_STAGED.value: StageFilesEvent,
