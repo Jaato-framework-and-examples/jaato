@@ -17,8 +17,13 @@ def _bare_sm():
     sm._load_calls = []
     sm._apply_calls = []
     sm._load_return = None
-    sm._load_session = lambda sid, client_id=None, workspace_path=None: (
-        sm._load_calls.append((sid, client_id, workspace_path)) or sm._load_return)
+    # ``load_reason`` says WHICH waking this is, and resume_session is the one
+    # caller that is a deliberate wake (#1157) -- the announcement record reads
+    # it to tell a wake from a grace-expired reattach, so the stub records it
+    # rather than swallowing it with **kwargs.
+    sm._load_session = lambda sid, client_id=None, workspace_path=None, load_reason="reattach": (
+        sm._load_calls.append((sid, client_id, workspace_path, load_reason))
+        or sm._load_return)
     sm._apply_client_config_to_server = (
         lambda cid, server: sm._apply_calls.append((cid, server)))
     return sm
@@ -29,7 +34,8 @@ def test_resume_reloads_same_id_and_restores_presentation():
     session = MagicMock(); session.server = MagicMock()
     sm._load_return = session
     assert sm.resume_session("sid", "/ws") == "sid"          # SAME id back
-    assert sm._load_calls == [("sid", "_headless", "/ws")]   # reloaded headless, right ws
+    # reloaded headless, right ws, recorded as a WAKE rather than a reattach
+    assert sm._load_calls == [("sid", "_headless", "/ws", "wake")]
     assert sm._apply_calls == [("_headless", session.server)]  # API presentation restored
 
 
