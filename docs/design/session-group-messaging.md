@@ -53,6 +53,7 @@ boundary in the general sense. Only the cid is, and only for loaded peers.
 | `session.wake` → `wake_session` | client verb / HTTP ingress | any: revives cold via `SessionWorkspaceIndex` → `resume_session` | text + inline attachments | **yes** | none — any authenticated caller, any session id |
 | `InjectPromptRequest` → `deliver_prompt_to_session` | client verb | loaded only | text + inline attachments (idle-only when attachments present) | no | caller-supplied `source_id` |
 | `send_to_subagent` | model tool, in-process | own children | text | n/a | parent |
+| `share_context` (the `telepathy` plugin) | model tool, in-process | own parent, which is running by construction | text: a `files` map (path → full content), `findings`, `notes` | n/a | the child's `_agent_id`; not wrapped as untrusted |
 
 All of the loaded-target paths converge on **one decision** —
 `shared.message_delivery` + `JaatoSession.offer_message`: the target
@@ -547,3 +548,61 @@ Two consequences of that sharing to hold to when implementing:
   permissions, no host tools, and the unload grace rather than the orphan
   bound. The receipt's `headless` flag is how the proposed verb makes that
   inheritance visible instead of implicit.
+
+---
+
+## 10. The telepathy plugin
+
+`telepathy` is the sixth channel, and the one axis the tables above do not
+cover: **parent ↔ child, in-process**. Its one tool, `share_context`, lets a
+subagent push context up to its parent. It is opt-in per profile,
+runner-tier, visible only when the session has a parent, and auto-approved.
+The executor reads `session._parent_session` — a `JaatoSession` object in
+the same process — and calls `parent_session.inject_prompt(...)` on the
+`CHILD` tier. The payload is structured: a `files` map of path to full
+content, a `findings` list, and free-text `notes`, rendered into a
+`<shared_context>` block with a header telling the parent not to re-read
+the files.
+
+| | `share_context` (telepathy) | the four verbs of §8 | proposed verb |
+|---|---|---|---|
+| Topology | parent ↔ child, in-process, same runtime | daemon sessions | daemon sessions in a group |
+| Direction | child → parent only | per verb | any member → any member |
+| Transport | a direct Python call on the parent object | daemon → runner RPC | daemon → runner RPC |
+| Addressing | none; the parent is implicit | name or id | id or name |
+| Wakes a cold target | no; the parent is running by construction | see §8 | yes |
+| Payload | text files by path, findings, notes | text, or text + inline bytes | text, text attachments, binary, file refs |
+| Untrusted wrap | none; the child is the parent's own spawn | sibling and wake wrap | wrapped |
+| `SessionManager` involved | no | yes | yes |
+
+**It is not replaced by the group verb, and cannot be.** A group is a set of
+daemon sessions. An in-process subagent has no session record, no id in the
+daemon's table, and no workspace index entry; it exists only as an object
+inside its parent's runner, which is the case §6 decision 5 scopes out.
+Telepathy is the channel that serves it. An **isolated** sub-runner is
+different: it has a record, carries `parent_session_id`, and inherits
+`created_by` from its parent, so it joins the parent's groups and the
+proposed verb reaches it in both directions.
+
+**Two things the design takes from it.**
+
+- **The `files` map is the `text_attachments` shape.** Telepathy already
+  carries whole file contents by path as text, with a header saying how
+  the receiver should treat them. §4.5's text attachments are the same
+  idea generalised to peers, and the group verb should render them the
+  same way, so a model sees one shape whether the content came from a
+  child or a peer.
+- **Its idle branch carries the queue-into-nothing defect.** When the
+  parent is not running, the executor injects anyway on the `CHILD` tier,
+  and `inject_prompt` starts a turn only while a `session.send_message` RPC
+  has the continuation installed (`shared/message_delivery.py` documents
+  exactly this). The plugin's own comment says the case should not happen,
+  since a subagent runs while its parent waits, and normally it does not.
+  But it is a private copy of the queue-or-drive decision rather than a
+  call to `deliver`, which is the shape that module exists to remove. A
+  small cleanup, independent of this design.
+
+**One difference to keep, not to erase.** Telepathy does not wrap the
+child's content as untrusted, on the reasoning that the child is the
+parent's own spawn under the parent's permission policy. A group peer is
+not that, which is why the proposed verb wraps.
