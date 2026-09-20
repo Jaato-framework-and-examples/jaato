@@ -216,7 +216,7 @@ from shared.tests.reversion import (  # noqa: E402
 REVERSIONS = [
     Reversion(
         target="jaato-server/pyproject.toml",
-        find='    "jaato-sdk>=0.24.0",  # SDK protocol: base plugin',
+        find='    "jaato-sdk>=0.25.0",  # SDK protocol: base plugin',
         replace='    "jaato-sdk",  # SDK protocol: base plugin',
         because=(
             "a bare jaato-sdk requirement is #1055 itself: the resolver "
@@ -228,7 +228,7 @@ REVERSIONS = [
     ),
     Reversion(
         target="jaato-tui/pyproject.toml",
-        find='"jaato-sdk>=0.24.0",  # SDK protocol: IPC client',
+        find='"jaato-sdk>=0.25.0",  # SDK protocol: IPC client',
         replace='"jaato-sdk>=0.19.0",  # SDK protocol: IPC client',
         because=(
             "a floor left behind at an older SDK is the same defect "
