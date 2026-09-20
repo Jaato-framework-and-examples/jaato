@@ -69,13 +69,12 @@ REVERSIONS = [
     ),
     Reversion(
         target=_MAIN,
-        find="""    elif scope in _SCOPES:
-        spec = _SCOPES[scope]""",
-        replace="""    elif scope == "profile":
-        spec = _SCOPES[scope]""",
+        find="""    render = None if scope is None else _scope_renderer(scope)""",
+        replace="""    render = (_SCOPE_KINDS[_SCOPES[scope].kind]
+              if scope == "profile" else None)""",
         test="test_dispatch_reads_only_the_scope_table",
-        because="the dispatch grew a scope-literal rung again, so the table is "
-                "no longer the one place a topic is registered",
+        because="the dispatch grew a scope-literal rung again, so the resolver "
+                "is no longer the one place a topic is looked up",
     ),
 ]
 
@@ -156,10 +155,17 @@ def test_no_argument_hint_contains_the_help_separator():
 def test_dispatch_reads_only_the_scope_table():
     """No rung of the old ladder may grow back.
 
-    ``_cmd_explain`` may compare ``scope`` against ``_SCOPES`` membership and
-    nothing else: not a string literal, not a second table.  A topic added to
-    any other container would be dispatched and unadvertised, which is the
-    defect, in the exact shape it took.
+    ``_cmd_explain`` resolves a topic through ``_scope_renderer`` and nothing
+    else: not a string literal, not a membership test against a second table.
+    A topic reachable through any other rung would be dispatched and
+    unadvertised, which is the defect, in the exact shape it took.
+
+    The seam that lets an installed package contribute a topic is why this
+    reads a RESOLVER rather than ``scope in _SCOPES`` as it did when it was
+    written: there are now legitimately two tiers, and the point of the guard
+    is that the dispatch cannot see them separately.  Everything the resolver
+    serves is in :func:`_all_scopes_help`, which
+    ``test_every_dispatched_scope_is_advertised`` checks the round trip of.
     """
     fn = _cmd_explain_ast()
     for node in ast.walk(fn):
@@ -174,15 +180,21 @@ def test_dispatch_reads_only_the_scope_table():
                 assert not isinstance(comparator, ast.Constant), (
                     f"_cmd_explain compares scope against the literal "
                     f"{comparator.value!r} -- that topic is dispatched outside "
-                    f"_SCOPES and so cannot reach the derived help."
+                    f"the resolver and so cannot reach the derived help."
                 )
-            if isinstance(op, (ast.In, ast.NotIn)):
-                assert (isinstance(comparator, ast.Name)
-                        and comparator.id == "_SCOPES"), (
-                    f"_cmd_explain dispatches on a second table "
-                    f"({ast.dump(comparator)}); _SCOPES must stay the one "
-                    f"place a topic is registered."
-                )
+            assert not isinstance(op, (ast.In, ast.NotIn)), (
+                f"_cmd_explain dispatches on a table of its own "
+                f"({ast.dump(comparator)}); _scope_renderer must stay the one "
+                f"place a topic is looked up."
+            )
+
+    called = {n.func.id for n in ast.walk(fn)
+              if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
+    assert "_scope_renderer" in called, (
+        "_cmd_explain no longer calls _scope_renderer -- it has grown its own "
+        "way to find a topic, which is how a topic becomes dispatchable "
+        "without being advertised."
+    )
 
 
 def test_every_declared_kind_has_a_handler_and_every_handler_is_used():

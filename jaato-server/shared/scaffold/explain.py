@@ -41,9 +41,19 @@ def _topic_lines() -> List[str]:
     rows = [("  jaato-scaffold explain "
              + f"{t['scope']} {t['arg']}".rstrip()
              + (" [--workspace DIR]" if t["reads_workspace"] else ""),
-             t["blurb"]) for t in scope_catalog()]
-    width = max(len(cmd) for cmd, _ in rows)
-    return [f"{cmd:<{width}}  # {blurb}" if blurb else cmd for cmd, blurb in rows]
+             t["blurb"], t.get("contributed_by", "")) for t in scope_catalog()]
+    width = max(len(cmd) for cmd, _, _ in rows)
+    out = []
+    for cmd, blurb, dist in rows:
+        # A contributed topic is marked with the distribution that supplied
+        # it, the way `explain plugins` marks a contributed plugin.  A reader
+        # who cannot tell the framework's answer from an installed package's
+        # cannot tell whose source to go and read, and cannot tell what
+        # uninstalling that package would take away.
+        note = f"{blurb} <- {dist}" if (blurb and dist) else (blurb or
+                                                              (f"<- {dist}" if dist else ""))
+        out.append(f"{cmd:<{width}}  # {note}" if note else cmd)
+    return out
 
 
 def _facet_lines() -> List[str]:
@@ -2769,6 +2779,23 @@ def _instruction_search_order(ws: Path):
     return order
 
 
+def _authored_workspace_paths(*names: str) -> List[Tuple[str, str]]:
+    """``(path, why)`` for the named workspace-tier AUTHORED entries.
+
+    Read from :data:`gitignore.AUTHORED` rather than re-typed, because that
+    tuple is already the declaration of what belongs to the workspace tier —
+    it is what ``new gitignore`` re-includes and what the AppArmor template
+    write-denies.  ``paths`` listing a workspace file the AUTHORED set does not
+    name, or omitting one it does, is two surfaces of one package disagreeing
+    about where a file goes, and the disagreement is invisible from either.
+
+    A name the set does not carry is dropped rather than rendered as a guess.
+    """
+    from . import gitignore as _gi
+    by_path = {e.path: e for e in _gi.AUTHORED}
+    return [(f".jaato/{n}", by_path[n].why) for n in names if n in by_path]
+
+
 def paths() -> Rendered:
     """The path & isolation model — daemon-global ``~/.jaato`` vs per-session
     workspace + ``config_root``.
@@ -2796,8 +2823,8 @@ def paths() -> Rendered:
     data = {
         "daemon_global": {
             "root": "~/.jaato/  (HOME-based, resolved via Path.home())",
-            "holds": ["reactors/<name>.json", "scripts/<name>.py",
-                      "<provider>_auth.json", "ws.token"],
+            "holds": ["reactors.json", "reactors/<name>.json",
+                      "scripts/<name>.py", "<provider>_auth.json", "ws.token"],
             "scope": "shared across every session on the daemon",
             "note": "do NOT override $HOME to isolate a run",
         },
@@ -2805,7 +2832,8 @@ def paths() -> Rendered:
             "root": "<workspace>/  +  config_root (default <workspace>/.jaato)",
             "holds": [".jaato/profiles/<set>/<agent>.yaml",
                       ".jaato/agents|instructions/", ".jaato/logs/",
-                      ".jaato/sessions/"],
+                      ".jaato/sessions/"]
+                     + [p for p, _ in _authored_workspace_paths("reactors.json")],
             "workspace_root_env": "JAATO_WORKSPACE_ROOT",
             "scope": "the isolation boundary — one per session",
         },
@@ -2831,6 +2859,7 @@ def paths() -> Rendered:
         "paths & isolation model:",
         "",
         "  ~/.jaato/   — DAEMON-GLOBAL (HOME-based, resolved via Path.home()):",
+        "    reactors.json             reactor rules, daemon-wide (premium)",
         "    reactors/<name>.json      installed reactor rule fragments (premium)",
         "    scripts/<name>.py         installed reactor scripts",
         "    <provider>_auth.json      provider credentials",
@@ -2844,6 +2873,18 @@ def paths() -> Rendered:
         "    .jaato/agents | instructions/        persona + base instructions",
         "    .jaato/logs/                         per-session logs",
         "    .jaato/sessions/                     persisted session records",
+    ] + [
+        f"    {path:<36} {why}"
+        for path, why in _authored_workspace_paths("reactors.json")
+    ] + [
+        "    -> A subsystem that reads BOTH tiers reads them in that order, and",
+        "       the workspace tier is the one you can write without being root:",
+        "       a daemon running as another user resolves ~/.jaato against ITS",
+        "       home, not yours.  reactors.json is the worked case — it is in",
+        "       the AUTHORED set this line is derived from, so `new gitignore`",
+        "       keeps it committable and the AppArmor template write-denies it",
+        "       to the confined runner, while `explain paths` used to name the",
+        "       HOME copy alone.",
         "    -> Isolate a run with a FRESH workspace dir; its .jaato/ is the",
         "       config_root.  Workspace-scoped tools (file_edit, cli cwd,",
         "       filesystem_query) resolve against JAATO_WORKSPACE_ROOT / the",
