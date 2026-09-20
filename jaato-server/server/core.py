@@ -1258,8 +1258,7 @@ class JaatoServer:
         self,
         *,
         text: Optional[str] = None,
-        suppressed: bool = False,
-        revived: bool = False,
+        withheld_reason: Optional[str] = None,
         created_by: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Write the Art. 50(1) ``announcement`` record to this session's ledger (#1157).
@@ -1292,13 +1291,21 @@ class JaatoServer:
         with its cwd AT the workspace, which is why the live suite could
         not see it.
 
+        **A row with no file to land in is announced at WARNING.**  With
+        neither ``trace.ledger`` nor ``LEDGER_PATH`` resolving, the ledger
+        keeps the row in memory and nothing on the daemon side ever
+        flushes it, so the person was told and ``--audit-verify`` has
+        nothing -- #735's shape, a control that silently does not apply.
+        The warning names both knobs; ``jaato-scaffold validate`` reports
+        the same profile as ``disclosure_unrecorded`` before any session.
+
         Args:
-            text: The announcement as emitted, or ``None`` when nothing was.
-            suppressed: The client's ``client_discloses_ai`` withheld it.
-            revived: This session was woken from disk; nothing was
-                re-announced.
-            created_by: The authenticated creator, when the caller holds
-                it; else the user this server already runs as.
+            text: The announcement as emitted; required when it was.
+            withheld_reason: ``None`` when the text reached a client, else
+                one of ``shared.ai_disclosure.WITHHELD_REASONS``.
+            created_by: The authenticated creator (#859), as the caller
+                holds it on the daemon ``Session``.  Absent means absent:
+                this server keeps no user of its own to fall back on.
 
         Returns:
             The record as handed to the ledger, for the caller's log line.
@@ -1306,20 +1313,27 @@ class JaatoServer:
         from shared.ai_disclosure import announcement_record
         record = announcement_record(
             self.session_id or "",
-            text=text, suppressed=suppressed, revived=revived,
+            text=text, withheld_reason=withheld_reason,
             presentation=self._presentation_context,
             provider=self._model_provider, model=self._model_name,
-            created_by=created_by or getattr(self, "_client_user_id", None),
+            created_by=created_by,
         )
         with self._with_session_env(), self._in_workspace():
             self.ledger._record("announcement", record)
             where = self.ledger.ledger_path()
-        logger.info(
-            "AI-disclosure announcement (Art. 50(1)) recorded for session %s "
-            "(%s) -> %s", self.session_id,
-            "suppressed by the client" if suppressed
-            else "revived, not re-announced" if revived else "emitted",
-            where or "no ledger configured; in memory only")
+        outcome = ("delivered" if withheld_reason is None
+                   else f"withheld: {withheld_reason}")
+        if where is None:
+            logger.warning(
+                "AI-disclosure announcement (Art. 50(1)) for session %s (%s) "
+                "was recorded in MEMORY ONLY: no ledger file is configured "
+                "(set `trace.ledger` in the profile, or LEDGER_PATH), so "
+                "nothing `jaato-doctor --audit-verify` can read holds it",
+                self.session_id, outcome)
+        else:
+            logger.info(
+                "AI-disclosure announcement (Art. 50(1)) recorded for session "
+                "%s (%s) -> %s", self.session_id, outcome, where)
         return record
 
     def set_apparmor_confinement(

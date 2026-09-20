@@ -3714,13 +3714,18 @@ def _announcement_lines(ann: Dict[str, Any]) -> List[str]:
     """The Art. 50(1) announcement rows of ``explain oversight <profile>``."""
     pad = " " * 28
     if ann["text"]:
+        from jaato_sdk import audit
+        # The ledger's location is the resolver's, not this page's: the
+        # store declares both sources it reads (#1157).
+        ledger_at = audit.store("ledger").path_source
         return [
             f"  announcement              {ann['text']!r}",
             f"{pad}emitted once at session creation; a client",
             f"{pad}sending client_discloses_ai withholds it.",
             f"{pad}Either way an `announcement` record (text,",
-            f"{pad}channel, locale, model) goes to the ledger",
-            f"{pad}when trace.ledger is set -- explain audit",
+            f"{pad}channel, locale, model, delivered or why not)",
+            f"{pad}goes to the ledger at {ledger_at}",
+            f"{pad}-- explain audit",
         ]
     why = _ANNOUNCEMENT_REASONS.get(
         ann["withheld_reason"] or "", "no reason recorded")

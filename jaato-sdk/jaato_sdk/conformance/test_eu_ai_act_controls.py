@@ -305,6 +305,7 @@ def test_the_announcement_is_recorded_in_the_chained_ledger(act_daemon):
     assert row["text"] == delivered[0], "the record must carry the text AS DELIVERED"
     assert row["client_type"] == "api" and row["locale"] == "de-DE"
     assert row["client_discloses_ai"] is False
+    assert row["delivered"] is True and "withheld_reason" not in row
     assert row["suppressed"] is False and row["revived"] is False
     assert row["agent_id"] == "main"
     assert (row["provider"], row["model"]) == ("echo", "echo"), (
@@ -343,6 +344,7 @@ def test_a_suppressed_announcement_is_recorded_as_suppressed(act_daemon):
     rows = _announcements(act_daemon, out["session_id"])
     assert len(rows) == 1, f"a suppressed announcement must still be recorded: {rows}"
     row = rows[0]
+    assert row["delivered"] is False and row["withheld_reason"] == "client_discloses"
     assert row["suppressed"] is True and row["client_discloses_ai"] is True
     assert row["client_type"] == "chat"
     assert "text" not in row, "nothing was delivered, so nothing claims to have been"

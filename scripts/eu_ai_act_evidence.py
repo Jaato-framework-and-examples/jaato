@@ -467,7 +467,7 @@ def collect(root: Path, ws: Dict[str, Path], daemon: Daemon) -> List[Capture]:
     add(Capture("33-announcement-ledger-record",
                 "The announcement, recorded: text, channel, locale and model, chained",
                 "grep '\"stage\": \"announcement\"' .jaato/logs/ledger.jsonl   "
-                "# emitted (locale de-DE), then suppressed (client_discloses_ai)",
+                "# delivered (locale de-DE), then withheld: client_discloses",
                 "\n".join(json.dumps(r, ensure_ascii=False) for r in mine)
                 or "NOT WRITTEN -- no announcement record in the ledger (#1157)",
                 "disclosure", note="" if mine else "defect"))

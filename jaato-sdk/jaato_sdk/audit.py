@@ -213,6 +213,11 @@ AUDIT_SCHEMA: Tuple[AuditEvent, ...] = (
             AuditField("agent_id",
                        "`main` -- the agent that fronts the person; a "
                        "subagent talks to its parent and is never announced"),
+            AuditField("delivered",
+                       "True iff the text reached a client. The one question "
+                       "an auditor asks, answered by construction: a row "
+                       "carries `text` exactly when this is True and "
+                       "`withheld_reason` exactly when it is False"),
             AuditField("suppressed",
                        "True when the CLIENT asserted it discloses already "
                        "(client_discloses_ai) and the framework withheld its "
@@ -226,7 +231,19 @@ AUDIT_SCHEMA: Tuple[AuditEvent, ...] = (
             AuditField("text",
                        "the announcement as delivered, verbatim -- a hash "
                        "would not answer WHAT was said. Present only when "
-                       "the framework emitted it",
+                       "`delivered` is True",
+                       guaranteed=False),
+            AuditField("withheld_reason",
+                       "why nothing was delivered, when nothing was: "
+                       "`client_discloses` (the client took the obligation), "
+                       "`headless` (the session was created for no client, "
+                       "so the event reached nobody), `decision_failed` "
+                       "(the predicate raised, so whether an announcement "
+                       "was owed could not be established), `wake` or "
+                       "`reattach` (a revive -- a deliberate session.wake, or "
+                       "a client attaching to a session the daemon had "
+                       "unloaded; a long-lived interactive session "
+                       "accumulates many of the second)",
                        guaranteed=False),
             AuditField("client_type",
                        "the channel: PresentationContext.client_type "
@@ -260,7 +277,11 @@ AUDIT_SCHEMA: Tuple[AuditEvent, ...] = (
             "announcement and the first response can both carry 0 -- the "
             "chain, not the index, is the order. Written only for a profile "
             "declaring interacts_with_persons: true; a profile that made no "
-            "determination gets no row, because a row would be one (#1157)"),
+            "determination gets no row, because a row would be one. With no "
+            "ledger file configured (trace.ledger / LEDGER_PATH) the row is "
+            "held in memory and never reaches disk -- announced at WARNING, "
+            "and `validate` reports the profile as disclosure_unrecorded "
+            "(#1157)"),
     ),
     AuditEvent(
         kind="permission-check",

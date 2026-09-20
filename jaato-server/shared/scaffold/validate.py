@@ -508,7 +508,7 @@ def validate_profile(
     _check_profile_identity(profile, add)
 
     # --- what it declares under the EU AI Act (regulatory:) -------------
-    _check_regulatory(profile, add)
+    _check_regulatory(profile, add, env_keys=env_keys)
 
     # --- provider --------------------------------------------------------
     pinfo = _resolve_and_check_provider(profile, provider_name, providers, add)
@@ -771,6 +771,7 @@ HIGH_RISK_ESCALATED_CODES = frozenset({
     "permission_rule_without_plugin",
     "unknown_tool",
     "disclosure_absent",
+    "disclosure_unrecorded",
 })
 
 
@@ -786,7 +787,22 @@ def _binds_persona(profile: Any) -> bool:
                 or getattr(profile, "system_instructions", None))
 
 
-def _check_regulatory(profile: Any, add) -> None:
+def _ledger_is_named(profile: Any, env_keys=None) -> bool:
+    """Whether a session built from this profile writes its ledger to a FILE.
+
+    Three routes reach ``TokenLedger.ledger_path``: the typed
+    ``trace.ledger``, the profile's ``env: {LEDGER_PATH: ...}``, and the
+    workspace ``.env`` (``env_keys``, when a workspace is being validated).
+    Any one of them is enough; with none, every ledger record -- the
+    ``announcement`` row included -- stays in the daemon's memory.
+    """
+    if any(where in ("trace.ledger", "env.LEDGER_PATH")
+           for _v, where in _trace_path_sources(profile)):
+        return True
+    return "LEDGER_PATH" in (env_keys or ())
+
+
+def _check_regulatory(profile: Any, add, env_keys=None) -> None:
     """The findings the ``regulatory:`` block makes possible.
 
     ``disclosure_absent`` (**warn**; error under ``high``)
@@ -794,6 +810,16 @@ def _check_regulatory(profile: Any, add) -> None:
         natural persons interact with it -- so nothing decides whether the
         Article 50(1) announcement is owed.  An explicit ``false`` is a
         declaration and is silent; only the ABSENCE is reported.
+
+    ``disclosure_unrecorded`` (**warn**; error under ``high``)
+        the profile declares that persons interact with it -- so the
+        announcement is OWED and emitted -- and names no ledger, so the
+        ``announcement`` audit record (#1157) proving they were told is
+        appended to memory and never reaches disk.  The daemon says the
+        same thing at WARNING once per session; this is the same fact
+        before any session exists.  Deliberately NOT ``disclosure_absent``
+        widened: that one says nothing decides whether to announce, this
+        one says the announcement cannot be proven.
 
     The ``high_risk_*`` findings (:func:`_check_high_risk_obligations`)
     fire only under an explicit ``risk_class: high``, and are **errors**:
@@ -812,6 +838,17 @@ def _check_regulatory(profile: Any, add) -> None:
             "announcement apply, Art. 50(1); false: it is a component another "
             "system drives).  Absent, nothing decides which.",
             where="regulatory.interacts_with_persons")
+    if (reg is not None and reg.interacts_with_persons is True
+            and not _ledger_is_named(profile, env_keys)):
+        add("warn", "disclosure_unrecorded",
+            "declares that natural persons interact with it, so the Art. 50(1) "
+            "announcement is emitted at session creation — and names no ledger, "
+            "so the `announcement` audit record that proves they were told is "
+            "written to memory only and cannot be produced later.  Set "
+            "`trace.ledger` (relative = one file per session), or "
+            "`LEDGER_PATH` in `env:` / the workspace `.env`; `explain audit` "
+            "then names the file.",
+            where="trace.ledger")
     if reg is not None and reg.is_high_risk:
         _check_high_risk_obligations(profile, reg, add)
 

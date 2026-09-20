@@ -117,10 +117,12 @@ And it is written down. An event a client may or may not have rendered is
 not something a deployer can show an auditor, so the daemon records the
 announcement in the session's chained ledger the moment it emits it (#1157):
 the text as delivered, the channel and locale the client declared, and the
-provider and model serving the session. A client that suppressed it by
-asserting `client_discloses_ai` gets a row saying so — `suppressed: true`,
-no text — rather than no row; a woken session gets `revived: true`, because
-nothing is re-announced and the ledger should say why. The capture shows
+provider and model serving the session. Every row says `delivered`, and a
+row that delivered nothing says why: a client that suppressed it by
+asserting `client_discloses_ai` gets `withheld_reason: client_discloses`
+and no text, rather than no row; a session created for no client gets
+`headless`; a woken session gets `wake` or `reattach`, because nothing is
+re-announced and the ledger should say which kind of waking this was. The capture shows
 both: the `screener` session above, driven by a client declaring `de-DE`,
 then the same profile driven by a client that discloses already.
 

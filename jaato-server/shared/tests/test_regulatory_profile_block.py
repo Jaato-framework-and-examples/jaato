@@ -311,7 +311,10 @@ def test_each_high_risk_finding_is_satisfied_by_the_mechanism_it_names():
             "interactive_shell": {"require_confinement": True},
         },
         trace=SimpleNamespace(session_log=".jaato/logs/trace.jsonl",
-                              provider_log=None),
+                              provider_log=None,
+                              # interacts_with_persons is True, so the
+                              # announcement must reach a FILE (#1157).
+                              ledger=".jaato/logs/ledger.jsonl"),
         record_keeping=RecordKeepingConfig(retention_days=180),
     ))
     assert found == []

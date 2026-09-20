@@ -146,13 +146,36 @@ def announcement_for(
 #: never announced, so this is the only value the record carries.
 ANNOUNCEMENT_AGENT_ID = "main"
 
+#: Why an ``announcement`` record carries no delivered text -- the record's
+#: ``withheld_reason`` vocabulary.  :data:`CLIENT_DISCLOSES` is shared with
+#: :func:`announcement_for`; the rest are facts only the emit site knows:
+#:
+#: * :data:`HEADLESS` -- the session was created for no client (a reactor,
+#:   a cascade stage): the event was handed to a client id nothing serves,
+#:   so nobody could have read it, and a row saying "delivered" would be
+#:   the false statement the record exists to prevent.
+#: * :data:`DECISION_FAILED` -- the predicate itself raised, so whether the
+#:   profile declared interaction could not be established.  Recorded
+#:   rather than read as "declared nothing": a failure to DECIDE is the
+#:   same state as a failure to announce.
+#: * :data:`REVIVED_WAKE` / :data:`REVIVED_REATTACH` -- a session woken from
+#:   disk is never re-announced; the two say WHICH path woke it, because a
+#:   deliberate ``session.wake`` and a grace-expired browser reload are
+#:   different events and a long-lived interactive session accumulates
+#:   many of the second.
+HEADLESS = "headless"
+DECISION_FAILED = "decision_failed"
+REVIVED_WAKE = "wake"
+REVIVED_REATTACH = "reattach"
+WITHHELD_REASONS = (CLIENT_DISCLOSES, HEADLESS, DECISION_FAILED,
+                    REVIVED_WAKE, REVIVED_REATTACH)
+
 
 def announcement_record(
     session_id: str,
     *,
     text: Optional[str] = None,
-    suppressed: bool = False,
-    revived: bool = False,
+    withheld_reason: Optional[str] = None,
     presentation: object = None,
     provider: Optional[str] = None,
     model: Optional[str] = None,
@@ -171,28 +194,33 @@ def announcement_record(
     record carries: the **text** as delivered, the **channel** and
     **locale** off the client's ``PresentationContext``, and the **model
     identity** (the ``provider`` / ``model`` pair ``generated_by`` stamps).
-    Three rules, each attached to a way the row could mislead:
+    Four rules, each attached to a way the row could mislead:
 
+    * **``delivered`` is the one question an auditor asks**, and it is
+      answered by construction: ``True`` iff ``withheld_reason`` is
+      ``None``, in which case ``text`` is required and carried verbatim.
+      A row can therefore never say "delivered" beside an explanation of
+      why it was not.
+    * **Withheld is a value, not an absence.**  Every row that delivered
+      nothing says why, from :data:`WITHHELD_REASONS`: the client took
+      the obligation (``client_discloses``, also ``suppressed: true``),
+      no client existed (``headless``), the predicate raised
+      (``decision_failed``), or the session was woken and not
+      re-announced (``wake`` / ``reattach``, also ``revived: true``).
+    * **``text`` is present only when the framework delivered it.**
+      Writing what WOULD have been said would read as what was said.
     * **Absent is not defaulted.**  A locale the client did not declare is
-      omitted, never guessed from the daemon's ``LANG``; ``client_type`` and
-      ``client_discloses_ai`` are omitted when no client had declared a
-      presentation at all (a revive), rather than written as a terminal
+      omitted, never guessed from the daemon's ``LANG``; ``client_type``
+      and ``client_discloses_ai`` are omitted when no client had declared
+      a presentation at all (a revive), rather than written as a terminal
       that did not disclose.
-    * **Suppressed is a value, not an absence.**  When the client asserted
-      it discloses already the framework emitted nothing, and the record
-      says the CLIENT took the obligation -- ``suppressed: true`` with no
-      ``text`` -- so a reader can tell a withheld announcement from one
-      that silently did not happen.
-    * **``text`` is present only when the framework delivered it.**  A
-      suppressed or revived row carries none: writing what WOULD have been
-      said would read as what was said.
 
     Args:
         session_id: The daemon session id.
-        text: The announcement as emitted, or ``None`` when nothing was.
-        suppressed: The client's ``client_discloses_ai`` withheld it.
-        revived: The session was woken from disk and nothing was
-            re-announced.
+        text: The announcement as emitted.  Required when
+            ``withheld_reason`` is ``None``; ignored otherwise.
+        withheld_reason: ``None`` when the text reached a client, else one
+            of :data:`WITHHELD_REASONS`.
         presentation: The client's ``PresentationContext`` (duck-typed, so
             this module stays stdlib-only), or ``None`` when no client had
             declared one.
@@ -203,15 +231,30 @@ def announcement_record(
     Returns:
         The record, without the ledger's own stamps (``stage``, ``ts``,
         ``iso_ts``, ``event_index``), which :class:`TokenLedger` adds.
+
+    Raises:
+        ValueError: a delivered row with no text, or a reason outside the
+            vocabulary -- both are rows that would mislead, refused at
+            the one place they are built.
     """
+    delivered = withheld_reason is None
+    if delivered and not text:
+        raise ValueError("a delivered announcement record must carry its text")
+    if not delivered and withheld_reason not in WITHHELD_REASONS:
+        raise ValueError(
+            f"unknown withheld_reason {withheld_reason!r}; "
+            f"expected one of {WITHHELD_REASONS}")
     record: dict = {
         "session_id": session_id,
         "agent_id": ANNOUNCEMENT_AGENT_ID,
-        "suppressed": bool(suppressed),
-        "revived": bool(revived),
+        "delivered": delivered,
+        "suppressed": withheld_reason == CLIENT_DISCLOSES,
+        "revived": withheld_reason in (REVIVED_WAKE, REVIVED_REATTACH),
     }
-    if text:
+    if delivered:
         record["text"] = text
+    else:
+        record["withheld_reason"] = withheld_reason
     if presentation is not None:
         client_type = getattr(presentation, "client_type", None)
         client_type = getattr(client_type, "value", client_type)

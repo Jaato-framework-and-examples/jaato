@@ -17,11 +17,15 @@ each attached to a way it could silently stop holding:
 A. **one writer, named by the schema.**  ``announcement_record`` is what
    the schema's ``written_by`` points at, so the contract guard reads its
    source for every promised field;
-B. **both outcomes are recorded.**  Emitted, and suppressed by the
-   client's ``client_discloses_ai`` -- suppressed is a VALUE, absent is
-   not a record of anything;
-C. **a revive is recorded as a revive.**  Nothing is re-announced, and
-   the ledger says so instead of stopping at the creation row;
+B. **every outcome is recorded, and the row says which.**  ``delivered``
+   is true iff the text reached a client; otherwise ``withheld_reason``
+   says why -- the client took the obligation (``client_discloses``), no
+   client existed (``headless``), the predicate raised
+   (``decision_failed``), or the session was revived.  Withheld is a
+   VALUE, absent is not a record of anything;
+C. **a revive is recorded as a revive, and says which kind.**  Nothing is
+   re-announced, and the row carries ``wake`` or ``reattach`` instead of
+   N indistinguishable ``revived: true`` lines;
 D. **absent is not defaulted.**  A locale nobody declared is omitted, and
    a revive with no client attached carries no channel;
 E. **a profile that declared nothing gets no row**, for the reason it
@@ -38,6 +42,11 @@ G. **the flags reach the daemon at all.**  ``PresentationContext``
    declared ``client_discloses_ai`` and carried it through neither
    ``to_dict`` nor ``from_dict``, so the suppression #1116 shipped never
    held over the wire -- found by writing the suppressed record's test.
+   Both directions are the model's own now, so a field added later
+   cannot be left behind by a hand-maintained list;
+H. **a row with nowhere to land is audible**, at WARNING from the daemon
+   and as ``disclosure_unrecorded`` from ``validate`` -- a control that
+   silently does not apply is #735's shape.
 """
 
 from __future__ import annotations
@@ -56,6 +65,11 @@ from jaato_sdk.events import ClientType, PresentationContext
 from shared.ai_disclosure import (
     ANNOUNCEMENT_AGENT_ID,
     CLIENT_DISCLOSES,
+    DECISION_FAILED,
+    HEADLESS,
+    REVIVED_REATTACH,
+    REVIVED_WAKE,
+    WITHHELD_REASONS,
     announcement_record,
 )
 from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
@@ -65,12 +79,14 @@ _MANAGER = "jaato-server/server/session_manager.py"
 _CORE = "jaato-server/server/core.py"
 _DISCLOSURE = "jaato-server/shared/ai_disclosure.py"
 _EVENTS = "jaato-sdk/jaato_sdk/events.py"
+_VALIDATE = "jaato-server/shared/scaffold/validate.py"
 
 REVERSIONS = [
     Reversion(
         target=_MANAGER,
         find="        self._record_ai_interaction(\n"
-             "            session, text=text, suppressed=(reason == CLIENT_DISCLOSES))",
+             "            session, text=text if withheld is None else None,\n"
+             "            withheld_reason=withheld)",
         replace="        pass  # reversion: the announcement is emitted and never recorded",
         because=(
             "an announcement nobody wrote down is the state #1157 reports: "
@@ -80,20 +96,45 @@ REVERSIONS = [
     ),
     Reversion(
         target=_MANAGER,
-        find="            elif reason != CLIENT_DISCLOSES:\n"
+        find="            elif reason == CLIENT_DISCLOSES:\n"
+             "                withheld = CLIENT_DISCLOSES\n"
+             "            else:\n"
              "                return      # the profile declared nothing, or declared false",
         replace="            else:\n"
                 "                return      # reversion: a suppression leaves no record",
         because=(
-            "a suppressed announcement must be recorded as suppressed, never "
+            "a suppressed announcement must be recorded as withheld, never "
             "as absent -- the client took the obligation, and the row is the "
             "only thing that says so"
         ),
-        test="test_a_suppressed_announcement_is_recorded_as_suppressed",
+        test="test_a_suppressed_announcement_is_recorded_as_withheld",
     ),
     Reversion(
         target=_MANAGER,
-        find="        self._record_revived_ai_interaction(session)",
+        find="                if client_id == self._HEADLESS_CLIENT_ID:\n"
+             "                    withheld = HEADLESS",
+        replace="                pass  # reversion: a headless emit is recorded as delivered",
+        because=(
+            "a headless session's client id is served by no transport, so a "
+            "row saying `delivered` there certifies a disclosure no person "
+            "received"
+        ),
+        test="test_a_headless_creation_is_recorded_as_not_delivered",
+    ),
+    Reversion(
+        target=_MANAGER,
+        find="        return None, DECISION_FAILED",
+        replace="        return None, None  # reversion: a failed decision reads as 'declared nothing'",
+        because=(
+            "a predicate that raised used to collapse to 'the profile declared "
+            "nothing' -- no announcement, no row, a DEBUG line -- for a "
+            "profile that may well have declared interaction"
+        ),
+        test="test_a_decision_that_raises_is_recorded_as_decision_failed",
+    ),
+    Reversion(
+        target=_MANAGER,
+        find="        self._record_revived_ai_interaction(session, load_reason)",
         replace="        pass  # reversion: a wake leaves no record",
         because=(
             "a woken session's ledger must say why nothing was announced, "
@@ -101,6 +142,17 @@ REVERSIONS = [
             "continued"
         ),
         test="test_the_revive_path_records_and_the_create_path_emits",
+    ),
+    Reversion(
+        target=_MANAGER,
+        find="            load_reason=\"wake\",\n",
+        replace="",
+        because=(
+            "resume_session is the one caller that is a WAKE; without the "
+            "argument every revive records as a reattach and N rows in a "
+            "long-lived session are indistinguishable"
+        ),
+        test="test_a_wake_and_a_reattach_are_told_apart",
     ),
     Reversion(
         target=_DISCLOSURE,
@@ -130,15 +182,39 @@ REVERSIONS = [
         test="test_the_row_lands_in_the_sessions_workspace_not_the_daemons_cwd",
     ),
     Reversion(
+        target=_CORE,
+        find="        if where is None:\n"
+             "            logger.warning(",
+        replace="        if where is None:\n"
+                "            logger.info(",
+        because=(
+            "a row kept in memory is a control that silently does not apply "
+            "(#735); an INFO line is the silence"
+        ),
+        test="test_a_row_with_no_file_to_land_in_is_a_warning",
+    ),
+    Reversion(
         target=_EVENTS,
-        find='            client_discloses_ai=bool(data.get("client_discloses_ai", False)),',
-        replace='            client_discloses_ai=False,  # reversion: dropped on ingest',
+        find="        return self.model_dump(mode=\"json\")",
+        replace="        return {\"client_type\": self.client_type.value}  # reversion: a hand list",
         because=(
             "the suppression #1116 shipped was declared on the model and "
             "carried by neither serializer, so a client that asserted it "
             "disclosed already was announced to anyway"
         ),
         test="test_the_two_disclosure_flags_and_the_locale_survive_the_wire",
+    ),
+    Reversion(
+        target=_VALIDATE,
+        find="    if (reg is not None and reg.interacts_with_persons is True\n"
+             "            and not _ledger_is_named(profile, env_keys)):",
+        replace="    if False:  # reversion: a profile with no ledger validates clean",
+        because=(
+            "a profile that announces and names no ledger writes the proof "
+            "to memory; validate is where an author hears that before any "
+            "session exists"
+        ),
+        test="test_validate_reports_a_profile_that_announces_and_records_nowhere",
     ),
 ]
 
@@ -227,23 +303,43 @@ def test_the_schema_names_the_event_in_the_ledger_and_its_writer():
     assert event.store == "ledger", "the record must ride the store that chains"
     assert event.written_by == "shared/ai_disclosure.py::announcement_record"
     guaranteed = set(audit.guaranteed_fields("announcement"))
-    assert {"session_id", "agent_id", "suppressed", "revived"} <= guaranteed
+    assert {"session_id", "agent_id", "delivered", "suppressed", "revived"} <= guaranteed
     # And the facts the issue asks to bind are declared, as measured-when-known.
     declared = {f.name for f in event.fields}
-    assert {"text", "client_type", "client_discloses_ai", "locale",
-            "provider", "model", "created_by"} <= declared
+    assert {"text", "withheld_reason", "client_type", "client_discloses_ai",
+            "locale", "provider", "model", "created_by"} <= declared
     assert audit.AUDIT_SCHEMA_VERSION == "2", (
         "adding an event bumps the schema version a reader pins against")
 
 
 def test_the_writer_emits_every_guaranteed_field_and_no_null():
-    rec = announcement_record("sid")
+    rec = announcement_record("sid", text="You are talking to a bot.")
     for name in audit.guaranteed_fields("announcement"):
         if name in ("stage", "ts", "iso_ts", "event_index"):
             continue        # the ledger's own stamps
         assert name in rec, f"{name} is promised and not written"
     assert None not in rec.values(), "absent is omitted, never null"
     assert rec["agent_id"] == ANNOUNCEMENT_AGENT_ID == "main"
+
+
+def test_the_writer_refuses_a_row_that_would_mislead():
+    """``delivered`` beside no text, or a reason outside the vocabulary,
+    are rows an auditor would misread -- refused where they are built."""
+    with pytest.raises(ValueError):
+        announcement_record("sid")                      # delivered, no text
+    with pytest.raises(ValueError):
+        announcement_record("sid", withheld_reason="because")
+    for reason in WITHHELD_REASONS:
+        rec = announcement_record("sid", withheld_reason=reason)
+        assert rec["delivered"] is False
+        assert rec["withheld_reason"] == reason
+        assert "text" not in rec
+    delivered = announcement_record("sid", text="x")
+    assert delivered["delivered"] is True and "withheld_reason" not in delivered
+    # The two derived flags older readers pin on are consistent with the reason.
+    assert announcement_record("sid", withheld_reason=CLIENT_DISCLOSES)["suppressed"]
+    assert announcement_record("sid", withheld_reason=REVIVED_WAKE)["revived"]
+    assert not announcement_record("sid", withheld_reason=HEADLESS)["suppressed"]
 
 
 # --------------------------------------------- B. both outcomes recorded
@@ -271,12 +367,13 @@ def test_an_emitted_announcement_is_recorded_with_its_four_facts(tmp_path):
     assert row["session_id"] == "20260920_120000"
     assert row["agent_id"] == "main"
     assert row["created_by"] == "app:alice"
+    assert row["delivered"] is True and "withheld_reason" not in row
     assert row["suppressed"] is False and row["revived"] is False
     assert row.get("digest") and row.get("prev_digest") == "genesis", (
         "the row must ride the chain the profile declared")
 
 
-def test_a_suppressed_announcement_is_recorded_as_suppressed(tmp_path):
+def test_a_suppressed_announcement_is_recorded_as_withheld(tmp_path):
     from server.session_manager import SessionManager
 
     emitted: List[Any] = []
@@ -287,12 +384,68 @@ def test_a_suppressed_announcement_is_recorded_as_suppressed(tmp_path):
 
     assert emitted == [], "the client took the obligation; the framework says nothing"
     rows = _rows(tmp_path)
-    assert len(rows) == 1, "suppressed is a value; absent is not a record of anything"
+    assert len(rows) == 1, "withheld is a value; absent is not a record of anything"
     row = rows[0]
+    assert row["delivered"] is False
+    assert row["withheld_reason"] == CLIENT_DISCLOSES == "client_discloses"
     assert row["suppressed"] is True
     assert row["client_discloses_ai"] is True
     assert row["client_type"] == "chat"
     assert "text" not in row, "nothing was delivered, so no text claims to have been"
+
+
+def test_a_headless_creation_is_recorded_as_not_delivered(tmp_path):
+    """``create_headless_session`` announces to ``_headless``, a client id
+    no transport serves: the event reaches the EventBus and no person.
+    A row saying ``delivered`` there would certify a disclosure nobody
+    received."""
+    from jaato_sdk.events import AgentOutputEvent
+    from server.session_manager import SessionManager
+
+    emitted: List[Any] = []
+    srv = _server(tmp_path, _Reg(True, "Acme GmbH"), presentation=None)
+    SessionManager._announce_ai_interaction(
+        _manager(emitted), SessionManager._HEADLESS_CLIENT_ID, _session(srv))
+
+    assert [type(e) for e in emitted] == [AgentOutputEvent], (
+        "the emit still happens -- a reactor may relay it")
+    [row] = _rows(tmp_path)
+    assert row["delivered"] is False
+    assert row["withheld_reason"] == HEADLESS == "headless"
+    assert "text" not in row
+
+
+def _raising_server(tmp_path):
+    """A stand-in whose predicate RAISES but whose recorder works."""
+    srv = _server(tmp_path, _Reg(True, "Acme GmbH"), PresentationContext())
+
+    def boom():
+        raise RuntimeError("the regulatory block is unreadable")
+    srv.disclosure_decision = boom
+    return srv
+
+
+def test_a_decision_that_raises_is_recorded_as_decision_failed(tmp_path, caplog):
+    """A failure to DECIDE used to collapse to ``(None, None)`` -- "the
+    profile declared nothing" -- on both paths, with a DEBUG line.  It is
+    the same state as a failure to announce and gets the same posture:
+    WARNING, and a row saying so."""
+    from server.session_manager import SessionManager
+
+    emitted: List[Any] = []
+    srv = _raising_server(tmp_path)
+    with caplog.at_level(logging.WARNING, logger="server.session_manager"):
+        SessionManager._announce_ai_interaction(_manager(emitted), "c", _session(srv))
+        SessionManager._record_revived_ai_interaction(
+            _manager(emitted), _session(srv), "reattach")
+
+    assert emitted == [], "nothing can be announced on a decision that failed"
+    rows = _rows(tmp_path)
+    assert [r["withheld_reason"] for r in rows] == [DECISION_FAILED, DECISION_FAILED]
+    assert all(r["delivered"] is False for r in rows)
+    warned = [r for r in caplog.records if "decision" in r.getMessage()
+              and "raised" in r.getMessage()]
+    assert len(warned) == 2, "each failed decision is audible, at WARNING"
 
 
 # ---------------------------------------------- C. a revive is a revive
@@ -332,15 +485,47 @@ def test_a_revived_session_is_recorded_as_revived_with_no_emit(tmp_path):
 
     emitted: List[Any] = []
     srv = _server(tmp_path, _Reg(True, "Acme GmbH"), presentation=None)
-    SessionManager._record_revived_ai_interaction(_manager(emitted), _session(srv))
+    SessionManager._record_revived_ai_interaction(
+        _manager(emitted), _session(srv), "reattach")
 
     assert emitted == []
     [row] = _rows(tmp_path)
     assert row["revived"] is True and row["suppressed"] is False
+    assert row["delivered"] is False
+    assert row["withheld_reason"] == REVIVED_REATTACH == "reattach"
     assert "text" not in row
     # D. no client attached yet: no channel is invented for it.
     assert "client_type" not in row and "client_discloses_ai" not in row
     assert (row["provider"], row["model"]) == ("echo", "echo-1")
+
+
+def test_a_wake_and_a_reattach_are_told_apart(tmp_path):
+    """``resume_session`` is the one caller that is a WAKE; every other
+    revive is a client attaching to a session the daemon had unloaded.
+    Both the recorder and the caller are pinned: the first behaviourally,
+    the second at the source, because ``resume_session`` needs a whole
+    manager to drive and the failure guarded against is the argument
+    being dropped at that one call site."""
+    from server.session_manager import SessionManager
+
+    srv = _server(tmp_path, _Reg(True, "Acme GmbH"), presentation=None)
+    SessionManager._record_revived_ai_interaction(_manager(), _session(srv), "wake")
+    SessionManager._record_revived_ai_interaction(_manager(), _session(srv), "reattach")
+    assert [r["withheld_reason"] for r in _rows(tmp_path)] == [REVIVED_WAKE, REVIVED_REATTACH]
+    assert all(r["revived"] is True for r in _rows(tmp_path))
+
+    tree = ast.parse(Path(_MANAGER).read_text())
+    resume = next(fn for fn in ast.walk(tree)
+                  if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef))
+                  and fn.name == "resume_session")
+    wake_calls = [
+        n for n in ast.walk(resume)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+        and n.func.attr == "_load_session"
+        and any(k.arg == "load_reason" and isinstance(k.value, ast.Constant)
+                and k.value.value == "wake" for k in n.keywords)
+    ]
+    assert wake_calls, "resume_session must load with load_reason='wake'"
 
 
 # ------------------------------------------- D. absent is not defaulted
@@ -358,7 +543,7 @@ def test_a_locale_nobody_declared_is_absent_not_defaulted():
 
 
 def test_a_binding_not_yet_known_is_absent():
-    rec = announcement_record("sid", provider="", model=None)
+    rec = announcement_record("sid", text="x", provider="", model=None)
     assert "provider" not in rec and "model" not in rec and "created_by" not in rec
 
 
@@ -371,7 +556,8 @@ def test_a_profile_that_declared_nothing_gets_no_row(tmp_path):
         emitted: List[Any] = []
         srv = _server(tmp_path, reg, PresentationContext())
         SessionManager._announce_ai_interaction(_manager(emitted), "c", _session(srv))
-        SessionManager._record_revived_ai_interaction(_manager(emitted), _session(srv))
+        SessionManager._record_revived_ai_interaction(
+            _manager(emitted), _session(srv), "reattach")
         assert emitted == []
     assert _rows(tmp_path) == [], "a row for a profile that made no determination IS one"
 
@@ -451,6 +637,79 @@ def test_a_record_that_cannot_land_costs_a_warning_not_the_session(tmp_path, cap
         "a disclosure that cannot be proved must be audible, not silent")
 
 
+# ----------------------------------------- H. a row with nowhere to land
+
+def test_a_row_with_no_file_to_land_in_is_a_warning(tmp_path, caplog):
+    """No ``trace.ledger`` and no ``LEDGER_PATH``: the ledger keeps the
+    row in memory and nothing daemon-side ever flushes it.  The person
+    was told and ``--audit-verify`` has nothing -- #735's shape, so it
+    is said at WARNING naming the knobs, not at INFO."""
+    srv = _server(tmp_path, _Reg(True), PresentationContext())
+    srv._session_env = {}           # nothing names a file
+    with caplog.at_level(logging.INFO, logger="server.core"):
+        rec = srv.record_disclosure_announcement(text="You are talking to a bot.")
+    assert rec["delivered"] is True
+    assert _rows(tmp_path) == []
+    warned = [r for r in caplog.records
+              if r.levelno == logging.WARNING and "MEMORY ONLY" in r.getMessage()]
+    assert len(warned) == 1, [r.getMessage() for r in caplog.records]
+    assert "trace.ledger" in warned[0].getMessage()
+    assert "LEDGER_PATH" in warned[0].getMessage()
+
+    # And with a file named, the same call is INFO: the warning is about
+    # the absence, never a per-session nag.
+    caplog.clear()
+    srv._session_env = {"LEDGER_PATH": "ledger.jsonl"}
+    with caplog.at_level(logging.INFO, logger="server.core"):
+        srv.record_disclosure_announcement(text="You are talking to a bot.")
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    # The ledger appends what it holds once a file appears, so the earlier
+    # memory-only row may land beside this one; what matters is that a
+    # file now carries the record.
+    assert _rows(tmp_path) and _rows(tmp_path)[-1]["delivered"] is True
+
+
+def test_validate_reports_a_profile_that_announces_and_records_nowhere():
+    """The same fact before any session exists.  ``interacts_with_persons:
+    true`` with no ledger source is ``disclosure_unrecorded`` (warn; error
+    under ``risk_class: high``); any of the three routes to a ledger file
+    silences it, and a profile that declared nothing about interaction
+    is not asked to prove an announcement it does not make."""
+    from types import SimpleNamespace
+
+    from shared.plugins.subagent.config import RegulatoryProfileConfig
+    from shared.scaffold.validate import (
+        HIGH_RISK_ESCALATED_CODES, _check_regulatory,
+    )
+
+    def run(reg, *, trace=None, env=None, env_keys=None):
+        out: List[Any] = []
+        prof = SimpleNamespace(regulatory=reg, default_agent="bot",
+                               system_instructions=None, trace=trace,
+                               env=env or {}, plugins=[], plugin_configs={},
+                               suppress_base_instructions=frozenset())
+        _check_regulatory(prof, lambda sev, code, msg, where=None:
+                          out.append((sev, code, msg, where)), env_keys=env_keys)
+        return out
+
+    interacts = RegulatoryProfileConfig.from_dict({"interacts_with_persons": True})
+    [(sev, code, msg, where)] = run(interacts)
+    assert (sev, code, where) == ("warn", "disclosure_unrecorded", "trace.ledger")
+    assert "trace.ledger" in msg and "LEDGER_PATH" in msg
+    assert "disclosure_unrecorded" in HIGH_RISK_ESCALATED_CODES
+
+    # Each route to a file is enough.
+    assert run(interacts, trace=SimpleNamespace(
+        session_log=None, provider_log=None, ledger=".jaato/logs/ledger.jsonl")) == []
+    assert run(interacts, env={"LEDGER_PATH": "/var/log/jaato/ledger.jsonl"}) == []
+    assert run(interacts, env_keys={"LEDGER_PATH"}) == []
+
+    # Nothing to prove for a profile that makes no announcement.
+    silent = RegulatoryProfileConfig.from_dict({"interacts_with_persons": False})
+    assert run(silent) == []
+    assert [c for _s, c, _m, _w in run(None)] == ["disclosure_absent"]
+
+
 # --------------------------------------------- G. the flags cross the wire
 
 def test_the_two_disclosure_flags_and_the_locale_survive_the_wire():
@@ -471,6 +730,16 @@ def test_the_two_disclosure_flags_and_the_locale_survive_the_wire():
     old = PresentationContext.from_dict({"client_type": "terminal"})
     assert old.client_discloses_ai is False and old.locale is None
     assert old.renderable_media == []
+
+    # Both directions are the model's own, so EVERY field rides -- the
+    # hand-maintained list is how two fields were left behind.
+    assert set(sent.to_dict()) == set(PresentationContext.model_fields)
+    assert PresentationContext.from_dict(sent.to_dict()) == sent
+
+    # A scalar mime is one entry, never its characters.
+    coerced = PresentationContext.from_dict({"renderable_media": "image/*"})
+    assert coerced.renderable_media == ["image/*"]
+    assert coerced.can_render_media("image/png")
 
 
 def test_explain_oversight_names_the_record():

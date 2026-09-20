@@ -909,7 +909,16 @@ def _disclosure_decision_of(
     and the text alone is ``None`` in both cases.  A server carrying only
     the older ``disclosure_announcement`` accessor answers with its text
     and no reason; one carrying neither answers ``(None, None)``.
+
+    **A predicate that raises answers ``DECISION_FAILED``, at WARNING.**
+    Collapsing it to ``(None, None)`` read as "the profile declared
+    nothing" on both the create and the revive path -- no announcement,
+    no ledger row, one DEBUG line -- for a profile that may well have
+    declared ``interacts_with_persons: true``.  A failure to DECIDE is
+    the same state as a failure to announce, and gets the same posture:
+    audible, and written down (the row carries the reason).
     """
+    from shared.ai_disclosure import DECISION_FAILED
     if server is None:
         return None, None
     decide = getattr(server, "disclosure_decision", None)
@@ -921,9 +930,13 @@ def _disclosure_decision_of(
     try:
         text, reason = decide()
         return text, reason
-    except Exception:  # noqa: BLE001 -- a snapshot must not fail on this
-        logger.debug("disclosure_decision raised", exc_info=True)
-        return None, None
+    except Exception:  # noqa: BLE001 -- see the docstring
+        logger.warning(
+            "AI-disclosure decision (Art. 50(1)) raised for session %s; "
+            "whether the person is owed an announcement could not be "
+            "established, so none was made",
+            getattr(server, "session_id", "?"), exc_info=True)
+        return None, DECISION_FAILED
 
 
 def initialize_or_refuse(server: JaatoServer, session_id: str) -> bool:
@@ -8442,12 +8455,13 @@ class SessionManager:
           message to the person, not a model turn, and putting it in
           history would replay it to the model on every request and let
           GC decide when the person stops having been told.
-        * **Recorded, on both outcomes (#1157).**  Emitted or suppressed by
-          the client, an ``announcement`` row goes to the ledger through
-          :meth:`_record_ai_interaction`, binding the text, channel,
-          locale and model identity to this session.  A profile that
-          declared nothing gets no row, for the same reason it gets no
-          announcement.
+        * **Recorded, on every outcome (#1157).**  Delivered, suppressed
+          by the client, created for no client (headless), or undecidable
+          because the predicate raised -- an ``announcement`` row goes to
+          the ledger through :meth:`_record_ai_interaction`, binding the
+          text, channel, locale and model identity to this session and
+          saying ``delivered`` or why not.  A profile that declared
+          nothing gets no row, for the same reason it gets no announcement.
 
         Best-effort by construction: a failure here must not fail a
         session that is otherwise created and usable -- but it is logged at
@@ -8458,15 +8472,27 @@ class SessionManager:
         ``--ws-unsafe-no-auth``).
         """
         from jaato_sdk.events import AgentOutputEvent
-        from shared.ai_disclosure import CLIENT_DISCLOSES
+        from shared.ai_disclosure import (
+            CLIENT_DISCLOSES, DECISION_FAILED, HEADLESS,
+        )
 
+        withheld: Optional[str] = None
         try:
             text, reason = _disclosure_decision_of(session.server)
-            if text:
+            if reason == DECISION_FAILED:
+                withheld = DECISION_FAILED
+            elif text:
                 self._emit_to_client(client_id, AgentOutputEvent(
                     agent_id="main", source="system", text=text, mode="write",
                 ))
-            elif reason != CLIENT_DISCLOSES:
+                # A headless session's client id is served by no transport:
+                # the event above reaches the EventBus (a reactor may relay
+                # it) and no person.  The record must not say otherwise.
+                if client_id == self._HEADLESS_CLIENT_ID:
+                    withheld = HEADLESS
+            elif reason == CLIENT_DISCLOSES:
+                withheld = CLIENT_DISCLOSES
+            else:
                 return      # the profile declared nothing, or declared false
         except Exception:  # noqa: BLE001 -- see the docstring
             logger.warning(
@@ -8475,18 +8501,19 @@ class SessionManager:
                 getattr(session, "session_id", "?"), exc_info=True,
             )
             return
-        # #1157: write down that it happened -- or that the client took the
-        # obligation.  A disclosure the framework cannot later prove is the
-        # state the record exists to prevent, so this is not skipped on a
-        # suppression: suppressed is a value, absent is not.
+        # #1157: write down that it happened -- or why it did not.  A
+        # disclosure the framework cannot later prove is the state the
+        # record exists to prevent, so this is not skipped on a suppression,
+        # a headless creation or a failed decision: withheld is a value,
+        # absent is not.
         self._record_ai_interaction(
-            session, text=text, suppressed=(reason == CLIENT_DISCLOSES))
+            session, text=text if withheld is None else None,
+            withheld_reason=withheld)
 
     def _record_ai_interaction(
         self, session: "Session", *,
         text: Optional[str] = None,
-        suppressed: bool = False,
-        revived: bool = False,
+        withheld_reason: Optional[str] = None,
     ) -> None:
         """Write the Art. 50(1) ``announcement`` audit record (#1157).
 
@@ -8501,14 +8528,16 @@ class SessionManager:
         model identity -- and it goes to the LEDGER, not the session
         trace, because the ledger is the store that chains.
 
-        Three call sites, one writer:
+        Two call sites, one writer, and every outcome is a row:
 
-        * the create path, when the text was **emitted**;
-        * the create path, when the client's ``client_discloses_ai``
-          **suppressed** it -- recorded as suppressed, never as absent;
-        * the revive path (``_load_session_impl``), as ``revived: true``
-          with no new emit, so a woken session's ledger says why nothing
-          was announced rather than leaving the wake unrecorded.
+        * the create path -- **delivered** (``withheld_reason=None``, the
+          text verbatim), or withheld because the client took the
+          obligation (``client_discloses``), because no client exists to
+          read it (``headless``), or because the predicate raised
+          (``decision_failed``);
+        * the revive path (``_load_session_impl``) -- ``wake`` or
+          ``reattach``, with no new emit, so a woken session's ledger says
+          why nothing was announced AND which kind of waking it was.
 
         Best-effort like the emit, and audible like it: a record that fails
         to land is logged at WARNING naming the session, because a
@@ -8527,34 +8556,53 @@ class SessionManager:
                 sid)
             return
         try:
-            writer(text=text, suppressed=suppressed, revived=revived,
+            writer(text=text, withheld_reason=withheld_reason,
                    created_by=getattr(session, "created_by", None))
         except Exception:  # noqa: BLE001 -- see the docstring
             logger.warning(
                 "AI-disclosure announcement (Art. 50(1)) for session %s was "
                 "%s but NOT recorded in the ledger",
-                sid, "suppressed" if suppressed else
-                "not re-announced on revive" if revived else "emitted",
+                sid, "delivered" if withheld_reason is None
+                else f"withheld ({withheld_reason})",
                 exc_info=True)
 
-    def _record_revived_ai_interaction(self, session: "Session") -> None:
+    def _record_revived_ai_interaction(
+        self, session: "Session", load_reason: str,
+    ) -> None:
         """The revive half of :meth:`_record_ai_interaction`.
 
         A revived session is never re-announced (see
         :meth:`_announce_ai_interaction`), and a ledger that simply stopped
         at the creation row would leave a reader unable to tell a wake
         from a session that never continued.  So a profile that declared
-        ``interacts_with_persons: true`` gets a ``revived: true`` row and
-        no emit; one that declared nothing gets nothing, the same gate the
-        create path applies.  The presentation context is usually unset
-        here -- no client has attached yet -- and the record says so by
-        omitting the channel rather than inventing one.
+        ``interacts_with_persons: true`` gets a row and no emit; one that
+        declared nothing gets nothing, the same gate the create path
+        applies; one whose predicate raised gets ``decision_failed``.
+
+        ``load_reason`` says WHICH waking this was, and the row carries it
+        as ``withheld_reason``: ``"wake"`` for the deliberate
+        ``session.wake`` / ``resume_session`` drive of a finished session,
+        ``"reattach"`` for a client attaching to a session the daemon had
+        unloaded -- the #1106 grace expiring under a browser reload, a
+        daemon restart.  A long-lived interactive session accumulates many
+        of the second and none of the first, and since a chained file
+        rotates whole, the row has to say which it is rather than leave N
+        indistinguishable ``revived: true`` lines.  The presentation
+        context is usually unset here -- no client has attached yet -- and
+        the record says so by omitting the channel rather than inventing
+        one.
         """
-        from shared.ai_disclosure import CLIENT_DISCLOSES
+        from shared.ai_disclosure import (
+            CLIENT_DISCLOSES, DECISION_FAILED, REVIVED_REATTACH, REVIVED_WAKE,
+        )
         text, reason = _disclosure_decision_of(getattr(session, "server", None))
-        if text is None and reason != CLIENT_DISCLOSES:
+        if reason == DECISION_FAILED:
+            withheld = DECISION_FAILED
+        elif text or reason == CLIENT_DISCLOSES:
+            withheld = REVIVED_WAKE if load_reason == "wake" else REVIVED_REATTACH
+        else:
             return
-        self._record_ai_interaction(session, revived=True)
+        self._record_ai_interaction(session, withheld_reason=withheld)
 
     # ------------------------------------------------------------------
     # Headless session creation (for daemon extensions / reactors)
@@ -9487,6 +9535,7 @@ class SessionManager:
             session_id,
             client_id=self._HEADLESS_CLIENT_ID,
             workspace_path=workspace_path,
+            load_reason="wake",
         )
         if session is None:
             logger.debug(
@@ -9775,6 +9824,7 @@ class SessionManager:
         session_id: str,
         client_id: Optional[str] = None,
         workspace_path: Optional[str] = None,
+        load_reason: str = "reattach",
     ) -> Optional[Session]:
         """Load a session from disk (server 0.6.71+ entry).
 
@@ -9783,10 +9833,19 @@ class SessionManager:
         so the bootstrap is isolated from any ContextVar values
         inherited from the caller's task.  See the helper's docstring
         for the rationale.
+
+        ``load_reason`` is WHY the session is coming off disk --
+        ``"reattach"`` (a client attaching to a session the daemon had
+        unloaded; the default, since the attach path is the one that
+        does not name itself) or ``"wake"`` (:meth:`resume_session`, the
+        deliberate drive of a finished session).  Read by the Art. 50(1)
+        revive record (#1157) and by nothing else: the two wakings are
+        indistinguishable in the ledger otherwise.
         """
         from shared.session_context import run_in_fresh_session_context
         return run_in_fresh_session_context(
             self._load_session_impl, session_id, client_id, workspace_path,
+            load_reason,
         )
 
     def _load_persisted_with_index_fallback(
@@ -10029,6 +10088,7 @@ class SessionManager:
         session_id: str,
         client_id: Optional[str] = None,
         workspace_path: Optional[str] = None,
+        load_reason: str = "reattach",
     ) -> Optional[Session]:
         """Implementation of session loading, called via fresh-context wrap.
 
@@ -10040,6 +10100,9 @@ class SessionManager:
             workspace_path: Workspace directory for resolving the session
                 storage path. Required so we know which workspace's
                 ``.jaato/sessions/`` to look in.
+            load_reason: ``"reattach"`` or ``"wake"`` -- see
+                :meth:`_load_session`; carried onto the Art. 50(1) revive
+                record so the ledger can tell the two apart (#1157).
 
         Returns:
             The loaded Session, or None if not found.
@@ -10493,8 +10556,9 @@ class SessionManager:
             restored_pending_attach=True,
         )
 
-        # #1157: a wake is not re-announced, and the ledger says so.
-        self._record_revived_ai_interaction(session)
+        # #1157: a wake is not re-announced, and the ledger says so -- and
+        # says which kind of waking this was.
+        self._record_revived_ai_interaction(session, load_reason)
 
         # Restore workspace file monitor with persisted tracked state
         if state.workspace_path:

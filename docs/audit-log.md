@@ -71,13 +71,20 @@ never written down (#1157), so "was this person told, and what were they
 told?" had no answer in any store `--audit-verify` covers. The row binds
 the four facts that used to sit in four places: `text` as delivered,
 `client_type` and `locale` off the client's `PresentationContext`, and the
-`provider` / `model` pair serving the session. It is written on **both**
-outcomes — `suppressed: true` when the client asserted
-`client_discloses_ai` and the framework withheld its text, so a withheld
-announcement is recorded as withheld and never as absent — and on a wake as
-`revived: true`, since nothing is re-announced and the ledger says why. A
-profile that made no determination gets no row, for the reason it gets no
-announcement. The daemon writes it at session creation, before the first
+`provider` / `model` pair serving the session. It is written on **every**
+outcome, and `delivered` is the one question it answers: `true` with the
+text verbatim, or `false` with a `withheld_reason` — `client_discloses`
+(the client asserted `client_discloses_ai` and the framework withheld its
+text), `headless` (the session was created for no client, so the emit
+reached no person), `decision_failed` (the predicate raised, which is
+also said at WARNING), or `wake` / `reattach` (a revive: nothing is
+re-announced, and the row says which kind of waking it was). A withheld
+announcement is recorded as withheld and never as absent. A profile that
+made no determination gets no row, for the reason it gets no
+announcement. A row with no file to land in stays in the daemon's memory
+and is announced at WARNING naming `trace.ledger` and `LEDGER_PATH`;
+`jaato-scaffold validate` reports the same profile as
+`disclosure_unrecorded` before any session exists. The daemon writes it at session creation, before the first
 turn, into the same file the runner's ledger then appends to; the chain
 belongs to the file, so the two writers continue one chain and the
 announcement precedes the first `response`. `event_index` is per writer and
