@@ -27,6 +27,24 @@ What fails here without the fix (registration inside ``_handle_request``):
 
 * ``cancel_stats()['unknown'] == 1`` instead of ``tripped == 1``
 * the queued call runs to completion and answers ``ok=True``
+
+REVERSION, spelled out.  The reversion meta-guard
+(``shared/tests/test_every_guard_detects_its_own_reversion.py``) walks only
+``shared/tests`` and ``server/tests``, so a ``REVERSIONS`` table declared
+here would never be executed — an inert declaration claiming coverage it
+does not have is worse than none (jaato #1097).  The one-line change this
+module is written against, to run by hand::
+
+    # server/runner/rpc.py, inside serve()
+    -   call_token = self._register_call(env.id)
+    +   call_token = None          # worker-side registration, pre-#988
+
+which puts the registration back inside ``_handle_request`` via its
+``token is None`` fallback.  Observed against it:
+``test_cancel_for_a_queued_call_is_honoured`` fails with
+``{'received': 1, 'tripped': 0, 'late': 0, 'unknown': 1}`` and
+``test_registration_is_on_the_reader_thread_for_every_method`` fails on the
+missing call — deterministically, idle or loaded.
 """
 
 from __future__ import annotations
