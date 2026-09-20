@@ -77,7 +77,11 @@ REVERSIONS = [
     ),
     Reversion(
         target=_VALIDATE,
-        find="    _check_regulatory(profile, add)\n",
+        # Anchored on the WHOLE call, `env_keys` included: the argument is
+        # what carries the workspace `.env`'s own `LEDGER_PATH` into
+        # `disclosure_unrecorded` (#1157), so a call site that lost it would
+        # be a check wired but under-informed -- the shape one line down.
+        find="    _check_regulatory(profile, add, env_keys=env_keys)\n",
         replace="",
         because=(
             "the check must be WIRED into validate_profile, not merely "
