@@ -5606,6 +5606,90 @@ It is a real question — a cascade stage does belong to whoever drove the
 cascade — and it changes attribution for every reactor-spawned session, so it
 wants its own change rather than riding this one.
 
+### A Reactor an IPC Deployment Could Not Trigger (#1167)
+
+`ExternalEventRequest` is how a host pokes a running session from outside —
+`{name, data, timestamp}` becomes an `EXTERNAL_EVENT` on the session's
+`EventBus`, reaching every agent that called
+`subscribeToEvents(event_types=['external_event'])` and sinking onward to
+`SessionManager.reactor_event_bus`. It was handled in exactly **one** place in
+the tree: `JaatoWSServer._handle_external_event`. `session_manager.py`,
+`command_router.py` and `ipc.py` contained zero occurrences.
+
+So an IPC client's request deserialized correctly — it is in
+`deserialize_event`'s registry, so it never took `ipc.py`'s unknown-type
+branch — fell through every `isinstance` arm of
+`SessionManager.handle_request`, and hit the final `else`:
+
+```
+ErrorEvent(error="Unknown request type: ExternalEventRequest",
+           error_type="RequestError")
+```
+
+**Loud, not silent**, which is the good direction and bounds the severity:
+this is a missing feature that announces itself rather than a member of the
+silent-ignore family (#910 / #925 / #947 / #950 / #1133). What it cost is
+still real — that WS publish was the only `EXTERNAL_EVENT` producer under
+`server/`, so an IPC-only deployment ran a daemon-wide reactor engine nothing
+could externally trigger. `session.wake` is not a substitute: it drives a turn
+on one session and publishes no bus event. The one workaround, the `webhook`
+plugin's listener (the tree's other producer, transport-independent), costs a
+bound port, TLS, an allowlist and a signed route — to deliver an event from a
+process already holding an authenticated socket to the same daemon.
+
+**The dispatch is what was missing; the translation is now shared.** Adding an
+IPC branch alone would have given the tree TWO answers to *what an external
+event looks like on the bus* — the shape this file already names as a defect
+in its own right, because each copy masks the other and neither can be shown
+to do anything (#688's `on_unmetered` validation, which the reversion
+meta-guard correctly called decorative). `server/external_event.py` is the one
+answer; each transport keeps only what is genuinely its own, which is
+resolving WHICH session the caller is driving.
+
+| Surface | |
+|---|---|
+| `publish_external_event(server, *, name, data, timestamp, source)` | `server/external_event.py`. Resolves `server._runtime.event_bus`, builds the bus event, publishes. Returns an `ExternalEventDelivery` — never raises for a missing bus, because both callers answer their client and a transport handler that raised would cost the connection |
+| `SessionManager._handle_external_event_request` | the IPC arm, `source="ipc"` |
+| `JaatoWSServer._handle_external_event` | unchanged behaviour, now a caller, `source="websocket"` |
+| `IPCClient.send_external_event()` / `JaatoClient.sendExternalEvent()` | the SDK methods |
+
+**Both SDKs gained a method, because neither had one.** `ExternalEventRequest`
+existed as a TYPE in each and as a METHOD in neither, so the only producer in
+practice was an out-of-tree web component hand-rolling the JSON frame — which
+reframes the gap: it was not only "IPC lacks what WS has" but "one component
+is the sole client of a protocol message the SDKs describe and cannot send".
+An empty `name` is refused client-side (it matches no `event_names` filter and
+renders a blank `Type:` to the model), and an absent `data` is sent as `{}`
+rather than `None` — a name with no payload is a legitimate ping.
+
+**`source` names the transport, and that is checkable rather than assumed.**
+It is rendered to the model as `Source: <x>` by
+`shared.event_bus_tools._format_event_notification`, so the parameter has no
+default: a module that guessed one would be making a provenance claim on every
+caller's behalf. `SessionManager.handle_request` serves BOTH transports and
+cannot ask which one it is on — it may say `ipc` only because
+`JaatoWSServer._handle_message` intercepts and returns *before* delegating to
+the `CommandRouter`. That ordering is an invariant, and
+`server/tests/test_external_event_over_ipc_1167.py` fails if the interception
+is removed, rather than letting WS traffic quietly start arriving at the IPC
+arm and being labelled `ipc`.
+
+**No protocol bump.** No event type and no field is added — only a dispatch
+for a message that already existed, already deserialized and already had a
+registry entry — so `PROTOCOL_VERSION` stays at 1.18 and neither SDK declares
+a floor. The 1.7 missing-verb rule is what would have forced one, and it does
+not apply: an older daemon answers that named `ErrorEvent` on the event stream
+rather than ignoring the request. A floor would also be **wrong in the other
+direction**, since the version is transport-agnostic: it would refuse against
+every WS daemon where the same request has always worked.
+
+**A cost, stated.** The complexity ratchet frozen `handle_request` at 101 and
+a baselined function may not grow, so the branchiest of the six permission
+arms — the only one with a three-way `target` switch — was lifted into
+`_handle_permission_remove` to pay for the new branch. Same move as #812's and
+#1069's; the chain is shorter than it was (101 → 93) and the arm's behaviour
+is unchanged.
+
 ### EU AI Act Mechanisms
 
 Regulation (EU) 2024/1689 addresses the **provider** and **deployer** of an

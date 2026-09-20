@@ -73,8 +73,28 @@ All communication between client and server uses **JSON-serialized dataclass eve
 | Client → Server | Commands | `CommandRequest`, `StopRequest` |
 | Client → Server | Configuration | `ClientConfigRequest` |
 | Client → Server | Workspace management | `WorkspaceListRequest`, `WorkspaceSelectRequest` |
-| Bidirectional | External events | `ExternalEventRequest` (client→server) |
+| Client → Server | External events | `ExternalEventRequest` (**both transports** since #1167 — `IPCClient.send_external_event()` / `JaatoClient.sendExternalEvent()`) |
 | Server ↔ Server | Peer gossip | `PeerHeartbeatEvent`, `PeerSpawnRequestEvent` |
+
+> **`ExternalEventRequest` was WS-only before #1167.** The row above said
+> "Bidirectional" with no transport qualifier, in a document about both
+> transports — and it was the one Client→Server row with no IPC route at all:
+> the request deserialized correctly, fell through every `isinstance` arm of
+> `SessionManager.handle_request`, and was answered
+> `ErrorEvent("Unknown request type: ExternalEventRequest")`. It is now
+> dispatched on both, through one shared publish
+> (`server/external_event.py`), and both SDKs carry a method for it —
+> previously the type existed in each and the method in neither, so the only
+> producer was a client hand-rolling the JSON frame. The payload's `source`
+> names the transport the request arrived on (`"ipc"` / `"websocket"`).
+>
+> **Degradation, and why there is no protocol floor for it.** Against a
+> daemon predating the change, an IPC `send_external_event` is answered by
+> that named `ErrorEvent` on the event stream rather than being ignored —
+> so the 1.7 rule (a missing *verb* is silently ignored, hence an SDK
+> minimum) does not apply. A floor would also refuse against every WS daemon
+> where the request has always worked, since the wire shape is unchanged and
+> the protocol version is transport-agnostic.
 
 ### Serialization
 

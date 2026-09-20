@@ -2140,17 +2140,30 @@ class JaatoWSServer:
             await self._send_error(client_id, f"Unknown request type: {event.type}")
 
     async def _handle_external_event(self, client_id: str, event) -> None:
-        """Handle an ``ExternalEventRequest`` from the web component.
+        """Handle an ``ExternalEventRequest`` from a WebSocket client.
 
         Publishes the external event on the session's ``EventBus`` so that
         agents subscribed via ``subscribeToEvents(event_types=['external_event'])``
-        are woken via ``inject_prompt()``.
+        are woken via ``inject_prompt()``, and so that it sinks onward to the
+        daemon-wide reactor bus.
+
+        This method's job is the half only the transport can do: say WHICH
+        session the caller is driving, and which ``JaatoServer`` owns it.  The
+        translation into a bus event is
+        :func:`server.external_event.publish_external_event`, shared with the
+        IPC path (``SessionManager._handle_external_event_request``) since
+        issue #1167 -- two copies of "what an external event looks like on the
+        bus" is the shape this tree treats as a defect.
+
+        Both failure answers reach the client as a WS error frame and neither
+        raises: a session with no bus, or a client driving no session at all,
+        must not cost the connection.
 
         Args:
             client_id: The WS client that sent the message.
             event: Deserialized ``ExternalEventRequest``.
         """
-        from jaato_sdk.event_bus import Event as BusEvent, EventType as BusEventType
+        from server.external_event import publish_external_event
 
         # Resolve the session attached to this client
         session_id = ""
@@ -2161,44 +2174,35 @@ class JaatoWSServer:
             await self._send_error(client_id, "No session attached — cannot deliver external event")
             return
 
-        # Find the session's EventBus.
-        # In daemon mode: SessionManager → Session → JaatoServer → JaatoClient → session → runtime
-        # Phase 3 §7c step 6.6.3.6: read event_bus directly from
-        # the daemon-side ``server._runtime`` (daemon-tier per
-        # §4.2; mirrors the migration in core.py's event_bus
-        # property at §7c step 6.2).  Eliminates the
-        # ``_jaato.get_session()._runtime.event_bus`` indirection.
-        bus = None
+        # Find the session's owning JaatoServer.
+        # In daemon mode: SessionManager → Session → JaatoServer.
+        # Phase 3 §7c step 6.6.3.6: the bus is read from the daemon-side
+        # ``server._runtime`` (daemon-tier per §4.2; mirrors the migration in
+        # core.py's event_bus property at §7c step 6.2), which is what
+        # ``publish_external_event`` does -- so this only has to pick the
+        # right server.
+        owner = None
         if self._command_router:
             sm = self._command_router._session_manager
             session_obj = sm.get_session(session_id) if hasattr(sm, 'get_session') else None
-            if session_obj and session_obj.server and session_obj.server._runtime:
-                bus = session_obj.server._runtime.event_bus
-        elif self._jaato_server and self._jaato_server._runtime:
-            bus = self._jaato_server._runtime.event_bus
+            owner = session_obj.server if session_obj else None
+        else:
+            owner = self._jaato_server
 
-        if not bus:
-            await self._send_error(client_id, "Session event bus not available")
+        delivery = publish_external_event(
+            owner,
+            name=event.name,
+            data=event.data,
+            timestamp=event.timestamp,
+            source="websocket",
+        )
+        if not delivery.ok:
+            await self._send_error(client_id, delivery.error)
             return
 
-        # Build and publish the bus event
-        timestamp = event.timestamp or datetime.now(timezone.utc).isoformat()
-
-        bus_event = BusEvent(
-            event_id=f"ext_{timestamp}",
-            event_type=BusEventType.EXTERNAL_EVENT,
-            timestamp=timestamp,
-            source_agent="_external",
-            payload={
-                "source": "websocket",
-                "event_type": event.name,
-                "data": event.data,
-            },
-        )
-        notified = bus.publish(bus_event)
         logger.debug(
             "External event '%s' published to session %s, notified %d subscriber(s)",
-            event.name, session_id, notified,
+            event.name, session_id, delivery.notified,
         )
 
     async def _handle_workspace_event(self, client_id: str, event: Event) -> None:

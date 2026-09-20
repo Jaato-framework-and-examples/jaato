@@ -659,6 +659,39 @@ describe("JaatoClient session management", () => {
     assert.equal((ev as { command?: string }).command, "session.delete");
     assert.deepEqual((ev as { args?: string[] }).args, ["sess_xyz"]);
   });
+
+  // #1167 -- the type existed in both SDKs and the method in neither, so the
+  // only producer was a web component hand-rolling the frame.  These pin the
+  // three things a hand-rolled frame kept getting wrong.
+  test("sendExternalEvent sends a typed event.external frame", async () => {
+    await client.sendExternalEvent("order.placed", { id: 7 });
+    const [ev] = getSent();
+    assert.equal(ev.type, EventTypeValue.EVENT_EXTERNAL);
+    assert.equal((ev as { name?: string }).name, "order.placed");
+    assert.deepEqual((ev as { data?: unknown }).data, { id: 7 });
+  });
+
+  test("sendExternalEvent sends {} rather than undefined for an absent payload", async () => {
+    await client.sendExternalEvent("build.finished");
+    const [ev] = getSent();
+    assert.deepEqual((ev as { data?: unknown }).data, {});
+  });
+
+  test("sendExternalEvent carries timestamp and sessionId when given", async () => {
+    await client.sendExternalEvent(
+      "ticket.assigned",
+      {},
+      { timestamp: "2026-09-20T12:00:00Z", sessionId: "sess_abc" },
+    );
+    const [ev] = getSent();
+    assert.equal((ev as { timestamp?: string }).timestamp, "2026-09-20T12:00:00Z");
+    assert.equal((ev as { session_id?: string }).session_id, "sess_abc");
+  });
+
+  test("sendExternalEvent refuses an empty name and sends nothing", async () => {
+    await assert.rejects(() => client.sendExternalEvent(""), /requires a name/);
+    assert.equal(getSent().length, 0);
+  });
 });
 
 describe("JaatoClient.stageFiles", () => {

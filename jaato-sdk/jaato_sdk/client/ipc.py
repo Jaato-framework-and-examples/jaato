@@ -68,6 +68,7 @@ from jaato_sdk.events import (
     ReferenceSelectionResponseRequest,
     StopRequest,
     CommandRequest,
+    ExternalEventRequest,
     CommandListRequest,
     CommandListEvent,
     ConnectedEvent,
@@ -2588,6 +2589,77 @@ class IPCClient:
             command="session.wake",
             args=[],
             payload=payload,
+        ))
+
+    async def send_external_event(
+        self,
+        name: str,
+        data: Optional[Dict[str, Any]] = None,
+        *,
+        timestamp: str = "",
+        session_id: str = "",
+    ) -> None:
+        """Publish an external event onto the session's ``EventBus``.
+
+        The host's way of telling a running session that something happened
+        outside it — ``order.placed``, ``build.finished``, ``ticket.assigned``.
+        It reaches every agent that called
+        ``subscribeToEvents(event_types=['external_event'])``, and sinks onward
+        to the daemon-wide reactor bus, so it is the one verb that can trigger
+        a reactor from a client.
+
+        ``ExternalEventRequest`` has existed as a TYPE in both SDKs and as a
+        METHOD in neither (#1167): the only producer was an out-of-tree web
+        component hand-rolling the JSON frame.  Both halves of that are fixed
+        together — this method, and the daemon dispatching the request on IPC
+        as well as WebSocket.
+
+        **Not** :meth:`wake_session`.  A wake drives a USER turn on one
+        session; this publishes a bus event and drives no turn of its own.  A
+        session with no ``external_event`` subscriber receives it and does
+        nothing, which is a success: ``notified == 0`` is the normal state
+        before any agent has subscribed.
+
+        Fire-and-forget, like the verbs around it.  A refusal arrives on the
+        event stream as an ``ErrorEvent`` — ``error_type="ExternalEventError"``
+        when the session has no bus, ``"SessionError"`` when the session is
+        gone, and ``"RequestError"`` (``Unknown request type:
+        ExternalEventRequest``) from a daemon predating #1167 on IPC.  That
+        last one is why this method takes no protocol floor: the refusal is a
+        named error on the stream rather than the silence an unknown command
+        verb produces, and a floor would ALSO refuse against the WebSocket
+        daemons where the request has always worked.
+
+        Args:
+            name: The event name the host chose, e.g. ``order.placed``.  This
+                is what an agent's ``subscribeToEvents(event_names=[...])``
+                filter matches, so it must agree with what the persona asked
+                to hear.
+            data: Arbitrary JSON-serialisable payload.  ``None`` is sent as
+                ``{}`` — a name with no data is a legitimate ping.
+            timestamp: ISO 8601, when the thing being reported happened.
+                Empty lets the daemon stamp arrival time; supply your own
+                when the event is being relayed rather than raised now.
+            session_id: The target session.  Empty means the one this client
+                is attached to, which is the usual case.
+
+        Raises:
+            ValueError: if ``name`` is empty.  An unnamed event matches no
+                subscriber filter and renders as a blank ``Type:`` to the
+                model, so it is refused here rather than delivered as an
+                event nobody can act on.
+        """
+        if not name:
+            raise ValueError(
+                "send_external_event requires a name — an unnamed event "
+                "matches no subscribeToEvents filter and reaches the model "
+                "with nothing to say what happened"
+            )
+        await self._send_event(ExternalEventRequest(
+            name=name,
+            data=data if data is not None else {},
+            timestamp=timestamp,
+            session_id=session_id,
         ))
 
     # ---- typed wake-primitive methods (see _wake_client) ----

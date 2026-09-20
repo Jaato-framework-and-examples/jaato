@@ -21,6 +21,7 @@ from jaato_sdk.client.ipc import IPCClient
 from jaato_sdk.events import ClientType
 from jaato_sdk.events import (
     Event,
+    ExternalEventRequest,
     InjectPromptRequest,
     InjectPromptResultEvent,
     PermissionAddBlacklistRequest,
@@ -455,3 +456,82 @@ class TestResumeVerbsCarryAttachments:
         with pytest.raises(ValueError, match="DROP the attachments"):
             await client.wake_session("sess_1", attachments=[{"data": "QUJD"}])
         assert captured == []
+
+
+class TestSendExternalEvent:
+    """``send_external_event`` — the method #1167 added.
+
+    ``ExternalEventRequest`` existed as a TYPE in both SDKs and as a METHOD
+    in neither, so the only producer was a client hand-rolling the JSON
+    frame.  These pin the three things such a frame kept getting wrong: the
+    event type, an absent payload, and an empty name.
+    """
+
+    @pytest.mark.asyncio
+    async def test_sends_a_typed_external_event_request(self, client_capture):
+        client, captured = client_capture
+        await client.send_external_event("order.placed", {"id": 7})
+
+        req = captured[0]
+        assert isinstance(req, ExternalEventRequest)
+        assert req.name == "order.placed"
+        assert req.data == {"id": 7}
+
+    @pytest.mark.asyncio
+    async def test_absent_payload_is_sent_as_an_empty_dict(
+            self, client_capture):
+        # A name with no data is a legitimate ping; ``None`` would reach the
+        # model as ``Data: None``.
+        client, captured = client_capture
+        await client.send_external_event("build.finished")
+        assert captured[0].data == {}
+
+    @pytest.mark.asyncio
+    async def test_timestamp_and_session_id_are_carried(self, client_capture):
+        client, captured = client_capture
+        await client.send_external_event(
+            "ticket.assigned", {},
+            timestamp="2026-09-20T12:00:00+00:00", session_id="sess_abc")
+
+        req = captured[0]
+        assert req.timestamp == "2026-09-20T12:00:00+00:00"
+        assert req.session_id == "sess_abc"
+
+    @pytest.mark.asyncio
+    async def test_an_unnamed_event_is_refused_client_side(
+            self, client_capture):
+        # It would match no subscribeToEvents filter and render a blank
+        # ``Type:`` to the model — an event nobody can act on.
+        client, captured = client_capture
+        with pytest.raises(ValueError, match="requires a name"):
+            await client.send_external_event("")
+        assert captured == []
+
+    @pytest.mark.asyncio
+    async def test_no_protocol_floor_is_applied(self, client_capture):
+        """Deliberately sendable against any daemon this SDK will connect to.
+
+        Over IPC a daemon predating #1167 answers a named ``ErrorEvent`` on
+        the event stream rather than ignoring the request, so the 1.7
+        missing-verb rule does not apply — and a floor would refuse against
+        every WS daemon where the request has always worked.
+        """
+        client, captured = client_capture
+        client._server_protocol_version = "1.0"
+        await client.send_external_event("order.placed")
+        assert len(captured) == 1
+
+    def test_recovery_client_mirrors_the_signature(self):
+        """Recovery-client parity has broken on two axes before (#585).
+
+        A reconnecting driver must not get a narrower method than the one
+        it was written against.
+        """
+        import inspect
+
+        from jaato_sdk.client.recovery import IPCRecoveryClient
+
+        assert (
+            inspect.signature(IPCRecoveryClient.send_external_event)
+            == inspect.signature(IPCClient.send_external_event)
+        )
