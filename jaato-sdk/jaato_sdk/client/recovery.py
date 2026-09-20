@@ -844,6 +844,25 @@ class IPCRecoveryClient:
         if self._client:
             await self._client.toggle_workspace_ignore(path)
 
+    async def explain_topic(
+        self,
+        topic: Optional[str] = None,
+        name: Optional[str] = None,
+    ) -> None:
+        """Ask the daemon to render one ``jaato-scaffold explain`` topic.
+
+        See :meth:`IPCClient.explain_topic` for full docs.  The answer
+        arrives as a ``ScaffoldExplainEvent`` on the event stream, so this
+        forwards the request and nothing more.  The inner client raises
+        against a daemon below the protocol floor rather than waiting out a
+        reply it will never send — which for this verb would be reported as
+        *the topic does not exist*, the exact confusion it was added to
+        remove.
+        """
+        self._check_can_send()
+        if self._client:
+            await self._client.explain_topic(topic, name)
+
     async def respond_to_post_auth_setup(
         self,
         request_id: str,

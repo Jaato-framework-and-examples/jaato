@@ -43,7 +43,7 @@ from pathlib import Path
 
 from shared.scaffold import remote as _remote
 from shared.scaffold.__main__ import render_topic
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 _ROUTER = "jaato-server/server/command_router.py"
 _REMOTE = "jaato-server/shared/scaffold/remote.py"

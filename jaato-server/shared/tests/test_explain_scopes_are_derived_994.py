@@ -69,7 +69,7 @@ REVERSIONS = [
     ),
     Reversion(
         target=_MAIN,
-        find="""    render = None if scope is None else _scope_renderer(scope)""",
+        find="""    render = _scope_renderer(scope)""",
         replace="""    render = (_SCOPE_KINDS[_SCOPES[scope].kind]
               if scope == "profile" else None)""",
         test="test_dispatch_reads_only_the_scope_table",
@@ -89,15 +89,25 @@ def _help_entries():
             for part in _SCOPES_HELP.split("|") if part.strip()]
 
 
-def _cmd_explain_ast():
+def _function_ast(name):
+    """The AST of one top-level function of ``shared/scaffold/__main__.py``.
+
+    A MISSING function is an assertion failure rather than a skip: this guard
+    reads a dispatch, and a dispatch that moved without the guard moving with
+    it is exactly the state where the guard reports nothing and means nothing.
+    """
     tree = ast.parse(_MAIN_PY.read_text(encoding="utf-8"))
     for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == "_cmd_explain":
+        if isinstance(node, ast.FunctionDef) and node.name == name:
             return node
     raise AssertionError(
-        "_cmd_explain is gone from shared/scaffold/__main__.py -- this guard "
-        "reads its dispatch and can no longer say anything about it."
+        f"{name} is gone from shared/scaffold/__main__.py -- this guard reads "
+        f"its dispatch and can no longer say anything about it."
     )
+
+
+def _cmd_explain_ast():
+    return _function_ast("_cmd_explain")
 
 
 def test_every_dispatched_scope_is_advertised():
@@ -155,10 +165,18 @@ def test_no_argument_hint_contains_the_help_separator():
 def test_dispatch_reads_only_the_scope_table():
     """No rung of the old ladder may grow back.
 
-    ``_cmd_explain`` resolves a topic through ``_scope_renderer`` and nothing
+    The dispatch resolves a topic through ``_scope_renderer`` and nothing
     else: not a string literal, not a membership test against a second table.
     A topic reachable through any other rung would be dispatched and
     unadvertised, which is the defect, in the exact shape it took.
+
+    **Both halves of the dispatch are scanned.**  It used to live wholly in
+    ``_cmd_explain``; ``render_topic`` was extracted so the daemon's
+    ``scaffold.explain`` verb renders through the same function the CLI does,
+    and the resolution went with it.  A guard that kept reading only the
+    printing half would have passed over a literal rung in the half that now
+    does the lookup -- which is how this reversion went stale rather than
+    failing: the anchor moved, and only the meta-guard noticed.
 
     The seam that lets an installed package contribute a topic is why this
     reads a RESOLVER rather than ``scope in _SCOPES`` as it did when it was
@@ -167,31 +185,33 @@ def test_dispatch_reads_only_the_scope_table():
     serves is in :func:`_all_scopes_help`, which
     ``test_every_dispatched_scope_is_advertised`` checks the round trip of.
     """
-    fn = _cmd_explain_ast()
-    for node in ast.walk(fn):
-        if not isinstance(node, ast.Compare):
-            continue
-        if not (isinstance(node.left, ast.Name) and node.left.id == "scope"):
-            continue
-        for op, comparator in zip(node.ops, node.comparators):
-            if isinstance(op, (ast.Eq, ast.NotEq)):
-                # `scope is None` is the overview branch and is an Is, not an
-                # Eq; a literal comparison here is a dispatch rung.
-                assert not isinstance(comparator, ast.Constant), (
-                    f"_cmd_explain compares scope against the literal "
-                    f"{comparator.value!r} -- that topic is dispatched outside "
-                    f"the resolver and so cannot reach the derived help."
+    for fname in ("render_topic", "_cmd_explain"):
+        fn = _function_ast(fname)
+        for node in ast.walk(fn):
+            if not isinstance(node, ast.Compare):
+                continue
+            if not (isinstance(node.left, ast.Name) and node.left.id == "scope"):
+                continue
+            for op, comparator in zip(node.ops, node.comparators):
+                if isinstance(op, (ast.Eq, ast.NotEq)):
+                    # `scope is None` is the overview branch and is an Is, not
+                    # an Eq; a literal comparison here is a dispatch rung.
+                    assert not isinstance(comparator, ast.Constant), (
+                        f"{fname} compares scope against the literal "
+                        f"{comparator.value!r} -- that topic is dispatched "
+                        f"outside the resolver and so cannot reach the "
+                        f"derived help."
+                    )
+                assert not isinstance(op, (ast.In, ast.NotIn)), (
+                    f"{fname} dispatches on a table of its own "
+                    f"({ast.dump(comparator)}); _scope_renderer must stay the "
+                    f"one place a topic is looked up."
                 )
-            assert not isinstance(op, (ast.In, ast.NotIn)), (
-                f"_cmd_explain dispatches on a table of its own "
-                f"({ast.dump(comparator)}); _scope_renderer must stay the one "
-                f"place a topic is looked up."
-            )
 
-    called = {n.func.id for n in ast.walk(fn)
+    called = {n.func.id for n in ast.walk(_function_ast("render_topic"))
               if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)}
     assert "_scope_renderer" in called, (
-        "_cmd_explain no longer calls _scope_renderer -- it has grown its own "
+        "render_topic no longer calls _scope_renderer -- it has grown its own "
         "way to find a topic, which is how a topic becomes dispatchable "
         "without being advertised."
     )
