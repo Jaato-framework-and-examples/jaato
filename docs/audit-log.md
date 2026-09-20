@@ -241,6 +241,16 @@ line breaks every link after it. Retention therefore rotates whole
 **files** — a new file per period, each starting at `genesis` — rather than
 deleting lines from one.
 
+That makes a per-revive row a volume question as well as a readability
+one. A long-lived interactive session on a blinking network is unloaded
+and reloaded once per grace expiry (#1106), and each reload appends one
+`announcement` row carrying `withheld_reason: "reattach"` — nothing was
+re-announced, and the row says so. They cannot be pruned individually for
+the reason above, so a deployment that expects many reattaches should size
+its rotation period for them rather than plan to delete them. A deliberate
+`session.wake` is the same shape and says `"wake"` instead, which is what
+lets the two be counted apart.
+
 ## What this does not do
 
 - **It does not sign anything.** `integrity: sha256-chain` proves a file
