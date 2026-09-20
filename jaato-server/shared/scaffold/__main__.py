@@ -26,6 +26,24 @@ entry in ``jaato.extensions``, and their RULES load from directories
 entry points.)  The premium ``compile``
 verb (the Daruma invariant compiler) mounts this way, with no compiler code in
 this repo.
+
+**Extension topics.**  The same idea for the one verb an agent actually reads.
+A package registering an :class:`api.ExplainTopic` under
+``jaato.scaffold_topics`` either adds a topic of its own (``explain reactors``)
+or appends an attributed SECTION to a built-in one (``extends = "paths"``), and
+either way it reaches the dispatch, the overview banner, ``--help`` and the
+unknown-scope error through the same merged table — so a contributed topic
+cannot be advertised without being served, or served without being advertised
+(#994's rule, one layer out).  Built-in names win on collision, and a topic
+that fails to load is skipped with a warning.
+
+It exists because a package that contributes a daemon EXTENSION has something
+to say and nothing to run, so the verb seam could only ever have offered it a
+subcommand nobody would think to type.  The measured cost of not having it:
+premium's reactor engine reads four rule-file tiers, and the only surface that
+named any of them named the one under the DAEMON's home — so a session asked
+to add a reactor could not find out where the file goes, what the schema is,
+or what the script must define, and read the engine's source instead.
 """
 
 from __future__ import annotations
@@ -33,9 +51,10 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from functools import partial
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 from . import explain as _explain
 from . import validate as _validate
@@ -227,11 +246,33 @@ _SCOPE_KINDS = {
 def _scopes_help() -> str:
     """The ``one of:`` line — every registered topic with its argument hint.
 
-    Derived from :data:`_SCOPES`, so a topic added there appears in the
-    unknown-scope error and in ``explain --help`` without anyone editing prose.
+    Derived from :data:`_SCOPES` PLUS the contributed topics, so a topic
+    appears in the unknown-scope error and in ``explain --help`` without anyone
+    editing prose — and so does one an installed package contributed.  A
+    contributed topic that dispatches and is advertised nowhere is the gap this
+    seam exists to close, reproduced one layer in.
     """
     return " | ".join(
         f"{scope} {spec.arg}".rstrip() for scope, spec in _SCOPES.items())
+
+
+def _all_scopes_help() -> str:
+    """:func:`_scopes_help` PLUS the contributed topics — what a READER is told.
+
+    The built-in line stays a constant derived from :data:`_SCOPES` (#994's
+    guard pins that, and discovery must not run at import time), so this is the
+    live sibling rather than a replacement: contributed topics are appended, in
+    the same ``scope <hint>`` spelling, marked with the distribution that
+    supplied them.  A contributed topic that dispatches and is advertised
+    nowhere is #994 reproduced one layer out, which is the whole complaint this
+    seam answers.
+    """
+    parts = [_SCOPES_HELP]
+    for name, topic in external_own_topics().items():
+        hint = f"{name} {getattr(topic, 'arg', '')}".rstrip()
+        dist = _topic_dist(topic)
+        parts.append(f"{hint} ({dist})" if dist else hint)
+    return " | ".join(parts)
 
 
 def _workspace_readers() -> list:
@@ -243,8 +284,13 @@ def _workspace_readers() -> list:
     ``sets`` alone while ``agents`` and ``services`` read the workspace just
     as much (#1006).
     """
-    return [n for n, s in _SCOPES.items()
-            if s.kind in ("workspace", "optional_named")]
+    readers = [n for n, s in _SCOPES.items()
+               if s.kind in ("workspace", "optional_named")]
+    # A contributed topic DECLARES whether it reads the workspace: every topic
+    # is handed the value, so nothing but the topic knows whether it uses it.
+    readers += [n for n, t in external_own_topics().items()
+                if getattr(t, "reads_workspace", False)]
+    return readers
 
 
 def _workspace_arg_help() -> str:
@@ -274,20 +320,35 @@ def scope_catalog() -> list:
         its renderer) and ``blurb``.
     """
     readers = set(_workspace_readers())
-    return [{"scope": name,
+    rows = [{"scope": name,
              "arg": spec.arg,
              "kind": spec.kind,
              "reads_workspace": name in readers,
-             "blurb": spec.blurb}
+             "blurb": spec.blurb,
+             "contributed_by": ""}
             for name, spec in _SCOPES.items()]
+    # Contributed topics ride the SAME catalog rather than a parallel one, so
+    # the banner cannot advertise a set the dispatcher does not serve.  They
+    # carry ``contributed_by`` so a reader — and `--json` — can tell the
+    # framework's own answer from an installed package's, which is what decides
+    # whose source to go and read.
+    rows += [{"scope": name,
+              "arg": getattr(t, "arg", ""),
+              "kind": "external",
+              "reads_workspace": name in readers,
+              "blurb": getattr(t, "help", ""),
+              "contributed_by": _topic_dist(t)}
+             for name, t in external_own_topics().items()]
+    return rows
 
 
-_SCOPES_HELP = _scopes_help()
 
 # Derived views of the one table, kept because callers and tests reach for
 # them by name.  Each is a projection, never a second declaration: a topic
 # added to _SCOPES appears here, and nothing can appear here without being
 # dispatched.
+_SCOPES_HELP = _scopes_help()
+
 _SIMPLE_SCOPES = {n: s.render for n, s in _SCOPES.items() if s.kind == "simple"}
 _FILTER_SCOPES = {n: s.render for n, s in _SCOPES.items() if s.kind == "filter"}
 _WORKSPACE_SCOPES = {n: s.render for n, s in _SCOPES.items()
@@ -321,6 +382,30 @@ def _take_deps_word(scope, name, extra):
     return kept[0], kept[1], asked
 
 
+def _scope_renderer(scope: str):
+    """Resolve a topic name to the thing that renders it, or ``None``.
+
+    The ONE lookup ``_cmd_explain`` performs.  Built-ins are consulted first
+    and win on a name collision; contributed topics follow.  Both tiers hand
+    back the SAME shape — a callable taking ``(scope, name, ws)`` — so the
+    dispatch does not branch on which tier answered, and a topic cannot be
+    reachable through a path the help line was not derived from.
+
+    Why a resolver rather than two membership tests in ``_cmd_explain``: #994
+    was a topic that dispatched through its own rung and so could never reach
+    the derived help.  A second rung for contributed topics would be the same
+    defect wearing the fix as a disguise, so there is one rung and the tiers
+    are inside it.
+    """
+    spec = _SCOPES.get(scope)
+    if spec is not None:
+        return partial(_SCOPE_KINDS[spec.kind], spec)
+    topic = external_own_topics().get(scope)
+    if topic is not None:
+        return partial(_render_external_topic, topic)
+    return None
+
+
 def _cmd_explain(args) -> int:
     """Render one `explain` topic.
 
@@ -336,17 +421,21 @@ def _cmd_explain(args) -> int:
         data, text = _deps.render(scope, name)
         print(json.dumps(data, indent=2) if args.json else text)
         return 0
+    render = None if scope is None else _scope_renderer(scope)
     if scope is None:
         data, text = _explain.overview()
-    elif scope in _SCOPES:
-        spec = _SCOPES[scope]
+    elif render is not None:
         try:
-            data, text = _SCOPE_KINDS[spec.kind](spec, scope, name, ws)
+            data, text = render(scope, name, ws)
         except _ScopeUsageError as exc:
             print(exc.message, file=sys.stderr)
             return exc.code
+        # Contributed SECTIONS append to whatever rendered — a built-in or a
+        # contributed topic alike — so two packages can answer about one
+        # subject without either having to know the other exists.
+        data, text = _append_topic_extensions(scope, name, ws, data, text)
     else:
-        print(f"unknown explain scope {scope!r} — one of: {_SCOPES_HELP}",
+        print(f"unknown explain scope {scope!r} — one of: {_all_scopes_help()}",
               file=sys.stderr)
         return 2
     print(json.dumps(data, indent=2, default=str) if args.json else text)
@@ -500,6 +589,189 @@ def _cmd_integration(args) -> int:
     return 0 if (changed or args.dry_run) else 1
 
 
+# ------------------------------------------------- external topics (plugins)
+
+#: Loaded external topics, or ``None`` before the first discovery.
+#:
+#: Cached because discovery IMPORTS the contributing modules, and the merged
+#: table is read several times in one run (the banner, the ``--help`` line, the
+#: unknown-scope error, the dispatch).  :func:`reset_external_topics` clears it;
+#: nothing but a test has a reason to.
+_EXTERNAL_TOPICS: "Optional[list]" = None
+
+
+def reset_external_topics() -> None:
+    """Drop the discovery cache so the next read re-scans the entry points."""
+    global _EXTERNAL_TOPICS
+    _EXTERNAL_TOPICS = None
+
+
+def _discover_external_topics() -> list:
+    """Load ``explain`` topics contributed by external packages.
+
+    Scans the ``jaato.scaffold_topics`` group (see :mod:`api`), the topic-shaped
+    sibling of :func:`_discover_external_verbs` and deliberately its twin in
+    every failure behaviour: an entry point loads to an :class:`api.ExplainTopic`
+    (an instance, or a zero-arg class/factory producing one), a package that is
+    not installed contributes nothing, and a topic that fails to load is skipped
+    with a warning rather than taking the CLI down.  A diagnostic that cannot
+    survive one broken contributor is not a diagnostic.
+
+    Only ``name`` and ``render`` are required of a contributor; ``help`` /
+    ``arg`` / ``extends`` / ``reads_workspace`` are read with defaults, so the
+    smallest useful topic is two attributes and one method.
+    """
+    global _EXTERNAL_TOPICS
+    if _EXTERNAL_TOPICS is not None:
+        return _EXTERNAL_TOPICS
+
+    import logging
+    from importlib.metadata import entry_points
+
+    log = logging.getLogger(__name__)
+    from .api import TOPIC_ENTRY_POINT_GROUP
+
+    try:  # entry_points(group=) is 3.10+; guard for older interpreters.
+        eps = entry_points(group=TOPIC_ENTRY_POINT_GROUP)
+    except TypeError:  # pragma: no cover - py<3.10
+        eps = entry_points().get(TOPIC_ENTRY_POINT_GROUP, [])
+
+    topics = []
+    for ep in eps:
+        try:
+            obj = ep.load()
+            topic = obj() if isinstance(obj, type) else obj
+            if not getattr(topic, "name", None) or not callable(
+                    getattr(topic, "render", None)):
+                log.warning(
+                    "scaffold topic %r does not satisfy ExplainTopic; skipped",
+                    ep.name)
+                continue
+            topic = _stamp_provenance(topic, ep)
+            topics.append(topic)
+        except Exception:
+            log.warning("failed to load scaffold topic %r", ep.name,
+                        exc_info=True)
+    _EXTERNAL_TOPICS = topics
+    return topics
+
+
+def _stamp_provenance(topic, ep):
+    """Record which DISTRIBUTION contributed *topic*, best-effort.
+
+    The banner marks a contributed topic with its distribution the way
+    ``explain plugins`` marks a contributed plugin (``<- jaato-premium``): a
+    reader who cannot tell the framework's own answer from an installed
+    package's answer cannot tell which one to go and read the source of, and
+    cannot tell what uninstalling premium would take away.
+
+    Best-effort by construction — ``ep.dist`` is absent on a hand-built entry
+    point (every test double, and some older metadata shapes).  An unknown
+    contributor renders as no marker at all, never as a guess.
+    """
+    dist = getattr(getattr(ep, "dist", None), "name", "") or ""
+    try:
+        setattr(topic, "_jaato_dist", dist)
+    except Exception:  # pragma: no cover - a frozen/slotted contributor
+        pass
+    return topic
+
+
+def _topic_dist(topic) -> str:
+    """The distribution that contributed *topic*, or ``""`` if unknown."""
+    return getattr(topic, "_jaato_dist", "") or ""
+
+
+def external_own_topics() -> "Dict[str, Any]":
+    """Contributed topics that are topics of their OWN, keyed by name.
+
+    A name a built-in already holds is refused with a warning — the verb seam's
+    collision rule, for the verb seam's reason: an installed package must not be
+    able to replace the framework's answer about the framework's own subject.
+    Two contributors claiming one name resolve first-wins, and the loser is
+    NAMED rather than silently dropped, the rule ``PluginRegistry`` already
+    applies to a plugin collision.
+    """
+    import logging
+    log = logging.getLogger(__name__)
+    out: "Dict[str, Any]" = {}
+    for topic in _discover_external_topics():
+        if getattr(topic, "extends", ""):
+            continue
+        name = topic.name
+        if name in _SCOPES:
+            log.warning(
+                "scaffold topic %r from %s collides with a built-in topic; "
+                "the built-in wins", name, _topic_dist(topic) or "an extension")
+            continue
+        if name in out:
+            log.warning(
+                "scaffold topic %r contributed twice (%s, %s); first wins",
+                name, _topic_dist(out[name]) or "?", _topic_dist(topic) or "?")
+            continue
+        out[name] = topic
+    return out
+
+
+def topic_extensions(topic_name: str) -> list:
+    """Contributed SECTIONS appended to *topic_name*, in contributor order.
+
+    An extension naming a topic that does not exist is not an error here: it
+    simply never renders.  Reporting it would mean deciding, at discovery time,
+    that a topic a later release adds is a mistake today.
+    """
+    return [t for t in _discover_external_topics()
+            if getattr(t, "extends", "") == topic_name]
+
+
+def _render_external_topic(topic, scope, name, ws):
+    """Invoke a contributed own-topic through the one external signature."""
+    from .api import TopicRequest
+    data, text = topic.render(TopicRequest(topic=scope, name=name, workspace=ws))
+    if isinstance(data, dict) and "error" in data:
+        raise _ScopeUsageError(text)
+    return data, text
+
+
+def _append_topic_extensions(scope, name, ws, data, text):
+    """Append every contributed section for *scope* to a rendered topic.
+
+    Two rules, each attached to a way a contributed section could mislead:
+
+    * the built-in's own data is never touched — a section lands at
+      ``data["extensions"][<name>]``, so a contributor cannot redefine what a
+      documented key means for a reader who is branching on it;
+    * a section that RAISES is reported in place and the built-in's answer still
+      prints.  The alternative is that installing a package can delete the
+      framework's own documentation, which is a worse failure than a missing
+      section and a much harder one to attribute.
+    """
+    import logging
+    log = logging.getLogger(__name__)
+    from .api import TopicRequest
+
+    extensions = topic_extensions(scope)
+    if not extensions:
+        return data, text
+
+    parts = [text]
+    for topic in extensions:
+        dist = _topic_dist(topic)
+        label = f"{topic.name} ({dist})" if dist else topic.name
+        try:
+            ext_data, ext_text = topic.render(
+                TopicRequest(topic=scope, name=name, workspace=ws))
+        except Exception as exc:
+            log.warning("scaffold topic extension %r failed on %r",
+                        topic.name, scope, exc_info=True)
+            parts.append(f"\n  -- {label} -- section failed to render: {exc}")
+            continue
+        if isinstance(data, dict):
+            data.setdefault("extensions", {})[topic.name] = ext_data
+        parts.append(f"\n{'-' * 70}\ncontributed by {label}:\n\n{ext_text}")
+    return data, "\n".join(parts)
+
+
 def _discover_external_verbs() -> list:
     """Load verbs contributed by external packages via entry points.
 
@@ -545,7 +817,7 @@ def main(argv=None) -> int:
     sub = ap.add_subparsers(dest="cmd")
 
     pe = sub.add_parser("explain", help="interrogate the installed framework")
-    pe.add_argument("scope", nargs="?", help=_SCOPES_HELP)
+    pe.add_argument("scope", nargs="?", help=_all_scopes_help())
     pe.add_argument("name", nargs="?",
                     help="name for plugin/provider/event/archetype scope, or a "
                          "filter for env/events")

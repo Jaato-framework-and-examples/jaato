@@ -52,7 +52,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Protocol, Tuple, runtime_checkable
+from typing import Any, Dict, List, Optional, Protocol, Tuple, runtime_checkable
 
 # Re-exported internals (the reusable, stable-enough surface) --------------- #
 from . import introspect  # noqa: F401  (re-export)
@@ -60,10 +60,29 @@ from .validate import Diagnostic, validate_workspace  # noqa: F401  (re-export)
 
 #: Bump on any backwards-incompatible change to the names re-exported here.
 #: An external verb can compare against this to fail loud on a version skew.
-SCAFFOLD_EXTENSION_API = "1.0"
+#:
+#: ``1.1`` added the ``explain`` TOPIC seam beside the verb seam:
+#: :data:`TOPIC_ENTRY_POINT_GROUP`, :class:`ExplainTopic`, :class:`TopicRequest`
+#: and :data:`Rendered`.  Additive — every 1.0 verb is unchanged.
+SCAFFOLD_EXTENSION_API = "1.1"
 
 #: The entry-point group the CLI scans for external verbs.
 VERB_ENTRY_POINT_GROUP = "jaato.scaffold_verbs"
+
+#: The entry-point group the CLI scans for external ``explain`` topics.
+#:
+#: A VERB is a new subcommand; a TOPIC is a new (or extended) answer from the
+#: one subcommand an agent actually reads.  They are separate groups because a
+#: package that contributes an engine extension — premium's reactors, gossip,
+#: pseudonymization — has something to SAY without having anything to RUN, and
+#: the verb seam could only ever have given it a subcommand nobody would think
+#: to type.
+TOPIC_ENTRY_POINT_GROUP = "jaato.scaffold_topics"
+
+#: What every ``explain`` renderer returns: ``(structured_data, human_text)``.
+#: ``--json`` prints the first, a terminal prints the second, and a topic that
+#: returns only one of them is only half an answer — an agent reads the JSON.
+Rendered = Tuple[Dict[str, Any], str]
 
 
 @runtime_checkable
@@ -89,6 +108,88 @@ class ScaffoldVerb(Protocol):
 
     def run(self, args: argparse.Namespace) -> int:
         """Execute the verb; return a process exit code."""
+        ...
+
+
+@dataclass(frozen=True)
+class TopicRequest:
+    """Everything an ``explain`` renderer is handed, whatever its shape.
+
+    ONE signature for every topic — a new one and one that extends a built-in
+    — because the alternative is the caller having to know each topic's
+    calling convention before it can call it.  The built-in table needs five
+    (``simple`` / ``filter`` / ``named`` / ``workspace`` / ``optional_named``)
+    for historical reasons; an external topic reads the fields it cares about
+    and ignores the rest, and gains nothing to update when a sixth is added.
+
+    Attributes:
+        topic: The topic asked for.  For an extension this is the BUILT-IN's
+            name (what the reader typed), not the extension's own — an
+            extension that appends to two topics needs to know which one it is
+            answering.
+        name: The topic argument, or ``None``.  A topic that REQUIRES one says
+            so by returning a data dict carrying an ``error`` key; the CLI
+            turns that into a stderr message and exit 2, the same contract a
+            built-in ``named`` scope has, so a reader who typo'd a name never
+            mistakes the miss for documentation.
+        workspace: The ``--workspace`` value, defaulted to ``"."``.  Always
+            present, so a topic that reads the workspace never has to ask
+            whether it was given one.
+    """
+
+    topic: str
+    name: Optional[str] = None
+    workspace: str = "."
+
+
+@runtime_checkable
+class ExplainTopic(Protocol):
+    """The contract an external ``explain`` topic must satisfy.
+
+    An entry point in :data:`TOPIC_ENTRY_POINT_GROUP` loads to either an
+    instance or a zero-arg class/factory producing one, exactly like
+    :class:`ScaffoldVerb`.
+
+    Two shapes, decided by :attr:`extends`:
+
+    * ``extends = ""`` — a topic of its OWN.  ``jaato-scaffold explain <name>``
+      renders it, and it appears in the overview banner, in ``--help`` and in
+      the unknown-scope error, because all three are derived from the same
+      merged table that dispatches it.  A name a built-in already holds is
+      REFUSED with a warning (the verb seam's rule: the framework's own answer
+      about its own subject cannot be replaced by a package that happens to be
+      installed).
+    * ``extends = "<built-in topic>"`` — an attributed SECTION appended to that
+      topic.  The built-in renders first and unchanged; the section's text
+      follows under a header naming its contributor, and its data lands at
+      ``data["extensions"][<name>]`` — never merged into the built-in's own
+      keys, so a contributed section cannot silently redefine what a documented
+      key means.  This is the half that matters for a subsystem whose FILES
+      live in a tree the built-in already describes: premium's reactor rules
+      are read from ``<workspace>/.jaato/reactors/``, and the place a reader
+      looks for that is ``explain paths``, not a topic they have not heard of.
+
+    Attributes:
+        name: The topic name (own topic), or the section's identity (extension).
+        help: The one-line ``# ...`` blurb the overview banner prints beside an
+            own topic.  Empty for a topic whose name already says what it is.
+        arg: The argument hint rendered beside an own topic (``"<name>"``,
+            ``"[<filter>]"``, ...).  Empty when the topic takes none.
+        extends: The built-in topic this appends to, or ``""`` for an own topic.
+        reads_workspace: Whether the banner appends ``[--workspace DIR]`` to
+            this topic's line.  Declared rather than inferred: every topic is
+            HANDED the workspace, so nothing but the topic itself knows whether
+            it reads it.
+    """
+
+    name: str
+    help: str
+    arg: str
+    extends: str
+    reads_workspace: bool
+
+    def render(self, request: TopicRequest) -> Rendered:
+        """Render this topic; return ``(structured_data, human_text)``."""
         ...
 
 
