@@ -77,7 +77,11 @@ REVERSIONS = [
     ),
     Reversion(
         target=_VALIDATE,
-        find="    _check_regulatory(profile, add)\n",
+        # Anchored on the WHOLE call, `env_keys` included: the argument is
+        # what carries the workspace `.env`'s own `LEDGER_PATH` into
+        # `disclosure_unrecorded` (#1157), so a call site that lost it would
+        # be a check wired but under-informed -- the shape one line down.
+        find="    _check_regulatory(profile, add, env_keys=env_keys)\n",
         replace="",
         because=(
             "the check must be WIRED into validate_profile, not merely "
@@ -311,7 +315,10 @@ def test_each_high_risk_finding_is_satisfied_by_the_mechanism_it_names():
             "interactive_shell": {"require_confinement": True},
         },
         trace=SimpleNamespace(session_log=".jaato/logs/trace.jsonl",
-                              provider_log=None),
+                              provider_log=None,
+                              # interacts_with_persons is True, so the
+                              # announcement must reach a FILE (#1157).
+                              ledger=".jaato/logs/ledger.jsonl"),
         record_keeping=RecordKeepingConfig(retention_days=180),
     ))
     assert found == []

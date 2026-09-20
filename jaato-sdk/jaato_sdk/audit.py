@@ -47,7 +47,7 @@ from typing import Dict, Optional, Tuple
 #: Bumped when an event or a guaranteed field is ADDED or REMOVED.  A
 #: reader that pins this knows whether the record it is holding can
 #: contain what it is looking for.
-AUDIT_SCHEMA_VERSION = "1"
+AUDIT_SCHEMA_VERSION = "2"
 
 
 # --------------------------------------------------------------- stores
@@ -202,6 +202,86 @@ AUDIT_SCHEMA: Tuple[AuditEvent, ...] = (
             "fields as null rather than omitting them, because a reported "
             "zero and an unreported one are different facts (#688) and "
             "`TokenUsage.reported` is what tells them apart"),
+    ),
+    AuditEvent(
+        kind="announcement",
+        article="Art. 50(1) -- the person was told, and what they were told",
+        store="ledger",
+        written_by="shared/ai_disclosure.py::announcement_record",
+        fields=_LEDGER_COMMON + (
+            AuditField("session_id", "the session the person was talking to"),
+            AuditField("agent_id",
+                       "`main` -- the agent that fronts the person; a "
+                       "subagent talks to its parent and is never announced"),
+            AuditField("delivered",
+                       "True iff the text reached a client. The one question "
+                       "an auditor asks, answered by construction: a row "
+                       "carries `text` exactly when this is True and "
+                       "`withheld_reason` exactly when it is False"),
+            AuditField("suppressed",
+                       "True when the CLIENT asserted it discloses already "
+                       "(client_discloses_ai) and the framework withheld its "
+                       "own text: the record then says the client took the "
+                       "obligation -- suppressed, never absent"),
+            AuditField("revived",
+                       "True on a session woken from disk: nothing is "
+                       "re-announced, because the person was told before the "
+                       "transcript they are looking at began, and the row "
+                       "says so rather than leaving the wake unrecorded"),
+            AuditField("text",
+                       "the announcement as delivered, verbatim -- a hash "
+                       "would not answer WHAT was said. Present only when "
+                       "`delivered` is True",
+                       guaranteed=False),
+            AuditField("withheld_reason",
+                       "why nothing was delivered, when nothing was: "
+                       "`client_discloses` (the client took the obligation), "
+                       "`headless` (the session was created for no client, "
+                       "so the event reached nobody), `decision_failed` "
+                       "(the predicate raised, so whether an announcement "
+                       "was owed could not be established), `wake` or "
+                       "`reattach` (a revive -- a deliberate session.wake, or "
+                       "a client attaching to a session the daemon had "
+                       "unloaded; a long-lived interactive session "
+                       "accumulates many of the second)",
+                       guaranteed=False),
+            AuditField("client_type",
+                       "the channel: PresentationContext.client_type "
+                       "(terminal / web / chat / api). Absent on a revive, "
+                       "where no client is attached yet",
+                       guaranteed=False),
+            AuditField("client_discloses_ai",
+                       "the client's own assertion, as received; absent "
+                       "when no client had declared a presentation",
+                       guaranteed=False),
+            AuditField("locale",
+                       "the BCP 47 tag the client declared for the person's "
+                       "interface; absent when it declared none -- never "
+                       "defaulted from the daemon's own environment",
+                       guaranteed=False),
+            AuditField("provider",
+                       "the binding active at the announcement -- the same "
+                       "pair `generated_by` stamps on the model's own output",
+                       guaranteed=False),
+            AuditField("model", "its other half", guaranteed=False),
+            AuditField("created_by",
+                       "the authenticated creator (#859)",
+                       guaranteed=False),
+        ),
+        note=(
+            "Written by the DAEMON at session creation, before the first "
+            "turn, into the same file the runner's ledger then appends to: "
+            "the chain belongs to the FILE, so the two writers continue one "
+            "chain and the announcement precedes the first `response`. "
+            "`event_index` is per writer, so on a runner-served session the "
+            "announcement and the first response can both carry 0 -- the "
+            "chain, not the index, is the order. Written only for a profile "
+            "declaring interacts_with_persons: true; a profile that made no "
+            "determination gets no row, because a row would be one. With no "
+            "ledger file configured (trace.ledger / LEDGER_PATH) the row is "
+            "held in memory and never reaches disk -- announced at WARNING, "
+            "and `validate` reports the profile as disclosure_unrecorded "
+            "(#1157)"),
     ),
     AuditEvent(
         kind="permission-check",

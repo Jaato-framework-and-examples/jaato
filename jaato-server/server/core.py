@@ -1233,13 +1233,108 @@ class JaatoServer:
         put a legal statement in front of every existing workspace's
         sessions.
         """
+        text, _reason = self.disclosure_decision()
+        return text
+
+    def disclosure_decision(self) -> "tuple[Optional[str], Optional[str]]":
+        """The announcement AND why it was withheld -- the predicate's whole answer.
+
+        :meth:`disclosure_announcement` keeps the text only, which is all
+        the emit site and the state snapshot need.  The audit record needs
+        the reason too (#1157): a session whose client asserted
+        ``client_discloses_ai`` must be recorded as SUPPRESSED, and one
+        whose profile declared nothing must not be recorded at all, and
+        ``None`` alone cannot tell those apart.  Same predicate, both
+        halves of its return.
+        """
         from shared.ai_disclosure import announcement_for
-        text, _reason = announcement_for(
+        return announcement_for(
             getattr(self._profile, "regulatory", None),
             client_discloses_ai=bool(getattr(
                 self._presentation_context, "client_discloses_ai", False)),
         )
-        return text
+
+    def record_disclosure_announcement(
+        self,
+        *,
+        text: Optional[str] = None,
+        withheld_reason: Optional[str] = None,
+        created_by: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Write the Art. 50(1) ``announcement`` record to this session's ledger (#1157).
+
+        The announcement is emitted DAEMON-side at session creation, before
+        the first turn, while the ledger a runner-served session writes its
+        ``response`` records into is held by the RUNNER (#1139).  So this
+        server's own :class:`TokenLedger` appends to the same file: the
+        chain belongs to the file, not to the process appending (#1120), so
+        a second writer continues the one chain rather than starting a
+        rival one, and the announcement lands before the first turn's
+        record because the turn has not happened yet.  On the in-process
+        path this ledger IS the session's, so nothing is special-cased.
+
+        The record is built by :func:`shared.ai_disclosure.announcement_record`
+        -- the one writer the audit schema names -- from what this server
+        holds: the client's ``PresentationContext`` (channel, locale, the
+        client's own disclosure assertion) and the active binding.  It is
+        appended under :meth:`_with_session_env` AND :meth:`_in_workspace`,
+        the pair every daemon-side turn runs under: ``trace.ledger`` and
+        ``record_keeping.integrity`` reach the ledger through the
+        session-scoped env, and a RELATIVE ``trace.ledger`` -- the
+        one-file-per-session idiom -- resolves against the workspace root
+        the second context publishes.  Without it the row resolved against
+        the daemon's own cwd: measured on the evidence harness, whose
+        daemon runs from the server package directory, the announcement
+        landed in ``jaato-server/.jaato/logs/ledger.jsonl`` while the
+        runner's turns went to the workspace, and the manual's capture
+        came back ``NOT WRITTEN``.  The conformance daemon happens to run
+        with its cwd AT the workspace, which is why the live suite could
+        not see it.
+
+        **A row with no file to land in is announced at WARNING.**  With
+        neither ``trace.ledger`` nor ``LEDGER_PATH`` resolving, the ledger
+        keeps the row in memory and nothing on the daemon side ever
+        flushes it, so the person was told and ``--audit-verify`` has
+        nothing -- #735's shape, a control that silently does not apply.
+        The warning names both knobs; ``jaato-scaffold validate`` reports
+        the same profile as ``disclosure_unrecorded`` before any session.
+
+        Args:
+            text: The announcement as emitted; required when it was.
+            withheld_reason: ``None`` when the text reached a client, else
+                one of ``shared.ai_disclosure.WITHHELD_REASONS``.
+            created_by: The authenticated creator (#859), as the caller
+                holds it on the daemon ``Session``.  Absent means absent:
+                this server keeps no user of its own to fall back on.
+
+        Returns:
+            The record as handed to the ledger, for the caller's log line.
+        """
+        from shared.ai_disclosure import announcement_record
+        record = announcement_record(
+            self.session_id or "",
+            text=text, withheld_reason=withheld_reason,
+            presentation=self._presentation_context,
+            provider=self._model_provider, model=self._model_name,
+            created_by=created_by,
+        )
+        with self._with_session_env(), self._in_workspace():
+            self.ledger._record("announcement", record)
+            where = self.ledger.ledger_path()
+        outcome = ("delivered" if withheld_reason is None
+                   else f"withheld: {withheld_reason}")
+        if where is None:
+            logger.warning(
+                "AI-disclosure announcement (Art. 50(1)) for session %s (%s) "
+                "was recorded in MEMORY ONLY: no ledger file is configured "
+                "(set `trace.ledger` in the profile, or LEDGER_PATH), so "
+                "nothing `jaato-doctor --audit-verify` can read holds it",
+                self.session_id, outcome)
+        else:
+            logger.info(
+                "AI-disclosure announcement (Art. 50(1)) recorded for session "
+                "%s (%s) -> %s", self.session_id, outcome, where)
+        return record
 
     def set_apparmor_confinement(
         self,

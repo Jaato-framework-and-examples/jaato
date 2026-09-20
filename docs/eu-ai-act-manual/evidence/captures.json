@@ -56,10 +56,17 @@
     "note": ""
   },
   {
+    "slug": "33-announcement-ledger-record",
+    "title": "The announcement, recorded: text, channel, locale and model, chained",
+    "control": "disclosure",
+    "command": "grep '\"stage\": \"announcement\"' .jaato/logs/ledger.jsonl   # emitted (locale de-DE), then suppressed (client_discloses_ai)",
+    "note": ""
+  },
+  {
     "slug": "06-disclosure-instruction-piece",
     "title": "The disclosure piece inside the rendered system prompt",
     "control": "disclosure",
-    "command": "jq -r .rendered_instructions .jaato/sessions/20260918_232854.json | grep -A3 'AI DISCLOSURE'",
+    "command": "jq -r .rendered_instructions .jaato/sessions/20260920_123713.json | grep -A3 'AI DISCLOSURE'",
     "note": ""
   },
   {
@@ -178,7 +185,7 @@
     "slug": "23-memory-generated-by",
     "title": "A stored memory records which model wrote it",
     "control": "memory",
-    "command": "cat .jaato/memories/raw/mem_20260918_232940_9806.json",
+    "command": "cat .jaato/memories/raw/mem_20260920_123742_1060.json",
     "note": ""
   },
   {

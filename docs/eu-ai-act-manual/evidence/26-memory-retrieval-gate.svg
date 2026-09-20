@@ -19,84 +19,84 @@
         font-weight: 700;
     }
 
-    .terminal-84979086-matrix {
+    .terminal-4172131702-matrix {
         font-family: Fira Code, monospace;
         font-size: 20px;
         line-height: 24.4px;
         font-variant-east-asian: full-width;
     }
 
-    .terminal-84979086-title {
+    .terminal-4172131702-title {
         font-size: 18px;
         font-weight: bold;
         font-family: arial;
     }
 
-    .terminal-84979086-r1 { fill: #c5c8c6;font-weight: bold }
-.terminal-84979086-r2 { fill: #c5c8c6 }
+    .terminal-4172131702-r1 { fill: #c5c8c6;font-weight: bold }
+.terminal-4172131702-r2 { fill: #c5c8c6 }
     </style>
 
     <defs>
-    <clipPath id="terminal-84979086-clip-terminal">
+    <clipPath id="terminal-4172131702-clip-terminal">
       <rect x="0" y="0" width="1267.8" height="291.79999999999995" />
     </clipPath>
-    <clipPath id="terminal-84979086-line-0">
+    <clipPath id="terminal-4172131702-line-0">
     <rect x="0" y="1.5" width="1268.8" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-84979086-line-1">
+<clipPath id="terminal-4172131702-line-1">
     <rect x="0" y="25.9" width="1268.8" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-84979086-line-2">
+<clipPath id="terminal-4172131702-line-2">
     <rect x="0" y="50.3" width="1268.8" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-84979086-line-3">
+<clipPath id="terminal-4172131702-line-3">
     <rect x="0" y="74.7" width="1268.8" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-84979086-line-4">
+<clipPath id="terminal-4172131702-line-4">
     <rect x="0" y="99.1" width="1268.8" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-84979086-line-5">
+<clipPath id="terminal-4172131702-line-5">
     <rect x="0" y="123.5" width="1268.8" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-84979086-line-6">
+<clipPath id="terminal-4172131702-line-6">
     <rect x="0" y="147.9" width="1268.8" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-84979086-line-7">
+<clipPath id="terminal-4172131702-line-7">
     <rect x="0" y="172.3" width="1268.8" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-84979086-line-8">
+<clipPath id="terminal-4172131702-line-8">
     <rect x="0" y="196.7" width="1268.8" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-84979086-line-9">
+<clipPath id="terminal-4172131702-line-9">
     <rect x="0" y="221.1" width="1268.8" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-84979086-line-10">
+<clipPath id="terminal-4172131702-line-10">
     <rect x="0" y="245.5" width="1268.8" height="24.65"/>
             </clipPath>
     </defs>
 
-    <rect fill="#292929" stroke="rgba(255,255,255,0.35)" stroke-width="1" x="1" y="1" width="1285" height="340.8" rx="8"/><text class="terminal-84979086-title" fill="#c5c8c6" text-anchor="middle" x="642" y="27">require_curation:&#160;the&#160;same&#160;retrieval&#160;before&#160;and&#160;after&#160;the&#160;curator</text>
+    <rect fill="#292929" stroke="rgba(255,255,255,0.35)" stroke-width="1" x="1" y="1" width="1285" height="340.8" rx="8"/><text class="terminal-4172131702-title" fill="#c5c8c6" text-anchor="middle" x="642" y="27">require_curation:&#160;the&#160;same&#160;retrieval&#160;before&#160;and&#160;after&#160;the&#160;curator</text>
             <g transform="translate(26,22)">
             <circle cx="0" cy="0" r="7" fill="#ff5f57"/>
             <circle cx="22" cy="0" r="7" fill="#febc2e"/>
             <circle cx="44" cy="0" r="7" fill="#28c840"/>
             </g>
         
-    <g transform="translate(9, 41)" clip-path="url(#terminal-84979086-clip-terminal)">
+    <g transform="translate(9, 41)" clip-path="url(#terminal-4172131702-clip-terminal)">
     
-    <g class="terminal-84979086-matrix">
-    <text class="terminal-84979086-r1" x="0" y="20" textLength="1024.8" clip-path="url(#terminal-84979086-line-0)">$&#160;retrieve_memories(tags=[refunds])&#160;&#160;&#160;#&#160;plugin_configs.memory.require_curation:&#160;true</text><text class="terminal-84979086-r2" x="1268.8" y="20" textLength="12.2" clip-path="url(#terminal-84979086-line-0)">
-</text><text class="terminal-84979086-r2" x="0" y="44.4" textLength="1049.2" clip-path="url(#terminal-84979086-line-1)">BEFORE&#160;the&#160;curator&#160;promoted&#160;anything&#160;(one&#160;legacy&#160;record&#160;validated&#160;with&#160;no&#160;curated_by):</text><text class="terminal-84979086-r2" x="1268.8" y="44.4" textLength="12.2" clip-path="url(#terminal-84979086-line-1)">
-</text><text class="terminal-84979086-r2" x="0" y="68.8" textLength="1171.2" clip-path="url(#terminal-84979086-line-2)">{&quot;status&quot;:&#160;&quot;no_results&quot;,&#160;&quot;count&quot;:&#160;0,&#160;&quot;matched&quot;:&#160;1,&#160;&quot;truncated&quot;:&#160;false,&#160;&quot;withheld_uncurated&quot;:&#160;1,&#160;</text><text class="terminal-84979086-r2" x="1268.8" y="68.8" textLength="12.2" clip-path="url(#terminal-84979086-line-2)">
-</text><text class="terminal-84979086-r2" x="0" y="93.2" textLength="1268.8" clip-path="url(#terminal-84979086-line-3)">&quot;message&quot;:&#160;&quot;1&#160;memory/memories&#160;matched&#160;and&#160;were&#160;WITHHELD:&#160;this&#160;deployment&#160;sets&#160;require_curation,&#160;and&#160;none</text><text class="terminal-84979086-r2" x="1268.8" y="93.2" textLength="12.2" clip-path="url(#terminal-84979086-line-3)">
-</text><text class="terminal-84979086-r2" x="0" y="117.6" textLength="1207.8" clip-path="url(#terminal-84979086-line-4)">of&#160;them&#160;carries&#160;a&#160;curator&#x27;s&#160;mark.&#160;They&#160;are&#160;stored,&#160;not&#160;lost&#160;--&#160;a&#160;curator&#160;promoting&#160;them&#160;makes&#160;them&#160;</text><text class="terminal-84979086-r2" x="1268.8" y="117.6" textLength="12.2" clip-path="url(#terminal-84979086-line-4)">
-</text><text class="terminal-84979086-r2" x="0" y="142" textLength="170.8" clip-path="url(#terminal-84979086-line-5)">retrievable.&quot;}</text><text class="terminal-84979086-r2" x="1268.8" y="142" textLength="12.2" clip-path="url(#terminal-84979086-line-5)">
-</text><text class="terminal-84979086-r2" x="1268.8" y="166.4" textLength="12.2" clip-path="url(#terminal-84979086-line-6)">
-</text><text class="terminal-84979086-r2" x="0" y="190.8" textLength="512.4" clip-path="url(#terminal-84979086-line-7)">AFTER&#160;the&#160;curator&#160;promoted&#160;the&#160;raw&#160;memory:</text><text class="terminal-84979086-r2" x="1268.8" y="190.8" textLength="12.2" clip-path="url(#terminal-84979086-line-7)">
-</text><text class="terminal-84979086-r2" x="0" y="215.2" textLength="1268.8" clip-path="url(#terminal-84979086-line-8)">{&quot;status&quot;:&#160;&quot;success&quot;,&#160;&quot;count&quot;:&#160;1,&#160;&quot;matched&quot;:&#160;2,&#160;&quot;truncated&quot;:&#160;false,&#160;&quot;message&quot;:&#160;&quot;Returned&#160;1&#160;of&#160;2&#160;matching</text><text class="terminal-84979086-r2" x="1268.8" y="215.2" textLength="12.2" clip-path="url(#terminal-84979086-line-8)">
-</text><text class="terminal-84979086-r2" x="0" y="239.6" textLength="1268.8" clip-path="url(#terminal-84979086-line-9)">memories&#160;—&#160;truncated&#160;by&#160;limit=3.&#160;Call&#160;retrieve_memories&#160;again&#160;with&#160;a&#160;larger&#160;`limit`&#160;to&#160;see&#160;the&#160;rest.&#160;&#160;1&#160;</text><text class="terminal-84979086-r2" x="1268.8" y="239.6" textLength="12.2" clip-path="url(#terminal-84979086-line-9)">
-</text><text class="terminal-84979086-r2" x="0" y="264" textLength="805.2" clip-path="url(#terminal-84979086-line-10)">further&#160;match(es)&#160;were&#160;withheld&#160;as&#160;uncurated&#160;(require_curation).&quot;}</text><text class="terminal-84979086-r2" x="1268.8" y="264" textLength="12.2" clip-path="url(#terminal-84979086-line-10)">
-</text><text class="terminal-84979086-r2" x="0" y="288.4" textLength="890.6" clip-path="url(#terminal-84979086-line-11)">&#160;&#160;-&#160;mem_20260918_232940_9806&#160;&#160;maturity=validated&#160;&#160;Refund&#160;windows&#160;per&#160;plan</text><text class="terminal-84979086-r2" x="1268.8" y="288.4" textLength="12.2" clip-path="url(#terminal-84979086-line-11)">
+    <g class="terminal-4172131702-matrix">
+    <text class="terminal-4172131702-r1" x="0" y="20" textLength="1024.8" clip-path="url(#terminal-4172131702-line-0)">$&#160;retrieve_memories(tags=[refunds])&#160;&#160;&#160;#&#160;plugin_configs.memory.require_curation:&#160;true</text><text class="terminal-4172131702-r2" x="1268.8" y="20" textLength="12.2" clip-path="url(#terminal-4172131702-line-0)">
+</text><text class="terminal-4172131702-r2" x="0" y="44.4" textLength="1049.2" clip-path="url(#terminal-4172131702-line-1)">BEFORE&#160;the&#160;curator&#160;promoted&#160;anything&#160;(one&#160;legacy&#160;record&#160;validated&#160;with&#160;no&#160;curated_by):</text><text class="terminal-4172131702-r2" x="1268.8" y="44.4" textLength="12.2" clip-path="url(#terminal-4172131702-line-1)">
+</text><text class="terminal-4172131702-r2" x="0" y="68.8" textLength="1171.2" clip-path="url(#terminal-4172131702-line-2)">{&quot;status&quot;:&#160;&quot;no_results&quot;,&#160;&quot;count&quot;:&#160;0,&#160;&quot;matched&quot;:&#160;1,&#160;&quot;truncated&quot;:&#160;false,&#160;&quot;withheld_uncurated&quot;:&#160;1,&#160;</text><text class="terminal-4172131702-r2" x="1268.8" y="68.8" textLength="12.2" clip-path="url(#terminal-4172131702-line-2)">
+</text><text class="terminal-4172131702-r2" x="0" y="93.2" textLength="1268.8" clip-path="url(#terminal-4172131702-line-3)">&quot;message&quot;:&#160;&quot;1&#160;memory/memories&#160;matched&#160;and&#160;were&#160;WITHHELD:&#160;this&#160;deployment&#160;sets&#160;require_curation,&#160;and&#160;none</text><text class="terminal-4172131702-r2" x="1268.8" y="93.2" textLength="12.2" clip-path="url(#terminal-4172131702-line-3)">
+</text><text class="terminal-4172131702-r2" x="0" y="117.6" textLength="1207.8" clip-path="url(#terminal-4172131702-line-4)">of&#160;them&#160;carries&#160;a&#160;curator&#x27;s&#160;mark.&#160;They&#160;are&#160;stored,&#160;not&#160;lost&#160;--&#160;a&#160;curator&#160;promoting&#160;them&#160;makes&#160;them&#160;</text><text class="terminal-4172131702-r2" x="1268.8" y="117.6" textLength="12.2" clip-path="url(#terminal-4172131702-line-4)">
+</text><text class="terminal-4172131702-r2" x="0" y="142" textLength="170.8" clip-path="url(#terminal-4172131702-line-5)">retrievable.&quot;}</text><text class="terminal-4172131702-r2" x="1268.8" y="142" textLength="12.2" clip-path="url(#terminal-4172131702-line-5)">
+</text><text class="terminal-4172131702-r2" x="1268.8" y="166.4" textLength="12.2" clip-path="url(#terminal-4172131702-line-6)">
+</text><text class="terminal-4172131702-r2" x="0" y="190.8" textLength="512.4" clip-path="url(#terminal-4172131702-line-7)">AFTER&#160;the&#160;curator&#160;promoted&#160;the&#160;raw&#160;memory:</text><text class="terminal-4172131702-r2" x="1268.8" y="190.8" textLength="12.2" clip-path="url(#terminal-4172131702-line-7)">
+</text><text class="terminal-4172131702-r2" x="0" y="215.2" textLength="1268.8" clip-path="url(#terminal-4172131702-line-8)">{&quot;status&quot;:&#160;&quot;success&quot;,&#160;&quot;count&quot;:&#160;1,&#160;&quot;matched&quot;:&#160;2,&#160;&quot;truncated&quot;:&#160;false,&#160;&quot;message&quot;:&#160;&quot;Returned&#160;1&#160;of&#160;2&#160;matching</text><text class="terminal-4172131702-r2" x="1268.8" y="215.2" textLength="12.2" clip-path="url(#terminal-4172131702-line-8)">
+</text><text class="terminal-4172131702-r2" x="0" y="239.6" textLength="1268.8" clip-path="url(#terminal-4172131702-line-9)">memories&#160;—&#160;truncated&#160;by&#160;limit=3.&#160;Call&#160;retrieve_memories&#160;again&#160;with&#160;a&#160;larger&#160;`limit`&#160;to&#160;see&#160;the&#160;rest.&#160;&#160;1&#160;</text><text class="terminal-4172131702-r2" x="1268.8" y="239.6" textLength="12.2" clip-path="url(#terminal-4172131702-line-9)">
+</text><text class="terminal-4172131702-r2" x="0" y="264" textLength="805.2" clip-path="url(#terminal-4172131702-line-10)">further&#160;match(es)&#160;were&#160;withheld&#160;as&#160;uncurated&#160;(require_curation).&quot;}</text><text class="terminal-4172131702-r2" x="1268.8" y="264" textLength="12.2" clip-path="url(#terminal-4172131702-line-10)">
+</text><text class="terminal-4172131702-r2" x="0" y="288.4" textLength="890.6" clip-path="url(#terminal-4172131702-line-11)">&#160;&#160;-&#160;mem_20260920_123742_1060&#160;&#160;maturity=validated&#160;&#160;Refund&#160;windows&#160;per&#160;plan</text><text class="terminal-4172131702-r2" x="1268.8" y="288.4" textLength="12.2" clip-path="url(#terminal-4172131702-line-11)">
 </text>
     </g>
     </g>

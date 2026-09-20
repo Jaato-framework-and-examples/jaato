@@ -5,7 +5,7 @@ Annex IV of Regulation (EU) 2024/1689, for the AI system this profile defines. G
 
 > **This is a skeleton, not a compliance document.** The sections marked *Computed* are facts about the installed framework, read from the same helpers `jaato-scaffold explain` reads. Everything else is the provider's to write, and the framework leaves it marked rather than blank.
 
-> *Computed from the installed framework at commit `070c376` on 2026-09-18. Regenerate after any release or profile change; a stale computed section is worse than an absent one, because it reads as current.*
+> *Computed from the installed framework at commit `54d4abe` on 2026-09-20. Regenerate after any release or profile change; a stale computed section is worse than an absent one, because it reads as current.*
 
 ## 1. General description of the AI system
 
@@ -56,6 +56,6 @@ human oversight, as ARMED by profile 'screener':
   interacts_with_persons    True
   announcement              'You are interacting with an AI system operated by Acme Support GmbH, not with a human being.'
                             emitted once at session creation; a client
-                            sending client_discloses_ai withholds it
-
-  DECIDE / OVERRIDE  NO permission policy declared -- the runtime policy of the root session applies (a subagent inherits it)
+                            sending client_discloses_ai withholds it.
+                            Either way an `announcement` record (text,
+                            channel, locale, model) goes to the ledger

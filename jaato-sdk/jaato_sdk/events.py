@@ -23,7 +23,7 @@ from enum import Enum
 from typing import Any, Dict, List, Optional, Union
 import json
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 # =============================================================================
@@ -3051,6 +3051,11 @@ class PresentationContext(BaseModel):
         client_discloses_ai: Whether this client already tells the person
             they are interacting with an AI system, so the framework
             withholds its own Article 50(1) announcement.
+        locale: The BCP 47 language tag of the person's interface
+            (``"de-DE"``, ``"es"``), when the client knows it.  Recorded
+            beside the Article 50(1) announcement so the audit record says
+            which language the person was addressed in; ``None`` is
+            recorded as absent, never defaulted (#1157).
     """
 
     # ── Dimensions ──────────────────────────────────────────────
@@ -3098,6 +3103,19 @@ class PresentationContext(BaseModel):
     # exactly as it is.  Default ``False``: a client that has not said it
     # discloses has not disclosed.
     client_discloses_ai: bool = False
+
+    # ── Locale (Regulation (EU) 2024/1689, Art. 50(1), #1157) ───
+    # The BCP 47 tag of the interface the person is using, declared by
+    # the client because only the client knows what language its
+    # surface is in.  Read by exactly one thing: the ``announcement``
+    # audit record, which binds the disclosure text to the channel and
+    # language it was delivered in.  Not consulted by the model's
+    # prompt -- the persona decides the language it speaks -- and never
+    # inferred from the daemon's own environment: a daemon's ``LANG``
+    # says nothing about the person on the other end of the socket, and
+    # an audit row asserting a locale nobody declared is worse than one
+    # that says the locale was not declared.
+    locale: Optional[str] = None
 
     # ── Communication style ────────────────────────────────────
     # When None, inferred from client_type: CHAT → CONVERSATIONAL,
@@ -3208,44 +3226,49 @@ class PresentationContext(BaseModel):
 
         return "\n".join(lines)
 
+    @field_validator("renderable_media", mode="before")
+    @classmethod
+    def _renderable_media_is_a_list(cls, value: Any) -> Any:
+        """A scalar mime is one entry, never its characters.
+
+        ``list("image/*")`` is ``['i', 'm', 'a', ...]`` -- a client that
+        serialised the field as a bare string would then match nothing in
+        :meth:`can_render_media`, with nothing reporting why.  ``None``
+        reads as the empty default.
+        """
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [value]
+        return value
+
     def to_dict(self) -> Dict[str, Any]:
-        """Serialize to a plain dict for event transport."""
-        return {
-            "content_width": self.content_width,
-            "content_height": self.content_height,
-            "supports_markdown": self.supports_markdown,
-            "supports_tables": self.supports_tables,
-            "supports_code_blocks": self.supports_code_blocks,
-            "supports_images": self.supports_images,
-            "supports_rich_text": self.supports_rich_text,
-            "supports_unicode": self.supports_unicode,
-            "supports_mermaid": self.supports_mermaid,
-            "supports_expandable_content": self.supports_expandable_content,
-            "client_type": self.client_type.value,
-            "communication_style": self.communication_style.value if self.communication_style else None,
-        }
+        """Serialize to a plain dict for event transport.
+
+        Every field on the model, by the model's own dump -- not a
+        hand-maintained list.  The list is how ``client_discloses_ai``
+        (#1116) and ``renderable_media`` (#824) were declared on this
+        class and carried by neither direction, so a client asserting it
+        disclosed already was announced to anyway and the suppression the
+        guard proved on the predicate never held over the wire (#1157).
+        A field added later rides automatically; enums are dumped as
+        their values (``mode="json"``), which is what :meth:`from_dict`
+        and every older daemon read.
+        """
+        return self.model_dump(mode="json")
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'PresentationContext':
-        """Create from a dict (e.g. deserialized from ClientConfigRequest)."""
-        return cls(
-            content_width=data.get("content_width", 80),
-            content_height=data.get("content_height"),
-            supports_markdown=data.get("supports_markdown", True),
-            supports_tables=data.get("supports_tables", True),
-            supports_code_blocks=data.get("supports_code_blocks", True),
-            supports_images=data.get("supports_images", False),
-            supports_rich_text=data.get("supports_rich_text", True),
-            supports_unicode=data.get("supports_unicode", True),
-            supports_mermaid=data.get("supports_mermaid", False),
-            supports_expandable_content=data.get("supports_expandable_content", False),
-            client_type=ClientType(data.get("client_type", "terminal")),
-            communication_style=(
-                CommunicationStyle(data["communication_style"])
-                if data.get("communication_style")
-                else None
-            ),
-        )
+        """Create from a dict (e.g. deserialized from ClientConfigRequest).
+
+        The model's own validation: an absent key takes the field's
+        default (an older client that sends none of the Art. 50(1) fields
+        reads as not disclosing, with no locale -- the safe direction), an
+        unknown key is ignored (a newer client against an older daemon),
+        and enums accept their values.  ``renderable_media`` sent as a
+        bare string is coerced by the validator above.
+        """
+        return cls.model_validate(dict(data or {}))
 
 
 class ClientConfigRequest(Event):

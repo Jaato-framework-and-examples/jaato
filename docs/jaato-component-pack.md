@@ -6,7 +6,7 @@ Both jaato distributions are licensed **`BUSL-1.1`**, which is source-available 
 
 This document is what such an agreement can point at. It is generated from the installed tree, so it describes the version you are running and not a release note.
 
-> *Computed from the installed framework at commit `ce71b3e` on 2026-09-18. Regenerate after any release or profile change; a stale computed section is worse than an absent one, because it reads as current.*
+> *Computed from the installed framework at commit `54d4abe` on 2026-09-20. Regenerate after any release or profile change; a stale computed section is worse than an absent one, because it reads as current.*
 
 ## Installed
 
@@ -55,8 +55,8 @@ Longer than the list above, on purpose: a limitations section a reader can finis
 
 | Surface | Value | What it versions |
 |---|---|---|
-| Event protocol | `1.16` | the client/daemon wire |
-| Audit schema | `1` | what is guaranteed to be recorded |
+| Event protocol | `1.17` | the client/daemon wire |
+| Audit schema | `2` | what is guaranteed to be recorded |
 | Profile keys | 28 accepted | what a profile file may declare |
 
 ## What the provider still owes
