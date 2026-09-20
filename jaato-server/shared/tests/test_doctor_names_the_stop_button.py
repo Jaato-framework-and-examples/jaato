@@ -19,7 +19,7 @@ from pathlib import Path
 
 from jaato_sdk import doctor
 from jaato_sdk.doctor import PASS, WARN, DaemonInfo, check_oversight
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 _DOCTOR = "jaato-sdk/jaato_sdk/doctor.py"
 

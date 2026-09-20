@@ -39,7 +39,7 @@ for _p in (str(ROOT / "jaato-sdk"), str(ROOT / "jaato-server")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from shared.tests.test_every_guard_detects_its_own_reversion import (  # noqa: E402
+from shared.tests.reversion import (  # noqa: E402
     Reversion,
 )
 from jaato_sdk.plugins.model_provider.types import (  # noqa: E402

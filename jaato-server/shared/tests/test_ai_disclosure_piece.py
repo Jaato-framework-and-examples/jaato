@@ -31,7 +31,7 @@ from shared.instruction_suppression import (
     normalize_suppression,
 )
 from shared.jaato_session import _announce_dropped_pieces
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 _RUNTIME = "jaato-server/shared/jaato_runtime.py"
 _SUPPRESSION = "jaato-server/shared/instruction_suppression.py"

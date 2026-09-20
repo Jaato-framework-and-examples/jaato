@@ -100,7 +100,7 @@ from shared.runtime_limits import (
     DEFAULT_UNLOAD_GRACE_SECONDS,
     RuntimeLimits,
 )
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 _MANAGER = "jaato-server/server/session_manager.py"
 _MANAGER_PY = pathlib.Path(__file__).resolve().parents[2] / (

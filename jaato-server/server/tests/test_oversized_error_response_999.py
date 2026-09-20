@@ -42,7 +42,7 @@ from server.runner.envelope import ErrorPayload
 from server.runner.json_codec import loads as _json_loads
 from server.runner.rpc import OVERSIZE_MESSAGE_CHARS, RunnerRPC
 
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 _RPC = "jaato-server/server/runner/rpc.py"
 

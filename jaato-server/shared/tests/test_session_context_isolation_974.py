@@ -81,7 +81,7 @@ from shared.session_context import (
     isolated_current_session,
     set_current_session,
 )
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]

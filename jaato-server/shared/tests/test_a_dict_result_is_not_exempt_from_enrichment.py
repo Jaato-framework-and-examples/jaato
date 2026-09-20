@@ -26,7 +26,7 @@ from shared.tool_result_builder import (
     pick_anchor_field,
     tool_result_text_view,
 )
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 
 REVERSIONS = [

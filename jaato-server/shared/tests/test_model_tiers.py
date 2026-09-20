@@ -21,7 +21,7 @@ Covers:
 import pytest
 from unittest.mock import MagicMock
 
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 #: The defect, put back: the system block names the CURRENT tier, so it is
 #: rewritten on every switch and takes the whole cached prefix with it.

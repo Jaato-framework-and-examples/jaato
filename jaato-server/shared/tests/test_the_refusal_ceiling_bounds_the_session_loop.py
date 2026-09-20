@@ -49,7 +49,7 @@ import pytest
 
 from shared.lifecycle_tools import LifecycleTools
 from shared.plugins.subagent.config import _parse_completion_processors
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 
 #: Put the defect back: reload the processors on every call.

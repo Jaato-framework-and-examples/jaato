@@ -26,7 +26,7 @@ from shared.jaato_runtime import (
     resolve_provider_extra,
 )
 from shared.plugins.subagent.config import CacheProfileConfig, parse_cache_block
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 #: The defect, put back: the common field stops being laid beneath the
 #: per-provider knobs, so declaring `cache:` does nothing.

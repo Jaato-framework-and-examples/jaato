@@ -136,7 +136,7 @@ def test_the_returned_client_is_handed_back_after_the_round_trip() -> None:
 # fail.  `test` is the nodeid WITHIN this module, and `replace` must
 # produce source that still COMPILES (#1065).
 # ---------------------------------------------------------------------------
-from shared.tests.test_every_guard_detects_its_own_reversion import (  # noqa: E402
+from shared.tests.reversion import (  # noqa: E402
     Reversion,
 )
 

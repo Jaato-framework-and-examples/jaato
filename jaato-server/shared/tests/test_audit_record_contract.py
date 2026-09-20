@@ -51,7 +51,7 @@ from shared.plugins.subagent.config import (
     profile_from_snapshot,
     profile_to_snapshot,
 )
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 _CONFIG = "jaato-server/shared/plugins/subagent/config.py"
 _RETENTION = "jaato-server/server/record_retention.py"

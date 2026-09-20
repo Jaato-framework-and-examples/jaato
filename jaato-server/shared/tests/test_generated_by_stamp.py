@@ -28,7 +28,7 @@ from jaato_sdk.events import (
     ai_generated_by,
 )
 from jaato_sdk.plugins.model_provider.types import Attachment, MediaDelta
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 _SESSION = "jaato-server/shared/jaato_session.py"
 

@@ -60,7 +60,7 @@ from shared.plugins.entry_point_trust import builtin_plugin_names
 # Reversions -- see test_every_guard_detects_its_own_reversion.py.  A guard
 # that cannot notice its own reversion is not evidence.
 # --------------------------------------------------------------------------
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 REVERSIONS = [
     Reversion(

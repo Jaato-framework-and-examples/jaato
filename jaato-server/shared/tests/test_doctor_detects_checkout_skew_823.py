@@ -31,7 +31,7 @@ from pathlib import Path
 import pytest
 
 from jaato_sdk import doctor as D
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 _DOCTOR_SRC = pathlib.Path(D.__file__)
 

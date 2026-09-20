@@ -26,7 +26,7 @@ from unittest.mock import MagicMock
 
 from shared.jaato_session import JaatoSession
 from shared.model_tiers import ModelTierConfig, TierEntry
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 #: The defect, put back: the tier switch stops re-wiring the cache plugin.
 REVERSIONS = [

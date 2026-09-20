@@ -72,7 +72,7 @@ from shared.ai_disclosure import (
     WITHHELD_REASONS,
     announcement_record,
 )
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 from shared.token_accounting import TokenLedger
 
 _MANAGER = "jaato-server/server/session_manager.py"

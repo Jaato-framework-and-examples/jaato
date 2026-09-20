@@ -70,7 +70,7 @@ from shared.apparmor_label import (
 # that followed it -- which is why the rule is written down here.
 
 try:  # pragma: no cover - import shape differs per invocation
-    from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+    from shared.tests.reversion import Reversion
 except Exception:  # pragma: no cover
     Reversion = None  # type: ignore[assignment]
 

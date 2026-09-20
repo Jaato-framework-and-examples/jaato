@@ -33,7 +33,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 from jaato_sdk.helpers import compute_cache_hit_percent
 from jaato_sdk.events import TurnCompletedEvent, UsageBreakdown

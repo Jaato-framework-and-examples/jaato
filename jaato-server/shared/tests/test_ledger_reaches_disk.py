@@ -31,7 +31,7 @@ import logging
 from pathlib import Path
 
 from shared.token_accounting import LEDGER_PATH_ENV, TokenLedger
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 _LEDGER = "jaato-server/shared/token_accounting.py"
 

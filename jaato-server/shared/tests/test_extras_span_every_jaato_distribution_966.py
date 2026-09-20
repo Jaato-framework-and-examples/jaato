@@ -31,7 +31,7 @@ import importlib.metadata
 import pytest
 
 from shared.scaffold import dependencies as D
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 REVERSIONS = [
     Reversion(

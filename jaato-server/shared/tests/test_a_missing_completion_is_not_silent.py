@@ -33,7 +33,7 @@ import ast
 import pathlib
 
 
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 #: The defect, put back.  ``not should_nudge`` alone is ALSO true when the
 #: agent signalled, so this stamps a completion gap on clean completions.

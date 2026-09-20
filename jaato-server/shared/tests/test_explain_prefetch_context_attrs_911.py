@@ -23,7 +23,7 @@ import dataclasses
 
 from shared.dynamic_instructions import RenderContext
 from shared.scaffold import explain
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 _EXPLAIN = "jaato-server/shared/scaffold/explain.py"
 

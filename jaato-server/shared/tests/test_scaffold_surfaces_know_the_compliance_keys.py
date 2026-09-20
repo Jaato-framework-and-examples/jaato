@@ -18,7 +18,7 @@ import re
 from pathlib import Path
 from types import SimpleNamespace
 
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 _BUILD = "jaato-server/shared/scaffold/build.py"
 _VALIDATE = "jaato-server/shared/scaffold/validate.py"

@@ -33,7 +33,7 @@ from __future__ import annotations
 from shared.plugins.subagent.config import SubagentConfig, SubagentProfile
 from shared.plugins.subagent.plugin import SubagentPlugin
 from shared.tool_result_builder import split_executor_result
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 REVERSIONS = [
     Reversion(

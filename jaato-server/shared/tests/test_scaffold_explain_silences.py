@@ -37,7 +37,7 @@ import pytest
 from shared.plugins.subagent.config import discover_profiles
 from shared.scaffold import archetypes as A
 from shared.scaffold import explain, introspect
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 
 #: Put each defect back.  ``find`` is the fixed text, ``replace`` what the

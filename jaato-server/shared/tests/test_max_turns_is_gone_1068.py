@@ -46,7 +46,7 @@ from shared.plugins.subagent.config import (
     validate_profile,
 )
 from shared.scaffold.validate import _profile_key_findings
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 _CONFIG = "jaato-server/shared/plugins/subagent/config.py"
 _VALIDATE = "jaato-server/shared/scaffold/validate.py"

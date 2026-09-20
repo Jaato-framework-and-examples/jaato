@@ -48,7 +48,7 @@ from jaato_sdk.output_marking import (
 )
 from jaato_sdk.plugins.base import TRAIT_OUTPUT_MARKER
 from shared.plugins.output_marker import create_plugin
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 _SESSION = "jaato-server/shared/jaato_session.py"
 _MARKER = "jaato-server/shared/plugins/output_marker/plugin.py"

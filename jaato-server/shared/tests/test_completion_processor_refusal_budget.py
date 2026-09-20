@@ -47,7 +47,7 @@ from shared.plugins.subagent.config import (
     CompletionProcessor,
     _parse_completion_processors,
 )
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 
 #: Put the defect back: drop the ceiling and let the gate refuse forever.

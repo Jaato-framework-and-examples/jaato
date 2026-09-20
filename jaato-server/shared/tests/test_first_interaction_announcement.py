@@ -43,7 +43,7 @@ from shared.ai_disclosure import (
     NOT_DECLARED,
     announcement_for,
 )
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 _MANAGER = "jaato-server/server/session_manager.py"
 _CORE = "jaato-server/server/core.py"

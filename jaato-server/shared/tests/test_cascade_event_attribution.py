@@ -48,7 +48,7 @@ def _event_classes():
     ]
 
 
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 #: The defect, put back: the 64-call-site path stops attributing, and every
 #: event a consumer sees through it goes back to arriving anonymous.

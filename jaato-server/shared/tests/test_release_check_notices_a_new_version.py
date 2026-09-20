@@ -25,7 +25,7 @@ import textwrap
 
 from jaato_sdk import doctor
 from jaato_sdk import release_channels as rc
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 REVERSIONS = [
     Reversion(

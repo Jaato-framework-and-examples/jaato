@@ -123,7 +123,7 @@ from server.core import JaatoServer
 from server.runner_rpc_handlers.clarification_relay import ClarificationRelayHandler
 from server.runner_rpc_handlers.prompt_operator import PromptOperatorHandler
 from server.session_manager import RuntimeSessionInfo, Session, SessionManager
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 
 _AWAITING = "jaato-server/server/awaiting.py"

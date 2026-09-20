@@ -37,7 +37,7 @@ from shared.plugins.webhook.replay import ReplayCache
 from shared.plugins.webhook.routes import parse_webhook_request
 from shared.plugins.webhook import routes as _routes
 from shared.plugins.webhook import signature_schemes as _schemes
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 _ROUTES = "jaato-server/shared/plugins/webhook/routes.py"
 _SCHEMES = "jaato-server/shared/plugins/webhook/signature_schemes.py"

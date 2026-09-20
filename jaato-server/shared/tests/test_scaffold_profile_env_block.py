@@ -77,7 +77,7 @@ import yaml
 from shared.scaffold import build, explain, introspect
 from shared.scaffold import validate as V
 from shared.scaffold.__main__ import _FILTER_SCOPES
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 
 #: Put each half of #752 back.  The defect was an ABSENCE in two places, so

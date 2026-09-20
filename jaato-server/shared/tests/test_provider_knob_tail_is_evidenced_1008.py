@@ -39,7 +39,7 @@ from pathlib import Path
 
 from shared.scaffold import introspect
 from shared.scaffold import validate as V
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 _VALIDATE = "jaato-server/shared/scaffold/validate.py"
 _INTROSPECT = "jaato-server/shared/scaffold/introspect.py"

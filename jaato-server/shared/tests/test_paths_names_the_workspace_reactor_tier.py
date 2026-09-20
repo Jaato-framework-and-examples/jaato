@@ -28,7 +28,7 @@ from pathlib import Path
 
 from shared.scaffold import explain as _explain
 from shared.scaffold import gitignore as _gi
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 _EXPLAIN = "jaato-server/shared/scaffold/explain.py"
 _APPARMOR_PY = (Path(__file__).resolve().parents[2] / "server" / "apparmor.py")

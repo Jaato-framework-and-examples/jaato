@@ -48,7 +48,7 @@ from jaato_sdk.plugins.model_provider.types import (
 )
 
 
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 
 REVERSIONS = [

@@ -97,7 +97,7 @@ from jaato_sdk.plugins.model_provider.types import (
 from server.core import JaatoServer, merge_pending_continuations
 from server.runner_rpc_client import RunnerRPCClient
 from shared.jaato_session import JaatoSession
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 
 REVERSIONS = [

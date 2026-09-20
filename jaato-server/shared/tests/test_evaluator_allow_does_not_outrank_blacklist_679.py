@@ -53,7 +53,7 @@ from shared.plugins.permission.policy import (
     PermissionDecision,
     PermissionPolicy,
 )
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 
 _POLICY = "jaato-server/shared/plugins/permission/policy.py"

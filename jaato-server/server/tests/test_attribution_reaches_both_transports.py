@@ -48,7 +48,7 @@ from jaato_sdk.events import CommandRequest, PermissionResponseRequest
 from server.command_router import CommandRouter
 from server.websocket import HAS_WEBSOCKETS
 from shared.peer_identity import PeerCredentials
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 _ROUTER = "jaato-server/server/command_router.py"
 _MANAGER = "jaato-server/server/session_manager.py"

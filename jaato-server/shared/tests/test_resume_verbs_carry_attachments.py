@@ -39,7 +39,7 @@ from server.session_manager import (
     _wrap_wake_content,
 )
 from shared.message_delivery import ACCEPTED, BUSY, QUEUED
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 UTTERANCE = {"mime_type": "audio/wav", "data": "QUJD",
              "display_name": "question.wav", "attachment_id": "sha256:beef"}

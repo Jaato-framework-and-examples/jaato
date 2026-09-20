@@ -81,7 +81,7 @@ from shared.plugins.gc import (
 )
 from shared.plugins.gc.utils import evict_consumed_media
 from shared.jaato_session import JaatoSession
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 
 REVERSIONS = [

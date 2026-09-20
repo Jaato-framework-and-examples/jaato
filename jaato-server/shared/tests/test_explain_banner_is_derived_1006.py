@@ -33,7 +33,7 @@ import re
 from shared.scaffold import dependencies as _deps
 from shared.scaffold import explain as _explain
 from shared.scaffold.__main__ import _DEPS_WORDS, _SCOPES, scope_catalog
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 _EXPLAIN = "jaato-server/shared/scaffold/explain.py"
 
