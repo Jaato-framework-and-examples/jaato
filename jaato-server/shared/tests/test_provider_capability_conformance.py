@@ -47,7 +47,7 @@ from shared.tests.test_provider_capabilities import (  # noqa: E402
     _provider_dirs,
     _read_declaration,
 )
-from shared.tests.test_every_guard_detects_its_own_reversion import (  # noqa: E402
+from shared.tests.reversion import (  # noqa: E402
     Reversion,
 )
 

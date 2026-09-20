@@ -48,7 +48,7 @@ from shared.incidents import (
     raise_incident,
     read_register,
 )
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 _CORE = "jaato-server/server/core.py"
 _BOOTSTRAP = "jaato-server/server/runner/bootstrap.py"

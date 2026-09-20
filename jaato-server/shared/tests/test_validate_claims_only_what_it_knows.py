@@ -40,7 +40,7 @@ import pytest
 
 from shared.scaffold import introspect
 from shared.scaffold.validate import validate_profile
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 #: Phrasings that assert a runtime consequence a JSON Schema cannot support.
 #: Each is the literal tail one of the three findings used to carry.

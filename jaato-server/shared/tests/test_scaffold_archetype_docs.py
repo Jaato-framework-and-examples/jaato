@@ -37,7 +37,7 @@ import pytest
 
 from shared.scaffold import archetypes as A
 from shared.scaffold import build, explain
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 
 #: Put the defect back: spell the archetype count instead of counting it.

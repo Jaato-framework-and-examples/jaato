@@ -331,7 +331,7 @@ def test_classifiers_do_not_outlive_the_floor(dist: str):
 # name and asserts each one makes the NAMED test fail.  A guard that
 # cannot notice its own reversion is not evidence.
 # ---------------------------------------------------------------------------
-from shared.tests.test_every_guard_detects_its_own_reversion import (  # noqa: E402
+from shared.tests.reversion import (  # noqa: E402
     Reversion,
 )
 

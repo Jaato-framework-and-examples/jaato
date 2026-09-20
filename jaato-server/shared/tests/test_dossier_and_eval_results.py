@@ -41,7 +41,7 @@ import pytest
 from shared.scaffold import archetypes as A
 from shared.scaffold import build, dossier
 from shared.scaffold import eval_results as ER
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 
 ROOT = Path(__file__).resolve().parents[3]

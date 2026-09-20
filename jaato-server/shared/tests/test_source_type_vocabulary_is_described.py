@@ -50,7 +50,7 @@ from shared.message_queue import (
     IDLE_ONLY_SOURCES,
     SourceType,
 )
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 REVERSIONS = [
     Reversion(

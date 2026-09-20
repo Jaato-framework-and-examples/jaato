@@ -43,7 +43,7 @@ from shared.scaffold.__main__ import (
     _SIMPLE_SCOPES,
     _WORKSPACE_SCOPES,
 )
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 _MAIN = "jaato-server/shared/scaffold/__main__.py"
 _MAIN_PY = Path(__file__).resolve().parents[1] / "scaffold" / "__main__.py"

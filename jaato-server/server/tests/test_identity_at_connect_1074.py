@@ -78,7 +78,7 @@ from server.ws_tickets import (
     credential_digest,
     load_app_credentials,
 )
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 _WS = "jaato-server/server/websocket.py"
 _TICKETS = "jaato-server/server/ws_tickets.py"

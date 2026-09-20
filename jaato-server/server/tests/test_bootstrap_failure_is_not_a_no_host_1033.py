@@ -77,7 +77,7 @@ from server.runner.rpc import RunnerRPC
 from server.session_manager import SessionManager
 
 try:  # pragma: no cover - import shape differs per invocation
-    from shared.tests.test_every_guard_detects_its_own_reversion import (
+    from shared.tests.reversion import (
         Reversion,
     )
 except Exception:  # pragma: no cover

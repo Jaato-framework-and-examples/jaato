@@ -83,7 +83,7 @@ from shared.plugins.model_provider._prose_tools import messages_to_prose_chat
 
 from shared.jaato_session import JaatoSession
 from shared.plugins.model_provider.nim.provider import NIMProvider
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 from jaato import FunctionCall, Message, Part, Role, ToolResult
 

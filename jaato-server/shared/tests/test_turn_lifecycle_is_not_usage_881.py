@@ -36,7 +36,7 @@ from types import SimpleNamespace
 
 from server.runner.rpc import RunnerRPC
 from shared.jaato_session import JaatoSession
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 _SESSION = "jaato-server/shared/jaato_session.py"
 _RPC = "jaato-server/server/runner/rpc.py"

@@ -75,7 +75,7 @@ from pathlib import Path
 from typing import Any, List, Optional
 
 from server.core import JaatoServer
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 _CORE = "jaato-server/server/core.py"
 _CORE_PY = Path(__file__).resolve().parents[1] / "core.py"

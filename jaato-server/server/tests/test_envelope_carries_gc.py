@@ -51,7 +51,7 @@ from shared.plugins.subagent.config import (
     gc_profile_to_plugin_config,
 )
 from shared.session_envelope import SessionInitEnvelope
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 
 REVERSIONS = [

@@ -21,7 +21,7 @@ from pathlib import Path
 
 from shared.scaffold import explain
 from shared.scaffold.__main__ import _SCOPES, scope_catalog
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 _EXPLAIN = "jaato-server/shared/scaffold/explain.py"
 

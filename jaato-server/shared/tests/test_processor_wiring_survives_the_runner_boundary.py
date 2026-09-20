@@ -53,7 +53,7 @@ from shared.plugins.subagent.config import (
     completion_processors_from_wire,
     completion_processors_to_wire,
 )
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 
 #: Put the defect back: serialise the fields somebody thought of.

@@ -40,7 +40,7 @@ from __future__ import annotations
 import ast
 import pathlib
 
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 from shared.tool_result_builder import normalize_result_dict, split_executor_result
 
 _PLUGIN = "jaato-server/shared/plugins/subagent/plugin.py"

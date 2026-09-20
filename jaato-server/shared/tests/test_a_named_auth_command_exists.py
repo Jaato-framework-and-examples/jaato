@@ -46,7 +46,7 @@ import os
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 #: The defect, put back: the plugin exists but stops answering to the
 #: name its provider advertises.  That is #888 exactly — a declaration

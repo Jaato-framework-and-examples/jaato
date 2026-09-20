@@ -218,7 +218,7 @@ def test_every_prompting_event_is_dispatched_by_every_client(client):
 # Self-certification for test_every_guard_detects_its_own_reversion.
 # ---------------------------------------------------------------------------
 
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion  # noqa: E402
+from shared.tests.reversion import Reversion  # noqa: E402
 
 
 REVERSIONS = [

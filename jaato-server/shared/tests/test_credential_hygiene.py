@@ -40,7 +40,7 @@ from typing import Any, Dict, List, Tuple
 import pytest
 
 from shared.secret_repr import REDACTED, SECRET_FIELD_NAMES
-from shared.tests.test_every_guard_detects_its_own_reversion import (
+from shared.tests.reversion import (
     Reversion,
 )
 

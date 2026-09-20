@@ -52,7 +52,7 @@ from shared.cli_path_policy import (
 )
 from shared.plugins.cli.plugin import CLIToolPlugin
 from shared.plugins.permission.policy import PermissionPolicy
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 
 _PLUGIN = "jaato-server/shared/plugins/cli/plugin.py"

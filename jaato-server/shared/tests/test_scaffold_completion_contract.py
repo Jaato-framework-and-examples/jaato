@@ -46,7 +46,7 @@ from shared.plugins.subagent import config as _cfg
 from shared.scaffold import archetypes as A
 from shared.scaffold import _processor_template as _tpl
 from shared.scaffold import explain, introspect
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 
 #: Put the defect back: spell the vocabularies instead of reading them.

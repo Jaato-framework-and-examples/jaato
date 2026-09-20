@@ -66,7 +66,7 @@ from shared.plugins.session import listing_cache
 from shared.plugins.session.base import SessionInfo, SessionState
 from shared.plugins.session.file_session import FileSessionPlugin
 from shared.plugins.session.serializer import serialize_session_state
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 
 _SRC = "jaato-server/shared/plugins/session/listing_cache.py"

@@ -47,7 +47,7 @@ import pytest
 from shared.ai_tool_runner import ToolExecutor
 from shared.jaato_session import JaatoSession
 from shared.plugins.permission import PermissionPlugin
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 from jaato_sdk.plugins.model_provider.types import FunctionCall
 
 _SESSION_SRC = Path(__file__).resolve().parents[1] / "jaato_session.py"

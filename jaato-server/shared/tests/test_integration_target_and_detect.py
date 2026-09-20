@@ -238,7 +238,7 @@ def test_a_shipped_detect_explains_itself():
 # discovers this list by name and asserts each makes the NAMED test fail.
 # `test` is the nodeid WITHIN this module and `replace` must still COMPILE.
 # ---------------------------------------------------------------------------
-from shared.tests.test_every_guard_detects_its_own_reversion import (  # noqa: E402
+from shared.tests.reversion import (  # noqa: E402
     Reversion,
 )
 

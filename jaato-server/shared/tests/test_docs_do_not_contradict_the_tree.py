@@ -45,7 +45,7 @@ from typing import Dict, Iterator, List, Optional, Set, Tuple
 
 import pytest
 
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 from shared.tests.test_provider_capabilities import (
     _provider_dirs,
     _read_declaration,

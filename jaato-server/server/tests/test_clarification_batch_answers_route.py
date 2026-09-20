@@ -26,7 +26,7 @@ routing they interrupt.
 import base64
 import queue
 
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 #: The refusal gate is the whole of #989's safety story on this path: with
 #: it removed the daemon resolves the clarification and the media simply

@@ -137,7 +137,7 @@ def test_explain_profile_points_at_the_validate_finding():
 # must notice.  See test_every_guard_detects_its_own_reversion.
 # ---------------------------------------------------------------------------
 
-from shared.tests.test_every_guard_detects_its_own_reversion import (  # noqa: E402
+from shared.tests.reversion import (  # noqa: E402
     Reversion,
 )
 

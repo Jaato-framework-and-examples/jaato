@@ -22,7 +22,7 @@ addable once rather than four times.
 import ast
 import pathlib
 
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 #: The defect, put back: one ingress parses ``gc`` inline again instead of
 #: calling the shared parser.

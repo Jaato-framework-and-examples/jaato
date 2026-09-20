@@ -57,7 +57,7 @@ from shared.plugins.subagent.config import build_inline_profile
 from shared.scaffold import archetypes as A
 from shared.scaffold import build
 from shared.script_loader import resolve_script_path
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 from shared.tests.test_lifecycle_tools import StubSession
 
 

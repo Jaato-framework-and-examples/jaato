@@ -76,7 +76,7 @@ from server.runner_pool import PoolManager, PoolSlot, slot_rpc_death
 
 import sys as _sys, pathlib as _pathlib
 _sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parents[2]))
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 #: Each entry puts the defect back and names the test that must go red.
 REVERSIONS = [

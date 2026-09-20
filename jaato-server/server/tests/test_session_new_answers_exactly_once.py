@@ -58,7 +58,7 @@ import pytest
 
 import sys as _sys
 _sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 #: The defect, put back: the spawn-payload refusal (#882's primary repro)
 #: goes around the answer funnel and emits an uncorrelated ErrorEvent again.

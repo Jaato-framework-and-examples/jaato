@@ -61,7 +61,7 @@ from shared.plugins.references.bundle import (
     ReferenceBundle,
     discover_bundles as discover_reference_bundles,
 )
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 
 REVERSIONS = [

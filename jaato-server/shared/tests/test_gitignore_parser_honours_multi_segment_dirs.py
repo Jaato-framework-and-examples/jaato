@@ -28,7 +28,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 from shared.utils.gitignore import GitignoreParser
 
 REVERSIONS = [

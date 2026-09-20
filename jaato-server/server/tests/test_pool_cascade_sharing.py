@@ -43,7 +43,7 @@ def _slot(pid: int, cascade_id=None, last_end_ts=None) -> PoolSlot:
 
 import sys as _sys, pathlib as _pathlib
 _sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parents[2]))
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 #: The defect, put back: the return path appends unconditionally again.
 REVERSIONS = [

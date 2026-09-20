@@ -40,7 +40,7 @@ from jaato_sdk.audit_chain import (
     verify,
 )
 from shared.plugins.subagent.config import RecordKeepingConfig
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 from shared.token_accounting import LEDGER_INTEGRITY_ENV, TokenLedger
 
 _CHAIN = "jaato-sdk/jaato_sdk/audit_chain.py"

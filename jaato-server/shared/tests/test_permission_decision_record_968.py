@@ -32,7 +32,7 @@ import textwrap
 
 from shared.plugins.permission import plugin as permission_plugin_module
 from shared.plugins.permission.plugin import PermissionPlugin
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 
 def _decision_trace_fstring() -> ast.JoinedStr:

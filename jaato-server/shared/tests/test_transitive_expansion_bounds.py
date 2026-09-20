@@ -52,7 +52,7 @@ from shared.plugins.references.models import (
     ReferenceSource,
     SourceType,
 )
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 _TARGET = "jaato-server/shared/plugins/references/plugin.py"
 

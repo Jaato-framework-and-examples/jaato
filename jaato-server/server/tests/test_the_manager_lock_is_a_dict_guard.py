@@ -40,7 +40,7 @@ from typing import Dict, List, Set
 
 import sys as _sys
 _sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 #: The defect, put back: the save moved back INSIDE the manager lock, which
 #: is the circular wait #657 removed.

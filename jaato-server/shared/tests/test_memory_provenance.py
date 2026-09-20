@@ -38,7 +38,7 @@ import pytest
 
 from shared.plugins.memory.models import Memory
 from shared.plugins.memory.plugin import MemoryPlugin
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 _PLUGIN = "jaato-server/shared/plugins/memory/plugin.py"
 _VALIDATE = "jaato-server/shared/scaffold/validate.py"

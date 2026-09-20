@@ -34,7 +34,7 @@ import pathlib
 # Resolved from __file__, not the CWD.  A relative path would make a wrong
 # working directory fire the "guard is stale" anchor below, sending the reader
 # to hunt a rename that never happened.
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 #: The defect, put back.  Publishing the global before filling it is what
 #: #652 removed; a guard that does not notice this is decorative.

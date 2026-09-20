@@ -29,7 +29,7 @@ import pytest
 CORE = Path(__file__).resolve().parents[1] / "core.py"
 
 try:  # pragma: no cover - import shape differs per invocation
-    from shared.tests.test_every_guard_detects_its_own_reversion import (
+    from shared.tests.reversion import (
         Reversion,
     )
 except Exception:  # pragma: no cover

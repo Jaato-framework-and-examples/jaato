@@ -53,7 +53,7 @@ from shared.plugins.model_provider.nim.provider import NIMProvider
 from shared.plugins.model_provider.openrouter.provider import OpenRouterProvider
 from jaato_sdk.plugins.model_provider.types import TokenUsage
 from shared.plugins.model_provider.vllm.provider import VLLMProvider
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 _SESSION = "jaato-server/shared/jaato_session.py"
 _BUDGET = "jaato-server/shared/budget_control.py"

@@ -107,6 +107,7 @@ scope is per worker), which costs disk rather than correctness.
 """
 from __future__ import annotations
 
+import ast
 import importlib
 import importlib.util
 import os
@@ -115,7 +116,6 @@ import re
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterator, List, NamedTuple, Optional, Set, Tuple
 
@@ -126,21 +126,13 @@ ROOT = Path(__file__).resolve().parents[3]
 PASS, FAIL, BLOCKED = "PASS", "FAIL", "BLOCKED"
 
 
-@dataclass(frozen=True)
-class Reversion:
-    """One way to put a guarded defect back."""
-    target: str      #: repo-relative file to edit
-    find: str        #: the FIXED text (must be present, exactly once)
-    replace: str     #: the BROKEN text it becomes
-    because: str     #: what the guard is supposed to notice
-    test: str        #: the ONE test that must fail. See below.
-    #
-    # NAMING THE TEST IS NOT PEDANTRY.  The first version of this asserted
-    # only that the MODULE failed, and a module is many tests: neutering
-    # one assertion was masked by a sibling in the same file, and the
-    # meta-guard reported the decorative guard as working.  That is the
-    # over-broad match -- the anchor matched something, just not the thing
-    # under test.  Caught only by sabotaging this suite itself.
+#: ``Reversion`` lives in its own leaf module, NOT here.  157 guard
+#: modules import it, and this module discovers the whole corpus at
+#: import time (``_CASES`` below) -- so keeping the dataclass here made
+#: importing one guard module import every guard module, in each of the
+#: 358 subprocesses this suite spawns.  See ``reversion.py`` for the
+#: measurement.  It is re-exported for this module's own use only.
+from shared.tests.reversion import Reversion
 
 
 #: Guard modules live in two packages; a reversion names the module, not
@@ -916,4 +908,91 @@ def test_the_guard_fails_when_its_defect_is_put_back(
         f"(a class-nested test needs its class, e.g. 'TestX::test_y')\n"
         f"  should notice: {rev.because}\n\n"
         f"pytest said:\n{run.output}"
+    )
+
+
+# ---------------------------------------------------------------------
+# Keeping the guard subprocess cheap.
+#
+# The 358 cases above each spawn `pytest <guard_module>::<test>`, so
+# whatever a guard module imports is paid 358 times per CI run.  It used
+# to import THIS module for `Reversion`, and this module discovers the
+# corpus at import time -- so one guard module imported all 157, plus the
+# framework packages they reach.  Measured with `python -X importtime`:
+# 3.62 s to collect one guard module, 2.60 s of it that single import.
+# Moving the dataclass to `reversion.py` took the same collection to
+# 0.27 s.
+#
+# Both directions of that fix are guarded, because neither is visible in
+# a working tree: the slow path still WORKS, it is only slow, and a
+# 20-minute regression spread over 358 subprocesses reads as "CI is a bit
+# slower lately" rather than as a defect.
+# ---------------------------------------------------------------------
+
+#: Modules `reversion.py` may import.  Standard library only: its whole
+#: purpose is to be cheap enough that 157 modules import it without
+#: thinking, so anything here is paid by every guard subprocess.
+_REVERSION_ALLOWED_IMPORTS = {"__future__", "dataclasses", "typing"}
+
+
+# REVERSION, spelled out.  This module declares no ``REVERSIONS`` table --
+# it is the thing that runs them, and a table here would have the suite
+# sabotage its own file while executing it.  So these two are verified by
+# hand, in the discipline this module's own docstring describes, and the
+# result is recorded rather than left as a claim (#1155's convention).
+#
+#   1. reversion.py gains `import requests`
+#      -> test_reversion_module_stays_cheap fails: extra=['requests']
+#
+#   2. any guard module's import goes back to the meta-guard, e.g.
+#      -   from shared.tests.reversion import Reversion
+#      +   from shared.tests.test_every_guard_detects_its_own_reversion \
+#      +       import Reversion
+#      -> test_no_guard_imports_reversion_from_the_meta_guard fails,
+#         naming that module
+#
+# Both were run against this change and observed to fail as described;
+# both pass on the tree as it stands.  The saving they protect is
+# measured, not estimated: collecting one guard module went 3.62 s ->
+# 0.27 s, and the suite spawns one such collection per case.
+
+
+def test_reversion_module_stays_cheap():
+    """`reversion.py` imports nothing that costs anything."""
+    src = (ROOT / "jaato-server/shared/tests/reversion.py").read_text()
+    roots = set()
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.Import):
+            roots |= {a.name.split(".")[0] for a in node.names}
+        elif isinstance(node, ast.ImportFrom) and node.level == 0:
+            roots.add((node.module or "").split(".")[0])
+    extra = sorted(roots - _REVERSION_ALLOWED_IMPORTS)
+    assert not extra, (
+        f"reversion.py imports {extra}, which every one of the "
+        f"{len(_CASES)} guard subprocesses now pays for.  It is imported "
+        f"by 157 guard modules precisely because it is cheap; a helper "
+        f"that needs more belongs in this module, which imports the "
+        f"corpus on purpose.  If the import really is stdlib and really "
+        f"is cheap, add it to _REVERSION_ALLOWED_IMPORTS with a reason."
+    )
+
+
+def test_no_guard_imports_reversion_from_the_meta_guard():
+    """A guard module importing `Reversion` from here is the slow path."""
+    offenders = []
+    for pkg in _PACKAGES:
+        for path in sorted((ROOT / pkg).glob("test_*.py")):
+            if path.name == Path(__file__).name:
+                continue
+            if "test_every_guard_detects_its_own_reversion import" in \
+                    path.read_text(encoding="utf8", errors="ignore"):
+                offenders.append(f"{pkg}/{path.name}")
+    assert not offenders, (
+        "these guard modules import from the meta-guard:\n  "
+        + "\n  ".join(offenders)
+        + "\n\nImport `Reversion` from `shared.tests.reversion` instead.  "
+          "This module builds _CASES at import time, so importing it from "
+          "a guard makes that guard's own test run import all 157 guard "
+          "modules -- measured at 2.60 s, paid once per subprocess, "
+          f"{len(_CASES)} times per CI run."
     )

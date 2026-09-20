@@ -56,7 +56,7 @@ from jaato_sdk.path_boundary import (
     require_absolute_path,
 )
 from shared.session_envelope import BootstrapEnvelope, SessionInitEnvelope
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 #: The defect, put back at each of the four enforcement points.  Each
 #: reversion restores the pre-fix behaviour — accept the value and let

@@ -34,7 +34,7 @@ from pathlib import Path
 
 import pytest
 
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 #: Repo root: this file is at <root>/jaato-server/shared/tests/<name>.py
 ROOT = Path(__file__).resolve().parents[3]

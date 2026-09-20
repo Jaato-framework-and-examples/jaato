@@ -31,7 +31,7 @@ import ast
 import pathlib
 from typing import Dict, List, Optional, Tuple
 
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 _ROUTER = "jaato-server/server/command_router.py"
 

@@ -170,7 +170,7 @@ def test_the_announcement_is_spent_once_per_kernel():
 # that must notice.  See test_every_guard_detects_its_own_reversion.
 # ---------------------------------------------------------------------------
 
-from shared.tests.test_every_guard_detects_its_own_reversion import (  # noqa: E402
+from shared.tests.reversion import (  # noqa: E402
     Reversion,
 )
 

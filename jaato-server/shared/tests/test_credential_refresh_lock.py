@@ -53,7 +53,7 @@ from pathlib import Path
 
 import pytest
 
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 #: The half-fix, put back.  Deleting the re-read leaves the lock fully
 #: intact -- which is precisely the shape that reads as fixed and is not:

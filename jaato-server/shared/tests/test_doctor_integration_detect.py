@@ -126,7 +126,7 @@ def test_an_unusable_manifest_is_reported_not_raised(shipped):
 # ---------------------------------------------------------------------------
 # Reversions -- see test_every_guard_detects_its_own_reversion.
 # ---------------------------------------------------------------------------
-from shared.tests.test_every_guard_detects_its_own_reversion import (  # noqa: E402
+from shared.tests.reversion import (  # noqa: E402
     Reversion,
 )
 

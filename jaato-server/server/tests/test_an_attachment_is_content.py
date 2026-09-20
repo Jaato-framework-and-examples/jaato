@@ -68,7 +68,7 @@ from jaato_sdk.events import (
 )
 from jaato_sdk.plugins.base import HelpLines
 from server.session_manager import SessionManager
-from shared.tests.test_every_guard_detects_its_own_reversion import Reversion
+from shared.tests.reversion import Reversion
 
 
 REVERSIONS = [
