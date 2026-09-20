@@ -3387,6 +3387,18 @@ async def main():
         format="%(asctime)s [%(levelname)s] %(message)s",
     )
 
+    # #1168.  This entry point spawns per-session runners under its own
+    # uid exactly as ``python -m server`` does, and it is the one the two
+    # deployment guides the warning cites actually print
+    # (docs/apparmor-setup.md, docs/runtime-limits-setup.md), so the
+    # posture has to be announced here too -- a warning that fires on one
+    # of two documented daemons is a warning an operator learns to
+    # disbelieve.  No ``--umask`` flag here deliberately: this server's
+    # flag surface is the isolation posture, and ``JAATO_UMASK`` is the
+    # host-scoped knob that works on every entry point without one.
+    from server.process_posture import apply_process_posture
+    apply_process_posture()
+
     server = JaatoWSServer(
         host=args.host,
         port=args.port,

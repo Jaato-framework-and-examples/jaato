@@ -315,6 +315,7 @@ class JaatoDaemon:
         ws_unsafe_no_auth: bool = False,
         ws_app_credentials: 'Optional[AppCredentialStore]' = None,
         ws_app_credentials_file: Optional[str] = None,
+        umask: Optional[str] = None,
     ):
         """Initialize the daemon.
 
@@ -342,6 +343,14 @@ class JaatoDaemon:
             ws_app_credentials_file: The path the store was loaded from,
                 persisted for ``--restart``. A path, never a credential —
                 the same rule ``ws_token_file`` follows.
+            umask: ``--umask``'s raw octal argument, or ``None`` when the
+                flag was not passed (in which case ``JAATO_UMASK`` is the
+                only source). Applied to this process in :meth:`start`
+                and inherited by every runner forked from it — see
+                :mod:`server.process_posture` for why it is a property of
+                the daemon and not of a session. Stored raw rather than
+                parsed so ``_write_config`` can round-trip exactly what
+                the operator wrote, and so one resolver parses it.
         """
         self.ipc_socket = ipc_socket
         self.web_socket = web_socket
@@ -358,6 +367,7 @@ class JaatoDaemon:
         self._ws_unsafe_no_auth = ws_unsafe_no_auth
         self._ws_app_credentials = ws_app_credentials
         self._ws_app_credentials_file = ws_app_credentials_file
+        self._umask = umask
 
         # Components
         self._session_manager: Optional[SessionManager] = None
@@ -431,6 +441,7 @@ class JaatoDaemon:
         """Start the daemon and run until shutdown.
 
         Wiring sequence:
+        0. Apply the process posture (umask; announce a root daemon)
         1. Create ``SessionManager``
         2. Discover daemon-level plugins (auth providers)
         3. Create transport servers (IPC, WS)
@@ -439,10 +450,26 @@ class JaatoDaemon:
         6. Wire router into transports and session manager
         7. Load daemon extensions
         8. Run until shutdown
+
+        Step 0 is first because both halves of it are only true if
+        nothing has happened yet: the umask must be in force before this
+        process opens a file or forks the pre-warm template (pool slots
+        fork from that template, so a umask set later never reaches the
+        slots that serve the default path), and the root warning belongs
+        at the head of the daemon's own log rather than buried in it.
+        Deliberately here rather than in :func:`main`: ``--daemon``
+        re-execs on Windows and double-forks on Unix, and ``start`` is
+        the one function the *surviving* process runs either way.
         """
         from server.event_sink import CompositeEventSink
         from server.command_router import CommandRouter
         from server.loop_watchdog import LoopWatchdog
+        from server.process_posture import apply_process_posture
+
+        # Step 0 (#1168).  One call, and deliberately one call: a
+        # daemon that applied the umask and skipped the warning would
+        # report a posture it had only half taken.
+        apply_process_posture(self._umask)
 
         # FIRST, before any wiring: the loop-stall witness.  The daemon's
         # loop is known to stop running scheduled coroutines for 5-35s at a
@@ -874,6 +901,13 @@ class JaatoDaemon:
             "ws_token_file": self._ws_token_file,
             "ws_unsafe_no_auth": self._ws_unsafe_no_auth,
             "ws_app_credentials": self._ws_app_credentials_file,
+            # The raw --umask argument, so --restart reproduces the
+            # posture rather than silently reverting it.  A value that
+            # came from JAATO_UMASK is NOT persisted here: it is ``None``
+            # in this field, and the restarted daemon re-reads the
+            # variable from its own environment, which is how every other
+            # env knob in this process behaves.
+            "umask": self._umask,
         }
         try:
             with open(self.config_file, 'w') as f:
@@ -1947,6 +1981,21 @@ Examples:
              "on a trusted host).",
     )
     parser.add_argument(
+        "--umask",
+        metavar="MODE",
+        default=None,
+        help="Octal umask for the daemon process, inherited by every "
+             "runner it forks and so by everything the agent writes "
+             "(default: whatever the daemon inherits from its parent). "
+             "The runner executes as the DAEMON's uid -- nothing in this "
+             "tree drops privileges -- so on a root daemon every file "
+             "written into a workspace is root-owned and its owner needs "
+             "sudo to overwrite or delete it. Pass 002, with a setgid "
+             "workspace directory, to keep those files group-writable; "
+             "it does not change who owns them. Equivalent to "
+             "JAATO_UMASK, which this flag outranks.",
+    )
+    parser.add_argument(
         "--ipc-trust-peer-paths",
         action="store_true",
         help="Disable the IPC peer-entitlement check: act on any workspace "
@@ -2083,6 +2132,10 @@ Examples:
         # A PATH, never a credential -- the file is re-read (and its mode
         # re-checked) on the restarted daemon.
         args.ws_app_credentials = config.get("ws_app_credentials")
+        # #1168: a flag that decided the mode of every file the agent
+        # wrote, silently dropped by --restart, is the silent-posture-
+        # change shape this tree announces rather than performs.
+        args.umask = config.get("umask")
 
         # Always restart as daemon
         args.daemon = True
@@ -2174,6 +2227,7 @@ Examples:
         ws_unsafe_no_auth=args.ws_unsafe_no_auth,
         ws_app_credentials=ws_app_credentials,
         ws_app_credentials_file=args.ws_app_credentials,
+        umask=args.umask,
     )
 
     try:

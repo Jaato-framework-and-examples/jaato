@@ -22,6 +22,21 @@ For local IPC usage (single user, jaato TUI), runtime limits are unnecessary —
 - **Linux** with cgroup v2 mounted (the unified hierarchy at `/sys/fs/cgroup`)
 - A parent cgroup directory the jaato server can write to
 - The `memory`, `pids`, and `cpu` controllers delegated to that parent via `cgroup.subtree_control`
+- A **service user** to run the daemon as — every `chown jaato:jaato` below
+  assumes one. See the note directly under this list for what happens if you
+  skip it.
+
+> **Run the daemon as a service user, not as root.** The per-session runner is
+> `fork`+`exec`ed under the **daemon's** uid — nothing in jaato drops
+> privileges — so on a root daemon every file the agent writes into a
+> workspace is root-owned: `writeNewFile`, `file_edit` backups, the
+> directories created beneath them, and whatever a `cli` subprocess produces
+> (it runs with `cwd=<workspace_root>`, so one `git clone` leaves a whole
+> root-owned tree there). The workspace's owner then needs `sudo` to overwrite
+> or delete their own files. A root daemon logs a WARNING saying so at
+> startup. Where a service user is genuinely impossible, `--umask 002` (or
+> `JAATO_UMASK=002`) plus a **setgid** workspace directory keeps those files
+> group-writable — it does not change who owns them.
 
 ### Verify cgroup v2 is active
 
