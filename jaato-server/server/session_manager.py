@@ -973,6 +973,85 @@ def initialize_or_refuse(server: JaatoServer, session_id: str) -> bool:
     return False
 
 
+def _agent_for_session(
+    agent_name: Optional[str],
+    profile: Any,
+) -> Tuple[Optional[str], bool]:
+    """Resolve which persona a session gets, and where the name came from.
+
+    A profile supplies PLUGINS; an agent supplies the PERSONA.  When the
+    caller names no agent, the profile's own ``default_agent`` stands in
+    (#944), so naming the profile alone yields a session that has both
+    instead of a correctly-tooled one with no instructions at all.  An
+    explicit ``agent`` argument always wins — the profile's binding is a
+    default, not a ceiling.
+
+    #1159: this resolution existed ONLY on the ``spawn_subagent`` path
+    (``shared/plugins/subagent/plugin.py``), so a top-level session created
+    by profile name over IPC/WS came up with no persona layer at all —
+    silently, because ``jaato-scaffold validate`` checks only that the
+    persona RESOLVES, never that anything reads it, and the session log
+    never carries persona text even when one IS loaded.  The reciprocal
+    binding (an agent naming its own ``default_profile``) was already
+    honoured a few lines below the caller; this is the other direction of
+    the same one, at the same site.
+
+    Returns ``(agent_name, from_profile)``.  ``from_profile`` is what lets
+    a failure blame the profile rather than an ``agent`` argument the
+    caller never passed.
+
+    No cycle is reachable through the reciprocal binding: the caller's
+    ``default_profile`` branch is gated on ``not profile_name``, and
+    ``from_profile`` can only be True for a profile resolved from disk,
+    which always has a name.  ``build_inline_profile`` does not recognise
+    ``default_agent`` — were that to change, an inline spec could have its
+    persona adopt a DIFFERENT profile off disk, and that branch would need
+    to exclude ``from_profile`` too.
+    """
+    if agent_name:
+        return agent_name, False
+    default_agent = getattr(profile, "default_agent", None) if profile else None
+    if default_agent:
+        return default_agent, True
+    return agent_name, False
+
+
+# Provenance suffix for the "Using agent" line, as a LOOKUP rather than a
+# ternary at the call site: ``_create_session_impl`` sits on the complexity
+# ratchet at 52 and radon counts a conditional expression as a decision
+# point, so the obvious inline ``x if y else z`` costs a baseline bump for
+# a log string.
+_AGENT_SOURCE_NOTE = {
+    True: " (from profile's default_agent)",
+    False: "",
+}
+
+
+def _agent_not_found_error(
+    agent_name: str,
+    profile: Any,
+    profile_name: Optional[str],
+    from_profile: bool,
+) -> str:
+    """Message for a persona that did not resolve.
+
+    Mirrors the spawn path's wording (``subagent/plugin.py``): when the
+    name came from the profile the CALLER did nothing wrong, so the
+    profile is what the message names.  Blaming an ``agent`` argument
+    nobody passed sends the reader looking for a bug in their own call.
+    """
+    if from_profile:
+        pname = getattr(profile, "name", None) or profile_name or "?"
+        return (
+            f"Profile '{pname}' declares default_agent '{agent_name}', "
+            f"which is not in .jaato/agents/ or .jaato/prompts/. This is a "
+            f"workspace configuration error."
+        )
+    return (
+        f"Agent '{agent_name}' not found in .jaato/agents/ or .jaato/prompts/"
+    )
+
+
 class SessionManager:
     """Manages multiple named sessions with persistence.
 
@@ -7991,6 +8070,13 @@ class SessionManager:
                 f"plugins={profile.plugins})"
             )
 
+        # A profile's own ``default_agent`` stands in when the caller named
+        # no agent (#944 on the spawn path, #1159 here).  Extracted to a
+        # helper rather than branched inline: ``_create_session_impl`` sits
+        # on the complexity ratchet at 52, and the resolution is a question
+        # about a profile, not about this function.
+        agent_name, agent_from_profile = _agent_for_session(agent_name, profile)
+
         # Resolve agent if requested — the agent's rendered markdown
         # is one LAYER of the assembled system instructions.
         agent_instructions = None
@@ -8000,7 +8086,9 @@ class SessionManager:
             )
             if agent_result is None:
                 self._answer_session_new(client_id, ErrorEvent(
-                    error=f"Agent '{agent_name}' not found in .jaato/agents/ or .jaato/prompts/",
+                    error=_agent_not_found_error(
+                        agent_name, profile, profile_name, agent_from_profile,
+                    ),
                     error_type="AgentNotFoundError",
                     recoverable=True,
                 ))
@@ -8021,7 +8109,10 @@ class SessionManager:
                     logger.warning(f"  Agent's default_profile '{default_prof}' not found: {error}")
             if agent_result.get("missing_params"):
                 logger.warning(f"  Agent has unresolved params: {agent_result['missing_params']}")
-            logger.info(f"  Using agent: {agent_name}")
+            logger.info(
+                "  Using agent: %s%s", agent_name,
+                _AGENT_SOURCE_NOTE[agent_from_profile],
+            )
 
             # Set agent instructions on the profile (overrides deprecated
             # system_instructions if present).
