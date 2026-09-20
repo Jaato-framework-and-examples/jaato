@@ -211,15 +211,19 @@ def _server_dir() -> str:
 # ----------------------------------------------------------- SDK sessions
 
 async def _drive(workspace: Path, sock: str, profile: str, prompts: List[str],
-                 answer_permissions: bool = True) -> Dict[str, Any]:
-    """One session: subscribe BEFORE creation, ask, end (which persists it)."""
+                 answer_permissions: bool = True, presentation: Any = None) -> Dict[str, Any]:
+    """One session: subscribe BEFORE creation, ask, end (which persists it).
+
+    ``presentation`` is the display context the SDK sends at connect -- how
+    a client declares a ``locale`` or asserts ``client_discloses_ai`` (#1157).
+    """
     from jaato_sdk.client.convenience import Session
     from jaato_sdk.client.ipc import IPCClient
     from jaato_sdk.events import ClientType, EventType
 
     events: List[Dict[str, Any]] = []
     c = IPCClient(socket_path=sock, client_type=ClientType.API, auto_start=False,
-                  workspace_path=str(workspace))
+                  workspace_path=str(workspace), presentation=presentation)
     if not await c.connect(timeout=15):
         raise RuntimeError("could not connect to the evidence daemon")
     c.subscribe(EventType.SESSION_INFO, lambda ev: events.append(
@@ -441,13 +445,32 @@ def collect(root: Path, ws: Dict[str, Path], daemon: Daemon) -> List[Capture]:
                 "\n".join(hits) or "(no matches)", "regulatory"))
 
     # ---- Art. 50(1): the announcement, the instruction piece, the suppression WARNING
+    from jaato_sdk.events import ClientType, PresentationContext
     screener = drive(acme, daemon.socket, "screener", ["Hello, is anyone there?", "Second question",
-                                                       "Third question"])
+                                                       "Third question"],
+                     presentation=PresentationContext(client_type=ClientType.API, locale="de-DE"))
     ev = screener["events"]
     add(Capture("05-announcement-events", "The first-interaction announcement, on the wire",
                 "session.new --profile screener   # events as the SDK receives them",
                 _fmt_events([e for e in ev if e["event"] in ("SESSION_INFO", "AGENT_OUTPUT")][:4]),
                 "disclosure"))
+    # #1157: the same announcement, RECORDED -- text, channel, locale and model
+    # bound to the session in the chained ledger; and the suppressed variant.
+    ledger_path = acme / ".jaato" / "logs" / "ledger.jsonl"
+    suppressed = drive(acme, daemon.socket, "screener", ["hi"],
+                       presentation=PresentationContext(client_type=ClientType.CHAT,
+                                                        client_discloses_ai=True))
+    ann_rows = [json.loads(l) for l in ledger_path.read_text(encoding="utf-8").splitlines()
+                if '"stage": "announcement"' in l] if ledger_path.is_file() else []
+    mine = [r for r in ann_rows if r.get("session_id") in (screener["session_id"],
+                                                             suppressed["session_id"])]
+    add(Capture("33-announcement-ledger-record",
+                "The announcement, recorded: text, channel, locale and model, chained",
+                "grep '\"stage\": \"announcement\"' .jaato/logs/ledger.jsonl   "
+                "# emitted (locale de-DE), then suppressed (client_discloses_ai)",
+                "\n".join(json.dumps(r, ensure_ascii=False) for r in mine)
+                or "NOT WRITTEN -- no announcement record in the ledger (#1157)",
+                "disclosure", note="" if mine else "defect"))
     rec = session_record(acme, screener["session_id"])
     rendered = rec.get("rendered_instructions") or ""
     m = re.search(r"AI DISCLOSURE:.*?(?=\n\n|\Z)", rendered, re.S)

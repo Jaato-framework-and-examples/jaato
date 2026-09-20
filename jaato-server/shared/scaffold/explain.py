@@ -3717,7 +3717,10 @@ def _announcement_lines(ann: Dict[str, Any]) -> List[str]:
         return [
             f"  announcement              {ann['text']!r}",
             f"{pad}emitted once at session creation; a client",
-            f"{pad}sending client_discloses_ai withholds it",
+            f"{pad}sending client_discloses_ai withholds it.",
+            f"{pad}Either way an `announcement` record (text,",
+            f"{pad}channel, locale, model) goes to the ledger",
+            f"{pad}when trace.ledger is set -- explain audit",
         ]
     why = _ANNOUNCEMENT_REASONS.get(
         ann["withheld_reason"] or "", "no reason recorded")

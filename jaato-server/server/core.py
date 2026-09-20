@@ -1233,13 +1233,94 @@ class JaatoServer:
         put a legal statement in front of every existing workspace's
         sessions.
         """
+        text, _reason = self.disclosure_decision()
+        return text
+
+    def disclosure_decision(self) -> "tuple[Optional[str], Optional[str]]":
+        """The announcement AND why it was withheld -- the predicate's whole answer.
+
+        :meth:`disclosure_announcement` keeps the text only, which is all
+        the emit site and the state snapshot need.  The audit record needs
+        the reason too (#1157): a session whose client asserted
+        ``client_discloses_ai`` must be recorded as SUPPRESSED, and one
+        whose profile declared nothing must not be recorded at all, and
+        ``None`` alone cannot tell those apart.  Same predicate, both
+        halves of its return.
+        """
         from shared.ai_disclosure import announcement_for
-        text, _reason = announcement_for(
+        return announcement_for(
             getattr(self._profile, "regulatory", None),
             client_discloses_ai=bool(getattr(
                 self._presentation_context, "client_discloses_ai", False)),
         )
-        return text
+
+    def record_disclosure_announcement(
+        self,
+        *,
+        text: Optional[str] = None,
+        suppressed: bool = False,
+        revived: bool = False,
+        created_by: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Write the Art. 50(1) ``announcement`` record to this session's ledger (#1157).
+
+        The announcement is emitted DAEMON-side at session creation, before
+        the first turn, while the ledger a runner-served session writes its
+        ``response`` records into is held by the RUNNER (#1139).  So this
+        server's own :class:`TokenLedger` appends to the same file: the
+        chain belongs to the file, not to the process appending (#1120), so
+        a second writer continues the one chain rather than starting a
+        rival one, and the announcement lands before the first turn's
+        record because the turn has not happened yet.  On the in-process
+        path this ledger IS the session's, so nothing is special-cased.
+
+        The record is built by :func:`shared.ai_disclosure.announcement_record`
+        -- the one writer the audit schema names -- from what this server
+        holds: the client's ``PresentationContext`` (channel, locale, the
+        client's own disclosure assertion) and the active binding.  It is
+        appended under :meth:`_with_session_env` AND :meth:`_in_workspace`,
+        the pair every daemon-side turn runs under: ``trace.ledger`` and
+        ``record_keeping.integrity`` reach the ledger through the
+        session-scoped env, and a RELATIVE ``trace.ledger`` -- the
+        one-file-per-session idiom -- resolves against the workspace root
+        the second context publishes.  Without it the row resolved against
+        the daemon's own cwd: measured on the evidence harness, whose
+        daemon runs from the server package directory, the announcement
+        landed in ``jaato-server/.jaato/logs/ledger.jsonl`` while the
+        runner's turns went to the workspace, and the manual's capture
+        came back ``NOT WRITTEN``.  The conformance daemon happens to run
+        with its cwd AT the workspace, which is why the live suite could
+        not see it.
+
+        Args:
+            text: The announcement as emitted, or ``None`` when nothing was.
+            suppressed: The client's ``client_discloses_ai`` withheld it.
+            revived: This session was woken from disk; nothing was
+                re-announced.
+            created_by: The authenticated creator, when the caller holds
+                it; else the user this server already runs as.
+
+        Returns:
+            The record as handed to the ledger, for the caller's log line.
+        """
+        from shared.ai_disclosure import announcement_record
+        record = announcement_record(
+            self.session_id or "",
+            text=text, suppressed=suppressed, revived=revived,
+            presentation=self._presentation_context,
+            provider=self._model_provider, model=self._model_name,
+            created_by=created_by or getattr(self, "_client_user_id", None),
+        )
+        with self._with_session_env(), self._in_workspace():
+            self.ledger._record("announcement", record)
+            where = self.ledger.ledger_path()
+        logger.info(
+            "AI-disclosure announcement (Art. 50(1)) recorded for session %s "
+            "(%s) -> %s", self.session_id,
+            "suppressed by the client" if suppressed
+            else "revived, not re-announced" if revived else "emitted",
+            where or "no ledger configured; in memory only")
+        return record
 
     def set_apparmor_confinement(
         self,

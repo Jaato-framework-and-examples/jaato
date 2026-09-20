@@ -5,7 +5,10 @@ human oversight, as ARMED by profile 'screener':
   interacts_with_persons    True
   announcement              'You are interacting with an AI system operated by Acme Support GmbH, not with a human being.'
                             emitted once at session creation; a client
-                            sending client_discloses_ai withholds it
+                            sending client_discloses_ai withholds it.
+                            Either way an `announcement` record (text,
+                            channel, locale, model) goes to the ledger
+                            when trace.ledger is set -- explain audit
 
   DECIDE / OVERRIDE  NO permission policy declared -- the runtime policy of the root session applies (a subagent inherits it)
   STOP (budget)      limits {'turns': 2}; ladder [100%->abort]; STOPS the run

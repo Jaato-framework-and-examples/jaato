@@ -19,52 +19,52 @@
         font-weight: 700;
     }
 
-    .terminal-4122184552-matrix {
+    .terminal-1063947130-matrix {
         font-family: Fira Code, monospace;
         font-size: 20px;
         line-height: 24.4px;
         font-variant-east-asian: full-width;
     }
 
-    .terminal-4122184552-title {
+    .terminal-1063947130-title {
         font-size: 18px;
         font-weight: bold;
         font-family: arial;
     }
 
-    .terminal-4122184552-r1 { fill: #c5c8c6;font-weight: bold }
-.terminal-4122184552-r2 { fill: #c5c8c6 }
+    .terminal-1063947130-r1 { fill: #c5c8c6;font-weight: bold }
+.terminal-1063947130-r2 { fill: #c5c8c6 }
     </style>
 
     <defs>
-    <clipPath id="terminal-4122184552-clip-terminal">
+    <clipPath id="terminal-1063947130-clip-terminal">
       <rect x="0" y="0" width="1267.8" height="96.6" />
     </clipPath>
-    <clipPath id="terminal-4122184552-line-0">
+    <clipPath id="terminal-1063947130-line-0">
     <rect x="0" y="1.5" width="1268.8" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-4122184552-line-1">
+<clipPath id="terminal-1063947130-line-1">
     <rect x="0" y="25.9" width="1268.8" height="24.65"/>
             </clipPath>
-<clipPath id="terminal-4122184552-line-2">
+<clipPath id="terminal-1063947130-line-2">
     <rect x="0" y="50.3" width="1268.8" height="24.65"/>
             </clipPath>
     </defs>
 
-    <rect fill="#292929" stroke="rgba(255,255,255,0.35)" stroke-width="1" x="1" y="1" width="1285" height="145.6" rx="8"/><text class="terminal-4122184552-title" fill="#c5c8c6" text-anchor="middle" x="642" y="27">The&#160;INCIDENT&#160;record&#160;in&#160;the&#160;application&#160;trace</text>
+    <rect fill="#292929" stroke="rgba(255,255,255,0.35)" stroke-width="1" x="1" y="1" width="1285" height="145.6" rx="8"/><text class="terminal-1063947130-title" fill="#c5c8c6" text-anchor="middle" x="642" y="27">The&#160;INCIDENT&#160;record&#160;in&#160;the&#160;application&#160;trace</text>
             <g transform="translate(26,22)">
             <circle cx="0" cy="0" r="7" fill="#ff5f57"/>
             <circle cx="22" cy="0" r="7" fill="#febc2e"/>
             <circle cx="44" cy="0" r="7" fill="#28c840"/>
             </g>
         
-    <g transform="translate(9, 41)" clip-path="url(#terminal-4122184552-clip-terminal)">
+    <g transform="translate(9, 41)" clip-path="url(#terminal-1063947130-clip-terminal)">
     
-    <g class="terminal-4122184552-matrix">
-    <text class="terminal-4122184552-r1" x="0" y="20" textLength="610" clip-path="url(#terminal-4122184552-line-0)">$&#160;grep&#160;&#x27;INCIDENT:&#x27;&#160;.jaato/logs/session_trace.jsonl</text><text class="terminal-4122184552-r2" x="1268.8" y="20" textLength="12.2" clip-path="url(#terminal-4122184552-line-0)">
-</text><text class="terminal-4122184552-r2" x="0" y="44.4" textLength="963.8" clip-path="url(#terminal-4122184552-line-1)">[23:29:03.737]&#160;[INCIDENT]&#160;INCIDENT:&#160;kind=budget_exhausted&#160;at=1789774143.736476&#160;</text><text class="terminal-4122184552-r2" x="1268.8" y="44.4" textLength="12.2" clip-path="url(#terminal-4122184552-line-1)">
-</text><text class="terminal-4122184552-r2" x="0" y="68.8" textLength="1000.4" clip-path="url(#terminal-4122184552-line-2)">session_id=20260918_232854&#160;site=server/core.py::_emit_budget_refusal_if_exhausted&#160;</text><text class="terminal-4122184552-r2" x="1268.8" y="68.8" textLength="12.2" clip-path="url(#terminal-4122184552-line-2)">
-</text><text class="terminal-4122184552-r2" x="0" y="93.2" textLength="634.4" clip-path="url(#terminal-4122184552-line-3)">cause=&#x27;budget_exhausted&#160;(self-enforced:&#160;turns&#160;100%)&#x27;</text><text class="terminal-4122184552-r2" x="1268.8" y="93.2" textLength="12.2" clip-path="url(#terminal-4122184552-line-3)">
+    <g class="terminal-1063947130-matrix">
+    <text class="terminal-1063947130-r1" x="0" y="20" textLength="610" clip-path="url(#terminal-1063947130-line-0)">$&#160;grep&#160;&#x27;INCIDENT:&#x27;&#160;.jaato/logs/session_trace.jsonl</text><text class="terminal-1063947130-r2" x="1268.8" y="20" textLength="12.2" clip-path="url(#terminal-1063947130-line-0)">
+</text><text class="terminal-1063947130-r2" x="0" y="44.4" textLength="976" clip-path="url(#terminal-1063947130-line-1)">[12:37:17.060]&#160;[INCIDENT]&#160;INCIDENT:&#160;kind=budget_exhausted&#160;at=1789907837.0600615&#160;</text><text class="terminal-1063947130-r2" x="1268.8" y="44.4" textLength="12.2" clip-path="url(#terminal-1063947130-line-1)">
+</text><text class="terminal-1063947130-r2" x="0" y="68.8" textLength="1000.4" clip-path="url(#terminal-1063947130-line-2)">session_id=20260920_123713&#160;site=server/core.py::_emit_budget_refusal_if_exhausted&#160;</text><text class="terminal-1063947130-r2" x="1268.8" y="68.8" textLength="12.2" clip-path="url(#terminal-1063947130-line-2)">
+</text><text class="terminal-1063947130-r2" x="0" y="93.2" textLength="634.4" clip-path="url(#terminal-1063947130-line-3)">cause=&#x27;budget_exhausted&#160;(self-enforced:&#160;turns&#160;100%)&#x27;</text><text class="terminal-1063947130-r2" x="1268.8" y="93.2" textLength="12.2" clip-path="url(#terminal-1063947130-line-3)">
 </text>
     </g>
     </g>

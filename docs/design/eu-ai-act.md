@@ -404,6 +404,18 @@ regulatory:
 > in its own medium. `PresentationContext.client_discloses_ai` suppresses.
 > Guard: `shared/tests/test_first_interaction_announcement.py`.
 >
+> Touch 4 (#1157): the announcement is RECORDED. `announcement_record()`
+> is the one writer of the `announcement` event `jaato_sdk.audit` declares
+> in the ledger store, binding the text as delivered, the channel and
+> locale (`PresentationContext.client_type` / the new `locale`), and the
+> `provider` / `model` pair to the session. Written on both outcomes
+> (`suppressed: true` when the client took the obligation) and on a wake
+> (`revived: true`); a profile declaring nothing gets no row. The daemon
+> appends it at creation to the file the runner's ledger continues, so it
+> precedes the first `response` in one chain. Guard:
+> `shared/tests/test_announcement_is_recorded_1157.py`; live:
+> `jaato_sdk/conformance/test_eu_ai_act_controls.py`.
+>
 > **Stated limit on the speaking-tier half.** §4.2's touch 2 proposed
 > routing the announcement through `ensure_spoken_part` so a voice bot
 > discloses in the medium the person is using. That function gives a

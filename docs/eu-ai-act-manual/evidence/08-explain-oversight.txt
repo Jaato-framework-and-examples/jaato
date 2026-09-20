@@ -53,7 +53,7 @@ REVERSIBLE / NOT
 MARKING GENERATED OUTPUT  (Art. 50(2), 50(4))
   media
         the model's own audio and images carry `generated_by` on the wire
-        (protocol 1.16): kind, provider, model, session_id, agent_id.  That
+        (protocol 1.17): kind, provider, model, session_id, agent_id.  That
         field travels with the DELIVERY EVENT and stops there -- a client that
         saves the bytes keeps no record of it
   files

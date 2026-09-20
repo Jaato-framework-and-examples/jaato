@@ -1,6 +1,6 @@
 $ jaato-scaffold explain audit
 the audit record  (Regulation (EU) 2024/1689, Arts. 12, 13(3)(f), 19)
-  schema version 1
+  schema version 2
 
   NOT a sixth store -- a CONTRACT over the stores that already record.
   13(3)(f) asks the instructions for use to describe the mechanisms a

@@ -1,4 +1,4 @@
 $ session.new --profile curator; ask   # PERMISSION_REQUESTED as the client receives it
-{"event": "PERMISSION_REQUESTED", "tool": "update_memory", "prompt_lines": ["Tool: update_memory", "Args: {'id': 'mem_20260918_232940_9806', 'maturity': 'validated', 'confidence': 0.9}"]}
+{"event": "PERMISSION_REQUESTED", "tool": "update_memory", "prompt_lines": ["Tool: update_memory", "Args: {'id': 'mem_20260920_123742_1060', 'maturity': 'validated', 'confidence': 0.9}"]}
 
 {"answered": "y"}

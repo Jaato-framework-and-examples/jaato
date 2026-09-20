@@ -3051,6 +3051,11 @@ class PresentationContext(BaseModel):
         client_discloses_ai: Whether this client already tells the person
             they are interacting with an AI system, so the framework
             withholds its own Article 50(1) announcement.
+        locale: The BCP 47 language tag of the person's interface
+            (``"de-DE"``, ``"es"``), when the client knows it.  Recorded
+            beside the Article 50(1) announcement so the audit record says
+            which language the person was addressed in; ``None`` is
+            recorded as absent, never defaulted (#1157).
     """
 
     # ── Dimensions ──────────────────────────────────────────────
@@ -3098,6 +3103,19 @@ class PresentationContext(BaseModel):
     # exactly as it is.  Default ``False``: a client that has not said it
     # discloses has not disclosed.
     client_discloses_ai: bool = False
+
+    # ── Locale (Regulation (EU) 2024/1689, Art. 50(1), #1157) ───
+    # The BCP 47 tag of the interface the person is using, declared by
+    # the client because only the client knows what language its
+    # surface is in.  Read by exactly one thing: the ``announcement``
+    # audit record, which binds the disclosure text to the channel and
+    # language it was delivered in.  Not consulted by the model's
+    # prompt -- the persona decides the language it speaks -- and never
+    # inferred from the daemon's own environment: a daemon's ``LANG``
+    # says nothing about the person on the other end of the socket, and
+    # an audit row asserting a locale nobody declared is worse than one
+    # that says the locale was not declared.
+    locale: Optional[str] = None
 
     # ── Communication style ────────────────────────────────────
     # When None, inferred from client_type: CHAT → CONVERSATIONAL,
@@ -3209,7 +3227,16 @@ class PresentationContext(BaseModel):
         return "\n".join(lines)
 
     def to_dict(self) -> Dict[str, Any]:
-        """Serialize to a plain dict for event transport."""
+        """Serialize to a plain dict for event transport.
+
+        Every field the daemon READS must be here, or a client's
+        declaration is dropped on the way in: ``client_discloses_ai``
+        (#1116) and ``renderable_media`` (#824) were declared on this
+        model and carried by neither this method nor :meth:`from_dict`,
+        so a client asserting it disclosed already was announced to
+        anyway, and the suppression the guard proved on the predicate
+        never held over the wire (#1157).  ``locale`` rides with them.
+        """
         return {
             "content_width": self.content_width,
             "content_height": self.content_height,
@@ -3221,7 +3248,10 @@ class PresentationContext(BaseModel):
             "supports_unicode": self.supports_unicode,
             "supports_mermaid": self.supports_mermaid,
             "supports_expandable_content": self.supports_expandable_content,
+            "renderable_media": list(self.renderable_media),
             "client_type": self.client_type.value,
+            "client_discloses_ai": self.client_discloses_ai,
+            "locale": self.locale,
             "communication_style": self.communication_style.value if self.communication_style else None,
         }
 
@@ -3239,7 +3269,13 @@ class PresentationContext(BaseModel):
             supports_unicode=data.get("supports_unicode", True),
             supports_mermaid=data.get("supports_mermaid", False),
             supports_expandable_content=data.get("supports_expandable_content", False),
+            renderable_media=list(data.get("renderable_media") or []),
             client_type=ClientType(data.get("client_type", "terminal")),
+            # The two Art. 50(1) fields and the locale: absent on the wire
+            # (an older client) reads as the model's own defaults -- not
+            # disclosing, no locale -- which is the safe direction.
+            client_discloses_ai=bool(data.get("client_discloses_ai", False)),
+            locale=(str(data["locale"]) if data.get("locale") else None),
             communication_style=(
                 CommunicationStyle(data["communication_style"])
                 if data.get("communication_style")

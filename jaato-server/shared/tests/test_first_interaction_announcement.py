@@ -135,6 +135,9 @@ def _server(reg, client_discloses=False):
     """
     from server.core import JaatoServer
     srv = _Server(reg, client_discloses)
+    # #1157: the text accessor delegates to the (text, reason) one, so a
+    # stand-in carries both -- the same predicate, both halves of its answer.
+    srv.disclosure_decision = JaatoServer.disclosure_decision.__get__(srv, _Server)
     return JaatoServer.disclosure_announcement.__get__(srv, _Server)
 
 

@@ -27,7 +27,8 @@ reverse-engineer a description from five formats.
 
 `jaato_sdk.audit` is a *contract over the stores that exist*:
 `AUDIT_SCHEMA` enumerates each event, the fields it carries, and the store
-it lands in. Nothing new writes.
+it lands in. Nothing new writes — the one event added since (#1157's
+`announcement`) rides the ledger, because that is the store that chains.
 
 | Store | Where | Governed by |
 |---|---|---|
@@ -63,6 +64,24 @@ free-text `reason` last, so the line parses.
 `shared.plugins.permission.plugin.parse_decision_trace` reads it back. It
 is the one artefact every deployment gets: the ledger's row needs a ledger
 configured, and `PermissionResolvedEvent` is opt-in.
+
+**An `announcement` row says what a person was told, and on which
+channel.** Article 50(1)'s first-interaction announcement was emitted and
+never written down (#1157), so "was this person told, and what were they
+told?" had no answer in any store `--audit-verify` covers. The row binds
+the four facts that used to sit in four places: `text` as delivered,
+`client_type` and `locale` off the client's `PresentationContext`, and the
+`provider` / `model` pair serving the session. It is written on **both**
+outcomes — `suppressed: true` when the client asserted
+`client_discloses_ai` and the framework withheld its text, so a withheld
+announcement is recorded as withheld and never as absent — and on a wake as
+`revived: true`, since nothing is re-announced and the ledger says why. A
+profile that made no determination gets no row, for the reason it gets no
+announcement. The daemon writes it at session creation, before the first
+turn, into the same file the runner's ledger then appends to; the chain
+belongs to the file, so the two writers continue one chain and the
+announcement precedes the first `response`. `event_index` is per writer and
+can repeat across the two; the chain is the order.
 
 ## Keeping it: `record_keeping:`
 

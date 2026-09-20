@@ -32,7 +32,7 @@ import pytest
 from jaato_sdk import IPCClient
 from jaato_sdk.client.convenience import Session, SessionEnded
 from jaato_sdk.conformance.daemon import ConformanceDaemon
-from jaato_sdk.events import ClientType, EventType, HistoryEvent
+from jaato_sdk.events import ClientType, EventType, HistoryEvent, PresentationContext
 
 pytestmark = pytest.mark.conformance
 
@@ -109,8 +109,13 @@ def act_daemon():
 # ------------------------------------------------------------- driving
 
 async def _run(daemon, profile: str, prompts: List[str], answer: str = "y",
-               await_tool: Optional[str] = None) -> Dict[str, Any]:
+               await_tool: Optional[str] = None,
+               presentation: Optional[PresentationContext] = None) -> Dict[str, Any]:
     """One session: subscribe BEFORE creation, ask, end (which persists it).
+
+    ``presentation`` overrides the display context the SDK sends at connect
+    (``ClientConfigRequest.presentation``) -- how a client asserts
+    ``client_discloses_ai`` or declares a ``locale`` (#1157).
 
     ``await_tool`` names a tool whose RESULTS are fetched over the wire
     (``request_history`` -> ``HistoryEvent``) from the live session before
@@ -124,7 +129,8 @@ async def _run(daemon, profile: str, prompts: List[str], answer: str = "y",
     supposed to be a copy of.
     """
     c = IPCClient(socket_path=daemon.socket_path, client_type=ClientType.API,
-                  workspace_path=str(daemon.workspace), auto_start=False)
+                  workspace_path=str(daemon.workspace), auto_start=False,
+                  presentation=presentation)
     assert await c.connect(timeout=60), "could not connect to the test daemon"
     events: List[Dict[str, Any]] = []
     c.subscribe(EventType.SESSION_INFO, lambda ev: events.append(
@@ -267,6 +273,86 @@ def test_a_profile_that_declares_nothing_announces_nothing(act_daemon):
     assert not [e for e in out["events"]
                 if e["event"] == "AGENT_OUTPUT" and e["source"] == "system"
                 and "AI system" in e["text"]]
+
+
+def _ledger_rows(daemon) -> List[Dict[str, Any]]:
+    ledger = daemon.workspace / ".jaato" / "logs" / "ledger.jsonl"
+    if not ledger.is_file():
+        return []
+    return [json.loads(l) for l in ledger.read_text(encoding="utf-8").splitlines()
+            if l.strip()]
+
+
+def _announcements(daemon, sid: str) -> List[Dict[str, Any]]:
+    return [r for r in _ledger_rows(daemon)
+            if r.get("stage") == "announcement" and r.get("session_id") == sid]
+
+
+def test_the_announcement_is_recorded_in_the_chained_ledger(act_daemon):
+    """jaato #1157: what the person was told is bound to the interaction --
+    text, channel, locale, model -- in the store `--audit-verify` covers,
+    and it precedes the session's first response record."""
+    before = len(_ledger_rows(act_daemon))
+    out = run(act_daemon, "screener", ["Hello, is anyone there?"],
+              presentation=PresentationContext(client_type=ClientType.API, locale="de-DE"))
+    delivered = [e["text"] for e in out["events"]
+                 if e["event"] == "AGENT_OUTPUT" and e["source"] == "system"]
+    assert delivered, "the client received no system announcement to compare against"
+
+    rows = _announcements(act_daemon, out["session_id"])
+    assert len(rows) == 1, f"one announcement record per session, got {rows}"
+    row = rows[0]
+    assert row["text"] == delivered[0], "the record must carry the text AS DELIVERED"
+    assert row["client_type"] == "api" and row["locale"] == "de-DE"
+    assert row["client_discloses_ai"] is False
+    assert row["suppressed"] is False and row["revived"] is False
+    assert row["agent_id"] == "main"
+    assert (row["provider"], row["model"]) == ("echo", "echo"), (
+        "the model identity must be the session's binding")
+    assert row.get("digest") and row.get("prev_digest"), (
+        "record_keeping.integrity: sha256-chain declared and the row carries no chain")
+    _assert_announcement_precedes_the_turns(act_daemon, before)
+
+
+def _assert_announcement_precedes_the_turns(daemon, before: int) -> None:
+    """The daemon wrote the announcement at creation, before the runner's
+    first turn -- so among a run's new rows it comes first, a response
+    follows it, and the two writers continued ONE chain."""
+    from jaato_sdk.audit_chain import verify
+    new = _ledger_rows(daemon)[before:]
+    stages = [r["stage"] for r in new]
+    assert new and new[0]["stage"] == "announcement", stages
+    assert "response" in stages[1:], stages
+    lines = (daemon.workspace / ".jaato" / "logs" / "ledger.jsonl").read_text(
+        encoding="utf-8").splitlines()
+    intact, breaks = verify(lines)
+    assert intact, f"two writers (daemon, runner) must continue ONE chain: {breaks}"
+
+
+def test_a_suppressed_announcement_is_recorded_as_suppressed(act_daemon):
+    """A client that discloses already gets no announcement, and the ledger
+    says the CLIENT took the obligation -- suppressed, never absent."""
+    out = run(act_daemon, "screener", ["hi"],
+              presentation=PresentationContext(client_type=ClientType.CHAT,
+                                               client_discloses_ai=True))
+    assert not [e for e in out["events"]
+                if e["event"] == "AGENT_OUTPUT" and e["source"] == "system"
+                and "AI system" in e["text"]], "the framework must withhold its own text"
+    assert all(not e["disclosure_announcement"]
+               for e in out["events"] if e["event"] == "SESSION_INFO")
+    rows = _announcements(act_daemon, out["session_id"])
+    assert len(rows) == 1, f"a suppressed announcement must still be recorded: {rows}"
+    row = rows[0]
+    assert row["suppressed"] is True and row["client_discloses_ai"] is True
+    assert row["client_type"] == "chat"
+    assert "text" not in row, "nothing was delivered, so nothing claims to have been"
+    assert "locale" not in row, "a locale nobody declared is absent, never defaulted"
+
+
+def test_a_quiet_profile_gets_no_announcement_record(act_daemon):
+    out = run(act_daemon, "quiet", ["hi"])
+    assert _announcements(act_daemon, out["session_id"]) == [], (
+        "a profile that made no determination must get no row")
 
 
 def test_the_disclosure_piece_is_in_the_rendered_prompt(act_daemon):

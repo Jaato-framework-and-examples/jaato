@@ -895,16 +895,35 @@ def _disclosure_announcement_of(server: Optional[JaatoServer]) -> Optional[str]:
     ``AttributeError`` inside the state snapshot every client waits on.
     A real :class:`JaatoServer` never takes that path.
     """
+    return _disclosure_decision_of(server)[0]
+
+
+def _disclosure_decision_of(
+    server: Optional[JaatoServer],
+) -> Tuple[Optional[str], Optional[str]]:
+    """``(text, withheld_reason)`` -- the whole answer of the predicate.
+
+    The same duck-typing as :func:`_disclosure_announcement_of`, one field
+    wider: the audit record (#1157) has to tell a client that took the
+    obligation (``client_discloses``) from a profile that declared nothing,
+    and the text alone is ``None`` in both cases.  A server carrying only
+    the older ``disclosure_announcement`` accessor answers with its text
+    and no reason; one carrying neither answers ``(None, None)``.
+    """
     if server is None:
-        return None
-    accessor = getattr(server, "disclosure_announcement", None)
-    if not callable(accessor):
-        return None
+        return None, None
+    decide = getattr(server, "disclosure_decision", None)
+    if not callable(decide):
+        legacy = getattr(server, "disclosure_announcement", None)
+        if not callable(legacy):
+            return None, None
+        decide = lambda: (legacy(), None)  # noqa: E731
     try:
-        return accessor()
+        text, reason = decide()
+        return text, reason
     except Exception:  # noqa: BLE001 -- a snapshot must not fail on this
-        logger.debug("disclosure_announcement raised", exc_info=True)
-        return None
+        logger.debug("disclosure_decision raised", exc_info=True)
+        return None, None
 
 
 def initialize_or_refuse(server: JaatoServer, session_id: str) -> bool:
@@ -8423,6 +8442,12 @@ class SessionManager:
           message to the person, not a model turn, and putting it in
           history would replay it to the model on every request and let
           GC decide when the person stops having been told.
+        * **Recorded, on both outcomes (#1157).**  Emitted or suppressed by
+          the client, an ``announcement`` row goes to the ledger through
+          :meth:`_record_ai_interaction`, binding the text, channel,
+          locale and model identity to this session.  A profile that
+          declared nothing gets no row, for the same reason it gets no
+          announcement.
 
         Best-effort by construction: a failure here must not fail a
         session that is otherwise created and usable -- but it is logged at
@@ -8433,20 +8458,103 @@ class SessionManager:
         ``--ws-unsafe-no-auth``).
         """
         from jaato_sdk.events import AgentOutputEvent
+        from shared.ai_disclosure import CLIENT_DISCLOSES
 
         try:
-            text = _disclosure_announcement_of(session.server)
-            if not text:
-                return
-            self._emit_to_client(client_id, AgentOutputEvent(
-                agent_id="main", source="system", text=text, mode="write",
-            ))
+            text, reason = _disclosure_decision_of(session.server)
+            if text:
+                self._emit_to_client(client_id, AgentOutputEvent(
+                    agent_id="main", source="system", text=text, mode="write",
+                ))
+            elif reason != CLIENT_DISCLOSES:
+                return      # the profile declared nothing, or declared false
         except Exception:  # noqa: BLE001 -- see the docstring
             logger.warning(
                 "AI-disclosure announcement (Art. 50(1)) was NOT emitted for "
                 "session %s; the person was not informed by the framework",
                 getattr(session, "session_id", "?"), exc_info=True,
             )
+            return
+        # #1157: write down that it happened -- or that the client took the
+        # obligation.  A disclosure the framework cannot later prove is the
+        # state the record exists to prevent, so this is not skipped on a
+        # suppression: suppressed is a value, absent is not.
+        self._record_ai_interaction(
+            session, text=text, suppressed=(reason == CLIENT_DISCLOSES))
+
+    def _record_ai_interaction(
+        self, session: "Session", *,
+        text: Optional[str] = None,
+        suppressed: bool = False,
+        revived: bool = False,
+    ) -> None:
+        """Write the Art. 50(1) ``announcement`` audit record (#1157).
+
+        The emit above is the DESIGN half of Art. 50(1); this is the proof
+        of it.  ``jaato_sdk.audit.AUDIT_SCHEMA`` declared six events across
+        the five stores and the announcement was none of them, so a
+        deployer asked "was this person told, and what were they told?"
+        had the framework's intent, an event a client may or may not have
+        rendered, and nothing ``jaato-doctor --audit-verify`` could vouch
+        for.  The record binds the four facts that used to live in four
+        places -- the text as delivered, the channel, the locale and the
+        model identity -- and it goes to the LEDGER, not the session
+        trace, because the ledger is the store that chains.
+
+        Three call sites, one writer:
+
+        * the create path, when the text was **emitted**;
+        * the create path, when the client's ``client_discloses_ai``
+          **suppressed** it -- recorded as suppressed, never as absent;
+        * the revive path (``_load_session_impl``), as ``revived: true``
+          with no new emit, so a woken session's ledger says why nothing
+          was announced rather than leaving the wake unrecorded.
+
+        Best-effort like the emit, and audible like it: a record that fails
+        to land is logged at WARNING naming the session, because a
+        disclosure that happened and cannot be shown to have happened is
+        exactly the gap this closes.  The writer is duck-typed on the server
+        (``record_disclosure_announcement``) so a double that predates it
+        costs a WARNING rather than the session.
+        """
+        server = getattr(session, "server", None)
+        writer = getattr(server, "record_disclosure_announcement", None)
+        sid = getattr(session, "session_id", "?")
+        if not callable(writer):
+            logger.warning(
+                "AI-disclosure announcement (Art. 50(1)) for session %s was "
+                "NOT recorded: this server cannot write the audit record",
+                sid)
+            return
+        try:
+            writer(text=text, suppressed=suppressed, revived=revived,
+                   created_by=getattr(session, "created_by", None))
+        except Exception:  # noqa: BLE001 -- see the docstring
+            logger.warning(
+                "AI-disclosure announcement (Art. 50(1)) for session %s was "
+                "%s but NOT recorded in the ledger",
+                sid, "suppressed" if suppressed else
+                "not re-announced on revive" if revived else "emitted",
+                exc_info=True)
+
+    def _record_revived_ai_interaction(self, session: "Session") -> None:
+        """The revive half of :meth:`_record_ai_interaction`.
+
+        A revived session is never re-announced (see
+        :meth:`_announce_ai_interaction`), and a ledger that simply stopped
+        at the creation row would leave a reader unable to tell a wake
+        from a session that never continued.  So a profile that declared
+        ``interacts_with_persons: true`` gets a ``revived: true`` row and
+        no emit; one that declared nothing gets nothing, the same gate the
+        create path applies.  The presentation context is usually unset
+        here -- no client has attached yet -- and the record says so by
+        omitting the channel rather than inventing one.
+        """
+        from shared.ai_disclosure import CLIENT_DISCLOSES
+        text, reason = _disclosure_decision_of(getattr(session, "server", None))
+        if text is None and reason != CLIENT_DISCLOSES:
+            return
+        self._record_ai_interaction(session, revived=True)
 
     # ------------------------------------------------------------------
     # Headless session creation (for daemon extensions / reactors)
@@ -10384,6 +10492,9 @@ class SessionManager:
             # ``attach_session`` after emitting SessionRestoredEvent.
             restored_pending_attach=True,
         )
+
+        # #1157: a wake is not re-announced, and the ledger says so.
+        self._record_revived_ai_interaction(session)
 
         # Restore workspace file monitor with persisted tracked state
         if state.workspace_path:

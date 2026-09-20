@@ -29,7 +29,7 @@ sessions on the credential-free `echo` provider, and the real
 | # | Obligation | Article | Mechanism | Evidence |
 |---|---|---|---|---|
 | 1 | Declare what the system is and who provides it | 6(4), 11, 13(3)(b) | `regulatory:` profile block; `validate` escalates under `risk_class: high` | 01–04 |
-| 2 | Tell natural persons they are talking to an AI | 50(1) | the `disclosure` instruction piece; the first-interaction announcement; a WARNING when the piece is dropped | 05–07 |
+| 2 | Tell natural persons they are talking to an AI | 50(1) | the `disclosure` instruction piece; the first-interaction announcement; a WARNING when the piece is dropped; the `announcement` ledger record binding text, channel, locale and model to the session | 05–07, 33 |
 | 3 | Mark generated output as artificially generated | 50(2), 50(4) | `generated_by` on the delivery event; the `output_marker` sidecar; the text posture, stated | 20–22 |
 | 4 | Human oversight: stop, decide, override | 14(3)(a), 14(4)(d)–(e) | `explain oversight`; the doctor's stop button; the permission gate; the budget ceiling | 08–11, 24 |
 | 5 | Automatic recording of events | 12(1), 13(3)(f) | one audit-record contract (`explain audit`); the ledger, written per record | 12–14 |
@@ -112,6 +112,19 @@ info a client renders. A client that already shows a badge sets
 `client_discloses_ai` and withholds it (the Act's "unless this is obvious").
 
 ![the announcement on the wire](eu-ai-act-manual/evidence/05-announcement-events.png)
+
+And it is written down. An event a client may or may not have rendered is
+not something a deployer can show an auditor, so the daemon records the
+announcement in the session's chained ledger the moment it emits it (#1157):
+the text as delivered, the channel and locale the client declared, and the
+provider and model serving the session. A client that suppressed it by
+asserting `client_discloses_ai` gets a row saying so — `suppressed: true`,
+no text — rather than no row; a woken session gets `revived: true`, because
+nothing is re-announced and the ledger should say why. The capture shows
+both: the `screener` session above, driven by a client declaring `de-DE`,
+then the same profile driven by a client that discloses already.
+
+![the announcement, recorded](eu-ai-act-manual/evidence/33-announcement-ledger-record.png)
 
 The model is also *told*. The `disclosure` instruction piece is appended to
 every rendered system prompt beside the security boundary, so the model answers
@@ -198,10 +211,12 @@ retention and its integrity posture.
 
 ![explain audit screener](eu-ai-act-manual/evidence/13-explain-audit-screener.png)
 
-The ledger after the session: one `response` record per model round trip,
-appended as it is recorded, attributed to the connecting user, and — because
-this profile declares `integrity: sha256-chain` — each linked to the digest
-of the one before it.
+The ledger after the session: the `announcement` record first (§2), then
+one `response` record per model round trip, appended as it is recorded,
+attributed to the connecting user, and — because this profile declares
+`integrity: sha256-chain` — each linked to the digest of the one before it.
+The announcement is written by the daemon and the responses by the runner;
+the chain belongs to the file, so the two writers continue one chain.
 
 ![the ledger on disk](eu-ai-act-manual/evidence/14-ledger-records.png)
 

@@ -24,6 +24,11 @@ Two halves, and this module owns the one the MODEL reads:
   text if it does.  One predicate, called by the daemon's session-create
   path and by ``jaato-scaffold explain oversight``, so the page and the
   behaviour cannot drift apart.
+* :func:`announcement_record` -- the PROOF that it did (#1157): the
+  ``announcement`` audit record the daemon appends to the session's
+  chained ledger, binding the text as delivered, the channel, the locale
+  and the model identity to the interaction.  The one writer the audit
+  schema names for that event.
 
 The piece is named ``disclosure`` in ``suppress_base_instructions`` and
 is KEPT by the blanket ``true`` -- dropping it is a legal posture change,
@@ -135,3 +140,92 @@ def announcement_for(
         provider_name=getattr(regulatory, "provider_name", None),
         text=getattr(regulatory, "disclosure_text", None),
     ), None
+
+
+#: The agent that fronts the person.  A subagent talks to its parent and is
+#: never announced, so this is the only value the record carries.
+ANNOUNCEMENT_AGENT_ID = "main"
+
+
+def announcement_record(
+    session_id: str,
+    *,
+    text: Optional[str] = None,
+    suppressed: bool = False,
+    revived: bool = False,
+    presentation: object = None,
+    provider: Optional[str] = None,
+    model: Optional[str] = None,
+    created_by: Optional[str] = None,
+) -> dict:
+    """The ``announcement`` audit record -- Art. 50(1), bound to the interaction.
+
+    :func:`announcement_for` decides whether a person is told; this is the
+    proof that they were, and of what.  It is the ONE writer of the record
+    ``jaato_sdk.audit.AUDIT_SCHEMA`` declares under that kind, so the
+    contract guard (``test_audit_record_contract.py``) reads this function's
+    source for every field the schema promises -- the field names below are
+    literal for that reason.
+
+    The four facts the issue asks to be bound together are the four this
+    record carries: the **text** as delivered, the **channel** and
+    **locale** off the client's ``PresentationContext``, and the **model
+    identity** (the ``provider`` / ``model`` pair ``generated_by`` stamps).
+    Three rules, each attached to a way the row could mislead:
+
+    * **Absent is not defaulted.**  A locale the client did not declare is
+      omitted, never guessed from the daemon's ``LANG``; ``client_type`` and
+      ``client_discloses_ai`` are omitted when no client had declared a
+      presentation at all (a revive), rather than written as a terminal
+      that did not disclose.
+    * **Suppressed is a value, not an absence.**  When the client asserted
+      it discloses already the framework emitted nothing, and the record
+      says the CLIENT took the obligation -- ``suppressed: true`` with no
+      ``text`` -- so a reader can tell a withheld announcement from one
+      that silently did not happen.
+    * **``text`` is present only when the framework delivered it.**  A
+      suppressed or revived row carries none: writing what WOULD have been
+      said would read as what was said.
+
+    Args:
+        session_id: The daemon session id.
+        text: The announcement as emitted, or ``None`` when nothing was.
+        suppressed: The client's ``client_discloses_ai`` withheld it.
+        revived: The session was woken from disk and nothing was
+            re-announced.
+        presentation: The client's ``PresentationContext`` (duck-typed, so
+            this module stays stdlib-only), or ``None`` when no client had
+            declared one.
+        provider: The provider serving the session at the announcement.
+        model: The model serving it.
+        created_by: The authenticated creator (#859), when known.
+
+    Returns:
+        The record, without the ledger's own stamps (``stage``, ``ts``,
+        ``iso_ts``, ``event_index``), which :class:`TokenLedger` adds.
+    """
+    record: dict = {
+        "session_id": session_id,
+        "agent_id": ANNOUNCEMENT_AGENT_ID,
+        "suppressed": bool(suppressed),
+        "revived": bool(revived),
+    }
+    if text:
+        record["text"] = text
+    if presentation is not None:
+        client_type = getattr(presentation, "client_type", None)
+        client_type = getattr(client_type, "value", client_type)
+        if client_type:
+            record["client_type"] = str(client_type)
+        record["client_discloses_ai"] = bool(
+            getattr(presentation, "client_discloses_ai", False))
+        locale = getattr(presentation, "locale", None)
+        if locale:
+            record["locale"] = str(locale)
+    if provider:
+        record["provider"] = provider
+    if model:
+        record["model"] = model
+    if created_by:
+        record["created_by"] = created_by
+    return record
