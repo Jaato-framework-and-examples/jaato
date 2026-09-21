@@ -38,6 +38,21 @@ Surface these in your IPC client's event loop so the user can see at a glance wh
 - **Linux** with AppArmor kernel module loaded
 - `apparmor_parser` and `aa-exec` on `PATH` (usually from `apparmor-utils`)
 - A writable profile directory (default: `/etc/apparmor.d/jaato`)
+- A **service user** (or your own user) to run the daemon as — the setup
+  below assumes one. See the note directly under this list.
+
+> **Confinement is not ownership, and the daemon should not be root.** An
+> AppArmor profile bounds which paths a session may touch; it says nothing
+> about who the files it writes belong to. The per-session runner is
+> `fork`+`exec`ed under the **daemon's** uid — nothing in jaato drops
+> privileges — so a root daemon leaves every file the agent writes into a
+> workspace root-owned (`writeNewFile`, `file_edit` backups, the directories
+> created beneath them, and everything a `cli` subprocess produces, since it
+> runs with `cwd=<workspace_root>`). The workspace's owner then needs `sudo`
+> to overwrite or delete their own files. A root daemon logs a WARNING saying
+> so at startup. Where a service user is genuinely impossible, `--umask 002`
+> (or `JAATO_UMASK=002`) plus a **setgid** workspace directory keeps those
+> files group-writable — it does not change who owns them.
 
 ### Install on Ubuntu/Debian
 

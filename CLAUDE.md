@@ -5291,6 +5291,114 @@ absent target would pass either way. Verified non-vacuous: with
 `_resolve_under_root` reduced to the bare join, exactly the ten enforcement
 cases fail and all six controls still pass.
 
+### A Root Daemon Writes Root-Owned Files, and Nothing Said So (#1168)
+
+The section above is about *which* paths a caller may name. This is about
+**who the files under them end up belonging to**, and it is the same answer
+one layer down: the daemon acts with ITS credential, and so does the runner.
+`RunnerSpawner.spawn` is `os.fork()` + `os.execvpe` with no `setuid` /
+`setgid` / `initgroups` anywhere on the path — tree-wide, nothing drops
+privileges. So on a **root** daemon everything the agent writes into a user's
+workspace is root-owned, and not one tool but all of them, because they all
+run in that one process:
+
+| What | Why it lands root-owned |
+|---|---|
+| `writeNewFile` / `file_edit` backups | runner-tier plugins, in the runner process |
+| the directories under them | `mkdir(parents=True)`, and the result payload never names them — which is why **delete** fails, not only overwrite |
+| completion processors | loaded in-process via `spec_from_file_location`, so not special in any way |
+| anything a `cli` subprocess creates | it runs with `cwd=<workspace_root>`, so one `git clone` drops a whole tree in there |
+
+The two symptoms have different causes, and the difference is what made the
+cheap fix findable: **overwrite** fails because the file is `644 root:root` —
+a permissions problem; **delete** fails only when the parent directory is
+root-owned too.
+
+**And the daemon never noticed.** `grep -rn 'geteuid'` across `server/`
+returned the egress proxy's sudo decision and a cgroups writability message,
+and nothing else — while every other weakened posture in this tree announces
+itself at WARNING (`scrub_secret_env: none`, `--ws-unsafe-no-auth`,
+complain-mode AppArmor, `interactive_shell` without `require_confinement`).
+The deployment guides are already written around a service user
+(`docs/apparmor-setup.md` and `docs/runtime-limits-setup.md` both
+`chown jaato:jaato`), so a root daemon is off the documented path; it simply
+was not *said*. `server/process_posture.py` says it, once per daemon process
+— naming the consequence, the fix (run as a service user) and the mitigation
+below, in that order.
+
+**`--umask` / `JAATO_UMASK` is the mitigation, and it is a mitigation rather
+than a fix.** `grep -rn 'os.umask'` returned nothing tree-wide, so a
+shared-group deployment could not be expressed at all. `umask 002` plus a
+setgid workspace makes those root-written files **group-writable**, which
+fixes the reported pain — overwrite and delete without `sudo` — **without
+touching ownership**. Measured on a live root daemon: pid file `644` → `664`,
+and `/proc/<pid>/status` reports `Umask: 0002` on the daemon, on the pre-warm
+template forked from it and on both pool slots forked from that.
+
+```bash
+python -m server --ipc-socket /tmp/jaato.sock --umask 002   # or JAATO_UMASK=002
+chgrp jaato /srv/workspaces/mine && chmod g+ws /srv/workspaces/mine
+```
+
+Four properties, each attached to a way it could go wrong:
+
+- **Host-scoped, and that is not a preference.** `os.umask` is a property of
+  the PROCESS and the daemon serves every session from one process, so a
+  per-session value could not be applied without racing whatever turn is
+  already running — unimplementable, not merely undesirable. It would also
+  miss the files the **daemon itself** puts in a workspace (session records,
+  `.jaato/logs`, the provisioned tree), which no session-scoped knob reaches.
+  The catalog entry in `shared/env_scope.py` says so, and there is no
+  `AWAITING_TYPED_KEY` row because `host` knobs do not want one.
+- **Applied at step 0 of `start()`, before anything forks.** The pre-warm
+  template is forked from this process and every pool slot forks from the
+  template, so a umask set later would not reach the slots that serve the
+  **default** path. In `start()` rather than `main()` because `--daemon`
+  double-forks on Unix and re-execs on Windows, and `start()` is the one
+  function the surviving process runs either way.
+- **Unset means the inherited umask, never a framework default.** Supplying
+  one would change the mode of every file on every existing deployment, which
+  is the opposite of what an opt-in mitigation may do. A **malformed** value
+  is refused at ERROR and the inherited umask is kept, for the sharper version
+  of the same reason: silently applying an invented mask changes every file's
+  mode for a reason no operator can find in their own configuration.
+- **It round-trips `--restart`.** A flag that decided the mode of every file
+  the agent wrote, silently dropped on restart, is the silent-posture-change
+  shape this tree announces rather than performs. A value that came from
+  `JAATO_UMASK` is not persisted — the restarted daemon re-reads it from its
+  own environment, as every other env knob here behaves.
+
+**Deliberately NOT done here: privilege dropping.** The issue measures it on
+an enforcing AppArmor host and finds an order that works (drop, *then*
+`aa_change_profile` — which needs nothing added to the template, so the
+confined runner keeps zero capabilities and cannot `setuid` afterwards). It
+is still its own change: `SlotKey` must carry the uid (a slot that has
+dropped is permanently that uid — #1033's own generating rule), *which* uid
+needs a policy, and **WS has no answer at all**, since `get_client_peer`
+returns `None` there by design (#1074). Two unknowns are also recorded
+unmeasured: the result was taken with
+`kernel.apparmor_restrict_unprivileged_unconfined = 0`, and an unprivileged
+*already-confined* re-transition — what a reused pool slot does — was not
+probed. Also not done, and for a stated reason: **chowning after write**. It
+cannot be made complete (it misses the intermediate directories, every file a
+subprocess writes, and anything an out-of-tree plugin writes), which is #735's
+shape — a mechanism handed to each write site where one path forgets — whereas
+a umask is applied once and inherited by everything downstream.
+
+Daemon-tier artifacts stay root-owned under either mitigation, deliberately:
+session records, `~/.jaato/session_workspace_index.json` and the daemon log
+are written by the daemon process and are not the agent's output.
+
+Guard: `server/tests/test_a_root_daemon_says_so_1168.py`, six reversions. The
+uid is substituted in **both** directions — patched to 0 for the warning
+cases and to an ordinary uid for the control — because patching only one side
+makes the verdict depend on the uid the suite happens to run under: on a
+normal runner an unconditional warning sails through the control, and in a
+root container a never-firing one sails through the warning cases. The two
+call-site tests are the load-bearing ones: everything else exercises
+`process_posture` directly, which says the mechanism works and says nothing
+about whether anything invokes it — the #1133 shape exactly.
+
 ### A Refresh Token That Rotates, and Two Sessions Refreshing It (#683)
 
 An OAuth refresh token **rotates**: the response replaces the token that
@@ -8636,6 +8744,7 @@ covers it, where one exists. `jaato-scaffold explain env` renders the tags;
 | `JAATO_RUNNER_ACK_TIMEOUT` | Seconds a dispatched runner RPC may go with NO frame bearing its id before the daemon stops assuming and asks the runner what it actually has (default 120; `0` disables). **Not** a cap on how long an RPC may take — a turn legitimately runs for minutes, and a runner that claims the id buys another full window. What it bounds is an unbounded WAIT: before it, a request the daemon wrote and the runner does not have hung the caller forever with every thread idle (#856). Host-scoped, because it bounds the channel, which a pool slot shares across several sessions in turn. A negative or unparseable value falls back to the default — "unbounded" is the bug this exists to fix. |
 | `JAATO_RUNNER_POOL_MAX_SIZE` | Hard ceiling on **total** idle pool slots, reservations included (default: `2 x JAATO_RUNNER_POOL_SIZE`).  This is the memory bound — a slot is 129–187 MB — on the growth that per-tenant reservations imply.  Raise it when `pool_replenish_ceiling_blocked_total` is nonzero: some tenant is being served by cold-spawn while reservations hold the ceiling. |
 | `JAATO_IPC_TRUST_PEER_PATHS` | Switch OFF the IPC peer-entitlement check, so the daemon acts on whatever `workspace_path` / `config_root` a client names. Host-scoped: it is a property of the SOCKET, and a session must not be able to widen the transport's own trust posture. Announced at WARNING the first time it applies. See [Two Principals on One Socket](#two-principals-on-one-socket). |
+| `JAATO_UMASK` | Octal umask for the daemon PROCESS, inherited by the pre-warm template, every pool slot forked from it and every runner — so it governs the mode of every file the agent writes into a workspace. Unset (the default) leaves the umask the daemon inherited, which is what every existing deployment gets. Host-scoped because `os.umask` is a process attribute and the daemon serves all of its sessions from one process: a per-session value could not be applied without racing whatever turn is already running, and would in any case miss the files the *daemon* puts in a workspace (session records, `.jaato/logs`, the provisioned tree). CLI twin `--umask`, which outranks it; a malformed value is refused at ERROR and the inherited umask is kept rather than an invented one applied. See [A Root Daemon Writes Root-Owned Files](#a-root-daemon-writes-root-owned-files-1168). |
 | `JAATO_IPC_EVENT_QUEUE_MAX` | Per-client IPC event-queue bound (default 2048). Beyond it, lossy tool-output chunks are evicted oldest-first (media before text); essential lifecycle events are queued past the bound rather than dropped, because losing one desynchronises the client permanently. A non-numeric or non-positive value falls back to the default — "unbounded" is the bug this exists to fix. See [Binary Media Chunks](docs/design/binary-media-chunks.md). |
 | `JAATO_CREDENTIAL_LOCK_TIMEOUT` | Seconds a caller waits for another process to finish refreshing a rotating OAuth credential before giving up (default 60). Host-scoped for the reason `JAATO_RUNNER_ACK_TIMEOUT` is: what is bounded is contention on a FILE, and the contenders — daemon, runner subprocesses, pool slots — serve sessions that have no say in each other's timeouts. A non-numeric or non-positive value falls back to the default; "unbounded" is the bug this exists to fix. See [A Refresh Token That Rotates](#a-refresh-token-that-rotates-and-two-sessions-refreshing-it-683). |
 | `JAATO_OAUTH_REFRESH_MARGIN` | Seconds before real expiry at which an OAuth access token is treated as stale and refreshed (default 300 — the value each provider previously hardcoded). Host-scoped because every process sharing one credential file must agree on when that file's token is stale. Note what it does **not** do: a fixed margin does not disperse a thundering herd (every process crosses it at the same instant), it makes the refresh happen while the old token is still valid — which is what lets a transient failure fall back on it instead of logging the user out. |

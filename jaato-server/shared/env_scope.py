@@ -354,6 +354,17 @@ CATALOG: Dict[str, EnvClass] = {
         "the trace incident"),
     "JAATO_TRACE_LOG": EnvClass(SESSION, "trace.session_log",
         "sibling of JAATO_PROVIDER_TRACE; typed together with it"),
+    "JAATO_UMASK": EnvClass(HOST, None,
+        "the octal umask of the daemon PROCESS, which every runner it "
+        "forks inherits and so every file the agent writes (#1168).  "
+        "`os.umask` is a process attribute and the daemon serves all of "
+        "its sessions from one process, so a per-session value could not "
+        "be applied without racing whatever turn is already running -- "
+        "unimplementable rather than merely undesirable.  It also has to "
+        "cover the files the DAEMON itself puts in a workspace (session "
+        "records, .jaato/logs, the provisioned tree), which no "
+        "session-scoped knob reaches.  Its CLI twin is `--umask`, which "
+        "outranks it"),
     "JAATO_WORKSPACE_ROOT": EnvClass(SESSION, "client.working_dir",
         "the session's workspace; typed on the handshake and refused when "
         "relative (#742)"),
