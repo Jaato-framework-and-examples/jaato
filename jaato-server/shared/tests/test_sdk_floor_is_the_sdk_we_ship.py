@@ -27,7 +27,11 @@ is hardest to diagnose.
 
 WHAT THIS ASSERTS.  For each dependent: its ``jaato-sdk`` requirement
 declares a ``>=`` floor, and that floor is **the version of `jaato-sdk` in
-this repository**.
+this repository, at its ``.dev0`` cut** — ``jaato-sdk>=0.26.0.dev0`` when
+the SDK declares ``0.26.0``.  ONE spelling, not two: a check that accepted
+both ``0.26.0`` and ``0.26.0.dev0`` would let the three dependents drift
+between them, and a floor is evidence only while every dependent names the
+same one.
 
 WHY THE SHIPPED VERSION, AND NOT THE OLDEST THAT WOULD WORK.  The oldest is
 the more precise answer and nothing can compute it: it is the newest SDK
@@ -47,6 +51,33 @@ tested** — and the asymmetry is what makes it safe:
 
 The first is an inconvenience an adopter can read; the second is the bug.
 This check can therefore only err toward the readable side.
+
+WHY ``.dev0`` AND NOT THE BARE VERSION (#1153).  The floor names the LOWEST
+POINT OF THE CUT rather than its final release, because the staging channel
+publishes nothing else: every TestPyPI build is a pre-release by
+construction — `.github/workflows/publish-pypi-sdk.yml` defaults its
+``suffix`` input to ``rc1``, and that input's own help text says so — and
+under PEP 440 ``0.26.0rc1 < 0.26.0``.  So a floor at the final excluded the
+only SDK on that index, and a staged release-candidate pair could not be
+installed together at all.  It recurred on every release cut.  PyPI proper
+was never affected, the artifacts there being finals — which is exactly why
+the breakage was invisible from the channel most people install from.
+
+``.dev0`` rather than ``rc1`` because that workflow's suffix validator
+accepts any lowercase alphanumerics-and-dots suffix and names ``dev2`` as an
+example, while PEP 440 orders ``.devN < aN < bN < rcN < final``.  ``.dev0``
+is therefore the floor that admits every suffix the workflow permits, plus
+the final, and nothing from an earlier release.  Verified against this
+repository's own parser, ``jaato_sdk.release_channels.parse_version``.
+
+It weakens nothing above.  The floor still names THIS cut, so the pairing it
+admits is still the pairing the four distributions are tested in; what it
+stops excluding is the staging build of that same cut.  Two tidier-looking
+alternatives were rejected: an upper bound (``<0.27``) is the constraint
+this repo has twice declined — see WHAT THIS DOES NOT ASSERT below — and
+rewriting the pins at publish time would make the staged artifact differ
+from the tree it was cut from, which is the one property a staging build
+exists to have.
 
 A corollary worth stating, because it constrains releases: the four
 distributions are cut from one repository and versioned together, so the
@@ -79,7 +110,10 @@ ROOT = Path(__file__).resolve().parents[3]
 SDK_DIST = "jaato-sdk"
 DEPENDENTS = ("jaato-server", "jaato-tui", "jaato-eval")
 
-#: ``jaato-sdk>=0.23.0``, ``jaato-sdk[extra] >= 0.23.0``, ``jaato-sdk``.
+#: Requirement spellings these read: ``jaato-sdk>=0.26.0.dev0``,
+#: ``jaato-sdk[extra] >= 0.26.0.dev0``, ``jaato-sdk``.  ``_FLOOR_RE`` keeps
+#: the version string whole, suffix included, so the ``.dev0`` a floor
+#: carries is compared rather than quietly trimmed off.
 _REQ_RE = re.compile(
     r"^(?P<name>[A-Za-z0-9._-]+)\s*(?:\[[^\]]*\])?\s*(?P<spec>.*)$"
 )
@@ -102,6 +136,17 @@ def _shipped_sdk_version() -> str:
     version = _pyproject(SDK_DIST).get("project", {}).get("version")
     assert version, f"{SDK_DIST}/pyproject.toml declares no version"
     return str(version)
+
+
+def _expected_floor() -> str:
+    """The one canonical floor spelling: this cut, at its lowest point.
+
+    ``.dev0`` rather than the bare version because every staging build is a
+    pre-release and ``0.26.0rc1 < 0.26.0`` (#1153), so a floor at the final
+    excludes the only SDK on the staging index.  One accepted form and not
+    two — see the module docstring.
+    """
+    return f"{_shipped_sdk_version()}.dev0"
 
 
 def _sdk_requirement(dist: str) -> Optional[str]:
@@ -165,16 +210,21 @@ def test_the_sdk_requirement_carries_a_floor(dist: str):
 def test_the_floor_is_the_sdk_this_repo_ships(dist: str):
     """The floor is a fact about what was tested together, not a guess."""
     shipped = _shipped_sdk_version()
+    expected = _expected_floor()
     requirement, floor = _floors()[dist]
     assert requirement is not None, f"{dist} declares no jaato-sdk dependency"
-    assert floor == shipped, (
+    assert floor == expected, (
         f"{dist}/pyproject.toml declares {requirement!r}, but this repo "
-        f"ships jaato-sdk {shipped}. The four distributions are cut from "
-        f"one repository and only ever tested against each other, so the "
-        f"floor is that version — raise it in the same commit that bumps "
-        f"the SDK. A floor that is too high refuses an install readably; "
-        f"one that is too low accepts an install that breaks later inside "
-        f"a provider (#1055)."
+        f"ships jaato-sdk {shipped}, whose floor is spelled {expected!r}. "
+        f"The four distributions are cut from one repository and only ever "
+        f"tested against each other, so the floor is that version — raise "
+        f"it in the same commit that bumps the SDK. It carries '.dev0' "
+        f"because every TestPyPI staging build is a pre-release and PEP 440 "
+        f"puts '{shipped}rc1' BELOW '{shipped}', so a floor at the final "
+        f"excludes the only SDK on that index and the staged pair cannot be "
+        f"installed together (#1153). A floor that is too high refuses an "
+        f"install readably; one that is too low accepts an install that "
+        f"breaks later inside a provider (#1055)."
     )
 
 
@@ -216,7 +266,7 @@ from shared.tests.reversion import (  # noqa: E402
 REVERSIONS = [
     Reversion(
         target="jaato-server/pyproject.toml",
-        find='    "jaato-sdk>=0.26.0",  # SDK protocol: base plugin',
+        find='    "jaato-sdk>=0.26.0.dev0",  # SDK protocol: base plugin',
         replace='    "jaato-sdk",  # SDK protocol: base plugin',
         because=(
             "a bare jaato-sdk requirement is #1055 itself: the resolver "
@@ -228,12 +278,26 @@ REVERSIONS = [
     ),
     Reversion(
         target="jaato-tui/pyproject.toml",
-        find='"jaato-sdk>=0.26.0",  # SDK protocol: IPC client',
+        find='"jaato-sdk>=0.26.0.dev0",  # SDK protocol: IPC client',
         replace='"jaato-sdk>=0.19.0",  # SDK protocol: IPC client',
         because=(
             "a floor left behind at an older SDK is the same defect "
             "wearing the fix as a disguise -- it looks constrained and "
             "still admits a pairing this repo has never tested"
+        ),
+        test="test_the_floor_is_the_sdk_this_repo_ships",
+    ),
+    Reversion(
+        target="jaato-eval/pyproject.toml",
+        find='    "jaato-sdk>=0.26.0.dev0",',
+        replace='    "jaato-sdk>=0.26.0",',
+        because=(
+            "a floor at the cut's FINAL is #1153 itself: every TestPyPI "
+            "staging build is a pre-release and PEP 440 puts 0.26.0rc1 "
+            "below 0.26.0, so the floor excludes the only SDK on that "
+            "index and the staged pair cannot be installed together -- "
+            "and it reads as correct, because the same pin is fine "
+            "against PyPI proper"
         ),
         test="test_the_floor_is_the_sdk_this_repo_ships",
     ),
