@@ -96,7 +96,7 @@ def _make_session_manager_with_restored_session() -> Tuple[SessionManager, Sessi
 
     emitted: List[Tuple[str, Any]] = []
     sm._emit_to_client = lambda cid, ev: emitted.append((cid, ev))  # type: ignore[method-assign]
-    sm._build_session_info_event = lambda s: MagicMock()  # type: ignore[method-assign]
+    sm._build_session_info_event = lambda s, client_id=None: MagicMock()  # type: ignore[method-assign]
     sm._apply_client_config_to_server = lambda *args, **kwargs: None  # type: ignore[method-assign]
     return sm, sess, emitted
 
@@ -188,7 +188,7 @@ def test_attach_to_fresh_session_does_not_emit_restored_event() -> None:
 
     emitted: List[Tuple[str, Any]] = []
     sm._emit_to_client = lambda cid, ev: emitted.append((cid, ev))  # type: ignore[method-assign]
-    sm._build_session_info_event = lambda s: MagicMock()  # type: ignore[method-assign]
+    sm._build_session_info_event = lambda s, client_id=None: MagicMock()  # type: ignore[method-assign]
     sm._apply_client_config_to_server = lambda *args, **kwargs: None  # type: ignore[method-assign]
 
     sm.attach_session(client_id="c-1", session_id="s-fresh-1")

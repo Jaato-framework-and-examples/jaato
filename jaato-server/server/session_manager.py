@@ -1129,6 +1129,10 @@ class SessionManager:
         from server import revive_policy
         revive_policy.capture()
 
+        # Set by ``CommandRouter.__init__``; see set_visible_sessions_resolver.
+        self._visible_sessions_resolver: Optional[
+            Callable[[str], List["RuntimeSessionInfo"]]] = None
+
         # Initialize session plugin for persistence.
         # storage_path stays relative (e.g. ".jaato/sessions") — it is
         # resolved per-workspace via _session_storage_dir() at each call site.
@@ -4229,6 +4233,85 @@ class SessionManager:
             callback: Called with (client_id, event) for each event.
         """
         self._event_callback = callback
+
+    def set_visible_sessions_resolver(
+        self,
+        resolver: Optional[Callable[[str], List["RuntimeSessionInfo"]]],
+    ) -> None:
+        """Teach the manager which sessions a given client may be SHOWN.
+
+        ``SessionInfoEvent.sessions`` is a listing, and since #1113 a
+        listing is entitlement-scoped: ``session.list`` renders
+        ``CommandRouter._sessions_visible_to`` and ``session.attach``
+        admits exactly that set.  The state SNAPSHOT was built from
+        ``list_sessions()`` -- every session on the daemon -- so the two
+        events answering one question disagreed, and the wider answer was
+        the one every client received at attach and at create.
+
+        Measured on a deployed daemon: the snapshot carried **169**
+        sessions where ``session.list`` for the same connection carried
+        **2**.  Each of those rows names another user's session id,
+        workspace path, provider/model and its model-written description.
+
+        This manager holds an event CALLBACK rather than an ``EventSink``,
+        so it cannot ask a transport about a client (the #1138 finding).
+        Rather than grow a second copy of the rule here -- two definitions
+        of "may this client see this session" is the defect one layer down
+        -- it takes the router's own method as a resolver.  Wired by
+        ``CommandRouter.__init__``, which is the one place that holds both.
+
+        ``None`` (a manager in a test, an embedding process, the IPC-only
+        daemon before the router is built) means no scoping, which is the
+        answer every transport gave before.
+        """
+        self._visible_sessions_resolver = resolver
+
+    def _sessions_for_snapshot(
+        self,
+        client_id: Optional[str],
+    ) -> List["RuntimeSessionInfo"]:
+        """The session listing to put on a snapshot bound for *client_id*.
+
+        No client and no resolver both mean "unscoped", which is what the
+        IPC transport and every in-process caller have always had.
+
+        A resolver that RAISES yields the empty list, not the unscoped one.
+        The two failure directions are not equal: an empty listing costs a
+        client its completions until the next ``session.list``, where the
+        unscoped one hands somebody else's sessions to whoever asked.
+        """
+        if client_id is None or self._visible_sessions_resolver is None:
+            return self.list_sessions()
+        try:
+            return list(self._visible_sessions_resolver(client_id))
+        except Exception:  # pragma: no cover - defensive
+            logger.error(
+                "session snapshot: could not scope the listing for client %s; "
+                "sending none rather than every session on this daemon",
+                client_id, exc_info=True)
+            return []
+
+    def _emit_session_info_to_attached(self, session: "Session") -> None:
+        """Refresh every attached client's snapshot, each scoped to ITS OWN view.
+
+        Deliberately not one event fanned out through ``_emit_to_session``:
+        ``sessions`` is entitlement-scoped per recipient, so one attached
+        client's boundary must not decide what another is shown.  That also
+        withholds the snapshot from cascade observers, which is the point --
+        a state snapshot of somebody else's session, scoped to nobody, is
+        exactly the listing this method exists to stop sending.
+        """
+        # Snapshot under the lock, emit outside it: ``attached_clients`` is a
+        # set another thread may be mutating, and the build below reaches
+        # ``list_sessions`` (which takes the same lock -- reentrant, but there
+        # is no reason to hold it across a resolver call per client).
+        with self._lock:
+            clients = list(session.attached_clients)
+        for client_id in clients:
+            self._emit_to_client(
+                client_id,
+                self._build_session_info_event(session, client_id=client_id),
+            )
 
     def set_broadcast_callback(
         self,
@@ -8391,7 +8474,7 @@ class SessionManager:
 
         # Register callback for when auth completes (if it was pending)
         def on_auth_complete():
-            self._emit_to_session(session_id, self._build_session_info_event(session))
+            self._emit_session_info_to_attached(session)
             self._emit_to_session(session_id, SystemMessageEvent(
                 message=f"Session created: {name} ({session_id})",
                 style="info",
@@ -8485,7 +8568,7 @@ class SessionManager:
         # needs the session_id immediately.  on_auth_complete() will send
         # an updated SessionInfoEvent once the provider is fully ready.
         try:
-            _info = self._build_session_info_event(session)
+            _info = self._build_session_info_event(session, client_id=client_id)
         except Exception as exc:
             # #975: this fallback used to emit an UNCORRELATED
             # SessionInfoEvent, which the client's create-wait discards --
@@ -9553,7 +9636,8 @@ class SessionManager:
             )
 
         # Send complete SessionInfoEvent with state snapshot
-        self._emit_to_client(client_id, self._build_session_info_event(session))
+        self._emit_to_client(
+            client_id, self._build_session_info_event(session, client_id=client_id))
 
         # Send workspace files snapshot so client can rebuild its mirror
         self._send_workspace_snapshot(session_id, client_id)
@@ -12244,6 +12328,24 @@ class SessionManager:
             logger.warning("egress proxy teardown failed for %s", session_id,
                            exc_info=True)
 
+        # A COLD session's workspace is not on any in-memory object -- that
+        # is what ``_session_workspace_index`` exists for, and its own module
+        # docstring states the gap: "locating a COLD (unloaded) session's
+        # record requires knowing its workspace".  It was consulted here only
+        # to ``forget`` the entry, twenty lines BELOW the delete that needed
+        # it, so an unloaded session's record was deleted from the plugin's
+        # own relative fallback directory instead of from
+        # ``<workspace>/.jaato/sessions/`` -- which is to say not at all.
+        # Measured: the record survived and ``delete_session`` returned
+        # ``False``, so the daemon answered ``Session '<id>' not found.`` and
+        # the session came back in the very next listing.
+        #
+        # An AMBIGUOUS id (one timestamp, two workspaces) still resolves to
+        # ``None`` and still fails: deleting the wrong session is
+        # unrecoverable, and the index refuses to guess by design.
+        if workspace_path is None:
+            workspace_path = self._session_workspace_index.resolve(session_id)
+
         # Delete from disk
         storage_dir = self._session_storage_dir(workspace_path) if workspace_path else None
         deleted = self._session_plugin.delete(session_id, storage_dir=storage_dir)
@@ -12361,7 +12463,9 @@ class SessionManager:
                         skip_session_info=True
                     )
                     # Send complete SessionInfoEvent with state snapshot
-                    self._emit_to_client(client_id, self._build_session_info_event(session))
+                    self._emit_to_client(
+                        client_id,
+                        self._build_session_info_event(session, client_id=client_id))
                     return session.session_id
 
         # Check persisted sessions (already sorted by updated_at descending)
@@ -12581,20 +12685,31 @@ class SessionManager:
         sessions.sort(key=lambda s: s.last_activity, reverse=True)
         return sessions
 
-    def _build_session_info_event(self, session: "Session") -> SessionInfoEvent:
+    def _build_session_info_event(
+        self,
+        session: "Session",
+        client_id: Optional[str] = None,
+    ) -> SessionInfoEvent:
         """Build a complete SessionInfoEvent with state snapshot.
 
         Includes current session info plus:
-        - sessions: All available sessions for completion/display
+        - sessions: the sessions *client_id* may be shown (see
+          :meth:`_sessions_for_snapshot`); every session on the daemon when
+          no client is named, which is what an unscoped transport gets
         - tools: All tools with enabled status
         - models: Available model names
+
+        ``client_id`` is optional because three of this method's four
+        callers hand it over and the fourth is a refresh fanned out to a
+        session's attached clients -- which goes through
+        :meth:`_emit_session_info_to_attached`, one scoped event each.
         """
         # Get sessions list
         # Build sessions list. Enrich with sandbox_mode from Session objects
         # (sandbox_mode is set by the WS server during workspace provisioning).
         session_lookup = {s.session_id: s for s in self._sessions.values()}
         sessions_data = []
-        for s in self.list_sessions():
+        for s in self._sessions_for_snapshot(client_id):
             entry = {
                 "id": s.session_id,
                 "name": s.name or "",

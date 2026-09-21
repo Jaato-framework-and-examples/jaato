@@ -39,8 +39,8 @@ export function ExitPrompt({ x, onAnswer }: { x: ExitChoice; onAnswer: (key: str
   const [failed, setFailed] = useState<string | null>(null);
 
   // A note about a session you are DELETING is an orphan in the store, so
-  // the field goes away when that is the answer in focus -- and answering it
-  // forgets the note rather than leaving one behind.
+  // the field goes away when that is the answer in focus; the forgetting
+  // happens once the daemon confirms (``app/sessionDelete.ts``).
   const ending = x.options[x.focus]?.key === "e";
 
   const answer = async (key: string): Promise<void> => {
@@ -48,15 +48,15 @@ export function ExitPrompt({ x, onAnswer }: { x: ExitChoice; onAnswer: (key: str
     setBusy(true);
     setFailed(null);
     try {
-      if (key === "e") {
-        // Best effort: the session is being deleted either way, and a
-        // stranded note is the cheap, documented cost of the store not
-        // knowing what the daemon did.  Blocking the exit on it would trade
-        // the expensive failure for the trivial one.
-        await note.remove().catch(() => undefined);
-      } else if (key !== "r") {
+      if (key !== "e" && key !== "r") {
         await note.flush();
       }
+      // ``e`` neither saves nor deletes here.  Not saving is the point --
+      // a draft about a session being deleted has nowhere to go.  Deleting
+      // used to happen here and was wrong twice: it ran BEFORE the daemon
+      // was asked, so a refused delete took the note and left the session,
+      // and it left the OTHER delete route (``session delete <id>``) with
+      // no forget at all.  ``sessionDelete.ts`` now owns both.
     } catch {
       setBusy(false);
       setFailed(noteStatusLabel(note.status, note.scope) || "could not save — retry");

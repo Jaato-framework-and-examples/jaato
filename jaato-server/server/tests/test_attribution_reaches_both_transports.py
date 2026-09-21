@@ -376,7 +376,7 @@ def test_attaching_does_not_restamp_someone_elses_session() -> None:
     manager._sessions = {"sess-existing": existing}
     manager._client_to_session: Dict[str, str] = {}
     manager._emit_to_client = lambda *a, **k: None       # type: ignore
-    manager._build_session_info_event = lambda s: None   # type: ignore
+    manager._build_session_info_event = lambda s, client_id=None: None   # type: ignore
 
     result = _get_or_create_default(
         manager, workspace_path="/w", created_by="someone-else")

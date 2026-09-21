@@ -23,17 +23,18 @@
  * - **End waits for the daemon's word before leaving.**  ``session.delete``
  *   is answered by a ``system.message`` naming the outcome, and leaving
  *   before it arrives would report a deletion nobody has confirmed.  A
- *   daemon that answers nothing is given a bounded grace.
+ *   daemon that answers nothing is given a bounded grace.  The waiting,
+ *   and the forgetting of the note that answer licenses, live in
+ *   ``sessionDelete.ts`` -- ``session delete <id>`` deletes too, and one
+ *   of the two routes touching the note is how a note outlives a
+ *   session.
  */
-import { EventTypeValue } from "@jaato/sdk";
 import type { ExitOption } from "@/store/types";
 import { useJaato } from "@/store/store";
 import { anyBusy } from "@/store/phase";
 import { disconnect, getClient, isConnected } from "@/sdk/connection";
 import { markExited } from "./exitIntent";
-
-/** How long End waits for the daemon's confirmation before leaving anyway. */
-export const END_CONFIRM_GRACE_MS = 4000;
+import { deleteSession } from "./sessionDelete";
 
 /**
  * The options the TUI offers, in its order, for a session with a turn in
@@ -109,14 +110,17 @@ async function endSession(running: boolean): Promise<void> {
   const st = useJaato.getState();
   const sessionId = st.sessionId;
   if (!sessionId || !isConnected()) return detach();
-  const client = getClient();
   if (running) {
-    try { await client.stop(); } catch { /* deletion still proceeds */ }
+    try { await getClient().stop(); } catch { /* deletion still proceeds */ }
   }
-  const confirmed = awaitDeleteAnswer(sessionId);
-  await client.deleteSession(sessionId);
-  const answer = await confirmed;
+  const answer = await deleteSession(sessionId);
   const fresh = useJaato.getState();
+  if (answer.kind === "refused") {
+    // The one answer after which nothing local may change: the session is
+    // still there, so leaving would report a deletion that did not happen.
+    fresh.addSystemBlock(fresh.selectedAgentId, answer.text, "warning");
+    return;
+  }
   if (answer.kind === "missing") {
     // The daemon says there was nothing to delete; the session is gone
     // either way, so the destination is the same.
@@ -126,27 +130,4 @@ async function endSession(running: boolean): Promise<void> {
   const to = endDestination(fresh.workspace.mode);
   if (to === "connect") return detach();
   fresh.setScreen("workspaces");
-}
-
-type DeleteAnswer = { kind: "deleted" | "missing" | "silent"; text: string };
-
-/**
- * The daemon answers ``session.delete`` with a ``system.message`` —
- * ``Session '<id>' deleted.`` or ``Session '<id>' not found.`` — and, for a
- * loaded session, also tells attached clients ``Session deleted: <name>``.
- * The first of those naming this session settles the wait; the grace
- * settles it for a daemon that says nothing.
- */
-function awaitDeleteAnswer(sessionId: string): Promise<DeleteAnswer> {
-  return new Promise((resolve) => {
-    const client = getClient();
-    let done = false;
-    const finish = (a: DeleteAnswer) => { if (done) return; done = true; unsub(); clearTimeout(timer); resolve(a); };
-    const unsub = client.subscribe(EventTypeValue.SYSTEM_MESSAGE, (ev) => {
-      const text = String((ev as { message?: unknown }).message ?? "");
-      if (text.includes(`'${sessionId}' not found`)) finish({ kind: "missing", text });
-      else if (text.includes(`'${sessionId}' deleted`) || text.startsWith("Session deleted:")) finish({ kind: "deleted", text });
-    });
-    const timer = setTimeout(() => finish({ kind: "silent", text: "" }), END_CONFIRM_GRACE_MS);
-  });
 }

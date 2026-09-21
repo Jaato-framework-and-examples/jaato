@@ -22,6 +22,7 @@ import { disconnect, getClient, isConnected } from "@/sdk/connection";
 import { noteAuthKeyCommand } from "./authKeyCapture";
 import { markExited } from "./exitIntent";
 import { answerExit, requestExit } from "./exitChoice";
+import { deleteSession, isGone } from "./sessionDelete";
 
 export const inputHistory: string[] = [];
 
@@ -267,6 +268,23 @@ export async function submitInput(text: string, verbatim: boolean): Promise<void
           applyTheme(name); saveThemePreference(name); st.setTheme(name);
           st.addSystemBlock(agentId, `Theme: ${name}`, "info");
         } else st.addSystemBlock(agentId, `Themes: ${THEME_NAMES.join(", ")}`, "info");
+        return;
+      }
+      if (parsed.command === "session.delete" && parsed.args?.[0]) {
+        // Deleting is a client-side transition too, and this is the route
+        // that had none: the note you wrote about that session is stored
+        // where the daemon cannot see it, so nothing forgot it and the
+        // rail went on offering an instruction about a session that no
+        // longer exists.  ``deleteSession`` waits for the daemon's word
+        // and forgets it only if that word says the session is gone.
+        st.addUserBlock(agentId, text);
+        const answer = await deleteSession(parsed.args[0]);
+        if (answer.text) st.addSystemBlock(agentId, answer.text, answer.kind === "deleted" ? "info" : "warning");
+        // The set of sessions just changed and this screen is still showing
+        // the old one, so the rail would go on offering a row for a session
+        // the daemon no longer has.  ``endSession`` needs no refresh: it
+        // leaves.  Silent, as every listing nobody typed is.
+        if (isGone(answer)) await ensureSessions();
         return;
       }
       if (parsed.command === "session.attach" && parsed.args?.[0]) {
