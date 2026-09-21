@@ -48,6 +48,10 @@ from server.egress_proxy.errors import (
     EgressEnforcementError as _EgressEnforcementError,
 )
 
+from server.confinement_id import (
+    confinement_id_from_profile_name, session_tmpdir,
+)
+
 # Named at import time because ``_profile_runtime_limits`` type-CHECKS the
 # profile's declared block (#735) rather than duck-typing it, and a lazy
 # import inside a per-session helper would pay the lookup on every spawn.
@@ -94,6 +98,26 @@ def _pool_enabled() -> bool:
     # Empty (unset) → enabled.  Explicit-falsy → disabled.  Anything
     # else (truthy or unrecognised) → enabled.
     return raw not in ("0", "false", "no", "off")
+
+
+def _ensure_session_tmpdir(session_id: str, profile_name: Optional[str]) -> None:
+    """Create the directory the runner's ``TMPDIR`` will point at.
+
+    The daemon runs unconfined, so it is the only party that can make
+    the boundary directory.  See the call site for why this is here
+    rather than in either spawn branch.
+    """
+    path = session_tmpdir(
+        session_id, confinement_id_from_profile_name(profile_name or ""),
+    )
+    try:
+        os.makedirs(path, exist_ok=True)
+    except OSError as exc:
+        logger.warning(
+            "spawn_session_runner: failed to create session tmpdir %s "
+            "(%s: %s) — the runner will fail its tempfile probe",
+            path, type(exc).__name__, exc,
+        )
 
 
 def spawn_session_runner(
@@ -205,6 +229,28 @@ def spawn_session_runner(
     if workspace_path:
         log_dir = os.path.join(workspace_path, ".jaato", "logs")
         log_path = os.path.join(log_dir, f"runner-{session_id}.log")
+
+    # ----- The session's tmpdir, before either branch (#1171) -----
+    # ``RunnerSpawner.spawn`` makes this directory before it forks,
+    # which covers the cold-spawn branch and nothing else: a pool-served
+    # session never calls ``spawn``, so on the DEFAULT path nobody
+    # created it.  The runner cannot create it for itself — the profile
+    # grants ``/tmp/jaato-<confinement_id>/**`` but not ``/tmp/``, so
+    # the confined child may make its own subdirectory and not the
+    # boundary directory above it.
+    #
+    # Done here rather than in the pool branch because one boundary
+    # covers both, and a per-branch mkdir is the shape that leaves one
+    # path armed and the other silently not (#735).  ``spawn``'s own
+    # call is then an idempotent second one, kept because it also
+    # serves callers that reach the spawner directly (the isolated
+    # sub-runner).
+    #
+    # Best-effort, and audible: a runner whose tmpdir is missing fails
+    # at plugin-import time with ``No usable temporary directory``,
+    # which is #1171 itself — so this must not fail silently, and must
+    # not take down a session that would otherwise run.
+    _ensure_session_tmpdir(session_id, profile_name)
 
     # ----- Pool routing (pool PR 4 + 5a) -----
     # Pool-served path is gated to sessions that:

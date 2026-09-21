@@ -27,7 +27,25 @@ from server.runner_spawner import RunnerSpawner
 
 class TestSessionTmpdirHelper:
     def test_returns_canonical_path(self):
+        """No profile name is the unconfined opt-out — pre-#1171 path."""
         assert RunnerSpawner._session_tmpdir("sess-A") == "/tmp/jaato-sess-A"
+
+    def test_confined_path_is_keyed_on_the_boundary(self):
+        """#1171: the profile is rendered per BOUNDARY and grants
+        ``/tmp/jaato-<confinement_id>/**``.  A tmpdir keyed on the
+        session alone agrees with that only when the two ids happen to
+        be equal, which #1037 made false for every WS session."""
+        assert RunnerSpawner._session_tmpdir(
+            "20260921_053346", "jaato-ws-runtime-cdd58a0cee68",
+        ) == "/tmp/jaato-runtime-cdd58a0cee68/20260921_053346"
+
+    def test_unrecognised_profile_name_is_not_guessed_at(self):
+        """A name this framework did not mint yields no id, so the path
+        falls back to the unconfined form rather than keying a tmpdir on
+        a boundary nobody rendered."""
+        assert RunnerSpawner._session_tmpdir("sess-A", "some-other-profile") == (
+            "/tmp/jaato-sess-A"
+        )
 
     def test_handles_full_session_id(self):
         assert RunnerSpawner._session_tmpdir("20260512_120000") == (
@@ -54,7 +72,10 @@ class TestBuildEnvTmpdir:
             tool_timeout_seconds=None,
             disable_confine=False,
         )
-        assert env["TMPDIR"] == "/tmp/jaato-sess-X"
+        # #1171: keyed on the CONFINEMENT id read back out of the
+        # profile name, nested under it, because that is what the
+        # rendered profile grants.
+        assert env["TMPDIR"] == "/tmp/jaato-sess-X/sess-X"
 
     def test_sets_tmpdir_even_when_unconfined(self):
         """The TMPDIR convention applies in both confined and
@@ -89,7 +110,7 @@ class TestSpawnCreatesTmpdirBeforeFork:
 
         with patch.object(
             RunnerSpawner, "_session_tmpdir",
-            staticmethod(lambda session_id: str(target)),
+            staticmethod(lambda session_id, profile_name='': str(target)),
         ):
             spawner = RunnerSpawner()
             with patch.object(spawner, "_assert_daemon_unconfined"):
@@ -127,7 +148,7 @@ class TestSpawnCreatesTmpdirBeforeFork:
 
         with patch.object(
             RunnerSpawner, "_session_tmpdir",
-            staticmethod(lambda session_id: str(target)),
+            staticmethod(lambda session_id, profile_name='': str(target)),
         ):
             spawner = RunnerSpawner()
             with patch.object(spawner, "_assert_daemon_unconfined"):

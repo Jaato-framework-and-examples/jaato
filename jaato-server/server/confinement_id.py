@@ -154,3 +154,77 @@ def confinement_id(
         rendered_body=rendered_body,
     )
     return f"{workspace_slug(workspace_root)}-{digest}"
+
+
+# ---------------------------------------------------------------------------
+# The profile NAME, and the tmpdir that has to agree with it (#1171)
+# ---------------------------------------------------------------------------
+
+PROFILE_PREFIX = "jaato-ws-"
+
+#: Every session tmpdir lives under this prefix.  The AppArmor template
+#: grants ``/tmp/jaato-{id}/**``, where ``{id}`` is whatever
+#: :func:`confinement_id` produced for the boundary being rendered.
+TMPDIR_PREFIX = "/tmp/jaato-"
+
+
+def profile_name_for(confinement_id: str) -> str:
+    """``jaato-ws-<id>`` — the one place the prefix is spelled."""
+    return f"{PROFILE_PREFIX}{confinement_id}"
+
+
+def confinement_id_from_profile_name(profile_name: Optional[str]) -> Optional[str]:
+    """Inverse of :func:`profile_name_for`, or ``None``.
+
+    ``None`` for an empty name (the unconfined opt-out) and for a name
+    that does not carry the prefix — never a guess.  An id derived from
+    a name this module did not mint would key a tmpdir on a boundary
+    nobody rendered, which is the failure being fixed rather than a
+    smaller version of it.
+    """
+    if not profile_name:
+        return None
+    if not profile_name.startswith(PROFILE_PREFIX):
+        return None
+    return profile_name[len(PROFILE_PREFIX):] or None
+
+
+def session_tmpdir(
+    session_id: str,
+    confinement_id: Optional[str] = None,
+) -> str:
+    """The directory a runner's ``TMPDIR`` points at.
+
+    This is the one definition, read by the daemon (which creates the
+    directory, unconfined, before the runner can) and by the runner
+    (which pins :data:`tempfile.tempdir` to it).  Two sides that derive
+    it separately is precisely #1171.
+
+    The session's directory is NESTED inside the confinement's, because
+    the two ids answer different questions and both have to be honoured:
+
+    * the profile is rendered once per BOUNDARY and grants
+      ``/tmp/jaato-<confinement_id>/**``, so the path must start there
+      or the kernel refuses every write (#1171);
+    * a tmpdir is per SESSION — that is what Phase 5 bought — so
+      flattening to the confinement id alone would hand two concurrent
+      sessions of one cascade a single directory.
+
+    Nesting satisfies both with no template change: the existing
+    ``/tmp/jaato-{id}/** rw`` rule already covers the subdirectory.
+
+    Note what the nesting does NOT claim.  Sessions sharing a boundary
+    share a kernel profile by construction, so the separation here is
+    organisational — it keeps one session's temp files out of another's
+    way, and grants nothing either could not already reach.
+
+    Args:
+        session_id: The session the runner serves.
+        confinement_id: The boundary its profile was rendered for, or
+            ``None`` when the runner is unconfined — in which case the
+            path is the pre-#1171 ``/tmp/jaato-<session_id>``, so an
+            unconfined deployment is byte-identical to before.
+    """
+    if not confinement_id:
+        return f"{TMPDIR_PREFIX}{session_id}"
+    return f"{TMPDIR_PREFIX}{confinement_id}/{session_id}"

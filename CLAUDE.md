@@ -1868,6 +1868,97 @@ is still the right place for the fix, because it protects against ANY
 unconfined session sharing a daemon; whether the first runner should wait
 for provisioning is its own change.
 
+### A Tmpdir Two Modules Named Differently (#1171)
+
+`RunnerSpawner` decided where a runner's temp files go; `AppArmorManager`
+rendered the rule that grants them. One fact, two modules, and after #1037
+they stopped agreeing:
+
+| side | keyed on | value |
+|---|---|---|
+| `TMPDIR` (`runner_spawner.py:319`) | the **session** | `/tmp/jaato-20260921_053346` |
+| the profile's tmp rule (`apparmor.py:623`, rendered with `confinement_id_of`) | the **boundary** | `/tmp/jaato-runtime-cdd58a0cee68` |
+
+They agreed only while the profile was named after the session, which #1033
+/ #1037 deliberately stopped doing. So a confined runner's first temp-dir
+resolution was denied, every fallback (`/tmp`, `/var/tmp`, `/usr/tmp`, `/`)
+was denied by default, and the bootstrap died with `[Errno 2] No usable
+temporary directory found` — with the kernel logging the other half as
+`apparmor="DENIED" operation="mknod"`.
+
+**No release caused it.** `apparmor.py` and `runner_spawner.py` are
+byte-identical from 0.16.0 through the fix; `_session_tmpdir(session_id)`
+predates 0.16.0 and so does `confinement_id_of`. What changed is how often
+a session reaches the path where the disagreement bites.
+
+**The pool was hiding it, and hiding a second defect underneath.**
+`shared/plugins/sandbox_utils.py` resolves `tempfile.gettempdir()` at
+**module scope**, reached through `cli` / `file_edit` / `filesystem_query`
+during `registry.discover(tier_filter="runner")`. `gettempdir()` PROBES —
+it creates and deletes a file — and caches the winner in a module global:
+
+| path | when the probe runs | consequence |
+|---|---|---|
+| **pool slot** | in the **template**, unconfined, before the fork | resolves `/tmp`, every slot inherits the cache, and `TMPDIR` is **never read again** |
+| **cold spawn** | after `runner/__main__.py` calls `aa_change_profile` | resolves under the profile — the reported crash |
+
+So the session-scoped `TMPDIR` was **inert on the default path and wrong on
+the other**: it works nowhere. And the surviving path was latently broken
+too, because a slot's inherited `/tmp` is a directory the base profile does
+not grant either (the broad `/tmp/jaato-*` grants are in the **isolated
+sub-runner** profile, not the base) — it survived only for as long as
+nothing in a confined session wrote a real temp file.
+
+**Both halves were then measured on the enforcing host** (#1171), with
+`aa-exec` into the live profile — which is the one thing this repository's
+CI cannot do:
+
+```
+aa-exec -p jaato-ws-runtime-cdd58a0cee68 -- python -c 'import tempfile; tempfile.NamedTemporaryFile()'
+  -> FileNotFoundError ... ['/tmp', '/var/tmp', '/usr/tmp', '/root']
+  with TMPDIR=/tmp/jaato-20260921_060114
+  -> FileNotFoundError ... ['/tmp/jaato-20260921_060114', '/tmp', ...]
+```
+
+So the pool path's inherited `/tmp` is denied, the session-scoped `TMPDIR`
+is denied, and the session directory had never been created at all. The
+surviving configuration was surviving on the absence of a temp write.
+
+**Four changes, and the first two are both load-bearing.**
+
+| # | Change | Why alone it is not enough |
+|---|---|---|
+| 1 | `server/confinement_id.session_tmpdir` — `/tmp/jaato-<confinement_id>/<session_id>` | fixes cold spawn; the pool path has already cached `/tmp` |
+| 2 | `_pin_session_tmpdir` assigns `tempfile.tempdir` in the runner, after confinement, before any plugin import | fixes the pool path; without (1) it would pin a path nothing grants |
+| 3 | `sandbox_utils` tolerates a failing resolution | it classifies paths and never writes one — a probe should not decide whether a module can be imported |
+| 4 | the daemon creates the directory in `spawn_session_runner`, before either branch | `RunnerSpawner.spawn` mkdirs only on the branch that calls it, and the confined runner cannot make the boundary directory itself |
+
+**Nesting rather than flattening.** Keying `TMPDIR` on the confinement id
+alone would restore agreement and throw away what Phase 5 bought — two
+concurrent sessions of one cascade would share a directory. The session
+keeps one of its own, nested; the existing `/tmp/jaato-{id}/** rw` rule
+already covers it, so the template is untouched. The alternative of granting
+`/tmp/jaato-*` on the base profile is refused: it would open every session's
+tmpdir to every other session on the host to fix a naming disagreement.
+An unconfined runner keeps the pre-#1171 path exactly.
+
+**The pin sets the module global rather than the env var**, because an
+assignment cannot be denied where a probe can, and because `TMPDIR` reaches
+a pool slot through no channel at all — it is set at `execvpe` and a slot is
+forked. `os.environ` is set too, so the subprocesses the model drives
+inherit the same answer instead of resolving one of their own.
+
+**The guard needs no kernel, and that is the point.** Every confinement test
+in this tree stubs `is_available()` and `apparmor_parser` because CI has no
+AppArmor LSM, so nothing in CI can observe an AVC. But the agreement is a
+property of two strings: `test_runner_tmpdir_matches_the_profile_grant_1171`
+renders a profile for a boundary, asks the spawner for that session's
+`TMPDIR`, and checks the second is covered by the first — with the pre-#1171
+path asserted **not** granted, so the test cannot pass vacuously. It would
+have failed the day #1037 landed. The old guard,
+`test_runner_session_tmpdir.py`, names this exact failure in its own
+docstring and asserts only one side of it.
+
 ### Slot-scoped Plugin Lifetime (#890)
 
 A pool slot serves several sessions of one cascade in turn, and

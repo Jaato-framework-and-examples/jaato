@@ -65,6 +65,7 @@ from shared.apparmor_label import (
     COMPLAIN_ENV_VAR,
     complain_mode_requested,
 )
+from server.confinement_id import profile_name_for
 from shared.session_id import validate_session_id
 
 logger = logging.getLogger(__name__)
@@ -2356,9 +2357,15 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
 
     @staticmethod
     def profile_name_for_confinement_id(confinement_id: str) -> str:
-        """``jaato-ws-<id>`` — the one place the prefix is spelled."""
+        """``jaato-ws-<id>`` — the one place the prefix is spelled.
+
+        Delegates to :func:`server.confinement_id.profile_name_for` so the
+        prefix has ONE definition: ``RunnerSpawner`` has to invert this
+        name to derive the tmpdir the profile grants (#1171), and a second
+        spelling is how the two sides start disagreeing again.
+        """
         validate_session_id(confinement_id)
-        return f"jaato-ws-{confinement_id}"
+        return profile_name_for(confinement_id)
 
     def profile_is_complain_mode(self, session_id: str) -> bool:
         """Was this session's profile generated in complain (log-only) mode?
