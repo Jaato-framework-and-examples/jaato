@@ -4794,7 +4794,7 @@ class SessionManager:
             if session is not None:
                 session.runner_identity = identity
         try:
-            self._session_index.record_identity(session_id, identity.to_dict())
+            self._session_workspace_index.record_identity(session_id, identity.to_dict())
         except Exception as exc:  # noqa: BLE001 — best-effort
             logger.warning(
                 "runner identity not written to the workspace index for "
@@ -4859,7 +4859,7 @@ class SessionManager:
         if identity is not None and session.runner_identity != identity:
             session.runner_identity = identity
             try:
-                self._session_index.record_identity(
+                self._session_workspace_index.record_identity(
                     session.session_id, identity.to_dict())
             except Exception as exc:  # noqa: BLE001 — best-effort
                 logger.debug(
@@ -4892,7 +4892,7 @@ class SessionManager:
             live = session.runner_identity if session is not None else None
         if live is not None:
             return live.to_dict()
-        stored = self._session_index.identity(session_id)
+        stored = self._session_workspace_index.identity(session_id)
         if stored is None:
             return None
         # A session not in ``_sessions`` is not being executed by anything
