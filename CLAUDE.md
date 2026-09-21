@@ -6618,6 +6618,56 @@ drag handle on its left edge (`components/layout/RailResizer.tsx`): a
 none` — and by arrow keys, clamped to 220–720px and remembered per browser
 (`ui.railWidth`, `localStorage`).
 
+### A Policy You Could Read and Not Change
+
+The status bar's `permissions ask` segment reported the effective default
+and named the command in its tooltip, and was inert text. So the reading
+and the doing were in different places, and only the reading was on
+screen — you learned the session's posture from the foot of the page and
+then had to know a command to act on it.
+
+It is a button now, opening a plate over the status bar with the
+`permissions` verbs **whose arguments are a closed set**:
+
+| | |
+|---|---|
+| default | `ask` / `allow` / `deny`, the one in force marked `aria-pressed` |
+| suspend | `--turn` or until idle — replaced by **Resume** once suspended |
+| show, clear | `permissions show`, `permissions clear` |
+
+**What is absent is the design.** `allow`, `deny` and `check` take a tool
+NAME — an open set the composer already completes from the daemon's own
+inventory — so the plate names them in prose and sends you there rather
+than building a second, staler picker. The split is *closed set clicks,
+open set types*.
+
+**Every action goes through `submitInput`**, the path a typed command
+takes. A button speaking to the daemon directly would change the
+session's permission posture with no record in the transcript of who
+asked for it, and would be a second expression of `permissions` free to
+drift from the first.
+
+**Suspension outranks the default in the rendering**, because it outranks
+it in the daemon: while prompting is suspended no policy is being
+consulted, so none is drawn as in force and the plate says why. Drawing
+`ask` as current there would be a true field rendered as a false claim.
+
+**And the test found a real defect, which is the reason to record how.**
+The plate's trigger sits OUTSIDE it, so the outside-click listener fires
+on the trigger's `mousedown`, closes, and the trigger's own `click` —
+which arrives after — reopens: a button that cannot be clicked shut. It
+was invisible to the first draft of the test because `fireEvent.click`
+dispatches **no `mousedown`**, so the listener was never exercised by the
+opening click at all. A first attempt at defending it (deferring the
+listener by a tick) survived its own reversion, which is what exposed
+that the test could not see the mechanism. Modelling a real browser click
+— `mousedown` then `click` — made both the defect and the fix visible:
+the listener treats the anchor as inside, and the deferral is gone as
+something that could not be shown to do anything.
+
+Guard: `components/prompts/PermissionsPlate.test.tsx`, nine cases;
+dropping the anchor exclusion fails exactly the toggle case.
+
 ### A Budget Panel That Showed Something Else
 
 Reported as *"this is not the same budget panel as the TUI"*, and it was
