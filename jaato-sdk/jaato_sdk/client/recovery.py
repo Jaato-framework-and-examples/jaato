@@ -844,6 +844,29 @@ class IPCRecoveryClient:
         if self._client:
             await self._client.toggle_workspace_ignore(path)
 
+    async def send_external_event(
+        self,
+        name: str,
+        data: Optional[Dict[str, Any]] = None,
+        *,
+        timestamp: str = "",
+        session_id: str = "",
+    ) -> None:
+        """Publish an external event onto the session's ``EventBus``.
+
+        See :meth:`IPCClient.send_external_event` for full docs.  Deliberately
+        NOT replayed on reconnect: an external event reports something that
+        happened at a moment, and re-publishing it after the socket came back
+        would tell every subscriber it happened twice.  A caller that needs
+        at-least-once delivery across a reconnect is the one that knows
+        whether its event is still true, so it re-sends.
+        """
+        self._check_can_send()
+        if self._client:
+            await self._client.send_external_event(
+                name, data, timestamp=timestamp, session_id=session_id,
+            )
+
     async def explain_topic(
         self,
         topic: Optional[str] = None,

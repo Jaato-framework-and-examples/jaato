@@ -12985,6 +12985,7 @@ class SessionManager:
             ReferenceSelectionResponseRequest,
             StopRequest,
             CommandRequest,
+            ExternalEventRequest,
             GetInstructionBudgetRequest,
             InstructionBudgetEvent,
             InjectPromptRequest,
@@ -13478,40 +13479,10 @@ class SessionManager:
                     permission_plugin._policy.add_session_blacklist(pattern)
 
         elif isinstance(event, PermissionRemoveRequest):
-            permission_plugin = (
-                server.registry.get_plugin("permission")
-                if server.registry else None
-            )
-            if permission_plugin is None or permission_plugin._policy is None:
-                self._emit_to_client(client_id, ErrorEvent(
-                    error="Permission plugin not available",
-                    error_type="PluginNotFound",
-                ))
-            elif event.target == "whitelist":
-                # Direct set mutation — no remove method on the
-                # policy, but the sets are public attributes.  discard
-                # is a no-op for missing items so the call is idempotent.
-                policy = permission_plugin._policy
-                for tool in event.tools:
-                    policy.whitelist_tools.discard(tool)
-                    policy.session_whitelist.discard(tool)
-                for pattern in event.patterns:
-                    policy.session_whitelist.discard(pattern)
-            elif event.target == "blacklist":
-                policy = permission_plugin._policy
-                for tool in event.tools:
-                    policy.blacklist_tools.discard(tool)
-                    policy.session_blacklist.discard(tool)
-                for pattern in event.patterns:
-                    policy.session_blacklist.discard(pattern)
-            else:
-                self._emit_to_client(client_id, ErrorEvent(
-                    error=(
-                        f"Invalid target: {event.target!r}. "
-                        f"Valid values: 'whitelist', 'blacklist'"
-                    ),
-                    error_type="ValidationError",
-                ))
+            self._handle_permission_remove(client_id, server, event)
+
+        elif isinstance(event, ExternalEventRequest):
+            self._handle_external_event_request(client_id, session, event)
 
         elif isinstance(event, PermissionClearRequest):
             permission_plugin = (
@@ -13585,6 +13556,131 @@ class SessionManager:
                 error=f"Unknown request type: {type(event).__name__}",
                 error_type="RequestError",
             ))
+
+    def _handle_permission_remove(
+        self,
+        client_id: str,
+        server: Any,
+        event: Any,
+    ) -> None:
+        """Serve one ``PermissionRemoveRequest``: drop tools/patterns from a list.
+
+        Lifted out of :meth:`handle_request` by #1167.  The chain is on the
+        cyclomatic-complexity ratchet and a baselined function may not grow,
+        so the external-event arm added in the same change is paid for by
+        moving the branchiest of the six permission arms -- the only one with
+        a three-way ``target`` switch -- out of it.  The arm's behaviour is
+        unchanged; only its address is.
+
+        Removal is direct set mutation because ``PermissionPolicy`` exposes no
+        remove method, and it touches BOTH the base list and the session-level
+        overlay: a tool whitelisted at both levels and removed from only one
+        is still whitelisted, which reads to the caller as the removal having
+        been ignored.  ``discard`` is a no-op for a missing item, so a repeat
+        call is idempotent rather than an error.
+
+        Args:
+            client_id: The requesting client, for the refusal events.
+            server: The session's ``JaatoServer``, whose registry holds the
+                permission plugin.
+            event: The ``PermissionRemoveRequest``.  ``target`` must be
+                ``"whitelist"`` or ``"blacklist"``; anything else is refused
+                by name rather than silently ignored.
+        """
+        permission_plugin = (
+            server.registry.get_plugin("permission")
+            if server.registry else None
+        )
+        if permission_plugin is None or permission_plugin._policy is None:
+            self._emit_to_client(client_id, ErrorEvent(
+                error="Permission plugin not available",
+                error_type="PluginNotFound",
+            ))
+        elif event.target == "whitelist":
+            policy = permission_plugin._policy
+            for tool in event.tools:
+                policy.whitelist_tools.discard(tool)
+                policy.session_whitelist.discard(tool)
+            for pattern in event.patterns:
+                policy.session_whitelist.discard(pattern)
+        elif event.target == "blacklist":
+            policy = permission_plugin._policy
+            for tool in event.tools:
+                policy.blacklist_tools.discard(tool)
+                policy.session_blacklist.discard(tool)
+            for pattern in event.patterns:
+                policy.session_blacklist.discard(pattern)
+        else:
+            self._emit_to_client(client_id, ErrorEvent(
+                error=(
+                    f"Invalid target: {event.target!r}. "
+                    f"Valid values: 'whitelist', 'blacklist'"
+                ),
+                error_type="ValidationError",
+            ))
+
+    def _handle_external_event_request(
+        self,
+        client_id: str,
+        session: Session,
+        event: Any,
+    ) -> None:
+        """Serve one ``ExternalEventRequest``: put it on the session's bus.
+
+        The IPC half of issue #1167.  ``ExternalEventRequest`` deserializes
+        fine over IPC -- it is in ``deserialize_event``'s registry, so it
+        never took ``ipc.py``'s unknown-type branch -- but nothing dispatched
+        it, so it fell through every arm of :meth:`handle_request` and was
+        answered ``Unknown request type: ExternalEventRequest``.  An IPC-only
+        deployment could therefore run a reactor engine and had no way to
+        trigger it short of standing up the ``webhook`` plugin's listener.
+
+        The translation into a bus event is
+        :func:`server.external_event.publish_external_event`, shared with
+        ``JaatoWSServer._handle_external_event`` so there is one answer to
+        what an external event looks like on the bus.
+
+        **Why ``source="ipc"`` from a transport-agnostic method.**  This
+        manager serves both transports, but WebSocket intercepts
+        ``ExternalEventRequest`` in ``JaatoWSServer._handle_message`` and
+        returns *before* delegating to the ``CommandRouter``, so IPC is the
+        only transport that reaches here with one.  That is an invariant
+        rather than an observation, and
+        ``server/tests/test_external_event_over_ipc_1167.py`` fails if the WS
+        interception is removed -- otherwise WS traffic would start arriving
+        here and be labelled ``ipc`` to the model, in the one field whose job
+        is to say where the event came from.
+
+        Failure is an ``ErrorEvent``, never a raise: this runs on the IPC
+        executor thread and a session with no bus yet must cost the request,
+        not the connection.
+
+        Args:
+            client_id: The requesting client, for the refusal event.
+            session: The target session, already resolved (and its
+                ``last_activity`` already stamped) by :meth:`handle_request`.
+            event: The ``ExternalEventRequest``.
+        """
+        from server.external_event import publish_external_event
+
+        delivery = publish_external_event(
+            session.server,
+            name=event.name,
+            data=event.data,
+            timestamp=event.timestamp,
+            source="ipc",
+        )
+        if not delivery.ok:
+            self._emit_to_client(client_id, ErrorEvent(
+                error=delivery.error,
+                error_type="ExternalEventError",
+            ))
+            return
+
+        logger.debug(
+            "External event '%s' published to session %s, notified %d subscriber(s)",
+            event.name, session.session_id, delivery.notified,
+        )
 
     # =========================================================================
     # Cleanup

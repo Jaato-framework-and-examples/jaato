@@ -38,6 +38,7 @@ import {
   type ClientConfigRequest,
   type CommandRequest,
   type ConnectedEvent,
+  type ExternalEventRequest,
   type JaatoEvent,
   type SendMessageRequest,
   type StopRequest,
@@ -1160,6 +1161,68 @@ export class JaatoClient {
       payload.attachments = attachments;
     }
     await this.executeCommand("session.wake", [], payload);
+  }
+
+  /**
+   * Publish an external event onto the session's `EventBus`.
+   *
+   * The host's way of telling a running session that something happened
+   * outside it — `order.placed`, `build.finished`, `ticket.assigned`.  It
+   * reaches every agent that called
+   * `subscribeToEvents(event_types: ['external_event'])`, and sinks onward to
+   * the daemon-wide reactor bus, so it is the one verb that can trigger a
+   * reactor from a client.  Mirror of Python
+   * ``IPCClient.send_external_event``.
+   *
+   * `ExternalEventRequest` has existed as a TYPE in both SDKs and as a METHOD
+   * in neither (#1167): the only producer was an out-of-tree web component
+   * hand-rolling the JSON frame.
+   *
+   * **Not** {@link wakeSession}.  A wake drives a USER turn on one session;
+   * this publishes a bus event and drives no turn of its own.  A session with
+   * no `external_event` subscriber receives it and does nothing, which is a
+   * success and the normal state before any agent has subscribed.
+   *
+   * Fire-and-forget.  A refusal arrives on the event stream as an
+   * `ErrorEvent` — `error_type: "ExternalEventError"` when the session has no
+   * bus, `"SessionError"` when the session is gone, and `"RequestError"`
+   * (`Unknown request type: ExternalEventRequest`) from a daemon predating
+   * #1167 on IPC.  That last one is why this method takes no protocol floor:
+   * the refusal is a named error on the stream rather than the silence an
+   * unknown command verb produces, and a floor would ALSO refuse against the
+   * WebSocket daemons where the request has always worked.
+   *
+   * @param name The event name the host chose, e.g. `order.placed`.  This is
+   *   what an agent's `subscribeToEvents(event_names)` filter matches, so it
+   *   must agree with what the persona asked to hear.
+   * @param data Arbitrary JSON-serialisable payload; omitted sends `{}`.
+   * @param options.timestamp ISO 8601, when the thing being reported
+   *   happened.  Omitted lets the daemon stamp arrival time.
+   * @param options.sessionId The target session; omitted means the one this
+   *   client is attached to.
+   * @throws Error if `name` is empty — an unnamed event matches no
+   *   subscriber filter and reaches the model with nothing to say what
+   *   happened.
+   */
+  async sendExternalEvent(
+    name: string,
+    data?: Record<string, unknown>,
+    options?: { timestamp?: string; sessionId?: string },
+  ): Promise<void> {
+    if (!name) {
+      throw new Error(
+        "sendExternalEvent requires a name — an unnamed event matches no " +
+          "subscribeToEvents filter and reaches the model with nothing to " +
+          "say what happened",
+      );
+    }
+    await this._sendEvent({
+      type: EventTypeValue.EVENT_EXTERNAL,
+      name,
+      data: data ?? {},
+      timestamp: options?.timestamp ?? "",
+      session_id: options?.sessionId ?? "",
+    } as ExternalEventRequest);
   }
 
   /**
