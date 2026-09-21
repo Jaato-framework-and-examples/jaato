@@ -6337,6 +6337,28 @@ agent's voice and telling yours apart from its is the whole point; the pencil
 is always drawn, never hover-gated, the lesson the Files panel's `hide` /
 `ignore` actions already taught.
 
+**And adding it cost the row its click.** The row used to BE a `<button>`,
+with `Attach` a decorative `<span>` inside it — so clicking the chip worked by
+bubbling rather than by being a control. A button cannot nest inside a button,
+so the pencil forced the row out of a `button`, the chip became a SIBLING of
+the clickable element, and it kept its `btn btn-steel` styling while doing
+nothing at all. What still worked was clicking the row's text, which nothing
+advertised; what every user reached for was the chip, which `.btn` renders
+uppercase as `ATTACH` and with `cursor: pointer`. `Attach` is a real `button`
+now and the text is inert, and its accessible name CONTAINS its visible word
+(WCAG 2.5.3) — a control reading `Attach` that announces itself as "Resume" is
+unreachable to a voice user asking for what they can see.
+
+**The e2e could not have caught it**, which is the part worth keeping. It
+resumes by ROLE and accessible name, and that name lived on the row's text
+while the chip was `aria-hidden` and therefore had no role to match: the suite
+exercised the path that worked and was structurally blind to the one that did
+not. Same shape as the mock speaking the client's vocabulary, one layer in —
+the test was correct and could not see the defect. The guard is
+`SessionRow.test.tsx`, which asserts *where the click goes* rather than what
+the row looks like: two cases that fail against the reverted chip, and a
+control (the rail, which offers no `Attach` at all) that passes either way.
+
 **And the daemon answers the other half of that question.** #1138's `awaiting`
 / `awaiting_since` (protocol 1.17) is the only way a client working in session
 A learns that B is blocked on a permission ASK or a clarification — prompt

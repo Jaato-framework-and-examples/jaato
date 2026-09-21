@@ -365,7 +365,9 @@ test("workspace mode: a configured workspace reopens with its sessions and no pr
   // No sign-in row, no .env talk: the workspace already binds a provider.
   await expect(page.getByText("No provider configured yet?")).toHaveCount(0);
   // Its previous session is offered for resuming, and resuming replays it.
-  await page.getByRole("button", { name: "Resume session 20260916_090000" }).click();
+  // Targeted by ROLE: the chip carried `btn btn-steel` styling as a plain
+  // span for two releases, so it looked like this control and was not one.
+  await page.getByRole("button", { name: "Attach session 20260916_090000" }).click();
   await expect(page.getByText("The panel reads function_calls as a number; it is a list of records.")).toBeVisible();
 });
 
