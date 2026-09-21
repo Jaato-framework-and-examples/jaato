@@ -6359,6 +6359,25 @@ the test was correct and could not see the defect. The guard is
 the row looks like: two cases that fail against the reverted chip, and a
 control (the rail, which offers no `Attach` at all) that passes either way.
 
+**A route that existed one way only.** The same picker had no way back to
+the workspace list. `WorkspaceScreen` routes FORWARD into it
+(`setScreen("session")`), and the only two routes back were **ending a
+session** and **disconnecting** — so a workspace opened by mistake could be
+left only by leaving the daemon, and the one visible escape offered to
+leave sessions behind entirely (`Go to the prompt without a session`). The
+button is gated on the workspace MODE rather than on a selection, because
+the list's own *server-provisioned workspace* link arrives with nothing
+selected and is equally worth backing out of, and it is bordered rather
+than a `.link` for the reason above — what was reported is that there is
+no button to find.
+
+Going back selects nothing and destroys nothing, so the daemon's
+per-connection selection survives it. That is **not** new: `endSession`
+already reached the list the same way (`resetSessionState` does not touch
+`workspace`), so the one residue — the list's provisioned-workspace link
+opening in the still-selected workspace rather than a fresh one — was
+reachable before this button and is left where it was.
+
 **And the daemon answers the other half of that question.** #1138's `awaiting`
 / `awaiting_since` (protocol 1.17) is the only way a client working in session
 A learns that B is blocked on a permission ASK or a clarification — prompt

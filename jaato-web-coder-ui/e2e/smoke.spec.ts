@@ -371,6 +371,25 @@ test("workspace mode: a configured workspace reopens with its sessions and no pr
   await expect(page.getByText("The panel reads function_calls as a number; it is a list of records.")).toBeVisible();
 });
 
+test("workspace mode: the session picker goes back to the workspace list", async ({ page }) => {
+  // Reported from a deployed client: a workspace opened by mistake could
+  // only be left by ending a session or leaving the daemon, because
+  // WorkspaceScreen routes forward and nothing routed back.
+  await page.goto("/");
+  await page.getByPlaceholder("ws://host:8080").fill("ws://127.0.0.1:8098");
+  await page.getByRole("button", { name: "Connect" }).click();
+  await page.getByRole("button", { name: "Open workspace project-a" }).click();
+  await expect(page.getByTestId("session-picker")).toBeVisible();
+
+  await page.getByRole("button", { name: "Workspaces" }).click();
+
+  // The list, with both workspaces still there — going back selects nothing
+  // and destroys nothing, so the other one is one click away.
+  await expect(page.getByRole("button", { name: "Open workspace project-a" })).toBeVisible();
+  await page.getByRole("button", { name: "Open workspace project-b" }).click();
+  await expect(page.getByTestId("session-picker")).toBeVisible();
+});
+
 test("workspace mode: a workspace is deleted after confirmation, and a refusal is shown", async ({ page }) => {
   await page.goto("/");
   await page.getByPlaceholder("ws://host:8080").fill("ws://127.0.0.1:8098");

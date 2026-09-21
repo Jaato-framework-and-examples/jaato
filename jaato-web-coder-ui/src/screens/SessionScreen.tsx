@@ -137,6 +137,7 @@ function ProfilePicker({ onPick, onAttach, onAuth, onSkip }: {
   const profiles = useJaato((s) => s.profiles);
   const commands = useJaato((s) => s.commands);
   const ws = useJaato((s) => s.workspace);
+  const setScreen = useJaato((s) => s.setScreen);
   const sessions = useJaato((s) => s.sessions);
   useEffect(() => { ensureSessions().catch(() => undefined); }, []);
   const auth = authCommands(commands);
@@ -151,6 +152,24 @@ function ProfilePicker({ onPick, onAttach, onAuth, onSkip }: {
       <Plate className="w-full max-w-[880px] flex flex-col" data-testid="session-picker">
         <div className="flex items-baseline justify-between gap-4 px-5 py-4 border-b hairline">
           <div className="flex items-baseline gap-3">
+            {/* The way back.  `WorkspaceScreen` routes FORWARD here and the
+                only routes back were ending a session or disconnecting, so a
+                workspace opened by mistake could only be left by leaving the
+                daemon.  Gated on the MODE rather than on `selected`: the
+                list's own "server-provisioned workspace" link arrives here
+                with nothing selected, and that is a state you may equally
+                want to back out of.  A bordered button, not a `.link` — what
+                was reported is that there is no button to find. */}
+            {ws.mode === "enabled" && (
+              <button
+                type="button"
+                onClick={() => setScreen("workspaces")}
+                title="Back to the workspace list"
+                className="btn btn-sm btn-quiet shrink-0"
+              >
+                <span aria-hidden="true">←</span> Workspaces
+              </button>
+            )}
             {selected ? <><span className="kicker tracking-[0.16em]">Workspace</span><span className="font-mono text-[16px]">{selected.name}</span></> : <span className="display text-[20px]">New session</span>}
           </div>
           {configured && <div className="font-mono text-xs text-text-muted">{binding} <span className="text-steel">from .env</span></div>}
