@@ -447,6 +447,13 @@ CATALOG: Dict[str, EnvClass] = {
         "terminal capability detection"),
     "TERM_PROGRAM": EnvClass(AMBIENT, None,
         "terminal capability detection"),
+    "TMPDIR": EnvClass(INTERNAL, None,
+        "the daemon hands the runner the session tmpdir its AppArmor "
+        "profile grants, and the runner hands the same value to the "
+        "subprocesses the model drives (#1171).  INTERNAL rather than "
+        "AMBIENT because the framework SETS it on both hops: reading the "
+        "host's TMPDIR is exactly what a confined runner must not do, "
+        "since the host's answer is a directory no profile grants"),
     "TMUX": EnvClass(AMBIENT, None,
         "tmux detection"),
     "workspaceRoot": EnvClass(AMBIENT, None,
