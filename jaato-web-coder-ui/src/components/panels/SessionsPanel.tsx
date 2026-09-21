@@ -64,10 +64,25 @@ export interface SessionRowProps {
  * is already the agent's voice (``description``), and telling yours apart
  * from its is the whole point.
  *
- * A button cannot nest inside a button, so the row is a ``div`` holding the
- * attach button and the pencil as SIBLINGS.  The pencil is always drawn,
- * never hover-gated -- a touch screen has no hover, the lesson the Files
- * panel's ``hide`` / ``ignore`` actions already taught.
+ * A button cannot nest inside a button, so the row is a ``div`` holding its
+ * controls as SIBLINGS: the text is inert, and ``Attach`` is the control.
+ *
+ * That arrangement is the fix for a regression this row shipped with.  The
+ * whole row used to BE the button, with ``Attach`` a decorative ``span``
+ * inside it -- so clicking the chip worked by bubbling, not by being a
+ * control.  Adding the note pencil forced the row out of a ``button``, the
+ * chip became a sibling of the clickable element instead of a child, and it
+ * kept its ``btn btn-steel`` styling while doing nothing at all.  A thing
+ * that looks like a button must be one; the chip is now a real ``button``
+ * and the text no longer pretends to be one.
+ *
+ * Its accessible name CONTAINS its visible word (WCAG 2.5.3): a control
+ * reading ``Attach`` must not announce itself as "Resume", or a voice user
+ * asking for what they can see does not reach it.
+ *
+ * The pencil is always drawn, never hover-gated -- a touch screen has no
+ * hover, the lesson the Files panel's ``hide`` / ``ignore`` actions already
+ * taught.
  */
 export function SessionRow({ sess, onAttach, showWorkspace = false }: SessionRowProps) {
   const [open, setOpen] = useState(false);
@@ -83,21 +98,15 @@ export function SessionRow({ sess, onAttach, showWorkspace = false }: SessionRow
     <div className="border-t hairline">
       <div className="flex gap-3 py-2.5 items-start">
         <span className={`pt-0.5 ${waiting ? "text-warning" : sess.isLoaded ? "text-success" : "text-text-muted"}`} aria-hidden="true">{waiting ? "⚠" : sess.isLoaded ? "●" : "○"}</span>
-        {/* The row's own aria-label used to override its content, so a screen
-            reader was told the id and nothing else.  The label names the
-            action; the text under it is readable in its own right. */}
-        <button
-          type="button"
-          onClick={() => onAttach?.(sess.id)}
-          disabled={!onAttach}
-          aria-label={onAttach ? `Resume session ${sess.id}` : undefined}
-          className="min-w-0 flex-1 text-left disabled:cursor-default"
-        >
+        {/* Inert on purpose.  It was a button whose aria-label overrode its
+            own content, so a screen reader was told the id and nothing
+            else; as plain text every line is read in its own right. */}
+        <div className="min-w-0 flex-1">
           <span className="block font-mono text-[13px]">{sess.id}</span>
           {waiting && <span className="block text-[13px] text-warning">{waiting}</span>}
           {subtitle && <span className="block text-[13px] text-text-muted truncate">{subtitle}</span>}
           {first && <span className="block chrome text-[13px] truncate" title={note}>✎ {first}</span>}
-        </button>
+        </div>
         <button
           type="button"
           onClick={() => setOpen((v) => !v)}
@@ -107,7 +116,16 @@ export function SessionRow({ sess, onAttach, showWorkspace = false }: SessionRow
         >
           {first ? "✎" : "✎ Add a note"}
         </button>
-        {onAttach && <span className={`btn btn-sm self-center shrink-0 ${sess.isLoaded ? "btn-steel" : "btn-quiet"}`} aria-hidden="true">Attach</span>}
+        {onAttach && (
+          <button
+            type="button"
+            onClick={() => onAttach(sess.id)}
+            aria-label={`Attach session ${sess.id}`}
+            className={`btn btn-sm self-center shrink-0 ${sess.isLoaded ? "btn-steel" : "btn-quiet"}`}
+          >
+            Attach
+          </button>
+        )}
       </div>
       {open && <div className="pb-2.5"><NoteEditor sessionId={sess.id} rows={3} /></div>}
     </div>
