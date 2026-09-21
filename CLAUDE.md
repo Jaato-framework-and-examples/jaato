@@ -6618,6 +6618,205 @@ drag handle on its left edge (`components/layout/RailResizer.tsx`): a
 none` — and by arrow keys, clamped to 220–720px and remembered per browser
 (`ui.railWidth`, `localStorage`).
 
+### A Policy You Could Read and Not Change
+
+The status bar's `permissions ask` segment reported the effective default
+and named the command in its tooltip, and was inert text. So the reading
+and the doing were in different places, and only the reading was on
+screen — you learned the session's posture from the foot of the page and
+then had to know a command to act on it.
+
+It is a button now, opening a plate over the status bar with the
+`permissions` verbs **whose arguments are a closed set**:
+
+| | |
+|---|---|
+| default | `ask` / `allow` / `deny`, the one in force marked `aria-pressed` |
+| suspend | `--turn` or until idle — replaced by **Resume** once suspended |
+| show, clear | `permissions show`, `permissions clear` |
+
+**What is absent is the design.** `allow`, `deny` and `check` take a tool
+NAME — an open set the composer already completes from the daemon's own
+inventory — so the plate names them in prose and sends you there rather
+than building a second, staler picker. The split is *closed set clicks,
+open set types*.
+
+**Every action goes through `submitInput`**, the path a typed command
+takes. A button speaking to the daemon directly would change the
+session's permission posture with no record in the transcript of who
+asked for it, and would be a second expression of `permissions` free to
+drift from the first.
+
+**Suspension outranks the default in the rendering**, because it outranks
+it in the daemon: while prompting is suspended no policy is being
+consulted, so none is drawn as in force and the plate says why. Drawing
+`ask` as current there would be a true field rendered as a false claim.
+
+**And the test found a real defect, which is the reason to record how.**
+The plate's trigger sits OUTSIDE it, so the outside-click listener fires
+on the trigger's `mousedown`, closes, and the trigger's own `click` —
+which arrives after — reopens: a button that cannot be clicked shut. It
+was invisible to the first draft of the test because `fireEvent.click`
+dispatches **no `mousedown`**, so the listener was never exercised by the
+opening click at all. A first attempt at defending it (deferring the
+listener by a tick) survived its own reversion, which is what exposed
+that the test could not see the mechanism. Modelling a real browser click
+— `mousedown` then `click` — made both the defect and the fix visible:
+the listener treats the anchor as inside, and the deferral is gone as
+something that could not be shown to do anything.
+
+Guard: `components/prompts/PermissionsPlate.test.tsx`, nine cases;
+dropping the anchor exclusion fails exactly the toggle case.
+
+### A Budget Panel That Showed Something Else
+
+Reported as *"this is not the same budget panel as the TUI"*, and it was
+not. The rail's **Budget** section rendered the TUI's `context` readout —
+how FULL the window is — under a heading that says Budget. What a budget
+answers is the other question, *what is the window spent ON*, and the TUI
+keeps the two apart: Ctrl+B opens the instruction budget, `context` is a
+command.
+
+**The data was on the wire the whole time.** `InstructionBudgetEvent`
+carries `InstructionBudget.snapshot()` — per-source tokens with each
+layer's GC policy — and the daemon emits it from six sites. Neither
+`INSTRUCTION_BUDGET_UPDATED` nor `budget_snapshot` appeared anywhere under
+the web client's `src/`. A typed event, declared in the TS SDK, read by
+nobody: the same shape as the plan reporter and the subagent hooks, one
+layer out — the mechanism complete except for the consumer.
+
+The section now renders both, budget first:
+
+| Heading | Question | Source |
+|---|---|---|
+| **Instructions** | what the window is spent on, by source layer, with each layer's GC policy and a drill-down into its children | `InstructionBudgetEvent` |
+| **Context** | how full the window is | `ContextUpdatedEvent` / `TurnCompletedEvent` — unchanged |
+
+Four rules, each attached to a way a readout starts lying:
+
+- **The snapshot is kept verbatim, not reshaped.** It is one dict and
+  several clients read it; a client-side flattening is how two readers
+  start disagreeing about what a source layer costs.
+- **An empty snapshot is IGNORED, not applied.** Replacing a populated
+  breakdown with an empty one blanks the panel mid-turn, which reads as
+  "nothing is using the window".
+- **The glyph is the daemon's.** `SourceEntry.to_dict()` ships
+  `indicator`; the local policy table is a fallback for a snapshot that
+  carries none, never an override — a client inventing its own mapping is
+  a second opinion about what `partial` means.
+- **A source the table does not name is still shown**, after the ones it
+  does. The snapshot decides WHAT exists; a hardcoded list deciding it
+  would hide a layer added later.
+- **A missing budget says which readout is missing.** The daemon reports
+  this only once a session has an `InstructionBudget`, and an unexplained
+  gap above a populated Context block is worse than a line saying so.
+
+Bars are drawn against `context_limit` when the daemon reported one, so a
+row reads as a share of the WINDOW rather than of the tracked total; with
+no limit they fall back to the largest row, which at least keeps them
+comparable with each other.
+
+Guard: `components/panels/BudgetPanel.test.tsx`. Five of its seven cases
+fail with the store handler removed and the two that do not are the
+Context-side controls; the empty-snapshot case fails on its own reversion
+(dropping the `length === 0` clause), which is what makes it a rule rather
+than a comment.
+
+Not done here: `BudgetRungFiredEvent` (#1069, the degrade ladder) is also
+unread by this client and is also arguably "budget" — but it is an
+episodic notification rather than a standing readout, so where it belongs
+is a separate question from this one.
+
+### A Subagent Nobody Could See (#1179)
+
+`spawn_subagent` succeeded, the agent said *"Subagent spawned (id:
+`subagent_1`)"*, and the only tab on screen stayed `MAIN AGENT`. The TUI
+has the same blind spot — both clients render `AgentCreatedEvent`, and on
+the default path nothing emitted one.
+
+**The web client was not at fault**, which is what located the defect:
+`store.ts` handles `AGENT_CREATED` fully, and `ensureAgent()` is a second
+chance invoked from `AGENT_OUTPUT`, so a tab would appear if *either*
+event arrived. Neither did. There is even an e2e case — *"subagents get
+their own tab"* — that was green throughout, and this time for a good
+reason rather than the usual one: the mock emits `agent.created` in the
+DAEMON's shape, so the test was correct and the client it tested was
+correct. What no web test can reach is the daemon's runner path, which is
+where the event was not being produced.
+
+`subagent` is `PLUGIN_TIER = "runner"`, so the plugin the model drives
+lives in the runner process, and `SubagentPlugin._ui_hooks` is the slot
+every `if self._ui_hooks:` in `subagent/plugin.py` reads. The daemon arms
+its OWN instance (`_setup_agent_hooks` → `subagent_plugin.set_ui_hooks`),
+which no runner-served session calls. The runner installs
+`_AgentUIHooksNotificationShim` — on `session._ui_hooks`, **a different
+object**. Measured against the real classes:
+
+```
+session._ui_hooks      : _AgentUIHooksNotificationShim
+todo._reporter         : LivePlanReporter
+subagent._plan_reporter: LivePlanReporter
+subagent._ui_hooks     : NoneType        <- the slot on_agent_created reads
+```
+
+The first three lines are what makes it findable: the same install already
+reaches into the registry for the `todo` and `subagent` plugins to hand
+them a plan reporter (*[A Plan Nobody Was
+Watching](#a-plan-nobody-was-watching-and-a-step-that-was-not-a-failure)*),
+and stops one attribute short. Meanwhile the shim's own `on_agent_created`
+docstring reads *"Called by the subagent plugin (PLUGIN_TIER='runner')"*
+and the class docstring claims *"every `self._ui_hooks.on_X` call on the
+runner side hits this shim"* — a forwarder written, tested, and wired to
+a caller that was never handed it. The #735 shape: the mechanism is
+complete except for the delivery.
+
+**One install, a whole family.** `_install_subagent_ui_hooks` mirrors
+`_install_plan_reporter` — per turn, save/restore, best-effort — and
+unlocks more than the tab, because the plugin propagates its own hooks to
+each child session (`session.set_ui_hooks(self._ui_hooks, agent_id)`): the
+subagent's status, context, turn accounting and **tool activity** all
+travel that slot, and every notification frame in the family already
+carries an `agent_id`. The plugin's `set_ui_hooks` is a plain setter,
+unlike the session's, which also overwrites `_agent_id` — that asymmetry
+is why the session is assigned directly and this one is not, and for the
+CHILD session overwriting `_agent_id` is exactly right.
+
+**Restoring is not tidiness.** The plugin is registry-scoped and outlives
+the call; a shim left behind keeps emitting frames under a request id that
+has already been answered.
+
+**`on_agent_output` is the second half.** It was a no-op, on the reasoning
+that *"the runner-side session uses the `on_output` kwarg path (stream
+frames)"* — true of the ROOT session and false of a subagent, whose output
+has no other route. It is the same misclassification the comment directly
+above it apologises for. A stream frame could not have carried it either:
+`StreamFrame` has `source`, `text` and `mode` and **no agent id**, so a
+subagent's words would arrive attributed to whoever owns the stream. A
+notification frame is the only shape that can say whose output this is.
+Forwarding it cannot double-emit, because on the runner path the subagent
+plugin is this method's only caller — `JaatoSession` never calls it, and
+`JaatoClient` (which does) is not on the runner's send path.
+
+**Paid for at the ratchet.** The daemon demuxer's `_handle` is baselined
+and a baselined function may not grow, so the seven `agent_*` forwards —
+already a commented group — moved into `_forward_agent_notification`
+(membership, a name test answered *before* the hooks are looked up, so it
+cannot depend on whether they are wired yet) plus `_dispatch_agent_hook`
+(the unpacking). The `_wire_str` / `_wire_int` / `_wire_float` readers put
+"absent and null both mean the default" in one place instead of an `or` on
+every field. `_handle` **91 → 58**, and both new functions are under the
+ceiling.
+
+Not measured here, deliberately: whether a subagent's output should ALSO
+keep reaching the parent's stream, as it does today by a separate route.
+It is a display question, the two are distinguishable at the client by
+`agent_id`, and answering it means deciding what a parent tab should show
+about its children.
+
+Guard: `server/tests/test_a_subagent_nobody_could_see.py`, five reversions.
+It asserts the plugin's slot rather than the session's, because filling the
+session's is precisely what the broken tree did.
+
 ### A File the Browser Could Not Put in the Workspace
 
 The premium `<jaato-task>` component (and the knowledge-manager client
