@@ -243,6 +243,48 @@ export interface ContextState {
   };
 }
 
+/**
+ * One row of the instruction budget -- a source layer, or a child of one.
+ *
+ * The daemon's ``InstructionBudget.snapshot()`` serialises
+ * ``SourceEntry.to_dict()`` verbatim, so this mirrors that shape rather
+ * than reshaping it: ``tokens`` is the entry's OWN cost and
+ * ``total_tokens`` includes its children, which is the number to show.
+ */
+export interface BudgetEntry {
+  source?: string;
+  /** This entry's own tokens, excluding children. */
+  tokens?: number;
+  /** This entry plus its children -- what the row displays. */
+  total_tokens?: number;
+  /** ``locked`` | ``preservable`` | ``partial`` | ``ephemeral`` | ``conditional``. */
+  gc_policy?: string;
+  gc_eligible_tokens?: number;
+  /** The daemon's own glyph for the policy; the client does not invent one. */
+  indicator?: string;
+  label?: string | null;
+  children?: Record<string, BudgetEntry>;
+  [k: string]: unknown;
+}
+
+/**
+ * ``InstructionBudgetEvent.budget_snapshot`` -- what the context window is
+ * spent ON, by instruction source.
+ *
+ * Distinct from {@link ContextState}, which is how FULL the window is.  The
+ * TUI keeps them apart too (Ctrl+B against the ``context`` command) and the
+ * web rail showed only the second under a section labelled Budget.
+ */
+export interface BudgetState {
+  contextLimit?: number | null;
+  totalTokens?: number | null;
+  utilizationPercent?: number | null;
+  lockedTokens?: number | null;
+  gcEligibleTokens?: number | null;
+  /** Keyed by source name: ``system``, ``plugin``, ``enrichment``, ... */
+  entries: Record<string, BudgetEntry>;
+}
+
 export interface WorkspaceInfo {
   name: string;
   configured: boolean;

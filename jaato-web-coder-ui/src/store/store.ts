@@ -41,6 +41,7 @@ import type {
   Agent,
   ConfigStatus,
   ConnectionPhase,
+  BudgetState,
   ContextState,
   InitProgress,
   OutputBlock,
@@ -153,6 +154,10 @@ export interface JaatoState {
 
   plan: Record<string, PlanState>;
   context: Record<string, ContextState>;
+  /** What the window is spent ON, by instruction source (see BudgetState). */
+  budget: Record<string, BudgetState>;
+  /** Budget source layers whose children are showing — the TUI panel's drill-down. */
+  budgetExpanded: string[];
   commands: CommandSpec[];
   workspaceFiles: Record<string, string>;
   /**
@@ -251,6 +256,8 @@ export interface JaatoState {
   /** Add (``+1``, before a silent request) or give back (``-1``, when it failed to send) one silent reply. */
   setSessionListSilent: (delta: 1 | -1) => void;
   setHistoryMode: (mode: JaatoState["historyMode"]) => void;
+  /** Show or hide one budget source's children. */
+  toggleBudgetSource: (source: string) => void;
   toggleWorkspaceHidden: (entryId: string) => void;
   toggleWorkspaceShowHidden: () => void;
   setWorkspaceNotice: (n: JaatoState["workspaceNotice"]) => void;
@@ -287,6 +294,8 @@ const emptySessionState = () => ({
   postAuth: null as PendingPostAuthSetup | null,
   plan: {} as Record<string, PlanState>,
   context: {} as Record<string, ContextState>,
+  budget: {} as Record<string, BudgetState>,
+  budgetExpanded: [] as string[],
   workspaceFiles: {} as Record<string, string>,
   workspaceHidden: [] as string[],
   workspaceShowHidden: false,
@@ -738,6 +747,33 @@ export function reduce(s: JaatoState, raw: JaatoEvent): JaatoState {
       };
       break;
     }
+    /**
+     * ``InstructionBudgetEvent`` -- what the context window is spent ON.
+     *
+     * Read by the rail's Budget section.  The daemon's snapshot is taken
+     * verbatim rather than reshaped: it is one dict, several clients read
+     * it, and a client-side flattening is how two readers start disagreeing
+     * about what a source layer costs.  A snapshot that carries no entries
+     * is ignored, because replacing a populated breakdown with an empty one
+     * would blank the panel mid-turn.
+     */
+    case EventTypeValue.INSTRUCTION_BUDGET_UPDATED: {
+      const snap = ev.budget_snapshot as Record<string, unknown> | undefined;
+      const entries = snap?.entries as BudgetState["entries"] | undefined;
+      if (!snap || !entries || Object.keys(entries).length === 0) break;
+      s.budget = {
+        ...s.budget,
+        [agentOf(ev)]: {
+          contextLimit: (snap.context_limit as number | null | undefined) ?? null,
+          totalTokens: (snap.total_tokens as number | null | undefined) ?? null,
+          utilizationPercent: (snap.utilization_percent as number | null | undefined) ?? null,
+          lockedTokens: (snap.locked_tokens as number | null | undefined) ?? null,
+          gcEligibleTokens: (snap.gc_eligible_tokens as number | null | undefined) ?? null,
+          entries,
+        },
+      };
+      break;
+    }
     case EventTypeValue.TURN_COMPLETED: {
       const id = agentOf(ev);
       const prev = s.context[id] ?? { usage: {} };
@@ -1017,6 +1053,11 @@ export const useJaato = create<JaatoState>()((set, get) => ({
   })),
   setSessionListSilent: (delta) => set((st) => ({ sessionListSilent: Math.max(0, st.sessionListSilent + delta) })),
   setHistoryMode: (mode) => set({ historyMode: mode }),
+  toggleBudgetSource: (source) => set((st) => ({
+    budgetExpanded: st.budgetExpanded.includes(source)
+      ? st.budgetExpanded.filter((k) => k !== source)
+      : [...st.budgetExpanded, source],
+  })),
   toggleWorkspaceHidden: (entryId) => set((st) => ({
     workspaceHidden: st.workspaceHidden.includes(entryId)
       ? st.workspaceHidden.filter((h) => h !== entryId)

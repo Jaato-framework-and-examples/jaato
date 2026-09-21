@@ -6618,6 +6618,65 @@ drag handle on its left edge (`components/layout/RailResizer.tsx`): a
 none` — and by arrow keys, clamped to 220–720px and remembered per browser
 (`ui.railWidth`, `localStorage`).
 
+### A Budget Panel That Showed Something Else
+
+Reported as *"this is not the same budget panel as the TUI"*, and it was
+not. The rail's **Budget** section rendered the TUI's `context` readout —
+how FULL the window is — under a heading that says Budget. What a budget
+answers is the other question, *what is the window spent ON*, and the TUI
+keeps the two apart: Ctrl+B opens the instruction budget, `context` is a
+command.
+
+**The data was on the wire the whole time.** `InstructionBudgetEvent`
+carries `InstructionBudget.snapshot()` — per-source tokens with each
+layer's GC policy — and the daemon emits it from six sites. Neither
+`INSTRUCTION_BUDGET_UPDATED` nor `budget_snapshot` appeared anywhere under
+the web client's `src/`. A typed event, declared in the TS SDK, read by
+nobody: the same shape as the plan reporter and the subagent hooks, one
+layer out — the mechanism complete except for the consumer.
+
+The section now renders both, budget first:
+
+| Heading | Question | Source |
+|---|---|---|
+| **Instructions** | what the window is spent on, by source layer, with each layer's GC policy and a drill-down into its children | `InstructionBudgetEvent` |
+| **Context** | how full the window is | `ContextUpdatedEvent` / `TurnCompletedEvent` — unchanged |
+
+Four rules, each attached to a way a readout starts lying:
+
+- **The snapshot is kept verbatim, not reshaped.** It is one dict and
+  several clients read it; a client-side flattening is how two readers
+  start disagreeing about what a source layer costs.
+- **An empty snapshot is IGNORED, not applied.** Replacing a populated
+  breakdown with an empty one blanks the panel mid-turn, which reads as
+  "nothing is using the window".
+- **The glyph is the daemon's.** `SourceEntry.to_dict()` ships
+  `indicator`; the local policy table is a fallback for a snapshot that
+  carries none, never an override — a client inventing its own mapping is
+  a second opinion about what `partial` means.
+- **A source the table does not name is still shown**, after the ones it
+  does. The snapshot decides WHAT exists; a hardcoded list deciding it
+  would hide a layer added later.
+- **A missing budget says which readout is missing.** The daemon reports
+  this only once a session has an `InstructionBudget`, and an unexplained
+  gap above a populated Context block is worse than a line saying so.
+
+Bars are drawn against `context_limit` when the daemon reported one, so a
+row reads as a share of the WINDOW rather than of the tracked total; with
+no limit they fall back to the largest row, which at least keeps them
+comparable with each other.
+
+Guard: `components/panels/BudgetPanel.test.tsx`. Five of its seven cases
+fail with the store handler removed and the two that do not are the
+Context-side controls; the empty-snapshot case fails on its own reversion
+(dropping the `length === 0` clause), which is what makes it a rule rather
+than a comment.
+
+Not done here: `BudgetRungFiredEvent` (#1069, the degrade ladder) is also
+unread by this client and is also arguably "budget" — but it is an
+episodic notification rather than a standing readout, so where it belongs
+is a separate question from this one.
+
 ### A Subagent Nobody Could See (#1179)
 
 `spawn_subagent` succeeded, the agent said *"Subagent spawned (id:
