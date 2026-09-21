@@ -6737,7 +6737,12 @@ the default path nothing emitted one.
 **The web client was not at fault**, which is what located the defect:
 `store.ts` handles `AGENT_CREATED` fully, and `ensureAgent()` is a second
 chance invoked from `AGENT_OUTPUT`, so a tab would appear if *either*
-event arrived. Neither did.
+event arrived. Neither did. There is even an e2e case — *"subagents get
+their own tab"* — that was green throughout, and this time for a good
+reason rather than the usual one: the mock emits `agent.created` in the
+DAEMON's shape, so the test was correct and the client it tested was
+correct. What no web test can reach is the daemon's runner path, which is
+where the event was not being produced.
 
 `subagent` is `PLUGIN_TIER = "runner"`, so the plugin the model drives
 lives in the runner process, and `SubagentPlugin._ui_hooks` is the slot
