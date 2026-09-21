@@ -6817,6 +6817,104 @@ Guard: `server/tests/test_a_subagent_nobody_could_see.py`, five reversions.
 It asserts the plugin's slot rather than the session's, because filling the
 session's is precisely what the broken tree did.
 
+### A Policy the Enforcer Did Not Hold
+
+Reported as *"the permission was to become a button, and now I do not even
+see it"*: the status bar's `permissions ask` segment, absent entirely. It
+is gated on having been **told** the policy (`{permStatus && ...}`), and
+the daemon had never told that client. Driving a real daemon over IPC found
+three facts, of which the report is only the first:
+
+| | measured on a live daemon |
+|---|---|
+| **A** | `session.new` → `PERMISSION_STATUS ('ask', None)` |
+| **B** | `session.attach` → **nothing at all** |
+| **C** | after `permissions default deny`, the command's own answer says `deny (session override, was: ask)` and the `PermissionStatusEvent` beside it says **`ask`** |
+
+**B is the reported symptom.** `emit_current_state` is the one door for
+*tell a client arriving mid-session what the state is* — it replays the
+agents, the conversation, the statuses, the instruction budget, the
+subagents and the tool-id registry — and the policy was not among them. So a
+client that ATTACHED rather than created (a reconnect, a session switch, a
+resume from the picker) never learned it, and the web client resets that
+field on attach, so the segment vanished and did not come back.
+
+**C is worse, and it is why this is not a one-line emit.** There are two
+`PermissionPlugin` objects on a runner-served session — the default — and
+only one of them decides anything. The daemon builds its own at
+`initialize()` and seeds it from the profile; the RUNNER's is the plugin
+`check_permission` consults and the one a `permissions` command mutates.
+`emit_permission_status` read the daemon's, so the value was true until
+somebody changed the policy and wrong from then on. Emitting *that* on
+attach would have made a stale fact arrive more reliably — the defect
+wearing the fix as a disguise.
+
+The segment is a **control** since the plate landed: it marks which default
+is in force and offers Suspend or Resume from this value. A control whose
+readout disagrees with the thing it controls is worse than one that shows
+nothing — the argument `test_envelope_carries_gc` (#1133) makes about a GC
+strategy displayed and never run.
+
+So the runner is asked — `session.get_permission_status`, a **control-lane**
+verb because an attach can land mid-turn and must not queue behind it — and
+**a failed ask reports nothing**. Falling back to the daemon's copy is
+reading the stale value this exists to stop reading, and the client then
+keeps what it last knew rather than being handed a new claim. The fallback
+applies only where there is no runner at all — the embedded client,
+standalone WS, the legacy daemon-local path — and there the daemon's plugin
+IS the enforcer, so it is the right answer rather than a tolerated one. A
+runner session whose runtime carries no permission plugin is likewise
+**refused, not defaulted**: `ask` invented there is the same lie one process
+over.
+
+Measured after the fix, same daemon, same probe:
+
+```
+A. create                         -> [('ask',  None)]
+B. attach (was: nothing)          -> [('ask',  None)]
+C. after 'default deny' (was ask) -> [('deny', None)]
+D. attach again                   -> [('deny', None)]
+E. after 'suspend --turn'         -> [('deny', 'turn')]
+```
+
+**The mock was right and the daemon was not**, which inverts this tree's
+usual failure. Forty-three e2e tests passed throughout because
+`mock/daemon.ts` emitted `permission.status` on attach — the shape the
+daemon was *supposed* to have — so the suite was certifying an agreement
+that only one side kept. What it genuinely could not see is the loop: the
+mock advertised `permissions status` as a command and handled none, so no
+test could ask whether clicking a default in the plate changes what the bar
+reads. It applies the verb and re-emits now, and one case asserts the round
+trip (verified to fail with that re-emit removed).
+
+**Paid for at the ratchet.** `_dispatch_method` is baselined at the top of
+the complexity table and a baselined function may not grow, so the
+argument-free session READS — `get_auth_info`, `get_user_commands` and the
+new one — fold into `_SESSION_READS` and one `_dispatch_session_read`
+branch. Each still says what it answers, beside its handler name; the table
+maps to NAMES because these are instance methods and the table is a class
+attribute, and the names are literals in that file, so nothing a peer sends
+can steer the lookup. 54 → **53**. `test_rpc_lane_classification` reads the
+new table alongside the two routes it already read, so the served set stays
+derived from the tree rather than restated.
+
+**NOT closed here, and stated rather than implied:** an `a` / `t` / `i`
+answer to a prompt re-emits only on the daemon-local path
+(`on_permission_resolved`), which is dead on a runner-served session. The
+runner applies the suspension asynchronously *after* `resolve_response`
+hands the answer over, so a re-emit at that seam would race the change it is
+reporting — and reporting the pre-change value is this section's own defect
+in a third place. The honest fix is for the runner-side plugin to announce
+its own policy change, which is a notification frame rather than a pull, and
+its own change.
+
+Guard: `server/tests/test_a_policy_the_enforcer_did_not_hold.py`, four
+reversions. The `emit_current_state` case is an **AST walk of the call
+sites** rather than a drive of the method: it reaches a dozen subsystems, so
+a test that stubbed enough of a server to run it would be asserting the
+stubs — and what the defect was is a missing call site, which is exactly
+what a walk of the call sites can answer.
+
 ### A File the Browser Could Not Put in the Workspace
 
 The premium `<jaato-task>` component (and the knowledge-manager client

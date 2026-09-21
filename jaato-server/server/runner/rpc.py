@@ -1007,23 +1007,15 @@ class RunnerRPC:
             # drain it.  args = ``{}``.  Returns ``{"text": str | None}``.
             return self._handle_session_try_drain_pending_user()
 
-        if env.method == "session.get_auth_info":
-            # Phase 3 §7c step 6.6.4.5c.1: read provider-credential
-            # source string from the runner-side session.  Replaces
-            # the daemon-side ``self._jaato.auth_info`` reach.
-            # args = ``{}``.  Returns ``{"auth_info": str}``.
-            return self._handle_session_get_auth_info()
-
-        if env.method == "session.get_user_commands":
-            # Phase 3 §7c step 6.6.4.5c.2: read the runner-side
-            # session's user-command catalog.  Replaces 2 daemon-side
-            # reaches into ``self._jaato.get_user_commands()``.
-            # args = ``{}``.  Returns
-            # ``{"commands": {<name>: <UserCommand-as-dict>, ...}}``.
-            # Wire shape per the 5c.2 audit decision: dict-shape-only
-            # (Path B) — UserCommand + CommandParameter are NamedTuples
-            # with primitive fields, no callables to strip.
-            return self._handle_session_get_user_commands()
+        # The argument-free session READS.  One branch rather than one
+        # per verb: this chain is baselined at the top of the complexity
+        # ratchet, so a verb added here has to pay for itself, and a
+        # family whose every member is "``{}`` in, a dict out" is the
+        # one that folds without losing anything.  Each still says what
+        # it answers -- in ``_SESSION_READS``, beside its handler.
+        read = self._dispatch_session_read(env.method)
+        if read is not None:
+            return read
 
         if env.method == "session.execute_user_command":
             # Phase 3 §7c step 6.6.4.5c.3: invoke a user command on
@@ -5119,6 +5111,50 @@ class RunnerRPC:
             }
         return True, {"text": text}
 
+    #: The argument-free session reads, ``{}`` in and a dict out.
+    #: Dispatched as one branch by :meth:`_dispatch_session_read`.
+    _SESSION_READS = {
+        # Phase 3 §7c step 6.6.4.5c.1: the provider-credential source
+        # string.  Replaces the daemon-side ``self._jaato.auth_info``
+        # reach.  Returns ``{"auth_info": str}``.
+        "session.get_auth_info": "_handle_session_get_auth_info",
+        # The policy AS THE ENFORCER HOLDS IT.  The daemon keeps a
+        # ``PermissionPlugin`` of its own, but on a runner-served
+        # session -- the default -- the runner-side one is the plugin in
+        # the loop, and the one a ``permissions`` command mutates, so
+        # reading the daemon's copy reported ``ask`` to every client
+        # while the enforcer denied.  Returns ``{"status": {...}}``.
+        "session.get_permission_status": "_handle_session_get_permission_status",
+        # Phase 3 §7c step 6.6.4.5c.2: the user-command catalog.
+        # Replaces 2 daemon-side reaches into
+        # ``self._jaato.get_user_commands()``.  Returns ``{"commands":
+        # {<name>: <UserCommand-as-dict>, ...}}`` -- dict-shape-only per
+        # the 5c.2 audit decision (Path B): UserCommand and
+        # CommandParameter are NamedTuples with primitive fields, so
+        # there are no callables to strip.
+        "session.get_user_commands": "_handle_session_get_user_commands",
+    }
+
+    def _dispatch_session_read(
+        self, method: str,
+    ) -> "Optional[tuple[bool, Any]]":
+        """Answer one of the argument-free session reads, or ``None``.
+
+        ``None`` means "not one of mine", which the caller reads as
+        *keep going down the chain*.  It can never collide with a real
+        answer: every handler returns the ``(ok, payload)`` tuple the
+        dispatch contract requires.
+
+        The table maps to handler NAMES rather than to functions because
+        these are instance methods and the table is a class attribute;
+        the names are literals in this file, so nothing a peer sends can
+        steer the lookup -- ``method`` only ever selects a key.
+        """
+        handler_name = self._SESSION_READS.get(method)
+        if handler_name is None:
+            return None
+        return getattr(self, handler_name)()
+
     def _handle_session_get_auth_info(self) -> "tuple[bool, Any]":
         """Read the credential-source description string from the
         runner-side session's provider.
@@ -5165,6 +5201,70 @@ class RunnerRPC:
                 "stage": "call",
             }
         return True, {"auth_info": str(auth_info or "")}
+
+    def _handle_session_get_permission_status(self) -> "tuple[bool, Any]":
+        """Read the permission policy from the plugin that enforces it.
+
+        The daemon builds a ``PermissionPlugin`` of its own at
+        ``initialize()`` and seeds it from the profile, so its answer is
+        true exactly until something changes the policy -- and nothing
+        changes *that* one.  ``permissions default deny`` is dispatched
+        to the runner-side session, which holds the plugin
+        ``check_permission`` actually consults, so after it the daemon
+        reported ``ask`` while the enforcer denied.  Measured on a live
+        daemon: ``permissions show`` said ``deny (session override, was:
+        ask)`` and the ``PermissionStatusEvent`` beside it said ``ask``.
+
+        Returns:
+            ``(True, {"status": {...}})`` with the plugin's own
+            ``get_permission_status()`` dict --
+            ``effective_default`` / ``suspension_scope`` /
+            ``is_suspended``.
+
+            ``(False, {"error": ..., "stage": ...})`` on
+            ``no_host`` / ``no_session`` / ``no_plugin`` / ``call``.
+
+        ``no_plugin`` is a real answer rather than a synthesised
+        ``ask``: a session whose runtime carries no permission plugin
+        has no policy to report, and inventing the framework default
+        for it is how a readout starts disagreeing with its enforcer in
+        a second place.
+        """
+        ready, err, session = self._require_ready_session()
+        if not ready:
+            return err
+        plugin = getattr(
+            getattr(session, "_runtime", None), "permission_plugin", None,
+        )
+        getter = getattr(plugin, "get_permission_status", None)
+        if not callable(getter):
+            return False, {
+                "error": (
+                    "session.get_permission_status: the runner session's "
+                    "runtime carries no permission plugin"
+                ),
+                "stage": "no_plugin",
+            }
+        try:
+            status = getter()
+        except Exception as exc:  # noqa: BLE001 — boundary
+            return False, {
+                "error": (
+                    f"session.get_permission_status: "
+                    f"get_permission_status raised "
+                    f"{type(exc).__name__}: {exc}"
+                ),
+                "stage": "call",
+            }
+        if not isinstance(status, dict):
+            return False, {
+                "error": (
+                    f"session.get_permission_status: expected a dict, got "
+                    f"{type(status).__name__}"
+                ),
+                "stage": "call",
+            }
+        return True, {"status": status}
 
     def _handle_session_get_user_commands(self) -> "tuple[bool, Any]":
         """Read the runner-side session's user-command catalog.

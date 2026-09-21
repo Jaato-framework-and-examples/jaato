@@ -24,6 +24,7 @@ from server.runner.rpc import (
     MAIN_THREAD_METHODS,
     NAMED_METHOD_HANDLERS,
     WORK_LANE_METHODS,
+    RunnerRPC,
 )
 
 _RPC_SOURCE = Path(__file__).resolve().parents[1] / "rpc.py"
@@ -32,14 +33,17 @@ _RPC_SOURCE = Path(__file__).resolve().parents[1] / "rpc.py"
 def _served_methods() -> set[str]:
     """Every method string the dispatcher serves.
 
-    Two routes: the flat ``if env.method == ...`` chain, read from the
-    source, and the table-driven tail (``NAMED_METHOD_HANDLERS``), read from
-    the module -- a verb added to the table is served exactly as one added
-    to the chain, and must be classified exactly the same way.
+    Three routes: the flat ``if env.method == ...`` chain, read from the
+    source, and two tables read from the module -- the named-method tail
+    (``NAMED_METHOD_HANDLERS``) and the argument-free session reads
+    (``RunnerRPC._SESSION_READS``).  A verb added to either table is
+    served exactly as one added to the chain, and must be classified
+    exactly the same way; reading them rather than restating them is what
+    keeps this set derived from the tree.
     """
     text = _RPC_SOURCE.read_text(encoding="utf-8")
     chain = set(re.findall(r'env\.method == "([a-z_.]+)"', text))
-    return chain | set(NAMED_METHOD_HANDLERS)
+    return chain | set(NAMED_METHOD_HANDLERS) | set(RunnerRPC._SESSION_READS)
 
 
 def test_the_dispatcher_serves_something():
@@ -110,6 +114,7 @@ _CONTROL_PLANE = frozenset({
     "session.end",
     "session.get_all_session_state",
     "session.get_auth_info",
+    "session.get_permission_status",
     "session.get_budget_exhausted",
     "session.get_budget_usage",
     "session.get_context_limit",

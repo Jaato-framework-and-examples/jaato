@@ -2373,6 +2373,49 @@ class RunnerRPCClient:
             timeout=timeout,
         )
 
+    async def session_get_permission_status(
+        self, *, timeout: Optional[float] = 5.0,
+    ) -> "Dict[str, Any]":
+        """Read the permission policy from the plugin that enforces it.
+
+        The daemon holds a ``PermissionPlugin`` of its own, seeded from
+        the profile at ``initialize()``.  On a runner-served session --
+        the default -- the runner-side plugin is the one
+        ``check_permission`` consults and the one a ``permissions``
+        command mutates, so the daemon's copy is true until somebody
+        changes the policy and wrong from then on.
+
+        Returns:
+            The plugin's own status dict: ``effective_default``
+            ("allow" | "deny" | "ask"), ``suspension_scope`` ("turn" |
+            "idle" | "session" | None) and ``is_suspended``.
+
+        Raises:
+            RunnerCallError on transport failure or runner-side
+                exception (no_host / no_session / no_plugin / call).
+                Callers report NOTHING rather than falling back to the
+                daemon's copy: that copy is the stale one this RPC
+                exists to stop reading.
+        """
+        result = await self._call_named(
+            "session.get_permission_status", {}, timeout=timeout,
+        )
+        status = result.get("status")
+        if not isinstance(status, dict):
+            raise RunnerCallError(
+                f"session_get_permission_status: expected dict for "
+                f"'status', got {type(status).__name__}"
+            )
+        return status
+
+    def session_get_permission_status_threadsafe(
+        self, *, timeout: Optional[float] = 5.0,
+    ) -> "Dict[str, Any]":
+        return self._run_threadsafe(
+            self.session_get_permission_status(timeout=timeout),
+            timeout=timeout,
+        )
+
     async def session_get_user_commands(
         self, *, timeout: Optional[float] = 10.0,
     ) -> "Dict[str, Any]":

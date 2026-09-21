@@ -2395,6 +2395,19 @@ class JaatoServer:
         # tracked in _agents (since they're managed by SubagentPlugin._active_sessions)
         self._emit_subagent_state(emit)
 
+        # Emit the permission policy.  ``session.new`` announced it and
+        # ``session.attach`` did not, so a client that ATTACHED -- a
+        # reconnect, a session switch, a resume from the picker -- never
+        # learned it, and the web client's status-bar segment (which is
+        # gated on having been told) simply vanished and did not come
+        # back.  This method is the one door for "tell a client arriving
+        # mid-session what the state is", beside the agents, the history,
+        # the statuses and the budget, so it is where the policy belongs
+        # rather than in the attach handler alone.
+        permission_status = self.permission_status_event()
+        if permission_status is not None:
+            emit(permission_status)
+
         # Emit tool ID registry so clients can resolve hash IDs
         self._emit_tool_id_registry_from_schemas(emit_fn=emit)
 
@@ -4969,15 +4982,71 @@ class JaatoServer:
             on_resolved=on_permission_resolved,
         )
 
-    def emit_permission_status(self) -> None:
-        """Emit current permission status for client toolbar updates."""
+    def permission_status_event(self) -> Optional[PermissionStatusEvent]:
+        """The policy AS THE ENFORCER HOLDS IT, or ``None``.
+
+        There are two permission plugins on a runner-served session --
+        the default -- and only one of them decides anything.  The daemon
+        builds its own at ``initialize()`` and seeds it from the profile;
+        the RUNNER's is the plugin ``check_permission`` consults and the
+        one ``permissions default deny`` mutates.  Reading the daemon's
+        copy is therefore true until somebody changes the policy and
+        wrong from then on.  Measured on a live daemon: the command's own
+        answer said ``Default Policy: deny (session override, was: ask)``
+        and the ``PermissionStatusEvent`` beside it said ``ask``.
+
+        That matters more than a cosmetic drift, because the status bar's
+        segment is a CONTROL: it marks which default is in force and
+        offers Suspend or Resume from this value.  A control whose
+        readout disagrees with the thing it controls is worse than one
+        that shows nothing.
+
+        So the runner is asked, and **a failed ask reports nothing**.
+        Falling back to the daemon's copy would re-introduce exactly the
+        stale value this exists to stop reading; the client then keeps
+        whatever it last knew, which is no worse than before and is not a
+        new claim.  The fallback applies only where there is no runner at
+        all -- the embedded client, standalone WS, the legacy daemon-
+        local path -- and there the daemon's plugin *is* the enforcer.
+        """
+        # ``getattr``, not an attribute read: this is reached from the
+        # permission-resolved hook, which a test drives on a server built
+        # via ``JaatoServer.__new__`` -- the same forward-compat idiom the
+        # prompt-operator teardown documents.  No runner is also the one
+        # state in which the daemon's own plugin IS the enforcer, so it
+        # falls through to exactly the right answer.
+        rpc = getattr(self, "_runner_rpc", None)
+        if rpc is not None:
+            forwarder = getattr(
+                rpc, "session_get_permission_status_threadsafe", None,
+            )
+            if callable(forwarder):
+                try:
+                    status = forwarder(timeout=2.0)
+                except Exception as exc:  # noqa: BLE001 — best-effort
+                    logger.debug(
+                        "permission_status_event: get_permission_status "
+                        "RPC failed (%s) — reporting no status rather "
+                        "than the daemon's stale copy", exc,
+                    )
+                    return None
+                return PermissionStatusEvent(
+                    effective_default=status.get("effective_default", "ask"),
+                    suspension_scope=status.get("suspension_scope"),
+                )
         if not self.permission_plugin:
-            return
+            return None
         status = self.permission_plugin.get_permission_status()
-        self.emit(PermissionStatusEvent(
+        return PermissionStatusEvent(
             effective_default=status.get("effective_default", "ask"),
             suspension_scope=status.get("suspension_scope"),
-        ))
+        )
+
+    def emit_permission_status(self) -> None:
+        """Broadcast the current permission status to every client."""
+        event = self.permission_status_event()
+        if event is not None:
+            self.emit(event)
 
     def _setup_clarification_hooks(self) -> None:
         """Set up clarification lifecycle hooks."""

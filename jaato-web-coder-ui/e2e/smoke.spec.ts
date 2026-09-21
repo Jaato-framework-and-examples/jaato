@@ -124,6 +124,31 @@ test("the status bar shows the permission default policy the daemon reports", as
   await expect(page.getByTestId("permission-status")).toHaveText(/permissions\s+ask/);
 });
 
+test("the permissions plate changes the policy and the readout follows it", async ({ page }) => {
+  // The segment is a CONTROL, so the loop is the thing worth asserting:
+  // click a default, the daemon applies it and re-emits its status, the
+  // bar reads the new one back.  It was broken in the daemon for as long
+  // as the segment existed -- it read a copy of the policy that nothing
+  // updated, so `permissions default deny` left the bar saying `ask` --
+  // and no test here could see it, because the mock was answering in the
+  // shape the daemon was SUPPOSED to and the daemon was not.
+  await openSession(page);
+  await expect(page.getByTestId("permission-status")).toHaveText(/permissions\s+ask/);
+
+  await page.getByTestId("permission-status").click();
+  const plate = page.getByRole("dialog", { name: /permission/i });
+  await expect(plate).toBeVisible();
+  await plate.getByRole("button", { name: /^deny$/i }).click();
+  await expect(page.getByTestId("permission-status")).toHaveText(/permissions\s+deny/);
+
+  // Suspension outranks the default in the rendering because it does in
+  // the daemon: while prompting is suspended no policy is consulted.
+  await page.getByTestId("permission-status").click();
+  await page.getByRole("dialog", { name: /permission/i })
+    .getByRole("button", { name: /until idle/i }).click();
+  await expect(page.getByTestId("permission-status")).toHaveText(/allow\s+\(idle\)/);
+});
+
 test("`session list` prints the daemon's listing; `session attach` completes ids and replays the conversation", async ({ page }) => {
   await openSession(page);
   await composer(page).fill("session list");
