@@ -71,8 +71,8 @@ def _make_sm() -> SessionManager:
     sm._lifetime_watchdog = None
     sm._lifetime_watchdog_stop = threading.Event()
     sm._lifetime_sweep_interval = 15.0
-    sm._session_index = MagicMock()
-    sm._session_index.identity.return_value = None
+    sm._session_workspace_index = MagicMock()
+    sm._session_workspace_index.identity.return_value = None
     sm._emit_to_session = MagicMock()
     return sm
 
@@ -255,7 +255,7 @@ class TestIdentityOnTheSessionManager:
 
     def test_a_cold_session_answers_from_the_index_and_is_stale(self):
         sm = _make_sm()
-        sm._session_index.identity.return_value = RunnerIdentity(
+        sm._session_workspace_index.identity.return_value = RunnerIdentity(
             runner_pid=88).to_dict()
         found = sm.get_runner_identity("gone")
         assert found["runner_pid"] == 88
@@ -276,13 +276,13 @@ class TestIdentityOnTheSessionManager:
         ident = sm._record_runner_identity("s1", server, cascade_driver_id="c")
         assert ident.runner_pid == 909
         assert sm._sessions["s1"].runner_identity.runner_pid == 909
-        sm._session_index.record_identity.assert_called_once()
+        sm._session_workspace_index.record_identity.assert_called_once()
 
     def test_an_index_write_failure_does_not_break_the_spawn(self):
         """Diagnostics never fail a spawn that already succeeded."""
         sm = _make_sm()
         sm._sessions["s1"] = _make_session("s1")
-        sm._session_index.record_identity.side_effect = OSError("read-only")
+        sm._session_workspace_index.record_identity.side_effect = OSError("read-only")
         server = MagicMock()
         server._spawned_runner.pid = 5
         server._spawned_runner.profile_name = ""

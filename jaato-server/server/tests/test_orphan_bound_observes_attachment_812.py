@@ -202,7 +202,7 @@ def _sm() -> SessionManager:
     sm._lifetime_watchdog = None
     sm._lifetime_watchdog_stop = threading.Event()
     sm._lifetime_sweep_interval = 15.0
-    sm._session_index = MagicMock()
+    sm._session_workspace_index = MagicMock()
     sm._emit_to_session = MagicMock()
     return sm
 

@@ -207,8 +207,7 @@ def _sm(*, armed: bool = True) -> SessionManager:
     # the server's real fields; a MagicMock server cannot satisfy it and none
     # of it bears on the unload decision under test.
     sm._build_session_info_event = MagicMock()
-    sm._session_index = MagicMock()
-    sm._session_index.identity.return_value = None
+    sm._session_workspace_index.identity.return_value = None
     sm._emit_to_session = MagicMock()
     sm._emit_to_client = MagicMock()
     sm.unloaded = []
