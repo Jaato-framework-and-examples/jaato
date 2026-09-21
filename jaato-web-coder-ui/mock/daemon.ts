@@ -83,9 +83,17 @@ function finishStaging(c: Client): void {
   if (staged.length) send(c, { type: "workspace.files_changed", changes: staged.map((path) => ({ path, status: "created" })) });
 }
 
+/**
+ * Sessions ``session.delete`` has removed.  The real daemon deletes the
+ * RECORD, so the next listing does not carry it -- a mock that answered the
+ * delete and went on listing the session would certify a client that never
+ * has to cope with the row going away.
+ */
+const deletedSessions = new Set<string>();
+
 /** What ``session.list`` answers: the daemon's free-form per-session dicts. */
 function sessionListing(c: Client): Record<string, unknown>[] {
-  return [
+  return ([
     // `awaiting` / `awaiting_since` are protocol 1.17: the one way a client
     // working in session A learns that B is blocked on a person.  Sent here
     // in the daemon's own spelling, because a mock that speaks the client's
@@ -93,7 +101,7 @@ function sessionListing(c: Client): Record<string, unknown>[] {
     { id: "20260916_090000", name: "", description: "fix the budget panel", model_provider: "anthropic", model_name: "claude-sonnet-4", is_loaded: true, is_current: c.sessionId === "20260916_090000", client_count: 1, turn_count: 3, workspace_path: "/srv/workspaces/project-a", awaiting: "permission", awaiting_since: new Date(Date.now() - 4 * 60_000).toISOString() },
     { id: "20260915_170000", name: "old notes", description: "", model_provider: "", model_name: "", is_loaded: false, is_current: false, client_count: 0, turn_count: 1, workspace_path: "/srv/workspaces/project-b" },
     ...(c.sessionId && !c.sessionId.startsWith("2026") ? [{ id: c.sessionId, name: "mock session", description: "", model_provider: "mock", model_name: "mock-1", is_loaded: true, is_current: true, client_count: 1, turn_count: 0, workspace_path: "/work" }] : []),
-  ];
+  ] as Record<string, unknown>[]).filter((s) => !deletedSessions.has(String(s.id)));
 }
 
 /** The conversation ``history.request`` replays for the sessions above. */
@@ -361,9 +369,14 @@ wss.on("connection", (ws, req) => {
           // The daemon answers with a system.message naming the outcome; a
           // loaded session's attached clients also hear "Session deleted:".
           const target = String(args[0] ?? "");
+          const known = sessionListing(c).some((s) => s.id === target);
           if (target && target === c.sessionId) {
             send(c, { type: "system.message", message: "Session deleted: mock session", style: "warning" });
             c.sessionId = null;
+            deletedSessions.add(target);
+            send(c, { type: "system.message", message: `Session '${target}' deleted.`, style: "info" });
+          } else if (known) {
+            deletedSessions.add(target);
             send(c, { type: "system.message", message: `Session '${target}' deleted.`, style: "info" });
           } else {
             send(c, { type: "system.message", message: `Session '${target}' not found.`, style: "warning" });

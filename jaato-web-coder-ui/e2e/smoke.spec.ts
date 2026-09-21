@@ -774,3 +774,33 @@ test("a session blocked on a person says so in the rail, from another session", 
   // And the header counts what needs a person ahead of what carries a note.
   await expect(page.getByText("1 waiting on you")).toBeVisible();
 });
+
+test("deleting a session forgets the note written about it", async ({ page }) => {
+  // The reported state: the rail offered `✎ …` under a session its owner
+  // had deleted.  A note is keyed by session id and stored where the daemon
+  // cannot see it, so nothing removed one when its session went away.
+  await openSession(page);
+  await page.getByRole("button", { name: "Toggle your sessions and their notes" }).click();
+  const rail = page.getByRole("region", { name: "Sessions" });
+
+  const row = rail.getByRole("button", { name: "Edit your note about session 20260915_170000" });
+  await row.click();
+  await rail.getByRole("textbox", { name: "Note about session 20260915_170000" }).fill("ask about the grace period");
+  await expect(rail.getByText("✎ ask about the grace period")).toBeVisible();
+
+  // The OTHER delete route -- the one that had no forget at all.
+  await composer(page).fill("session delete 20260915_170000");
+  await composer(page).press("Enter");
+
+  // The row goes because the daemon really removed the record, and the
+  // listing is re-asked; that is the refresh, not the forget.
+  await expect(rail.getByText("20260915_170000")).toHaveCount(0);
+
+  // The forget is asserted in the STORE, because the row disappearing takes
+  // the note's line with it whether or not anything forgot anything -- a
+  // first draft of this case passed with the forget deleted.  Without a BFF
+  // the store is this browser's ``localStorage``, which outlives the row.
+  await expect
+    .poll(() => page.evaluate(() => localStorage.getItem("jaato.web-coder.notes.v1") ?? ""))
+    .not.toContain("grace period");
+});

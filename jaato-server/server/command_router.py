@@ -130,6 +130,31 @@ class CommandRouter:
         self._event_sink = event_sink
         self._daemon_plugins = daemon_plugins
 
+        # ``SessionInfoEvent.sessions`` is the same listing ``session.list``
+        # renders, and it was built unscoped -- so a client the #1113
+        # boundary shows 2 sessions was handed every session on the daemon
+        # the moment it attached.  The manager holds an event callback
+        # rather than an ``EventSink`` and cannot ask a transport about a
+        # client, and a second copy of the rule living there is how the two
+        # answers come to differ again.  This is the one place holding both
+        # halves, so the router lends the manager its own method.
+        #
+        # Tolerated when absent, the shape ``client_peer`` and
+        # ``client_visible_workspaces`` already have for a sink predating a
+        # method: this constructor is handed arbitrary objects and must not
+        # raise at one that is not a full ``SessionManager``.  Announced,
+        # never silent -- without it the snapshot is unscoped, which is the
+        # defect this exists to close.
+        lend = getattr(session_manager, "set_visible_sessions_resolver", None)
+        if lend is None:
+            logger.warning(
+                "session manager %s cannot scope its state snapshot: "
+                "SessionInfoEvent.sessions will list every session on this "
+                "daemon, not the ones each client may see",
+                type(session_manager).__name__)
+        else:
+            lend(self._sessions_visible_to)
+
         # Pending workspace mismatch requests: client_id -> {request_id, session_id, ...}
         self._pending_workspace_mismatch: dict = {}
 
@@ -1211,11 +1236,26 @@ class CommandRouter:
         return [s for s in sessions
                 if (user is not None and s.created_by == user) or _inside(s.workspace_path)]
 
-    def _refuse_foreign_session(self, client_id: str, target_session_id: str) -> bool:
-        """Refuse ``session.attach`` to a session outside the caller's boundary.
+    def _refuse_foreign_session(
+        self,
+        client_id: str,
+        target_session_id: str,
+        verb: str = "session.attach",
+    ) -> bool:
+        """Refuse *verb* on a session outside the caller's boundary.
 
-        Returns True (and has answered the client) when the attach must not
-        proceed.  Unscoped transports never refuse here.
+        Returns True (and has answered the client) when the command must
+        not proceed.  Unscoped transports never refuse here.
+
+        ``session.delete`` takes the same gate as ``session.attach``,
+        which it did not before: #1113 wrote the boundary in terms of the
+        two verbs that READ (``session.list`` renders the set,
+        ``session.attach`` admits only members of it) and the verb that
+        DESTROYS was simply not among them.  It mattered less while the
+        snapshot leak handed every id to every client and cold deletes
+        silently did nothing; with both fixed, an id is the only thing
+        standing between one user and another user's session record, and
+        an id here is a second-granularity timestamp.
         """
         from server.event_sink import client_visible_workspaces
         if client_visible_workspaces(self._event_sink, client_id) is None:
@@ -1225,12 +1265,12 @@ class CommandRouter:
             return False
         from jaato_sdk.events import ErrorEvent
         self._event_sink.send_event(client_id, ErrorEvent(
-            error=f"session.attach: {target_session_id} is not one of your sessions",
+            error=f"{verb}: {target_session_id} is not one of your sessions",
             error_type="SessionError",
             recoverable=True,
         ))
-        logger.info("session.attach: client=%s refused foreign session %s",
-                    client_id, target_session_id)
+        logger.info("%s: client=%s refused foreign session %s",
+                    verb, client_id, target_session_id)
         return True
 
     def _handle_session_list(self, client_id: str, session_id: str) -> None:
@@ -1824,6 +1864,9 @@ class CommandRouter:
             return
 
         session_id_to_delete = args[0]
+        if self._refuse_foreign_session(
+                client_id, session_id_to_delete, verb="session.delete"):
+            return
         if self._session_manager.delete_session(session_id_to_delete):
             self._event_sink.send_event(client_id, SystemMessageEvent(
                 message=f"Session '{session_id_to_delete}' deleted.",

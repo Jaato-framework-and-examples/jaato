@@ -6235,6 +6235,91 @@ confirms inline before sending.
 Stated cost, unchanged in kind: the session still runs as the daemon's uid,
 so this is an entitlement boundary at the verbs, not a filesystem one.
 
+### A Session You Deleted, and a Listing That Was Not Yours
+
+Reported from a deployed client, as one symptom: the web rail's Sessions
+section said **`1 of 169 noted`** collapsed and **`1 of 2 noted`** expanded,
+and the single "other" row was a session its owner had deleted — still
+listed, still carrying the note they had written about it. Two independent
+defects, one behind each number, and a third that only the first two were
+hiding.
+
+**The 2 that should have been 1: a cold delete landed nowhere.**
+`SessionManager.delete_session` reads `workspace_path` off the in-memory
+`Session` it pops. A session that is not LOADED has no in-memory object, so
+the field stayed `None`, `storage_dir` stayed `None`, and
+`FileSessionPlugin.delete`'s `storage_dir or self._storage_path` fell back
+to the plugin's own relative path instead of
+`<workspace>/.jaato/sessions/`. Measured against the real class: the record
+survived and the call returned `False`, so the daemon answered
+`Session '<id>' not found.` — and the session was back in the next listing.
+
+The daemon knew the workspace the whole time.
+`server/session_workspace_index.py` exists for exactly this and its own
+first paragraph says so — *"locating a COLD (unloaded) session's record
+requires knowing its workspace"* — and it was consulted here only to
+`forget` the entry, twenty lines BELOW the delete that needed it. An
+AMBIGUOUS id (one second-granularity timestamp, two workspaces) still
+resolves to `None` and still fails, deliberately: deleting the wrong
+session is unrecoverable, which is the index's own stated reason for
+refusing to guess.
+
+**The 169 that should have been 2: the snapshot bypassed the boundary.**
+`SessionInfoEvent.sessions` and `SessionListEvent.sessions` answer one
+question — which sessions are there — and disagreed.
+`_handle_session_list` renders `_sessions_visible_to(client_id)`; the state
+snapshot was built from `list_sessions()`, every session on the daemon. So
+the **wider** answer was the one every client received at attach and at
+create, each row naming another user's session id, workspace path,
+provider/model and its model-written description.
+
+`SessionManager` holds an event CALLBACK rather than an `EventSink` and
+cannot ask a transport about a client — the #1138 finding — so rather than
+grow a second copy of the rule there (two definitions of *may this client
+see this session* is the defect one layer down), it takes the router's own
+method as a resolver. `CommandRouter.__init__` is the one place holding
+both halves, and wires it in a line.
+
+| Property | Why |
+|---|---|
+| **scoped per RECIPIENT, not per event** | `_emit_session_info_to_attached` builds one snapshot per attached client, because a listing bounded by one recipient's entitlement must not decide what another is shown. It also withholds the snapshot from cascade observers, which is the point: a state snapshot of somebody else's session, scoped to nobody, is what this exists to stop sending |
+| **no client and no resolver both mean UNSCOPED** | IPC, an embedding process and every in-process caller keep the answer they always had |
+| **a resolver that RAISES sends none** | failing open on an entitlement decision is the defect; an empty listing costs a client its completions until the next `session.list` |
+
+**And the verb that destroys was outside the boundary.** #1113 wrote it in
+terms of the two verbs that READ (`session.list` renders the set,
+`session.attach` admits only members of it). `session.delete` took no gate
+at all. That mattered less while the snapshot handed every id to every
+client and cold deletes silently did nothing — with both fixed, an id is
+the only thing between one user and another user's record, and an id here
+is `YYYYMMDD_HHMMSS`. `_refuse_foreign_session` now takes the verb it is
+refusing for, so the two share one rule and one wording.
+
+**The note outlived the session, and pruning on absence is not the fix.**
+A note (§ *A Note the Model Never Sees*) is keyed by session id and stored
+where the daemon cannot see it, so nothing removed one when its session
+went away. The obvious repair — drop notes whose session is absent from the
+listing — is wrong, and *this very defect is the demonstration*: that
+listing is entitlement-scoped and it NARROWS (a workspace deselected, an
+identity not yet resolved, a daemon that answered 2 where the snapshot said
+169), so pruning on absence destroys the only copy of what you meant to do
+next because a workspace went momentarily out of view. **A note is
+forgotten when the daemon SAYS the session is gone, and at no other time.**
+
+`app/sessionDelete.ts` is that one place, because there were two routes and
+only one touched the note:
+
+| Route | Before | Now |
+|---|---|---|
+| `End session` on the exit plate | removed the note BEFORE the daemon was asked | deletes, waits, forgets on the answer |
+| `session delete <id>` in the composer | forgot nothing | the same verb |
+
+Removing it pre-emptively was wrong twice over: a delete the daemon now
+REFUSES would have taken the note and left the session, and the other route
+had no forget at all. `deleted` and `missing` both mean the session is gone
+and both forget; `refused` and `silent` change nothing, which is what makes
+those two the load-bearing cases in the guard.
+
 ### A Key Typed Once Per Workspace
 
 The web client's configure form asked for the provider's API key on every
@@ -6321,9 +6406,11 @@ runs.** A failed `PUT` while the client detaches anyway loses the note
 silently, which is the single outcome this feature cannot have — so a failure
 keeps the plate open with the reason, and the draft is never cleared on
 failure because what was typed is then the only copy left. `End session`
-forgets the note instead of stranding it, best-effort: the session is being
-deleted either way, and blocking the exit on a note nobody will read again
-trades the cheap failure for the expensive one.
+neither saves nor deletes here — a draft about a session being deleted has
+nowhere to go, and the stored note is forgotten once the daemon CONFIRMS the
+delete (§ *A Session You Deleted, and a Listing That Was Not Yours*). It used
+to be removed on the spot, which was wrong twice: it ran before the daemon was
+asked, and it left the other delete route with no forget at all.
 
 **The rail's Sessions section supersedes a Notes section.** `SessionScreen`
 shows its picker only when no session is held, and `session list` renders
