@@ -302,11 +302,11 @@ _OUTPUT_FORWARD_BROKEN = """            return
                 request_id=self._request_id,
                 event_type=self._rpc._NOTIF_AGENT_OUTPUT,"""
 
-_OUTPUT_DEMUX_FIXED = """                if event_type == "agent_output":
-                    hooks = server._get_ui_hooks()
+_OUTPUT_DEMUX_FIXED = """        if event_type == "agent_output":
+            hooks.on_agent_output(
 """
-_OUTPUT_DEMUX_BROKEN = """                if event_type == "agent_output_disabled":
-                    hooks = server._get_ui_hooks()
+_OUTPUT_DEMUX_BROKEN = """        if event_type == "agent_output_never_matches":
+            hooks.on_agent_output(
 """
 
 REVERSIONS = [
