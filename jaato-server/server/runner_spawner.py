@@ -29,6 +29,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
+from server.confinement_id import (
+    confinement_id_from_profile_name, session_tmpdir,
+)
+
 
 logger = logging.getLogger(__name__)
 
@@ -156,14 +160,14 @@ class RunnerSpawner:
         # same id (e.g., session-restore path).
         try:
             os.makedirs(
-                self._session_tmpdir(session_id),
+                self._session_tmpdir(session_id, profile_name),
                 exist_ok=True,
             )
         except OSError as exc:
             logger.warning(
                 "RunnerSpawner.spawn: failed to create session tmpdir %s "
                 "before fork: %s — runner may EACCES on tempfile probe",
-                self._session_tmpdir(session_id), exc,
+                self._session_tmpdir(session_id, profile_name), exc,
             )
 
         parent_sock, child_sock = socket.socketpair(
@@ -316,17 +320,32 @@ class RunnerSpawner:
             env["JAATO_RUNNER_DISABLE_CONFINE"] = "1"
         # Phase 5 — session-scoped TMPDIR.  Profile allow rule:
         # /tmp/jaato-{session_id}/** rwkl.
-        env["TMPDIR"] = self._session_tmpdir(session_id)
+        env["TMPDIR"] = self._session_tmpdir(session_id, profile_name)
         return env
 
     @staticmethod
-    def _session_tmpdir(session_id: str) -> str:
+    def _session_tmpdir(session_id: str, profile_name: str = "") -> str:
         """Return the session-scoped tmpdir path used by ``TMPDIR``.
+
+        Keyed on the BOUNDARY, not on the session alone (#1171).  The
+        AppArmor profile is rendered once per confinement id and grants
+        ``/tmp/jaato-<confinement_id>/**``; this path used to be
+        ``/tmp/jaato-<session_id>``, so the two agreed only when the
+        profile happened to be named after the session — which #1037
+        made false for every WS session.  The session keeps a directory
+        of its own, nested inside the confinement's.
+
+        *profile_name* is the name the runner self-confines to, which
+        the caller already has; the id is read back out of it, so
+        nothing new is threaded through.  An empty name is the
+        unconfined opt-out and yields the pre-#1171 path unchanged.
 
         Static so :meth:`spawn` can mkdir before fork and tests can
         pin the convention without instantiating a spawner.
         """
-        return f"/tmp/jaato-{session_id}"
+        return session_tmpdir(
+            session_id, confinement_id_from_profile_name(profile_name),
+        )
 
     def _exec_runner(
         self,

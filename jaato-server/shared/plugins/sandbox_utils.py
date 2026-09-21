@@ -57,8 +57,37 @@ from shared.path_utils import msys2_to_windows_path, normalize_for_comparison
 # The special configuration directory that gets contained symlink escape
 JAATO_CONFIG_DIR = ".jaato"
 
+def _default_temp_paths() -> list:
+    """The system temp roots, without requiring one to be USABLE (#1171).
+
+    This module classifies paths; it never writes a temp file.  But
+    ``tempfile.gettempdir()`` does not merely read a setting — on first
+    call it PROBES each candidate by creating and deleting a file, and
+    raises ``FileNotFoundError: No usable temporary directory found``
+    when every candidate is denied.  Inside a confined runner that is
+    exactly the state, so a module-scope call turned "I cannot write a
+    temp file" into "this module cannot be imported", which failed the
+    whole session bootstrap during plugin discovery.
+
+    ``lsp/plugin.py`` hit the same hazard and fixed its own instance in
+    ``d871e83``; this is the other one.
+
+    Falling back to ``/tmp`` alone is not a guess: it is already the
+    first entry, and the second exists only to pick up a ``TMPDIR`` that
+    points somewhere else.  Losing it costs this module the ability to
+    recognise a non-default temp root as a temp root — it never grants
+    anything, so the failure direction is a path treated as ordinary
+    rather than as temp.
+    """
+    try:
+        resolved = tempfile.gettempdir()
+    except Exception:  # noqa: BLE001 — any failure means "no usable dir"
+        return ["/tmp"]
+    return ["/tmp", resolved]
+
+
 # System temp directories that are allowed by default
-SYSTEM_TEMP_PATHS = ["/tmp", tempfile.gettempdir()]
+SYSTEM_TEMP_PATHS = _default_temp_paths()
 
 # Standard POSIX pseudo-devices, allowed regardless of workspace_root.
 #

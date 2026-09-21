@@ -30,10 +30,14 @@ from __future__ import annotations
 
 import logging
 import os
+import tempfile
 from dataclasses import dataclass
 from typing import (Any, Callable, Dict, List, Optional, Protocol, Tuple,
                     TYPE_CHECKING)
 
+from server.confinement_id import (
+    confinement_id_from_profile_name, session_tmpdir,
+)
 from shared.apparmor_label import (
     AppArmorLabel,
     COMPLAIN_ENV_VAR,
@@ -678,6 +682,72 @@ def apply_session_env(session_env: Optional[Dict[str, str]]) -> Dict[str, str]:
     return applied
 
 
+def _pin_session_tmpdir(envelope: SessionInitEnvelope) -> None:
+    """Point this runner's temp files at the directory its profile grants.
+
+    Two things are wrong without it, and they are wrong on different
+    paths (#1171):
+
+    * **Cold spawn.**  ``TMPDIR`` is in the environment (the spawner put
+      it there before ``execvpe``), but nothing has resolved it yet, so
+      the first module that wants a temp dir resolves it HERE — under
+      the profile, after :func:`_maybe_self_confine`.  ``sandbox_utils``
+      does exactly that at import, during plugin discovery, and a
+      denied probe raises ``No usable temporary directory found`` and
+      fails the bootstrap.
+    * **Pool slot.**  ``TMPDIR`` is not in the environment at all: it is
+      set at exec, and a slot is FORKED.  What the slot does carry is
+      the template's already-resolved :data:`tempfile.tempdir`, which is
+      ``/tmp`` — a directory the profile does not grant either.  So the
+      session-scoped tmpdir was inert on the default path and wrong on
+      the other, which is the whole of #1171.
+
+    Setting the module global directly is what makes this work on both:
+    it is an assignment, not a probe, so it cannot be denied, and
+    ``gettempdir()`` returns it without consulting the environment or
+    the filesystem.  ``os.environ`` is set too, so the subprocesses the
+    model drives (``cli``, ``interactive_shell``, ``mcp``) inherit the
+    same answer rather than resolving one of their own.
+
+    Runs AFTER confinement deliberately: the value depends on the
+    profile the runner is actually wearing, and the directory itself was
+    created daemon-side before either spawn branch.
+
+    An unconfined runner (no ``profile_name``) keeps the pre-#1171
+    ``/tmp/jaato-<session_id>``.
+    """
+    path = session_tmpdir(
+        envelope.session_id,
+        confinement_id_from_profile_name(envelope.profile_name or ""),
+    )
+
+    # ``tempfile`` does not CREATE ``tempdir`` -- it fails on use.  The
+    # daemon makes this directory before either spawn branch, and a
+    # confined runner may make its own subdirectory under the boundary
+    # dir its profile grants, so this is normally a no-op.  When it is
+    # not, pinning would be worse than leaving the resolution alone: a
+    # missing pinned directory fails every temp operation, where the
+    # unpinned probe might still find somewhere usable.  So a failure
+    # here declines to pin rather than half-applying.
+    try:
+        os.makedirs(path, exist_ok=True)
+    except OSError as exc:
+        logger.warning(
+            "runner-session bootstrap: session tmpdir %s is missing and "
+            "could not be created (%s: %s) — leaving tempfile resolution "
+            "alone; temp files may be refused by the profile",
+            path, type(exc).__name__, exc,
+        )
+        return
+
+    os.environ["TMPDIR"] = path
+    tempfile.tempdir = path
+    logger.info(
+        "runner-session bootstrap: tmpdir pinned to %s (profile=%s)",
+        path, envelope.profile_name or "(unconfined)",
+    )
+
+
 def _maybe_self_confine(
     envelope: SessionInitEnvelope,
     recycle_pools: Optional[Callable[[str], Any]] = None,
@@ -1249,6 +1319,12 @@ def bootstrap_session(
     # ``disable_confine`` opt-out or no AppArmor opt-in), the step
     # is also a no-op — runner runs unconfined.
     _maybe_self_confine(envelope, recycle_pools)
+
+    # ---- 1d. Temp files, now that we know the profile (#1171) ----
+    # Before ANY plugin import: ``sandbox_utils`` resolves a temp
+    # dir at module scope, and under confinement that resolution is
+    # what raised ``No usable temporary directory found``.
+    _pin_session_tmpdir(envelope)
 
     # ---- 2. Optionally construct the runtime ----
     if runtime_factory is None:
