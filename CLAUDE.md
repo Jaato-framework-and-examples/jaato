@@ -6618,6 +6618,91 @@ drag handle on its left edge (`components/layout/RailResizer.tsx`): a
 none` — and by arrow keys, clamped to 220–720px and remembered per browser
 (`ui.railWidth`, `localStorage`).
 
+### A Subagent Nobody Could See (#1179)
+
+`spawn_subagent` succeeded, the agent said *"Subagent spawned (id:
+`subagent_1`)"*, and the only tab on screen stayed `MAIN AGENT`. The TUI
+has the same blind spot — both clients render `AgentCreatedEvent`, and on
+the default path nothing emitted one.
+
+**The web client was not at fault**, which is what located the defect:
+`store.ts` handles `AGENT_CREATED` fully, and `ensureAgent()` is a second
+chance invoked from `AGENT_OUTPUT`, so a tab would appear if *either*
+event arrived. Neither did.
+
+`subagent` is `PLUGIN_TIER = "runner"`, so the plugin the model drives
+lives in the runner process, and `SubagentPlugin._ui_hooks` is the slot
+every `if self._ui_hooks:` in `subagent/plugin.py` reads. The daemon arms
+its OWN instance (`_setup_agent_hooks` → `subagent_plugin.set_ui_hooks`),
+which no runner-served session calls. The runner installs
+`_AgentUIHooksNotificationShim` — on `session._ui_hooks`, **a different
+object**. Measured against the real classes:
+
+```
+session._ui_hooks      : _AgentUIHooksNotificationShim
+todo._reporter         : LivePlanReporter
+subagent._plan_reporter: LivePlanReporter
+subagent._ui_hooks     : NoneType        <- the slot on_agent_created reads
+```
+
+The first three lines are what makes it findable: the same install already
+reaches into the registry for the `todo` and `subagent` plugins to hand
+them a plan reporter (*[A Plan Nobody Was
+Watching](#a-plan-nobody-was-watching-and-a-step-that-was-not-a-failure)*),
+and stops one attribute short. Meanwhile the shim's own `on_agent_created`
+docstring reads *"Called by the subagent plugin (PLUGIN_TIER='runner')"*
+and the class docstring claims *"every `self._ui_hooks.on_X` call on the
+runner side hits this shim"* — a forwarder written, tested, and wired to
+a caller that was never handed it. The #735 shape: the mechanism is
+complete except for the delivery.
+
+**One install, a whole family.** `_install_subagent_ui_hooks` mirrors
+`_install_plan_reporter` — per turn, save/restore, best-effort — and
+unlocks more than the tab, because the plugin propagates its own hooks to
+each child session (`session.set_ui_hooks(self._ui_hooks, agent_id)`): the
+subagent's status, context, turn accounting and **tool activity** all
+travel that slot, and every notification frame in the family already
+carries an `agent_id`. The plugin's `set_ui_hooks` is a plain setter,
+unlike the session's, which also overwrites `_agent_id` — that asymmetry
+is why the session is assigned directly and this one is not, and for the
+CHILD session overwriting `_agent_id` is exactly right.
+
+**Restoring is not tidiness.** The plugin is registry-scoped and outlives
+the call; a shim left behind keeps emitting frames under a request id that
+has already been answered.
+
+**`on_agent_output` is the second half.** It was a no-op, on the reasoning
+that *"the runner-side session uses the `on_output` kwarg path (stream
+frames)"* — true of the ROOT session and false of a subagent, whose output
+has no other route. It is the same misclassification the comment directly
+above it apologises for. A stream frame could not have carried it either:
+`StreamFrame` has `source`, `text` and `mode` and **no agent id**, so a
+subagent's words would arrive attributed to whoever owns the stream. A
+notification frame is the only shape that can say whose output this is.
+Forwarding it cannot double-emit, because on the runner path the subagent
+plugin is this method's only caller — `JaatoSession` never calls it, and
+`JaatoClient` (which does) is not on the runner's send path.
+
+**Paid for at the ratchet.** The daemon demuxer's `_handle` is baselined
+and a baselined function may not grow, so the seven `agent_*` forwards —
+already a commented group — moved into `_forward_agent_notification`
+(membership, a name test answered *before* the hooks are looked up, so it
+cannot depend on whether they are wired yet) plus `_dispatch_agent_hook`
+(the unpacking). The `_wire_str` / `_wire_int` / `_wire_float` readers put
+"absent and null both mean the default" in one place instead of an `or` on
+every field. `_handle` **91 → 58**, and both new functions are under the
+ceiling.
+
+Not measured here, deliberately: whether a subagent's output should ALSO
+keep reaching the parent's stream, as it does today by a separate route.
+It is a display question, the two are distinguishable at the client by
+`agent_id`, and answering it means deciding what a parent tab should show
+about its children.
+
+Guard: `server/tests/test_a_subagent_nobody_could_see.py`, five reversions.
+It asserts the plugin's slot rather than the session's, because filling the
+session's is precisely what the broken tree did.
+
 ### A File the Browser Could Not Put in the Workspace
 
 The premium `<jaato-task>` component (and the knowledge-manager client

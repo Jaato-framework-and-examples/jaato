@@ -357,6 +357,38 @@ def _runtime_limit_session_kwargs(profile: Any) -> Dict[str, Any]:
     return kwargs
 
 
+def _wire_str(payload: Dict[str, Any], key: str, default: str = "") -> str:
+    """Read a string off a notification payload.
+
+    Absent and null both mean the default — a wire field carrying
+    ``None`` is the peer saying nothing, not the peer saying ``"None"``.
+    """
+    return payload.get(key) or default
+
+
+def _wire_int(payload: Dict[str, Any], key: str) -> int:
+    """Read an int off a notification payload; absent or null is 0."""
+    return int(payload.get(key) or 0)
+
+
+def _wire_float(payload: Dict[str, Any], key: str) -> float:
+    """Read a float off a notification payload; absent or null is 0.0."""
+    return float(payload.get(key) or 0.0)
+
+
+#: The ``agent_*`` notification frames :meth:`JaatoServer._forward_agent_notification`
+#: owns.  A name, not a capability test — see that method's docstring.
+_AGENT_NOTIFICATION_TYPES = frozenset({
+    "agent_created",
+    "agent_output",
+    "agent_status_changed",
+    "agent_turn_completed",
+    "agent_context_updated",
+    "agent_gc_config",
+    "agent_history_updated",
+})
+
+
 def _deserialize_wire_history(history: Any) -> List[Any]:
     """Turn a runner ``agent_history_updated`` payload into ``Message``s.
 
@@ -4416,6 +4448,148 @@ class JaatoServer:
                 logger.debug("  _setup_agent_hooks: subagent.set_ui_hooks done")
         logger.debug("  _setup_agent_hooks: completed")
 
+    def _forward_agent_notification(
+        self, event_type: str, payload: Dict[str, Any],
+    ) -> bool:
+        """Route one ``agent_*`` notification frame to ``ServerAgentHooks``.
+
+        The runner emits these; the daemon-side hooks turn each into the
+        SDK event the in-process path emits, so the two processes cannot
+        disagree about an event's shape.  Returns ``True`` when the frame
+        was one of ours and has been handled.
+
+        A hooks-less server (``_setup_agent_hooks`` has not run) still
+        CONSUMES the frame: it was addressed to this family, and letting
+        it fall through would have it tried against every later branch of
+        the demuxer.  Which frames are ours is therefore a question about
+        the NAME alone (``_AGENT_NOTIFICATION_TYPES``) and is answered
+        before the hooks are looked up, so the answer cannot depend on
+        whether they happen to be wired yet.
+        """
+        if event_type not in _AGENT_NOTIFICATION_TYPES:
+            return False
+        hooks = self._get_ui_hooks()
+        if hooks is not None:
+            self._dispatch_agent_hook(hooks, event_type, payload)
+        return True
+
+    def _dispatch_agent_hook(
+        self, hooks: Any, event_type: str, payload: Dict[str, Any],
+    ) -> None:
+        """Unpack one wire payload and call its hook.
+
+        Split from :meth:`_forward_agent_notification` so the membership
+        test and the unpacking are separate questions; the ``_wire_*``
+        readers keep the "absent or null both mean the default" rule in
+        one place rather than as an ``or`` on every field.
+        """
+        agent_id = payload.get("agent_id") or self._main_agent_id
+        # Path F sweep (2026-05-12): wire the remaining 6
+        # ``ServerAgentHooks`` methods that the original
+        # Path F audit misclassified as "covered daemon-
+        # side".  Each branch unpacks the payload and
+        # forwards to the daemon-side hook (which fires the
+        # corresponding SDK event into the event-bus +
+        # reactor engine).
+        if event_type == "agent_created":
+            hooks.on_agent_created(
+                agent_id=agent_id,
+                agent_name=_wire_str(payload, "agent_name"),
+                agent_type=_wire_str(payload, "agent_type"),
+                profile_name=payload.get("profile_name"),
+                parent_agent_id=payload.get("parent_agent_id"),
+                created_at=payload.get("created_at"),
+            )
+            return
+
+        if event_type == "agent_output":
+            hooks.on_agent_output(
+                agent_id=agent_id,
+                source=_wire_str(payload, "source"),
+                text=_wire_str(payload, "text"),
+                mode=_wire_str(payload, "mode"),
+            )
+            return
+
+        if event_type == "agent_status_changed":
+            hooks.on_agent_status_changed(
+                agent_id=agent_id,
+                status=_wire_str(payload, "status"),
+                error=payload.get("error"),
+            )
+            return
+
+        if event_type == "agent_turn_completed":
+            # ``function_calls`` is the per-call timing list
+            # (``TurnCompletedEvent.function_calls`` is typed
+            # ``List[Dict[str, Any]]``).  Pass it through as a
+            # list — pre-2026-06-07 this coerced to ``int``,
+            # which crashed the shim for any turn that actually
+            # contained tool calls and silently dropped the
+            # event.  See ``project_pr_turn_completed_event_*``
+            # for the diagnosis.
+            fc_payload = payload.get("function_calls")
+            if not isinstance(fc_payload, list):
+                fc_payload = []
+            hooks.on_agent_turn_completed(
+                agent_id=agent_id,
+                turn_number=_wire_int(payload, "turn_number"),
+                prompt_tokens=_wire_int(payload, "prompt_tokens"),
+                output_tokens=_wire_int(payload, "output_tokens"),
+                total_tokens=_wire_int(payload, "total_tokens"),
+                duration_seconds=_wire_float(payload, "duration_seconds"),
+                function_calls=fc_payload,
+                cache_read_tokens=payload.get("cache_read_tokens"),
+                cache_creation_tokens=payload.get("cache_creation_tokens"),
+                spend_total_tokens=payload.get("spend_total_tokens"),
+                spend_prompt_tokens=payload.get(
+                    "spend_prompt_tokens"),
+                spend_output_tokens=payload.get(
+                    "spend_output_tokens"),
+                spend_cache_read_tokens=payload.get(
+                    "spend_cache_read_tokens"),
+                spend_cache_creation_tokens=payload.get(
+                    "spend_cache_creation_tokens"),
+                # ``.get`` without a default: absent and null both
+                # mean the provider reported no cost, and a 0.0
+                # default would claim it reported free.
+                cost_usd=payload.get("cost_usd"),
+                finish_reason=payload.get("finish_reason", "stop"),
+            )
+            return
+
+        if event_type == "agent_context_updated":
+            hooks.on_agent_context_updated(
+                agent_id=agent_id,
+                total_tokens=_wire_int(payload, "total_tokens"),
+                prompt_tokens=_wire_int(payload, "prompt_tokens"),
+                output_tokens=_wire_int(payload, "output_tokens"),
+                turns=_wire_int(payload, "turns"),
+                percent_used=_wire_float(payload, "percent_used"),
+            )
+            return
+
+        if event_type == "agent_gc_config":
+            hooks.on_agent_gc_config(
+                agent_id=agent_id,
+                threshold=_wire_float(payload, "threshold"),
+                strategy=_wire_str(payload, "strategy"),
+                target_percent=payload.get("target_percent"),
+                continuous_mode=bool(
+                    payload.get("continuous_mode", False)
+                ),
+            )
+            return
+
+        if event_type == "agent_history_updated":
+            hooks.on_agent_history_updated(
+                agent_id=agent_id,
+                history=_deserialize_wire_history(
+                    payload.get("history"),
+                ),
+            )
+            return
+
     def _get_ui_hooks(self) -> Optional[Any]:
         """Return the daemon-side ``ServerAgentHooks`` instance, or
         ``None`` if ``_setup_agent_hooks`` hasn't run yet.
@@ -5770,117 +5944,12 @@ class JaatoServer:
                         )
                     return
 
-                # Path F sweep (2026-05-12): wire the remaining 6
-                # ``ServerAgentHooks`` methods that the original
-                # Path F audit misclassified as "covered daemon-
-                # side".  Each branch unpacks the payload and
-                # forwards to the daemon-side hook (which fires the
-                # corresponding SDK event into the event-bus +
-                # reactor engine).
-                if event_type == "agent_created":
-                    hooks = server._get_ui_hooks()
-                    if hooks is not None:
-                        hooks.on_agent_created(
-                            agent_id=payload.get("agent_id") or server._main_agent_id,
-                            agent_name=payload.get("agent_name", "") or "",
-                            agent_type=payload.get("agent_type", "") or "",
-                            profile_name=payload.get("profile_name"),
-                            parent_agent_id=payload.get("parent_agent_id"),
-                            created_at=payload.get("created_at"),
-                        )
-                    return
-
-                if event_type == "agent_status_changed":
-                    hooks = server._get_ui_hooks()
-                    if hooks is not None:
-                        hooks.on_agent_status_changed(
-                            agent_id=payload.get("agent_id") or server._main_agent_id,
-                            status=payload.get("status", "") or "",
-                            error=payload.get("error"),
-                        )
-                    return
-
-                if event_type == "agent_turn_completed":
-                    hooks = server._get_ui_hooks()
-                    if hooks is not None:
-                        # ``function_calls`` is the per-call timing list
-                        # (``TurnCompletedEvent.function_calls`` is typed
-                        # ``List[Dict[str, Any]]``).  Pass it through as a
-                        # list — pre-2026-06-07 this coerced to ``int``,
-                        # which crashed the shim for any turn that actually
-                        # contained tool calls and silently dropped the
-                        # event.  See ``project_pr_turn_completed_event_*``
-                        # for the diagnosis.
-                        fc_payload = payload.get("function_calls")
-                        if not isinstance(fc_payload, list):
-                            fc_payload = []
-                        hooks.on_agent_turn_completed(
-                            agent_id=payload.get("agent_id") or server._main_agent_id,
-                            turn_number=int(payload.get("turn_number", 0) or 0),
-                            prompt_tokens=int(payload.get("prompt_tokens", 0) or 0),
-                            output_tokens=int(payload.get("output_tokens", 0) or 0),
-                            total_tokens=int(payload.get("total_tokens", 0) or 0),
-                            duration_seconds=float(
-                                payload.get("duration_seconds", 0.0) or 0.0
-                            ),
-                            function_calls=fc_payload,
-                            cache_read_tokens=payload.get("cache_read_tokens"),
-                            cache_creation_tokens=payload.get("cache_creation_tokens"),
-                            spend_total_tokens=payload.get("spend_total_tokens"),
-                            spend_prompt_tokens=payload.get(
-                                "spend_prompt_tokens"),
-                            spend_output_tokens=payload.get(
-                                "spend_output_tokens"),
-                            spend_cache_read_tokens=payload.get(
-                                "spend_cache_read_tokens"),
-                            spend_cache_creation_tokens=payload.get(
-                                "spend_cache_creation_tokens"),
-                            # ``.get`` without a default: absent and null both
-                            # mean the provider reported no cost, and a 0.0
-                            # default would claim it reported free.
-                            cost_usd=payload.get("cost_usd"),
-                            finish_reason=payload.get("finish_reason", "stop"),
-                        )
-                    return
-
-                if event_type == "agent_context_updated":
-                    hooks = server._get_ui_hooks()
-                    if hooks is not None:
-                        hooks.on_agent_context_updated(
-                            agent_id=payload.get("agent_id") or server._main_agent_id,
-                            total_tokens=int(payload.get("total_tokens", 0) or 0),
-                            prompt_tokens=int(payload.get("prompt_tokens", 0) or 0),
-                            output_tokens=int(payload.get("output_tokens", 0) or 0),
-                            turns=int(payload.get("turns", 0) or 0),
-                            percent_used=float(
-                                payload.get("percent_used", 0.0) or 0.0
-                            ),
-                        )
-                    return
-
-                if event_type == "agent_gc_config":
-                    hooks = server._get_ui_hooks()
-                    if hooks is not None:
-                        hooks.on_agent_gc_config(
-                            agent_id=payload.get("agent_id") or server._main_agent_id,
-                            threshold=float(payload.get("threshold", 0.0) or 0.0),
-                            strategy=payload.get("strategy", "") or "",
-                            target_percent=payload.get("target_percent"),
-                            continuous_mode=bool(
-                                payload.get("continuous_mode", False)
-                            ),
-                        )
-                    return
-
-                if event_type == "agent_history_updated":
-                    hooks = server._get_ui_hooks()
-                    if hooks is not None:
-                        hooks.on_agent_history_updated(
-                            agent_id=payload.get("agent_id") or server._main_agent_id,
-                            history=_deserialize_wire_history(
-                                payload.get("history"),
-                            ),
-                        )
+                # The seven ``agent_*`` forwards, lifted into
+                # :meth:`_forward_agent_notification` — one grouping, and
+                # the only way this function could take the ``agent_output``
+                # branch #1179 needed without growing past its frozen
+                # complexity baseline.
+                if server._forward_agent_notification(event_type, payload):
                     return
 
                 # Phase 4 §4.4 (Finding 2 closure): bridge the runner-

@@ -4047,6 +4047,7 @@ class RunnerRPC:
     # post-§7c) so their ``self._ui_hooks.on_X`` calls were dropping
     # on the shim's no-op stubs pre-fix.
     _NOTIF_AGENT_CREATED = "agent_created"
+    _NOTIF_AGENT_OUTPUT = "agent_output"
     _NOTIF_AGENT_STATUS_CHANGED = "agent_status_changed"
     _NOTIF_AGENT_TURN_COMPLETED = "agent_turn_completed"
     _NOTIF_AGENT_CONTEXT_UPDATED = "agent_context_updated"
@@ -4665,6 +4666,9 @@ class RunnerRPC:
         # The todo plugin's plan reporter (see _NOTIF_PLAN_UPDATED).
         self._install_plan_reporter(session, originals, request_id)
 
+        # The subagent plugin's ui-hooks slot (see _NOTIF_AGENT_CREATED).
+        self._install_subagent_ui_hooks(session, originals, request_id)
+
         return originals
 
     def _restore_session_notification_callbacks(
@@ -4755,6 +4759,7 @@ class RunnerRPC:
             except Exception:  # noqa: BLE001
                 logger.debug("restore description_callback raised")
         self._restore_plan_reporter(session, originals)
+        self._restore_subagent_ui_hooks(session, originals)
 
     @staticmethod
     def _plan_plugins(session: Any) -> "tuple[Any, Any]":
@@ -4808,6 +4813,67 @@ class RunnerRPC:
                 subagent_plugin.set_plan_reporter(originals["subagent_plan_reporter"])
         except Exception:  # noqa: BLE001
             logger.debug("restore plan reporter raised")
+
+    def _install_subagent_ui_hooks(
+        self, session: Any, originals: Dict[str, Any], request_id: int,
+    ) -> None:
+        """Hand the runner's subagent plugin the notification shim.
+
+        :class:`_AgentUIHooksNotificationShim` already forwards
+        ``on_agent_created`` and its five siblings, and its docstring
+        names the caller: *"Called by the subagent plugin
+        (PLUGIN_TIER='runner')"*.  Nothing ever handed that plugin the
+        shim.  The install above puts it on ``session._ui_hooks`` — the
+        :class:`JaatoSession`'s slot, which is a different object from
+        ``SubagentPlugin._ui_hooks``, the one ``plugin.py``'s
+        ``if self._ui_hooks:`` guards read.  So every one of those
+        guards was False on the default path and a spawned subagent
+        reached no client at all: no ``AgentCreatedEvent`` (hence no
+        tab), no status, no context, and — because the plugin
+        propagates its own hooks to the child session at
+        ``session.set_ui_hooks(self._ui_hooks, agent_id)`` — none of
+        the child's tool activity either.
+
+        The plugin's ``set_ui_hooks`` is a plain setter, unlike the
+        session's, which also overwrites ``_agent_id``; that is why the
+        session is assigned directly above and this one is not.  For the
+        CHILD session overwriting ``_agent_id`` is exactly right, and
+        the plugin does it.
+        """
+        try:
+            _, subagent_plugin = self._plan_plugins(session)
+            if subagent_plugin is None or not hasattr(
+                subagent_plugin, "set_ui_hooks",
+            ):
+                return
+            originals["subagent_ui_hooks"] = getattr(
+                subagent_plugin, "_ui_hooks", None,
+            )
+            subagent_plugin.set_ui_hooks(
+                _AgentUIHooksNotificationShim(self, request_id),
+            )
+        except Exception:  # noqa: BLE001
+            logger.debug("subagent ui_hooks shim install raised")
+
+    def _restore_subagent_ui_hooks(
+        self, session: Any, originals: Dict[str, Any],
+    ) -> None:
+        """Put back what :meth:`_install_subagent_ui_hooks` swapped.
+
+        The plugin is registry-scoped and outlives the call, so a shim
+        left behind would keep emitting notification frames under a
+        request id that has already been answered.
+        """
+        if "subagent_ui_hooks" not in originals:
+            return
+        try:
+            _, subagent_plugin = self._plan_plugins(session)
+            if subagent_plugin is not None and hasattr(
+                subagent_plugin, "set_ui_hooks",
+            ):
+                subagent_plugin.set_ui_hooks(originals["subagent_ui_hooks"])
+        except Exception:  # noqa: BLE001
+            logger.debug("restore subagent ui_hooks raised")
 
     def _handle_session_shutdown(self) -> "tuple[bool, Any]":
         """Graceful runner-side session teardown.
@@ -6027,12 +6093,12 @@ class _AgentUIHooksNotificationShim:
     no-op for all 8 methods, silently dropping the events before they
     could reach the daemon-side reactor engine + event-bus subscribers.
 
-    The remaining methods (``on_agent_output``) use a different path
-    (``on_output`` kwarg threading through the stream callback chain,
-    not the ui_hooks slot) and are intentionally no-ops here.
-    - ``on_agent_instruction_budget_updated``: already covered by
-      the §7c step 6.6.4.2 ``instruction_budget_updated``
-      notification frame.
+    ``on_agent_instruction_budget_updated`` is already covered by the
+    §7c step 6.6.4.2 ``instruction_budget_updated`` notification frame
+    and is a no-op here.  ``on_agent_output`` used to be one too, on
+    the reasoning that the ``on_output`` kwarg path carries it; see
+    that method for why that holds for the root session and not for a
+    subagent.
 
     Pre-Path-F the runner-side session's ``_ui_hooks`` was None and
     these methods silently dropped — see
@@ -6222,11 +6288,42 @@ class _AgentUIHooksNotificationShim:
         except Exception:  # noqa: BLE001
             logger.exception("agent_created notify raised")
 
-    def on_agent_output(self, *args: Any, **kwargs: Any) -> None:
-        # Runner-side session uses the ``on_output`` kwarg path
-        # (stream frames), not _ui_hooks.on_agent_output — covered
-        # daemon-side at _start_model_thread's output_callback.
-        pass
+    def on_agent_output(
+        self,
+        agent_id: str,
+        source: str = "",
+        text: str = "",
+        mode: str = "",
+        **_kwargs: Any,
+    ) -> None:
+        """Forward a SUBAGENT's output across the wire.
+
+        This was a no-op, on the reasoning that the runner-side session
+        uses the ``on_output`` kwarg path (stream frames) instead.  That
+        is true of the ROOT session and false of a subagent, and the
+        subagent plugin is this method's only runner-side caller — the
+        root's :class:`JaatoSession` never calls it, and ``JaatoClient``
+        (which does) is not on the runner's send path.
+
+        A stream frame could not have carried it anyway: it has fields
+        for ``source``/``text``/``mode`` and none for an agent id, so a
+        subagent's words would arrive attributed to whoever the stream
+        belongs to.  A notification frame is the only shape that can say
+        WHOSE output this is.
+        """
+        try:
+            self._rpc.emit_notification(
+                request_id=self._request_id,
+                event_type=self._rpc._NOTIF_AGENT_OUTPUT,
+                payload={
+                    "agent_id": str(agent_id or ""),
+                    "source": str(source or ""),
+                    "text": str(text or ""),
+                    "mode": str(mode or ""),
+                },
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("agent_output notify raised")
 
     def on_agent_status_changed(
         self,

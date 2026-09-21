@@ -115,7 +115,7 @@ BASELINE: Dict[str, int] = {
     # (``continuation_needed`` starting a model thread, the GC phases
     # mutating server state) stay explicit: a table of builders cannot
     # express those.
-    "jaato-server/server/core.py::JaatoServer._build_send_message_notification_handler._handle": 91,
+    "jaato-server/server/core.py::JaatoServer._build_send_message_notification_handler._handle": 58,
     "jaato-server/server/core.py::JaatoServer._check_auth_completion": 17,
     "jaato-server/server/core.py::JaatoServer._emit_conversation_replay": 19,
     "jaato-server/server/core.py::JaatoServer._setup_permission_hooks.on_permission_requested": 35,
