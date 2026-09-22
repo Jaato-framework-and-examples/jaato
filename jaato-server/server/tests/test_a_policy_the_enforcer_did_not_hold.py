@@ -175,6 +175,36 @@ def test_emit_permission_status_publishes_the_runners_answer():
 # ------------------------------- B: an arriving client is told the policy
 
 
+def _is_resolver_call(node: ast.AST) -> bool:
+    """``<anything>.permission_status_event(...)``."""
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "permission_status_event"
+    )
+
+
+def _resolver_result_names(fn: ast.FunctionDef) -> set:
+    """The local names the resolver's answer was assigned to."""
+    names = set()
+    for node in ast.walk(fn):
+        if not isinstance(node, ast.Assign) or not _is_resolver_call(node.value):
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                names.add(target.id)
+    return names
+
+
+def _emits_one_of(node: ast.AST, names: set) -> bool:
+    """``emit(<name>)`` for one of those names."""
+    if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+        return False
+    if node.func.id != "emit" or len(node.args) != 1:
+        return False
+    return isinstance(node.args[0], ast.Name) and node.args[0].id in names
+
+
 def _emit_current_state_calls_the_resolver() -> Tuple[bool, bool]:
     """Does ``emit_current_state`` resolve the policy, and EMIT it?
 
@@ -183,33 +213,22 @@ def _emit_current_state_calls_the_resolver() -> Tuple[bool, bool]:
     that stubbed enough of a server to run it would be asserting the
     stubs.  What the reported defect was is a missing CALL SITE, which is
     exactly what a walk of the call sites can answer.
+
+    The three predicates above are separate because this file is subject
+    to the complexity ratchet like any other: one comprehension answering
+    all of it scored 20 against a ceiling of 15.
     """
     tree = ast.parse(Path(_CORE).read_text())
     fn = next(
         n for n in ast.walk(tree)
         if isinstance(n, ast.FunctionDef) and n.name == "emit_current_state"
     )
-    resolves = any(
-        isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-        and n.func.attr == "permission_status_event"
-        for n in ast.walk(fn)
+    nodes = list(ast.walk(fn))
+    names = _resolver_result_names(fn)
+    return (
+        any(_is_resolver_call(n) for n in nodes),
+        any(_emits_one_of(n, names) for n in nodes),
     )
-    # ``emit(<name>)`` where <name> is what the resolver was assigned to.
-    names = {
-        t.id
-        for a in ast.walk(fn) if isinstance(a, ast.Assign)
-        for t in a.targets if isinstance(t, ast.Name)
-        if isinstance(a.value, ast.Call)
-        and isinstance(a.value.func, ast.Attribute)
-        and a.value.func.attr == "permission_status_event"
-    }
-    emits = any(
-        isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
-        and n.func.id == "emit" and len(n.args) == 1
-        and isinstance(n.args[0], ast.Name) and n.args[0].id in names
-        for n in ast.walk(fn)
-    )
-    return resolves, emits
 
 
 def test_emit_current_state_tells_an_attaching_client_the_policy():
