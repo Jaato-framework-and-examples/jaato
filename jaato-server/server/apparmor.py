@@ -465,7 +465,23 @@ class AppArmorManager:
     #       allow at any specificity.  ``/proc/*/`` (one level up) has
     #       been granted in the isolated body since v30 for the same
     #       class of reason.
-    _TEMPLATE_VERSION = 32
+    #  33 — (2026-09-22) ``audit deny {workspace_path}/.jaato/plans/**
+    #       wlk,`` in the base body, ``tool_hat``, ``//child`` and the isolated
+    #       sub-runner body (#1195).  ``.jaato/plans/`` holds the
+    #       predefined plans a profile's ``plugin_configs.todo.
+    #       initial_plan_name`` loads as a session's active plan — an
+    #       AUTHORED asset beside ``profiles/`` and ``agents/``, and the
+    #       same class #893 closed for ``templates/``: an agent that could
+    #       rewrite its own plan file would rewrite the task it was given
+    #       for every later session that loads it.  The todo plugin only
+    #       reads the file (``yaml.safe_load``) and keeps progress in its
+    #       storage backend, whose defaults (``./todo_plans.yaml`` in the
+    #       process cwd, or an explicit ``storage_path``) are never under
+    #       this directory, so no write the plugin makes is denied.
+    #       Strictly a narrowing.  ``shared/scaffold/gitignore.AUTHORED``
+    #       gains ``plans/`` in lockstep, enforced by
+    #       ``test_gitignore_authored_set_tracks_apparmor.py``.
+    _TEMPLATE_VERSION = 33
 
     # AppArmor profile template.  Placeholders are filled per-session by
     # ``_render_profile()``.
@@ -542,6 +558,13 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
   # redirect generated files out from under the rule the routing
   # encodes.
   audit deny {workspace_path}/.jaato/template_routing.yaml wlk,
+  # Predefined plans (#1195) — a profile's
+  # ``plugin_configs.todo.initial_plan_name`` loads one as the
+  # session's active plan.  Authored, like the profile naming it:
+  # an agent that could rewrite the plan would rewrite the task it
+  # was given.  The todo plugin only READS it; progress is kept by
+  # its storage backend, never under this directory.
+  audit deny {workspace_path}/.jaato/plans/**              wlk,
   # Workspace-tier AppArmor fragments — read by _render_profile on
   # the NEXT session spawn.  A confined runner that could write a
   # fragment here would be authoring its own future-session rules
@@ -1741,6 +1764,13 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
   # redirect generated files out from under the rule the routing
   # encodes.
   audit deny {workspace_path}/.jaato/template_routing.yaml wlk,
+  # Predefined plans (#1195) — a profile's
+  # ``plugin_configs.todo.initial_plan_name`` loads one as the
+  # session's active plan.  Authored, like the profile naming it:
+  # an agent that could rewrite the plan would rewrite the task it
+  # was given.  The todo plugin only READS it; progress is kept by
+  # its storage backend, never under this directory.
+  audit deny {workspace_path}/.jaato/plans/**              wlk,
   # Workspace-tier AppArmor fragments — privilege-escalation guard
   # (mirrors base; isolated sub-runner could otherwise plant rules
   # for the next session's profile).
@@ -2699,6 +2729,13 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     audit deny {workspace_path}/.jaato/templates/**          wlk,
     # Routing table for rendered output (mirrors base, #893).
     audit deny {workspace_path}/.jaato/template_routing.yaml wlk,
+    # Predefined plans (#1195) — a profile's
+    # ``plugin_configs.todo.initial_plan_name`` loads one as the
+    # session's active plan.  Authored, like the profile naming it:
+    # an agent that could rewrite the plan would rewrite the task it
+    # was given.  The todo plugin only READS it; progress is kept by
+    # its storage backend, never under this directory.
+    audit deny {workspace_path}/.jaato/plans/**              wlk,
     # Workspace-tier AppArmor fragments — privilege-escalation guard
     # (mirrors base; a tool execution under tool_hat could otherwise
     # plant rules for the next session's profile).
@@ -2871,6 +2908,13 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     audit deny {workspace_path}/.jaato/templates/**          wlk,
     # Routing table for rendered output (mirrors base, #893).
     audit deny {workspace_path}/.jaato/template_routing.yaml wlk,
+    # Predefined plans (#1195) — a profile's
+    # ``plugin_configs.todo.initial_plan_name`` loads one as the
+    # session's active plan.  Authored, like the profile naming it:
+    # an agent that could rewrite the plan would rewrite the task it
+    # was given.  The todo plugin only READS it; progress is kept by
+    # its storage backend, never under this directory.
+    audit deny {workspace_path}/.jaato/plans/**              wlk,
     # Workspace-tier AppArmor fragments — privilege-escalation guard
     # (mirrors base; a //child subprocess could otherwise plant
     # rules for the next session's profile).

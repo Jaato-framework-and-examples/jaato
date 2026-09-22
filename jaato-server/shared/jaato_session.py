@@ -423,6 +423,23 @@ def _resolve_parallel_width(
     return getattr(limits, "max_parallel_tools", None)
 
 
+def _initial_plan_block(
+    plugin_configs: Optional[Dict[str, Dict[str, Any]]],
+) -> Optional[Dict[str, Any]]:
+    """This session's ``plugin_configs.todo`` block, when it names a
+    predefined plan (``initial_plan_name``, #1195); else ``None``.
+
+    Read straight from the session's own configs rather than from the todo
+    plugin, whose instance every session on the registry shares.  A key
+    that is PRESENT counts even when its value is empty — an empty name is
+    a declaration to refuse, not an absence to ignore.
+    """
+    block = (plugin_configs or {}).get("todo")
+    if isinstance(block, dict) and "initial_plan_name" in block:
+        return dict(block)
+    return None
+
+
 
 def _resolve_cost_and_source(
     session: Any, usage: Any,
@@ -961,6 +978,17 @@ class JaatoSession:
         self._permission_config: Optional[Dict[str, Any]] = None
         self._permission_scope: str = uuid.uuid4().hex[:12]
         self._permission_scoped: bool = False
+        # The key this session's per-session state is filed under on a
+        # SHARED plugin instance (#1195 — the todo plugin's predefined
+        # plan), the #957 shape generalised: minted here, not taken from
+        # ``_agent_id``, for the reasons ``_permission_context`` gives.
+        # ``_initial_plan_config`` is this session's own
+        # ``plugin_configs.todo`` block when it declares
+        # ``initial_plan_name``; ``_initial_plan_loaded`` records that
+        # ``_apply_initial_plan`` installed it.
+        self._plugin_scope: str = uuid.uuid4().hex[:12]
+        self._initial_plan_config: Optional[Dict[str, Any]] = None
+        self._initial_plan_loaded: bool = False
         self._telemetry_spans_started: bool = False
 
         # UI hooks for agent lifecycle events
@@ -1382,6 +1410,31 @@ class JaatoSession:
         return self._agent_id
 
     @property
+    def agent_type(self) -> str:
+        """``"main"`` or ``"subagent"`` — set by :meth:`set_agent_context`.
+
+        A session is ``"main"`` until the subagent plugin marks it, which
+        happens AFTER ``configure()``; read it at tool time, not at
+        configure time, when the answer matters.
+        """
+        return self._agent_type
+
+    @property
+    def plugin_scope(self) -> str:
+        """A key unique to this session, for per-session state on a SHARED
+        plugin instance (#1195).
+
+        Plugin instances are shared by a parent and its in-process
+        subagents (one registry) and carried across cascade stages on a
+        pool slot, so state that belongs to ONE session cannot live on the
+        instance as such.  A plugin files it under this key and resolves the
+        calling session's key at call time — the todo plugin's predefined
+        plan is the first user.  Minted at construction, so it is stable for
+        the session's life and never equal to another session's.
+        """
+        return self._plugin_scope
+
+    @property
     def instruction_budget(self) -> Optional[InstructionBudget]:
         """Get the instruction budget for this session.
 
@@ -1542,6 +1595,75 @@ class JaatoSession:
         self._trace(
             f"permission: session-scoped policy installed "
             f"scope={self._permission_scope} agent={self._agent_name}")
+
+    def _apply_initial_plan(self, plugins: Optional[List[str]]) -> None:
+        """Install this session's predefined plan, if its profile names one
+        (``plugin_configs.todo.initial_plan_name``, #1195).
+
+        Everything happens per SESSION on the shared todo instance:
+
+        * the plan is loaded by :meth:`TodoPlugin.preload_plan` under
+          :attr:`plugin_scope`, so it is this session's current plan and no
+          other session's;
+        * ``createPlan`` leaves THIS session's surface through its tool
+          scope (``_tool_scopes``, the per-session filter
+          :meth:`_apply_tool_scopes` applies) — the plugin's schema is
+          untouched, so a parent or sibling on the same registry keeps it;
+        * the hint is contributed by the plugin's system instructions only
+          for a scope whose plan loaded.
+
+        Fails LOUD.  A plugin ``initialize()`` exception is swallowed by
+        ``expose_tool`` (a WARNING, and the session up without the plugin),
+        so the knob is deliberately not read there: this raises
+        :class:`~shared.plugins.todo.initial_plan.InitialPlanError` out of
+        ``configure()``.  On the runner that is a bootstrap failure the
+        daemon refuses the session with (``RunnerBootstrapFailed``, naming
+        the file); for an in-process subagent it is a failed spawn the
+        parent reads; in-process it reaches the caller of
+        ``create_session``.
+        """
+        block = self._initial_plan_config
+        if block is None:
+            return
+        from .plugins.todo.initial_plan import InitialPlanError
+        name = block.get("initial_plan_name")
+        registry = self._runtime.registry if self._runtime else None
+        plugin = registry.get_plugin("todo") if registry else None
+        preload = getattr(plugin, "preload_plan", None)
+        enabled = registry is not None and registry.is_exposed("todo") and (
+            plugins is None or "todo" in plugins)
+        if preload is None or not enabled:
+            raise InitialPlanError(
+                f"plugin_configs.todo.initial_plan_name={name!r} is declared "
+                f"but this session does not enable the todo plugin, so the "
+                f"plan could never be read.  Add 'todo' to the profile's "
+                f"plugins, or drop the knob.",
+                code="initial_plan_without_todo")
+        config_root = block.get("config_root") or registry.get_config_root()
+        plan = preload(self._plugin_scope, name, config_root=config_root,
+                       workspace_path=self.workspace_path)
+        self._initial_plan_loaded = True
+        self._gate_create_plan(plugin)
+        logger.info(
+            "session %s: predefined plan %r loaded (plan_id=%s, %d steps); "
+            "createPlan hidden for this session", self._agent_id, name,
+            plan.plan_id, len(plan.steps))
+
+    def _gate_create_plan(self, plugin: Any) -> None:
+        """Drop ``createPlan`` from THIS session's todo tool scope (#1195).
+
+        Narrows an allow-list the profile already declared
+        (``todo(tools:[...])``), else starts from every tool the plugin
+        ships.  Per-session: ``_tool_scopes`` is this session's own dict and
+        the registry is never touched.
+        """
+        from .plugins.todo.initial_plan import GATED_TOOL
+        allow = self._tool_scopes.get("todo")
+        if allow is None:
+            allow = [s.name for s in plugin.get_tool_schemas()]
+        self._tool_scopes["todo"] = [t for t in allow if t != GATED_TOOL]
+        if self._tools:
+            self._tools = self._apply_tool_scopes(self._tools)
 
     def set_daemon_session_id(self, session_id: str) -> None:
         """Set the daemon session manager ID for this session.
@@ -2948,6 +3070,10 @@ class JaatoSession:
         # shared plugin — ``_apply_scoped_permission_policy``.  The root
         # session's block was already applied at bootstrap on every path.
         self._apply_plugin_configs(plugin_configs)
+        # A predefined plan (#1195) is THIS session's, never the shared todo
+        # instance's: stash the block here, install it once the plugins are
+        # wired to this session (``_apply_initial_plan``, below).
+        self._initial_plan_config = _initial_plan_block(plugin_configs)
 
         # Stash provider-creation args for lazy use by ``_ensure_provider``.
         # Pre-2026-05-13 the eager ``self._provider = self._runtime.create_provider(...)``
@@ -3248,6 +3374,13 @@ class JaatoSession:
                 plugin = self._runtime.registry.get_plugin(plugin_name)
                 if plugin and hasattr(plugin, 'set_session'):
                     plugin.set_session(self)
+
+        # Predefined plan (#1195): after the wiring above (the todo plugin
+        # must see THIS session as current) and before the system prompt is
+        # assembled (the hint depends on the plan having loaded).  Raises
+        # ``InitialPlanError`` — the session is refused, not started without
+        # the plan its profile promised.
+        self._apply_initial_plan(plugins)
 
         # Remember both knobs so _populate_instruction_budget (called
         # below) can produce an honest budget reflecting the wire prompt.
@@ -3859,6 +3992,13 @@ class JaatoSession:
                 filters.append(plugin)
         if not filters:
             return scoped
+        # The predicates answer for "the current session", and a plugin
+        # instance is shared by every session on the registry (#1195: the
+        # todo plugin's per-session predefined plan).  This thread is
+        # serving THIS session now — say so, as ``_execute_single_tool``
+        # does before a tool call, so no predicate reads another session's
+        # state left behind on this thread.
+        set_current_session(self)
 
         visible: List['ToolSchema'] = []
         for tool in scoped:
@@ -15084,7 +15224,20 @@ NOTES
             if release is not None:
                 release(self._permission_scope)
             self._permission_scoped = False
+        self._release_plugin_scope()
         self._persistence.close()
+
+    def _release_plugin_scope(self) -> None:
+        """Drop this session's per-session state on the shared todo plugin
+        (#1195).  The stored plan stays — it is a later stage's handoff."""
+        if not self._initial_plan_loaded or self._runtime is None:
+            return
+        registry = self._runtime.registry
+        plugin = registry.get_plugin("todo") if registry else None
+        release = getattr(plugin, "release_session_scope", None)
+        if release is not None:
+            release(self._plugin_scope)
+        self._initial_plan_loaded = False
 
 
 __all__ = ['JaatoSession']

@@ -213,7 +213,9 @@ which is what covers the degraded posture below.
 The write-denies on user-authored config are the integrity half of the
 profile: those files are read back by the framework and turned into
 behaviour (a persona, a profile, a prefetch script, a template that becomes
-code at render time), so a confined session that could rewrite one would be
+code at render time, a predefined plan a profile's
+`plugin_configs.todo.initial_plan_name` loads from `.jaato/plans/` —
+template v33), so a confined session that could rewrite one would be
 authoring its own instructions. Tenant-runtime state under `.jaato/`
 (`sessions/`, `logs/`, `cache/`, `memory/`, `todos/`, …) carries no deny and
 stays writable. Two deliberate omissions: `.jaato/prompts/`, because

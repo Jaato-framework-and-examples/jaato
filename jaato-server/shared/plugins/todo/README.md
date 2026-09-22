@@ -345,7 +345,7 @@ Model: How would you like me to proceed? I can work on this without plan trackin
   },
   "storage": {
     "type": "memory",
-    "path": "./todo_plans.json",
+    "path": "./todo_plans.yaml",
     "use_directory": false
   },
   "display": {
@@ -367,7 +367,7 @@ plugin.initialize({
         "headers": {"X-Custom": "value"}
     },
     "storage_type": "hybrid",
-    "storage_path": "./plans.json"
+    "storage_path": "./plans.yaml"
 })
 ```
 
@@ -377,7 +377,77 @@ plugin.initialize({
 |----------|-------------|
 | `TODO_CONFIG_PATH` | Path to todo.json configuration file |
 | `TODO_WEBHOOK_TOKEN` | Bearer token for webhook reporter |
-| `TODO_STORAGE_PATH` | Default path for file/hybrid storage |
+| `TODO_STORAGE_PATH` | Default path for hybrid storage (default `./todo_plans.yaml`) |
+
+## Predefined Plans (`initial_plan_name`)
+
+A profile can start a session with a plan already in place instead of
+asking the model to write one:
+
+```yaml
+# .jaato/profiles/onboarder.yaml
+plugins: [todo, cli]
+plugin_configs:
+  todo:
+    initial_plan_name: onboard-service    # an id, never a path
+```
+
+The id names `<config_root>/plans/<id>.yaml` — by default
+`<workspace>/.jaato/plans/onboard-service.yaml`, an authored asset beside
+`profiles/` and `agents/`.  For the session that declares the knob, and
+**only** that session:
+
+- the plan is loaded before turn 1 and is the session's active plan —
+  overriding a plan an earlier cascade stage of the same agent left behind;
+- its system prompt carries: *"You were invoked with a predefined plan. Use
+  the available TODO tools to read it and organize your work to comply
+  with it."*;
+- `createPlan` is not on its tool surface.  Every other TODO tool is.
+
+A parent, a sibling subagent or a later session on the same plugin instance
+is unaffected: the knob is per session, never per instance (the instance is
+shared by one registry and carried across cascade stages).
+
+The authored file is read with `yaml.safe_load` and **never written**.
+What is stored is a copy with a fresh `plan_id`, kept by the storage
+backend like any other plan, so progress never reaches the file.
+
+A name that is not an id (`../x`, `/abs`, `a/b`), a missing file or a
+document that is not a plan **refuses the session** — it does not start
+without the plan its profile promised.  `jaato-scaffold validate` reports
+the same defects first, as `initial_plan_name_invalid`,
+`initial_plan_missing` and `initial_plan_invalid` (errors).
+
+### Plan file schema
+
+The document mirrors `TodoPlan.to_dict()` (see [Data Models](#data-models)),
+so a plan the storage saved is a valid authored plan.  Only `title` and each
+step's `description` are required:
+
+<!-- initial-plan-example -->
+```yaml
+title: Onboard a new service
+steps:
+  - description: Read the service's README and list its entry points
+  - step_id: tests
+    description: Run the test suite and record the failures
+  - description: Validate the fixes against the service contract
+    validation_required: true
+context:
+  owner: platform-team
+```
+
+| Field | Required | Meaning |
+|-------|----------|---------|
+| `title` | yes | Plan summary |
+| `steps[].description` | yes | What the step does |
+| `steps[].step_id` | no | Authored id (plan-scoped); a fresh UUID otherwise |
+| `steps[].sequence` | no | Defaults to the step's position (1-based) |
+| `steps[].validation_required` | no | Completion needs subagent evidence (see Validation Enforcement). Honoured as written — descriptions are not auto-classified the way `createPlan`'s are |
+| `steps[].depends_on`, `provides` | no | Cross-agent fields, as in `TodoStep` |
+| `started` | no | **Defaults to `true`**: the authored file is the approval `startPlan` otherwise asks for. Write `started: false` to make the agent confirm the plan first |
+| `context` | no | Free-form; `initial_plan_name` is added to it |
+| `plan_id`, `created_at` | no | Ignored — minted per load, so two sessions never share one stored plan |
 
 ## Transport Protocols (Reporters)
 
@@ -474,15 +544,19 @@ Writes progress to filesystem for external monitoring:
 ```
 {base_path}/
 ├── plans/{plan_id}/
-│   ├── plan.json       # Full plan state
-│   ├── progress.json   # Current progress stats
+│   ├── plan.yaml       # Full plan state
+│   ├── progress.yaml   # Current progress stats
 │   └── events/         # Event history
-│       ├── 001_plan_created.json
-│       ├── 002_step_in_progress.json
-│       ├── 003_step_completed.json
+│       ├── 001_plan_created.yaml
+│       ├── 002_step_in_progress.yaml
+│       ├── 003_step_completed.yaml
 │       └── ...
-└── latest.json         # Pointer to most recent plan
+└── latest.yaml         # Pointer to most recent plan
 ```
+
+Every file is YAML.  The reporter only writes — nothing reads these back —
+and its `{base_path}/plans/` is unrelated to the authored
+`<config_root>/plans/` that `initial_plan_name` reads.
 
 Configuration:
 ```python
@@ -503,11 +577,14 @@ storage = create_storage("memory")
 
 ### File Storage
 
-Persists plans to JSON file(s).
+Persists plans to YAML file(s): `{plan_id}.yaml` per plan in directory
+mode, one `plan_id -> plan` mapping in single-file mode.  The plugin
+persists nothing as JSON, and does not read plans an older release saved
+as `.json`.
 
 ```python
 # Single file
-storage = create_storage("file", path="./plans.json")
+storage = create_storage("file", path="./plans.yaml")
 
 # Directory (one file per plan)
 storage = create_storage("file", path="./plans/", use_directory=True)
@@ -518,7 +595,7 @@ storage = create_storage("file", path="./plans/", use_directory=True)
 Combines in-memory cache with file persistence for fast access + durability.
 
 ```python
-storage = create_storage("hybrid", path="./plans.json")
+storage = create_storage("hybrid", path="./plans.yaml")
 ```
 
 ## Programmatic API

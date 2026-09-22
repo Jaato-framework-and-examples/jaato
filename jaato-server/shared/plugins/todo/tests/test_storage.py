@@ -1,6 +1,6 @@
 """Tests for TODO plugin storage backends."""
 
-import json
+import yaml
 import os
 import tempfile
 from pathlib import Path
@@ -94,7 +94,7 @@ class TestFileStorage:
     """Tests for FileStorage."""
 
     def test_save_and_get_plan_single_file(self):
-        with tempfile.NamedTemporaryFile(suffix='.json', delete=False) as f:
+        with tempfile.NamedTemporaryFile(suffix='.yaml', delete=False) as f:
             path = f.name
 
         try:
@@ -122,11 +122,11 @@ class TestFileStorage:
             assert retrieved.title == "Test"
 
             # Check file exists
-            plan_file = Path(tmpdir) / f"{plan.plan_id}.json"
+            plan_file = Path(tmpdir) / f"{plan.plan_id}.yaml"
             assert plan_file.exists()
 
     def test_get_all_plans_single_file(self):
-        with tempfile.NamedTemporaryFile(suffix='.json', delete=False) as f:
+        with tempfile.NamedTemporaryFile(suffix='.yaml', delete=False) as f:
             path = f.name
 
         try:
@@ -156,7 +156,7 @@ class TestFileStorage:
             assert len(plans) == 2
 
     def test_delete_plan_single_file(self):
-        with tempfile.NamedTemporaryFile(suffix='.json', delete=False) as f:
+        with tempfile.NamedTemporaryFile(suffix='.yaml', delete=False) as f:
             path = f.name
 
         try:
@@ -181,11 +181,11 @@ class TestFileStorage:
             deleted = storage.delete_plan(plan.plan_id)
 
             assert deleted is True
-            plan_file = Path(tmpdir) / f"{plan.plan_id}.json"
+            plan_file = Path(tmpdir) / f"{plan.plan_id}.yaml"
             assert not plan_file.exists()
 
     def test_clear_single_file(self):
-        with tempfile.NamedTemporaryFile(suffix='.json', delete=False) as f:
+        with tempfile.NamedTemporaryFile(suffix='.yaml', delete=False) as f:
             path = f.name
 
         try:
@@ -206,14 +206,14 @@ class TestFileStorage:
 
             storage.clear()
 
-            assert len(list(Path(tmpdir).glob("*.json"))) == 0
+            assert len(list(Path(tmpdir).glob("*.yaml"))) == 0
 
 
 class TestHybridStorage:
     """Tests for HybridStorage."""
 
     def test_save_persists_to_file(self):
-        with tempfile.NamedTemporaryFile(suffix='.json', delete=False) as f:
+        with tempfile.NamedTemporaryFile(suffix='.yaml', delete=False) as f:
             path = f.name
 
         try:
@@ -224,14 +224,14 @@ class TestHybridStorage:
 
             # Verify file was created
             with open(path, 'r') as f:
-                data = json.load(f)
+                data = yaml.safe_load(f)
             assert plan.plan_id in data
         finally:
             if os.path.exists(path):
                 os.unlink(path)
 
     def test_get_from_memory_after_save(self):
-        with tempfile.NamedTemporaryFile(suffix='.json', delete=False) as f:
+        with tempfile.NamedTemporaryFile(suffix='.yaml', delete=False) as f:
             path = f.name
 
         try:
@@ -249,7 +249,7 @@ class TestHybridStorage:
                 os.unlink(path)
 
     def test_loads_from_file_on_first_access(self):
-        with tempfile.NamedTemporaryFile(suffix='.json', delete=False) as f:
+        with tempfile.NamedTemporaryFile(suffix='.yaml', delete=False) as f:
             path = f.name
 
         try:
@@ -280,7 +280,7 @@ class TestCreateStorage:
         assert isinstance(storage, InMemoryStorage)
 
     def test_create_file_storage(self):
-        with tempfile.NamedTemporaryFile(suffix='.json', delete=False) as f:
+        with tempfile.NamedTemporaryFile(suffix='.yaml', delete=False) as f:
             path = f.name
 
         try:
@@ -292,7 +292,7 @@ class TestCreateStorage:
                 os.unlink(path)
 
     def test_create_hybrid_storage(self):
-        with tempfile.NamedTemporaryFile(suffix='.json', delete=False) as f:
+        with tempfile.NamedTemporaryFile(suffix='.yaml', delete=False) as f:
             path = f.name
 
         try:

@@ -124,6 +124,8 @@ AUTHORED: Tuple[AuthoredEntry, ...] = (
                   confined=True),
     AuthoredEntry("apparmor-fragments/", "workspace-tier confinement rules",
                   confined=True),
+    AuthoredEntry("plans/", "predefined plans a profile's "
+                  "plugin_configs.todo.initial_plan_name loads", confined=True),
     AuthoredEntry("reactors.json", "reactor rules", confined=True),
     AuthoredEntry("prompts/", "the prompt library (authored; write-allowed "
                   "under confinement so savePrompt works)"),

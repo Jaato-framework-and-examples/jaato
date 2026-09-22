@@ -27,6 +27,9 @@ from .channels import TodoReporter, ConsoleReporter, create_reporter
 from shared.trace import trace as _trace_write
 from .config_loader import load_config, TodoConfig
 from .event_bus import TaskEventBus
+from .initial_plan import (
+    GATED_TOOL, INITIAL_PLAN_KNOB, PRELOADED_PLAN_HINT, load_initial_plan,
+)
 from jaato_sdk.plugins.base import TRAIT_SLOT_SCOPED, UserCommand
 from shared.plugins.runner_forwarding import RunnerForwardingMixin
 
@@ -119,6 +122,16 @@ class TodoPlugin(RunnerForwardingMixin):
     :data:`TRAIT_SLOT_SCOPED` is what makes that preservation reachable:
     without it the next ``session.bootstrap`` constructed a fresh instance
     with an empty storage and the preserved plans were unreadable (#890).
+
+    **Per-session state lives beside it, keyed by the session's scope.**
+    A profile's ``plugin_configs.todo.initial_plan_name`` (#1195) belongs to
+    ONE session, while this instance is shared by every session on the
+    registry.  So :meth:`preload_plan` files the preloaded plan, the hint
+    and the ``createPlan`` refusal under ``JaatoSession.plugin_scope``, and
+    every read resolves the CALLING session's scope first
+    (:meth:`_resolve_plan_id`).  That state is dropped at
+    :meth:`reset_for_next_session` (its sessions ended) and per session by
+    :meth:`release_session_scope`; the per-agent map above is not.
     """
 
     plugin_traits = frozenset({TRAIT_SLOT_SCOPED})
@@ -139,6 +152,26 @@ class TodoPlugin(RunnerForwardingMixin):
         # discarding the other's changes.
         self._plan_locks: Dict[str, threading.Lock] = {}
         self._plan_locks_guard = threading.Lock()  # protects _plan_locks dict
+
+        # Per-SESSION predefined plans (#1195), keyed by the scope the
+        # session supplies (``JaatoSession.plugin_scope``) — the #957
+        # ``_scoped_policies`` shape.  This instance is shared by a parent
+        # and its in-process subagents and carried across cascade stages,
+        # so nothing a profile's ``initial_plan_name`` does may live on the
+        # instance as such: only the session that declared it is affected.
+        #
+        # ``_scoped_plan_ids``  scope -> the session's current plan id.  A
+        #     PRESENT key is authoritative for that session (``None`` = its
+        #     plan was completed; do not fall back to the per-agent map,
+        #     which may hold a plan carried from an earlier stage).
+        # ``_preloaded_scopes`` sessions whose plan LOADED — they get the
+        #     hint and are refused ``createPlan``.
+        # ``_unbound_scopes``   preloads not yet written to the per-agent
+        #     map.  Bound on the first tool call a ROOT session makes (see
+        #     :meth:`_resolve_plan_id`), when its agent identity is final.
+        self._scoped_plan_ids: Dict[str, Optional[str]] = {}
+        self._preloaded_scopes: set = set()
+        self._unbound_scopes: set = set()
 
         # Note: session is stored in thread-local storage via set_session()
         # This prevents subagent sessions from overwriting the parent's reference
@@ -238,7 +271,7 @@ class TodoPlugin(RunnerForwardingMixin):
         if tool_name not in PLAN_REQUIRED_TOOLS:
             return True
         try:
-            return self._get_current_plan() is not None
+            return self._get_current_plan(bind=False) is not None
         except Exception:
             # Defensive: a buggy plan-lookup must not break the turn.
             # Fail-open (treat tool as visible) — the runtime check
@@ -294,6 +327,13 @@ class TodoPlugin(RunnerForwardingMixin):
                    - reporter_config: Configuration for the reporter
                    - storage_type: Type of storage ("memory", "file", "hybrid")
                    - storage_path: Path for file-based storage
+
+                   ``initial_plan_name`` is deliberately NOT read here
+                   (#1195): this instance is shared by every session on the
+                   registry, and a predefined plan belongs to the one
+                   session that declared it.  ``JaatoSession.configure()``
+                   reads the knob from its own ``plugin_configs`` and calls
+                   :meth:`preload_plan` with its own scope.
         """
         config = config or {}
 
@@ -400,7 +440,15 @@ class TodoPlugin(RunnerForwardingMixin):
         preserved plans was discarded at the same boundary this hook runs
         on.
         """
-        self._trace("reset_for_next_session: NO-OP (per-agent plan map is cross-session by design)")
+        # The per-SESSION preload state (#1195) is the one thing here that
+        # is NOT cross-session: its sessions just ended.  Plans a root
+        # session bound into the per-agent map stay there, which is what
+        # lets a later stage of the same agent read them.
+        self._scoped_plan_ids.clear()
+        self._preloaded_scopes.clear()
+        self._unbound_scopes.clear()
+        self._trace("reset_for_next_session: per-agent plan map preserved "
+                    "(cross-session by design); per-session preloads dropped")
 
     def get_config_schema(self) -> Dict[str, Any]:
         """Return JSON Schema for this plugin's configuration."""
@@ -412,6 +460,17 @@ class TodoPlugin(RunnerForwardingMixin):
                     "default": "memory",
                     "description": "Storage backend type",
                     "enum": ["memory", "file", "hybrid"],
+                },
+                INITIAL_PLAN_KNOB: {
+                    "type": "string",
+                    "description": (
+                        "Id of a predefined plan at <config_root>/plans/"
+                        "<id>.yaml.  The session that declares it starts "
+                        "with that plan active, is told so in its system "
+                        "prompt, and does not see createPlan.  An id, not "
+                        "a path.  A missing or malformed plan refuses the "
+                        "session."
+                    ),
                 },
             },
         }
@@ -755,8 +814,18 @@ class TodoPlugin(RunnerForwardingMixin):
         })
 
     def get_system_instructions(self) -> Optional[str]:
-        """Return system instructions for the TODO plugin."""
-        return (
+        """Return system instructions for the TODO plugin.
+
+        Per SESSION, not per instance (#1195): the session asking is the
+        current one (``JaatoSession.configure`` sets it before it assembles
+        its prompt), and a session whose predefined plan LOADED gets
+        :data:`~.initial_plan.PRELOADED_PLAN_HINT` appended.  A session on the
+        same instance that declared nothing — the parent of a subagent that
+        did, or a sibling — gets the text unchanged.  In the system prompt
+        rather than a message because the hint must survive GC and sits in
+        the prompt-cache prefix, where a per-session constant is free.
+        """
+        text = (
             "You have access to plan tracking and cross-agent coordination tools.\n\n"
             "# WHEN TO USE PLANS\n"
             "- Use plans when the user explicitly requests one, OR when coordinating subagents\n"
@@ -868,6 +937,9 @@ class TodoPlugin(RunnerForwardingMixin):
             "- If startPlan is rejected: call completePlan(status='cancelled')\n"
             "- When using completeStepWithOutput, the output is passed to dependent steps"
         )
+        if self._current_scope() in self._preloaded_scopes:
+            text += "\n\n# PREDEFINED PLAN\n\n" + PRELOADED_PLAN_HINT
+        return text
 
     def get_auto_approved_tools(self) -> List[str]:
         """Return TODO tools as auto-approved (no security implications).
@@ -904,14 +976,9 @@ class TodoPlugin(RunnerForwardingMixin):
         steps = args.get("steps", [])
         self._trace(f"createPlan: title={title!r}, steps={len(steps)}")
 
-        if not title:
-            return {"error": "title is required"}
-
-        if not steps or not isinstance(steps, list):
-            return {"error": "steps must be a non-empty array"}
-
-        if not all(isinstance(s, str) for s in steps):
-            return {"error": "all steps must be strings"}
+        refusal = self._create_plan_refusal(title, steps)
+        if refusal is not None:
+            return {"error": refusal}
 
         # Guard: warn if there's already an active started plan
         existing_plan = self._get_current_plan()
@@ -942,7 +1009,7 @@ class TodoPlugin(RunnerForwardingMixin):
             self._storage.save_plan(plan)
 
         # Set as current plan for this agent
-        self._current_plan_ids[self._get_agent_name()] = plan.plan_id
+        self._set_current_plan_id(plan.plan_id)
 
         # Report creation
         if self._reporter:
@@ -988,6 +1055,27 @@ class TodoPlugin(RunnerForwardingMixin):
                 "jaato.todo.step_count": len(step_dicts),
             },
         }
+
+    def _create_plan_refusal(self, title: Any, steps: Any) -> Optional[str]:
+        """Why ``createPlan`` must refuse these arguments, or ``None``.
+
+        The argument checks, plus one that is about the SESSION: a session
+        started with a predefined plan does not see ``createPlan`` (its tool
+        scope drops it, #1195), and an executor reached anyway — a model
+        emitting the call from memory — is refused here, for that session
+        only.  Any other session on this shared instance is unaffected.
+        """
+        if not title:
+            return "title is required"
+        if not steps or not isinstance(steps, list):
+            return "steps must be a non-empty array"
+        if not all(isinstance(s, str) for s in steps):
+            return "all steps must be strings"
+        if self._current_scope() in self._preloaded_scopes:
+            return (f"This session was invoked with a predefined plan, so "
+                    f"{GATED_TOOL} is not available.  Read the plan with "
+                    f"getPlanStatus and adapt it with addStep / setStepStatus.")
+        return None
 
     def _execute_start_plan(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute the startPlan tool.
@@ -1311,7 +1399,7 @@ class TodoPlugin(RunnerForwardingMixin):
             )
 
         # Clear current plan for this agent
-        self._current_plan_ids.pop(self._get_agent_name(), None)
+        self._clear_current_plan_id(plan.plan_id)
 
         return {
             "plan_id": plan.plan_id,
@@ -1371,12 +1459,152 @@ class TodoPlugin(RunnerForwardingMixin):
             "progress": plan.get_progress(),
         }
 
-    def _get_current_plan(self) -> Optional[TodoPlan]:
-        """Get the current active plan for this agent."""
-        plan_id = self._current_plan_ids.get(self._get_agent_name())
+    def _get_current_plan(self, bind: bool = True) -> Optional[TodoPlan]:
+        """Get the current active plan for the calling session's agent.
+
+        See :meth:`_resolve_plan_id` for which map answers and what
+        ``bind`` does.  ``is_tool_visible`` passes ``bind=False``: it runs
+        on the model thread, where only the session ContextVar is known to
+        be current, so it may read but must not write the per-agent map.
+        """
+        plan_id = self._resolve_plan_id(bind=bind)
         if not plan_id or not self._storage:
             return None
         return self._storage.get_plan(plan_id)
+
+    # === Per-session predefined plan (#1195) ===
+
+    def _current_session(self) -> Any:
+        """The session this call is serving: the session ContextVar
+        (``JaatoSession`` sets it in ``configure``, before each tool call and
+        before each provider call's tool filtering), else this plugin's
+        thread-local reference."""
+        from shared.session_context import get_current_session
+        try:
+            return get_current_session()
+        except LookupError:
+            return getattr(_thread_local, 'session', None)
+
+    def _current_scope(self) -> Optional[str]:
+        """The per-session key the current session supplies, or ``None``."""
+        scope = getattr(self._current_session(), 'plugin_scope', None)
+        return scope if isinstance(scope, str) and scope else None
+
+    def _resolve_plan_id(self, bind: bool) -> Optional[str]:
+        """The calling session's current plan id.
+
+        A session that preloaded a plan is answered from
+        ``_scoped_plan_ids`` — which is what makes the preload OVERRIDE a
+        plan carried in the per-agent map from an earlier cascade stage of
+        the same agent, and what keeps a subagent's preload from being read
+        as its parent's.  Every other session is answered from the per-agent
+        map exactly as before.
+
+        With ``bind``, a ROOT session's preload is also written into the
+        per-agent map on first use, so a later stage of the same agent reads
+        it the way it reads a plan ``createPlan`` made.  Not at preload time:
+        an in-process subagent is ``configure()``-d while its ``agent_id``
+        is still the default ``"main"`` and before ``set_agent_context``
+        marks it a subagent, so an eager write would replace its PARENT's
+        plan.  A subagent is never bound — its plan is its own.
+        """
+        scope = self._current_scope()
+        if scope is None or scope not in self._scoped_plan_ids:
+            return self._current_plan_ids.get(self._get_agent_name())
+        plan_id = self._scoped_plan_ids[scope]
+        if bind and plan_id and scope in self._unbound_scopes:
+            session = self._current_session()
+            if getattr(session, 'agent_type', 'main') != 'subagent':
+                self._current_plan_ids[self._get_agent_name()] = plan_id
+            self._unbound_scopes.discard(scope)
+        return plan_id
+
+    def _set_current_plan_id(self, plan_id: str) -> None:
+        """Make *plan_id* the calling session's current plan."""
+        scope = self._current_scope()
+        if scope is not None and scope in self._scoped_plan_ids:
+            self._scoped_plan_ids[scope] = plan_id
+            return
+        self._current_plan_ids[self._get_agent_name()] = plan_id
+
+    def _clear_current_plan_id(self, plan_id: str) -> None:
+        """The calling session's plan *plan_id* ended: it has none now."""
+        scope = self._current_scope()
+        if scope is not None and scope in self._scoped_plan_ids:
+            self._scoped_plan_ids[scope] = None
+            self._unbound_scopes.discard(scope)
+            agent = self._get_agent_name()
+            if self._current_plan_ids.get(agent) == plan_id:
+                self._current_plan_ids.pop(agent, None)
+            return
+        self._current_plan_ids.pop(self._get_agent_name(), None)
+
+    def preload_plan(
+        self,
+        scope: str,
+        plan_name: str,
+        *,
+        config_root: Optional[str],
+        workspace_path: Optional[str],
+    ) -> TodoPlan:
+        """Load ``<config_root>/plans/<plan_name>.yaml`` as the active plan of
+        the session identified by *scope* (#1195).
+
+        Called by ``JaatoSession.configure()`` for the session whose
+        ``plugin_configs.todo.initial_plan_name`` names the plan — never by
+        :meth:`initialize`, which ignores the knob, because this instance is
+        shared and the knob belongs to one session.
+
+        The authored file is only READ (``yaml.safe_load``); what is stored
+        is a copy with a fresh ``plan_id``, saved through the ordinary
+        storage, so progress never reaches the file.  It becomes the
+        session's current plan immediately — overriding any plan the
+        per-agent map carries for the same agent — and the session gets the
+        hint and loses ``createPlan``.
+
+        Raises:
+            InitialPlanError: the name is not an id, the file is missing, or
+                it is not a plan.  Nothing is recorded for *scope* then, so
+                no hint is contributed for a plan that did not load.
+        """
+        plan = load_initial_plan(plan_name, config_root, workspace_path)
+        if self._storage is None:
+            self._storage = InMemoryStorage()
+        self._storage.save_plan(plan)
+        self._scoped_plan_ids[scope] = plan.plan_id
+        self._preloaded_scopes.add(scope)
+        self._unbound_scopes.add(scope)
+        self._trace(
+            f"preload_plan: scope={scope} plan={plan_name!r} "
+            f"plan_id={plan.plan_id} steps={len(plan.steps)}")
+        self._report_preloaded(plan, plan_name)
+        return plan
+
+    def _report_preloaded(self, plan: TodoPlan, plan_name: str) -> None:
+        """Announce a preloaded plan the way ``createPlan`` announces one.
+        Best-effort: a reporter that fails must not undo a load."""
+        try:
+            if self._reporter:
+                self._reporter.report_plan_created(
+                    plan, agent_id=self._get_agent_name())
+            self._publish_event(TaskEventType.PLAN_CREATED, plan, payload={
+                "steps": [{"step_id": s.step_id, "sequence": s.sequence,
+                           "description": s.description} for s in plan.steps],
+                "predefined": plan_name,
+            })
+        except Exception as exc:  # noqa: BLE001
+            self._trace(f"preload_plan: reporting failed: {exc}")
+
+    def has_preloaded_plan(self, scope: Optional[str]) -> bool:
+        """Whether the session identified by *scope* started with a plan."""
+        return scope in self._preloaded_scopes
+
+    def release_session_scope(self, scope: str) -> None:
+        """Forget a closed session's per-session state.  The stored plan and
+        any per-agent binding stay — they are the handoff to a later stage."""
+        self._scoped_plan_ids.pop(scope, None)
+        self._preloaded_scopes.discard(scope)
+        self._unbound_scopes.discard(scope)
 
     def _get_most_recent_plan(self) -> Optional[TodoPlan]:
         """Get the most recently created plan from storage."""
@@ -1411,7 +1639,7 @@ class TodoPlugin(RunnerForwardingMixin):
         if self._storage:
             self._storage.save_plan(plan)
 
-        self._current_plan_ids[self._get_agent_name()] = plan.plan_id
+        self._set_current_plan_id(plan.plan_id)
 
         if self._reporter:
             self._reporter.report_plan_created(plan, agent_id=self._get_agent_name())

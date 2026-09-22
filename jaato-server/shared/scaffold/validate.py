@@ -2808,6 +2808,48 @@ def _check_completion_assets(profiles, ws: Path, config_root: str, out) -> None:
                     profile=pname, where=where))
 
 
+def _check_initial_plans(profiles, ws: Path, config_root: str, out) -> None:
+    """A profile's predefined plan (``plugin_configs.todo.initial_plan_name``,
+    #1195) must name a plan that LOADS.
+
+    At runtime the same defect refuses the session (the knob is read by
+    ``JaatoSession.configure()``, which raises rather than start a session
+    without the plan its profile promised), so this is the cheap half: it
+    fires before any session exists.  Resolved and parsed by the SAME
+    function the session calls (:func:`~shared.plugins.todo.initial_plan.
+    load_initial_plan`), so the validator and the runtime cannot disagree
+    about which file a name means or whether it is a plan.  Reading a YAML
+    file with ``safe_load`` runs nothing, so validate stays side-effect free.
+
+    Three **error** findings, the posture ``completion_asset_missing`` and
+    ``default_agent_missing`` take for a declared asset the session cannot
+    start without:
+
+    * ``initial_plan_name_invalid`` — the value is not a plan id (a path, a
+      suffix, empty);
+    * ``initial_plan_missing`` — ``<config_root>/plans/<id>.yaml`` is absent;
+    * ``initial_plan_invalid`` — the file is not readable YAML, or not a
+      plan (no ``title``, no ``steps``, a step with no ``description``).
+    """
+    from shared.plugins.todo.initial_plan import (
+        INITIAL_PLAN_KNOB, InitialPlanError, load_initial_plan,
+    )
+
+    for pname, profile in sorted((profiles or {}).items()):
+        block = (getattr(profile, "plugin_configs", None) or {}).get("todo")
+        if not isinstance(block, dict) or INITIAL_PLAN_KNOB not in block:
+            continue
+        root = block.get("config_root") or config_root
+        try:
+            load_initial_plan(block[INITIAL_PLAN_KNOB], root, str(ws))
+        except InitialPlanError as exc:
+            out.append(Diagnostic(
+                "error", exc.code,
+                f"{exc} — a session of this profile is refused rather than "
+                f"started without its predefined plan",
+                profile=pname, where=f"plugin_configs.todo.{INITIAL_PLAN_KNOB}"))
+
+
 def _check_default_agent_exists(profiles, ws: Path, config_root: str, out) -> None:
     """Flag a profile whose ``default_agent`` is not on disk (#944).
 
@@ -2930,6 +2972,7 @@ def validate_workspace(
     _check_prefetch_directives(ws, config_root, out)
     _check_spawn_schema_wire_types(result.profiles, config_root, out)
     _check_completion_assets(result.profiles, ws, config_root, out)
+    _check_initial_plans(result.profiles, ws, config_root, out)
     _check_default_agent_exists(result.profiles, ws, config_root, out)
     _check_memory_curation(result.profiles, out)
     _check_regulatory_declared(result.profiles, out)
