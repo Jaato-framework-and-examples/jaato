@@ -5,7 +5,7 @@ client.  It answers, deterministically and from the client's own
 vantage, the questions that otherwise cost an hour of trial-and-error:
 
 - Is the ``server`` package importable, so autostart's
-  ``python -m server`` will work?
+  ``python -m jaato_server`` will work?
 - Is a daemon listening on the socket, or is the socket file **stale**
   (present but dead) — the state that silently blocks autostart?
 - **Which** daemon am I attached to, and **what HOME does it run with?**
@@ -218,7 +218,7 @@ def probe_daemon(socket_path: str, pidfile: str) -> DaemonInfo:
 def check_python_env() -> List[Check]:
     """Verify the interpreter can import what an SDK client needs.
 
-    Autostart launches the daemon via ``python -m server`` using the
+    Autostart launches the daemon via ``python -m jaato_server`` using the
     *current* ``sys.executable`` — so ``server`` must be importable on
     this interpreter, not just ``jaato_sdk``.
     """
@@ -228,7 +228,7 @@ def check_python_env() -> List[Check]:
     for mod, hint in (
         ("jaato_sdk", "pip install -e jaato-sdk/."),
         ("server", "pip install -e 'jaato-server/.[all]' — required for "
-                    "autostart (python -m server)"),
+                    "autostart (python -m jaato_server)"),
     ):
         if _u.find_spec(mod) is not None:
             checks.append(Check(f"import {mod}", PASS, "importable"))
@@ -275,7 +275,7 @@ def check_dependency_coherence() -> List[Check]:
     WARN, not FAIL: a skew misleads, it does not stop work.
     """
     try:
-        from shared.scaffold import dependencies as _deps
+        from jaato_server.shared.scaffold import dependencies as _deps
     except Exception:      # noqa: BLE001 — sdk installed without the server
         return [Check("dependency coherence", WARN,
                       "cannot check: `shared.scaffold` is not importable "
@@ -309,6 +309,51 @@ def check_dependency_coherence() -> List[Check]:
                       "shows the full picture.")]
     return [Check("dependency coherence", PASS,
                   ", ".join(seen) + " — metadata agrees with sources")]
+
+
+def check_package_layout() -> List[Check]:
+    """Warn about a stale pre-1.0 top-level ``shared`` / ``server`` package.
+
+    Before the 1.0 namespace rename (#1079) the server shipped as top-level
+    ``shared`` and ``server`` packages and the daemon ran as
+    ``python -m server``.  Both now live under ``jaato_server``, and
+    ``python -m server`` / ``import shared`` / ``import server`` no longer
+    resolve -- the operator migration is to ``python -m jaato_server`` (or the
+    unchanged ``jaato-server`` console script).
+
+    POSITIVE EVIDENCE ONLY -- the #1014 / #1023 posture.  This WARNs only when a
+    top-level ``shared`` or ``server`` actually RESOLVES: a leftover pre-1.0
+    install, or a third-party package colliding on the name (the collision the
+    rename exists to end).  With only ``jaato_server`` installed it is SILENT;
+    the mere absence of the old names is not a finding, or the check would warn
+    about a correct install.  Never FAILs -- a migration hint is not a defect,
+    and ``jaato-doctor`` is documented as usable as a CI gate.
+    """
+    import importlib.util as _u
+    stale: List[Tuple[str, str]] = []
+    for name in ("shared", "server"):
+        try:
+            spec = _u.find_spec(name)
+        except Exception:  # pragma: no cover - a broken parent package etc.
+            spec = None
+        if spec is not None:
+            stale.append((name, getattr(spec, "origin", None) or "?"))
+    if not stale:
+        return [Check("package layout", PASS,
+                      "no stale top-level shared/server package")]
+    names = " and ".join(n for n, _ in stale)
+    where = "\n  ".join(f"{n} -> {o}" for n, o in stale)
+    return [Check(
+        "package layout", WARN,
+        f"a top-level {names} package resolves, which the 1.0 namespace "
+        f"rename (#1079) retired:\n  {where}\n"
+        "The daemon is now jaato_server: start it with "
+        "'python -m jaato_server' or the unchanged 'jaato-server' console "
+        "script -- 'python -m server' no longer works, and 'import shared' / "
+        "'import server' resolve to jaato_server.shared / jaato_server.server. "
+        "If this is a leftover pre-1.0 install, uninstall and reinstall "
+        "jaato-server; if it is another package, the collision is now "
+        "harmless (jaato no longer squats those names).")]
 
 
 def _release_line(dist, status) -> str:
@@ -456,7 +501,7 @@ def check_mcp_sdk() -> List[Check]:
         version = "unknown"
     try:
         from mcp import types as mcp_types
-        from shared.plugins.mcp.plugin import detect_jsonrpc_seam
+        from jaato_server.shared.plugins.mcp.plugin import detect_jsonrpc_seam
     except Exception as exc:             # noqa: BLE001 — sdk without the server
         return [Check("mcp sdk", WARN,
                       f"mcp {version} installed, but the plugin is not "
@@ -488,7 +533,7 @@ def check_integrations() -> List[Check]:
     that stop work.
     """
     try:
-        from shared.scaffold import integrations as _install
+        from jaato_server.shared.scaffold import integrations as _install
     except Exception:      # noqa: BLE001 — sdk installed without the server
         return [Check("integrations", WARN,
                       "cannot check: `shared.scaffold` is not importable "
@@ -1114,7 +1159,7 @@ def load_known_env_vars() -> Optional[Dict[str, str]]:
     client-only install); the daemon-env check then WARNs rather than guessing.
     """
     try:
-        from shared.scaffold.introspect import env_vars  # type: ignore
+        from jaato_server.shared.scaffold.introspect import env_vars  # type: ignore
     except Exception:
         return None
     return {n: v.tier for n, v in env_vars().items()}
@@ -1408,7 +1453,7 @@ def check_secret_scrub(workspace: str, config_root: Optional[str]) -> List[Check
     reporting PASS on nothing.
     """
     try:
-        from shared.scaffold.validate import validate_workspace  # type: ignore
+        from jaato_server.shared.scaffold.validate import validate_workspace  # type: ignore
     except Exception:
         return [Check("secret scrub", WARN,
                       "jaato-server's validator is not importable here — cannot "
@@ -1679,6 +1724,7 @@ def run_checks(
     checks: List[Check] = []
     checks += check_python_env()
     checks += check_premium_reactors()
+    checks += check_package_layout()
     checks += check_dependency_coherence()
     checks += check_package_releases(timeout=release_timeout,
                                      refresh=refresh_releases,

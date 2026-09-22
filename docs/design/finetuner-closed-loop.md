@@ -41,8 +41,8 @@ profile plugin_configs.reliability  >  workspace JSON  >  user JSON  >  built-in
 Profile-supplied entries that share a `policy_id` with file-supplied ones replace them; otherwise they are additive. `pattern_detection` fields from the profile override matching fields from files.
 
 Implementation surface:
-- `shared/plugins/reliability/plugin.py::ReliabilityPlugin.initialize()` — read `config.get("pattern_detection")` and `config.get("prerequisite_policies")`, normalise via the existing `policy_config` parsers, and apply them after `load_file_policies()`.
-- `shared/plugins/reliability/policy_config.py` — expose a pure parsing entry point that takes a dict (not a file path) so the same code path validates both sources.
+- `jaato_server/shared/plugins/reliability/plugin.py::ReliabilityPlugin.initialize()` — read `config.get("pattern_detection")` and `config.get("prerequisite_policies")`, normalise via the existing `policy_config` parsers, and apply them after `load_file_policies()`.
+- `jaato_server/shared/plugins/reliability/policy_config.py` — expose a pure parsing entry point that takes a dict (not a file path) so the same code path validates both sources.
 - `get_config_schema()` on the plugin — declare the two top-level keys so introspection tools (and the fine-tuner) can discover the schema.
 
 ### 2. Profile patcher (the new capability)
@@ -57,7 +57,7 @@ A small, focused module that:
 6. Returns a unified diff of the change so the caller (or a human approver) can see exactly what will be written.
 7. Writes atomically (temp file + rename) only when the caller confirms.
 
-Location: `shared/plugins/subagent/profile_patcher.py` — co-located with `config.py` since it operates on the same on-disk format. Deliberately *not* a method on `SubagentProfile`, because that dataclass represents the resolved (post-inheritance) form and is the wrong identity for a write-back operation.
+Location: `jaato_server/shared/plugins/subagent/profile_patcher.py` — co-located with `config.py` since it operates on the same on-disk format. Deliberately *not* a method on `SubagentProfile`, because that dataclass represents the resolved (post-inheritance) form and is the wrong identity for a write-back operation.
 
 **API sketch:**
 
@@ -103,7 +103,7 @@ The fine-tuner needs two tools (both `discoverability="discoverable"`, neither a
 
 Splitting propose/apply lets the fine-tuner present its reasoning + diff to the user (or to a fork-replay validator) before any disk mutation.
 
-These tools belong in a new `shared/plugins/profile_patcher/` plugin rather than being grafted onto an existing plugin — it gives them a clean home, isolates the permission surface, and keeps `subagent/` focused on profile *resolution* rather than *mutation*.
+These tools belong in a new `jaato_server/shared/plugins/profile_patcher/` plugin rather than being grafted onto an existing plugin — it gives them a clean home, isolates the permission surface, and keeps `subagent/` focused on profile *resolution* rather than *mutation*.
 
 ## What this design deliberately does *not* do
 

@@ -2,7 +2,7 @@
 
 ## Executive Summary
 
-JAATO implements a **pluggable context garbage collection (GC) system** that prevents context window overflow during long-running agentic sessions. Four strategy plugins — `gc_truncate`, `gc_summarize`, `gc_hybrid`, and `gc_budget` — share a common `GCPlugin` protocol defined in `shared/plugins/gc/base.py`. The most advanced strategy, **`gc_budget`**, uses the `InstructionBudget` to make **policy-aware removal decisions** across a five-tier priority system (ENRICHMENT → EPHEMERAL → PARTIAL → PRESERVABLE → LOCKED) and supports a **continuous collection mode** that trims context after every turn rather than waiting for a threshold breach. The session integrates with all plugins through **proactive threshold monitoring during streaming**, **pre-send checks**, and **automatic budget synchronization** after each collection.
+JAATO implements a **pluggable context garbage collection (GC) system** that prevents context window overflow during long-running agentic sessions. Four strategy plugins — `gc_truncate`, `gc_summarize`, `gc_hybrid`, and `gc_budget` — share a common `GCPlugin` protocol defined in `jaato_server/shared/plugins/gc/base.py`. The most advanced strategy, **`gc_budget`**, uses the `InstructionBudget` to make **policy-aware removal decisions** across a five-tier priority system (ENRICHMENT → EPHEMERAL → PARTIAL → PRESERVABLE → LOCKED) and supports a **continuous collection mode** that trims context after every turn rather than waiting for a threshold breach. The session integrates with all plugins through **proactive threshold monitoring during streaming**, **pre-send checks**, and **automatic budget synchronization** after each collection.
 
 ---
 
@@ -51,7 +51,7 @@ Agentic sessions produce large volumes of context: tool call arguments, tool res
 
 ### The Plugin Protocol
 
-All four GC strategies implement the `GCPlugin` protocol defined in `shared/plugins/gc/base.py`. This protocol-based design allows the session to swap strategies without code changes.
+All four GC strategies implement the `GCPlugin` protocol defined in `jaato_server/shared/plugins/gc/base.py`. This protocol-based design allows the session to swap strategies without code changes.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -153,7 +153,7 @@ Which GC strategy?
 
 ### GC Policy Tiers
 
-The `InstructionBudget` (defined in `shared/instruction_budget.py`) assigns a `GCPolicy` to every tracked instruction source. These policies determine removal priority during budget-aware garbage collection.
+The `InstructionBudget` (defined in `jaato_server/shared/instruction_budget.py`) assigns a `GCPolicy` to every tracked instruction source. These policies determine removal priority during budget-aware garbage collection.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -591,7 +591,7 @@ All four GC plugins respect turn-level preservation to maintain conversation coh
 ### Programmatic Configuration
 
 ```python
-from shared.plugins.gc import load_gc_plugin, GCConfig
+from jaato_server.shared.plugins.gc import load_gc_plugin, GCConfig
 
 # Threshold mode (default)
 gc_plugin = load_gc_plugin('gc_budget', {
@@ -631,7 +631,7 @@ GC can be configured per subagent via `.jaato/profiles/*.json`:
 }
 ```
 
-The `GCProfileConfig` dataclass in `shared/plugins/subagent/config.py` maps these settings to `GCConfig` and plugin initialization.
+The `GCProfileConfig` dataclass in `jaato_server/shared/plugins/subagent/config.py` maps these settings to `GCConfig` and plugin initialization.
 
 ---
 

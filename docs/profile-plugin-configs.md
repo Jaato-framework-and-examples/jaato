@@ -48,7 +48,7 @@ Plugin.initialize()
 Every plugin that accepts configuration declares its settings via `get_config_schema()`. You can query them programmatically:
 
 ```python
-from shared.plugins.registry import PluginRegistry
+from jaato_server.shared.plugins.registry import PluginRegistry
 
 registry = PluginRegistry()
 registry.discover()

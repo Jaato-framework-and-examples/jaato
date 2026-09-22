@@ -40,12 +40,12 @@ current repo state at write time:
 
 | Claim                                                | Verified at      |
 |------------------------------------------------------|------------------|
-| Memory plugin `enrich_prompt`                        | `shared/plugins/memory/plugin.py:585` |
-| Tag-coherence matching (paragraph-coherent)          | `shared/plugins/memory/plugin.py:730` (`_tag_coherent_in_paragraphs`) |
+| Memory plugin `enrich_prompt`                        | `jaato_server/shared/plugins/memory/plugin.py:585` |
+| Tag-coherence matching (paragraph-coherent)          | `jaato_server/shared/plugins/memory/plugin.py:730` (`_tag_coherent_in_paragraphs`) |
 | `agent_params` plumbed end-to-end                    | `jaato_runtime.py:879`, `session_manager.py:890+` |
 | `agent_params` validated against profile schema      | `session_manager.py:1110+` |
 | `%prompt-name` expansion + param substitution        | `session_manager.py:2463` (`_expand_prompt_references`) |
-| Raw → curated memory lifecycle (advisor pattern)     | `shared/plugins/memory/plugin.py` docstrings (lines 4, 53, 184, 240, 328) |
+| Raw → curated memory lifecycle (advisor pattern)     | `jaato_server/shared/plugins/memory/plugin.py` docstrings (lines 4, 53, 184, 240, 328) |
 | Memory advisor as auto-firing reactor on `agent.completed` | **Pattern shipped in `jaato-knowledge-manager/.jaato.example/`** as the canonical example. Reactor rule in `reactors.json` matches `agent.completed where source_agent == 'main'`, fires `reactors/on_session_complete.py`, which spawns a headless session with the `memory-advisor` profile (`profiles/memory-advisor.json`) — see "Reference implementation" section below. **CORRECTED 2026-06-27:** enrichment surfaces **curated memories only** — the index is built from `curated.jsonl` (`plugin.py:246`: *"Build index from CURATED memories only — raw memories are the curator's queue and aren't surfaced as enrichment hints"*). So auto-curation (the advisor reactor) is **REQUIRED** for continuity, not optional: without it `curated.jsonl` stays empty, `enrich_prompt` surfaces nothing, and the next session sees a "fresh start" even though raw memories exist on disk. (A stored-but-raw memory is still reachable via the explicit `retrieve_memories` tool — its `maturity` filter accepts raw — but it does **not** auto-surface as a 💡 hint.) |
 
 Future readers: re-verify before relying on file:line citations.
@@ -82,7 +82,7 @@ first; see §2.)
 
 When an agent calls `store_memory(tags=[...], content=...)`, the entry
 lands as **raw**. The memory plugin's "advisor agent" pattern (see
-`shared/plugins/memory/plugin.py:4-7, 53-57`) provides for a separate
+`jaato_server/shared/plugins/memory/plugin.py:4-7, 53-57`) provides for a separate
 agent to consume `get_pending_curation`, refine raw entries into
 validated/curated ones (deduplicating, merging, tagging consistency),
 and write back via `update_memory`.

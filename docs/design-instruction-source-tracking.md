@@ -12,41 +12,41 @@ Track token consumption by instruction source to help users understand where the
 
 | Component | File | Status |
 |-----------|------|--------|
-| `InstructionSource` enum | `shared/instruction_budget.py` | Done |
-| `GCPolicy` enum | `shared/instruction_budget.py` | Done |
-| `SourceEntry` dataclass | `shared/instruction_budget.py` | Done |
-| `InstructionBudget` dataclass | `shared/instruction_budget.py` | Done |
-| `ConversationTurnType` enum | `shared/instruction_budget.py` | Done |
-| `PluginToolType` enum | `shared/instruction_budget.py` | Done |
-| `estimate_tokens()` helper | `shared/instruction_budget.py` | Done |
-| Unit tests (35 tests) | `shared/tests/test_instruction_budget.py` | Done |
+| `InstructionSource` enum | `jaato_server/shared/instruction_budget.py` | Done |
+| `GCPolicy` enum | `jaato_server/shared/instruction_budget.py` | Done |
+| `SourceEntry` dataclass | `jaato_server/shared/instruction_budget.py` | Done |
+| `InstructionBudget` dataclass | `jaato_server/shared/instruction_budget.py` | Done |
+| `ConversationTurnType` enum | `jaato_server/shared/instruction_budget.py` | Done |
+| `PluginToolType` enum | `jaato_server/shared/instruction_budget.py` | Done |
+| `estimate_tokens()` helper | `jaato_server/shared/instruction_budget.py` | Done |
+| Unit tests (35 tests) | `jaato_server/shared/tests/test_instruction_budget.py` | Done |
 
 ### Phase 2: Session Integration - COMPLETE
 
 | Component | File | Status |
 |-----------|------|--------|
-| `InstructionBudgetEvent` | `server/events.py` | Done |
-| `_instruction_budget` attribute | `shared/jaato_session.py` | Done |
-| `instruction_budget` property | `shared/jaato_session.py` | Done |
-| `_populate_instruction_budget()` | `shared/jaato_session.py` | Done |
-| `_update_conversation_budget()` | `shared/jaato_session.py` | Done |
-| `_emit_instruction_budget_update()` | `shared/jaato_session.py` | Done |
-| `set_instruction_budget_callback()` | `shared/jaato_session.py` | Done |
-| Wire up in `configure()` | `shared/jaato_session.py` | Done |
-| Wire up on turn completion | `shared/jaato_session.py` | Done |
+| `InstructionBudgetEvent` | `jaato_server/server/events.py` | Done |
+| `_instruction_budget` attribute | `jaato_server/shared/jaato_session.py` | Done |
+| `instruction_budget` property | `jaato_server/shared/jaato_session.py` | Done |
+| `_populate_instruction_budget()` | `jaato_server/shared/jaato_session.py` | Done |
+| `_update_conversation_budget()` | `jaato_server/shared/jaato_session.py` | Done |
+| `_emit_instruction_budget_update()` | `jaato_server/shared/jaato_session.py` | Done |
+| `set_instruction_budget_callback()` | `jaato_server/shared/jaato_session.py` | Done |
+| Wire up in `configure()` | `jaato_server/shared/jaato_session.py` | Done |
+| Wire up on turn completion | `jaato_server/shared/jaato_session.py` | Done |
 
 ### Phase 3: Server Integration - COMPLETE
 
 | Component | File | Status |
 |-----------|------|--------|
-| Import `InstructionBudgetEvent` | `server/core.py` | Done |
-| Wire up callback in server | `server/core.py` | Done |
-| Add `on_agent_instruction_budget_updated` hook | `shared/plugins/subagent/ui_hooks.py` | Done |
-| Implement hook in `ServerAgentHooks` | `server/core.py` | Done |
-| Emit budgets in `emit_current_state()` | `server/core.py` | Done |
-| Emit budgets in `_emit_subagent_state()` | `server/core.py` | Done |
-| Add `GetInstructionBudgetRequest` | `server/events.py` | Done |
-| Handle request in `SessionManager` | `server/session_manager.py` | Done |
+| Import `InstructionBudgetEvent` | `jaato_server/server/core.py` | Done |
+| Wire up callback in server | `jaato_server/server/core.py` | Done |
+| Add `on_agent_instruction_budget_updated` hook | `jaato_server/shared/plugins/subagent/ui_hooks.py` | Done |
+| Implement hook in `ServerAgentHooks` | `jaato_server/server/core.py` | Done |
+| Emit budgets in `emit_current_state()` | `jaato_server/server/core.py` | Done |
+| Emit budgets in `_emit_subagent_state()` | `jaato_server/server/core.py` | Done |
+| Add `GetInstructionBudgetRequest` | `jaato_server/server/events.py` | Done |
+| Handle request in `SessionManager` | `jaato_server/server/session_manager.py` | Done |
 
 ### Phase 4: Rich Client UI - COMPLETE
 
@@ -410,7 +410,7 @@ InstructionBudgetEvent(agent_id="main", budget_snapshot={...})
 ```
 
 The request is handled by `SessionManager._dispatch_to_session()`, which:
-1. For `agent_id="main"` (or None): Gets budget from `server._jaato.get_session().instruction_budget`
+1. For `agent_id="main"` (or None): Gets budget from `jaato_server.server._jaato.get_session().instruction_budget`
 2. For subagents: Gets budget from `SubagentPlugin._active_sessions[agent_id].session.instruction_budget`
 
 ### GC Plugin Integration

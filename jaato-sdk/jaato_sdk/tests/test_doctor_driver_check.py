@@ -158,7 +158,7 @@ def test_the_marker_matches_what_the_templates_actually_emit():
     result.
     """
     try:
-        from shared.scaffold._client_templates import TEMPLATES
+        from jaato_server.shared.scaffold._client_templates import TEMPLATES
     except ImportError:                      # pragma: no cover
         pytest.skip("jaato-server not importable in this environment")
 

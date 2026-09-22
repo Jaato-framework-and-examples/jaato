@@ -544,7 +544,7 @@ base_url: http://127.0.0.1:8084
 ### Port 0 for Dynamic Allocation
 
 Use `port=0` to let the OS assign a free port.  Read it from
-`server.port` and inject into environment variables:
+`jaato_server.server.port` and inject into environment variables:
 
 ```python
 server = MockRESTServer(port=0)
@@ -776,7 +776,7 @@ base_url: http://127.0.0.1:8084
 ### Port 0 for Dynamic Allocation
 
 Use `port=0` to let the OS assign a free port.  Read it from
-`server.port` and inject into the schema store or environment:
+`jaato_server.server.port` and inject into the schema store or environment:
 
 ```python
 server = MockRESTServer(port=0)

@@ -68,7 +68,7 @@ def _default_embedded_factory(
     Imported lazily so only embedded use pulls in the server runtime — callers
     that never embed pay nothing for importing this module.
     """
-    from shared import JaatoClient
+    from jaato_server.shared import JaatoClient
     return JaatoClient(
         provider_name=provider,
         workspace_path=workspace_path,
@@ -91,7 +91,7 @@ def _resolve_plugin_config_secrets(
     ``resolve_secret_uri`` is imported lazily (only embedded use pulls it) so
     importing ``jaato_embedded.client`` stays cheap.
     """
-    from shared.config_resolver import resolve_secret_uri
+    from jaato_server.shared.config_resolver import resolve_secret_uri
 
     if not plugin_configs:
         return {}
@@ -121,7 +121,7 @@ def _resolve_named_profile(name: str, config_root: Optional[str]) -> Dict[str, A
             f"named profile {name!r} needs config_root (the directory whose "
             f"'profiles/' holds the profile YAML/JSON)"
         )
-    from shared.plugins.subagent.config import discover_profiles
+    from jaato_server.shared.plugins.subagent.config import discover_profiles
 
     profiles_dir = str(Path(config_root).expanduser() / "profiles")
     result = discover_profiles(profiles_dir, config_root=str(config_root))
@@ -161,7 +161,7 @@ def _resolve_agent_persona(
     persona (frontmatter + ``{{param}}`` substitution) identically. Raises
     ``ValueError`` when the named agent isn't found (fail loud, no silent bare).
     """
-    from shared.plugins.subagent.config import resolve_agent
+    from jaato_server.shared.plugins.subagent.config import resolve_agent
 
     resolved = resolve_agent(agent_name, agent_params, workspace_path, config_root)
     if resolved is None:
@@ -377,7 +377,7 @@ class InProcessClient:
         # honors the same knob the daemon does.  Lazy shared import keeps the
         # facade SDK-only-importable at module load (ipc/ws paths never touch
         # ``shared``); this line runs only in the embedded runtime path.
-        from shared.instruction_suppression import normalize_suppression
+        from jaato_server.shared.instruction_suppression import normalize_suppression
         self._suppress_base_instructions = normalize_suppression(
             suppress_base_instructions
         )
@@ -542,7 +542,7 @@ class InProcessClient:
         # context-inheriting threads (the turn's ``to_thread`` worker); os.environ
         # covers the subagent ``ThreadPoolExecutor``, which does NOT inherit the
         # ContextVar. Like the runner (one session per process) there is no reset.
-        from shared.session_context import set_workspace_root, set_config_root
+        from jaato_server.shared.session_context import set_workspace_root, set_config_root
         if self._workspace_path:
             set_workspace_root(self._workspace_path)
             os.environ["JAATO_WORKSPACE_ROOT"] = self._workspace_path
@@ -604,7 +604,7 @@ class InProcessClient:
         elif self._embedded_factory is _default_embedded_factory:
             self._registry = await asyncio.to_thread(self._build_registry)
         else:
-            from shared import PluginRegistry
+            from jaato_server.shared import PluginRegistry
 
             self._registry = PluginRegistry(model_name=self._model)
         return True
@@ -628,7 +628,7 @@ class InProcessClient:
         preloaded_plugins = None
         tool_scopes = None
         if plugins is not None:
-            from shared.plugins.subagent.config import parse_plugin_list
+            from jaato_server.shared.plugins.subagent.config import parse_plugin_list
             plugins, preloaded_plugins, tool_scopes = parse_plugin_list(plugins)
         session_kwargs: Dict[str, Any] = {
             "plugin_configs": self._resolved_plugin_configs,
@@ -797,7 +797,7 @@ class InProcessClient:
         transports; gating only at expose_all (the old behavior) skipped
         non-requested plugins' init, diverging on enrichment side-effects.
         """
-        from shared import PluginRegistry
+        from jaato_server.shared import PluginRegistry
 
         registry = PluginRegistry(model_name=self._model)
         # tier_filter="runner": match the daemon SESSION's plugin tier (the
@@ -961,7 +961,7 @@ class InProcessClient:
         # profile would under the daemon.  The raw-value sibling, because
         # what crossed into this facade is a profile SPEC DICT — there is
         # no SubagentProfile in process to hand the attribute reader.
-        from shared.completion_nudge import coerce_max_completion_nudges
+        from jaato_server.shared.completion_nudge import coerce_max_completion_nudges
 
         MAX_COMPLETION_NUDGES = coerce_max_completion_nudges(
             self._max_completion_nudges, where="<embedded lead>",

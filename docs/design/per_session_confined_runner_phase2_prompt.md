@@ -44,26 +44,26 @@ inherits a confined profile and the self-confine in bootstrap step 3
 fails — the multitenancy promise breaks silently.]
 
 - Delete `apparmor_confine` enter/exit calls in
-  `server/__main__.py:_register_ipc_apparmor_hook` (the per-session
+  `jaato_server/server/__main__.py:_register_ipc_apparmor_hook` (the per-session
   thread-confinement pattern).
 - Delete the `SafeThreadPoolExecutor` pre-task apparmor hook
-  (`shared/safe_pool.py` or wherever it lives).
+  (`jaato_server/shared/safe_pool.py` or wherever it lives).
 - The daemon process becomes unconfined for Phase 2.  Phase 6 may
   later add a daemon-side narrow profile per §4.7; out of scope for
   Phase 2.
-- Existing `apparmor_confine` machinery in `server/apparmor.py`
+- Existing `apparmor_confine` machinery in `jaato_server/server/apparmor.py`
   STAYS in the file for now (other code may reference it during the
   transition).  Phase 6 cleanup deletes it.  DO NOT delete it as
   part of Phase 2 — it's a Phase 6 task.
 
-### 2.2 New package: `jaato-server/server/runner/`
+### 2.2 New package: `jaato-server/jaato_server/server/runner/`
 
-A new top-level package under `server/`.  Layout:
+A new top-level package under `jaato_server/server/`.  Layout:
 
 ```
-jaato-server/server/runner/
+jaato-server/jaato_server/server/runner/
 ├── __init__.py
-├── __main__.py             # entry point (python -m server.runner)
+├── __main__.py             # entry point (python -m jaato_server.runner)
 ├── bootstrap.py            # AppArmor self-confinement (§4.6 steps 1-3)
 ├── rpc_server.py           # runner-side RPC dispatcher
 ├── tool_executor.py        # runner-local ToolExecutor (echoes the daemon-side shape)
@@ -86,26 +86,26 @@ unconfined contract).
 
 [**Critical-path #2.**  After 2.1.]
 
-- New module `jaato-server/server/runner_spawner.py`.
+- New module `jaato-server/jaato_server/server/runner_spawner.py`.
 - `RunnerSpawner.spawn(session_id, workspace_path, profile_name, env)`:
   - Creates `socketpair(AF_UNIX, SOCK_STREAM)`.
   - Forks.
-  - Child: dup socketpair[1] to fd 3, exec `python -m server.runner`.
+  - Child: dup socketpair[1] to fd 3, exec `python -m jaato_server.runner`.
   - Parent: returns `(child_pid, socket)` pair.
 - Wire into `SessionManager.create_session` AFTER the AppArmor
   profile load (`_run_pre_initialize_hooks` already loads the
   profile; spawn happens after the load returns).
-- Daemon-side RPC client (`server/runner_rpc.py`): wraps the socket,
+- Daemon-side RPC client (`jaato_server/server/runner_rpc.py`): wraps the socket,
   exposes `call(method, args) → response`, manages request_ids,
   receives stream frames + forwards to `on_output`, handles cancel
   frame.
 
 ### 2.4 RPC framing: shared module
 
-- Factor `_read_frame` / `_write_frame` out of `server/ipc.py` into
-  `server/framing.py` (or `shared/framing.py` — pick one; document
+- Factor `_read_frame` / `_write_frame` out of `jaato_server/server/ipc.py` into
+  `jaato_server/server/framing.py` (or `jaato_server/shared/framing.py` — pick one; document
   the choice in the implementation plan).
-- Both `server/ipc.py` (daemon→client) and the runner-RPC code
+- Both `jaato_server/server/ipc.py` (daemon→client) and the runner-RPC code
   (daemon↔runner) import from there.
 - The factoring should be a pure code move — same byte-for-byte
   framing, same error-handling shape, no behavioral changes.
@@ -235,27 +235,27 @@ Phase 2 deliverables MUST land in this order:
 
 ## Code anchors (copied from §7)
 
-- `jaato-server/server/__main__.py:_register_ipc_apparmor_hook`
+- `jaato-server/jaato_server/server/__main__.py:_register_ipc_apparmor_hook`
   (lines 656–835) — task 2.1
-- `jaato-server/server/session_manager.py:create_session`
+- `jaato-server/jaato_server/server/session_manager.py:create_session`
   (lines 948–1382) — task 2.3 wiring
-- `jaato-server/shared/ai_tool_runner.py:execute / _execute_impl`
+- `jaato-server/jaato_server/shared/ai_tool_runner.py:execute / _execute_impl`
   (lines 756–950) — daemon-side stub becomes RPC; the actual
   `_execute_impl` body moves to `runner/tool_executor.py`
-- `jaato-server/server/ipc.py` — task 2.4 (factoring `_read_frame`
+- `jaato-server/jaato_server/server/ipc.py` — task 2.4 (factoring `_read_frame`
   / `_write_frame`)
-- `jaato-server/shared/jaato_runtime.py:create_session` and
-  `jaato-server/shared/jaato_session.py` — TOUCH MINIMALLY in
+- `jaato-server/jaato_server/shared/jaato_runtime.py:create_session` and
+  `jaato-server/jaato_server/shared/jaato_session.py` — TOUCH MINIMALLY in
   Phase 2; full session-state move is Phase 3
-- `jaato-server/shared/plugins/cli/plugin.py` — task 2.5 migration
-- `jaato-server/server/apparmor.py:PROFILE_TEMPLATE` — UNCHANGED;
+- `jaato-server/jaato_server/shared/plugins/cli/plugin.py` — task 2.5 migration
+- `jaato-server/jaato_server/server/apparmor.py:PROFILE_TEMPLATE` — UNCHANGED;
   only the load site moves earlier (before runner spawn)
 
 ## What I want first
 
 **A 200-300 line implementation plan**, NOT code yet.  Specifically:
 
-1. **File layout proposal** for `jaato-server/server/runner/` —
+1. **File layout proposal** for `jaato-server/jaato_server/server/runner/` —
    confirm or adjust the §2.2 sketch.  Justify any deviations.
 2. **Task-by-task breakdown** — for each of 2.1 / 2.2 / 2.3 / 2.4 /
    2.5 / 2.6, list every file you'll touch + every function you'll

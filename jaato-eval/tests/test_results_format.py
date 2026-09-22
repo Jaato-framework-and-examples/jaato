@@ -2,7 +2,7 @@
 
 ``docs/eval-results.md`` declares what a reader outside this package may rely
 on.  The first such reader is jaato's dossier generator
-(``jaato-server/shared/scaffold/eval_results.py``), which renders an arm's
+(``jaato-server/jaato_server/shared/scaffold/eval_results.py``), which renders an arm's
 numbers into the accuracy section of an Annex IV dossier (jaato #1124) and
 may NOT import this engine -- ``jaato_eval`` imports ``jaato_sdk`` and
 nothing else from that tree, so a consumer importing the producer would run

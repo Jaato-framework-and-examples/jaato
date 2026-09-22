@@ -336,15 +336,15 @@ class FormatterPlugin:
 
 | File | What it contains |
 |------|-------------------|
-| `server/shared/plugins/table_formatter/plugin.py` | `<j-table>` detection and emission, markdown/ASCII grid table parsing, alignment, character width |
-| `server/shared/plugins/code_block_formatter/plugin.py` | `<j-code>` detection, Pygments tokenisation, `<j-line>`/`<j-tok>` assembly, HTML escaping, line numbers |
-| `server/shared/plugins/notebook_output_formatter/plugin.py` | `<notebook-cell>` detection, `<nb-row>` emission, cell type labels |
-| `server/shared/plugins/mermaid_formatter/plugin.py` | Mermaid block detection, image rendering via multiple backends (iTerm2, Kitty, Sixel, Rich pixels) |
-| `server/shared/plugins/diff_formatter/` | Unified diff rendering with multiple modes (unified, side-by-side, compact), syntax highlighting in diffs |
-| `server/shared/plugins/hidden_content_filter/plugin.py` | Strips content marked as hidden from the output stream |
-| `server/shared/plugins/formatter_pipeline/registry.py` | Plugin discovery, configuration loading, pipeline assembly |
-| `server/shared/plugins/formatter_pipeline/pipeline.py` | `FormatterPipeline` — chains plugins in priority order |
-| `server/shared/plugins/formatter_pipeline/protocol.py` | `FormatterPlugin` base protocol / `ConfigurableFormatter` mixin |
+| `jaato_server/server/shared/plugins/table_formatter/plugin.py` | `<j-table>` detection and emission, markdown/ASCII grid table parsing, alignment, character width |
+| `jaato_server/server/shared/plugins/code_block_formatter/plugin.py` | `<j-code>` detection, Pygments tokenisation, `<j-line>`/`<j-tok>` assembly, HTML escaping, line numbers |
+| `jaato_server/server/shared/plugins/notebook_output_formatter/plugin.py` | `<notebook-cell>` detection, `<nb-row>` emission, cell type labels |
+| `jaato_server/server/shared/plugins/mermaid_formatter/plugin.py` | Mermaid block detection, image rendering via multiple backends (iTerm2, Kitty, Sixel, Rich pixels) |
+| `jaato_server/server/shared/plugins/diff_formatter/` | Unified diff rendering with multiple modes (unified, side-by-side, compact), syntax highlighting in diffs |
+| `jaato_server/server/shared/plugins/hidden_content_filter/plugin.py` | Strips content marked as hidden from the output stream |
+| `jaato_server/server/shared/plugins/formatter_pipeline/registry.py` | Plugin discovery, configuration loading, pipeline assembly |
+| `jaato_server/server/shared/plugins/formatter_pipeline/pipeline.py` | `FormatterPipeline` — chains plugins in priority order |
+| `jaato_server/server/shared/plugins/formatter_pipeline/protocol.py` | `FormatterPlugin` base protocol / `ConfigurableFormatter` mixin |
 | `tui/j_markup_renderer.py` | TUI client-side renderer for `<j-code>` and `<j-table>`, ANSI rendering via rich |
 | `tui/output_buffer.py` | TUI output buffer with `<nb-row>` 2-column table rendering |
 | `tui/tests/test_j_markup_renderer.py` | Tests for the TUI renderer |

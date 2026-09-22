@@ -116,7 +116,7 @@ it a `config` object whose `ticketUrl` replaces the launcher's `token`.
 ## 4. The daemon-side contract (#1074, implemented in PR #1075)
 
 Everything in this section is read from PR #1075's branch
-(`server/ws_tickets.py`, `server/websocket.py`, `jaato_sdk/events.py`),
+(`jaato_server/server/ws_tickets.py`, `jaato_server/server/websocket.py`, `jaato_sdk/events.py`),
 not assumed. Protocol **1.10**.
 
 ### 4.1 Credentials
@@ -270,7 +270,7 @@ None of this changes the launcher's behaviour: with `token` present and no
 
 ### 5.3 The daemon
 
-Only #1074. The BFF adds nothing to `server/`.
+Only #1074. The BFF adds nothing to `jaato_server/server/`.
 
 ## 6. Modes
 
@@ -334,7 +334,7 @@ The daemon side of the same pairing:
 
 ```bash
 # /etc/jaato/ws-apps.json, mode 0600:  {"jaato-web-coder": "<the same credential>"}
-python -m server --web-socket 127.0.0.1:8080 --ws-app-credentials /etc/jaato/ws-apps.json --daemon
+python -m jaato_server --web-socket 127.0.0.1:8080 --ws-app-credentials /etc/jaato/ws-apps.json --daemon
 ```
 
 `--ws-token-file` may stay beside it so the TUI and `npx @jaato/web-coder-ui` keep
@@ -555,7 +555,7 @@ than self-daemonising:
 | Unit | Runs | Note |
 |---|---|---|
 | `keycloak.service` | Keycloak's own `kc.sh start` with `--hostname` set to the public URL and `--hostname-backchannel-dynamic=true` | the host's existing install |
-| `jaato-server.service` | `python -m server --web-socket 127.0.0.1:8080 --ws-app-credentials /etc/jaato/ws-apps.json` **without `--daemon`** | `--daemon` double-forks, which fights systemd's process tracking; `Type=simple` and let systemd own it |
+| `jaato-server.service` | `python -m jaato_server --web-socket 127.0.0.1:8080 --ws-app-credentials /etc/jaato/ws-apps.json` **without `--daemon`** | `--daemon` double-forks, which fights systemd's process tracking; `Type=simple` and let systemd own it |
 | `jaato-web-coder-server.service` | `jaato-web-coder-server --config /etc/jaato-web-coder/server.yaml` | `DynamicUser=` or a dedicated user; the secret files are readable by that user only |
 
 Plus the reverse proxy's site config (`/`, `/auth/`, `/daemon` with the

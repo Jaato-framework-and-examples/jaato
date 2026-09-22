@@ -122,13 +122,13 @@ def check_environment(results: CheckResult) -> Dict[str, Any]:
     ctx: Dict[str, Any] = {}
 
     # .env should already be loaded by caller
-    from shared.http import (
+    from jaato_server.shared.http import (
         get_proxy_url,
         is_kerberos_proxy_enabled,
         is_ssl_verify_disabled,
         get_httpx_client,
     )
-    from shared.ssl_helper import active_cert_bundle
+    from jaato_server.shared.ssl_helper import active_cert_bundle
 
     # SSL
     ssl_verify_off = is_ssl_verify_disabled()
@@ -161,7 +161,7 @@ def check_environment(results: CheckResult) -> Dict[str, Any]:
     info(f"Kerberos proxy: {kerberos}")
 
     # Credential sources
-    from shared.plugins.model_provider.zhipuai.env import (
+    from jaato_server.shared.plugins.model_provider.zhipuai.env import (
         resolve_api_key,
         resolve_base_url,
         resolve_model,
@@ -169,7 +169,7 @@ def check_environment(results: CheckResult) -> Dict[str, Any]:
         resolve_enable_thinking,
         resolve_thinking_budget,
     )
-    from shared.plugins.model_provider.zhipuai.auth import (
+    from jaato_server.shared.plugins.model_provider.zhipuai.auth import (
         load_credentials,
         get_stored_api_key,
         get_stored_base_url,
@@ -266,7 +266,7 @@ def check_api_key_validation(results: CheckResult, ctx: Dict[str, Any]) -> None:
         results.record_skip(f"POST {test_url}", "no API key available")
         return
 
-    from shared.http import get_httpx_client
+    from jaato_server.shared.http import get_httpx_client
 
     headers = {
         "Content-Type": "application/json",
@@ -328,7 +328,7 @@ def check_models_endpoint(
     base_url = ctx.get("base_url", "https://api.z.ai/api/anthropic")
 
     # Derive the OpenAI-compatible models URL from the Anthropic base URL
-    from shared.plugins.model_provider.zhipuai.provider import _openai_models_url
+    from jaato_server.shared.plugins.model_provider.zhipuai.provider import _openai_models_url
     models_url = _openai_models_url(base_url)
 
     info(f"GET {models_url}")
@@ -337,7 +337,7 @@ def check_models_endpoint(
         results.record_skip(f"GET {models_url}", "no API key available")
         return None
 
-    from shared.http import get_httpx_client
+    from jaato_server.shared.http import get_httpx_client
 
     t0 = time.monotonic()
     try:
@@ -419,7 +419,7 @@ def check_chat_completion(
         )
         return
 
-    from shared.http import get_httpx_client
+    from jaato_server.shared.http import get_httpx_client
 
     # Build client matching ZhipuAIProvider._create_client() logic
     client_kwargs: Dict[str, Any] = {
@@ -427,8 +427,8 @@ def check_chat_completion(
         "api_key": api_key,
     }
     try:
-        from shared.ssl_helper import active_cert_bundle
-        from shared.http.proxy import (
+        from jaato_server.shared.ssl_helper import active_cert_bundle
+        from jaato_server.shared.http.proxy import (
             get_proxy_url,
             is_kerberos_proxy_enabled,
         )
@@ -540,15 +540,15 @@ def check_thinking(
         results.record_fail("Extended thinking", "anthropic package not installed")
         return
 
-    from shared.http import get_httpx_client
+    from jaato_server.shared.http import get_httpx_client
 
     client_kwargs: Dict[str, Any] = {
         "base_url": base_url,
         "api_key": api_key,
     }
     try:
-        from shared.ssl_helper import active_cert_bundle
-        from shared.http.proxy import (
+        from jaato_server.shared.ssl_helper import active_cert_bundle
+        from jaato_server.shared.http.proxy import (
             get_proxy_url,
             is_kerberos_proxy_enabled,
         )

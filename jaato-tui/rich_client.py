@@ -1043,7 +1043,7 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
 
     # Set up prompt provider for %prompt completion (local prompt discovery)
     try:
-        from shared.plugins.prompt_library.plugin import PromptLibraryPlugin
+        from jaato_server.shared.plugins.prompt_library.plugin import PromptLibraryPlugin
         _prompt_lib = PromptLibraryPlugin()
         _prompt_lib.set_workspace_path(str(workspace_path))
 

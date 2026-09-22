@@ -21,8 +21,8 @@ plan. Promote to a feature branch / ticket when work is ready to start.
   hint naming the specific tool and suggesting a chunked-write strategy.
 - **Why it matters**: Replaces the current workaround of baking large-payload
   guidance into every session's system prompt. Reactive, targeted, bounded.
-- **Entry points**: `jaato-server/shared/jaato_session.py:3962` (hook after
-  `_add_model_response_to_history`); new `shared/rewind.py` module for the
+- **Entry points**: `jaato-server/jaato_server/shared/jaato_session.py:3962` (hook after
+  `_add_model_response_to_history`); new `jaato_server/shared/rewind.py` module for the
   detector.
 - **Open questions**: Cache invalidation cost on Anthropic provider; detector
   scope v1 conservatism; budget-reset semantics.
@@ -48,7 +48,7 @@ plan. Promote to a feature branch / ticket when work is ready to start.
 - **Likely fix shape**: Mirror permission's pattern per plugin —
   new `types.py` + `runner_rpc_channel.py` + plugin
   `_get_channel` extension + daemon-side handler in
-  `server/runner_rpc_handlers/`.  Plus `set_runner_rpc` registration
+  `jaato_server/server/runner_rpc_handlers/`.  Plus `set_runner_rpc` registration
   + `respond_to_*` dual-path routing extension (same pattern as
   Step 7.3).  ~4-6 hours implementation for both plugins.
 
@@ -59,7 +59,7 @@ plan. Promote to a feature branch / ticket when work is ready to start.
   Not in scope for the §7c series.
 - **Summary**: Post-§7c step 6.6.4.3b seat-flip, the runner-side `JaatoSession`
   is the live session for tool execution but its `_ui_hooks` attribute is
-  never set (cross-grep of `server/runner/` confirms zero references).  All
+  never set (cross-grep of `jaato_server/server/runner/` confirms zero references).  All
   10 `if self._ui_hooks: self._ui_hooks.on_*(...)` callsites in
   `jaato_session.py` (`on_tool_call_start`, `on_tool_call_end`,
   `on_tool_output`, `on_turn_progress`,

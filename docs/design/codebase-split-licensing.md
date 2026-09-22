@@ -155,13 +155,13 @@ multi-server clustering.
   `permission.py`). jaato-server owns `jaato_embedded`; jaato-sdk owns `jaato`
   (two dists cannot both ship a regular `jaato` package).
 
-- `shared/jaato_client.py`, `jaato_runtime.py`, `jaato_session.py`
-- `shared/instruction_budget.py`, `shared/token_accounting.py`
-- `shared/ai_tool_runner.py`, `shared/mcp_context_manager.py`
-- `shared/plugins/base.py`, `shared/plugins/registry.py`
-- `server/core.py`, `server/ipc.py`, `server/websocket.py`
-- `server/session_manager.py` (single-server session management)
-- `server/__main__.py` (daemon entry point with gossip hook points)
+- `jaato_server/shared/jaato_client.py`, `jaato_runtime.py`, `jaato_session.py`
+- `jaato_server/shared/instruction_budget.py`, `jaato_server/shared/token_accounting.py`
+- `jaato_server/shared/ai_tool_runner.py`, `jaato_server/shared/mcp_context_manager.py`
+- `jaato_server/shared/plugins/base.py`, `jaato_server/shared/plugins/registry.py`
+- `jaato_server/server/core.py`, `jaato_server/server/ipc.py`, `jaato_server/server/websocket.py`
+- `jaato_server/server/session_manager.py` (single-server session management)
+- `jaato_server/server/__main__.py` (daemon entry point with gossip hook points)
 
 #### jaato-server — standard plugins (58 plugin directories)
 
@@ -277,7 +277,7 @@ into a structured catalog with semantic embeddings and validation rules.
 
 ##### 5. Prompt Templates (`prompt_templates/`)
 
-**Source:** `jaato-server/shared/prompt_templates/`
+**Source:** `jaato-server/jaato_server/shared/prompt_templates/`
 
 - COBOL analysis prompts (identify_code_changes, parse_mod_history)
 - Confluence integration prompts (get_page, search, update_page — CLI & MCP)
@@ -293,7 +293,7 @@ into a structured catalog with semantic embeddings and validation rules.
 
 ##### 7. Framework Prompt Constants (PUBLIC — stays in jaato-server)
 
-**Source:** `jaato-server/shared/jaato_runtime.py`
+**Source:** `jaato-server/jaato_server/shared/jaato_runtime.py`
 
 Three embedded prompt constants:
 - `_TASK_COMPLETION_INSTRUCTION` — Anti-fabrication + relentless completion
@@ -321,23 +321,23 @@ cluster management.
 
 | Module | LOC | Description |
 |--------|-----|-------------|
-| `server/peers.py` | 551 | Gossip protocol, peer registry, heartbeats, liveness tracking |
-| `server/remote_spawn.py` | 731 | Remote subagent delegation (origin + remote sides) |
-| `server/workspace_sync.py` | 584 | Git-based workspace replication for remote subagents |
-| `server/server_reliability.py` | 412 | Trust state, failure history, affinity scores for peers |
-| `server/health.py` | 84 | Server health metrics collection (CPU, memory, sessions) |
-| `server/health_http.py` | 301 | HTTP health endpoint + dashboard route dispatch |
-| `server/dashboard/routes.py` | 560 | REST API for cluster config CRUD, Docker launch operations |
-| `server/dashboard/docker_launcher.py` | 755 | Docker Compose generation + container lifecycle management |
-| `server/dashboard/static/index.html` | 1,502 | Self-contained SPA for web-based cluster management |
+| `jaato_server/server/peers.py` | 551 | Gossip protocol, peer registry, heartbeats, liveness tracking |
+| `jaato_server/server/remote_spawn.py` | 731 | Remote subagent delegation (origin + remote sides) |
+| `jaato_server/server/workspace_sync.py` | 584 | Git-based workspace replication for remote subagents |
+| `jaato_server/server/server_reliability.py` | 412 | Trust state, failure history, affinity scores for peers |
+| `jaato_server/server/health.py` | 84 | Server health metrics collection (CPU, memory, sessions) |
+| `jaato_server/server/health_http.py` | 301 | HTTP health endpoint + dashboard route dispatch |
+| `jaato_server/server/dashboard/routes.py` | 560 | REST API for cluster config CRUD, Docker launch operations |
+| `jaato_server/server/dashboard/docker_launcher.py` | 755 | Docker Compose generation + container lifecycle management |
+| `jaato_server/server/dashboard/static/index.html` | 1,502 | Self-contained SPA for web-based cluster management |
 
 Plus integration touchpoints in:
-- `server/__main__.py` — `_init_gossip()`, `_load_servers_config()`, CLI args
+- `jaato_server/server/__main__.py` — `_init_gossip()`, `_load_servers_config()`, CLI args
   (`--health-port`, `--server-name`, `--servers-json`)
-- `server/session_manager.py` — `set_gossip_context()`,
+- `jaato_server/server/session_manager.py` — `set_gossip_context()`,
   `_configure_gossip_context()`
-- `shared/plugins/environment/plugin.py` — `jaato_agentic_servers` aspect
-- `shared/plugins/subagent/plugin.py` — `server` parameter on
+- `jaato_server/shared/plugins/environment/plugin.py` — `jaato_agentic_servers` aspect
+- `jaato_server/shared/plugins/subagent/plugin.py` — `server` parameter on
   `spawn_subagent`, `_execute_remote_spawn()`
 - `tests/e2e/gossip/`, `tests/e2e/workspace-sync/` — Docker-based E2E tests
 
@@ -470,8 +470,8 @@ contribute to gossip code. Only licensing changes.
 **Approach B (plugin-based extraction)** best fits the existing architecture:
 
 1. jaato already has an entry-point plugin system
-2. The gossip modules are naturally self-contained (9 files in `server/`,
-   not scattered changes across `shared/`)
+2. The gossip modules are naturally self-contained (9 files in `jaato_server/server/`,
+   not scattered changes across `jaato_server/shared/`)
 3. The integration points are narrow — `_init_gossip()` is one method,
    plugin wiring is two `set_*_context()` calls
 4. The SDK event types can stay in `jaato-sdk` (they're just data classes,
@@ -585,10 +585,10 @@ Move (not copy) the premium content out of the public repo:
 - `.jaato/prompts/*.md` (premium prompts) → jaato-premium
   - **Keep** `gh_issue_fixer.md` in public repo as example prompt
 - `knowledge/` → jaato-premium
-- `shared/prompt_templates/` → jaato-premium
-- `server/peers.py`, `remote_spawn.py`, `workspace_sync.py`,
+- `jaato_server/shared/prompt_templates/` → jaato-premium
+- `jaato_server/server/peers.py`, `remote_spawn.py`, `workspace_sync.py`,
   `server_reliability.py`, `health.py`, `health_http.py` → jaato-premium
-- `server/dashboard/` → jaato-premium
+- `jaato_server/server/dashboard/` → jaato-premium
 - `tests/e2e/gossip/`, `tests/e2e/workspace-sync/` → jaato-premium
 - `modlog-training-set-test/` → jaato-premium
 - `cli_vs_mcp/` → jaato-premium

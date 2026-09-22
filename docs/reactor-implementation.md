@@ -354,7 +354,7 @@ def execute(params, event, ctx):
 
 ### Script Resolution
 
-Scripts are resolved via `shared.script_loader.resolve_script_path()`:
+Scripts are resolved via `jaato_server.shared.script_loader.resolve_script_path()`:
 
 1. If the path is **absolute**, use it directly
 2. Try `<workspace>/.jaato/<script>`
@@ -466,7 +466,7 @@ Alternatively, reference an external schema file:
 2. **Workspace** — `<workspace>/.jaato/completion_schemas/<path>`
 3. **Home** — `~/.jaato/completion_schemas/<path>`
 
-Implemented in `shared/completion_schema_loader.resolve_completion_schema()`.
+Implemented in `jaato_server/shared/completion_schema_loader.resolve_completion_schema()`.
 
 ### How It Works at Runtime
 
@@ -706,7 +706,7 @@ The watcher runs on a daemon thread (`daemon=True`) and stops gracefully via a `
 
 ### Script Locations
 
-Resolved by `shared.script_loader.resolve_script_path()`:
+Resolved by `jaato_server.shared.script_loader.resolve_script_path()`:
 
 | Priority | Path pattern |
 |----------|-------------|
@@ -716,7 +716,7 @@ Resolved by `shared.script_loader.resolve_script_path()`:
 
 ### Completion Schema Locations
 
-Resolved by `shared.completion_schema_loader.resolve_completion_schema()`:
+Resolved by `jaato_server.shared.completion_schema_loader.resolve_completion_schema()`:
 
 | Priority | Path pattern |
 |----------|-------------|
@@ -746,7 +746,7 @@ The engine subscribes with an empty `EventFilter()` (match everything) and a nam
 
 ### Script Loading
 
-Scripts are loaded via `shared.script_loader.load_script_symbol(resolved_path, symbol="execute", module_prefix="_jaato_reactor")`. The module prefix prevents naming collisions between reactor scripts and other loaded modules. Each invocation reloads the module, so script changes take effect on the next event (no restart needed for script edits).
+Scripts are loaded via `jaato_server.shared.script_loader.load_script_symbol(resolved_path, symbol="execute", module_prefix="_jaato_reactor")`. The module prefix prevents naming collisions between reactor scripts and other loaded modules. Each invocation reloads the module, so script changes take effect on the next event (no restart needed for script edits).
 
 ### The `completeStepWithOutput` Bridge
 
@@ -801,10 +801,10 @@ All fork actions (`fork_from_originating`, `fork_from_session`, `fork_from_waypo
 
 | File | Lines | Contents |
 |------|-------|----------|
-| `shared/completion_schema_loader.py` | 128 | `resolve_completion_schema()` — 3-tier path resolution |
-| `shared/lifecycle_tools.py` | 198 | `LifecycleTools` — `signal_completion` with typed payloads |
-| `shared/plugins/subagent/config.py` | 1530 | `SubagentProfile` dataclass with `completion_payload_schema` field |
-| `shared/plugins/subagent/tests/test_profile_inheritance.py` | — | Tests for `completion_payload_schema` inheritance |
+| `jaato_server/shared/completion_schema_loader.py` | 128 | `resolve_completion_schema()` — 3-tier path resolution |
+| `jaato_server/shared/lifecycle_tools.py` | 198 | `LifecycleTools` — `signal_completion` with typed payloads |
+| `jaato_server/shared/plugins/subagent/config.py` | 1530 | `SubagentProfile` dataclass with `completion_payload_schema` field |
+| `jaato_server/shared/plugins/subagent/tests/test_profile_inheritance.py` | — | Tests for `completion_payload_schema` inheritance |
 
 ### External Dependencies
 

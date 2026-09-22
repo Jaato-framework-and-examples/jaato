@@ -80,7 +80,7 @@ HEADER_SIZE = 4
 MAX_MESSAGE_SIZE = 10 * 1024 * 1024  # 10 MB
 ```
 
-**Auto-start:** When `auto_start=True` (default), the client launches `python -m server --daemon` if the socket/pipe is not available. On Windows, the resolved pipe path is passed to avoid shell mangling of backslashes.
+**Auto-start:** When `auto_start=True` (default), the client launches `python -m jaato_server --daemon` if the socket/pipe is not available. On Windows, the resolved pipe path is passed to avoid shell mangling of backslashes.
 
 **Windows named pipe resolution:** The client accepts multiple input formats (`\.\pipe\jaato`, `pipe\jaato`, `jaato`) and normalizes to `\\.\pipe\<name>`. Uses `WaitNamedPipeW` (1ms timeout) for existence probing and `WaitNamedPipeW` (full timeout) for availability checks — both consume no pipe instances, avoiding ghost-client issues.
 
@@ -674,7 +674,7 @@ On Windows, if `wait_for()` cancels a coroutine after `create_pipe_connection()`
 | `package.json` | Package metadata (v0.1.0, ESM, zero runtime deps) |
 | `README.md` | Comprehensive README with API reference, consuming options, publishing workflow |
 
-### Shared (in `jaato-server/shared/`)
+### Shared (in `jaato-server/jaato_server/shared/`)
 
 | File | Contents |
 |------|----------|

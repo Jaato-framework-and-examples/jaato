@@ -6,7 +6,7 @@ paths.
 
 ## Motivation
 
-Today `jaato-server/server/apparmor.py:PROFILE_TEMPLATE` contains plugin-specific
+Today `jaato-server/jaato_server/server/apparmor.py:PROFILE_TEMPLATE` contains plugin-specific
 rules baked into the framework body:
 
 ```

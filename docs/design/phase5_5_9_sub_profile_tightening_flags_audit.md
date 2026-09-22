@@ -120,7 +120,7 @@ flags and the allow-list module documents the full set.
 
 ### 5.1 New module `sub_profile_tightenings_schema.py`
 
-`server/runner_rpc_handlers/sub_profile_tightenings_schema.py`
+`jaato_server/server/runner_rpc_handlers/sub_profile_tightenings_schema.py`
 mirrors the §5.8 pattern:
 
 ```python
