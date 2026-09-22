@@ -53,6 +53,12 @@ interface Client {
    * a reconnect losing the selection.
    */
   selected: string | null; provisioned: boolean;
+  /** The permission policy, as the DAEMON holds it: the status bar's
+   *  segment is a control, so the readout has to follow what the plate
+   *  just did.  The real daemon re-emits ``permission.status`` after a
+   *  ``permissions`` command; this models that loop so the e2e can see
+   *  it. */
+  policy: { effective_default: string; suspension_scope: string | null };
   /**
    * A ``workspace.files.stage_request`` in progress: the daemon reads one
    * BINARY frame per declared file, in order, before answering with
@@ -278,6 +284,7 @@ wss.on("connection", (ws, req) => {
   const c: Client = {
     ws, id: `client_${++clientSeq}`, sessionId: null, pending: new Map(), ignored: new Set(),
     selected: null, provisioned: false, staging: null,
+    policy: { effective_default: "ask", suspension_scope: null },
   };
   send(c, { type: "connected", protocol_version: "1.12", server_info: { server_version: "mock-0.0.1", client_id: randomUUID() } });
 
@@ -346,7 +353,7 @@ wss.on("connection", (ws, req) => {
           send(c, { type: "agent.created", agent_id: "main", agent_name: "main", agent_type: "main", profile_name: args.includes("--profile") ? args[args.indexOf("--profile") + 1] : null });
           send(c, { type: "session.info", session_name: "mock session", model_provider: "mock", model_name: "mock-1", profile_name: args.includes("--profile") ? args[args.indexOf("--profile") + 1] : null, models: ["mock-1", "mock-2"], sessions: sessionListing(c) });
           // PermissionStatusEvent, emitted by the daemon at init: effective_default + suspension_scope.
-          send(c, { type: "permission.status", effective_default: "ask", suspension_scope: null });
+          send(c, { type: "permission.status", ...c.policy });
           send(c, { type: "system.message", message: "Connected to the mock daemon. Try: code, tool, permit, ask, fail, subagent.", style: "info" });
         } else if (cmd === "mock-auth") {
           // A daemon-level auth plugin command: works with NO session, like
@@ -396,7 +403,12 @@ wss.on("connection", (ws, req) => {
           }
           send(c, { type: "agent.created", agent_id: "main", agent_name: "main", agent_type: "main", profile_name: null });
           send(c, { type: "session.info", session_id: target, session_name: target === "20260916_090000" ? "fix the budget panel" : "old notes", model_provider: target === "20260916_090000" ? "anthropic" : "mock", model_name: target === "20260916_090000" ? "claude-sonnet-4" : "mock-1", profile_name: null, models: ["mock-1"], sessions: sessionListing(c) });
-          send(c, { type: "permission.status", effective_default: "allow", suspension_scope: null });
+          // Attaching reports the policy of the SESSION being attached,
+          // which is what the daemon does and is why it differs from the
+          // one a fresh session starts on.  Adopted as this connection's
+          // policy so the plate goes on agreeing with the bar.
+          c.policy = { effective_default: "allow", suspension_scope: null };
+          send(c, { type: "permission.status", ...c.policy });
         } else if (cmd === "session.profiles") {
           send(c, { type: "session.profiles", profiles: [{ name: "researcher", description: "Deep research", provider: "anthropic", model: "claude-sonnet-4" }, { name: "coder", description: "Coding agent", provider: "openrouter", model: "openai/gpt-5" }] });
         } else if (cmd === "workspace.ignore") {
@@ -426,6 +438,19 @@ wss.on("connection", (ws, req) => {
           // what a dropped connection looks like (and 1006 is a reserved
           // code the ws library refuses to send).
           setTimeout(() => c.ws.terminate(), 10);
+        } else if (cmd === "permissions") {
+          // The daemon applies the change and re-emits its status, which
+          // is the loop the status-bar plate depends on: it marks the
+          // default in force and offers Suspend or Resume from that
+          // value.  Until the daemon read the policy from the plugin
+          // that ENFORCES it, this event carried the profile's seeded
+          // answer and the readout disagreed with the control.
+          const [verb, arg] = args;
+          if (verb === "default" && arg) c.policy.effective_default = arg;
+          else if (verb === "suspend") c.policy.suspension_scope = arg === "--turn" ? "turn" : "idle";
+          else if (verb === "resume") c.policy.suspension_scope = null;
+          send(c, { type: "system.message", message: `mock: permissions ${args.join(" ")}`.trim(), style: "info" });
+          send(c, { type: "permission.status", ...c.policy });
         } else if (cmd === "reset") {
           send(c, { type: "system.message", message: "History cleared.", style: "info" });
         } else {

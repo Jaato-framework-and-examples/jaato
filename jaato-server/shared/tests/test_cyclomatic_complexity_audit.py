@@ -148,7 +148,7 @@ BASELINE: Dict[str, int] = {
     # per branch) moves it.  Reducing it means replacing the chain with a
     # lookup table, which is a refactor of the whole dispatcher rather than
     # part of adding a read.
-    "jaato-server/server/runner/rpc.py::RunnerRPC._dispatch_method": 54,
+    "jaato-server/server/runner/rpc.py::RunnerRPC._dispatch_method": 53,
     "jaato-server/server/runner/rpc.py::RunnerRPC._handle_session_register_client_tools": 17,
     "jaato-server/server/runner/rpc.py::RunnerRPC._handle_session_resolve_fork_point": 17,
     # Down one in #881: the inline try/except that snapshotted
