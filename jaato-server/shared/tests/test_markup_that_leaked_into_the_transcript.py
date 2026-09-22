@@ -77,14 +77,18 @@ REVERSIONS = [
     ),
     Reversion(
         target=_TABLE,
-        find="""from shared.plugins.code_block_formatter.plugin import FENCE_CLOSE_RE, FENCE_OPEN_RE
+        find="""from shared.plugins.code_block_formatter.plugin import Fence, open_fence
 """,
-        replace="""FENCE_OPEN_RE = re.compile(r'```(\\w*)\\n')
-FENCE_CLOSE_RE = re.compile(r'(?:^|\\n)```')
+        replace="""from shared.plugins.code_block_formatter.plugin import Fence
+from shared.plugins.code_block_formatter.plugin import open_fence as _shared_open_fence
+
+
+def open_fence(line, *, at_line_start=True):
+    return _shared_open_fence(line, at_line_start=at_line_start)
 """,
         test="test_both_formatters_decide_fences_with_one_definition",
         because=(
-            "a second copy of the fence patterns agrees with the first only "
+            "a second definition of the fence rule agrees with the first only "
             "until somebody edits one of them -- which is how two formatters "
             "start disagreeing about which lines are code"
         ),
@@ -163,30 +167,27 @@ def test_any_chunking_formats_exactly_like_the_whole_text(text):
 
 
 def test_both_formatters_decide_fences_with_one_definition():
-    """The table formatter IMPORTS the fence patterns; it does not restate them.
+    """The table formatter IMPORTS the fence rule; it does not restate it.
 
-    Asserted on the source, not on the objects: ``re.compile`` caches, so
-    a local copy of the same pattern string returns the very same object
-    and an ``is`` check passes against the duplicate it exists to forbid.
-    The first draft of this test was exactly that, and the reversion
-    meta-guard reported it as decorative.
+    Asserted on the source, not on behaviour: a local copy agrees with
+    the original on every input right up until one of them is edited,
+    so no input can tell them apart today.  (The rule was two regexes
+    until the fence rewrite; it is ``open_fence`` / ``Fence`` now.)
     """
     tree = ast.parse(Path(table_fmt.__file__).read_text())
     imported = {
-        alias.name
+        alias.asname or alias.name
         for node in ast.walk(tree)
         if isinstance(node, ast.ImportFrom) and node.module == code_block.__name__
         for alias in node.names
     }
-    assert {"FENCE_OPEN_RE", "FENCE_CLOSE_RE"} <= imported, imported
-    assigned = {
-        target.id
-        for node in ast.walk(tree) if isinstance(node, ast.Assign)
-        for target in node.targets if isinstance(target, ast.Name)
+    assert {"open_fence", "Fence"} <= imported, imported
+    defined = {
+        node.name for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.ClassDef))
     }
-    assert not {"FENCE_OPEN_RE", "FENCE_CLOSE_RE"} & assigned, assigned
-    # And the patterns really are the ones that formatter opens/closes on.
-    assert table_fmt.FENCE_OPEN_RE.pattern == code_block.FENCE_OPEN_RE.pattern
+    assert not {"open_fence", "Fence"} & defined, defined
+    assert table_fmt.open_fence is code_block.open_fence
 
 
 # ------------------------------------------------------------------ #1193

@@ -12022,6 +12022,8 @@ export type SessionId87 = string;
 export type Changes = {
   [k: string]: string;
 }[];
+export type Seq = number | null;
+export type Epoch = string | null;
 /**
  * All event types in the protocol.
  */
@@ -12156,6 +12158,8 @@ export type Files = {
   [k: string]: string;
 }[];
 export type Total = number;
+export type Seq1 = number | null;
+export type Epoch1 = string | null;
 /**
  * All event types in the protocol.
  */
@@ -18474,6 +18478,8 @@ export interface WorkspaceFilesChangedEvent {
   timestamp?: Timestamp87;
   session_id?: SessionId87;
   changes?: Changes;
+  seq?: Seq;
+  epoch?: Epoch;
 }
 /**
  * Complete workspace file state snapshot.
@@ -18488,6 +18494,12 @@ export interface WorkspaceFilesSnapshotEvent {
   session_id?: SessionId88;
   files?: Files;
   total?: Total;
+  seq?: Seq1;
+  epoch?: Epoch1;
+  seqs?: Seqs;
+}
+export interface Seqs {
+  [k: string]: number;
 }
 /**
  * Answer to ``workspace.ignore <path>`` (protocol 1.12).

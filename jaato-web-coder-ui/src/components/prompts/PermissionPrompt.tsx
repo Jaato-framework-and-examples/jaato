@@ -15,6 +15,7 @@ import type { PendingPermission } from "@/store/types";
 import { useJaato } from "@/store/store";
 import { DiffLines } from "@/components/output/JMarkup";
 import { Plate } from "@/components/layout/Plate";
+import { resolveToolArgs } from "@/protocol/toolIds";
 
 /** A refusal, from what the daemon labelled it: ``deny``, ``never``, ``no``. */
 function isRefusal(o: { key: string; label?: string; action?: string | null }): boolean {
@@ -37,7 +38,8 @@ export function PermissionPrompt({ p, onRespond }: { p: PendingPermission; onRes
     return () => window.removeEventListener("keydown", onKey);
   }, [p, focus]);
 
-  const argEntries = Object.entries(p.toolArgs ?? {});
+  const toolIdNames = useJaato((s) => s.toolIdNames);
+  const argEntries = Object.entries(resolveToolArgs(p.toolArgs ?? {}, toolIdNames));
   const level = p.warningLevel ?? "warning";
   const options = p.options.length ? p.options : [{ key: "y", label: "yes" }, { key: "n", label: "no" }];
   const grants = options.map((o, i) => [o, i] as const).filter(([o]) => !isRefusal(o));

@@ -917,6 +917,12 @@ class JaatoServer:
         # invalidated on ``/model`` command.  ``None`` means
         # uninitialized — readers fall back to 0 / payload value.
         self._cached_context_limit: Optional[int] = None
+        # #1190: the last COMPLETED GC pass, as the GCEvent that announced
+        # it, so a client attaching after it still learns when collection
+        # last ran and what it freed (``_emit_gc_state``).  ``None`` until
+        # a pass completes.  Not persisted: a revived session starts with
+        # no record, which ``_emit_gc_state`` reports as "none since load".
+        self._last_gc_pass: Optional[Any] = None
 
         # Path F (cycle 7) §7c streaming-response chain: cached
         # ServerAgentHooks instance.  Populated in
@@ -2410,6 +2416,10 @@ class JaatoServer:
 
         # Emit tool ID registry so clients can resolve hash IDs
         self._emit_tool_id_registry_from_schemas(emit_fn=emit)
+
+        # The GC policy and the last completed pass (#1190), for the same
+        # reason as the permission policy above.
+        self._emit_gc_state(emit)
 
         # Clear stale pending requests on client if requested
         # This is used after session recovery when the server has no pending requests
@@ -5657,7 +5667,7 @@ class JaatoServer:
         phase = str(payload.get("phase") or "")
         if not phase:
             return
-        self.emit(GCEvent(
+        event = GCEvent(
             agent_id=self._main_agent_id or "",
             phase=phase,
             trigger_reason=payload.get("trigger_reason"),
@@ -5671,7 +5681,39 @@ class JaatoServer:
             tokens_after=payload.get("tokens_after"),
             tokens_freed=payload.get("tokens_freed"),
             error=payload.get("error"),
+        )
+        # #1190: the one pass a late client needs is the last one.  Kept as
+        # the event itself so a replay carries the ORIGINAL timestamp --
+        # "when did collection last run" answered with the attach time
+        # would be a readout that lies.
+        if phase == "completed":
+            self._last_gc_pass = event
+        self.emit(event)
+
+    def _emit_gc_state(self, emit: EventCallback) -> None:
+        """Tell a client arriving mid-session the GC policy and last pass (#1190).
+
+        Both events are sent live -- ``GCConfigEvent`` at initialisation and
+        on reconfigure, ``GCEvent`` for each phase of a pass -- and neither
+        was replayed, so a client that ATTACHED (a reconnect, a session
+        switch, a second tab) never learned the strategy and read "no GC has
+        run" about a session that had collected an hour ago.
+
+        The policy is sent whatever it is, including no strategy at all: a
+        session with no GC is the state an operator most needs to see (#1133
+        is what it cost when it was invisible).  The last pass is sent only
+        when there was one, with its original timestamp.
+        """
+        agent = self._agents.get(self._main_agent_id) if self._main_agent_id else None
+        emit(GCConfigEvent(
+            agent_id=self._main_agent_id or "",
+            threshold=getattr(agent, "gc_threshold", None),
+            strategy=getattr(agent, "gc_strategy", None),
+            target_percent=getattr(agent, "gc_target_percent", None),
+            continuous_mode=bool(getattr(agent, "gc_continuous_mode", False)),
         ))
+        if self._last_gc_pass is not None:
+            emit(self._last_gc_pass.model_copy())
 
     def _emit_budget_refusal_if_exhausted(self, result: Any) -> bool:
         """Emit ``SessionTerminatedEvent(reason="budget_exhausted")`` when the

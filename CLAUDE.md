@@ -7196,6 +7196,199 @@ Guards: `shared/tests/test_markup_that_leaked_into_the_transcript.py` (four
 reversions) and the web client's `nbmarkup.test.ts` / `JMarkup.test.tsx`
 plus two e2e cases.
 
+### Prose Drawn as a Code Block, Because a Fence Never Closed
+
+Reported with a web-client screenshot: the second half of an ordinary reply
+(the model's headings, its questions to the user, its closing line) rendered
+monospaced, line-numbered and syntax-coloured as one `<j-code>` block
+running to the end of the message. Clients draw a `<j-code>` block
+faithfully, so the defect is where the block is decided:
+`code_block_formatter`.
+
+Its opener was `` ```(\w*)\n `` and its closer any line that STARTED with
+three backticks. So an opener the pattern did not recognise was passed
+through as text, and ITS closer then opened a block that nothing closed:
+
+| Input | What went wrong |
+|---|---|
+| `` ```c++ ``, `` ```shell-session ``, `` ```text `` (trailing space), `` ```python title="x" `` | the opener was not seen |
+| a four-backtick fence quoting a three-backtick one | the inner fence closed the outer, and every later fence was read the wrong way round |
+| a closer indented inside a list item | never seen at all |
+
+The rule is CommonMark's now, in one place (`open_fence` / `Fence` in
+`code_block_formatter/plugin.py`), and the table formatter imports it, as
+#1191 requires:
+
+- an opener at a line start takes any info string, and the language is its
+  first word;
+- a closer is a line holding only a run of the **same** character, at least
+  as long as the opener's run;
+- both may be indented, and the opener's indent is removed from the code;
+- `~~~` fences work.
+
+The old mid-line opener (`` text ```py ``) is kept, with its old narrow info
+string, because models write it. The text held back while streaming is
+unchanged: only an incomplete line that could still turn out to be an
+opener waits for its newline. One behaviour changes: a closer now needs its
+line to end, so a block completes when the closer's newline arrives, or at
+`flush`, rather than on the closer's backticks alone.
+
+Guard: `shared/tests/test_prose_drawn_as_a_code_block.py`, three
+reversions. Every fixture is also streamed one character at a time and in
+random pieces.
+
+### A Reset the Next Reconnect Undid (#1189)
+
+The TUI's workspace panel has `workspace_clear` (Delete): empty the list so
+only files that change from now on appear. It is a reset of the starting
+point, not a hide — a file the agent touches again after the reset comes
+back. The web Files panel had no equivalent, and after a long session it
+listed thousands of entries with no way to clear them short of a reload.
+
+**Kept only in the client, a reset does not survive a reconnect.** An
+attaching client gets a `WorkspaceFilesSnapshotEvent` it applies wholesale,
+and a snapshot entry is `{path, status}` — nothing says *when* it changed.
+The TUI rarely reattaches; a browser does it routinely (a tablet sleeps, a
+network blips), so a naive port works in testing and stops working in use.
+
+**The daemon numbers changes** (protocol **1.19**). The workspace monitor
+stamps every flushed batch with `seq`, one more than the last, and each
+tracked path remembers its latest `seq`:
+
+| Event | Carries |
+|---|---|
+| `WorkspaceFilesChangedEvent` | `seq`, `epoch` for the batch |
+| `WorkspaceFilesSnapshotEvent` | `seq` (latest), `epoch`, `seqs` (path → seq) |
+
+A counter rather than a clock: nothing to skew between daemon and browser,
+and ordering is all the filter needs. `seqs` is a parallel map rather than a
+third key on each `files` entry because those entries are `Dict[str, str]`
+and an older client validates them as such — an integer there fails its
+whole event, while an unknown top-level field is ignored. The monitor hands
+its callback a `ChangeBatch`, a `list` subclass carrying `seq` / `epoch`, so
+every existing callback keeps receiving exactly what it did.
+
+**The epoch is what keeps it from failing silently.** A session reload
+rebuilds the monitor, which counts from 0 again; a mark of 500 compared
+against the new counter hides every new change and empties the panel with
+nothing saying why. `epoch` names the monitor instance and is not
+persisted, so a mark from before a reload is recognisably void — dropped,
+the full list shown, and the panel says so. Restored entries carry no
+number of their own and read as 0. The snapshot is now sent even when
+empty: it is the only way a reconnecting client learns the epoch changed.
+
+| Client | What the reset does |
+|---|---|
+| web (`store/workspaceView.ts`) | keeps the FULL list plus the numbers, filters past the mark — so **show everything** is possible. Per viewer, in memory, like hide |
+| TUI (`workspace_panel.py`) | `clear()` records the mark; a reattach's snapshot keeps only entries past it |
+| either, against a daemon below 1.19 | changes numbered locally between snapshots; a snapshot drops the mark (the web client says why) — the old behaviour, stated |
+
+**Not reset on the daemon**, deliberately: the monitor is per session and
+shared by every attached client, so a daemon-side reset would empty the list
+for everyone else watching.
+
+Guards: `server/tests/test_a_reset_that_survives_a_reconnect_1189.py` (three
+reversions), `jaato-tui/tests/test_workspace_clear_survives_a_reattach_1189.py`,
+`src/store/workspaceView.test.ts`, and an e2e case that resets, touches a
+listed file again, drops the connection and checks the reset held. A first
+draft cleared the restored entries' numbers inside `restore()`; the
+reversion meta-guard reported it decorative — unreachable, since only paths
+this monitor numbered are reported — and it would have erased a number the
+new monitor genuinely assigned, so it went.
+
+### A Category Id Nobody Could Read
+
+A discovery call reached the web transcript as
+`LIST_TOOLS  category_id=c_bbc5e661`. Tool names reach the MODEL as
+hash-derived ids (`t_<8 hex>`, `c_<8 hex>`; `shared/tool_id_map.py`), so a
+call's arguments carry them, and the agreement is that anything user-facing
+shows the name a person knows — the TUI has done so since the ids shipped
+(`ui_utils.resolve_tool_ids`). The daemon already sent the mapping for
+exactly this, twice: `tools.id_registry` (`ToolIdRegistryEvent`, the full
+set each time) and `session.info`'s `tool_id_mappings`. The web client read
+neither.
+
+`src/protocol/toolIds.ts` is the TUI's function, and the store keeps the map
+(`toolIdNames`), replaced wholesale on each receive. Two properties:
+
+- **Resolved at render time, not at reduce time.** The registry is sent after
+  tool configuration and again when deferred tools activate, so it can arrive
+  after the call that used an id; a row rendered from the stored arguments
+  picks the name up whenever it lands. The e2e sends the mapping after the
+  call for that reason, and fails with the resolution removed.
+- **Only a value that IS an id is replaced.** An id the map does not name is
+  left as it is — showing the id is honest, inventing a name is not — and a
+  string merely containing one is untouched.
+
+Both argument displays use it: the tool row and the permission card's
+argument grid.
+
+### When GC Last Ran, What It Freed, and Which Policy (#1190)
+
+The Instructions panel showed what each layer held and each layer's GC
+glyph, and nothing about collection itself: not when a pass last ran, not
+what it freed, not which policy was in force. All three were already on the
+wire — `GCConfigEvent` (strategy, threshold, target, continuous) at
+initialisation and on reconfigure, `GCEvent` for each phase of a pass with
+`tokens_freed` on `completed` — and the web client read neither.
+
+**Neither was replayed, and that is the daemon half.** `emit_current_state`
+is the one door for "tell a client arriving mid-session what the state is",
+and it sent neither event. A tab that attached after a pass — a second tab,
+a session switch, a resume from the picker — read "no GC" about a session
+that had collected an hour ago, and never learned the strategy at all.
+`JaatoServer._emit_gc_state` replays both:
+
+- **The last completed pass is kept as the event that announced it**
+  (`_last_gc_pass`), so the replay carries the pass's ORIGINAL timestamp.
+  "When did GC last run" answered with the attach time would be a readout
+  that lies. Not persisted: a revived session starts with no record, which
+  the panel reports as "no GC pass reported yet", never as "never collected".
+- **The policy is replayed whatever it is, including no strategy.** A session
+  with no GC is the state an operator most needs to see (#1133 is what it
+  cost when invisible); the panel renders it as a warning line.
+
+The panel (`src/protocol/gc.ts` for the wording) adds two lines under the
+heading, subordinate to the tracked total: `◷ last GC 12 min ago · freed
+14.2k tokens` (hover: absolute time, trigger, before → after; `collecting…`
+between `started` and `completed`; a failed pass in the error tone) and
+`GC: budget · runs at 80% · down to 60%` (or `after every turn above N%`
+when continuous). They show even before any usage is reported — the policy
+is known first. The legend's glyphs carry one-line tooltips, and a caption
+says the icons describe what GC **may** reclaim from each layer, not what
+it recently did — `never collected` read as "data was never collected".
+
+Guards: `server/tests/test_the_gc_state_reaches_a_late_client_1190.py` (two
+reversions; its call-site check parses `core.py` from beside the test
+rather than via `inspect.getsource`, which the reversion meta-guard's
+sandbox cannot see through), `BudgetPanel.test.tsx` / `gc.test.ts`, and an
+e2e case in which a SECOND tab attaches after the pass and must be told —
+verified to fail with the replay removed. A reconnect of the same tab could
+not have proved it: it keeps what the tab already knew.
+
+### A Popup That Floated Off the Page
+
+Reported with a screenshot: the live tool-output popup of a running
+`cli_based_tool` was cut off on the left edge of the transcript. The
+component was correct (`absolute right-5 bottom-[104px]` inside a `relative`
+`<main>`); the stylesheet was not. `.plate { position: relative }` in
+`theme.css` was an **unlayered** rule, and in Tailwind v4 an unlayered rule
+outranks every utility whatever its specificity. So each floating plate lost
+its `absolute`. The popup sat in normal flow, and `right-5` then shifted it
+20px past the left edge. The command-proposal list had the same defect: laid
+out in flow, it grew the composer strip upward and shrank the transcript by
+its own height every time a proposal appeared.
+
+The rule now lives in `@layer components`. A plate is still positioned by
+default (its corner marks need it), and a caller's utility can override
+that. Two e2e cases measure the result rather than the styling: the popup's
+box lies inside the transcript column, above the input and against its right
+edge; and the composer strip's top does not move when proposals open. Both
+fail against the unlayered rule. Measuring the input's own position would
+not have caught the second case, because it is pinned to the bottom. The
+mock gained a `live` turn that keeps a tool running with output until
+`session.stop`, because the popup only exists in that window.
+
 ### An Exit That Never Asked
 
 The TUI's `exit` is a question before it is an action: a session lives on

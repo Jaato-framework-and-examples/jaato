@@ -15,6 +15,7 @@ import { useJaato } from "@/store/store";
 import { Plate } from "@/components/layout/Plate";
 import { MediaView } from "./MediaView";
 import { hasServerMarkup, JMarkup } from "./JMarkup";
+import { resolveToolArgs } from "@/protocol/toolIds";
 
 export function summarizeArgs(args: Record<string, unknown>, max = 110): string {
   const parts: string[] = [];
@@ -38,6 +39,8 @@ function StatusGlyph({ status }: { status: ToolBlock["status"] }) {
 
 export const ToolBlockView = memo(function ToolBlockView({ block }: { block: ToolBlock }) {
   const toggle = useJaato((s) => s.toggleTool);
+  // Hashed tool / category ids in the arguments, shown by name (protocol/toolIds.ts).
+  const toolIdNames = useJaato((s) => s.toolIdNames);
   const setPopup = useJaato((s) => s.setPopup);
   const hasBody = block.output.length > 0 || block.media.length > 0 || !!block.errorMessage;
   const running = block.status === "running";
@@ -53,7 +56,7 @@ export const ToolBlockView = memo(function ToolBlockView({ block }: { block: Too
           <StatusGlyph status={block.status} />
         </span>
         <span className={`chrome w-[120px] shrink-0 truncate ${block.status === "error" ? "text-error" : ""}`}>{block.toolName}</span>
-        <span className="font-mono text-xs text-text-muted truncate flex-1">{summarizeArgs(block.args)}</span>
+        <span className="font-mono text-xs text-text-muted truncate flex-1">{summarizeArgs(resolveToolArgs(block.args, toolIdNames))}</span>
         {block.backgrounded && <span className="kicker kicker-muted text-[10px]">bg</span>}
         {running && block.output ? (
           <span
