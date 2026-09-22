@@ -119,6 +119,31 @@ test("tool calls stream into a collapsible block and update the plan panel", asy
   await expect(toolBlock).toHaveAttribute("aria-expanded", "false");
 });
 
+test("a notebook cell renders as a cell, not as its <nb-row> tags (#1193)", async ({ page }) => {
+  await openSession(page);
+  await composer(page).fill("run a notebook cell");
+  await composer(page).press("Enter");
+  await expect(page.getByText("The cell raised a ZeroDivisionError.")).toBeVisible();
+  const cell = page.locator("[data-testid=tool-block] .nb-cells");
+  await expect(cell).toBeVisible();
+  await expect(cell.locator(".nb-label")).toHaveText(["In [1]:", "Out [1]:", "Err [1]:"]);
+  await expect(cell.locator('.nb-row[data-nb-type="input"] pre.code-block')).toContainText("1/0");
+  await expect(cell.locator('.nb-row[data-nb-type="error"] pre.nb-out')).toContainText('File "<cell>", line 2');
+  // The reported leak: no wrapper tag reaches the page as text.
+  await expect(page.getByText("<nb-row")).toHaveCount(0);
+  await expect(page.getByText("</nb-row>")).toHaveCount(0);
+});
+
+test("an early-exit notebook error renders as a cell too", async ({ page }) => {
+  await openSession(page);
+  await composer(page).fill("show an early notebook exit");
+  await composer(page).press("Enter");
+  const label = page.locator("[data-testid=tool-block] .nb-label");
+  await expect(label).toHaveText("Err:");
+  await expect(page.locator("[data-testid=tool-block] pre.nb-out")).toHaveText("No code provided");
+  await expect(page.getByText("<nb-row")).toHaveCount(0);
+});
+
 test("the status bar shows the permission default policy the daemon reports", async ({ page }) => {
   await openSession(page);
   await expect(page.getByTestId("permission-status")).toHaveText(/permissions\s+ask/);

@@ -7037,6 +7037,77 @@ so an auto-provisioned workspace needs the provisioner's own
 `templates/default/.env` seeded. A probe whose sessions do not start
 reports on the no-session path and says so nowhere.
 
+### Markup That Reached the Transcript as Tags (#1191, #1193)
+
+Reported as two web-client defects: `<j-table>` tags showing as text inside
+a code block, and a notebook cell arriving wrapped in literal
+`<nb-row …>` / `</nb-row>` with its traceback as unstyled prose. Driving the
+daemon's own formatter pipeline put two of the three causes **upstream of
+every client** — the TUI showed the first one too.
+
+**#1191 — a table inside a fence.** `table_formatter` (priority 25) runs
+before `code_block_formatter` (40) and knew nothing about fences, so a
+markdown table QUOTED in a fence — a ```` ```markdown ```` example, a cell's
+fenced output — was rewritten into `<j-table>`, and the code-block formatter
+then escaped that markup into a `<j-code>` block. Every client renders a
+`<j-code>` block faithfully: monospace, line-numbered, and the literal
+`&lt;j-table&gt;` the screenshot shows. The table formatter now leaves the
+inside of a fence alone, and decides "inside" with the code-block
+formatter's OWN two patterns (`FENCE_OPEN_RE` / `FENCE_CLOSE_RE`, imported,
+never restated), so the two cannot disagree about which lines are code.
+
+Two properties the streaming shape forces:
+
+- **A fence opener can arrive without its newline.** Partial lines are
+  passed through immediately for latency, so the completed line is judged
+  with the head that already went out (`_fence_line_prefix`); judging only
+  the tail means the fence never opens.
+- **Chunking must not change the output.** The guard formats each fixture
+  whole, one character at a time, and at twenty random cut sets, and asserts
+  byte equality.
+
+**#1193, the server half — an error cell with no execution count.** Every
+early exit on the notebook's streaming path (no code, a refusal by the
+containment boundary, a notebook that could not be created or does not
+exist) emits `<notebook-cell type="error">` with no `exec`, and
+`notebook_output_formatter` required one. Unmatched, the raw marker went to
+every client — and the refusals are the messages a person most needs to
+read. `exec` is optional now and such a cell is labelled `Err:`. The guard
+reads every `<notebook-cell` literal out of the notebook plugin's AST rather
+than listing shapes, because the defect was an emitter nobody checked
+against the formatter.
+
+**#1193, the client half — the web client had no `<nb-row>` renderer.**
+The TUI has had one since the notebook shipped. `src/protocol/nbmarkup.ts`
+is the parser and is bounded to its own tags, as `jmarkup.ts` is to `<j-*>`
+(the boundary the TUI pins with `test_nb_row_is_not_j_markup`): a row's body
+is handed back raw so an input cell's `<j-code>` still highlights. A cell
+renders as a two-column grid, label beside body, with `error` / `stderr`
+rows in the error tone and program output verbatim — the server does not
+escape it, so a traceback's `File "<cell>"` must reach the screen as
+written. **An unterminated row stays text**, as an unterminated `<j-code>`
+does: no producer the web client sees splits a row, while a model quoting
+the tag in prose is entirely possible. And the tool-row gate asked only
+`includes("<j-")`, so a `print(42)` — a cell whose whole output is one
+stdout row — went to the raw `<pre>` with its tags showing; `hasServerMarkup`
+asks about both families.
+
+The fixtures in `JMarkup.test.tsx` and the mock's two notebook scenarios are
+the daemon's real output (the plugin's `_format_*_cell` emitters run through
+the pipeline), not hand-written: a hand-written fixture is how the mock ends
+up speaking the client's vocabulary.
+
+Not fixed, and stated: `notebook_output_formatter` passes a `<notebook-cell`
+marker through untouched if it is split across two chunks. Nothing emits it
+that way today (tool output is formatted per chunk and the three emitters
+write whole markers), so it is a latent gap rather than a live one. The
+"FOLLOW INPUT" control in the #1193 screenshot is the tool row's existing
+live-output **Follow** toggle, not a notebook feature.
+
+Guards: `shared/tests/test_markup_that_leaked_into_the_transcript.py` (four
+reversions) and the web client's `nbmarkup.test.ts` / `JMarkup.test.tsx`
+plus two e2e cases.
+
 ### An Exit That Never Asked
 
 The TUI's `exit` is a question before it is an action: a session lives on

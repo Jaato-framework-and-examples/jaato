@@ -35,6 +35,22 @@ def _trace(msg: str) -> None:
 # Priority for pipeline ordering (40-59 = syntax highlighting)
 DEFAULT_PRIORITY = 40
 
+# What opens and what closes a fenced code block.  Named, because this
+# formatter is not the only one that must agree on it: every formatter
+# running BEFORE this one (priority < 40) sees the raw fence and must
+# leave its contents alone, or it rewrites text that this formatter then
+# escapes and shows as code.  ``table_formatter`` did exactly that --
+# a markdown table inside a fence became ``<j-table>`` markup and reached
+# every client as literal, line-numbered tags (#1191).  It imports these
+# two patterns rather than restating them, so the two formatters cannot
+# disagree about where a fence starts and ends.
+#
+# FENCE_OPEN_RE: three backticks, an optional language word, and the
+#     newline -- searched anywhere, so ``text ```py\n`` opens too.
+# FENCE_CLOSE_RE: three backticks at the start of the buffer or of a line.
+FENCE_OPEN_RE = re.compile(r'```(\w*)\n')
+FENCE_CLOSE_RE = re.compile(r'(?:^|\n)```')
+
 
 class CodeBlockFormatterPlugin:
     """Streaming plugin that formats code blocks with syntax highlighting.
@@ -78,7 +94,7 @@ class CodeBlockFormatterPlugin:
         while self._buffer:
             if not self._in_code_block:
                 # Look for code block start: ```lang or ```
-                match = re.search(r'```(\w*)\n', self._buffer)
+                match = FENCE_OPEN_RE.search(self._buffer)
                 if match:
                     # Yield text before the code block
                     before = self._buffer[:match.start()]
@@ -106,7 +122,7 @@ class CodeBlockFormatterPlugin:
             else:
                 # In code block, look for closing ```
                 # Match ``` at start of buffer OR preceded by newline
-                end_match = re.search(r'(?:^|\n)```', self._buffer)
+                end_match = FENCE_CLOSE_RE.search(self._buffer)
                 if end_match:
                     # Extract code block content
                     code = self._buffer[:end_match.start()]
