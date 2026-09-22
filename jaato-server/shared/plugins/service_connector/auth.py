@@ -29,6 +29,7 @@ from shared.session_context import get_session_env
 from shared.secret_repr import secret_safe_repr
 from ..subagent.config import (
     _SECRET_URI_RE,
+    _discover_secret_resolvers,
     _resolve_secret_uri,
     expand_variables,
 )
@@ -242,6 +243,100 @@ def _resolve_credential(
 
     # Env var path (legacy behaviour).
     return get_session_env(name_or_uri), source
+
+
+def resolution_failure_hint(source: Optional[AuthSource]) -> str:
+    """Explain why a credential could not be resolved, distinguishing the
+    three causes that need three different fixes (#1188).
+
+    ``call_service``'s auth-error path used to emit ONE hint that named
+    jaato-premium as the likely-missing resolver for every resolution
+    failure.  That is the right advice for exactly one of three causes and
+    actively misleading for the other two, because it sends the operator to
+    install a resolver they may already have or may not need:
+
+    (a) **no resolver registered** — the value is a ``scheme://`` secret URI
+        and no resolver is registered for that scheme.  This is the genuine
+        missing-resolver case; install the package that provides it
+        (jaato-premium for ``pass://``).
+    (b) **a literal env-var name** — the value never matched the secret-URI
+        pattern (``AuthSource.kind == "env"``), so the resolver chain was
+        never entered at all: resolution read the environment directly and
+        the variable is unset.  This is the reporter's own case
+        (``resolved_from: "env://TYPESAFE_API_KEY"``).  The fix is "set the
+        variable, or write a ``pass://`` URI if you meant a secret manager"
+        — NOT "install a resolver".
+    (c) **resolver present but empty** — the value is a secret URI, a
+        resolver IS registered for its scheme, and it returned an empty
+        value (a wrong ``pass`` entry, a missing GPG key).  Not a missing
+        resolver; fix the secret at its source.
+
+    Which case applies is decided entirely from what the caller already
+    holds: ``source.kind`` (``"uri"`` vs ``"env"`` — i.e. whether the stored
+    reference matched ``_SECRET_URI_RE``) and, for a URI, whether a resolver
+    is registered for its scheme (:func:`_discover_secret_resolvers`).
+
+    Args:
+        source: The :class:`AuthSource` of the credential that failed to
+            resolve, or ``None`` when the caller has no per-credential
+            attempt to point at (legacy callers, or an empty attempt list).
+
+    Returns:
+        One hint string.  Every branch ends by saying this is a
+        configuration issue rather than a stale credential, so the model
+        reading it does not report the failure as an expired token.
+    """
+    if source is None or source.kind == "unset":
+        return (
+            "The environment variable was not available in this session "
+            "context. This is a session/environment issue, not a credential "
+            "configuration problem. Report it as: 'environment variable not "
+            "set in this session.'"
+        )
+
+    if source.kind == "env":
+        # Case (b): a literal env-var NAME, so no resolver was ever consulted.
+        return (
+            f"Could not resolve the credential from {source.provenance}. "
+            f"The configured value is a literal environment-variable NAME "
+            f"(not a `pass://` / `vault://` secret URI), so no secret "
+            f"resolver was consulted — resolution read the environment "
+            f"directly and `{source.env_var}` is not set in this session. "
+            f"Set that variable, or, if you meant to read from a secret "
+            f"manager, write the value as a `pass://…` URI instead of a bare "
+            f"name. This is a configuration issue, not a stale-credential "
+            f"issue."
+        )
+
+    # source.kind == "uri" from here.  The scheme decides (a) vs (c).
+    scheme = ""
+    m = _SECRET_URI_RE.match(source.uri or "")
+    if m:
+        scheme = m.group("scheme")
+    resolver_registered = bool(scheme) and scheme in _discover_secret_resolvers()
+
+    if resolver_registered:
+        # Case (c): the resolver ran and returned an empty value.
+        return (
+            f"Could not resolve the credential from {source.provenance}. "
+            f"A resolver for the `{scheme}://` scheme IS registered, but it "
+            f"returned an empty value — the entry most likely does not exist "
+            f"(wrong path) or its key is unset (e.g. a missing GPG key for "
+            f"`pass`). Fix the secret at its source, not the jaato "
+            f"configuration. This is a configuration issue, not a "
+            f"stale-credential issue."
+        )
+
+    # Case (a): a secret URI whose scheme has no registered resolver.
+    scheme_label = f"the `{scheme}://` scheme" if scheme else "that scheme"
+    install = " (install jaato-premium)" if scheme == "pass" else ""
+    return (
+        f"Could not resolve the credential from {source.provenance}: "
+        f"no resolver is registered for {scheme_label}{install}. Install the "
+        f"package that provides the resolver, then create a new session (or "
+        f"reset the resolver cache) so it is discovered. This is a "
+        f"configuration issue, not a stale-credential issue."
+    )
 
 
 class AuthError(Exception):

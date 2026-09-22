@@ -27,7 +27,7 @@ from jaato_sdk.plugins.model_provider.types import (
     DISCOVERABILITY_DEFERRED,
 )
 
-from .auth import AuthError, AuthManager
+from .auth import AuthError, AuthManager, resolution_failure_hint
 from .bruno_import import BrunoParseError, parse_bruno_collection
 from .http_client import HttpClientError, ServiceHttpClient
 from .openapi_parser import (
@@ -1334,33 +1334,19 @@ class ServiceConnectorPlugin(RunnerForwardingMixin):
                     "problem. Do NOT tell the user their config is broken."
                 )
         else:
-            # Resolution failed.  Name the failing source explicitly
-            # when we have it so the user knows whether the issue is a
-            # missing env var or an unregistered secret-URI scheme.
-            failing: Optional[str] = None
+            # Resolution failed.  The old single hint named jaato-premium
+            # as the likely-missing resolver for every failure — wrong for
+            # two of the three distinct causes.  #1188: distinguish them by
+            # the FAILING source's own shape (env-var name vs secret URI,
+            # and — for a URI — whether a resolver is registered), so the
+            # hint names the fix the user actually needs.
+            failing_source: Optional['AuthSource'] = None
             if attempts:
                 for a in attempts:
                     if not a.resolved:
-                        failing = a.source.provenance
+                        failing_source = a.source
                         break
-
-            if failing:
-                ctx["hint"] = (
-                    f"Could not resolve the credential from {failing}. "
-                    f"For env vars: the variable is not set in this "
-                    f"session context. For secret URIs: either no "
-                    f"resolver is registered for the scheme (e.g. "
-                    f"jaato-premium not installed for `pass://`) or the "
-                    f"resolver returned an empty value. This is a "
-                    f"configuration issue, not a stale-credential issue."
-                )
-            else:
-                ctx["hint"] = (
-                    "The environment variable was not available in this "
-                    "session context. This is a session/environment issue, "
-                    "not a credential configuration problem. Report it as: "
-                    "'environment variable not set in this session.'"
-                )
+            ctx["hint"] = resolution_failure_hint(failing_source)
 
         return ctx
 
