@@ -8069,8 +8069,14 @@ model can act on, and claims nothing more.
 **The enforcement point is one module, not two.** `cli`'s classification and
 workspace test moved to `shared/plugins/command_containment.py`
 (`classify_command_paths`, `path_within_workspace`, `first_denied_path`); `cli`
-keeps its result-shaping (it refuses by mimicking "No such file or directory")
-and delegates the analysis. Fail-closed is the caller's decision and
+keeps its result-shaping (an explicit `cli containment (workspace boundary):`
+refusal naming `plugin_configs.cli.extra_paths` — until #1202 it mimicked "No
+such file or directory", and a session read that as binaries vanishing) and
+delegates the analysis. `cli` alone also asks for the executable position to be
+classified `exec`: a program named by path (`/usr/bin/git`) is allowed iff its
+directory is an entry of the subprocess PATH `_build_subprocess_env` builds —
+the one PATH that both judges and runs — so it gets the verdict its bare name
+gets; the same path as an argument (`cat /usr/bin/git`) is still data. Fail-closed is the caller's decision and
 `first_denied_path` makes each caller state it — `on_parse_error="deny"` for a
 command, `"allow"` for typed input.
 

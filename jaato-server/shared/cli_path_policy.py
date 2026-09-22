@@ -90,9 +90,13 @@ MISSING_COMMAND_ERROR = "cli_based_tool: command must be provided"
 #: the call this module refuses.  Named here so the two messages cannot drift
 #: into contradicting each other.
 CLI_EXE_NOT_FOUND_HINT = (
-    "Provide the full path to the executable, or ask the operator to add its "
-    "directory to plugin_configs.cli.extra_paths (PATH extension is "
-    "operator-configured, not settable per call)."
+    "The name did not resolve on this session's PATH. A full path runs only "
+    "for a program inside the workspace -- one outside it runs by path only "
+    "if its directory is on that PATH, which is exactly when the bare name "
+    "would have worked (#1202). So ask the operator to add the directory to "
+    "plugin_configs.cli.extra_paths (PATH extension is operator-configured, "
+    "not settable per call). The program may also exist but be unreachable "
+    "by the user this session runs as."
 )
 
 #: Why the operator's own entries are appended rather than prepended.  Quoted
