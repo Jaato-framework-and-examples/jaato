@@ -501,7 +501,7 @@ class CommandRouter:
             return True
         return False
 
-    def _resolve_caller_workspace(
+    def resolve_caller_workspace(
         self, client_id: str, client_workspace: Optional[str],
         session_id: Optional[str] = None,
     ) -> "tuple[Optional[str], Dict[str, Optional[str]]]":
@@ -545,7 +545,7 @@ class CommandRouter:
         :func:`jaato_sdk.gitignore_toggle.toggle_gitignore_pattern` on both
         routes, so one press means one thing whichever client made it.
 
-        Which ``.gitignore``: :meth:`_resolve_caller_workspace` -- the
+        Which ``.gitignore``: :meth:`resolve_caller_workspace` -- the
         SESSION's workspace when the caller is attached to one (by the
         manager's binding, or by the session id the transport handed in),
         else the workspace the client declared or selected.
@@ -579,7 +579,7 @@ class CommandRouter:
             answer(ok=False, error=f"workspace.ignore: {reason}")
             return
 
-        workspace, sources = self._resolve_caller_workspace(
+        workspace, sources = self.resolve_caller_workspace(
             client_id, client_workspace, session_id)
         if not workspace:
             # Name what was looked at: "no workspace" alone sent a reader
@@ -685,7 +685,7 @@ class CommandRouter:
         except Exception:                         # pragma: no cover - defensive
             topics = []
 
-        workspace, _sources = self._resolve_caller_workspace(
+        workspace, _sources = self.resolve_caller_workspace(
             client_id, client_workspace, session_id)
 
         try:

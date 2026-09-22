@@ -6966,6 +6966,77 @@ context, #838) — a file the model should *see* rather than have on disk
 is a different feature with a different cost, and the composer does not
 yet offer it.
 
+### A File Staged Where the Session Was Not
+
+Reported from a deployed client, on a workspace the user had created and
+named: every indicator said the attachment was in the workspace — the chip
+went `staged`, the transcript said *"Staged into the workspace: X.jpg"*,
+the user turn carried *"Attached files, staged in the workspace: X.jpg"* —
+and the model could not read it, at the relative path or at the
+workspace's own absolute path, while the FILES panel showed only the
+session's `.jaato/` and no new file.
+
+**Neither client was lying**, and establishing that is what located the
+defect. `staging.ts` marks a chip `staged` only for a name the daemon
+echoed back in `StageFilesEvent.staged`, and the daemon appends a name
+only after `_write_staged_payload` returned. The bytes really were
+written — somewhere else.
+
+**Two definitions of "this client's workspace", and staging used the
+wrong one.** `CommandRouter.resolve_caller_workspace` is the daemon's
+answer — the attached session's workspace, else the transport's session,
+else what the client declared — and it already recorded why staging needs
+exactly that order: *a session's path outranks a declared one because the
+session's tree is what `WorkspaceMonitor` watches and what the panel
+shows.* `_resolve_staging_workspace` answered separately, reading
+`_client_provisioned` first: a map stamped when a `session.new` arrives
+from a client with no workspace (the daemon auto-provisions one) and
+cleared only on DISCONNECT, never by a later `workspace.select`.
+
+Measured over the real WS wire, three orders on one connection:
+
+| order | session runs in | file lands in |
+|---|---|---|
+| `select, new` | named | named |
+| `new, select` | provisioned | provisioned |
+| `new, select, new` | **named** | **provisioned** |
+
+Only the third diverges, which is why it reads as intermittent — and it
+is an ordinary flow: create a session, end it (in workspace mode that
+returns to the workspace list), open a named workspace, create a session,
+attach a file.
+
+**Reordering the two stores would have fixed that row and broken the
+second**, which is the whole reason this delegates rather than growing a
+third ordering: after `new, select` the SESSION is still in the
+provisioned workspace, and a file attached to it belongs there, not in
+whatever the client selected afterwards. Both directions were measured,
+and both are pinned by the guard.
+
+The explicit-id caller was broken too, and loudly: staging with
+`workspace_id="named"` compared that name against the PROVISIONED
+directory's basename and refused with `workspace_not_found` for a
+workspace the client had selected and the session was running in.
+
+`_client_provisioned` stays as the LAST fallback, for a caller that
+reached `provision_workspace()` directly — the one path that stamps it
+without telling the adapter or the router.
+
+Guard: `server/tests/test_a_file_staged_where_the_session_is_not.py`,
+three reversions. It drives the real `CommandRouter.resolve_caller_workspace`
+rather than a stub of it, because a stub would assert the test's opinion
+of the ordering instead of the daemon's.
+
+**A harness note worth keeping.** The first three runs of the wire probe
+measured nothing: every `session.new` was refused with `envelope.model_name
+is empty`, so no session existed, `attached_session` was `None` in all
+three orders, and the resolver fell through to the declared workspace —
+which made the fix look like it had broken `new, select`. A session's
+provider comes from its WORKSPACE `.env`, not the daemon's environment,
+so an auto-provisioned workspace needs the provisioner's own
+`templates/default/.env` seeded. A probe whose sessions do not start
+reports on the no-session path and says so nowhere.
+
 ### An Exit That Never Asked
 
 The TUI's `exit` is a question before it is an action: a session lives on

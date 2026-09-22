@@ -2412,15 +2412,67 @@ class JaatoWSServer:
 
         Returns the absolute path, or ``None`` if the client has no
         workspace or the requested id doesn't match.
+
+        **It asks the question the router already answers.**
+
+        ``CommandRouter.resolve_caller_workspace`` is this daemon's one
+        definition of *which workspace a verb acts in for this client* --
+        the attached session's, else the transport's session, else what the
+        client declared -- and its docstring gives the reason staging needs
+        exactly that order: *a session's path outranks a declared one
+        because the session's tree is what ``WorkspaceMonitor`` watches and
+        what the panel shows.*
+
+        Staging used to answer it a second way, and wrongly: it read
+        ``_client_provisioned`` FIRST.  That map is stamped when a
+        ``session.new`` arrives from a client with no workspace (the daemon
+        auto-provisions one) and is cleared only on DISCONNECT -- never when
+        the client later selects a workspace.  So on one connection:
+
+        ===============================  ================  ==============
+        order                            session runs in   file lands in
+        ===============================  ================  ==============
+        ``select, new``                  named             named
+        ``new, select``                  provisioned       provisioned
+        ``new, select, new``             **named**         **provisioned**
+        ===============================  ================  ==============
+
+        Only the third diverges, which is why it reads as intermittent, and
+        it is an ordinary flow: create a session, end it (in workspace mode
+        that returns to the workspace list), open a named workspace, create
+        a session, attach a file.  Nothing reports it -- the write succeeds,
+        so the daemon answers ``StageFilesEvent(staged=[name], failed=[])``,
+        the client says the file is in the workspace, the model cannot find
+        it, and the files panel never shows it.
+
+        Reordering the two stores here would have fixed that row and broken
+        the second: after ``new, select`` the SESSION is still in the
+        provisioned workspace, and a file attached to it belongs there, not
+        in whatever the client selected afterwards.  Measured both ways --
+        which is why this delegates rather than growing a third ordering.
+
+        The provisioned map stays as the LAST fallback, for a caller that
+        reached :meth:`provision_workspace` directly: the one path that
+        stamps it without telling the adapter or the router.
         """
-        provisioned = self._client_provisioned.get(client_id)
-        if provisioned is not None:
-            current_path = provisioned.path
-        elif self._workspace_manager is not None:
+        adapter = self._event_sink_adapter
+        declared = adapter.get_client_workspace(client_id) if adapter else None
+        if not declared and self._workspace_manager is not None:
             selected = self._workspace_manager.get_selected_workspace(client_id=client_id)
-            current_path = selected.path if selected else None
+            declared = selected.path if selected else None
+
+        router = getattr(self, "_command_router", None)
+        if router is not None and hasattr(router, "resolve_caller_workspace"):
+            session_id = adapter._client_sessions.get(client_id) if adapter else None
+            current_path, _sources = router.resolve_caller_workspace(
+                client_id, declared, session_id,
+            )
         else:
-            current_path = None
+            current_path = declared
+
+        if not current_path:
+            provisioned = self._client_provisioned.get(client_id)
+            current_path = provisioned.path if provisioned is not None else None
 
         if not current_path:
             return None
