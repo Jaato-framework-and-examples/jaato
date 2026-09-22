@@ -960,6 +960,37 @@ profile of that name. The stub satisfies the schema and changes nothing about
 what the peer runs. `spawn_subagent`'s own `server` parameter description says
 so, so the model reads it where it chooses.
 
+**`inherit` is the one reserved `profile` value (#1198), and it does NOT
+reopen inline spawning.** `spawn_subagent(profile="inherit")` spawns a
+subagent from a **frozen snapshot of the parent's profile at spawn time** —
+the parent's plugin set and the parent's assembled system instruction (carried
+as `create_session(system_instruction_override=...)` so the child runs the
+parent's exact framing rather than re-assembling, and doubling, its own). It
+succeeds under `allow_inline: false` (the headline point: the "spawn a child
+like me" pattern was only reachable through the opt-in #944 switched off),
+because `inherit` NAMES a profile and passes the profile-first gate. It is
+added to `_spawn_profile_enum` whenever the enum is offered and slots in
+alphabetically under `sorted`; the discovery scan REFUSES a profile file that
+would load as `inherit` (`RESERVED_PROFILE_NAMES` in `config.py`, rejected in
+`_parse_profile_file`) so a workspace cannot shadow the reserved value.
+
+**The self-replication guard is the triage's smaller, local mitigation, not a
+depth bound.** An `inherit` snapshot includes the persona that makes the parent
+delegate, so an `inherit` child is primed to call
+`spawn_subagent(profile="inherit")` itself — and there is no spawn-depth bound
+(#680), so leaving it in would make unbounded self-replication the path of least
+resistance. So `_build_inherit_profile` strips the `subagent` plugin from the
+inherited set: an `inherit` child can neither spawn nor message siblings, and a
+caller that needs a spawning child names a real profile. (`_parent_plugins` is
+already `subagent`-free upstream, so the strip is a property of THIS code rather
+than an accident of how that list is populated.) "Frozen" is a deep copy via the
+#787 snapshot round-trip, so later parent mutation cannot reach the child;
+`agent=` / `default_agent` are ignored (the override is authoritative); and
+`inherit` is refused — with a clear message — on the remote `server=` path (the
+snapshot is local), under the isolated-runner opt-in (the override cannot cross
+that boundary), and when there is no parent session to snapshot. Guard:
+`shared/tests/test_inherit_profile_snapshot_1198.py`, five reversions.
+
 ### A Failure the Framework Was Told Was a Success (#1053)
 
 `ToolExecutor` hands the reliability plugin one flag — `ok` — and derives it
