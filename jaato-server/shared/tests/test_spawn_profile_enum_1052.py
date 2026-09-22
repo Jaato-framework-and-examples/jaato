@@ -61,11 +61,9 @@ REVERSIONS = [
             "        names = self._available_profile_names()\n"
             "        if not names:\n"
             "            return {}\n"
-            '        return {"enum": sorted(names)}'
         ),
         replace=(
             "        names = self._available_profile_names()\n"
-            '        return {"enum": sorted(names)}'
         ),
         test="TestWhenTheEnumIsWithheld::test_no_enum_when_nothing_is_available",
         because="emitting ``enum: []``, which makes every value invalid and "
@@ -88,8 +86,8 @@ REVERSIONS = [
     ),
     Reversion(
         target="jaato-server/shared/plugins/subagent/plugin.py",
-        find='        return {"enum": sorted(names)}',
-        replace='        return {"enum": names}',
+        find='        return {"enum": sorted([*names, INHERIT_PROFILE_NAME])}',
+        replace='        return {"enum": [*names, INHERIT_PROFILE_NAME]}',
         test="TestTheEnumNamesWhatExists::test_the_enum_is_sorted_not_in_discovery_order",
         because="an enum ordered by an unsorted ``iterdir()``, which varies "
                 "per host and churns the prompt-cache prefix the tool "
@@ -123,14 +121,14 @@ class TestTheEnumNamesWhatExists:
 
     def test_the_enum_lists_the_discovered_profiles(self):
         param = _profile_param(_plugin(profile_names=["researcher", "scribe"]))
-        assert param["enum"] == ["researcher", "scribe"]
+        assert param["enum"] == ["inherit", "researcher", "scribe"]
 
     def test_the_enum_is_sorted_not_in_discovery_order(self):
         """``_scan_profiles_dir`` builds the dict from an unsorted
         ``iterdir()``; the tool schema sits in the prompt-cache prefix, so
         a per-host order would re-read the whole prefix for nothing."""
         param = _profile_param(_plugin(profile_names=["zebra", "alpha", "mid"]))
-        assert param["enum"] == ["alpha", "mid", "zebra"]
+        assert param["enum"] == ["alpha", "inherit", "mid", "zebra"]
 
     def test_the_invented_name_from_the_incident_is_not_offered(self):
         param = _profile_param(_plugin(profile_names=["researcher"]))
@@ -142,7 +140,7 @@ class TestTheEnumNamesWhatExists:
         would invite exactly the spawn the runtime blocks."""
         param = _profile_param(
             _plugin(profile_names=["me", "other"], self_profile="me"))
-        assert param["enum"] == ["other"]
+        assert param["enum"] == ["inherit", "other"]
 
     def test_the_parameter_keeps_its_type_and_description(self):
         param = _profile_param(_plugin(profile_names=["researcher"]))
@@ -212,9 +210,9 @@ class TestTheSchemaIsRebuiltPerExposure:
 
     def test_a_newly_discovered_profile_appears_without_a_restart(self):
         plugin = _plugin(profile_names=["researcher"])
-        assert _profile_param(plugin)["enum"] == ["researcher"]
+        assert _profile_param(plugin)["enum"] == ["inherit", "researcher"]
         plugin._config.add_profile(SubagentProfile(name="scribe", description="d"))
-        assert _profile_param(plugin)["enum"] == ["researcher", "scribe"]
+        assert _profile_param(plugin)["enum"] == ["inherit", "researcher", "scribe"]
 
     def test_the_enum_follows_a_config_swap(self):
         plugin = _plugin(profile_names=["researcher"])
@@ -261,7 +259,7 @@ class TestTheRemoteConstraint:
 
     def test_the_enum_is_local_only(self):
         param = _profile_param(_plugin(profile_names=["local-only"]))
-        assert param["enum"] == ["local-only"]
+        assert param["enum"] == ["inherit", "local-only"]
 
     def test_the_server_parameter_says_so(self):
         for schema in _plugin(profile_names=["p"]).get_tool_schemas():
