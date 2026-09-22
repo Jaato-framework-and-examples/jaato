@@ -246,6 +246,13 @@ class TestOpenAPIParser:
         assert "bearer" in result.auth_schemes
         # First scheme becomes default auth config
         assert result.config.auth.type == AuthType.API_KEY
+        # #1211: the non-secret STRUCTURE is kept...
+        assert result.config.auth.key_name == "X-API-Key"
+        # ...but NO credential reference is derived from the (attacker-
+        # controlled) scheme key.  A human binds it afterwards.
+        assert result.config.auth.value_env is None
+        assert result.config.auth.username_env is None
+        assert result.config.auth.password_env is None
 
     def test_parse_with_server_variables(self):
         """Test parsing server URL with variables."""

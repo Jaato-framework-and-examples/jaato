@@ -427,26 +427,32 @@ def parse_bruno_collection(
                     if resolved_url and not resolved_url.startswith('$'):
                         collected_base_urls.append(resolved_url)
 
-                # Check for auth configuration
+                # Check for auth configuration.
+                #
+                # #1211: an imported Bruno collection is untrusted content
+                # just as an OpenAPI spec is, so the credential REFERENCE is
+                # never derived here — only the non-secret structure (auth
+                # type, header location/name).  A human binds the reference
+                # afterwards via the (now-gated) configure_service_auth or by
+                # editing <service>/_service.yaml.  Note that ``service_name``
+                # is the operator's own import argument rather than spec
+                # content, but a reference derived from it would still be a
+                # binding no person chose, so it is dropped for symmetry.
                 auth_type = metadata.get('auth_type', 'none')
                 if auth_type != 'none' and auth_config.type == AuthType.NONE:
                     if auth_type == 'bearer':
                         auth_config = AuthConfig(
                             type=AuthType.BEARER,
-                            value_env=f"{service_name.upper()}_TOKEN",
                         )
                     elif auth_type == 'basic':
                         auth_config = AuthConfig(
                             type=AuthType.BASIC,
-                            username_env=f"{service_name.upper()}_USERNAME",
-                            password_env=f"{service_name.upper()}_PASSWORD",
                         )
                     elif auth_type == 'apikey':
                         auth_config = AuthConfig(
                             type=AuthType.API_KEY,
                             key_location=ParameterLocation.HEADER,
                             key_name='X-API-Key',
-                            value_env=f"{service_name.upper()}_API_KEY",
                         )
 
         except BrunoParseError as e:

@@ -775,12 +775,24 @@ class ServiceConnectorPlugin(RunnerForwardingMixin):
     def get_auto_approved_tools(self) -> List[str]:
         """Return tools that don't require permission.
 
-        Note: call_service requires permission as it makes HTTP requests.
-        The permission plugin handles domain-based approval.
+        Three verbs are deliberately absent and each requires permission:
+
+        - ``call_service`` makes the outbound HTTP request; the permission
+          plugin handles domain-based approval.
+        - ``discover_service`` registers a service — its destination
+          (``servers:``) and, before #1211, a spec-derived credential
+          binding — in one call.  Registering a service the model may
+          later drive is not a read-only act, so it is gated.
+        - ``configure_service_auth`` sets or changes a service's credential
+          binding.  Binding a daemon-held credential to a host must be a
+          decision a person makes, not one an auto-approved verb makes on
+          content the model was steered by (#1211).
+
+        The remaining verbs are read-only discovery, dry-run preview, or
+        local-file schema management, and stay auto-approved.
         """
         return [
             # Read-only discovery tools
-            "discover_service",
             "list_endpoints",
             "get_endpoint_schema",
             "list_schemas",
@@ -789,7 +801,6 @@ class ServiceConnectorPlugin(RunnerForwardingMixin):
             # Schema management (local files only)
             "save_schema",
             "import_bruno_collection",
-            "configure_service_auth",
             # User command (invoked by user directly)
             "services",
         ]
