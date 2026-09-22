@@ -929,3 +929,44 @@ test("deleting a session forgets the note written about it", async ({ page }) =>
     .poll(() => page.evaluate(() => localStorage.getItem("jaato.web-coder.notes.v1") ?? ""))
     .not.toContain("grace period");
 });
+
+test("the live tool-output popup floats inside the transcript, not off its edge", async ({ page }) => {
+  // Reported with a screenshot of the CLI's popup cut off on the left.  An
+  // unlayered ``.plate { position: relative }`` outranked Tailwind's
+  // ``absolute``, so the popup sat in normal flow and ``right-5`` pushed it
+  // off the left edge.  Measured, not styled: the box must lie inside the
+  // transcript column and above the composer.
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await openSession(page);
+  await composer(page).fill("live");
+  await composer(page).press("Enter");
+  const popup = page.getByRole("dialog", { name: "Live tool output" });
+  await expect(popup).toContainText("src/slow.test.ts");
+  const box = (await popup.boundingBox())!;
+  const main = (await page.locator("main").boundingBox())!;
+  const input = (await composer(page).boundingBox())!;
+  expect(box.x).toBeGreaterThanOrEqual(main.x);
+  expect(box.x + box.width).toBeLessThanOrEqual(main.x + main.width);
+  expect(box.y).toBeGreaterThanOrEqual(main.y);
+  expect(box.y + box.height).toBeLessThanOrEqual(input.y);
+  // Anchored to the right, as the design draws it -- in flow it hugs the left.
+  expect(main.x + main.width - (box.x + box.width)).toBeLessThan(40);
+});
+
+test("the command proposals float above the composer instead of pushing the layout", async ({ page }) => {
+  // The same unlayered rule cancelled this list's ``absolute bottom-full``:
+  // it was laid out in flow, so the composer's strip grew upward and the
+  // transcript shrank by the list's height every time a proposal appeared.
+  // The input itself does not move (it is pinned to the bottom), which is
+  // why the strip's TOP is what is measured.
+  await openSession(page);
+  const strip = page.locator("main > div.border-t");
+  const before = (await strip.boundingBox())!;
+  await composer(page).fill("mo");
+  const listbox = page.getByRole("listbox", { name: "Command proposals" });
+  await expect(listbox).toBeVisible();
+  const list = (await listbox.boundingBox())!;
+  const after = (await strip.boundingBox())!;
+  expect(after.y).toBe(before.y);
+  expect(list.y + list.height).toBeLessThanOrEqual((await composer(page).boundingBox())!.y);
+});

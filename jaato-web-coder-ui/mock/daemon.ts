@@ -309,6 +309,18 @@ async function turn(c: Client, text: string, agentId = "main"): Promise<void> {
     const choices = ["React 19", "Svelte 5", "Solid"];
     const first = /^\d+$/.test(answers[0] ?? "") ? (choices[Number(answers[0]) - 1] ?? answers[0]) : answers[0];
     await stream(c, agentId, `Thanks — you chose **${first}** and said "${answers[1]}".`);
+  } else if (lower.includes("live")) {
+    // A tool still RUNNING with output on screen, until ``session.stop``: the
+    // live-output popup exists only in that window, which the no-delay e2e
+    // mock would otherwise close before a test could look at it.
+    const callId = randomUUID();
+    send(c, { type: "tool.call_start", agent_id: agentId, tool_name: "cli_based_tool", tool_args: { command: "npm test" }, call_id: callId });
+    for (const line of ["> vitest run", " ✓ src/app.test.ts (12 tests)", " RUN  src/slow.test.ts"]) {
+      send(c, { type: "tool.output", agent_id: agentId, call_id: callId, chunk: line + "\n" });
+    }
+    await new Promise<void>((r) => c.pending.set("hang", () => r()));
+    send(c, { type: "tool.call_end", agent_id: agentId, tool_name: "cli_based_tool", call_id: callId, success: false, duration_seconds: 1.2 });
+    await stream(c, agentId, "Stopped mid-turn.");
   } else if (lower.includes("hang")) {
     // A turn that runs until ``session.stop``: how a test presses Exit
     // mid-turn without betting on a clock (the e2e mock runs with no delays).
@@ -360,7 +372,7 @@ async function turn(c: Client, text: string, agentId = "main"): Promise<void> {
   } else if (lower.includes("code")) {
     await stream(c, agentId, CODE_REPLY, 10);
   } else {
-    await stream(c, agentId, `You said: *${text.replace(/\*/g, "")}*\n\nThis is the **mock daemon**. Try \`code\`, \`tool\`, \`permit\`, \`ask\`, \`fail\` or \`subagent\`.`);
+    await stream(c, agentId, `You said: *${text.replace(/\*/g, "")}*\n\nThis is the **mock daemon**. Try \`code\`, \`tool\`, \`live\`, \`permit\`, \`ask\`, \`fail\` or \`subagent\`.`);
   }
 
   send(c, { type: "context.updated", agent_id: agentId, usage: { prompt_tokens: 1200, output_tokens: 340, total_tokens: 1540, cache_read_tokens: 800 }, context_limit: 200000, percent_used: 0.77, tokens_remaining: 198460, turns: 1 });

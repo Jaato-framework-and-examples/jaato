@@ -7237,6 +7237,29 @@ e2e case in which a SECOND tab attaches after the pass and must be told —
 verified to fail with the replay removed. A reconnect of the same tab could
 not have proved it: it keeps what the tab already knew.
 
+### A Popup That Floated Off the Page
+
+Reported with a screenshot: the live tool-output popup of a running
+`cli_based_tool` was cut off on the left edge of the transcript. The
+component was correct (`absolute right-5 bottom-[104px]` inside a `relative`
+`<main>`); the stylesheet was not. `.plate { position: relative }` in
+`theme.css` was an **unlayered** rule, and in Tailwind v4 an unlayered rule
+outranks every utility whatever its specificity. So each floating plate lost
+its `absolute`. The popup sat in normal flow, and `right-5` then shifted it
+20px past the left edge. The command-proposal list had the same defect: laid
+out in flow, it grew the composer strip upward and shrank the transcript by
+its own height every time a proposal appeared.
+
+The rule now lives in `@layer components`. A plate is still positioned by
+default (its corner marks need it), and a caller's utility can override
+that. Two e2e cases measure the result rather than the styling: the popup's
+box lies inside the transcript column, above the input and against its right
+edge; and the composer strip's top does not move when proposals open. Both
+fail against the unlayered rule. Measuring the input's own position would
+not have caught the second case, because it is pinned to the bottom. The
+mock gained a `live` turn that keeps a tool running with output until
+`session.stop`, because the popup only exists in that window.
+
 ### An Exit That Never Asked
 
 The TUI's `exit` is a question before it is an action: a session lives on
