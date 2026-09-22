@@ -96,10 +96,12 @@ SYSTEM_TEMP_PATHS = _default_temp_paths()
 # files, and their semantics are fixed by the kernel.  ``2>/dev/null`` is
 # one of the most common idioms a model emits, and refusing it made the
 # sandbox look like a broken environment rather than a boundary -- the
-# refusal is reported as ``<cmd>: /dev/null: No such file or directory``
-# (see ``CLIToolPlugin._make_not_found_result``), from which the only
-# available inference is "this machine has no /dev/null" (jaato issue
-# #784).
+# refusal was then reported as ``<cmd>: /dev/null: No such file or
+# directory``, from which the only available inference was "this machine has
+# no /dev/null" (jaato issue #784).  (``cli`` refusals have since stopped
+# posing as ENOENT -- see ``CLIToolPlugin._make_containment_result``, #1202
+# -- but refusing a pseudo-device would still be refusing something that
+# carries no workspace data.)
 #
 # The list is deliberately exhaustive rather than a ``/dev/`` prefix
 # match: block devices (``/dev/sda``), the tty multiplexer's peers

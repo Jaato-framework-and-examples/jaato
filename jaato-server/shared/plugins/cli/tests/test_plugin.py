@@ -607,15 +607,19 @@ class TestCLIPluginPathSandboxing:
         assert result is None
 
     def test_validate_command_paths_blocked(self, tmp_path):
-        """Test validation returns a not-found result for paths outside workspace."""
+        """A path outside the workspace yields an honest containment refusal.
+
+        Until #1202 this asserted a fabricated ``No such file or directory``,
+        i.e. it asserted the defect.
+        """
         plugin = CLIToolPlugin()
         plugin.initialize({"workspace_root": str(tmp_path)})
 
         result = plugin._validate_command_paths("cat /etc/passwd")
-        # New contract: a ready-to-return result dict mimicking "not found".
         assert isinstance(result, dict)
         assert result["returncode"] == 1
-        assert "No such file or directory" in result["stderr"]
+        assert result["stderr"].startswith("cli containment (workspace boundary):")
+        assert "No such file or directory" not in result["stderr"]
         assert "/etc/passwd" in result["stderr"]
 
     def test_validate_command_paths_unparseable_fails_closed(self, tmp_path):
@@ -647,26 +651,33 @@ class TestCLIPluginPathSandboxing:
         # commands shlex can't parse.
         assert plugin._validate_command_paths('cat "/etc/passwd') is None
 
-    def test_make_not_found_result(self):
-        """Test generation of not-found error result."""
+    def test_make_containment_result_names_the_boundary(self, tmp_path):
+        """The refusal says it is a refusal, and names the ways through it."""
         plugin = CLIToolPlugin()
+        plugin.initialize({"workspace_root": str(tmp_path)})
 
-        result = plugin._make_not_found_result("/etc/passwd", "cat /etc/passwd")
+        result = plugin._make_containment_result("/etc/passwd", "read")
 
         assert result["stdout"] == ""
-        assert "No such file or directory" in result["stderr"]
-        assert "/etc/passwd" in result["stderr"]
         assert result["returncode"] == 1
+        assert result["stderr"].startswith("cli containment (workspace boundary):")
+        assert "not a missing file" in result["stderr"]
+        assert "/etc/passwd" in result["stderr"]
+        assert str(tmp_path) in result["stderr"]
+        assert "plugin_configs.cli.extra_paths" in result["stderr"]
+        assert "No such file or directory" not in result["stderr"]
 
-    def test_make_not_found_result_uses_command_name(self):
-        """Test that error message uses the command name."""
+    def test_make_containment_result_for_an_executable(self, tmp_path):
+        """An executable refusal names its directory and extra_paths."""
         plugin = CLIToolPlugin()
+        plugin.initialize({"workspace_root": str(tmp_path)})
 
-        result = plugin._make_not_found_result("/etc/passwd", "cat /etc/passwd")
-        assert result["stderr"].startswith("cat:")
+        result = plugin._make_containment_result("/opt/x/tool", "exec")
 
-        result = plugin._make_not_found_result("/etc/passwd", "ls /etc/passwd")
-        assert result["stderr"].startswith("ls:")
+        assert "refused to run '/opt/x/tool'" in result["stderr"]
+        assert "'/opt/x'" in result["stderr"]
+        assert "plugin_configs.cli.extra_paths" in result["stderr"]
+        assert "No such file or directory" not in result["stderr"]
 
     @pytest.mark.skipif(sys.platform == "win32", reason="Unix-specific test")
     def test_execute_blocks_path_outside_workspace(self, tmp_path):
@@ -677,7 +688,7 @@ class TestCLIPluginPathSandboxing:
         result = plugin._execute({"command": "cat /etc/passwd"})
 
         assert result["returncode"] == 1
-        assert "No such file or directory" in result["stderr"]
+        assert result["stderr"].startswith("cli containment (workspace boundary):")
         assert result["stdout"] == ""
 
     @pytest.mark.skipif(sys.platform == "win32", reason="Unix-specific test")
@@ -705,7 +716,7 @@ class TestCLIPluginPathSandboxing:
         result = plugin._execute({"command": "cat /etc/passwd"})
 
         assert result["returncode"] == 1
-        assert "No such file or directory" in result["stderr"]
+        assert result["stderr"].startswith("cli containment (workspace boundary):")
 
     @pytest.mark.skipif(sys.platform == "win32", reason="Unix-specific test")
     def test_execute_allows_traversal_within_tmp(self, tmp_path):
@@ -735,7 +746,7 @@ class TestCLIPluginPathSandboxing:
         result = plugin._execute({"command": "cat ~/.bashrc"})
 
         assert result["returncode"] == 1
-        assert "No such file or directory" in result["stderr"]
+        assert result["stderr"].startswith("cli containment (workspace boundary):")
 
     @pytest.mark.skipif(sys.platform == "win32", reason="Unix-specific test")
     def test_execute_allows_commands_without_paths(self, tmp_path):
@@ -1050,7 +1061,7 @@ class TestCLIPluginAnalyzerFailsClosed:
         result = plugin._validate_command_paths(command)
         assert isinstance(result, dict), f"not blocked: {command}"
         assert result["returncode"] == 1
-        assert "No such file or directory" in result["stderr"]
+        assert result["stderr"].startswith("cli containment (workspace boundary):")
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX pseudo-devices")
@@ -1069,9 +1080,9 @@ class TestRedirectToPseudoDevices:
     ``_validate_command_paths`` refused the command before it ever
     reached a shell and synthesised
     ``<cmd>: /dev/null: No such file or directory``.  The program-name
-    prefix comes from ``_make_not_found_result``, not from the program --
-    which is why the observed inference was "this sandbox has no
-    /dev/null" rather than "my command was refused".
+    prefix came from the (since removed, #1202) ``_make_not_found_result``,
+    not from the program -- which is why the observed inference was "this
+    sandbox has no /dev/null" rather than "my command was refused".
     """
 
     def _plugin(self, workspace):

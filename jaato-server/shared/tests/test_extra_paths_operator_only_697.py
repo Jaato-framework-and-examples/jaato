@@ -74,11 +74,13 @@ REVERSIONS = [
                 return refusal
 
             command = args.get('command')
-            arg_list = args.get('args')
-            extra_paths = self._extra_paths""",
+            arg_list = args.get('args')""",
+        # Since #1202 the PATH is built in ONE place,
+        # ``_build_subprocess_env``, from ``self._extra_paths``; the broken
+        # form therefore feeds the caller's value into that one place.
         replace="""            command = args.get('command')
             arg_list = args.get('args')
-            extra_paths = args.get('extra_paths', self._extra_paths)
+            self._extra_paths = args.get('extra_paths', self._extra_paths)
 
             if not command:
                 return {'error': 'cli_based_tool: command must be provided'}""",

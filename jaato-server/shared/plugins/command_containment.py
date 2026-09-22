@@ -12,9 +12,19 @@ boundary.
 The logic here is ``cli``'s, moved verbatim -- the write/read classification
 heuristics, the ``path_like`` filter, and the
 ``check_path_with_jaato_containment`` call that decides each path.
-``CLIToolPlugin`` keeps its result-shaping methods (it refuses by mimicking
-"No such file or directory") and delegates the analysis;
-``InteractiveShellPlugin`` refuses in its own vocabulary.
+``CLIToolPlugin`` keeps its result-shaping methods (it refuses with an
+explicit ``cli containment (workspace boundary): ...`` message -- until
+#1202 it mimicked "No such file or directory", which sessions read as
+missing binaries) and delegates the analysis; ``InteractiveShellPlugin``
+refuses in its own vocabulary.
+
+**The executable position (#1202).**  With ``mark_executables=True`` the
+word a segment directly executes is classified ``"exec"`` rather than as
+data, and :func:`executable_on_search_path` allows it iff its directory is
+an entry of the PATH the bare name would resolve against: ``git`` and
+``/usr/bin/git`` are one program and get one verdict.  Only ``cli`` asks for
+this, because only ``cli`` holds the subprocess PATH to judge against;
+``interactive_shell`` keeps the pre-#1202 classification.
 
 **Fail-closed is the caller's decision, not this module's.**
 :func:`classify_command_paths` raises
@@ -52,6 +62,7 @@ from shared.command_analysis import (
     Segment,
     WRAPPER_COMMANDS,
     analyze_command,
+    executable_word_index,
 )
 from shared.path_utils import msys2_to_windows_path
 from .sandbox_utils import check_path_with_jaato_containment
@@ -159,7 +170,20 @@ def classify_word_paths(
     return result
 
 
-def classify_segment(segment: Segment) -> List[Tuple[str, str]]:
+#: Mode given to a path in the direct executable position when the caller
+#: asks for it (``mark_executables=True``).  It is the weakest mode: the same
+#: path appearing anywhere else in the command as data upgrades it to
+#: ``read`` / ``write``, so ``/usr/bin/cat /usr/bin/cat`` is judged as a
+#: READ of ``/usr/bin/cat`` and an executable exemption can never cover a
+#: data argument that happens to share its spelling.
+EXEC_MODE = 'exec'
+
+_MODE_RANK = {EXEC_MODE: 0, 'read': 1, 'write': 2}
+
+
+def classify_segment(
+    segment: Segment, mark_executables: bool = False
+) -> List[Tuple[str, str]]:
     """Classify the paths of a single shell segment.
 
     Each segment is judged on its own command name and its own
@@ -170,13 +194,30 @@ def classify_segment(segment: Segment) -> List[Tuple[str, str]]:
 
     Args:
         segment: One segment from :func:`analyze_command`.
+        mark_executables: When True, a path-like word in the segment's
+            DIRECT executable position (see
+            :func:`shared.command_analysis.executable_word_index`) is
+            reported with mode :data:`EXEC_MODE` instead of being run
+            through the read/write heuristics.  Only the word at that
+            position is affected -- the same path as an argument is still
+            data.  When False (the default) the output is exactly what it
+            was before #1202: the executable is a ``read``.
 
     Returns:
-        List of ``(path, mode)`` tuples where mode is "read" or "write".
+        List of ``(path, mode)`` tuples where mode is "read", "write" or
+        (only with *mark_executables*) :data:`EXEC_MODE`.
     """
     cmd_name = effective_command_name(segment)
-    word_paths = [word for word in segment.words if path_like(word)]
+    exe_index = (
+        executable_word_index(segment.words) if mark_executables else None
+    )
+    word_paths = [
+        word for index, word in enumerate(segment.words)
+        if index != exe_index and path_like(word)
+    ]
     result = classify_word_paths(cmd_name, word_paths)
+    if exe_index is not None and path_like(segment.words[exe_index]):
+        result.insert(0, (segment.words[exe_index], EXEC_MODE))
 
     # Redirection targets carry the mode the operator grants, regardless
     # of what the command itself does.
@@ -217,6 +258,7 @@ def classify_arg_list(
 def classify_command_paths(
     command: str,
     arg_list: Optional[Sequence[str]] = None,
+    mark_executables: bool = False,
 ) -> List[Tuple[str, str]]:
     """Classify each path token in a command as "read" or "write".
 
@@ -237,13 +279,23 @@ def classify_command_paths(
     4. All path args of commands in :data:`WRITE_OUTPUT_CMDS` are "write".
     5. Everything else defaults to "read".
 
+    With *mark_executables*, the word in each segment's direct executable
+    position is reported as :data:`EXEC_MODE` (jaato #1202) -- see
+    :func:`classify_segment`.  A path seen in several roles keeps the
+    strongest (write > read > exec), so the executable marking can never
+    survive a data use of the same path.
+
     Args:
         command: The shell command string.
         arg_list: Optional separate argument list.
+        mark_executables: Report executable-position words as
+            :data:`EXEC_MODE` instead of ``read``.  Off by default so a
+            caller that has no PATH to judge them against
+            (``interactive_shell``) sees the pre-#1202 classification.
 
     Returns:
         List of ``(path, mode)`` tuples, first-seen order, where mode is
-        "read" or "write".
+        "read", "write" or (only with *mark_executables*) "exec".
 
     Raises:
         UnanalyzableCommand: When the command cannot be modelled the way
@@ -260,11 +312,11 @@ def classify_command_paths(
             if path not in modes:
                 modes[path] = mode
                 order.append(path)
-            elif mode == 'write':
-                modes[path] = 'write'
+            elif _MODE_RANK[mode] > _MODE_RANK[modes[path]]:
+                modes[path] = mode
 
     for segment in segments:
-        record(classify_segment(segment))
+        record(classify_segment(segment, mark_executables))
 
     if arg_list:
         record(classify_arg_list(segments, arg_list))
@@ -329,6 +381,79 @@ def path_within_workspace(
     except (OSError, ValueError):
         # If path resolution fails, treat as outside workspace for safety
         return False
+
+
+def executable_on_search_path(
+    executable: str,
+    search_path: Optional[str],
+    cwd: Optional[str],
+) -> bool:
+    """True when *executable* sits directly in a directory of *search_path*.
+
+    The executable-position rule of jaato #1202: **an absolute (or
+    otherwise path-shaped) executable is allowed iff its directory is an
+    entry of the PATH the bare name would be resolved against.**  Anything
+    in such a directory already runs by bare name, so reaching it by path
+    widens nothing -- ``git`` and ``/usr/bin/git`` are one program and must
+    get one verdict.
+
+    Semantics chosen to match ``shutil.which`` / ``execvp`` rather than to
+    be generous:
+
+    - **Exact directory equality**, never a prefix: ``/usr/bin/sub/tool``
+      is not in ``/usr/bin``.  Both sides are ``normpath``-ed (and
+      ``normcase``-d, a no-op on POSIX) so spelling differences like
+      ``/usr//bin`` or a trailing slash do not matter.
+    - **The executable is NOT realpath-ed.**  The bare-name lookup does not
+      follow symlinks when deciding which directory a name is in either;
+      matching its semantics is the point.
+    - **A ``..`` component disqualifies the word outright.**  ``normpath``
+      collapses ``..`` lexically while the kernel resolves it through
+      symlinks, so ``<bin>/link/../tool`` normalises into ``<bin>`` and may
+      execute somewhere else entirely (``link -> /outside/sub`` runs
+      ``/outside/tool``).  Such a word is left to the ordinary data check.
+    - **Relative and empty PATH entries** are resolved against *cwd* (the
+      directory the command runs in), an empty entry meaning *cwd* itself,
+      as POSIX ``execvp`` does.
+
+    Args:
+        executable: The word in the executable position, as written
+            (``~`` is expanded, as the shell would).
+        search_path: The PATH value the command will run under -- the ONE
+            the caller built for the subprocess, never one parsed out of the
+            command string.  ``None`` authorizes nothing.
+        cwd: The subprocess working directory, for relative entries and a
+            relative *executable*.
+
+    Returns:
+        True when the executable's directory equals a PATH entry.
+    """
+    if search_path is None or not cwd:
+        return False
+    candidate = os.path.expanduser(msys2_to_windows_path(executable))
+    if not os.path.basename(candidate):
+        return False
+    if '..' in re.split(r'[\\/]', candidate):
+        return False
+    exe_dir = _normalized_dir(os.path.dirname(candidate), cwd)
+    return any(
+        _normalized_dir(entry, cwd) == exe_dir
+        for entry in search_path.split(os.pathsep)
+    )
+
+
+def _normalized_dir(directory: str, cwd: str) -> str:
+    """Absolute, lexically normalised form of a PATH entry or exe directory.
+
+    An empty *directory* is the working directory (POSIX ``execvp``'s
+    reading of an empty PATH entry, and ``os.path.dirname`` of a bare
+    ``tool``).  No symlink resolution: see
+    :func:`executable_on_search_path`.
+    """
+    directory = directory or os.curdir
+    if not os.path.isabs(directory):
+        directory = os.path.join(cwd, directory)
+    return os.path.normcase(os.path.normpath(directory))
 
 
 def first_denied_path(

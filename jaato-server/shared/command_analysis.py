@@ -46,6 +46,7 @@ __all__ = [
     "Segment",
     "analyze_command",
     "resolve_command_names",
+    "executable_word_index",
     "WRAPPER_COMMANDS",
 ]
 
@@ -196,7 +197,7 @@ def resolve_command_names(words: List[str]) -> List[str]:
     names: List[str] = []
     saw_wrapper = False
     for word in words:
-        if _ASSIGNMENT_RE.match(word) or word in _SHELL_KEYWORDS:
+        if _fills_command_slot_without_command(word):
             continue
         if saw_wrapper and word.startswith("-"):
             continue
@@ -209,6 +210,57 @@ def resolve_command_names(words: List[str]) -> List[str]:
             continue
         break
     return names
+
+
+def _fills_command_slot_without_command(word: str) -> bool:
+    """True for a word the shell reads before the command name.
+
+    A leading variable assignment (``FOO=bar``) or a reserved word
+    (``if``, ``!``, ``time``, ...) occupies the head of a simple command
+    without being the program that runs.  One predicate, shared by
+    :func:`resolve_command_names` and :func:`executable_word_index`, so the
+    two cannot disagree about where a segment's command starts.
+    """
+    return bool(_ASSIGNMENT_RE.match(word)) or word in _SHELL_KEYWORDS
+
+
+def executable_word_index(words: List[str]) -> Optional[int]:
+    """Index of the word the shell will EXECUTE directly, or ``None``.
+
+    This is the *direct* executable position only: the first word after
+    leading assignments and reserved words.  ``/usr/bin/git --version``
+    answers ``0``; ``FOO=1 /usr/bin/git`` answers ``1``.
+
+    Deliberately NOT the wrapper-following resolution
+    :func:`resolve_command_names` performs.  That resolution does not know
+    a wrapper's flag arity or positional layout, so the word it reports
+    after a wrapper is not reliably a program: in ``xargs -a /x/list cat``
+    it reports ``/x/list`` (an input FILE, the argument of ``-a``), in
+    ``script /x/out`` the typescript OUTPUT file, and in ``timeout 5 cmd``
+    the duration ``5``.  Reporting what may be run is harmless for the
+    write/read heuristics that consume :func:`resolve_command_names`; it is
+    not harmless for a caller that EXEMPTS the executable word from a data
+    check (jaato #1202), because the mis-modelled word is exactly a data
+    argument.  So a wrapped program (``sudo /usr/bin/git``) is not
+    reported here and keeps being treated as data -- the conservative
+    direction.
+
+    A word with an empty basename (``/usr/bin/``) names a directory, which
+    no shell can execute, so it yields ``None`` rather than an index.
+
+    Args:
+        words: Words of a single segment, quoting already removed.
+
+    Returns:
+        The index into *words*, or ``None`` when the segment runs no
+        program (assignments / reserved words only) or its head word
+        cannot be one.
+    """
+    for index, word in enumerate(words):
+        if _fills_command_slot_without_command(word):
+            continue
+        return index if os.path.basename(word) else None
+    return None
 
 
 def _redirect_mode(op: str, target: str) -> str:

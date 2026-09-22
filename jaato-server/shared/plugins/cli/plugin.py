@@ -10,7 +10,7 @@ import subprocess
 import tempfile
 import threading
 from datetime import datetime
-from typing import Dict, List, Any, Callable, Optional
+from typing import Dict, List, Any, Callable, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +37,9 @@ from shared.cli_path_policy import (
 from shared.trace import trace as _trace_write
 from shared.command_analysis import UnanalyzableCommand, analyze_command
 from ..command_containment import (
+    EXEC_MODE,
     classify_command_paths,
+    executable_on_search_path,
     path_like,
     path_within_workspace,
 )
@@ -114,8 +116,12 @@ class CLIToolPlugin(BackgroundCapableMixin, RunnerForwardingMixin):
         max_output_chars: Maximum characters to return from stdout/stderr (default: 50000).
         auto_background_threshold: Seconds before auto-backgrounding (default: 10.0).
         background_max_workers: Max concurrent background tasks (default: 4).
-        workspace_root: Root directory for path sandboxing. Paths outside this
-            directory will appear as "No such file or directory" to the model.
+        workspace_root: Root directory for path sandboxing. A command naming
+            a path outside it is refused with an explicit
+            ``cli containment (workspace boundary): ...`` message (#1202;
+            this used to be disguised as "No such file or directory").  An
+            executable named by path is allowed when its directory is on the
+            subprocess PATH -- see :meth:`_build_subprocess_env`.
     """
 
     def __init__(self):
@@ -209,7 +215,7 @@ class CLIToolPlugin(BackgroundCapableMixin, RunnerForwardingMixin):
                 - auto_background_threshold: Seconds before auto-backgrounding (default: 10.0)
                 - background_max_workers: Max concurrent background tasks (default: 4)
                 - workspace_root: Root directory for path sandboxing. Paths outside
-                    this directory will appear as "No such file or directory".
+                    it are refused with an explicit containment message.
                     If not provided, auto-detects from JAATO_WORKSPACE_ROOT or
                     workspaceRoot environment variables.
         """
@@ -663,7 +669,8 @@ ERROR HANDLING:
 - "File exists" or "Directory exists" errors mean the goal is already achieved - consider the step successful and continue
 - "Permission denied" - try an alternative approach (different path, sudo if appropriate) or report as a blocker
 - "Command not found" - check if the required tool is installed, or try an alternative command
-- "No such file or directory" - verify the path exists before operating on it
+- "No such file or directory" - the path genuinely does not exist (the sandbox never reports a refusal this way) - verify the path before operating on it
+- "cli containment (workspace boundary): ..." - the SANDBOX refused the command before anything ran; the path was not checked and may well exist. Do not conclude a file or binary is missing. Work inside the workspace, run programs by bare name (an absolute path is accepted only when its directory is on PATH), and if a directory outside the workspace is genuinely needed, report that the operator must add it to plugin_configs.cli.extra_paths (binaries) or grant the path with `sandbox add` (files)
 - When a step fails, decide whether to: retry with a workaround, skip if goal is met, or report the blocker
 
 NO INTERACTIVITY — this tool runs commands via subprocess, NOT a PTY/TTY.
@@ -826,45 +833,32 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
 
             command = args.get('command')
             arg_list = args.get('args')
-            extra_paths = self._extra_paths
 
             cmd_preview = command[:100] + "..." if len(command) > 100 else command
             self._trace(f"execute_streaming: {cmd_preview}")
 
+            # The subprocess environment is built ONCE, before containment,
+            # because its PATH is what authorizes an executable named by path
+            # (#1202) and is also what ``shutil.which`` / the shell resolve a
+            # bare name against below.  Pure: creates nothing on disk.
+            env, venv_path = self._build_subprocess_env()
+
             # Validate paths are within workspace (if sandboxing enabled).
             # Returns a ready result dict on refusal (blocked path or
             # unparseable command), or None when the command is allowed.
-            refusal = self._validate_command_paths(command, arg_list)
+            refusal = self._validate_command_paths(
+                command, arg_list, search_path=env.get('PATH'),
+            )
             if refusal is not None:
                 # Call callbacks with the refusal error
                 on_stderr(refusal['stderr'].encode('utf-8'))
                 on_returncode(refusal['returncode'])
                 return refusal
 
-            # Prepare environment.  APPEND_ORDER_RATIONALE: extra_paths are
-            # appended, never prepended, so a configured directory can supply
-            # a command name the base PATH lacks but can never shadow an
-            # existing binary.  The ordering is a security property, not
-            # formatting — do not "fix" it to match a docstring.
-            env = os.environ.copy()
-            if extra_paths:
-                path_sep = os.pathsep
-                env['PATH'] = env.get('PATH', '') + path_sep + path_sep.join(extra_paths)
-
-            # Activate the workspace venv (if configured) so ``pip install``
-            # persists to it and later imports resolve.  Prepends the venv
-            # bin ahead of extra_paths so the venv's python/pip win.
-            venv_path = resolve_venv_path(self._workspace_venv, self._workspace_root)
+            # Create the workspace venv (if configured) only once the command
+            # is known to run, so a refused command still creates nothing.
             if venv_path:
                 ensure_workspace_venv(venv_path)
-                apply_venv_to_env(env, venv_path)
-
-            # Secrets-broker scrub (feature #10): strip declared secret vars
-            # from the subprocess env so a model-driven command can't read raw
-            # credentials the runner itself holds.  No-op when unconfigured.
-            if self._scrub_secret_env:
-                from shared.secret_scrub import scrub_env as _scrub_secret_env
-                env = _scrub_secret_env(env, self._scrub_secret_env)
 
             # Check if shell interpretation is needed
             use_shell = self._requires_shell(command)
@@ -1049,6 +1043,68 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
 
     # --- End BackgroundCapable implementation ---
 
+    def _build_subprocess_env(self) -> Tuple[Dict[str, str], Optional[str]]:
+        """Build the environment a model-driven command runs under.
+
+        The single definition of the subprocess ``PATH`` (#1202).  Both
+        execution paths call it once per command, BEFORE containment, and
+        use the one result for two things that must agree:
+
+        1. :meth:`_validate_command_paths` authorizes an executable named
+           by path iff its directory is an entry of this ``PATH`` -- "if
+           the bare name would run it, so does its path".
+        2. ``shutil.which`` (argv mode) and the shell (shell mode) resolve
+           a bare command name against this same ``PATH``.
+
+        Computing it twice -- once to judge, once to run -- is how the two
+        would start disagreeing (the #1171 shape: two modules naming one
+        tmpdir).  Built from ``os.environ`` in this order:
+
+        - configured ``extra_paths`` APPENDED.  APPEND_ORDER_RATIONALE:
+          appended, never prepended, so a configured directory can supply a
+          command name the base PATH lacks but can never shadow an existing
+          binary.  The ordering is a security property, not formatting —
+          do not "fix" it to match a docstring.
+        - the workspace venv bin PREPENDED (``apply_venv_to_env``), so the
+          venv's ``python`` / ``pip`` win and ``pip install`` persists to it.
+        - secret env vars scrubbed (feature #10 / #863).
+
+        Pure: it creates nothing.  The venv itself is created by the caller
+        (``ensure_workspace_venv``) only once the command passed
+        containment, so a refused command leaves no trace on disk.
+
+        The command string never contributes: a ``PATH=...`` it sets inline
+        or via ``export`` / ``env`` is not read here and authorizes nothing.
+
+        Returns:
+            ``(env, venv_path)`` -- the complete environment, and the
+            resolved workspace venv path (``None`` when not configured) for
+            the caller to ensure.
+
+        Raises:
+            ValueError: A relative ``workspace_venv`` with no workspace
+                root (from ``resolve_venv_path``).
+        """
+        env = os.environ.copy()
+        if self._extra_paths:
+            path_sep = os.pathsep
+            # The host PATH is read from os.environ by name (it is the
+            # AMBIENT entry shared/env_scope.py catalogs); env is a copy of
+            # it, so this is the same value env.get('PATH') would give.
+            env['PATH'] = (
+                os.environ.get('PATH', '')
+                + path_sep + path_sep.join(self._extra_paths)
+            )
+
+        venv_path = resolve_venv_path(self._workspace_venv, self._workspace_root)
+        if venv_path:
+            apply_venv_to_env(env, venv_path)
+
+        if self._scrub_secret_env:
+            from shared.secret_scrub import scrub_env as _scrub_secret_env
+            env = _scrub_secret_env(env, self._scrub_secret_env)
+        return env, venv_path
+
     def _requires_shell(self, command: str) -> bool:
         """Check if a command requires shell interpretation.
 
@@ -1135,12 +1191,16 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
         command: str,
         arg_list: Optional[List[str]] = None,
     ) -> List[tuple]:
-        """Classify each path token in a command as "read" or "write".
+        """Classify each path token in a command as "read", "write" or "exec".
 
         Delegates to
-        :func:`shared.plugins.command_containment.classify_command_paths`;
-        see that function for the segmentation and the per-segment
-        heuristics.
+        :func:`shared.plugins.command_containment.classify_command_paths`
+        with ``mark_executables=True``; see that function for the
+        segmentation and the per-segment heuristics.  The word in a
+        segment's direct executable position comes back as ``"exec"``
+        (#1202) so :meth:`_validate_command_paths` can judge it as a program
+        to run rather than as data to read.  The same path used anywhere
+        else in the command as an argument is "read"/"write" instead.
 
         Args:
             command: The shell command string.
@@ -1148,25 +1208,60 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
 
         Returns:
             List of ``(path, mode)`` tuples, first-seen order, where mode is
-            "read" or "write".
+            "read", "write" or "exec".
 
         Raises:
             UnanalyzableCommand: When the command cannot be modelled the way
                 the shell would parse it.  Callers must refuse it; see
                 :meth:`_validate_command_paths`.
         """
-        return classify_command_paths(command, arg_list)
+        return classify_command_paths(command, arg_list, mark_executables=True)
+
+    def _path_allowed(
+        self, path: str, mode: str, search_path: Optional[str]
+    ) -> bool:
+        """Containment verdict for one classified path.
+
+        A data path ("read"/"write") must be inside the workspace (or
+        otherwise granted -- see :meth:`_is_path_within_workspace`).  An
+        executable ("exec") is allowed when either holds:
+
+        - its directory is an entry of *search_path*, the PATH the command
+          will run under (#1202): a program reachable by bare name is
+          reachable by path, and refusing ``/usr/bin/git`` while running
+          ``git`` guarded nothing; or
+        - it passes the ordinary data check as a read (a workspace script,
+          ``./build.sh``).
+
+        Args:
+            path: The path token as written.
+            mode: "read", "write" or "exec".
+            search_path: The PATH built by :meth:`_build_subprocess_env` --
+                never one taken from the command string.  ``None`` means no
+                PATH authorizes anything.
+
+        Returns:
+            True when the path may be used in that role.
+        """
+        if mode == EXEC_MODE:
+            if executable_on_search_path(path, search_path, self._workspace_root):
+                return True
+            mode = 'read'
+        return self._is_path_within_workspace(path, mode=mode)
 
     def _validate_command_paths(
         self,
         command: str,
-        arg_list: Optional[List[str]] = None
+        arg_list: Optional[List[str]] = None,
+        search_path: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """Validate that all paths in a command are within workspace_root.
 
         Each path is checked with its inferred access mode: paths in write
         positions (redirections, write commands) require "readwrite"
-        authorization; all other paths only require "read" access.
+        authorization; all other data paths only require "read" access.  A
+        path in the executable position is judged by
+        :meth:`_path_allowed` against *search_path* (#1202).
 
         **Fail-closed contract.** The command is parsed by
         :func:`shared.command_analysis.analyze_command`, which models POSIX
@@ -1184,12 +1279,18 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
         Args:
             command: The command string.
             arg_list: Optional separate argument list.
+            search_path: The subprocess PATH from
+                :meth:`_build_subprocess_env`, the one the command will
+                actually resolve against.  ``None`` (a direct caller with no
+                environment) authorizes no executable by PATH; they are then
+                judged as data reads, the pre-#1202 behaviour.
 
         Returns:
             ``None`` if all paths are valid; otherwise a ready-to-return
             result dict (``stdout``/``stderr``/``returncode``) describing
-            why the command was refused — either a blocked path (mimicking
-            "not found") or an unparseable command (shell syntax error).
+            why the command was refused — either a containment refusal
+            (:meth:`_make_containment_result`) or an unparseable command
+            (shell syntax error).
         """
         if not self._workspace_root:
             # No sandboxing configured
@@ -1206,37 +1307,69 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
             return self._make_unparseable_result(command, exc)
 
         for path, mode in classified:
-            if not self._is_path_within_workspace(path, mode=mode):
+            if not self._path_allowed(path, mode, search_path):
                 self._trace(f"path_sandbox: blocked access to '{path}' (outside workspace, mode={mode})")
-                return self._make_not_found_result(path, command)
+                return self._make_containment_result(path, mode)
 
         return None
 
-    def _make_not_found_result(self, path: str, command: str) -> Dict[str, Any]:
-        """Create a result dict that mimics "file/directory not found".
+    def _make_containment_result(self, path: str, mode: str) -> Dict[str, Any]:
+        """Create the result dict for a command refused by path containment.
+
+        **Supersedes the old ``_make_not_found_result``, which mimicked
+        ``<cmd>: <path>: No such file or directory`` on purpose** -- the idea
+        being that a path outside the sandbox should simply look absent.  It
+        did not read as absent; it read as a DIFFERENT FAILURE.  A session
+        refused ``/usr/bin/git --version`` was told git did not exist while
+        ``git --version`` worked, concluded binaries were vanishing, and
+        filed two misdiagnosed issues and three duplicates (#1202, #1204).
+        The notebook tier learned the same lesson in #1012: an unexplained
+        refusal is diagnosed as whatever it resembles.  So the refusal now
+        says what it is, names the boundary, and names the supported ways
+        through it -- ``plugin_configs.cli.extra_paths`` for a directory of
+        binaries, ``sandbox add`` for a specific path -- in the prefix
+        vocabulary the notebook uses (``notebook containment (audit tier):
+        ...``).  It also states that existence was NOT checked, because a
+        model otherwise infers "the file is there" or "the file is gone"
+        from a message that said neither.
 
         Args:
-            path: The path that "doesn't exist".
-            command: The original command (used to determine error format).
+            path: The refused path token, as written in the command.
+            mode: "exec" (a program to run), "read" or "write".
 
         Returns:
-            Dict with stdout, stderr, returncode mimicking not found error.
+            Dict with stdout, stderr (the refusal) and returncode 1.
         """
-        # Extract the base command name for realistic error messages
-        try:
-            cmd_name = shlex.split(command)[0]
-            # Get just the executable name without path
-            cmd_name = os.path.basename(cmd_name)
-        except (ValueError, IndexError):
-            cmd_name = "command"
-
-        # Format error message based on common command patterns
-        stderr = f"{cmd_name}: {path}: No such file or directory"
-
+        boundary = self._workspace_root
+        not_a_missing_file = (
+            "This is a sandbox refusal, not a missing file: nothing was run "
+            "and the path's existence was not checked."
+        )
+        if mode == EXEC_MODE:
+            directory = os.path.dirname(path) or '.'
+            stderr = (
+                f"cli containment (workspace boundary): refused to run "
+                f"'{path}' — it is outside the workspace ({boundary}) and its "
+                f"directory '{directory}' is not on this session's PATH.  "
+                f"{not_a_missing_file}  A program may be run by path only "
+                f"from a directory it could also be run from by bare name.  "
+                f"To allow binaries in that directory, the operator adds it "
+                f"to plugin_configs.cli.extra_paths."
+            )
+        else:
+            stderr = (
+                f"cli containment (workspace boundary): refused {mode} "
+                f"access to '{path}' — it is outside the workspace "
+                f"({boundary}).  {not_a_missing_file}  Work on paths inside "
+                f"the workspace, or ask the operator to grant this path "
+                f"(`sandbox add`).  plugin_configs.cli.extra_paths lets a "
+                f"directory's binaries be RUN; it never makes them readable "
+                f"as data."
+            )
         return {
             'stdout': '',
             'stderr': stderr,
-            'returncode': 1
+            'returncode': 1,
         }
 
     def _make_unparseable_result(
@@ -1256,7 +1389,7 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
 
         Args:
             command: The original command string (unused beyond context;
-                kept for symmetry with :meth:`_make_not_found_result`).
+                kept so every refusal builder takes the command).
             exc: The ``shlex`` parse error, surfaced to aid correction.
 
         Returns:
@@ -1315,16 +1448,22 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
 
             command = args.get('command')
             arg_list = args.get('args')
-            extra_paths = self._extra_paths
 
             # Truncate command for logging (avoid huge commands in trace)
             cmd_preview = command[:100] + "..." if len(command) > 100 else command
             self._trace(f"execute: {cmd_preview}")
 
+            # One environment, built before containment: its PATH authorizes
+            # a path-named executable (#1202) AND is the PATH run_command
+            # resolves a bare name against, via ``extra_env`` below.
+            env, venv_path = self._build_subprocess_env()
+
             # Validate paths are within workspace (if sandboxing enabled).
             # Returns a ready result dict on refusal (blocked path or
             # unparseable command), or None when the command is allowed.
-            refusal = self._validate_command_paths(command, arg_list)
+            refusal = self._validate_command_paths(
+                command, arg_list, search_path=env.get('PATH'),
+            )
             if refusal is not None:
                 return refusal
 
@@ -1335,33 +1474,20 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
                     [shlex.quote(command)] + [shlex.quote(a) for a in arg_list]
                 )
 
-            # Build extra env for PATH extension.  APPEND_ORDER_RATIONALE:
-            # appended, never prepended — see _execute_streaming.
-            extra_env: Optional[Dict[str, str]] = None
-            if extra_paths:
-                path_sep = os.pathsep
-                extra_env = {
-                    'PATH': os.environ.get('PATH', '')
-                    + path_sep + path_sep.join(extra_paths)
-                }
-
-            # Activate the workspace venv (if configured) on the FOREGROUND path
-            # too — run_command starts from os.environ + extra_env, so seed a
-            # full env, activate, and carry the venv-touched keys back into
-            # extra_env.  Without this, foreground `python`/`pip` resolve to the
-            # runner base venv instead of the tool-venv (parity with the
-            # streaming path in _execute_streaming).
-            venv_path = resolve_venv_path(self._workspace_venv, self._workspace_root)
+            # run_command starts from os.environ + extra_env and scrubs
+            # itself, so hand it only the keys the environment builder
+            # changes: PATH (extra_paths appended, venv bin prepended — the
+            # SAME value containment just judged) and the venv's
+            # VIRTUAL_ENV / PYTHONPATH.  Everything else it re-derives from
+            # os.environ identically.  Carrying the full env over would
+            # re-add, then re-strip, the scrubbed keys for nothing.
             if venv_path:
                 ensure_workspace_venv(venv_path)
-                seed = dict(os.environ)
-                if extra_env:
-                    seed.update(extra_env)
-                apply_venv_to_env(seed, venv_path)
-                extra_env = extra_env or {}
-                for _k in ('PATH', 'VIRTUAL_ENV', 'PYTHONPATH'):
-                    if _k in seed:
-                        extra_env[_k] = seed[_k]
+            extra_env: Optional[Dict[str, str]] = {
+                key: env[key]
+                for key in ('PATH', 'VIRTUAL_ENV', 'PYTHONPATH')
+                if key in env
+            } or None
 
             # Resolve streaming callback
             effective_callback = self._get_effective_output_callback()
