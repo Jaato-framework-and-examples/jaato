@@ -4456,6 +4456,94 @@ without closing is bounded by the slot boundary.
 question — the cross-profile check the issue floated would now assert a
 relationship that no longer holds. Not added.
 
+### A Plan the Profile Names, Not the Model (#1195)
+
+A session can start with its plan already in place instead of asking the
+model to write one:
+
+```yaml
+plugins: [todo, cli]
+plugin_configs:
+  todo:
+    initial_plan_name: onboard-service   # an id, never a path
+```
+
+The id names `<config_root>/plans/<id>.yaml` — an **authored** asset beside
+`profiles/` and `agents/`, in the `.gitignore` `AUTHORED` set and write-denied
+to a confined runner (template **v33**, all four profile bodies). Not the
+`{base_path}/plans/{plan_id}/` directory `FileReporter` writes: that is a
+write-only progress log nothing reads back, and pointing an authored input at
+it would have made the plugin's own output a place to author plans.
+
+For the session that declared it, and **only** that session:
+
+| Effect | Mechanism |
+|---|---|
+| the plan is its active plan before turn 1, overriding a plan an earlier cascade stage of the same agent left in the per-agent map | `TodoPlugin.preload_plan`, called from `JaatoSession.configure()` |
+| its system prompt carries *"You were invoked with a predefined plan. Use the available TODO tools to read it and organize your work to comply with it."* | the plugin's instruction contribution, only for a scope whose plan LOADED |
+| `createPlan` is off its surface | the session's own `_tool_scopes["todo"]` — every other TODO tool stays |
+
+**Per session, never per instance — the #944 lesson.** The todo instance is
+shared by a parent and its in-process subagents (one registry) and carried
+across stages on a pool slot (#890), so gating the instance would strip
+`createPlan` from every session sharing it. The mechanism is #957's: the
+session mints `JaatoSession.plugin_scope`, the plugin files per-session state
+under it (`_scoped_plan_ids`, `_preloaded_scopes`) and resolves the CALLING
+session's scope at call time, and the gate is the per-session tool-scope
+filter rather than the plugin's schema. `TodoPlugin.initialize()` ignores the
+knob by design. Two consequences handled rather than inherited:
+
+- **A subagent's preload never lands in the per-agent map.** An in-process
+  subagent is configured while its `agent_id` is still the default `main` —
+  its parent's key — so the preload is bound into that map lazily, on the
+  first tool call of a session whose `agent_type` is not `subagent`. A root
+  cascade stage therefore still hands its plan to the next stage of its
+  agent; a child cannot overwrite its parent's.
+- **`is_tool_visible` asks the session that is actually on the wire.**
+  `_get_tools_for_provider` now sets the session ContextVar before consulting
+  the predicates, so the plan-required tools are visible on turn 1 of a
+  preloaded session rather than decided against whatever session last wrote
+  this thread's thread-local.
+
+**The authored file is only read** (`yaml.safe_load`). What is stored is a
+copy with a **fresh `plan_id`**, kept by the ordinary storage backend — so two
+sessions preloading one file never share one stored plan, and even a file
+storage rooted at `.jaato/plans/` writes beside the authored file, never over
+it. The document mirrors `TodoPlan.to_dict()` (the todo README's
+`<!-- initial-plan-example -->` block, loaded verbatim by a test); only
+`title` and `steps[].description` are required, and `started` defaults to
+**true** because the authored file is the approval `startPlan` otherwise asks
+for.
+
+**A missing or malformed plan refuses the session.** A plugin
+`initialize()` exception is swallowed by `expose_tool` (a WARNING, and the
+session up without the plugin), so the knob is read by the session instead:
+`configure()` raises `InitialPlanError`, which on the runner is a bootstrap
+failure the daemon turns into a non-recoverable `RunnerBootstrapFailed`
+refusal naming the file (#1033), for an in-process subagent a failed spawn,
+and in-process an exception from `create_session`. A profile declaring the
+knob without enabling `todo` is refused the same way. `jaato-scaffold
+validate` reports the same defects first, through the same resolver:
+`initial_plan_name_invalid`, `initial_plan_missing`, `initial_plan_invalid`
+(all **error**).
+
+**Todo persistence is YAML only.** `FileStorage` writes `{plan_id}.yaml` /
+`todo_plans.yaml` (the `TODO_STORAGE_PATH` default is `./todo_plans.yaml`)
+and `FileReporter` writes `plan.yaml`, `progress.yaml`, `events/NNN_*.yaml`
+and `latest.yaml`. Deliberately **no** fallback reader and no warning: plans
+an older release saved as `.json` are not read. `todo.json`, the plugin's own
+CONFIG file, is configuration rather than persistence and is unchanged.
+
+Not done: a revived session re-runs `configure()` and so re-preloads a fresh
+copy rather than resuming the one it had — the per-session state is not
+persisted, which matches what a revive does for every other todo plan today.
+
+Guard: `shared/tests/test_a_predefined_plan_is_per_session_1195.py`, eleven
+reversions — among them the instance-wide gate (a sibling session must still
+see `createPlan`), the hint recorded before the load, the preload losing to a
+carried plan, a subagent binding into its parent's key, and `safe_load`
+replaced by a loader that constructs objects.
+
 ### What the Authoring Surface Would Not Say
 
 Six findings from one workspace bring-up, each the same shape: the framework

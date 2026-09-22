@@ -97,6 +97,7 @@ jobs:
             jaato-server/shared/tests/test_ci_runs_every_test_file.py \
             jaato-server/shared/tests/test_declared_python_floor_is_tested.py \
             jaato-server/shared/tests/test_sdk_floor_is_the_sdk_we_ship.py \
+            jaato-server/shared/tests/test_a_predefined_plan_is_per_session_1195.py \
             jaato-server/shared/tests/test_templates_handle_a_session_that_ended.py \
             jaato-server/shared/tests/test_session_manager_reads_only_attributes_it_assigns.py \
             jaato-server/shared/tests/test_cli_executable_by_path_1202.py

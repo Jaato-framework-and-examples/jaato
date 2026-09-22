@@ -485,7 +485,7 @@ BASELINE: Dict[str, int] = {
     "jaato-server/shared/plugins/template/plugin.py::TemplatePlugin.enrich_tool_result": 29,
     "jaato-server/shared/plugins/todo/config_loader.py::validate_config": 26,
     "jaato-server/shared/plugins/todo/plugin.py::TodoPlugin._execute_add_dependent_step": 19,
-    "jaato-server/shared/plugins/todo/plugin.py::TodoPlugin._execute_create_plan": 20,
+    "jaato-server/shared/plugins/todo/plugin.py::TodoPlugin._execute_create_plan": 16,
     "jaato-server/shared/plugins/todo/plugin.py::TodoPlugin._execute_set_step_status": 29,
     "jaato-server/shared/plugins/waypoint/plugin.py::WaypointPlugin.get_command_completions": 22,
     "jaato-server/shared/plugins/waypoint/tests/test_plugin.py::TestCommandExecution.test_list_shows_current_waypoint": 18,

@@ -1,6 +1,6 @@
 """Tests for TODO plugin reporter channels."""
 
-import json
+import yaml
 import os
 import tempfile
 from pathlib import Path
@@ -142,12 +142,12 @@ class TestFileReporter:
             # Check files were created
             plan_dir = Path(tmpdir) / "plans" / plan.plan_id
             assert plan_dir.exists()
-            assert (plan_dir / "plan.json").exists()
-            assert (plan_dir / "progress.json").exists()
+            assert (plan_dir / "plan.yaml").exists()
+            assert (plan_dir / "progress.yaml").exists()
             assert (plan_dir / "events").exists()
 
             # Check event file
-            events = list((plan_dir / "events").glob("*_plan_created.json"))
+            events = list((plan_dir / "events").glob("*_plan_created.yaml"))
             assert len(events) == 1
 
     def test_report_step_update(self):
@@ -163,7 +163,7 @@ class TestFileReporter:
 
             # Check event file
             plan_dir = Path(tmpdir) / "plans" / plan.plan_id
-            events = list((plan_dir / "events").glob("*_step_completed.json"))
+            events = list((plan_dir / "events").glob("*_step_completed.yaml"))
             assert len(events) == 1
 
     def test_report_plan_completed(self):
@@ -179,7 +179,7 @@ class TestFileReporter:
 
             # Check event file
             plan_dir = Path(tmpdir) / "plans" / plan.plan_id
-            events = list((plan_dir / "events").glob("*_plan_completed.json"))
+            events = list((plan_dir / "events").glob("*_plan_completed.yaml"))
             assert len(events) == 1
 
     def test_latest_file_updated(self):
@@ -190,11 +190,11 @@ class TestFileReporter:
             plan = TodoPlan.create("Test Plan", ["A"])
             reporter.report_plan_created(plan)
 
-            latest_file = Path(tmpdir) / "latest.json"
+            latest_file = Path(tmpdir) / "latest.yaml"
             assert latest_file.exists()
 
             with open(latest_file, 'r') as f:
-                data = json.load(f)
+                data = yaml.safe_load(f)
             assert data["plan_id"] == plan.plan_id
             assert data["title"] == "Test Plan"
 

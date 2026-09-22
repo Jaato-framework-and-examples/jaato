@@ -6,7 +6,6 @@ Channels handle progress reporting through different transport protocols:
 - FileReporter: Writes progress to filesystem
 """
 
-import json
 import logging
 import os
 import sys
@@ -15,6 +14,8 @@ from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
+
+import yaml
 
 logger = logging.getLogger(__name__)
 
@@ -357,18 +358,24 @@ class FileReporter(TodoReporter):
     """Reporter that writes progress to the filesystem.
 
     Designed for scenarios where a separate process monitors progress,
-    or for creating persistent logs of plan execution.
+    or for creating persistent logs of plan execution.  Write-only: nothing
+    in the framework reads these files back (plan persistence is
+    :class:`~.storage.FileStorage`), and ``{base_path}/plans/`` here is NOT
+    the authored ``<config_root>/plans/`` a profile's ``initial_plan_name``
+    reads from (#1195).
+
+    Every file is YAML (``yaml.safe_dump``); the plugin writes no JSON.
 
     Directory structure:
         {base_path}/
         ├── plans/{plan_id}/
-        │   ├── plan.json       (full plan state)
-        │   ├── progress.json   (current progress stats)
+        │   ├── plan.yaml       (full plan state, TodoPlan.to_dict())
+        │   ├── progress.yaml   (current progress stats)
         │   └── events/         (individual event files)
-        │       ├── 001_plan_created.json
-        │       ├── 002_step_started.json
+        │       ├── 001_plan_created.yaml
+        │       ├── 002_step_started.yaml
         │       └── ...
-        └── latest.json         (pointer to most recent plan)
+        └── latest.yaml         (pointer to most recent plan)
     """
 
     def __init__(self):
@@ -411,39 +418,38 @@ class FileReporter(TodoReporter):
         if plan.plan_id not in self._event_counter:
             # Count existing events
             events_dir = plan_dir / "events"
-            existing = list(events_dir.glob("*.json"))
+            existing = list(events_dir.glob("*.yaml"))
             self._event_counter[plan.plan_id] = len(existing)
 
         self._event_counter[plan.plan_id] += 1
         count = self._event_counter[plan.plan_id]
 
         # Write event file
-        event_file = plan_dir / "events" / f"{count:03d}_{event.event_type}.json"
-        with open(event_file, 'w', encoding='utf-8') as f:
-            json.dump(event.to_dict(), f, indent=2)
+        event_file = plan_dir / "events" / f"{count:03d}_{event.event_type}.yaml"
+        self._dump(event_file, event.to_dict())
 
         # Update plan state
-        plan_file = plan_dir / "plan.json"
-        with open(plan_file, 'w', encoding='utf-8') as f:
-            json.dump(plan.to_dict(), f, indent=2)
+        self._dump(plan_dir / "plan.yaml", plan.to_dict())
 
         # Update progress
-        progress_file = plan_dir / "progress.json"
         progress = plan.get_progress()
         progress["status"] = plan.status.value
         progress["updated_at"] = datetime.now(timezone.utc).isoformat() + "Z"
-        with open(progress_file, 'w', encoding='utf-8') as f:
-            json.dump(progress, f, indent=2)
+        self._dump(plan_dir / "progress.yaml", progress)
 
         # Update latest pointer
-        latest_file = self._base_path / "latest.json"
-        with open(latest_file, 'w', encoding='utf-8') as f:
-            json.dump({
-                "plan_id": plan.plan_id,
-                "title": plan.title,
-                "status": plan.status.value,
-                "progress": progress,
-            }, f, indent=2)
+        self._dump(self._base_path / "latest.yaml", {
+            "plan_id": plan.plan_id,
+            "title": plan.title,
+            "status": plan.status.value,
+            "progress": progress,
+        })
+
+    @staticmethod
+    def _dump(path: Path, data: Dict[str, Any]) -> None:
+        """Write *data* to *path* as YAML (``safe_dump``, key order kept)."""
+        with open(path, 'w', encoding='utf-8') as f:
+            yaml.safe_dump(data, f, sort_keys=False, allow_unicode=True)
 
     def report_plan_created(self, plan: TodoPlan, agent_id: Optional[str] = None) -> None:
         """Report new plan to filesystem."""

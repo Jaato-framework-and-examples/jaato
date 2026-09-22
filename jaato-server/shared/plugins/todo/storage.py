@@ -1,16 +1,43 @@
 """Storage backends for the TODO plugin.
 
 Provides in-memory and file-based persistence for plans.
+
+File persistence is **YAML only** (#1195): ``{plan_id}.yaml`` per plan in
+directory mode, one ``todo_plans.yaml`` mapping in single-file mode.  The
+plan document is :meth:`TodoPlan.to_dict`, which is also the shape of a
+hand-authored predefined plan (``<config_root>/plans/<id>.yaml``), so a
+saved plan and an authored one are the same format.  Files the plugin
+wrote as JSON before are not read — there is no fallback reader.
 """
 
-import json
 import os
 from abc import ABC, abstractmethod
 from pathlib import Path
 from threading import Lock
 from typing import Dict, List, Optional
 
+import yaml
+
 from jaato_sdk.plugins.todo.models import TodoPlan
+
+#: Extension of every file :class:`FileStorage` writes or reads.
+PLAN_FILE_SUFFIX = ".yaml"
+
+#: Default single-file path for ``hybrid`` storage when neither a path nor
+#: ``TODO_STORAGE_PATH`` is given.  Relative to the process cwd — never under
+#: ``.jaato/plans/``, which holds AUTHORED plans a confined runner may not
+#: write.
+DEFAULT_STORAGE_PATH = "./todo_plans.yaml"
+
+
+def _dump(data, fh) -> None:
+    """Write *data* as YAML (``safe_dump``; key order kept for readability)."""
+    yaml.safe_dump(data, fh, sort_keys=False, allow_unicode=True)
+
+
+def _load(fh):
+    """Read one YAML document (``safe_load`` — plan files are data)."""
+    return yaml.safe_load(fh)
 
 
 class TodoStorage(ABC):
@@ -85,8 +112,10 @@ class InMemoryStorage(TodoStorage):
 class FileStorage(TodoStorage):
     """File-based persistent storage for plans.
 
-    Plans are stored as JSON in a single file or directory structure.
-    Thread-safe using a lock.
+    Plans are stored as YAML — one ``{plan_id}.yaml`` per plan in a
+    directory, or a single file mapping plan id to plan.  Thread-safe using
+    a lock.  An unreadable or malformed file reads as "no plan", as it did
+    when the format was JSON.
     """
 
     def __init__(self, path: str, use_directory: bool = False):
@@ -118,18 +147,18 @@ class FileStorage(TodoStorage):
         """Save plan to individual file in directory."""
         # Ensure directory exists before writing (handles CWD changes, deletions, etc.)
         self._path.mkdir(parents=True, exist_ok=True)
-        plan_file = self._path / f"{plan.plan_id}.json"
+        plan_file = self._path / f"{plan.plan_id}{PLAN_FILE_SUFFIX}"
         with open(plan_file, 'w', encoding='utf-8') as f:
-            json.dump(plan.to_dict(), f, indent=2)
+            _dump(plan.to_dict(), f)
 
     def _save_plan_to_single_file(self, plan: TodoPlan) -> None:
-        """Save plan to single JSON file."""
+        """Save plan to the single YAML file."""
         # Ensure parent directory exists before writing
         self._path.parent.mkdir(parents=True, exist_ok=True)
         plans = self._load_all_plans_from_file()
         plans[plan.plan_id] = plan.to_dict()
         with open(self._path, 'w', encoding='utf-8') as f:
-            json.dump(plans, f, indent=2)
+            _dump(plans, f)
 
     def _load_all_plans_from_file(self) -> Dict[str, dict]:
         """Load all plans from single file."""
@@ -137,9 +166,10 @@ class FileStorage(TodoStorage):
             return {}
         try:
             with open(self._path, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except (json.JSONDecodeError, IOError):
+                data = _load(f)
+        except (yaml.YAMLError, IOError):
             return {}
+        return data if isinstance(data, dict) else {}
 
     def get_plan(self, plan_id: str) -> Optional[TodoPlan]:
         """Get a plan by ID."""
@@ -151,15 +181,15 @@ class FileStorage(TodoStorage):
 
     def _get_plan_from_file(self, plan_id: str) -> Optional[TodoPlan]:
         """Get plan from individual file."""
-        plan_file = self._path / f"{plan_id}.json"
+        plan_file = self._path / f"{plan_id}{PLAN_FILE_SUFFIX}"
         if not plan_file.exists():
             return None
         try:
             with open(plan_file, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            return TodoPlan.from_dict(data)
-        except (json.JSONDecodeError, IOError):
+                data = _load(f)
+        except (yaml.YAMLError, IOError):
             return None
+        return TodoPlan.from_dict(data) if isinstance(data, dict) else None
 
     def _get_plan_from_single_file(self, plan_id: str) -> Optional[TodoPlan]:
         """Get plan from single file."""
@@ -181,13 +211,14 @@ class FileStorage(TodoStorage):
         plans = []
         if not self._path.exists():
             return plans
-        for plan_file in self._path.glob("*.json"):
+        for plan_file in self._path.glob(f"*{PLAN_FILE_SUFFIX}"):
             try:
                 with open(plan_file, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                plans.append(TodoPlan.from_dict(data))
-            except (json.JSONDecodeError, IOError):
+                    data = _load(f)
+            except (yaml.YAMLError, IOError):
                 continue
+            if isinstance(data, dict):
+                plans.append(TodoPlan.from_dict(data))
         return plans
 
     def _get_all_plans_from_single_file(self) -> List[TodoPlan]:
@@ -205,7 +236,7 @@ class FileStorage(TodoStorage):
 
     def _delete_plan_from_directory(self, plan_id: str) -> bool:
         """Delete plan file from directory."""
-        plan_file = self._path / f"{plan_id}.json"
+        plan_file = self._path / f"{plan_id}{PLAN_FILE_SUFFIX}"
         if plan_file.exists():
             plan_file.unlink()
             return True
@@ -220,7 +251,7 @@ class FileStorage(TodoStorage):
         # Ensure parent directory exists before writing
         self._path.parent.mkdir(parents=True, exist_ok=True)
         with open(self._path, 'w', encoding='utf-8') as f:
-            json.dump(plans, f, indent=2)
+            _dump(plans, f)
         return True
 
     def clear(self) -> None:
@@ -228,13 +259,13 @@ class FileStorage(TodoStorage):
         with self._lock:
             if self._use_directory:
                 if self._path.exists():
-                    for plan_file in self._path.glob("*.json"):
+                    for plan_file in self._path.glob(f"*{PLAN_FILE_SUFFIX}"):
                         plan_file.unlink()
             else:
                 # Ensure parent directory exists before writing
                 self._path.parent.mkdir(parents=True, exist_ok=True)
                 with open(self._path, 'w', encoding='utf-8') as f:
-                    json.dump({}, f)
+                    _dump({}, f)
 
 
 class HybridStorage(TodoStorage):
@@ -319,7 +350,7 @@ def create_storage(
     elif storage_type == "hybrid":
         if not path:
             # Default path
-            path = os.environ.get("TODO_STORAGE_PATH", "./todo_plans.json")  # env: where the todo plugin persists plans (default ./todo_plans.json)
+            path = os.environ.get("TODO_STORAGE_PATH", DEFAULT_STORAGE_PATH)  # env: where the todo plugin persists plans (default ./todo_plans.yaml)
         return HybridStorage(path, use_directory)
 
     else:

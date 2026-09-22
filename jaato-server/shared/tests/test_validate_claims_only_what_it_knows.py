@@ -152,7 +152,9 @@ def test_unknown_knob_does_not_claim_the_runtime_ignores_it(env):
     msg = diags[0].message
     assert "silently ignored at runtime" not in msg
     assert "no config read site for it appears in the plugin's source" in msg
-    assert "known: storage_type" in msg
+    # The known-knob list names the near-miss (todo declares more than one
+    # knob since #1195's ``initial_plan_name``, so no fixed position).
+    assert "storage_type" in msg.split("known:", 1)[1]
 
 
 def test_an_unscannable_plugin_reports_absence_of_evidence_as_such(env):
