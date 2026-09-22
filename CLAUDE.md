@@ -7167,6 +7167,33 @@ reversion meta-guard reported it decorative — unreachable, since only paths
 this monitor numbered are reported — and it would have erased a number the
 new monitor genuinely assigned, so it went.
 
+### A Category Id Nobody Could Read
+
+A discovery call reached the web transcript as
+`LIST_TOOLS  category_id=c_bbc5e661`. Tool names reach the MODEL as
+hash-derived ids (`t_<8 hex>`, `c_<8 hex>`; `shared/tool_id_map.py`), so a
+call's arguments carry them, and the agreement is that anything user-facing
+shows the name a person knows — the TUI has done so since the ids shipped
+(`ui_utils.resolve_tool_ids`). The daemon already sent the mapping for
+exactly this, twice: `tools.id_registry` (`ToolIdRegistryEvent`, the full
+set each time) and `session.info`'s `tool_id_mappings`. The web client read
+neither.
+
+`src/protocol/toolIds.ts` is the TUI's function, and the store keeps the map
+(`toolIdNames`), replaced wholesale on each receive. Two properties:
+
+- **Resolved at render time, not at reduce time.** The registry is sent after
+  tool configuration and again when deferred tools activate, so it can arrive
+  after the call that used an id; a row rendered from the stored arguments
+  picks the name up whenever it lands. The e2e sends the mapping after the
+  call for that reason, and fails with the resolution removed.
+- **Only a value that IS an id is replaced.** An id the map does not name is
+  left as it is — showing the id is honest, inventing a name is not — and a
+  string merely containing one is untouched.
+
+Both argument displays use it: the tool row and the permission card's
+argument grid.
+
 ### An Exit That Never Asked
 
 The TUI's `exit` is a question before it is an action: a session lives on

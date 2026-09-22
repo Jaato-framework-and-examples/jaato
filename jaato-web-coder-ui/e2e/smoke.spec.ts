@@ -724,6 +724,17 @@ test("the Files panel's reset shows only later changes, and survives a reconnect
   await expect(panel.getByText("~ old.py")).toBeVisible();
 });
 
+test("a hashed category id in a tool call is shown by its name", async ({ page }) => {
+  await openSession(page);
+  await composer(page).fill("please discover tools");
+  await composer(page).press("Enter");
+  await expect(page.getByText("I have a system category.")).toBeVisible();
+  const row = page.getByRole("button", { name: /list_tools/ });
+  // The mapping arrived after the call: the row resolves when it does.
+  await expect(row).toContainText("category_id=system");
+  await expect(row).not.toContainText("c_bbc5e661");
+});
+
 test("the workspace list says who is signed in and offers the backend's Sign out", async ({ page }) => {
   await page.route("**/config.json", (route) =>
     route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ daemon: WS_WORKSPACES, ticketUrl: "/api/ticket", autoConnect: true }) }),

@@ -30,6 +30,9 @@
  *   "…touch a.py b.py" → the workspace monitor reports those files as
  *                 modified, numbered like the daemon's (#1189); not as the
  *                 first word, which the composer runs as a command
+ *   "…discover tools" → a ``list_tools`` call whose argument is a hashed
+ *                 category id, then the ``tools.id_registry`` naming it --
+ *                 AFTER the call, as the daemon may send it
  *   "subagent"  → spawns a subagent that streams in its own tab
  *   "model this is broken" (verbatim test) → echoes the text back
  *   anything else → a short streamed markdown reply
@@ -218,6 +221,12 @@ async function turn(c: Client, text: string, agentId = "main"): Promise<void> {
     const paths = (touch[1] ?? "").split(/\s+/).filter(Boolean);
     emitWorkspaceChanges(c, paths.map((path) => ({ path, status: "modified" })));
     await stream(c, agentId, `Touched ${paths.join(", ")}.`);
+  } else if (lower.includes("discover tools")) {
+    const callId = randomUUID();
+    send(c, { type: "tool.call_start", agent_id: agentId, tool_name: "list_tools", tool_args: { category_id: "c_bbc5e661" }, call_id: callId });
+    send(c, { type: "tool.call_end", agent_id: agentId, tool_name: "list_tools", call_id: callId, success: true, duration_seconds: 0.01, error_message: null, show_output: false });
+    send(c, { type: "tools.id_registry", mappings: { c_bbc5e661: "system", t_a3f2b1c0: "cli_based_tool" } });
+    await stream(c, agentId, "I have a system category.");
   } else if (lower.includes("subagent")) {
     const subId = `sub-${randomUUID().slice(0, 6)}`;
     send(c, { type: "agent.created", agent_id: subId, agent_name: "researcher", agent_type: "subagent", parent_agent_id: agentId, profile_name: "researcher" });

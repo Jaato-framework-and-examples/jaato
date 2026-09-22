@@ -17,6 +17,7 @@ import { formatSessionList, normalizeSessionList, type SessionSummary } from "@/
 import { formatHistoryListing, historyBlocks } from "@/protocol/history";
 import { clampRailWidth, loadRailWidth, saveRailWidth } from "@/store/railWidth";
 import { applyChanged, applySnapshot, markReset, type WorkspaceReset } from "@/store/workspaceView";
+import { toolIdMappings } from "@/protocol/toolIds";
 import type { SessionNote } from "@/app/notes";
 
 /**
@@ -162,6 +163,13 @@ export interface JaatoState {
   commands: CommandSpec[];
   /** Every file the session changed, path -> status: the FULL list, whatever the panel's reset point. */
   workspaceFiles: Record<string, string>;
+  /**
+   * Hashed tool / category id -> the name a person knows, from
+   * ``tools.id_registry`` and ``session.info.tool_id_mappings``
+   * (``protocol/toolIds.ts``).  Replaced wholesale on each receive -- the
+   * daemon always sends the full current set.
+   */
+  toolIdNames: Record<string, string>;
   /** Path -> the daemon's number for its latest change (#1189, ``store/workspaceView.ts``). */
   workspaceSeqs: Record<string, number>;
   /** The workspace monitor those numbers belong to; ``null`` from a daemon that numbers nothing. */
@@ -315,6 +323,7 @@ const emptySessionState = () => ({
   context: {} as Record<string, ContextState>,
   budget: {} as Record<string, BudgetState>,
   budgetExpanded: [] as string[],
+  toolIdNames: {} as Record<string, string>,
   workspaceFiles: {} as Record<string, string>,
   workspaceSeqs: {} as Record<string, number>,
   workspaceEpoch: null as string | null,
@@ -865,6 +874,15 @@ export function reduce(s: JaatoState, raw: JaatoEvent): JaatoState {
         profile: (ev.profile_name as string | null | undefined) ?? s.session.profile ?? null,
         models: (ev.models as string[] | undefined) ?? s.session.models,
       };
+      {
+        const names = toolIdMappings(ev.tool_id_mappings);
+        if (names && Object.keys(names).length) s.toolIdNames = names;
+      }
+      break;
+    }
+    case EventTypeValue.TOOL_ID_REGISTRY: {
+      const names = toolIdMappings(ev.mappings);
+      if (names) s.toolIdNames = names;
       break;
     }
     case EventTypeValue.SESSION_PROFILES:
