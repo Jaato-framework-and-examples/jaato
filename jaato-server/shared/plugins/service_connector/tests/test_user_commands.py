@@ -97,6 +97,15 @@ class TestGetUserCommands:
         approved = plugin.get_auto_approved_tools()
         assert "services" in approved
 
+    def test_setup_verbs_are_not_auto_approved(self, plugin):
+        """#1211: registering a service or binding its credential each
+        require permission, so neither setup verb is auto-approved."""
+        approved = plugin.get_auto_approved_tools()
+        assert "discover_service" not in approved
+        assert "configure_service_auth" not in approved
+        # call_service was never auto-approved and stays gated.
+        assert "call_service" not in approved
+
     def test_services_executor_registered(self, plugin):
         executors = plugin.get_executors()
         assert "services" in executors

@@ -396,26 +396,34 @@ def _parse_security_schemes_v3(
         scheme_type = scheme.get("type", "")
         scheme_names.append(name)
 
-        # Use the first scheme as default auth config template
+        # Use the first scheme as default auth config template.
+        #
+        # #1211: NEVER derive a credential REFERENCE (``*_env`` / any
+        # secret-URI field) from the spec.  The ``securitySchemes`` KEY is
+        # attacker-controlled, so ``value_env=f"{name.upper()}_API_KEY"``
+        # let a scheme keyed ``ANTHROPIC`` name ``ANTHROPIC_API_KEY`` and
+        # have ``call_service`` resolve the daemon's own provider key and
+        # send it to the spec's host.  We keep only the non-secret
+        # STRUCTURE the spec legitimately describes — scheme type, header
+        # vs query location, header/param name — and leave every reference
+        # unbound.  A human binds the credential afterwards, via the
+        # (now-gated) ``configure_service_auth`` or by editing
+        # ``<service>/_service.yaml``.
         if auth_config.type == AuthType.NONE:
             if scheme_type == "apiKey":
                 auth_config = AuthConfig(
                     type=AuthType.API_KEY,
                     key_location=ParameterLocation(scheme.get("in", "header")),
                     key_name=scheme.get("name"),
-                    value_env=f"{name.upper()}_API_KEY",
                 )
             elif scheme_type == "http":
                 if scheme.get("scheme") == "bearer":
                     auth_config = AuthConfig(
                         type=AuthType.BEARER,
-                        value_env=f"{name.upper()}_TOKEN",
                     )
                 elif scheme.get("scheme") == "basic":
                     auth_config = AuthConfig(
                         type=AuthType.BASIC,
-                        username_env=f"{name.upper()}_USERNAME",
-                        password_env=f"{name.upper()}_PASSWORD",
                     )
             elif scheme_type == "oauth2":
                 flows = scheme.get("flows", {})
@@ -425,8 +433,6 @@ def _parse_security_schemes_v3(
                     auth_config = AuthConfig(
                         type=AuthType.OAUTH2_CLIENT,
                         token_url=flow.get("tokenUrl"),
-                        client_id_env=f"{name.upper()}_CLIENT_ID",
-                        client_secret_env=f"{name.upper()}_CLIENT_SECRET",
                         scope=" ".join(flow.get("scopes", {}).keys()),
                     )
 
@@ -451,27 +457,25 @@ def _parse_security_schemes_v2(
         scheme_type = scheme.get("type", "")
         scheme_names.append(name)
 
+        # #1211: keep the STRUCTURE the spec describes, never derive a
+        # credential reference from the (attacker-controlled) scheme key.
+        # See _parse_security_schemes_v3 for the full rationale.
         if auth_config.type == AuthType.NONE:
             if scheme_type == "apiKey":
                 auth_config = AuthConfig(
                     type=AuthType.API_KEY,
                     key_location=ParameterLocation(scheme.get("in", "header")),
                     key_name=scheme.get("name"),
-                    value_env=f"{name.upper()}_API_KEY",
                 )
             elif scheme_type == "basic":
                 auth_config = AuthConfig(
                     type=AuthType.BASIC,
-                    username_env=f"{name.upper()}_USERNAME",
-                    password_env=f"{name.upper()}_PASSWORD",
                 )
             elif scheme_type == "oauth2":
                 if scheme.get("flow") == "application":
                     auth_config = AuthConfig(
                         type=AuthType.OAUTH2_CLIENT,
                         token_url=scheme.get("tokenUrl"),
-                        client_id_env=f"{name.upper()}_CLIENT_ID",
-                        client_secret_env=f"{name.upper()}_CLIENT_SECRET",
                         scope=" ".join(scheme.get("scopes", {}).keys()),
                     )
 
