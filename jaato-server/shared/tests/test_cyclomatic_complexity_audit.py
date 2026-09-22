@@ -454,7 +454,7 @@ BASELINE: Dict[str, int] = {
     "jaato-server/shared/plugins/service_connector/http_client.py::ServiceHttpClient.build_request": 26,
     "jaato-server/shared/plugins/service_connector/http_client.py::ServiceHttpClient.execute": 40,
     "jaato-server/shared/plugins/service_connector/openapi_parser.py::_extract_json_schema": 19,
-    "jaato-server/shared/plugins/service_connector/plugin.py::ServiceConnectorPlugin._build_auth_context": 30,
+    "jaato-server/shared/plugins/service_connector/plugin.py::ServiceConnectorPlugin._build_auth_context": 29,
     "jaato-server/shared/plugins/service_connector/plugin.py::ServiceConnectorPlugin._cmd_auth": 16,
     "jaato-server/shared/plugins/service_connector/plugin.py::ServiceConnectorPlugin._cmd_endpoints": 18,
     "jaato-server/shared/plugins/service_connector/plugin.py::ServiceConnectorPlugin._cmd_show": 18,

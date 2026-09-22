@@ -205,8 +205,22 @@ def _discover_secret_resolvers_uncached() -> Dict[str, 'SecretResolver']:
                     resolvers[scheme] = resolver
                     logger.debug("Registered secret resolver: %s://", scheme)
         except Exception:
+            # #1188: name the entry point that was skipped, not just
+            # "failed to load".  A minimal-PATH daemon makes
+            # PassResolver.__init__ raise ImportError (no `pass` /
+            # `gpg-connect-agent` on PATH), and the operator needs to know
+            # WHICH resolver they just lost and why.  WARNING (not debug),
+            # and once per process because discovery is cached: a missing
+            # resolver must not be a silent skip.
             logger.warning(
-                "Failed to load secret_resolvers entry point",
+                "secret_resolvers entry point %r (from %s) failed to load; "
+                "its secret-URI scheme(s) are UNAVAILABLE for this process "
+                "(e.g. a pass:// resolver needs `pass` / `gpg-connect-agent` "
+                "on PATH). Secret URIs for those schemes will be used "
+                "literally, which is almost certainly wrong, until the cause "
+                "is fixed and the resolver cache is reset "
+                "(reset_secret_resolvers) or the daemon restarts.",
+                ep.name, getattr(ep, "value", "<unknown>"),
                 exc_info=True,
             )
 
@@ -214,6 +228,24 @@ def _discover_secret_resolvers_uncached() -> Dict[str, 'SecretResolver']:
         logger.info(
             "Secret resolvers available for schemes: %s",
             ", ".join(sorted(resolvers.keys())),
+        )
+    else:
+        # #1188: an empty registry is cached for the process lifetime, so
+        # every pass:// / vault:// URI thereafter reports "no resolver
+        # registered" with no other signal.  Say so ONCE, here, where the
+        # cause (nothing was discovered) is known — rather than leaving an
+        # operator to infer it from a run of downstream "no resolver" errors.
+        # Fires only when discovery actually runs (lazily, on first secret-URI
+        # use), and once per process because the result is cached.
+        logger.warning(
+            "No secret resolvers were discovered from the jaato.premium "
+            "'secret_resolvers' entry point. pass:// / vault:// (and any "
+            "other scheme://) secret URIs cannot be resolved and will be "
+            "used literally, which is almost certainly wrong. Install the "
+            "package that provides the resolver (jaato-premium for pass://). "
+            "If it was installed AFTER this process started, call "
+            "reset_secret_resolvers() (or restart the daemon) to force "
+            "re-discovery — the empty result is cached for the process."
         )
 
     return resolvers
@@ -345,7 +377,18 @@ def looks_like_malformed_secret_uri(value: Any) -> Optional[str]:
 
 
 def reset_secret_resolvers() -> None:
-    """Reset the cached secret resolvers (for testing).
+    """Drop the cached secret-resolver registry so the next lookup re-discovers.
+
+    Discovery (:func:`_discover_secret_resolvers`) runs once and caches its
+    result — including an EMPTY result — for the whole process lifetime.  That
+    is right for a settled deployment but wrong for one where a resolver
+    package (e.g. jaato-premium's ``pass://`` resolver) is installed *after*
+    the daemon started: every ``pass://`` URI keeps reporting "no resolver
+    registered" until the cache is cleared.  This is the supported,
+    **documented** way to force re-discovery without restarting the daemon;
+    it is deliberately the ONLY such mechanism (#1188 explicitly does not add
+    filesystem watching or automatic re-discovery).  It is also what the
+    resolver tests call between cases.
 
     Takes the discovery lock so that *every* write to ``_resolvers`` happens
     under it -- a reader can then rely on seeing either ``None`` or a
