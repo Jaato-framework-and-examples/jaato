@@ -7108,6 +7108,65 @@ Guards: `shared/tests/test_markup_that_leaked_into_the_transcript.py` (four
 reversions) and the web client's `nbmarkup.test.ts` / `JMarkup.test.tsx`
 plus two e2e cases.
 
+### A Reset the Next Reconnect Undid (#1189)
+
+The TUI's workspace panel has `workspace_clear` (Delete): empty the list so
+only files that change from now on appear. It is a reset of the starting
+point, not a hide — a file the agent touches again after the reset comes
+back. The web Files panel had no equivalent, and after a long session it
+listed thousands of entries with no way to clear them short of a reload.
+
+**Kept only in the client, a reset does not survive a reconnect.** An
+attaching client gets a `WorkspaceFilesSnapshotEvent` it applies wholesale,
+and a snapshot entry is `{path, status}` — nothing says *when* it changed.
+The TUI rarely reattaches; a browser does it routinely (a tablet sleeps, a
+network blips), so a naive port works in testing and stops working in use.
+
+**The daemon numbers changes** (protocol **1.19**). The workspace monitor
+stamps every flushed batch with `seq`, one more than the last, and each
+tracked path remembers its latest `seq`:
+
+| Event | Carries |
+|---|---|
+| `WorkspaceFilesChangedEvent` | `seq`, `epoch` for the batch |
+| `WorkspaceFilesSnapshotEvent` | `seq` (latest), `epoch`, `seqs` (path → seq) |
+
+A counter rather than a clock: nothing to skew between daemon and browser,
+and ordering is all the filter needs. `seqs` is a parallel map rather than a
+third key on each `files` entry because those entries are `Dict[str, str]`
+and an older client validates them as such — an integer there fails its
+whole event, while an unknown top-level field is ignored. The monitor hands
+its callback a `ChangeBatch`, a `list` subclass carrying `seq` / `epoch`, so
+every existing callback keeps receiving exactly what it did.
+
+**The epoch is what keeps it from failing silently.** A session reload
+rebuilds the monitor, which counts from 0 again; a mark of 500 compared
+against the new counter hides every new change and empties the panel with
+nothing saying why. `epoch` names the monitor instance and is not
+persisted, so a mark from before a reload is recognisably void — dropped,
+the full list shown, and the panel says so. Restored entries carry no
+number of their own and read as 0. The snapshot is now sent even when
+empty: it is the only way a reconnecting client learns the epoch changed.
+
+| Client | What the reset does |
+|---|---|
+| web (`store/workspaceView.ts`) | keeps the FULL list plus the numbers, filters past the mark — so **show everything** is possible. Per viewer, in memory, like hide |
+| TUI (`workspace_panel.py`) | `clear()` records the mark; a reattach's snapshot keeps only entries past it |
+| either, against a daemon below 1.19 | changes numbered locally between snapshots; a snapshot drops the mark (the web client says why) — the old behaviour, stated |
+
+**Not reset on the daemon**, deliberately: the monitor is per session and
+shared by every attached client, so a daemon-side reset would empty the list
+for everyone else watching.
+
+Guards: `server/tests/test_a_reset_that_survives_a_reconnect_1189.py` (three
+reversions), `jaato-tui/tests/test_workspace_clear_survives_a_reattach_1189.py`,
+`src/store/workspaceView.test.ts`, and an e2e case that resets, touches a
+listed file again, drops the connection and checks the reset held. A first
+draft cleared the restored entries' numbers inside `restore()`; the
+reversion meta-guard reported it decorative — unreachable, since only paths
+this monitor numbered are reported — and it would have erased a number the
+new monitor genuinely assigned, so it went.
+
 ### An Exit That Never Asked
 
 The TUI's `exit` is a question before it is an action: a session lives on

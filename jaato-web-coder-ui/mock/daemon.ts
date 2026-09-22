@@ -27,6 +27,9 @@
  *                 daemon sends it: input / stdout / error <nb-row>s
  *   "…early…notebook…" → the early-exit error cell (no execution count);
  *                 not as the first word, which the composer runs as a command
+ *   "…touch a.py b.py" → the workspace monitor reports those files as
+ *                 modified, numbered like the daemon's (#1189); not as the
+ *                 first word, which the composer runs as a command
  *   "subagent"  → spawns a subagent that streams in its own tab
  *   "model this is broken" (verbatim test) → echoes the text back
  *   anything else → a short streamed markdown reply
@@ -75,6 +78,38 @@ interface Client {
 const STAGE_PER_FILE_LIMIT = 10 * 1024 * 1024;
 const STAGE_TOTAL_LIMIT = 50 * 1024 * 1024;
 
+/**
+ * The session's workspace monitor, as the daemon keeps it (#1189): every
+ * flushed batch is numbered one more than the last, each path remembers the
+ * number of its latest change, and ``epoch`` names the monitor instance.
+ * Keyed by session, not by connection -- a reconnecting client attaches to
+ * the same monitor and gets its snapshot, which is what the Files panel's
+ * reset has to survive.
+ */
+interface MockMonitor { epoch: string; seq: number; files: Map<string, { status: string; seq: number }> }
+const MONITORS = new Map<string, MockMonitor>();
+function monitorFor(c: Client): MockMonitor {
+  const key = c.sessionId ?? `_client:${c.id}`;
+  let m = MONITORS.get(key);
+  if (!m) { m = { epoch: randomUUID().slice(0, 12), seq: 0, files: new Map() }; MONITORS.set(key, m); }
+  return m;
+}
+function emitWorkspaceChanges(c: Client, changes: { path: string; status: string }[]): void {
+  const m = monitorFor(c);
+  m.seq += 1;
+  for (const ch of changes) {
+    if (ch.status === "deleted") m.files.delete(ch.path);
+    else m.files.set(ch.path, { status: ch.status, seq: m.seq });
+  }
+  send(c, { type: "workspace.files_changed", changes, seq: m.seq, epoch: m.epoch });
+}
+function sendWorkspaceSnapshot(c: Client): void {
+  const m = monitorFor(c);
+  const files = [...m.files.entries()].map(([path, v]) => ({ path, status: v.status }));
+  const seqs = Object.fromEntries([...m.files.entries()].map(([path, v]) => [path, v.seq]));
+  send(c, { type: "workspace.files_snapshot", files, total: files.length, seq: m.seq, epoch: m.epoch, seqs });
+}
+
 function finishStaging(c: Client): void {
   const st = c.staging!;
   c.staging = null;
@@ -90,7 +125,7 @@ function finishStaging(c: Client): void {
   });
   send(c, { type: "workspace.files.staged", workspace_id: st.workspaceId, staged, failed });
   // The daemon's workspace monitor then reports the new files.
-  if (staged.length) send(c, { type: "workspace.files_changed", changes: staged.map((path) => ({ path, status: "created" })) });
+  if (staged.length) emitWorkspaceChanges(c, staged.map((path) => ({ path, status: "created" })));
 }
 
 /**
@@ -178,7 +213,12 @@ async function turn(c: Client, text: string, agentId = "main"): Promise<void> {
   send(c, { type: "agent.status_changed", agent_id: agentId, status: "active" });
   await sleep(50);
 
-  if (lower.includes("subagent")) {
+  const touch = /\btouch\s+(.+)$/i.exec(text);
+  if (touch) {
+    const paths = (touch[1] ?? "").split(/\s+/).filter(Boolean);
+    emitWorkspaceChanges(c, paths.map((path) => ({ path, status: "modified" })));
+    await stream(c, agentId, `Touched ${paths.join(", ")}.`);
+  } else if (lower.includes("subagent")) {
     const subId = `sub-${randomUUID().slice(0, 6)}`;
     send(c, { type: "agent.created", agent_id: subId, agent_name: "researcher", agent_type: "subagent", parent_agent_id: agentId, profile_name: "researcher" });
     await stream(c, agentId, "Delegating to a researcher subagent…\n");
@@ -215,7 +255,7 @@ async function turn(c: Client, text: string, agentId = "main"): Promise<void> {
     send(c, { type: "permission.resolved", agent_id: agentId, request_id: reqId, tool_name: "write_file", granted, method: "user" });
     send(c, { type: "tool.call_end", agent_id: agentId, tool_name: "write_file", call_id: callId, success: granted, duration_seconds: 0.21, error_message: granted ? null : "Permission denied by user", show_output: false });
     // WorkspaceFilesChangedEvent.changes carries {path, status} — the daemon's key.
-    if (granted) send(c, { type: "workspace.files_changed", changes: [{ path: "src/app.py", status: "modified" }, { path: ".jaato/logs/session.log", status: "created" }] });
+    if (granted) emitWorkspaceChanges(c, [{ path: "src/app.py", status: "modified" }, { path: ".jaato/logs/session.log", status: "created" }]);
     await stream(c, agentId, granted ? `Written (you answered \`${answer}\`).` : "Understood, not writing the file.");
   } else if (lower.includes("ask")) {
     const reqId = randomUUID();
@@ -425,6 +465,9 @@ wss.on("connection", (ws, req) => {
             // else: the workspace selection is the client's own to re-assert.
             send(c, { type: "agent.created", agent_id: "main", agent_name: "main", agent_type: "main", profile_name: null });
             send(c, { type: "session.info", session_id: target, session_name: "mock session", model_provider: "mock", model_name: "mock-1", profile_name: null, models: ["mock-1", "mock-2"], sessions: sessionListing(c) });
+            // The daemon rebuilds an attaching client's Files mirror with a
+            // snapshot -- sent even when empty, since it carries the epoch.
+            sendWorkspaceSnapshot(c);
             break;
           }
           send(c, { type: "agent.created", agent_id: "main", agent_name: "main", agent_type: "main", profile_name: null });

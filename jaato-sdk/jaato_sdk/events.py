@@ -327,7 +327,27 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 # touched, because quietly giving an offline introspection an egress would
 # change what running it means (the argument ``explain releases`` already
 # makes about being its own topic).
-PROTOCOL_VERSION = "1.18"
+#
+# 1.19 -- ``seq`` / ``epoch`` on ``WorkspaceFilesChangedEvent`` and
+# ``seq`` / ``epoch`` / ``seqs`` on ``WorkspaceFilesSnapshotEvent`` (#1189).
+# A client can reset its Files panel to "only what changes from now on" --
+# the TUI's ``workspace_clear`` -- and have that survive a reconnect.
+# Without numbering it could not: a reconnect sends a snapshot that the
+# client applies wholesale, and ``{path, status}`` does not say WHEN a file
+# changed, so the reset was undone by the next reattach -- rare in a
+# terminal, routine in a browser that sleeps.  The monitor stamps each
+# flushed batch with a counter (not a clock: nothing to skew between daemon
+# and browser) and names itself with an ``epoch`` that is NOT persisted, so
+# a mark taken before a session reload is recognisably void rather than
+# compared against a counter that restarted, which would empty the panel
+# silently.
+#
+# Additive optional fields in both directions.  ``seqs`` is a separate map
+# because the entries of ``files`` are ``Dict[str, str]`` and an older
+# client validates them as such.  A client against an older daemon sees no
+# epoch and falls back to "reset until the next snapshot" -- the TUI's
+# behaviour before this, and no worse than it.  No SDK minimum.
+PROTOCOL_VERSION = "1.19"
 
 
 # =============================================================================
@@ -2088,6 +2108,16 @@ class WorkspaceFilesChangedEvent(Event):
     type: EventType = Field(default=EventType.WORKSPACE_FILES_CHANGED)
     changes: List[Dict[str, str]] = Field(default_factory=list)
     # ^ List of {"path": str, "status": "created"|"modified"|"deleted"}
+    seq: Optional[int] = None
+    # ^ Protocol 1.19 (#1189): this batch's number from the session's
+    #   workspace monitor, one more than the last.  Every entry in
+    #   ``changes`` changed at this ``seq``.  A counter, not a clock.
+    epoch: Optional[str] = None
+    # ^ Protocol 1.19: which monitor instance numbered it.  A ``seq`` from
+    #   a different epoch is not comparable -- the monitor is rebuilt when a
+    #   session is reloaded and counts again from 0 -- so a reader keeping a
+    #   "changed since" mark discards it when the epoch changes.  Both
+    #   fields are absent from a daemon older than 1.19.
 
 
 class WorkspaceFilesSnapshotEvent(Event):
@@ -2102,6 +2132,22 @@ class WorkspaceFilesSnapshotEvent(Event):
     # ^ List of {"path": str, "status": "created"|"modified"|"deleted"}
     total: int = 0
     # ^ Convenience: count of non-deleted entries
+    seq: Optional[int] = None
+    # ^ Protocol 1.19 (#1189): the monitor's latest batch number at the
+    #   moment of the snapshot -- what a client records as its mark when it
+    #   resets the panel right after attaching.
+    epoch: Optional[str] = None
+    # ^ Protocol 1.19: the monitor instance, as on the changed event.
+    seqs: Dict[str, int] = Field(default_factory=dict)
+    # ^ Protocol 1.19: path -> the ``seq`` of that path's latest change.  A
+    #   PARALLEL map rather than a third key on each ``files`` entry, because
+    #   those entries are ``Dict[str, str]`` and an older client validates
+    #   them as such -- an integer there would fail its whole event, where an
+    #   unknown top-level field is ignored.  A path with no entry changed
+    #   before this monitor numbered anything (restored across a reload):
+    #   read it as 0.  This map is what lets a client that reset its panel
+    #   keep only what changed afterwards across a reconnect, which replaces
+    #   its list wholesale.
 
 
 class WorkspaceIgnoreResultEvent(Event):

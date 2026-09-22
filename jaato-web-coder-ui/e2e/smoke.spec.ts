@@ -691,6 +691,39 @@ test("a reconnect re-selects the workspace, so a file attached after it still la
   await expect(page.getByText("Staged into the workspace: after.txt")).toBeVisible();
 });
 
+test("the Files panel's reset shows only later changes, and survives a reconnect (#1189)", async ({ page }) => {
+  await openSession(page);
+  await composer(page).fill("please touch old.py kept.py");
+  await composer(page).press("Enter");
+  await expect(page.getByText("Touched old.py, kept.py.")).toBeVisible();
+  await page.getByRole("button", { name: "Toggle workspace changes (Alt+W)" }).click();
+  const panel = page.getByRole("region", { name: "Files" });
+  await expect(panel.getByText("~ old.py")).toBeVisible();
+
+  await panel.getByRole("button", { name: "reset", exact: true }).click();
+  await expect(panel.getByText("No files changed since the reset.")).toBeVisible();
+
+  // kept.py was already listed: touching it again is what the reset is for.
+  await composer(page).fill("please touch kept.py new.py");
+  await composer(page).press("Enter");
+  await expect(page.getByText("Touched kept.py, new.py.")).toBeVisible();
+  await expect(panel.getByText("~ kept.py")).toBeVisible();
+  await expect(panel.getByText("~ new.py")).toBeVisible();
+  await expect(panel.getByText("~ old.py")).toHaveCount(0);
+
+  // The reconnect's snapshot replaces the list wholesale; the numbering on
+  // it is what lets the reset survive.
+  await composer(page).fill("mock-drop");
+  await composer(page).press("Enter");
+  await expect(page.getByText(/^reconnecting/)).toBeVisible();
+  await expect(page.getByText("connected", { exact: true })).toBeVisible();
+  await expect(panel.getByText("~ new.py")).toBeVisible();
+  await expect(panel.getByText("~ old.py")).toHaveCount(0);
+
+  await panel.getByRole("button", { name: "show everything" }).click();
+  await expect(panel.getByText("~ old.py")).toBeVisible();
+});
+
 test("the workspace list says who is signed in and offers the backend's Sign out", async ({ page }) => {
   await page.route("**/config.json", (route) =>
     route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ daemon: WS_WORKSPACES, ticketUrl: "/api/ticket", autoConnect: true }) }),
