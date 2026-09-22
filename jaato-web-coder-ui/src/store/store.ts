@@ -44,6 +44,7 @@ import type {
   ConfigStatus,
   ConnectionPhase,
   BudgetState,
+  GcState,
   ContextState,
   InitProgress,
   OutputBlock,
@@ -158,6 +159,8 @@ export interface JaatoState {
   context: Record<string, ContextState>;
   /** What the window is spent ON, by instruction source (see BudgetState). */
   budget: Record<string, BudgetState>;
+  /** GC policy and last pass, per agent (see GcState). */
+  gc: Record<string, GcState>;
   /** Budget source layers whose children are showing — the TUI panel's drill-down. */
   budgetExpanded: string[];
   commands: CommandSpec[];
@@ -322,6 +325,7 @@ const emptySessionState = () => ({
   plan: {} as Record<string, PlanState>,
   context: {} as Record<string, ContextState>,
   budget: {} as Record<string, BudgetState>,
+  gc: {} as Record<string, GcState>,
   budgetExpanded: [] as string[],
   toolIdNames: {} as Record<string, string>,
   workspaceFiles: {} as Record<string, string>,
@@ -877,6 +881,33 @@ export function reduce(s: JaatoState, raw: JaatoEvent): JaatoState {
       {
         const names = toolIdMappings(ev.tool_id_mappings);
         if (names && Object.keys(names).length) s.toolIdNames = names;
+      }
+      break;
+    }
+    case EventTypeValue.GC_CONFIG: {
+      const id = (ev.agent_id as string) || "main";
+      const num = (v: unknown) => (typeof v === "number" ? v : null);
+      s.gc = { ...s.gc, [id]: { ...s.gc[id], config: {
+        strategy: typeof ev.strategy === "string" && ev.strategy ? ev.strategy : null,
+        threshold: num(ev.threshold), targetPercent: num(ev.target_percent), continuous: ev.continuous_mode === true,
+      } } };
+      break;
+    }
+    case EventTypeValue.GC: {
+      const id = (ev.agent_id as string) || "main";
+      const cur = s.gc[id] ?? {};
+      const num = (v: unknown) => (typeof v === "number" ? v : null);
+      if (ev.phase === "started") s.gc = { ...s.gc, [id]: { ...cur, running: true } };
+      else if (ev.phase === "completed") {
+        const at = Date.parse(String(ev.timestamp ?? ""));
+        s.gc = { ...s.gc, [id]: { ...cur, running: false, lastPass: {
+          at: Number.isFinite(at) ? at : Date.now(),
+          success: ev.success !== false,
+          tokensFreed: num(ev.tokens_freed), tokensBefore: num(ev.tokens_before), tokensAfter: num(ev.tokens_after),
+          trigger: typeof ev.trigger_reason === "string" ? ev.trigger_reason : null,
+          strategy: typeof ev.strategy === "string" ? ev.strategy : null,
+          error: typeof ev.error === "string" ? ev.error : null,
+        } } };
       }
       break;
     }

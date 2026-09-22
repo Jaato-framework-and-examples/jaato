@@ -33,6 +33,8 @@
  *   "…discover tools" → a ``list_tools`` call whose argument is a hashed
  *                 category id, then the ``tools.id_registry`` naming it --
  *                 AFTER the call, as the daemon may send it
+ *   "…collect garbage" → one GC pass (``gc`` started, then completed,
+ *                 freeing 14 200 tokens), remembered and replayed on attach
  *   "subagent"  → spawns a subagent that streams in its own tab
  *   "model this is broken" (verbatim test) → echoes the text back
  *   anything else → a short streamed markdown reply
@@ -97,6 +99,20 @@ function monitorFor(c: Client): MockMonitor {
   if (!m) { m = { epoch: randomUUID().slice(0, 12), seq: 0, files: new Map() }; MONITORS.set(key, m); }
   return m;
 }
+/**
+ * GC as the daemon reports it (#1190): the policy at session start, a pass
+ * as ``gc`` started / completed, and BOTH replayed to a client that
+ * attaches -- the daemon's ``_emit_gc_state`` -- with the pass carrying its
+ * own timestamp.  Keyed by session so a reconnecting client gets the replay.
+ */
+const MOCK_GC_POLICY = { strategy: "budget", threshold: 80, target_percent: 60, continuous_mode: false };
+const LAST_GC = new Map<string, Record<string, unknown>>();
+function sendGcState(c: Client): void {
+  send(c, { type: "gc.config", agent_id: "main", ...MOCK_GC_POLICY });
+  const last = c.sessionId ? LAST_GC.get(c.sessionId) : undefined;
+  if (last) send(c, last);
+}
+
 function emitWorkspaceChanges(c: Client, changes: { path: string; status: string }[]): void {
   const m = monitorFor(c);
   m.seq += 1;
@@ -221,6 +237,13 @@ async function turn(c: Client, text: string, agentId = "main"): Promise<void> {
     const paths = (touch[1] ?? "").split(/\s+/).filter(Boolean);
     emitWorkspaceChanges(c, paths.map((path) => ({ path, status: "modified" })));
     await stream(c, agentId, `Touched ${paths.join(", ")}.`);
+  } else if (lower.includes("collect garbage")) {
+    send(c, { type: "gc", agent_id: agentId, phase: "started", trigger_reason: "manual", strategy: "budget" });
+    await sleep(30);
+    const done = { type: "gc", agent_id: agentId, phase: "completed", trigger_reason: "manual", strategy: "budget", success: true, tokens_before: 90000, tokens_after: 75800, tokens_freed: 14200, timestamp: new Date(Date.now() - 12 * 60_000).toISOString() };
+    if (c.sessionId) LAST_GC.set(c.sessionId, done);
+    send(c, done);
+    await stream(c, agentId, "Collected.");
   } else if (lower.includes("discover tools")) {
     const callId = randomUUID();
     send(c, { type: "tool.call_start", agent_id: agentId, tool_name: "list_tools", tool_args: { category_id: "c_bbc5e661" }, call_id: callId });
@@ -429,6 +452,7 @@ wss.on("connection", (ws, req) => {
           send(c, { type: "session.info", session_name: "mock session", model_provider: "mock", model_name: "mock-1", profile_name: args.includes("--profile") ? args[args.indexOf("--profile") + 1] : null, models: ["mock-1", "mock-2"], sessions: sessionListing(c) });
           // PermissionStatusEvent, emitted by the daemon at init: effective_default + suspension_scope.
           send(c, { type: "permission.status", ...c.policy });
+          send(c, { type: "gc.config", agent_id: "main", ...MOCK_GC_POLICY });
           send(c, { type: "system.message", message: "Connected to the mock daemon. Try: code, tool, permit, ask, fail, subagent.", style: "info" });
         } else if (cmd === "mock-auth") {
           // A daemon-level auth plugin command: works with NO session, like
@@ -477,6 +501,7 @@ wss.on("connection", (ws, req) => {
             // The daemon rebuilds an attaching client's Files mirror with a
             // snapshot -- sent even when empty, since it carries the epoch.
             sendWorkspaceSnapshot(c);
+            sendGcState(c);
             break;
           }
           send(c, { type: "agent.created", agent_id: "main", agent_name: "main", agent_type: "main", profile_name: null });

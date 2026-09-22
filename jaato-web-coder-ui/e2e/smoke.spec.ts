@@ -735,6 +735,37 @@ test("a hashed category id in a tool call is shown by its name", async ({ page }
   await expect(row).not.toContainText("c_bbc5e661");
 });
 
+test("the Instructions panel says when GC last ran, what it freed, and the policy -- to a tab that attached later too (#1190)", async ({ page }) => {
+  await openSession(page);
+  await composer(page).fill("please collect garbage");
+  await composer(page).press("Enter");
+  await expect(page.getByText("Collected.")).toBeVisible();
+  const budgetToggle = page.getByRole("button", { name: /Open Budget/ });
+  if (await budgetToggle.count()) await budgetToggle.click();
+  const gc = page.getByTestId("gc-summary");
+  // The mock stamps the pass 12 minutes in the past: the panel must show
+  // the pass's own time, not the moment the event arrived.
+  await expect(gc).toContainText("last GC 12 min ago · freed 14.2k tokens");
+  await expect(gc).toContainText("GC: budget · runs at 80% · down to 60%");
+
+  // A second tab attaching to the same session never saw the pass.  Only
+  // the daemon's replay can tell it -- a reconnect of THIS tab would not
+  // prove that, since it keeps what the tab already knew.
+  const sessionId = await page.locator("span[title]").filter({ hasText: /^session / }).first().getAttribute("title");
+  expect(sessionId).toBeTruthy();
+  const other = await page.context().newPage();
+  await other.goto("/");
+  await other.getByPlaceholder("ws://host:8080").fill(WS);
+  await other.getByRole("button", { name: "Connect" }).click();
+  await other.getByRole("button", { name: "Go to the prompt without a session" }).click();
+  await composer(other).fill(`session attach ${sessionId}`);
+  await composer(other).press("Enter");
+  const otherToggle = other.getByRole("button", { name: /Open Budget/ });
+  if (await otherToggle.count()) await otherToggle.click();
+  await expect(other.getByTestId("gc-summary")).toContainText("last GC 12 min ago · freed 14.2k tokens");
+  await expect(other.getByTestId("gc-summary")).toContainText("GC: budget");
+});
+
 test("the workspace list says who is signed in and offers the backend's Sign out", async ({ page }) => {
   await page.route("**/config.json", (route) =>
     route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ daemon: WS_WORKSPACES, ticketUrl: "/api/ticket", autoConnect: true }) }),

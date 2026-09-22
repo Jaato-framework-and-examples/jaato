@@ -16,6 +16,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import type { JaatoEvent } from "@jaato/sdk";
 import { BudgetPanel } from "./BudgetPanel";
+import { POLICY_EXPLAINED } from "@/protocol/gc";
 import { useJaato, MAIN_AGENT } from "@/store/store";
 
 const ev = (o: Record<string, unknown>) => o as unknown as JaatoEvent;
@@ -103,7 +104,9 @@ describe("the panel", () => {
     render(<BudgetPanel agentId={MAIN_AGENT} />);
     // The daemon said "!", so "!" is what shows -- the local POLICY_GLYPH
     // table is a fallback for a snapshot that carries none, not an override.
-    expect(screen.getByTitle("locked").textContent).toBe("!");
+    // The row's glyph carries the policy explained (#1190); it comes before
+    // the legend, which carries the same tooltip.
+    expect(screen.getAllByTitle(POLICY_EXPLAINED.locked!)[0]!.textContent).toBe("!");
   });
 
   it("still shows the context readout beneath it", () => {
@@ -125,5 +128,48 @@ describe("the panel", () => {
     render(<BudgetPanel agentId={MAIN_AGENT} />);
     expect(screen.getByText(/No instruction budget reported yet/)).toBeTruthy();
     expect(screen.getByText("Context")).toBeTruthy();
+  });
+});
+
+describe("the GC line (#1190)", () => {
+  const PASS_AT = "2026-09-22T14:32:00.000Z";
+
+  it("shows the last pass with its OWN time and what it freed", () => {
+    useJaato.getState().dispatch([
+      budgetEvent(),
+      ev({ type: "gc", agent_id: "main", phase: "started", strategy: "budget" }),
+      ev({ type: "gc", agent_id: "main", phase: "completed", success: true, tokens_freed: 14_200, tokens_before: 90_000, tokens_after: 75_800, trigger_reason: "threshold", timestamp: PASS_AT }),
+    ]);
+    const pass = useJaato.getState().gc[MAIN_AGENT]!.lastPass!;
+    // The event's timestamp, not the moment it was reduced: a replay on attach
+    // carries the pass's own time, and "when did GC last run" answered with
+    // the attach time would be a readout that lies.
+    expect(pass.at).toBe(Date.parse(PASS_AT));
+    render(<BudgetPanel agentId={MAIN_AGENT} />);
+    expect(screen.getByTestId("gc-summary").textContent).toMatch(/last GC .* · freed 14\.2k tokens/);
+  });
+
+  it("says a pass is running between started and completed", () => {
+    useJaato.getState().dispatch([budgetEvent(), ev({ type: "gc", agent_id: "main", phase: "started" })]);
+    render(<BudgetPanel agentId={MAIN_AGENT} />);
+    expect(screen.getByTestId("gc-summary").textContent).toContain("collecting");
+  });
+
+  it("shows the policy in force, and a session with none as a warning, not as nothing", () => {
+    useJaato.getState().dispatch([budgetEvent(), ev({ type: "gc.config", agent_id: "main", strategy: "budget", threshold: 80, target_percent: 60 })]);
+    const { unmount } = render(<BudgetPanel agentId={MAIN_AGENT} />);
+    expect(screen.getByTestId("gc-summary").textContent).toContain("GC: budget · runs at 80% · down to 60%");
+    unmount();
+    useJaato.getState().dispatch([ev({ type: "gc.config", agent_id: "main", strategy: null })]);
+    render(<BudgetPanel agentId={MAIN_AGENT} />);
+    expect(screen.getByTestId("gc-summary").textContent).toContain("GC: none configured");
+  });
+
+  it("the control: with nothing reported, it says so rather than 'never collected'", () => {
+    useJaato.getState().dispatch([budgetEvent()]);
+    render(<BudgetPanel agentId={MAIN_AGENT} />);
+    const text = screen.getByTestId("gc-summary").textContent ?? "";
+    expect(text).toContain("no GC pass reported yet");
+    expect(text).not.toContain("GC:");
   });
 });

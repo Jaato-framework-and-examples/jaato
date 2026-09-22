@@ -7194,6 +7194,49 @@ neither.
 Both argument displays use it: the tool row and the permission card's
 argument grid.
 
+### When GC Last Ran, What It Freed, and Which Policy (#1190)
+
+The Instructions panel showed what each layer held and each layer's GC
+glyph, and nothing about collection itself: not when a pass last ran, not
+what it freed, not which policy was in force. All three were already on the
+wire — `GCConfigEvent` (strategy, threshold, target, continuous) at
+initialisation and on reconfigure, `GCEvent` for each phase of a pass with
+`tokens_freed` on `completed` — and the web client read neither.
+
+**Neither was replayed, and that is the daemon half.** `emit_current_state`
+is the one door for "tell a client arriving mid-session what the state is",
+and it sent neither event. A tab that attached after a pass — a second tab,
+a session switch, a resume from the picker — read "no GC" about a session
+that had collected an hour ago, and never learned the strategy at all.
+`JaatoServer._emit_gc_state` replays both:
+
+- **The last completed pass is kept as the event that announced it**
+  (`_last_gc_pass`), so the replay carries the pass's ORIGINAL timestamp.
+  "When did GC last run" answered with the attach time would be a readout
+  that lies. Not persisted: a revived session starts with no record, which
+  the panel reports as "no GC pass reported yet", never as "never collected".
+- **The policy is replayed whatever it is, including no strategy.** A session
+  with no GC is the state an operator most needs to see (#1133 is what it
+  cost when invisible); the panel renders it as a warning line.
+
+The panel (`src/protocol/gc.ts` for the wording) adds two lines under the
+heading, subordinate to the tracked total: `◷ last GC 12 min ago · freed
+14.2k tokens` (hover: absolute time, trigger, before → after; `collecting…`
+between `started` and `completed`; a failed pass in the error tone) and
+`GC: budget · runs at 80% · down to 60%` (or `after every turn above N%`
+when continuous). They show even before any usage is reported — the policy
+is known first. The legend's glyphs carry one-line tooltips, and a caption
+says the icons describe what GC **may** reclaim from each layer, not what
+it recently did — `never collected` read as "data was never collected".
+
+Guards: `server/tests/test_the_gc_state_reaches_a_late_client_1190.py` (two
+reversions; its call-site check parses `core.py` from beside the test
+rather than via `inspect.getsource`, which the reversion meta-guard's
+sandbox cannot see through), `BudgetPanel.test.tsx` / `gc.test.ts`, and an
+e2e case in which a SECOND tab attaches after the pass and must be told —
+verified to fail with the replay removed. A reconnect of the same tab could
+not have proved it: it keeps what the tab already knew.
+
 ### An Exit That Never Asked
 
 The TUI's `exit` is a question before it is an action: a session lives on
