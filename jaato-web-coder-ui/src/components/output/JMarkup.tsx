@@ -1,11 +1,28 @@
 /**
- * Renders a ``<j-*>`` + markdown buffer as DOM.  Pure function of its
- * ``text`` prop; memoised per block so a streaming append re-renders
- * only the block that grew.  Never uses ``innerHTML``.
+ * Renders the server's markup as DOM: ``<nb-row>`` notebook cells,
+ * ``<j-code>`` / ``<j-table>`` blocks, and the markdown between them.
+ * Pure function of its ``text`` prop; memoised per block so a streaming
+ * append re-renders only the block that grew.  Never uses ``innerHTML``.
+ *
+ * **Two parsers, composed here and only here.**  ``nbmarkup.ts`` knows
+ * ``<nb-row>`` and nothing else; ``jmarkup.ts`` knows ``<j-*>`` and
+ * nothing else (the boundary the TUI keeps between
+ * ``j_markup_renderer.py`` and ``_render_notebook_rows``).  The buffer is
+ * split on notebook rows FIRST, so a row's wrapper tags never reach the
+ * ``<j-*>`` parser -- which, not knowing them, used to pass them through
+ * as text: the leak in #1193.  A row's body then goes through
+ * ``parseJMarkup`` in its turn, because an input cell carries a
+ * ``<j-code>`` block and a printed markdown table arrives as ``<j-table>``.
+ *
+ * **A cell body is program output, not prose.**  Its plain text renders
+ * verbatim (``.nb-out``: monospace, whitespace kept) rather than through
+ * the markdown parser, which would read a traceback's ``*`` / ``_`` as
+ * emphasis and reflow its indentation -- the TUI prints it verbatim too.
  */
 import { Plate } from "@/components/layout/Plate";
 import { memo, useMemo } from "react";
 import { parseJMarkup, type CodeLine, type Segment } from "@/protocol/jmarkup";
+import { containsNbMarkup, isFailureRow, parseNbMarkup, type NotebookRow, type NotebookSegment } from "@/protocol/nbmarkup";
 import { parseMarkdown, type Block, type Inline } from "@/protocol/markdown";
 import { tokenClass } from "@/protocol/pygments";
 
@@ -102,11 +119,85 @@ function SegmentView({ seg }: { seg: Segment }) {
   return <MarkdownBlocks blocks={parseMarkdown(seg.text)} />;
 }
 
+/** ``<j-*>`` + markdown, the path every non-notebook text has always taken. */
+function JSegments({ text }: { text: string }) {
+  return <>{parseJMarkup(text).map((seg, i) => <SegmentView key={i} seg={seg} />)}</>;
+}
+
+/** One row's body: code and tables as everywhere else, plain text verbatim. */
+function CellBody({ row }: { row: NotebookRow }) {
+  return (
+    <>
+      {parseJMarkup(row.content).map((seg, i) => {
+        if (seg.kind !== "text") return <SegmentView key={i} seg={seg} />;
+        const out = seg.text.replace(/^\n+|\n+$/g, "");
+        return out.trim() ? <pre key={i} className="nb-out">{out}</pre> : null;
+      })}
+    </>
+  );
+}
+
+/**
+ * The rows of one notebook cell, laid out as the TUI draws them: a label
+ * column (``In [1]:`` / ``Out [1]:`` / ``Err [1]:``) beside the body, one
+ * grid for the whole cell so the labels line up.  ``error`` and ``stderr``
+ * rows take the error tone; ``data-nb-type`` carries the row's type through
+ * for anything that wants to style the rest.
+ */
+function NotebookCells({ rows }: { rows: NotebookRow[] }) {
+  return (
+    <div className="nb-cells">
+      {rows.map((row, i) => (
+        <div key={i} className={`nb-row${isFailureRow(row) ? " nb-row-failed" : ""}`} data-nb-type={row.type}>
+          <span className="nb-label">{row.label}</span>
+          <div className="nb-body min-w-0"><CellBody row={row} /></div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+type Piece = { kind: "text"; text: string } | { kind: "cells"; rows: NotebookRow[] };
+
+/**
+ * Consecutive rows are one cell: gather them into one grid, dropping the
+ * separator whitespace the emitters write between rows.  Any other text
+ * ends the cell.
+ */
+function groupRows(segments: NotebookSegment[]): Piece[] {
+  const out: Piece[] = [];
+  for (const seg of segments) {
+    const prev = out.at(-1);
+    if (seg.kind === "row") {
+      if (prev?.kind === "cells") prev.rows.push(seg.row);
+      else out.push({ kind: "cells", rows: [seg.row] });
+    } else if (!(prev?.kind === "cells" && seg.text.trim() === "")) {
+      out.push({ kind: "text", text: seg.text });
+    }
+  }
+  return out;
+}
+
+/**
+ * Does this text carry markup ``JMarkup`` renders rather than shows?
+ *
+ * ``ToolBlockView`` chooses between this component and a raw ``<pre>`` with
+ * it.  It used to ask only about ``<j-``, so a notebook cell that printed
+ * plain text -- ``<nb-row type="stdout" label="Out [1]:">42</nb-row>``,
+ * no ``<j-*>`` block anywhere -- went to the ``<pre>`` with its tags in
+ * plain sight.
+ */
+export function hasServerMarkup(text: string): boolean {
+  return text.includes("<j-") || containsNbMarkup(text);
+}
+
 export const JMarkup = memo(function JMarkup({ text }: { text: string }) {
-  const segments = useMemo(() => parseJMarkup(text), [text]);
+  const pieces = useMemo(() => groupRows(parseNbMarkup(text)), [text]);
   return (
     <div className="prose-j">
-      {segments.map((seg, i) => <SegmentView key={i} seg={seg} />)}
+      {pieces.map((piece, i) =>
+        piece.kind === "cells" ? <NotebookCells key={i} rows={piece.rows} /> : <JSegments key={i} text={piece.text} />,
+      )}
     </div>
   );
 });

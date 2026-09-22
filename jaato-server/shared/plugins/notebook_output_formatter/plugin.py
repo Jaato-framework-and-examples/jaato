@@ -40,9 +40,17 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 # After hidden_content_filter (10) and diff_formatter (20)
 DEFAULT_PRIORITY = 22
 
-# Pattern to match notebook cell markers
+# Pattern to match notebook cell markers.
+#
+# ``exec`` is OPTIONAL.  A cell that ran carries its execution count, but
+# the notebook plugin also emits ``<notebook-cell type="error">`` with no
+# count from every early exit on its streaming path -- no code, a cell the
+# containment boundary refused, a notebook that could not be created or
+# does not exist.  Requiring the attribute left those unmatched, so the
+# raw marker reached every client as literal text (#1193), and the
+# refusals were exactly the messages a person most needed to read.
 NOTEBOOK_CELL_PATTERN = re.compile(
-    r'<notebook-cell\s+type="([^"]+)"\s+exec="(\d+)">\s*\n?(.*?)\n?</notebook-cell>',
+    r'<notebook-cell\s+type="([^"]+)"(?:\s+exec="(\d+)")?>\s*\n?(.*?)\n?</notebook-cell>',
     re.DOTALL
 )
 
@@ -160,7 +168,7 @@ class NotebookOutputFormatterPlugin:
 
     # ==================== Cell Formatting ====================
 
-    def _format_cell(self, cell_type: str, exec_count: str, content: str) -> str:
+    def _format_cell(self, cell_type: str, exec_count: Optional[str], content: str) -> str:
         """Format a notebook cell with semantic markers for client rendering.
 
         The output preserves semantic structure using <nb-row> markers that
@@ -173,7 +181,8 @@ class NotebookOutputFormatterPlugin:
 
         Args:
             cell_type: Type of cell (input, result, error, etc.)
-            exec_count: Execution count for the cell
+            exec_count: Execution count for the cell, or ``None`` for a
+                cell that never ran (an early-exit error)
             content: Cell content (may include code fences)
 
         Returns:
@@ -194,20 +203,24 @@ class NotebookOutputFormatterPlugin:
 
         return f'<nb-row type="{cell_type}" label="{label}">\n{content}\n</nb-row>\n'
 
-    def _get_label(self, cell_type: str, exec_count: str) -> str:
+    def _get_label(self, cell_type: str, exec_count: Optional[str]) -> str:
         """Get the label for a cell type.
 
         Args:
             cell_type: Type of cell
-            exec_count: Execution count
+            exec_count: Execution count, or ``None`` when the cell never
+                ran -- labelled without a count (``Err:``) rather than
+                with an invented one.
 
         Returns:
-            Label string like "In [3]:" or "Out [3]:"
+            Label string like "In [3]:", "Out [3]:" or "Err:"
         """
         prefix = CELL_LABELS.get(cell_type, "")
         if not prefix:
             # No label for stdout - just show content
             return ""
+        if exec_count is None:
+            return f"{prefix}:"
         return f"{prefix} [{exec_count}]:"
 
     # ==================== ConfigurableFormatter Protocol ====================

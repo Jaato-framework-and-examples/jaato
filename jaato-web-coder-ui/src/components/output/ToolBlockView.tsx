@@ -14,7 +14,7 @@ import type { ToolBlock } from "@/store/types";
 import { useJaato } from "@/store/store";
 import { Plate } from "@/components/layout/Plate";
 import { MediaView } from "./MediaView";
-import { JMarkup } from "./JMarkup";
+import { hasServerMarkup, JMarkup } from "./JMarkup";
 
 export function summarizeArgs(args: Record<string, unknown>, max = 110): string {
   const parts: string[] = [];
@@ -76,7 +76,7 @@ export const ToolBlockView = memo(function ToolBlockView({ block }: { block: Too
         <Plate ground corners="two" edge={block.status === "error" ? "error" : "hairline"} className="ml-6 mt-0.5 mb-2.5">
           {block.errorMessage && <div className="px-3 py-1.5 text-error text-xs whitespace-pre-wrap">{block.errorMessage}</div>}
           {block.output && (
-            block.output.includes("<j-") ? (
+            hasServerMarkup(block.output) ? (
               <div className="px-3 py-1.5 text-[13px]"><JMarkup text={block.output} /></div>
             ) : (
               <pre className="code-block whitespace-pre-wrap break-words px-3 py-2 max-h-[60vh] overflow-auto">{block.output}</pre>

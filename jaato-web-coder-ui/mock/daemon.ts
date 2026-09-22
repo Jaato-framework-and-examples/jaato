@@ -23,6 +23,10 @@
  *                 the tool arguments
  *   "ask"       → a batch_only clarification with two questions
  *   "fail"      → a failing tool call
+ *   "…notebook…" → a notebook_execute call whose output is one cell as the
+ *                 daemon sends it: input / stdout / error <nb-row>s
+ *   "…early…notebook…" → the early-exit error cell (no execution count);
+ *                 not as the first word, which the composer runs as a command
  *   "subagent"  → spawns a subagent that streams in its own tab
  *   "model this is broken" (verbatim test) → echoes the text back
  *   anything else → a short streamed markdown reply
@@ -238,6 +242,28 @@ async function turn(c: Client, text: string, agentId = "main"): Promise<void> {
     // mid-turn without betting on a clock (the e2e mock runs with no delays).
     await new Promise<void>((r) => c.pending.set("hang", () => r()));
     await stream(c, agentId, "Stopped mid-turn.");
+  } else if (lower.includes("notebook")) {
+    // The daemon's own wire, not a paraphrase of it: each chunk is what
+    // core.on_tool_output sends after the formatter pipeline has run on the
+    // notebook plugin's emitters (_format_*_cell), one chunk at a time.
+    // Regenerate it from the server rather than editing it by hand -- a mock
+    // that drifts into the client's vocabulary certifies a renderer that
+    // does not work, which is how #1193 stayed invisible.
+    const callId = randomUUID();
+    const chunks = lower.includes("early")
+      ? ['<nb-row type="error" label="Err:">\nNo code provided\n</nb-row>\n']
+      : [
+          '<nb-row type="input" label="In [1]:">\n<j-code language="ipython">\n<j-line n="1">print(\'before the error\')</j-line>\n<j-line n="2">1/0</j-line>\n</j-code>\n\n</nb-row>\n',
+          '<nb-row type="stdout" label="Out [1]:">\nbefore the error\n</nb-row>\n',
+          '<nb-row type="error" label="Err [1]:">\nTraceback (most recent call last):\n  File "<cell>", line 2\nZeroDivisionError: division by zero\n</nb-row>\n',
+        ];
+    send(c, { type: "tool.call_start", agent_id: agentId, tool_name: "notebook_execute", tool_args: { code: "print('before the error')\n1/0" }, call_id: callId });
+    for (const chunk of chunks) {
+      send(c, { type: "tool.output", agent_id: agentId, call_id: callId, chunk });
+      await sleep(40);
+    }
+    send(c, { type: "tool.call_end", agent_id: agentId, tool_name: "notebook_execute", call_id: callId, success: true, duration_seconds: 0.4, show_output: true });
+    await stream(c, agentId, "The cell raised a ZeroDivisionError.");
   } else if (lower.includes("fail")) {
     const callId = randomUUID();
     send(c, { type: "tool.call_start", agent_id: agentId, tool_name: "run_command", tool_args: { command: "false" }, call_id: callId });

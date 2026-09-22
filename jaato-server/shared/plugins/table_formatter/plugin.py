@@ -28,6 +28,8 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import wcwidth
 
+from shared.plugins.code_block_formatter.plugin import FENCE_CLOSE_RE, FENCE_OPEN_RE
+
 
 def _get_ambiguous_width() -> int:
     """Get the width to use for East Asian Ambiguous characters.
@@ -116,6 +118,29 @@ class TableFormatterPlugin:
     - Detects markdown tables (``| col | col |`` with ``|---|---|``)
     - Passes ASCII grid tables (``+---+---+``) through unchanged
     - Handles multi-line streaming input
+    - Leaves the inside of a fenced code block alone
+
+    **Fences.**  This formatter runs at priority 25, BEFORE
+    ``code_block_formatter`` (40), so it sees fences in their raw form.
+    A table inside one is code the author quoted -- a ````markdown``
+    example, a notebook cell's fenced stdout -- and rewriting it into
+    ``<j-table>`` hands ``code_block_formatter`` a fence full of markup,
+    which it escapes into literal, line-numbered ``&lt;j-table&gt;``
+    lines that every client then renders faithfully (#1191).  Fence state
+    is decided by the SAME two patterns that formatter opens and closes
+    on, imported rather than restated, so the two cannot disagree about
+    which lines are code.
+
+    Fence state is tracked on COMPLETE lines, and a line can arrive in
+    pieces: a head with no ``|`` is passed straight through for streaming
+    latency before its newline arrives.  ``_fence_line_prefix`` remembers
+    that already-yielded head so the completed line is judged whole --
+    otherwise a ````py`` split from its newline would never open a fence.
+
+    State: ``_in_fence`` flips on an opener line outside a fence and on a
+    closer line inside one; ``flush()`` and ``reset()`` both clear it,
+    because ``code_block_formatter``'s own ``flush()`` closes an
+    unterminated block and the two must agree after a flush too.
     """
 
     def __init__(self):
@@ -129,6 +154,12 @@ class TableFormatterPlugin:
 
         # Buffer for incomplete lines (no trailing newline yet)
         self._line_buffer: str = ""
+
+        # Fence tracking (#1191): inside a fence nothing is rewritten.
+        self._in_fence = False
+        # The head of the current line already yielded before its newline
+        # arrived, so the completed line can be judged whole.
+        self._fence_line_prefix: str = ""
 
     # ==================== FormatterPlugin Protocol ====================
 
@@ -194,11 +225,12 @@ class TableFormatterPlugin:
             if last_newline == -1:
                 # No complete lines yet
                 # Only buffer if it looks like potential table content
-                if self._in_table or self._looks_like_table_content(text):
+                if self._may_hold_table(text):
                     self._line_buffer = text
                     return
                 else:
                     # Pass through non-table content immediately for streaming
+                    self._fence_line_prefix += text
                     yield text
                     return
             else:
@@ -206,7 +238,7 @@ class TableFormatterPlugin:
                 incomplete_part = text[last_newline + 1:]
                 text = text[:last_newline + 1]
                 # Only buffer incomplete part if it looks like table content
-                if self._in_table or self._looks_like_table_content(incomplete_part):
+                if self._may_hold_table(incomplete_part):
                     self._line_buffer = incomplete_part
                 else:
                     # Yield after processing complete lines
@@ -221,6 +253,17 @@ class TableFormatterPlugin:
             if is_last_line and line == "":
                 continue
 
+            whole_line = self._fence_line_prefix + line
+            self._fence_line_prefix = ""
+            if self._fence_transition(whole_line):
+                # A fence boundary, or a line inside a fence: code the
+                # author quoted, passed through exactly as written.  Any
+                # table buffered before an opener is complete -- flush it
+                # (``_flush_buffer`` is a no-op on an empty buffer).
+                yield from self._flush_buffer()
+                yield line + "\n"
+                continue
+
             table_line_type = self._classify_line(line)
 
             if table_line_type:
@@ -231,16 +274,43 @@ class TableFormatterPlugin:
                 self._buffer.append(line)
             else:
                 # Non-table line - flush any buffered table first
-                if self._buffer:
-                    for output in self._flush_buffer():
-                        yield output
+                yield from self._flush_buffer()
 
                 # Pass through non-table content with newline
                 yield line + "\n"
 
         # Yield any non-table incomplete content that wasn't buffered
         if trailing_non_table:
+            self._fence_line_prefix = trailing_non_table
             yield trailing_non_table
+
+    def _may_hold_table(self, text: str) -> bool:
+        """Should this incomplete line be held back as possible table content?
+
+        Never inside a fence: nothing there is rewritten, so holding it
+        back would only cost streaming latency.
+        """
+        if self._in_fence:
+            return False
+        return self._in_table or self._looks_like_table_content(text)
+
+    def _fence_transition(self, line: str) -> bool:
+        """Update fence state for one COMPLETE line; True if it is fence text.
+
+        Returns True for the opener, every line inside the fence, and the
+        closer -- the lines this formatter must pass through unchanged.
+        The patterns are ``code_block_formatter``'s own (see the class
+        docstring): the opener is searched with the line's newline
+        restored, because that is how that formatter sees it.
+        """
+        if self._in_fence:
+            if FENCE_CLOSE_RE.search(line):
+                self._in_fence = False
+            return True
+        if FENCE_OPEN_RE.search(line + "\n"):
+            self._in_fence = True
+            return True
+        return False
 
     def _classify_line(self, line: str) -> Optional[str]:
         """Classify a line as table content or not.
@@ -298,7 +368,14 @@ class TableFormatterPlugin:
         return False
 
     def flush(self) -> Iterator[str]:
-        """Flush any remaining buffered content."""
+        """Flush any remaining buffered content.
+
+        Leaves fence state CLEARED: ``code_block_formatter.flush()``
+        renders an unterminated block and forgets it, so after a flush the
+        two formatters must again agree that no fence is open.
+        """
+        self._in_fence = False
+        self._fence_line_prefix = ""
         # First, handle any incomplete line in the line buffer
         if self._line_buffer:
             # Try to classify it as a table line
@@ -325,6 +402,8 @@ class TableFormatterPlugin:
         self._in_table = False
         self._table_type = None
         self._line_buffer = ""
+        self._in_fence = False
+        self._fence_line_prefix = ""
 
     # ==================== Table Parsing ====================
 
