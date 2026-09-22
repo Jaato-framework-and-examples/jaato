@@ -31,7 +31,7 @@ def test_imports_are_parsed_from_source_not_declared(tmp_path):
     """The whole design: read the code, don't keep a table."""
     f = tmp_path / "m.py"
     f.write_text("import httpx\nfrom openai import OpenAI\n"
-                 "import os, json\nfrom . import sibling\nfrom shared import x\n")
+                 "import os, json\nfrom . import sibling\nfrom jaato_server import x\n")
     got = D.third_party_imports([f])
     assert got == ["httpx", "openai"]          # stdlib, relative and first-party dropped
 
@@ -163,7 +163,7 @@ def test_a_plugin_is_located_without_importing_it(monkeypatch):
     asked.  Importing to find the file fails in exactly that case."""
     monkeypatch.setattr(D, "_module_file",
                         lambda _: pytest.fail("an in-tree plugin must not be imported"))
-    d = D.for_plugin("memory", "create_plugin (shared.plugins.memory)")
+    d = D.for_plugin("memory", "create_plugin (jaato_server.shared.plugins.memory)")
     assert d["files_parsed"] > 0 and d["note"] is None
 
 
@@ -180,7 +180,7 @@ def test_single_file_scan_still_follows_nothing(tmp_path):
 def test_the_closure_does_not_leave_its_scope(tmp_path):
     inside, outside = tmp_path / "in", tmp_path / "out"
     inside.mkdir(); outside.mkdir()
-    (inside / "a.py").write_text("from shared.plugins.x import y\nimport httpx\n")
+    (inside / "a.py").write_text("from jaato_server.shared.plugins.x import y\nimport httpx\n")
     names, walked = D.import_closure([inside / "a.py"], inside)
     assert list(names) == ["httpx"] and len(walked) == 1
 

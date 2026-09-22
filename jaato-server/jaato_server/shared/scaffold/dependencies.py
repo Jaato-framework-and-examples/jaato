@@ -47,7 +47,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 # one; the module is stdlib-only and imports nothing back.
 from jaato_sdk import release_channels as _release_channels
 
-FIRST_PARTY = {"shared", "server", "jaato_sdk", "jaato_embedded", "jaato_premium"}
+FIRST_PARTY = {"jaato_server", "jaato_sdk", "jaato_embedded", "jaato_premium"}
 #: The jaato distributions this repository knows the names of.  It is a SEED,
 #: not the answer: :func:`framework_dists` unions it with whatever jaato-named
 #: distribution is actually installed, so a distribution shipped separately —
@@ -246,18 +246,25 @@ def _parse(path: Path) -> Optional[ast.Module]:
 
 @lru_cache(maxsize=None)
 def _first_party_roots() -> Dict[str, Path]:
-    """``{"shared": Path(...), "jaato_sdk": Path(...)}`` — found, not assumed.
+    """``{"jaato_server": Path(...), "jaato_sdk": Path(...)}`` — found, not assumed.
 
     Resolved on the filesystem rather than with ``find_spec`` because
     importing a first-party package executes it, and this module's whole
     contract is that a package which cannot be imported still gets reported.
-    Both layouts answer: a venv (every root a sibling in site-packages) and
-    the source checkout (``jaato-server/shared`` beside ``jaato-server/server``,
-    with ``jaato-sdk/jaato_sdk`` found through ``sys.path``).
+    ``jaato_server`` is this module's OWN top-level package, so its directory
+    is ``here.parent`` in both layouts (a venv's ``site-packages/jaato_server``
+    and the source checkout's ``jaato-server/jaato_server``) and is seeded
+    directly rather than guessed. The siblings (``jaato_sdk`` etc.) are found
+    beside it — as siblings in site-packages, or through ``sys.path`` in the
+    source checkout, where the editable installs put each package's containing
+    directory on the path.
     """
     roots: Dict[str, Path] = {}
-    here = Path(__file__).resolve().parents[1]          # .../shared
-    candidates = [here.parent] + [Path(p) for p in sys.path if p]
+    here = Path(__file__).resolve().parents[1]          # .../jaato_server/shared
+    pkg_dir = here.parent                               # .../jaato_server
+    if (pkg_dir / "__init__.py").is_file():
+        roots["jaato_server"] = pkg_dir.resolve()
+    candidates = [pkg_dir.parent] + [Path(p) for p in sys.path if p]
     for parent in candidates:
         for pkg in FIRST_PARTY:
             if pkg in roots:

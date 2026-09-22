@@ -219,7 +219,7 @@ def check_python_env() -> List[Check]:
     """Verify the interpreter can import what an SDK client needs.
 
     Autostart launches the daemon via ``python -m jaato_server`` using the
-    *current* ``sys.executable`` — so ``server`` must be importable on
+    *current* ``sys.executable`` — so ``jaato_server`` must be importable on
     this interpreter, not just ``jaato_sdk``.
     """
     checks = [Check("python", PASS, f"{sys.executable}")]
@@ -227,8 +227,8 @@ def check_python_env() -> List[Check]:
     import importlib.util as _u
     for mod, hint in (
         ("jaato_sdk", "pip install -e jaato-sdk/."),
-        ("server", "pip install -e 'jaato-server/.[all]' — required for "
-                    "autostart (python -m jaato_server)"),
+        ("jaato_server", "pip install -e 'jaato-server/.[all]' — required for "
+                         "autostart (python -m jaato_server)"),
     ):
         if _u.find_spec(mod) is not None:
             checks.append(Check(f"import {mod}", PASS, "importable"))
@@ -855,11 +855,11 @@ def check_home_match(info: DaemonInfo) -> List[Check]:
 
 
 #: The top-level packages whose EVENT SHAPES both sides must agree on.
-#: ``jaato_sdk`` holds the client's event classes and ``server`` the daemon's
-#: emitters; they are the two halves of the wire contract #823 is about.
-#: ``shared`` ships in the same distribution as ``server`` and from the same
-#: ``PYTHONPATH`` entry, so listing it would add a row and no information.
-_SKEW_PACKAGES = ("jaato_sdk", "server")
+#: ``jaato_sdk`` holds the client's event classes and ``jaato_server`` the
+#: daemon's emitters (``jaato_server.server``) plus the shared core
+#: (``jaato_server.shared``) — one top-level package since the #1079 rename,
+#: so the two halves of the wire contract #823 is about are these two names.
+_SKEW_PACKAGES = ("jaato_sdk", "jaato_server")
 
 #: Quote characters a ``pyproject.toml`` version may be wrapped in.
 _QUOTES = "\"'"
@@ -974,8 +974,8 @@ def _daemon_package_dir(pkg: str, entries: List[str],
 def _client_package_dir(pkg: str) -> Optional[Path]:
     """Where THIS process imports ``pkg`` from — the fact, not a derivation.
 
-    ``find_spec`` rather than importing: ``server`` is heavy, and the doctor
-    must be able to report on a package it would rather not execute.
+    ``find_spec`` rather than importing: ``jaato_server`` is heavy, and the
+    doctor must be able to report on a package it would rather not execute.
     """
     import importlib.util as _u
     try:
