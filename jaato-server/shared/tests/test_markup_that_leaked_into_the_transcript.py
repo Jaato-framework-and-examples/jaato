@@ -204,46 +204,55 @@ def test_an_error_cell_with_a_count_keeps_its_label():
     assert '<nb-row type="error" label="Err [3]:">' in out
 
 
-def _notebook_cell_literals() -> List[str]:
-    """Every ``<notebook-cell`` string the notebook plugin can emit.
+def _non_emitting_string_ids(tree: ast.AST) -> set:
+    """Ids of string nodes that are part of the source but emit nothing.
 
-    Read from the plugin's AST rather than listed here: the defect was an
-    emitter shape nobody checked against the formatter, and a list written
-    in this file covers only the shapes its author thought of.  An f-string
-    is rendered with a stand-in for each placeholder.
+    A docstring that MENTIONS the marker documents it; and the literal
+    fragments INSIDE an f-string are visited on their own by ``ast.walk`` --
+    the f-string is the emission, a fragment of it is not.
     """
-    source = Path(__file__).resolve().parents[1] / "plugins" / "notebook" / "plugin.py"
-    tree = ast.parse(source.read_text())
-    # A docstring that MENTIONS the marker documents it and emits nothing.
+    owners = (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
     docstrings = {
         id(owner.body[0].value)
         for owner in ast.walk(tree)
-        if isinstance(owner, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
-        and owner.body
+        if isinstance(owner, owners) and owner.body
         and isinstance(owner.body[0], ast.Expr)
         and isinstance(owner.body[0].value, ast.Constant)
     }
-    # The literal fragments INSIDE an f-string are visited on their own by
-    # ``ast.walk``; the f-string is the emission, a fragment of it is not.
     fragments = {
         id(part)
         for joined in ast.walk(tree) if isinstance(joined, ast.JoinedStr)
         for part in joined.values
     }
+    return docstrings | fragments
+
+
+def _string_text(node: ast.AST):
+    """The text a string node emits, an f-string's placeholders stood in."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.JoinedStr):
+        return "".join(
+            part.value if isinstance(part, ast.Constant) else "placeholder"
+            for part in node.values
+        )
+    return None
+
+
+def _notebook_cell_literals() -> List[str]:
+    """Every ``<notebook-cell`` string the notebook plugin can emit.
+
+    Read from the plugin's AST rather than listed here: the defect was an
+    emitter shape nobody checked against the formatter, and a list written
+    in this file covers only the shapes its author thought of.
+    """
+    source = Path(__file__).resolve().parents[1] / "plugins" / "notebook" / "plugin.py"
+    tree = ast.parse(source.read_text())
+    skip = _non_emitting_string_ids(tree)
     found: List[str] = []
     for node in ast.walk(tree):
-        if id(node) in docstrings or id(node) in fragments:
-            continue
-        if isinstance(node, ast.Constant) and isinstance(node.value, str):
-            text = node.value
-        elif isinstance(node, ast.JoinedStr):
-            text = "".join(
-                part.value if isinstance(part, ast.Constant) else "placeholder"
-                for part in node.values
-            )
-        else:
-            continue
-        if re.search(r'<notebook-cell\s+type="', text):
+        text = None if id(node) in skip else _string_text(node)
+        if text and re.search(r'<notebook-cell\s+type="', text):
             found.append(text)
     return found
 
