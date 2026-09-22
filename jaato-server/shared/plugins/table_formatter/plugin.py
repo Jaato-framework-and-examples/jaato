@@ -28,7 +28,7 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import wcwidth
 
-from shared.plugins.code_block_formatter.plugin import FENCE_CLOSE_RE, FENCE_OPEN_RE
+from shared.plugins.code_block_formatter.plugin import Fence, open_fence
 
 
 def _get_ambiguous_width() -> int:
@@ -127,9 +127,9 @@ class TableFormatterPlugin:
     ``<j-table>`` hands ``code_block_formatter`` a fence full of markup,
     which it escapes into literal, line-numbered ``&lt;j-table&gt;``
     lines that every client then renders faithfully (#1191).  Fence state
-    is decided by the SAME two patterns that formatter opens and closes
-    on, imported rather than restated, so the two cannot disagree about
-    which lines are code.
+    is decided by that formatter's own :func:`open_fence` and
+    :meth:`Fence.closes`, imported rather than restated, so the two
+    cannot disagree about which lines are code.
 
     Fence state is tracked on COMPLETE lines, and a line can arrive in
     pieces: a head with no ``|`` is passed straight through for streaming
@@ -137,8 +137,8 @@ class TableFormatterPlugin:
     that already-yielded head so the completed line is judged whole --
     otherwise a ````py`` split from its newline would never open a fence.
 
-    State: ``_in_fence`` flips on an opener line outside a fence and on a
-    closer line inside one; ``flush()`` and ``reset()`` both clear it,
+    State: ``_fence`` is set by an opener line outside a fence and cleared
+    by that fence's own closer; ``flush()`` and ``reset()`` both clear it,
     because ``code_block_formatter``'s own ``flush()`` closes an
     unterminated block and the two must agree after a flush too.
     """
@@ -156,7 +156,8 @@ class TableFormatterPlugin:
         self._line_buffer: str = ""
 
         # Fence tracking (#1191): inside a fence nothing is rewritten.
-        self._in_fence = False
+        # The open fence itself, because only its own closer ends it.
+        self._fence: Optional[Fence] = None
         # The head of the current line already yielded before its newline
         # arrived, so the completed line can be judged whole.
         self._fence_line_prefix: str = ""
@@ -290,7 +291,7 @@ class TableFormatterPlugin:
         Never inside a fence: nothing there is rewritten, so holding it
         back would only cost streaming latency.
         """
-        if self._in_fence:
+        if self._fence is not None:
             return False
         return self._in_table or self._looks_like_table_content(text)
 
@@ -299,16 +300,17 @@ class TableFormatterPlugin:
 
         Returns True for the opener, every line inside the fence, and the
         closer -- the lines this formatter must pass through unchanged.
-        The patterns are ``code_block_formatter``'s own (see the class
-        docstring): the opener is searched with the line's newline
-        restored, because that is how that formatter sees it.
+        The rule is ``code_block_formatter``'s own (see the class
+        docstring): the line is judged whole, from its start, as that
+        formatter judges it.
         """
-        if self._in_fence:
-            if FENCE_CLOSE_RE.search(line):
-                self._in_fence = False
+        if self._fence is not None:
+            if self._fence.closes(line):
+                self._fence = None
             return True
-        if FENCE_OPEN_RE.search(line + "\n"):
-            self._in_fence = True
+        found = open_fence(line)
+        if found:
+            self._fence = found[1]
             return True
         return False
 
@@ -374,7 +376,7 @@ class TableFormatterPlugin:
         renders an unterminated block and forgets it, so after a flush the
         two formatters must again agree that no fence is open.
         """
-        self._in_fence = False
+        self._fence = None
         self._fence_line_prefix = ""
         # First, handle any incomplete line in the line buffer
         if self._line_buffer:
@@ -402,7 +404,7 @@ class TableFormatterPlugin:
         self._in_table = False
         self._table_type = None
         self._line_buffer = ""
-        self._in_fence = False
+        self._fence = None
         self._fence_line_prefix = ""
 
     # ==================== Table Parsing ====================

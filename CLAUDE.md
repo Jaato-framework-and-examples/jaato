@@ -7108,6 +7108,47 @@ Guards: `shared/tests/test_markup_that_leaked_into_the_transcript.py` (four
 reversions) and the web client's `nbmarkup.test.ts` / `JMarkup.test.tsx`
 plus two e2e cases.
 
+### Prose Drawn as a Code Block, Because a Fence Never Closed
+
+Reported with a web-client screenshot: the second half of an ordinary reply
+(the model's headings, its questions to the user, its closing line) rendered
+monospaced, line-numbered and syntax-coloured as one `<j-code>` block
+running to the end of the message. Clients draw a `<j-code>` block
+faithfully, so the defect is where the block is decided:
+`code_block_formatter`.
+
+Its opener was `` ```(\w*)\n `` and its closer any line that STARTED with
+three backticks. So an opener the pattern did not recognise was passed
+through as text, and ITS closer then opened a block that nothing closed:
+
+| Input | What went wrong |
+|---|---|
+| `` ```c++ ``, `` ```shell-session ``, `` ```text `` (trailing space), `` ```python title="x" `` | the opener was not seen |
+| a four-backtick fence quoting a three-backtick one | the inner fence closed the outer, and every later fence was read the wrong way round |
+| a closer indented inside a list item | never seen at all |
+
+The rule is CommonMark's now, in one place (`open_fence` / `Fence` in
+`code_block_formatter/plugin.py`), and the table formatter imports it, as
+#1191 requires:
+
+- an opener at a line start takes any info string, and the language is its
+  first word;
+- a closer is a line holding only a run of the **same** character, at least
+  as long as the opener's run;
+- both may be indented, and the opener's indent is removed from the code;
+- `~~~` fences work.
+
+The old mid-line opener (`` text ```py ``) is kept, with its old narrow info
+string, because models write it. The text held back while streaming is
+unchanged: only an incomplete line that could still turn out to be an
+opener waits for its newline. One behaviour changes: a closer now needs its
+line to end, so a block completes when the closer's newline arrives, or at
+`flush`, rather than on the closer's backticks alone.
+
+Guard: `shared/tests/test_prose_drawn_as_a_code_block.py`, three
+reversions. Every fixture is also streamed one character at a time and in
+random pieces.
+
 ### A Reset the Next Reconnect Undid (#1189)
 
 The TUI's workspace panel has `workspace_clear` (Delete): empty the list so
