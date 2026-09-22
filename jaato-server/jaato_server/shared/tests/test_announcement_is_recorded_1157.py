@@ -301,7 +301,7 @@ def test_the_schema_names_the_event_in_the_ledger_and_its_writer():
     event = audit.event("announcement")
     assert event is not None, "AUDIT_SCHEMA declares no `announcement` event"
     assert event.store == "ledger", "the record must ride the store that chains"
-    assert event.written_by == "shared/ai_disclosure.py::announcement_record"
+    assert event.written_by == "jaato_server/shared/ai_disclosure.py::announcement_record"
     guaranteed = set(audit.guaranteed_fields("announcement"))
     assert {"session_id", "agent_id", "delivered", "suppressed", "revived"} <= guaranteed
     # And the facts the issue asks to bind are declared, as measured-when-known.

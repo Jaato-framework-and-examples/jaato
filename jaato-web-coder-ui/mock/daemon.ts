@@ -27,6 +27,14 @@
  *                 daemon sends it: input / stdout / error <nb-row>s
  *   "…early…notebook…" → the early-exit error cell (no execution count);
  *                 not as the first word, which the composer runs as a command
+ *   "…touch a.py b.py" → the workspace monitor reports those files as
+ *                 modified, numbered like the daemon's (#1189); not as the
+ *                 first word, which the composer runs as a command
+ *   "…discover tools" → a ``list_tools`` call whose argument is a hashed
+ *                 category id, then the ``tools.id_registry`` naming it --
+ *                 AFTER the call, as the daemon may send it
+ *   "…collect garbage" → one GC pass (``gc`` started, then completed,
+ *                 freeing 14 200 tokens), remembered and replayed on attach
  *   "subagent"  → spawns a subagent that streams in its own tab
  *   "model this is broken" (verbatim test) → echoes the text back
  *   anything else → a short streamed markdown reply
@@ -75,6 +83,52 @@ interface Client {
 const STAGE_PER_FILE_LIMIT = 10 * 1024 * 1024;
 const STAGE_TOTAL_LIMIT = 50 * 1024 * 1024;
 
+/**
+ * The session's workspace monitor, as the daemon keeps it (#1189): every
+ * flushed batch is numbered one more than the last, each path remembers the
+ * number of its latest change, and ``epoch`` names the monitor instance.
+ * Keyed by session, not by connection -- a reconnecting client attaches to
+ * the same monitor and gets its snapshot, which is what the Files panel's
+ * reset has to survive.
+ */
+interface MockMonitor { epoch: string; seq: number; files: Map<string, { status: string; seq: number }> }
+const MONITORS = new Map<string, MockMonitor>();
+function monitorFor(c: Client): MockMonitor {
+  const key = c.sessionId ?? `_client:${c.id}`;
+  let m = MONITORS.get(key);
+  if (!m) { m = { epoch: randomUUID().slice(0, 12), seq: 0, files: new Map() }; MONITORS.set(key, m); }
+  return m;
+}
+/**
+ * GC as the daemon reports it (#1190): the policy at session start, a pass
+ * as ``gc`` started / completed, and BOTH replayed to a client that
+ * attaches -- the daemon's ``_emit_gc_state`` -- with the pass carrying its
+ * own timestamp.  Keyed by session so a reconnecting client gets the replay.
+ */
+const MOCK_GC_POLICY = { strategy: "budget", threshold: 80, target_percent: 60, continuous_mode: false };
+const LAST_GC = new Map<string, Record<string, unknown>>();
+function sendGcState(c: Client): void {
+  send(c, { type: "gc.config", agent_id: "main", ...MOCK_GC_POLICY });
+  const last = c.sessionId ? LAST_GC.get(c.sessionId) : undefined;
+  if (last) send(c, last);
+}
+
+function emitWorkspaceChanges(c: Client, changes: { path: string; status: string }[]): void {
+  const m = monitorFor(c);
+  m.seq += 1;
+  for (const ch of changes) {
+    if (ch.status === "deleted") m.files.delete(ch.path);
+    else m.files.set(ch.path, { status: ch.status, seq: m.seq });
+  }
+  send(c, { type: "workspace.files_changed", changes, seq: m.seq, epoch: m.epoch });
+}
+function sendWorkspaceSnapshot(c: Client): void {
+  const m = monitorFor(c);
+  const files = [...m.files.entries()].map(([path, v]) => ({ path, status: v.status }));
+  const seqs = Object.fromEntries([...m.files.entries()].map(([path, v]) => [path, v.seq]));
+  send(c, { type: "workspace.files_snapshot", files, total: files.length, seq: m.seq, epoch: m.epoch, seqs });
+}
+
 function finishStaging(c: Client): void {
   const st = c.staging!;
   c.staging = null;
@@ -90,7 +144,7 @@ function finishStaging(c: Client): void {
   });
   send(c, { type: "workspace.files.staged", workspace_id: st.workspaceId, staged, failed });
   // The daemon's workspace monitor then reports the new files.
-  if (staged.length) send(c, { type: "workspace.files_changed", changes: staged.map((path) => ({ path, status: "created" })) });
+  if (staged.length) emitWorkspaceChanges(c, staged.map((path) => ({ path, status: "created" })));
 }
 
 /**
@@ -178,7 +232,25 @@ async function turn(c: Client, text: string, agentId = "main"): Promise<void> {
   send(c, { type: "agent.status_changed", agent_id: agentId, status: "active" });
   await sleep(50);
 
-  if (lower.includes("subagent")) {
+  const touch = /\btouch\s+(.+)$/i.exec(text);
+  if (touch) {
+    const paths = (touch[1] ?? "").split(/\s+/).filter(Boolean);
+    emitWorkspaceChanges(c, paths.map((path) => ({ path, status: "modified" })));
+    await stream(c, agentId, `Touched ${paths.join(", ")}.`);
+  } else if (lower.includes("collect garbage")) {
+    send(c, { type: "gc", agent_id: agentId, phase: "started", trigger_reason: "manual", strategy: "budget" });
+    await sleep(30);
+    const done = { type: "gc", agent_id: agentId, phase: "completed", trigger_reason: "manual", strategy: "budget", success: true, tokens_before: 90000, tokens_after: 75800, tokens_freed: 14200, timestamp: new Date(Date.now() - 12 * 60_000).toISOString() };
+    if (c.sessionId) LAST_GC.set(c.sessionId, done);
+    send(c, done);
+    await stream(c, agentId, "Collected.");
+  } else if (lower.includes("discover tools")) {
+    const callId = randomUUID();
+    send(c, { type: "tool.call_start", agent_id: agentId, tool_name: "list_tools", tool_args: { category_id: "c_bbc5e661" }, call_id: callId });
+    send(c, { type: "tool.call_end", agent_id: agentId, tool_name: "list_tools", call_id: callId, success: true, duration_seconds: 0.01, error_message: null, show_output: false });
+    send(c, { type: "tools.id_registry", mappings: { c_bbc5e661: "system", t_a3f2b1c0: "cli_based_tool" } });
+    await stream(c, agentId, "I have a system category.");
+  } else if (lower.includes("subagent")) {
     const subId = `sub-${randomUUID().slice(0, 6)}`;
     send(c, { type: "agent.created", agent_id: subId, agent_name: "researcher", agent_type: "subagent", parent_agent_id: agentId, profile_name: "researcher" });
     await stream(c, agentId, "Delegating to a researcher subagent…\n");
@@ -215,7 +287,7 @@ async function turn(c: Client, text: string, agentId = "main"): Promise<void> {
     send(c, { type: "permission.resolved", agent_id: agentId, request_id: reqId, tool_name: "write_file", granted, method: "user" });
     send(c, { type: "tool.call_end", agent_id: agentId, tool_name: "write_file", call_id: callId, success: granted, duration_seconds: 0.21, error_message: granted ? null : "Permission denied by user", show_output: false });
     // WorkspaceFilesChangedEvent.changes carries {path, status} — the daemon's key.
-    if (granted) send(c, { type: "workspace.files_changed", changes: [{ path: "src/app.py", status: "modified" }, { path: ".jaato/logs/session.log", status: "created" }] });
+    if (granted) emitWorkspaceChanges(c, [{ path: "src/app.py", status: "modified" }, { path: ".jaato/logs/session.log", status: "created" }]);
     await stream(c, agentId, granted ? `Written (you answered \`${answer}\`).` : "Understood, not writing the file.");
   } else if (lower.includes("ask")) {
     const reqId = randomUUID();
@@ -237,6 +309,18 @@ async function turn(c: Client, text: string, agentId = "main"): Promise<void> {
     const choices = ["React 19", "Svelte 5", "Solid"];
     const first = /^\d+$/.test(answers[0] ?? "") ? (choices[Number(answers[0]) - 1] ?? answers[0]) : answers[0];
     await stream(c, agentId, `Thanks — you chose **${first}** and said "${answers[1]}".`);
+  } else if (lower.includes("live")) {
+    // A tool still RUNNING with output on screen, until ``session.stop``: the
+    // live-output popup exists only in that window, which the no-delay e2e
+    // mock would otherwise close before a test could look at it.
+    const callId = randomUUID();
+    send(c, { type: "tool.call_start", agent_id: agentId, tool_name: "cli_based_tool", tool_args: { command: "npm test" }, call_id: callId });
+    for (const line of ["> vitest run", " ✓ src/app.test.ts (12 tests)", " RUN  src/slow.test.ts"]) {
+      send(c, { type: "tool.output", agent_id: agentId, call_id: callId, chunk: line + "\n" });
+    }
+    await new Promise<void>((r) => c.pending.set("hang", () => r()));
+    send(c, { type: "tool.call_end", agent_id: agentId, tool_name: "cli_based_tool", call_id: callId, success: false, duration_seconds: 1.2 });
+    await stream(c, agentId, "Stopped mid-turn.");
   } else if (lower.includes("hang")) {
     // A turn that runs until ``session.stop``: how a test presses Exit
     // mid-turn without betting on a clock (the e2e mock runs with no delays).
@@ -288,7 +372,7 @@ async function turn(c: Client, text: string, agentId = "main"): Promise<void> {
   } else if (lower.includes("code")) {
     await stream(c, agentId, CODE_REPLY, 10);
   } else {
-    await stream(c, agentId, `You said: *${text.replace(/\*/g, "")}*\n\nThis is the **mock daemon**. Try \`code\`, \`tool\`, \`permit\`, \`ask\`, \`fail\` or \`subagent\`.`);
+    await stream(c, agentId, `You said: *${text.replace(/\*/g, "")}*\n\nThis is the **mock daemon**. Try \`code\`, \`tool\`, \`live\`, \`permit\`, \`ask\`, \`fail\` or \`subagent\`.`);
   }
 
   send(c, { type: "context.updated", agent_id: agentId, usage: { prompt_tokens: 1200, output_tokens: 340, total_tokens: 1540, cache_read_tokens: 800 }, context_limit: 200000, percent_used: 0.77, tokens_remaining: 198460, turns: 1 });
@@ -380,6 +464,7 @@ wss.on("connection", (ws, req) => {
           send(c, { type: "session.info", session_name: "mock session", model_provider: "mock", model_name: "mock-1", profile_name: args.includes("--profile") ? args[args.indexOf("--profile") + 1] : null, models: ["mock-1", "mock-2"], sessions: sessionListing(c) });
           // PermissionStatusEvent, emitted by the daemon at init: effective_default + suspension_scope.
           send(c, { type: "permission.status", ...c.policy });
+          send(c, { type: "gc.config", agent_id: "main", ...MOCK_GC_POLICY });
           send(c, { type: "system.message", message: "Connected to the mock daemon. Try: code, tool, permit, ask, fail, subagent.", style: "info" });
         } else if (cmd === "mock-auth") {
           // A daemon-level auth plugin command: works with NO session, like
@@ -425,6 +510,10 @@ wss.on("connection", (ws, req) => {
             // else: the workspace selection is the client's own to re-assert.
             send(c, { type: "agent.created", agent_id: "main", agent_name: "main", agent_type: "main", profile_name: null });
             send(c, { type: "session.info", session_id: target, session_name: "mock session", model_provider: "mock", model_name: "mock-1", profile_name: null, models: ["mock-1", "mock-2"], sessions: sessionListing(c) });
+            // The daemon rebuilds an attaching client's Files mirror with a
+            // snapshot -- sent even when empty, since it carries the epoch.
+            sendWorkspaceSnapshot(c);
+            sendGcState(c);
             break;
           }
           send(c, { type: "agent.created", agent_id: "main", agent_name: "main", agent_type: "main", profile_name: null });

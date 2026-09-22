@@ -13,6 +13,14 @@
  *   entry from then on, but does not remove what the panel already shows —
  *   pair it with hide for that.
  *
+ * - **reset** (TUI ``Delete``, ``workspace_clear``): empty the panel so it
+ *   shows only files that change from now on -- including a file it already
+ *   listed, if the agent touches it again.  **show everything** drops the
+ *   reset.  Per viewer; it changes what this panel shows and nothing on the
+ *   daemon.  The reset survives a reconnect because the daemon numbers every
+ *   change (``store/workspaceView.ts``), and is dropped, with a notice, when
+ *   it cannot be honoured.
+ *
  * Entry ids match the TUI's: a directory is its path with a trailing ``/``,
  * a file is its workspace-relative path.  The section header (``Files``
  * and the count) is the rail's; this is the body.
@@ -20,6 +28,7 @@
 import { useMemo } from "react";
 import { useJaato } from "@/store/store";
 import { toggleWorkspaceIgnore } from "@/app/actions";
+import { visibleFiles } from "@/store/workspaceView";
 
 interface Node { name: string; path: string; change?: string; children: Map<string, Node> }
 
@@ -102,8 +111,35 @@ function Tree({ node, depth, hidden, showHidden, ignored }: { node: Node; depth:
   );
 }
 
-export function WorkspacePanel() {
+/** The Files panel's files after its reset point, if one is set. */
+export function useVisibleWorkspaceFiles(): Record<string, string> {
   const files = useJaato((s) => s.workspaceFiles);
+  const seqs = useJaato((s) => s.workspaceSeqs);
+  const reset = useJaato((s) => s.workspaceReset);
+  return useMemo(() => visibleFiles({ files, seqs, reset }), [files, seqs, reset]);
+}
+
+function ResetBar({ total, isReset }: { total: number; isReset: boolean }) {
+  const reset = useJaato((s) => s.resetWorkspaceView);
+  const showAll = useJaato((s) => s.showAllWorkspace);
+  const all = useJaato((s) => Object.keys(s.workspaceFiles).length);
+  if (!isReset && total === 0) return null;
+  return (
+    <div className="mb-2 text-[11px] text-text-muted flex items-center gap-2 flex-wrap">
+      {isReset && <span>Showing changes since the reset{all > total ? ` (${all - total} earlier not shown)` : ""}.</span>}
+      {isReset && <button type="button" className="link" onClick={showAll}>show everything</button>}
+      {total > 0 && (
+        <button type="button" className="link" onClick={reset} title="Empty the panel; only files that change from now on will appear, including ones already listed">
+          {isReset ? "reset again" : "reset"}
+        </button>
+      )}
+    </div>
+  );
+}
+
+export function WorkspacePanel() {
+  const files = useVisibleWorkspaceFiles();
+  const isReset = useJaato((s) => s.workspaceReset !== null);
   const hidden = useJaato((s) => s.workspaceHidden);
   const showHidden = useJaato((s) => s.workspaceShowHidden);
   const toggleShowHidden = useJaato((s) => s.toggleWorkspaceShowHidden);
@@ -117,7 +153,8 @@ export function WorkspacePanel() {
       {notice && (
         <div role="status" className={`text-[11px] mb-2 ${notice.error ? "text-error" : "text-text-muted"}`}>{notice.text}</div>
       )}
-      {total === 0 ? <div className="text-xs text-text-muted italic">No files changed yet.</div> : <Tree node={tree} depth={0} hidden={hidden} showHidden={showHidden} ignored={ignored} />}
+      <ResetBar total={total} isReset={isReset} />
+      {total === 0 ? <div className="text-xs text-text-muted italic">{isReset ? "No files changed since the reset." : "No files changed yet."}</div> : <Tree node={tree} depth={0} hidden={hidden} showHidden={showHidden} ignored={ignored} />}
       {hiddenCount > 0 && (
         <div className="mt-2 text-[11px] text-text-muted flex items-center gap-2">
           <span>{hiddenCount} hidden</span>

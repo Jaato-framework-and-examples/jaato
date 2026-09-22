@@ -23,7 +23,7 @@ import { ClarificationPrompt } from "@/components/prompts/ClarificationPrompt";
 import { ReferenceSelectionPrompt } from "@/components/prompts/ReferenceSelectionPrompt";
 import { PlanPanel, planProgress } from "@/components/panels/PlanPanel";
 import { BudgetPanel } from "@/components/panels/BudgetPanel";
-import { WorkspacePanel } from "@/components/panels/WorkspacePanel";
+import { WorkspacePanel, useVisibleWorkspaceFiles } from "@/components/panels/WorkspacePanel";
 import { SessionRow, SessionsPanel, notedSummary } from "@/components/panels/SessionsPanel";
 import { AgentTabs } from "@/components/panels/AgentTabs";
 import { StatusBar } from "@/components/layout/StatusBar";
@@ -92,7 +92,8 @@ function Rail({ agentId }: { agentId: string }) {
   const toggle = useJaato((s) => s.toggleUi);
   const plan = useJaato((s) => s.plan[agentId]);
   const ctx = useJaato((s) => s.context[agentId]);
-  const changed = useJaato((s) => Object.keys(s.workspaceFiles).length);
+  const changed = Object.keys(useVisibleWorkspaceFiles()).length;
+  const isReset = useJaato((s) => s.workspaceReset !== null);
   const sessions = useJaato((s) => s.sessions);
   const notes = useJaato((s) => s.notes);
   const budget = ctx?.usage.cost_usd != null ? `$${Number(ctx.usage.cost_usd).toFixed(4)}` : ctx?.percentUsed != null ? `${ctx.percentUsed.toFixed(0)}%` : null;
@@ -100,7 +101,7 @@ function Rail({ agentId }: { agentId: string }) {
     <aside className="hidden md:flex shrink-0 border-l hairline bg-surface flex-col min-h-0 overflow-auto" style={{ width: ui.railWidth }} aria-label="Session rail">
       <RailSection title="Plan" value={planProgress(plan)} open={ui.showPlan} onToggle={() => toggle("showPlan")}><PlanPanel agentId={agentId} /></RailSection>
       <RailSection title="Budget" value={budget} open={ui.showBudget} onToggle={() => toggle("showBudget")}><BudgetPanel agentId={agentId} /></RailSection>
-      <RailSection title="Files" value={changed ? `${changed} changed` : null} open={ui.showWorkspace} onToggle={() => toggle("showWorkspace")}><WorkspacePanel /></RailSection>
+      <RailSection title="Files" value={changed ? `${changed} ${isReset ? "since reset" : "changed"}` : isReset ? "reset" : null} open={ui.showWorkspace} onToggle={() => toggle("showWorkspace")}><WorkspacePanel /></RailSection>
       <RailSection title="Sessions" value={notedSummary(sessions, notes)} open={ui.showSessions} onToggle={() => toggle("showSessions")}><SessionsPanel /></RailSection>
     </aside>
   );

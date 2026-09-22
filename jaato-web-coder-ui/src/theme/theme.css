@@ -82,10 +82,19 @@ button, input, select, textarea { border-radius: 0; font-family: inherit; }
    ``--plate-edge`` recolours the border for a plate that means
    something — steel for the focused / primary one, warning for a
    permission request. */
-.plate {
-  position: relative;
-  background: var(--c-surface);
-  border: 1px solid var(--plate-edge, var(--c-divider));
+/* In the components layer, not unlayered: an unlayered rule outranks every
+   Tailwind utility whatever its specificity, so ``position: relative`` here
+   silently cancelled the ``absolute`` of every floating plate -- the live
+   tool-output popup and the command proposals sat in normal flow, and the
+   popup's ``right-5`` then pushed it off the left edge of the transcript.
+   A plate is positioned by default (its corner marks need it) and a
+   caller's utility may say otherwise. */
+@layer components {
+  .plate {
+    position: relative;
+    background: var(--c-surface);
+    border: 1px solid var(--plate-edge, var(--c-divider));
+  }
 }
 .plate-ground { background: var(--c-bg); }
 .plate-steel { --plate-edge: var(--c-steel); }

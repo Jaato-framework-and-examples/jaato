@@ -8,7 +8,9 @@
  * by instruction source, with each layer's GC policy -- and it was on the
  * wire the whole time as `InstructionBudgetEvent` and read by nobody.
  */
+import { useEffect, useState } from "react";
 import { describeToolCalls } from "@/protocol/turnStats";
+import { POLICY_EXPLAINED, describeGcPolicy, describeLastPass, lastPassTitle } from "@/protocol/gc";
 import type { BudgetEntry, BudgetState } from "@/store/types";
 import { useJaato } from "@/store/store";
 
@@ -101,7 +103,7 @@ function BudgetRow({
         {name}
       </span>
       <span className="font-mono text-[11px] tabular-nums">{fmt(tokens)}</span>
-      <span className={"text-[11px] " + policyClass(entry.gc_policy)} title={entry.gc_policy ?? ""}>
+      <span className={"text-[11px] " + policyClass(entry.gc_policy)} title={POLICY_EXPLAINED[entry.gc_policy ?? ""] ?? entry.gc_policy ?? ""}>
         {glyph}
       </span>
       <span className="col-span-3 bar h-[3px]">
@@ -160,13 +162,53 @@ function BudgetTable({ budget, expanded, onToggle }: {
   );
 }
 
+/** Re-render on a slow tick so "12 min ago" stays true without an event. */
+function useNow(periodMs = 30_000): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), periodMs);
+    return () => clearInterval(t);
+  }, [periodMs]);
+  return now;
+}
+
+/**
+ * The GC line under the Instructions heading (#1190): the last pass and the
+ * policy, both subordinate to the tracked total.  Whatever the daemon has not
+ * said is not rendered as a fact -- "no GC pass reported yet" rather than
+ * "never collected".
+ */
+function GcSummary({ agentId }: { agentId: string }) {
+  const gc = useJaato((s) => s.gc[agentId]);
+  const now = useNow();
+  const policy = describeGcPolicy(gc?.config);
+  const failed = gc?.lastPass && !gc.lastPass.success;
+  return (
+    <div className="mb-2 font-mono text-[11px] text-text-muted" data-testid="gc-summary">
+      <div className={failed ? "text-error" : ""} title={gc?.lastPass ? lastPassTitle(gc.lastPass) : undefined}>
+        <span aria-hidden="true">◷ </span>{describeLastPass(gc, now)}
+      </div>
+      {policy && <div className={gc?.config?.strategy ? "" : "text-warning"}>{policy}</div>}
+    </div>
+  );
+}
+
 export function BudgetPanel({ agentId }: { agentId: string }) {
   const ctx = useJaato((s) => s.context[agentId]);
   const budget = useJaato((s) => s.budget[agentId]);
   const expanded = useJaato((s) => s.budgetExpanded);
   const toggleSource = useJaato((s) => s.toggleBudgetSource);
   if (!ctx && !budget) {
-    return <div className="px-3.5 py-3 text-xs text-text-muted italic">No usage reported yet.</div>;
+    // The GC line still shows: the policy and the last pass are known
+    // before any usage is -- a client that attached late is told them by
+    // the daemon's replay, and hiding them behind "no usage" is the gap
+    // #1190 exists to close.
+    return (
+      <div className="px-3.5 py-3">
+        <GcSummary agentId={agentId} />
+        <div className="text-xs text-text-muted italic">No usage reported yet.</div>
+      </div>
+    );
   }
   const pct =
     ctx?.percentUsed ??
@@ -192,12 +234,15 @@ export function BudgetPanel({ agentId }: { agentId: string }) {
           {budget ? `${fmt(budget.totalTokens)} tracked` : ""}
         </span>
       </div>
+      <GcSummary agentId={agentId} />
       {budget ? (
         <>
           <BudgetTable budget={budget} expanded={expanded} onToggle={toggleSource} />
           <div className="mt-2 text-[11px] text-text-muted">
-            {POLICY_GLYPH.locked} never collected &middot; {POLICY_GLYPH.partial} partly &middot;{" "}
-            {POLICY_GLYPH.ephemeral} freely
+            <span title={POLICY_EXPLAINED.locked}>{POLICY_GLYPH.locked} never collected</span> &middot;{" "}
+            <span title={POLICY_EXPLAINED.partial}>{POLICY_GLYPH.partial} partly</span> &middot;{" "}
+            <span title={POLICY_EXPLAINED.ephemeral}>{POLICY_GLYPH.ephemeral} freely</span>
+            <div className="mt-0.5">The icons show what GC is allowed to reclaim from each layer, not what it recently did.</div>
           </div>
         </>
       ) : (

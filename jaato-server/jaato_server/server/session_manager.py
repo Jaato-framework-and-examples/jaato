@@ -6220,8 +6220,12 @@ class SessionManager:
                 if session:
                     session.is_dirty = True
 
+            # #1189: the monitor hands over a ChangeBatch carrying the
+            # batch's number; getattr keeps a plain list working.
             self._emit_to_session(session_id, WorkspaceFilesChangedEvent(
-                changes=changes,
+                changes=list(changes),
+                seq=getattr(changes, "seq", None),
+                epoch=getattr(changes, "epoch", None),
             ))
 
         monitor = WorkspaceMonitor(workspace_path, on_changed=on_changed)
@@ -6322,12 +6326,20 @@ class SessionManager:
         if not monitor:
             return
 
+        # Sent even when EMPTY (#1189).  An empty snapshot used to be
+        # skipped, which left a reconnecting client showing whatever it held
+        # before -- and now the snapshot is also what carries the monitor's
+        # ``epoch``, the only way a client learns that a "changed since"
+        # mark it holds belongs to a monitor that no longer exists.
         snapshot = monitor.get_snapshot()
-        if snapshot:
-            self._emit_to_client(client_id, WorkspaceFilesSnapshotEvent(
-                files=snapshot,
-                total=monitor.active_file_count,
-            ))
+        numbering = monitor.get_sequence_state()
+        self._emit_to_client(client_id, WorkspaceFilesSnapshotEvent(
+            files=snapshot,
+            total=monitor.active_file_count,
+            seq=numbering["seq"],
+            epoch=numbering["epoch"],
+            seqs=numbering["seqs"],
+        ))
 
     #: Path-bearing ``ClientConfigRequest`` fields, in the order they are
     #: reported.  Every one of them is interpreted by the DAEMON's

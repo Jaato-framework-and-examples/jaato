@@ -30,6 +30,7 @@ IPC broadcast) do not need additional synchronisation.
 
 import logging
 import os
+import secrets
 import threading
 import time
 from pathlib import Path
@@ -51,6 +52,34 @@ logger = logging.getLogger(__name__)
 # How long (seconds) to wait after the last filesystem event before flushing
 # the accumulated changes as a single batched event.
 _DEBOUNCE_SECONDS = 0.3
+
+
+class ChangeBatch(list):
+    """One flushed batch of ``{"path", "status"}`` dicts, stamped (#1189).
+
+    A ``list`` subclass so every existing ``on_changed`` callback keeps
+    receiving exactly what it always did; a caller that wants the stamp
+    reads the two attributes.
+
+    Attributes:
+        seq: The monitor's change sequence number for this batch.  Strictly
+            increasing within one monitor instance, so "changed after X" is
+            ``seq > X`` -- a counter rather than a wall clock, because
+            ordering is all a reader needs and a counter cannot skew between
+            the daemon and a browser.
+        epoch: The identity of the monitor instance that numbered it.  A
+            ``seq`` means nothing outside its epoch: a monitor rebuilt on
+            session reload starts counting again, and a reader holding a
+            ``seq`` from the previous monitor must treat it as void rather
+            than compare it -- compared, every new change would sort BELOW a
+            stale high-water mark and a filtered view would stay empty with
+            nothing saying why.
+    """
+
+    def __init__(self, items=(), *, seq: int = 0, epoch: str = ""):
+        super().__init__(items)
+        self.seq = seq
+        self.epoch = epoch
 
 
 class _ChangeAccumulator:
@@ -173,6 +202,18 @@ class WorkspaceMonitor:
     Files created and then deleted within the same session vanish from
     ``tracked`` entirely.
 
+    Change numbering (#1189): every flushed batch is stamped with ``seq``, one
+    more than the last, and each tracked path remembers the ``seq`` of its
+    latest change (``file_seqs``).  ``epoch`` names this monitor instance and
+    is NOT persisted: ``restore()`` brings back the tracked state of a
+    previous instance with no ``seq`` of its own (they read as 0), so a
+    reader holding a mark from before a session reload sees a different
+    epoch and must discard the mark rather than compare it.  That is what
+    lets a client show "only what changed since I reset the panel" across a
+    reconnect -- the snapshot a reconnecting client receives carries the
+    ``seq`` of every entry -- without a session reload silently emptying the
+    view.
+
     Attributes:
         workspace_path: The root directory being monitored.
         tracked: Current delta dict ``{path: status}``.  Workspace files use
@@ -199,6 +240,11 @@ class WorkspaceMonitor:
         self._lock = threading.Lock()
         self.baseline: Set[str] = set()
         self.tracked: Dict[str, str] = {}
+        # #1189: see the class docstring.  ``file_seqs`` holds only paths
+        # present in ``tracked``.
+        self.epoch: str = secrets.token_hex(6)
+        self.seq: int = 0
+        self.file_seqs: Dict[str, int] = {}
 
         # Build gitignore filter eagerly so it's available before start() —
         # add_sandbox_path() may be called pre-start and needs to filter the
@@ -432,6 +478,25 @@ class WorkspaceMonitor:
                 {"path": p, "status": s} for p, s in self.tracked.items()
             ]
 
+    def get_sequence_state(self) -> Dict[str, object]:
+        """The change numbering a snapshot carries beside its entries (#1189).
+
+        Returns:
+            ``{"epoch": str, "seq": int, "seqs": {path: int}}`` -- this
+            monitor's identity, its latest batch number, and the batch number
+            of every tracked path's latest change.  A path restored from a
+            previous monitor and not changed since has no entry, which a
+            reader reads as 0: older than anything this monitor numbered.
+        """
+        with self._lock:
+            return {
+                "epoch": self.epoch,
+                "seq": self.seq,
+                "seqs": {
+                    p: n for p, n in self.file_seqs.items() if p in self.tracked
+                },
+            }
+
     def get_tracked_dict(self) -> Dict[str, str]:
         """Return a copy of the tracked dict for persistence.
 
@@ -457,6 +522,10 @@ class WorkspaceMonitor:
         """
         with self._lock:
             self.tracked = dict(tracked)
+            # #1189: a restored entry has no number here -- the previous
+            # monitor's numbers mean nothing in this epoch -- so it reads as
+            # 0 until it changes again.  A number THIS monitor assigned
+            # before the restore stays: that change did happen in this epoch.
             if baseline is not None:
                 self.baseline = set(baseline)
 
@@ -550,6 +619,11 @@ class WorkspaceMonitor:
                     else:
                         del self.tracked[f]
                         changes.append({"path": f, "status": "deleted"})
+
+            # #1189: what changed while the server was down changed after
+            # anything a previous monitor numbered, so it takes a number of
+            # this one's (none, when nothing changed).
+            self._stamp_locked(changes)
 
         return changes
 
@@ -782,13 +856,36 @@ class WorkspaceMonitor:
 
         self._accumulator.record(key, new_status)
 
+    def _stamp_locked(self, changes: List[Dict[str, str]]) -> int:
+        """Number one batch and record it per path.  Caller holds ``_lock``.
+
+        A path the batch deleted outright (no longer in ``tracked``) drops its
+        number with it, so ``file_seqs`` never outgrows ``tracked``.  An
+        empty batch takes no number.
+        """
+        if not changes:
+            return self.seq
+        self.seq += 1
+        for change in changes:
+            path = change["path"]
+            if path in self.tracked:
+                self.file_seqs[path] = self.seq
+            else:
+                self.file_seqs.pop(path, None)
+        return self.seq
+
     def _handle_flush(self, changes: List[Dict[str, str]]) -> None:
         """Called by the accumulator after the debounce period.
 
-        Forwards the batched changes to the external callback.
+        Stamps the batch with the next ``seq`` (#1189) and forwards it to the
+        external callback as a :class:`ChangeBatch` -- still a list of
+        ``{"path": str, "status": str}`` dicts, with ``seq`` / ``epoch``
+        attributes for a caller that wants them.
 
         Args:
             changes: List of ``{"path": str, "status": str}`` dicts.
         """
         if changes:
-            self._on_changed(changes)
+            with self._lock:
+                seq = self._stamp_locked(changes)
+            self._on_changed(ChangeBatch(changes, seq=seq, epoch=self.epoch))

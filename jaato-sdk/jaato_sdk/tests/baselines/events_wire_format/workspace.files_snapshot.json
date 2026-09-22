@@ -3,5 +3,8 @@
   "timestamp": "<TIMESTAMP>",
   "session_id": "",
   "files": [],
-  "total": 0
+  "total": 0,
+  "seq": null,
+  "epoch": null,
+  "seqs": {}
 }
