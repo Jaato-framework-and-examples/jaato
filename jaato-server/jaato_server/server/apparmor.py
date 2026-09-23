@@ -481,7 +481,39 @@ class AppArmorManager:
     #       Strictly a narrowing.  ``shared/scaffold/gitignore.AUTHORED``
     #       gains ``plans/`` in lockstep, enforced by
     #       ``test_gitignore_authored_set_tracks_apparmor.py``.
-    _TEMPLATE_VERSION = 33
+    #  34 — (2026-09-23) the ``//child`` sub-profile grants the broad
+    #       system-binary execs (``/usr/bin/** ix``, ``/usr/local/bin/**
+    #       ix``, ``/bin/** ix``) again — but ONLY for a session that did
+    #       not opt into per-stage exec scoping, i.e. whose profile
+    #       declares no ``apparmor_fragments`` (``requested_fragments is
+    #       None``) (#1251).
+    #
+    #       v18 stripped those three grants from ``//child`` and made
+    #       ``apparmor_fragments`` the SOLE source of exec authority there,
+    #       so a cascade stage scoped to (say) java/mvn could not improvise
+    #       ``curl``.  That is correct for a scoped stage and is preserved
+    #       unchanged.  But it assumed EVERY confined session declares
+    #       fragments; a plain WS/IPC session declares none, so its
+    #       ``//child`` had ZERO exec grants and every ``cli`` subprocess
+    #       was EACCES-denied on ``exec()`` of ``/bin/sh`` / ``/usr/bin/gh``
+    #       / ``/usr/bin/git`` — a total loss of ``cli`` under confinement.
+    #       It surfaced on the FIRST confined runner of such a session
+    #       (#1251: a WS session's cold revive, the pre-detach runner
+    #       having spawned unconfined per #1100).
+    #
+    #       The fix keys the grant on the SAME signal v18 keys fragment
+    #       composition on — ``requested_fragments`` — which v18's own
+    #       docstring calls "back-compat for non-cascade workspaces" when
+    #       ``None``.  A non-scoping session's ``//child`` now mirrors the
+    #       base + tool_hat bodies (which always kept the broad ``ix``),
+    #       restoring the pre-v18 posture for exactly the class v18 never
+    #       intended to restrict.  It grants only ``ix`` on in-PATH
+    #       binaries the base already trusts — no file-access rule is
+    #       widened, the workspace / ``.jaato`` / procfs denies are
+    #       unchanged, and the three escape-vector lines stay dropped.  A
+    #       session that DECLARES ``apparmor_fragments`` (a list, incl.
+    #       ``[]``) keeps v18's fragment-sole authority verbatim.
+    _TEMPLATE_VERSION = 34
 
     # AppArmor profile template.  Placeholders are filled per-session by
     # ``_render_profile()``.
@@ -2656,6 +2688,14 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
             plugin_contributed_rules=plugin_rules_subprofile_inline,
             session_id=session_id,
             subprofile_flag_clause=subprofile_flag_clause,
+            # #1251 (template v34): a session that declared no
+            # ``apparmor_fragments`` (``requested_fragments is None``)
+            # never opted into v18's per-stage exec scoping, so its
+            # //child gets the broad in-PATH execs base + tool_hat carry —
+            # otherwise its ``cli`` is EACCES-denied on ``/bin/sh`` etc.
+            # A scoped session (a list, incl. ``[]``) keeps v18's
+            # fragment-sole exec authority.
+            broad_system_exec=(requested_fragments is None),
         )
 
         return self.PROFILE_TEMPLATE.format(
@@ -2847,9 +2887,23 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
         plugin_contributed_rules: str,
         session_id: str,
         subprofile_flag_clause: str = "",
+        broad_system_exec: bool = False,
     ) -> str:
         """Build the ``profile child { ... }`` sub-profile body
         (Phase 5 §5.10, template v14).
+
+        ``broad_system_exec`` (#1251, template v34) decides whether this
+        sub-profile grants the broad in-PATH execs — ``/usr/bin/** ix``,
+        ``/usr/local/bin/** ix``, ``/bin/** ix`` — that the base and
+        tool_hat bodies always carry.  It defaults ``False`` (v18's
+        posture: those grants are absent and ``apparmor_fragments`` is the
+        sole source of exec authority), and ``_render_profile`` passes
+        ``True`` only when the session declared NO ``apparmor_fragments``
+        (``requested_fragments is None``) — a non-cascade session that
+        never opted into per-stage exec scoping and would otherwise have a
+        completely non-functional ``cli`` under confinement.  A scoped
+        session (``apparmor_fragments`` declared, list or ``[]``) keeps the
+        default and thus v18's fragment-sole authority verbatim.
 
         Subprocesses spawned by the cli / interactive_shell plugins
         transition into this sub-profile via
@@ -2882,6 +2936,42 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
             f"  {line}" if line.strip() else line
             for line in extension_fragments_inline.splitlines()
         )
+        # #1251 (template v34): the broad in-PATH exec grants.  Present
+        # only for a non-scoping session (``broad_system_exec``); a scoped
+        # session keeps v18's fragment-sole exec authority (empty block +
+        # the explanatory comment).  Either way ``/usr/lib`` / ``/lib``
+        # library-mapping (``rm``) is unconditional below — an exec'd
+        # binary must mmap its shared libraries whatever authorised the
+        # exec.
+        if broad_system_exec:
+            child_system_exec = (
+                "    # ---- broad in-PATH exec (mirrors base + tool_hat, #1251) ----\n"
+                "    # This session declared no ``apparmor_fragments`` (non-cascade,\n"
+                "    # ``requested_fragments is None``), so it never opted into v18's\n"
+                "    # per-stage exec scoping.  Without these grants its ``cli`` /\n"
+                "    # interactive_shell subprocesses — which transition into //child —\n"
+                "    # are EACCES-denied on ``exec()`` of ``/bin/sh``, ``gh``, ``git`` and\n"
+                "    # coreutils, i.e. every shell command fails.  These mirror the base\n"
+                "    # and tool_hat bodies (which always keep them); they grant only the\n"
+                "    # ``ix`` exec capability on in-PATH binaries the base already trusts\n"
+                "    # and widen no file-access rule.  A session that DECLARES\n"
+                "    # ``apparmor_fragments`` (a list, incl. ``[]``) does not get this\n"
+                "    # block — its exec authority stays fragment-only per v18.\n"
+                "    /usr/bin/**          ix,\n"
+                "    /usr/local/bin/**    ix,\n"
+                "    /bin/**              ix,"
+            )
+        else:
+            child_system_exec = (
+                "    # ---- NO broad in-PATH exec (v18, scoped session) ----\n"
+                "    # This session declared ``apparmor_fragments``, opting into\n"
+                "    # per-stage exec scoping: ``apparmor_fragments`` is the SOLE source\n"
+                "    # of exec authority in //child, so a stage scoped to (say) java/mvn\n"
+                "    # cannot improvise ``curl``.  The broad ``/usr/bin/** ix`` etc. that\n"
+                "    # base + tool_hat carry are intentionally ABSENT here (they would\n"
+                "    # shadow the fragment declarations).  A non-scoping session gets\n"
+                "    # them instead — see the #1251 branch."
+            )
         return f"""  profile child{subprofile_flag_clause} {{
     #include <abstractions/base>
     #include <abstractions/nameservice>
@@ -2953,52 +3043,36 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     /tmp/jaato-{session_id}/   rw,
     /tmp/jaato-{session_id}/** rw,
 
-    # ---- basic system access (mirrors tool_hat, MINUS broad ix) ----
-    # Template v18 (2026-05-15): the broad ``/usr/bin/** ix``,
-    # ``/usr/local/bin/** ix``, ``/bin/** ix`` rules are
-    # INTENTIONALLY OMITTED from //child.  Rationale:
+    # ---- basic system access (mirrors tool_hat) ----
+    # In-PATH exec authority in //child depends on whether the session
+    # opted into per-stage exec scoping (#1251, template v34):
     #
-    # The //child sub-profile is the agent-controlled exec
-    # context.  Per-profile ``apparmor_fragments`` (Piece 1, PR
-    # #107) authorize stage-specific binaries
-    # (e.g. host_validator's fragment declares
-    # ``/usr/bin/java ix, /usr/bin/mvn ix``).  Pre-v18, the broad
-    # ``/usr/bin/** ix`` rule shadowed those declarations — every
-    # cascade stage could exec ANY ``/usr/bin/*`` binary
-    # regardless of what its fragment listed.  Peer's v83 caught
-    # this empirically: a host_validator agent improvised
-    # ``curl`` when ``mvn dependency:get`` raised
-    # ``MojoExecutionException``; ``curl`` ran because the broad
-    # rule allowed it even though the fragment only listed
-    # java/mvn/sh/coreutils.  The per-profile scoping promise
-    # ("codegen/transform/build_descriptor cannot exec java
-    # because their fragment does not list it") was empty.
+    #   * A session that declared ``apparmor_fragments`` (a list, incl.
+    #     ``[]``) opts into v18's model — ``apparmor_fragments`` is the
+    #     SOLE source of exec authority here, so a stage scoped to
+    #     java/mvn cannot improvise ``curl`` (peer's v83 escape).  For it
+    #     the block below is a comment only, no broad ``ix``.
+    #   * A session that declared none (``requested_fragments is None`` —
+    #     a plain WS/IPC session, the majority) never opted in, so it gets
+    #     the broad ``/usr/bin/** ix`` etc. that base + tool_hat always
+    #     keep.  Without it every ``cli`` subprocess is EACCES-denied on
+    #     ``exec()`` of ``/bin/sh`` / ``gh`` / ``git`` and ``cli`` is
+    #     entirely non-functional under confinement.
     #
-    # In v18, ``apparmor_fragments`` becomes the SOLE source of
-    # exec authority in //child:
-    # - A fragment-less stage (or
-    #   ``apparmor_fragments: []``) gets NO exec authority — the
-    #   maximally locked-down cascade stage.
-    # - A stage with ``apparmor_fragments: [host_validator]``
-    #   gets only the binaries the host_validator.rules fragment
-    #   declares.
-    # - Shell helpers (sh, cat, grep, ...) that probes need must
-    #   appear in the fragment explicitly OR in a separately-
-    #   included ``shell_essentials`` fragment if operators
-    #   compose one later.
+    # v18 stripped the broad grants unconditionally on the assumption
+    # every confined session declares fragments; #1251 is what happens to
+    # the class that never does.  The base profile + tool_hat sub-profile
+    # KEEP the broad ``ix`` grants regardless — framework code (Python
+    # stdlib subprocess machinery, runner-tier plugin subprocesses,
+    # references plugin's SentenceTransformer load) executes there, not in
+    # //child.
+{child_system_exec}
     #
-    # The base profile + tool_hat sub-profile KEEP the broad
-    # ``ix`` grants — framework code (Python stdlib subprocess
-    # machinery, runner-tier plugin subprocesses, references
-    # plugin's SentenceTransformer load) executes there, not in
-    # //child.  Narrowing those would risk breaking framework
-    # internals invisibly; the agent-controlled-exec threat
-    # model belongs uniquely to //child.
-    #
-    # Library mapping (``rm``) is preserved unchanged — execs
-    # need shared-library mmap rights to load the binary they're
-    # about to run.  The deny is on ``ix`` (the exec capability),
-    # not on the libraries.
+    # Library mapping (``rm``) is preserved unchanged and is
+    # UNCONDITIONAL — an exec'd binary needs shared-library mmap rights to
+    # load whatever authorised the exec (a fragment-listed binary, or the
+    # broad grant above).  The v18 narrowing was on ``ix`` (the exec
+    # capability), never on the libraries.
     /usr/lib/**          rm,
     /lib/**              rm,
     /etc/ld.so.cache     r,
