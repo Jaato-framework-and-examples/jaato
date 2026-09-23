@@ -1110,16 +1110,50 @@ delegate(
 )
 ```
 
+### Inherit (frozen parent snapshot, #1198)
+
+```python
+delegate(profile="inherit", task="Draft the section while I keep reviewing")
+```
+
+`inherit` is a **reserved value** of the `profile` argument, not a discovered
+profile. It spawns a subagent from a frozen snapshot of the **parent's**
+profile at the moment of the call — the parent's plugin set and the parent's
+system instructions — so a "spawn a child like me" helper is expressible
+**without** `allow_inline` (which stays off by default). It succeeds even when
+`profile` is otherwise required.
+
+Two deliberate departures from "identical to the parent":
+
+- **The `subagent` plugin is stripped**, so an `inherit` child can neither
+  spawn nor message siblings. Its snapshot includes the persona that makes the
+  parent delegate, and there is no spawn-depth bound (#680), so leaving it in
+  would make unbounded self-replication the path of least resistance. This is
+  the smaller, local mitigation the triage chose over a general depth bound. A
+  caller that needs a spawning child names a real profile.
+- **The parent's whole system instruction is applied as an override** (not a
+  persona layer), so the child runs the parent's exact framing rather than
+  re-assembling its own — `agent=` / `default_agent` are ignored for `inherit`.
+
+"Frozen" is a deep copy: later mutation of the parent's profile or instructions
+does not reach an already-spawned child. `inherit` is refused with a clear
+message on the remote (`server=`) path — the snapshot is local, a peer cannot
+see it — and when there is no parent session to snapshot. A profile **file**
+named `inherit` is rejected at discovery so it cannot shadow the reserved value.
+
 ### Comparison
 
-| Aspect | Profile-Based | Inline |
-|---|---|---|
-| Configuration | Pre-defined, version-controlled | Ad-hoc per request |
-| Tools available | Profile's `plugins` list | `inline_allowed_plugins` whitelist |
-| Model override | Per-profile `model`/`provider` | Inherits parent's model |
-| Tier switching | Per-profile `model_tiers` | Not available (no profile) |
-| GC strategy | Per-profile `gc` config | Parent's default |
-| Inheritance | Supported | Not applicable |
+| Aspect | Profile-Based | Inline | `inherit` (#1198) |
+|---|---|---|---|
+| Configuration | Pre-defined, version-controlled | Ad-hoc per request | Frozen snapshot of the parent |
+| Tools available | Profile's `plugins` list | `inline_allowed_plugins` whitelist | Parent's plugins **minus `subagent`** |
+| Model override | Per-profile `model`/`provider` | Inherits parent's model | Inherits parent's model |
+| Tier switching | Per-profile `model_tiers` | Not available (no profile) | Not available |
+| GC strategy | Per-profile `gc` config | Parent's default | Parent's default |
+| Instructions | Agent / profile persona | `system_instructions` arg | Parent's assembled prompt (override) |
+| Needs `allow_inline` | No | **Yes** (off by default) | **No** |
+| Can itself spawn | Per its plugins | Per `inline_allowed_plugins` | **No** (subagent stripped) |
+| Inheritance | Supported | Not applicable | Not applicable |
 
 ---
 

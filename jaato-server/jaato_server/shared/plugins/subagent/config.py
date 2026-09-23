@@ -4380,6 +4380,22 @@ def _merge_profiles(
     )
 
 
+#: The reserved ``spawn_subagent(profile="inherit")`` value (#1198).  It is
+#: resolved at SPAWN time from a frozen snapshot of the parent's profile —
+#: the parent's plugin set (minus the ``subagent`` plugin, so the child
+#: cannot itself spawn) and the parent's system instructions as they stand
+#: at the moment of the call — not a profile discovered on disk.  A discovered
+#: profile of this name would shadow the reserved value and a spawn naming it
+#: would silently get the file instead of the parent snapshot, so a file that
+#: would load under it is REFUSED at discovery (see :func:`_parse_profile_file`).
+INHERIT_PROFILE_NAME = "inherit"
+
+#: Profile names a discovered file may not claim.  Currently just
+#: ``inherit``; a set so a second reserved value costs one entry rather than
+#: a new branch.
+RESERVED_PROFILE_NAMES = frozenset({INHERIT_PROFILE_NAME})
+
+
 def _parse_profile_file(
     file_path: Path,
 ) -> Tuple[Optional[str], Optional[Dict[str, Any]], Optional[str]]:
@@ -4416,6 +4432,20 @@ def _parse_profile_file(
 
         # Profile name is either explicit 'name' field or derived from filename
         name = data.get('name') or file_path.stem
+
+        # Reserved names are resolved at spawn time, not loaded from disk
+        # (#1198).  Refuse rather than register: were a discovered profile
+        # allowed to claim ``inherit``, ``spawn_subagent(profile="inherit")``
+        # would silently get the file instead of the parent snapshot.
+        if name in RESERVED_PROFILE_NAMES:
+            msg = (
+                f"Profile name '{name}' is reserved and cannot be loaded from "
+                f"a file ({file_path.name}): spawn_subagent(profile='{name}') "
+                f"means a frozen snapshot of the parent's profile at spawn "
+                f"time (#1198). Rename the profile."
+            )
+            logger.warning(msg)
+            return None, None, msg
 
         return name, data, None
 
