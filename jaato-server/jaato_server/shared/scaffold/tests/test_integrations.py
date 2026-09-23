@@ -184,6 +184,8 @@ def test_listing_reports_every_shipped_integration():
     ["integration", "claude-code", "--workspace", "/tmp/x"],
     ["integration", "claude-code", "--user", "--dry-run"],
     ["integration", "claude-code", "--force", "--json"],
+    ["integration", "claude-code", "--refresh"],
+    ["integration", "claude-code", "--refresh", "--json"],
 ])
 def test_every_advertised_invocation_parses(argv):
     """Help text that promises a flag the parser rejects is worse than none.
@@ -205,3 +207,169 @@ def test_user_and_workspace_are_mutually_exclusive():
     with pytest.raises(SystemExit) as exc:
         main(["integration", "claude-code", "--user", "--workspace", "/tmp/x"])
     assert exc.value.code == 2
+
+
+# --- --refresh: overwrite only when nothing local is lost (#1261) -----------
+
+def _copy_payload(tmp_path):
+    """A writable copy of the shipped payload, for a monkeypatched src.
+
+    The `outdated` and `diverged` states need the UPSTREAM payload to have
+    moved, which the tests below simulate by pointing `payload_dir` at an
+    edited copy — the same device `test_outdated_*` and `test_diverged_*` use.
+    """
+    fake_src = tmp_path / "moved"
+    fake_src.mkdir()
+    real = I.payload_dir("claude-code")
+    for f in real.rglob("*"):
+        if f.is_file():
+            t = fake_src / f.relative_to(real)
+            t.parent.mkdir(parents=True, exist_ok=True)
+            t.write_bytes(f.read_bytes())
+    return fake_src
+
+
+def test_refresh_writes_absent_stale_outdated(dest, monkeypatch, tmp_path):
+    """The write half of the flag's table: the three states that lose nothing
+    local by being re-applied.  Each is built in isolation so no state leaks
+    into the next, then refreshed, and the result must be `current`.
+    """
+    # absent: nothing installed yet.
+    changed, _ = I.install("claude-code", dest, refresh=True)
+    assert changed and I.compare("claude-code", dest)[0] == "current"
+
+    # stale: a pristine copy from another build.
+    f = dest / I.STAMP
+    d = json.loads(f.read_text()); d["version"] = "0.0.1-old"; f.write_text(json.dumps(d))
+    assert I.compare("claude-code", dest)[0] == "stale"
+    changed, _ = I.install("claude-code", dest, refresh=True)
+    assert changed and I.compare("claude-code", dest)[0] == "current"
+
+    # outdated: the payload moved upstream at the same version.  The moved
+    # payload stays in force through the refresh AND the follow-up compare, so
+    # writing from it lands the copy at `current`.
+    fake_src = _copy_payload(tmp_path)
+    (fake_src / "SKILL.md").write_text("upstream gained a paragraph\n")
+    monkeypatch.setattr(I, "payload_dir", lambda n: fake_src)
+    assert I.compare("claude-code", dest)[0] == "outdated"
+    changed, _ = I.install("claude-code", dest, refresh=True)
+    assert changed and I.compare("claude-code", dest)[0] == "current"
+
+
+def test_refresh_leaves_edited_diverged_unstamped(dest, monkeypatch, tmp_path):
+    """The leave-alone half: the states that carry local content a rewrite
+    would discard.  Each is built on its own dest, and the local content must
+    survive the refresh untouched with changed=False."""
+    # edited: a local change, payload unmoved.
+    e = dest.parent / "edited"
+    I.install("claude-code", e)
+    (e / "SKILL.md").write_text("edited locally\n")
+    assert I.compare("claude-code", e)[0] == "edited"
+    changed, lines = I.install("claude-code", e, refresh=True)
+    assert not changed
+    assert (e / "SKILL.md").read_text() == "edited locally\n"
+    assert any("left unchanged" in l and "edited" in l for l in lines)
+
+    # diverged: both sides moved.
+    v = dest.parent / "diverged"
+    I.install("claude-code", v)
+    (v / "SKILL.md").write_text("edited locally\n")
+    fake_src = _copy_payload(tmp_path)
+    (fake_src / "SKILL.md").write_text("upstream moved too\n")
+    monkeypatch.setattr(I, "payload_dir", lambda n: fake_src)
+    assert I.compare("claude-code", v)[0] == "diverged"
+    changed, _ = I.install("claude-code", v, refresh=True)
+    assert not changed
+    assert (v / "SKILL.md").read_text() == "edited locally\n"
+    monkeypatch.undo()
+
+    # unstamped: hand-copied, provenance unknown.
+    u = dest.parent / "unstamped"
+    I.install("claude-code", u)
+    (u / I.STAMP).unlink()
+    assert I.compare("claude-code", u)[0] == "unstamped"
+    changed, _ = I.install("claude-code", u, refresh=True)
+    assert not changed
+    assert not (u / I.STAMP).is_file()
+
+
+def test_refresh_leaves_a_current_copy_untouched(dest):
+    """A current copy is already up to date, so refresh writes nothing and
+    reports success — the same exit-0 skip an edited copy gets."""
+    I.install("claude-code", dest)
+    assert I.compare("claude-code", dest)[0] == "current"
+    changed, _ = I.install("claude-code", dest, refresh=True)
+    assert not changed
+
+
+def test_refresh_does_not_overwrite_edits_made_under_an_older_version(dest):
+    """The digest-first check (#1261).
+
+    `compare` returns `stale` the instant the version differs — so a copy
+    edited under an OLDER framework version would read `stale`, a state
+    refresh is entitled to overwrite, and the edit would be silently
+    discarded on upgrade.  The digest recorded at apply time is compared
+    FIRST, so a changed installed tree reads `edited` whatever the version,
+    and refresh leaves it alone.
+    """
+    I.install("claude-code", dest)
+    (dest / "SKILL.md").write_text("edited under the old version\n")
+    f = dest / I.STAMP
+    d = json.loads(f.read_text()); d["version"] = "0.0.1-old"; f.write_text(json.dumps(d))
+
+    # Version differs AND the tree was edited: this is `edited`, not `stale`.
+    assert I.compare("claude-code", dest)[0] == "edited"
+    changed, lines = I.install("claude-code", dest, refresh=True)
+    assert not changed
+    assert (dest / "SKILL.md").read_text() == "edited under the old version\n"
+
+
+def test_a_pristine_copy_at_another_version_is_still_stale(dest):
+    """The complement of the digest-first check: an UNEDITED copy at a
+    different version is `stale` (safe to overwrite), so refresh writes it."""
+    I.install("claude-code", dest)
+    f = dest / I.STAMP
+    d = json.loads(f.read_text()); d["version"] = "0.0.1-old"; f.write_text(json.dumps(d))
+    assert I.compare("claude-code", dest)[0] == "stale"
+    changed, _ = I.install("claude-code", dest, refresh=True)
+    assert changed
+    assert I.compare("claude-code", dest)[0] == "current"
+
+
+def test_refresh_and_force_are_mutually_exclusive():
+    """They mean opposite things about local edits, so asking for both is a
+    contradiction argparse refuses (exit 2)."""
+    from jaato_server.shared.scaffold.__main__ import main
+    with pytest.raises(SystemExit) as exc:
+        main(["integration", "claude-code", "--refresh", "--force", "--dry-run"])
+    assert exc.value.code == 2
+
+
+def test_refresh_json_reports_the_transition_and_exits_zero(tmp_path, capsys):
+    """--json --refresh reports state_before / state_after / changed /
+    skipped_reason, and exit code is 0 whether it wrote or skipped."""
+    from jaato_server.shared.scaffold.__main__ import main
+
+    ws = str(tmp_path)
+    # The CLI resolves the install path from the manifest, not from us.
+    target = I.target_dir("claude-code", user=False, workspace=ws)
+
+    # absent -> writes: state_before absent, state_after current, changed, no skip.
+    code = main(["integration", "claude-code", "--workspace", ws, "--refresh", "--json"])
+    assert code == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["state_before"] == "absent"
+    assert out["state_after"] == "current"
+    assert out["changed"] is True
+    assert out["skipped_reason"] is None
+
+    # edited -> skips: changed False, skipped_reason names the state, still exit 0.
+    (target / "SKILL.md").write_text("edited locally\n")
+    code = main(["integration", "claude-code", "--workspace", ws, "--refresh", "--json"])
+    assert code == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["state_before"] == "edited"
+    assert out["state_after"] == "edited"
+    assert out["changed"] is False
+    assert out["skipped_reason"] and out["skipped_reason"].startswith("edited")
+    assert (target / "SKILL.md").read_text() == "edited locally\n"
