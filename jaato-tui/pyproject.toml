@@ -22,7 +22,7 @@ classifiers = [
 dependencies = [
     # Floor = the SDK version this repo ships (#1055); see
     # jaato-server/shared/tests/test_sdk_floor_is_the_sdk_we_ship.py.
-    "jaato-sdk>=0.27.1.dev0",  # SDK protocol: IPC client, event types, server communication
+    "jaato-sdk>=0.28.0.dev0",  # SDK protocol: IPC client, event types, server communication
     "prompt_toolkit>=3.0.0",  # Interactive terminal UI: input handling, keybindings, command history, multi-line editing
     "rich>=13.0.0",  # Terminal rendering: syntax highlighting, tables, panels, markdown, themed output formatting
     "python-dotenv",  # Environment loading: .env file support for client configuration

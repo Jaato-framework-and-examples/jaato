@@ -42,7 +42,7 @@ dependencies = [
     # what changed is that it needs the library, not a running server.
     # Floor = the SDK version this repo ships (#1055); see
     # jaato-server/shared/tests/test_sdk_floor_is_the_sdk_we_ship.py.
-    "jaato-sdk>=0.27.1.dev0",
+    "jaato-sdk>=0.28.0.dev0",
 ]
 
 [project.optional-dependencies]
