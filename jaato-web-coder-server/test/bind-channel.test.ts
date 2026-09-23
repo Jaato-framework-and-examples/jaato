@@ -47,4 +47,39 @@ describe("BindChannel", () => {
     await assert.rejects(ch.bind("alice", 60), BindUnavailableError);
     await ch.close().catch(() => undefined);
   });
+
+  test("reloadUser sends secret.reload and reports the daemon's answer (#1226 §6.4)", async () => {
+    const ch = new BindChannel({ bindUrl: daemon.url, appCredential: APP_CREDENTIAL });
+    await ch.connect();
+    daemon.nextReloadCount = 2;
+    assert.deepEqual(await ch.reloadUser("alice"), { status: "ok", reloaded: 2 });
+    assert.deepEqual(daemon.reloads, ["alice"]);
+    await ch.close();
+  });
+
+  test("attachSecretResolver answers a daemon-initiated secret.resolve, correlated by request_id", async () => {
+    const ch = new BindChannel({ bindUrl: daemon.url, appCredential: APP_CREDENTIAL });
+    await ch.connect();
+    const seen: Array<{ user: string; workspace: string; name: string }> = [];
+    ch.attachSecretResolver(async (req) => { seen.push(req); return { value: "the-token", expiresAt: "2026-01-01T00:00:00Z" }; });
+    // Give the subscription a tick to register before the daemon asks.
+    await new Promise((r) => setTimeout(r, 20));
+    const answer = await daemon.askSecretResolve({ request_id: "r-1", user: "alice", workspace: "/ws/one", name: "github" });
+    assert.equal(answer.status, "ok");
+    assert.equal(answer.value, "the-token");
+    assert.equal(answer.expires_at, "2026-01-01T00:00:00Z");
+    assert.deepEqual(seen, [{ user: "alice", workspace: "/ws/one", name: "github" }]);
+    await ch.close();
+  });
+
+  test("a resolver that declines answers not_found with no value", async () => {
+    const ch = new BindChannel({ bindUrl: daemon.url, appCredential: APP_CREDENTIAL });
+    await ch.connect();
+    ch.attachSecretResolver(async () => ({ status: "not_found", detail: "not_bound" }));
+    await new Promise((r) => setTimeout(r, 20));
+    const answer = await daemon.askSecretResolve({ request_id: "r-2", user: "bob", workspace: "/ws/x", name: "github" });
+    assert.equal(answer.status, "not_found");
+    assert.equal(answer.value, undefined);
+    await ch.close();
+  });
 });

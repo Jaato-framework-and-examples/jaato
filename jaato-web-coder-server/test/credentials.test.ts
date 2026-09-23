@@ -89,4 +89,11 @@ describe("credential store", () => {
     assert.equal(store.remove("s", id), false);
     assert.deepEqual(new FileCredentialStore(path, KEY).list("s"), []);
   });
+
+  test("the 'github' provider is refused here — its token never reaches the browser (no /reveal)", () => {
+    const store = new FileCredentialStore(fresh(), KEY);
+    assert.throws(() => store.add("s", "github", "gho_abcdefghijklmnop"), (e: unknown) => e instanceof CredentialError && /GitHub connect flow/.test(e.message));
+    // A github secret cannot enter the store, so there is nothing for reveal to return.
+    assert.deepEqual(store.list("s", undefined), []);
+  });
 });

@@ -60,6 +60,26 @@ export interface ServerConfig {
    * answer 404, so the bundle falls back to ``localStorage`` and says so.
    */
   notes?: { file: string; key: string };
+  /**
+   * Per-user GitHub connect (``src/github.ts``, #1227).  Absent = the feature
+   * is off: ``config.json`` names no ``githubUrl`` and the ``/auth/github`` /
+   * ``/api/github`` routes answer 404.  ``client_id`` is the GitHub App's
+   * (non-secret, it rides the authorize URL); the client secret is a 0600
+   * file like every other secret here.  ``workspace_root`` bounds where the
+   * ``.env`` / ``.gitconfig`` writes may land; unset = those writes are
+   * skipped (the binding is still recorded).  ``oauth_base_url`` /
+   * ``api_base_url`` point at a GitHub Enterprise host.
+   */
+  github?: {
+    file: string;
+    key: string;
+    clientId: string;
+    clientSecret: string;
+    oauthBaseUrl?: string;
+    apiBaseUrl?: string;
+    noreplyDomain?: string;
+    workspaceRoot?: string;
+  };
 }
 
 const DEFAULT_TTL = "8h";
@@ -198,6 +218,28 @@ export function configFromObject(raw: unknown, baseDir: string): ServerConfig {
     notes = { file, key };
   }
 
+  let github: ServerConfig["github"];
+  if (o.github !== undefined && o.github !== null) {
+    const g = o.github;
+    if (typeof g !== "object") throw new ConfigError("github must be a mapping");
+    const file = rel(str(req(g.file, "github.file"), "github.file"));
+    const key = readSecretFile(rel(str(req(g.key_file, "github.key_file"), "github.key_file")), "github key");
+    if (key.length < 32) throw new ConfigError("github key must be at least 32 characters");
+    const clientId = str(req(g.client_id, "github.client_id"), "github.client_id");
+    const clientSecret = readSecretFile(rel(str(req(g.client_secret_file, "github.client_secret_file"), "github.client_secret_file")), "GitHub App client secret");
+    const oauthBaseUrl = g.oauth_base_url ? str(g.oauth_base_url, "github.oauth_base_url") : undefined;
+    const apiBaseUrl = g.api_base_url ? str(g.api_base_url, "github.api_base_url") : undefined;
+    for (const [k, v] of [["github.oauth_base_url", oauthBaseUrl], ["github.api_base_url", apiBaseUrl]] as const) {
+      if (v && !/^https:\/\//.test(v)) throw new ConfigError(`${k} must be an https URL`);
+    }
+    const noreplyDomain = g.noreply_domain ? str(g.noreply_domain, "github.noreply_domain") : undefined;
+    // Contained, not taken literally: the write path resolves symlinks and
+    // refuses a workspace outside this root (the daemon's own rule).  Resolved
+    // to an absolute path so a relative one is anchored at the config dir.
+    const workspaceRoot = g.workspace_root ? resolve(baseDir, str(g.workspace_root, "github.workspace_root")) : undefined;
+    github = { file, key, clientId, clientSecret, oauthBaseUrl, apiBaseUrl, noreplyDomain, workspaceRoot };
+  }
+
   return {
     listen: parseListen(o.listen),
     publicUrl,
@@ -208,6 +250,7 @@ export function configFromObject(raw: unknown, baseDir: string): ServerConfig {
     ticket: { ttlSeconds: ticketTtl },
     credentials,
     notes,
+    github,
   };
 }
 

@@ -71,6 +71,15 @@ export interface CredentialStore {
 
 /** Provider names as the daemon spells them (``zhipuai``, ``google_genai``, ...). */
 const PROVIDER_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+/**
+ * Provider names this store refuses.  ``github`` is a rotating OAuth grant
+ * with an 8-hour minted token, handled by ``src/github.ts`` and delivered
+ * BFF -> daemon over ``secret.resolve`` — it must NEVER be stored here, where
+ * ``/reveal`` would hand it to the browser.  The "no ``/reveal`` for GitHub"
+ * rule (#1227) is enforced by making a GitHub secret unstorable in the first
+ * place, not by trusting a route not to be hit.
+ */
+const RESERVED_PROVIDERS = new Set(["github"]);
 export const MAX_LABEL_CHARS = 64;
 export const MAX_SECRET_CHARS = 4096;
 /** Per owner; a combobox longer than this is not a combobox. */
@@ -98,6 +107,7 @@ export function autoLabel(provider: string, secret: string): string {
 
 export function validateProvider(provider: unknown): string {
   if (typeof provider !== "string" || !PROVIDER_RE.test(provider)) throw new CredentialError("provider must be a daemon provider name (lower-case letters, digits, _ or -)");
+  if (RESERVED_PROVIDERS.has(provider)) throw new CredentialError(`'${provider}' is not stored here; connect it through the GitHub connect flow (its token never reaches the browser)`);
   return provider;
 }
 

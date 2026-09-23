@@ -4,6 +4,9 @@ export { BindChannel, BindRefusedError, BindUnavailableError, type BoundTicket }
 export { createRouter, isSameOrigin } from "./routes.js";
 export { FileCredentialStore, CredentialError, autoLabel, secretHint, type CredentialStore, type CredentialEntry } from "./credentials.js";
 export { FileNoteStore, NoteError, validateNote, validateSessionId, MAX_NOTE_CHARS, MAX_NOTES_PER_OWNER, type NoteStore, type NoteEntry } from "./notes.js";
+export { FileGitHubStore, GitHubStoreError, MAX_ACCOUNTS_PER_OWNER, type GitHubAccount, type GitHubBinding, type GrantSecret, type GrantInput } from "./github-store.js";
+export { HttpGitHubApi, GitHubApiError, GitHubGrantRevoked, type GitHubApi, type GitHubTokenSet, type GitHubIdentity, type GitHubInstallation } from "./github-api.js";
+export { GitHubService, GitHubBindError, upsertEnvLine, renderGitConfig, tokenSetToSecret, GITHUB_REFERENCE_NAME, GH_TOKEN_ENV, GH_TOKEN_ENV_VALUE, TOKEN_REFRESH_MARGIN_SECONDS, type BindResult, type SessionReloader, type GitHubServiceOptions } from "./github.js";
 export { startServer, type RunningServer } from "./server.js";
 export { OidcProvider, hasRole, rewritingFetch } from "./auth/oidc.js";
 export { type IdentityProvider, type AuthenticatedUser, type LoginStart, type LogoutToken, SignInRefusedError } from "./auth/identity.js";
