@@ -23,7 +23,7 @@
 
 Post-§7c step 6.6.4.3b seat-flip, the runner-side `JaatoSession` is the live
 session for the model loop and tool execution.  Its `_ui_hooks` attribute is
-**never set** — cross-grep of `jaato-server/server/runner/` confirms zero
+**never set** — cross-grep of `jaato-server/jaato_server/server/runner/` confirms zero
 references to `ui_hooks`, `set_ui_hooks`, or `AgentUIHooks`.
 
 The 10 callsites in `jaato_session.py` that consume `_ui_hooks`:
@@ -119,10 +119,10 @@ threading model (e.g., a context-var or active-call lookup).
 
 ## Files to touch (when scheduled)
 
-- `jaato-server/server/runner/envelope.py` — new event_type constants
-- `jaato-server/server/runner/rpc.py` — install/restore machinery
-- `jaato-server/server/runner_rpc_client.py` — daemon demuxer extension
-- `jaato-server/server/core.py` — `_build_send_message_notification_handler`
+- `jaato-server/jaato_server/server/runner/envelope.py` — new event_type constants
+- `jaato-server/jaato_server/server/runner/rpc.py` — install/restore machinery
+- `jaato-server/jaato_server/server/runner_rpc_client.py` — daemon demuxer extension
+- `jaato-server/jaato_server/server/core.py` — `_build_send_message_notification_handler`
   branches
-- `jaato-server/shared/jaato_session.py` — possible setter-call additions
+- `jaato-server/jaato_server/shared/jaato_session.py` — possible setter-call additions
   if the per-call shim approach is chosen

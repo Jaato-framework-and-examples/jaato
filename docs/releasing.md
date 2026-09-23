@@ -78,7 +78,7 @@ artifact is what you think it is:
 
 ```bash
 python -c "import importlib.metadata as m; print(m.version('jaato-server'))"
-python -m server --status            # or whatever the change under test needs
+python -m jaato_server --status            # or whatever the change under test needs
 ```
 
 ## Publishing to PyPI

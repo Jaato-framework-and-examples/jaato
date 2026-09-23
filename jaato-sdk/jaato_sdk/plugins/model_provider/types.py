@@ -37,7 +37,7 @@ which files were affected:
 
 Usage::
 
-    from shared.plugins.model_provider.types import ToolSchema, TRAIT_FILE_WRITER
+    from jaato_server.shared.plugins.model_provider.types import ToolSchema, TRAIT_FILE_WRITER
 
     ToolSchema(
         name="myWriteTool",
@@ -71,7 +71,7 @@ passed through unchanged).
 
 Usage::
 
-    from shared.plugins.model_provider.types import ToolSchema, TRAIT_GREPPABLE_CONTENT
+    from jaato_server.shared.plugins.model_provider.types import ToolSchema, TRAIT_GREPPABLE_CONTENT
 
     ToolSchema(
         name="call_service",
@@ -102,7 +102,7 @@ workspace profile doesn't grant.
 
 Usage::
 
-    from shared.plugins.model_provider.types import ToolSchema, TRAIT_FRAMEWORK_LEVEL
+    from jaato_server.shared.plugins.model_provider.types import ToolSchema, TRAIT_FRAMEWORK_LEVEL
 
     ToolSchema(
         name="spawn_subagent",

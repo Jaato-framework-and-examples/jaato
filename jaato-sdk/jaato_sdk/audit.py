@@ -186,7 +186,7 @@ AUDIT_SCHEMA: Tuple[AuditEvent, ...] = (
         kind="response",
         article="Art. 12(1) -- each model round trip",
         store="ledger",
-        written_by="shared/jaato_session.py::_record_token_usage",
+        written_by="jaato_server/shared/jaato_session.py::_record_token_usage",
         fields=_LEDGER_COMMON + (
             AuditField("prompt_tokens",
                        "NEW, uncached input tokens -- excludes both cache "
@@ -207,7 +207,7 @@ AUDIT_SCHEMA: Tuple[AuditEvent, ...] = (
         kind="announcement",
         article="Art. 50(1) -- the person was told, and what they were told",
         store="ledger",
-        written_by="shared/ai_disclosure.py::announcement_record",
+        written_by="jaato_server/shared/ai_disclosure.py::announcement_record",
         fields=_LEDGER_COMMON + (
             AuditField("session_id", "the session the person was talking to"),
             AuditField("agent_id",
@@ -287,7 +287,7 @@ AUDIT_SCHEMA: Tuple[AuditEvent, ...] = (
         kind="permission-check",
         article="Art. 12(1), 14(4)(d) -- each tool call's verdict",
         store="ledger",
-        written_by="shared/ai_tool_runner.py::_permission_gate_verdict",
+        written_by="jaato_server/shared/ai_tool_runner.py::_permission_gate_verdict",
         fields=_LEDGER_COMMON + (
             AuditField("tool", "the tool asked for"),
             AuditField("args", "the arguments it was asked with"),
@@ -317,7 +317,7 @@ AUDIT_SCHEMA: Tuple[AuditEvent, ...] = (
         article="Art. 12(1), 14(4)(d) -- the same verdict, in the one "
                 "artefact every deployment gets",
         store="session_trace",
-        written_by="shared/plugins/permission/plugin.py::check_permission",
+        written_by="jaato_server/shared/plugins/permission/plugin.py::check_permission",
         fields=(
             AuditField("tool", "the tool asked for"),
             AuditField("call_id", "correlates to the tool call"),
@@ -346,7 +346,7 @@ AUDIT_SCHEMA: Tuple[AuditEvent, ...] = (
         kind="BUDGET CEILING / BUDGET RUNG",
         article="Art. 12(1), 14(3)(a) -- a built-in constraint acting",
         store="session_trace",
-        written_by="shared/jaato_session.py::_apply_budget_rungs",
+        written_by="jaato_server/shared/jaato_session.py::_apply_budget_rungs",
         fields=(
             AuditField("dim", "which dimension crossed"),
             AuditField("used", "what had been spent"),
@@ -363,7 +363,7 @@ AUDIT_SCHEMA: Tuple[AuditEvent, ...] = (
         kind="INCIDENT",
         article="Arts. 72, 73, 26(5) -- something a person should look at",
         store="session_trace",
-        written_by="shared/incidents.py::raise_incident",
+        written_by="jaato_server/shared/incidents.py::raise_incident",
         fields=(
             AuditField("kind",
                        "which of the framework's known incident kinds "
@@ -395,7 +395,7 @@ AUDIT_SCHEMA: Tuple[AuditEvent, ...] = (
         kind="session record header",
         article="Art. 12(1) -- the session's own lifecycle",
         store="session_record",
-        written_by="server/session_manager.py::_save_session",
+        written_by="jaato_server/server/session_manager.py::_save_session",
         fields=(
             AuditField("session_id", "the id"),
             AuditField("version", "record version"),

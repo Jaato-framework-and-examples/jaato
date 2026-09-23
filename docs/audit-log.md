@@ -61,7 +61,7 @@ distinguishable from "somebody answered".
 
 **The `DECISION` line is machine-readable by construction.** Scalars first,
 free-text `reason` last, so the line parses.
-`shared.plugins.permission.plugin.parse_decision_trace` reads it back. It
+`jaato_server.shared.plugins.permission.plugin.parse_decision_trace` reads it back. It
 is the one artefact every deployment gets: the ledger's row needs a ledger
 configured, and `PermissionResolvedEvent` is opt-in.
 

@@ -80,27 +80,27 @@ jobs:
       - name: Plugin contract guards
         run: |
           pytest -q \
-            jaato-server/shared/tests/test_all_plugins_satisfy_protocol.py \
-            jaato-server/shared/tests/test_plugin_tier_partition.py \
-            jaato-server/shared/tests/test_provider_capabilities.py \
-            jaato-server/shared/tests/test_provider_capability_conformance.py \
-            jaato-server/shared/tests/test_provider_knobs.py \
-            jaato-server/shared/tests/test_tool_id_wire_conformance.py \
-            jaato-server/shared/tests/test_reset_for_next_session.py \
-            jaato-server/shared/tests/test_enrichment_plugin.py \
-            jaato-server/shared/tests/test_a_cache_is_published_only_when_complete.py \
-            jaato-server/shared/tests/test_cyclomatic_complexity_audit.py \
-            jaato-server/shared/tests/test_truncation_is_not_reported_as_tool_use.py \
-            jaato-server/shared/tests/test_a_dead_stream_is_not_a_finished_turn.py \
-            jaato-server/shared/tests/test_env_scope_catalog.py \
-            jaato-server/shared/tests/test_docs_do_not_contradict_the_tree.py \
-            jaato-server/shared/tests/test_ci_runs_every_test_file.py \
-            jaato-server/shared/tests/test_declared_python_floor_is_tested.py \
-            jaato-server/shared/tests/test_sdk_floor_is_the_sdk_we_ship.py \
-            jaato-server/shared/tests/test_a_predefined_plan_is_per_session_1195.py \
-            jaato-server/shared/tests/test_templates_handle_a_session_that_ended.py \
-            jaato-server/shared/tests/test_session_manager_reads_only_attributes_it_assigns.py \
-            jaato-server/shared/tests/test_cli_executable_by_path_1202.py
+            jaato-server/jaato_server/shared/tests/test_all_plugins_satisfy_protocol.py \
+            jaato-server/jaato_server/shared/tests/test_plugin_tier_partition.py \
+            jaato-server/jaato_server/shared/tests/test_provider_capabilities.py \
+            jaato-server/jaato_server/shared/tests/test_provider_capability_conformance.py \
+            jaato-server/jaato_server/shared/tests/test_provider_knobs.py \
+            jaato-server/jaato_server/shared/tests/test_tool_id_wire_conformance.py \
+            jaato-server/jaato_server/shared/tests/test_reset_for_next_session.py \
+            jaato-server/jaato_server/shared/tests/test_enrichment_plugin.py \
+            jaato-server/jaato_server/shared/tests/test_a_cache_is_published_only_when_complete.py \
+            jaato-server/jaato_server/shared/tests/test_cyclomatic_complexity_audit.py \
+            jaato-server/jaato_server/shared/tests/test_truncation_is_not_reported_as_tool_use.py \
+            jaato-server/jaato_server/shared/tests/test_a_dead_stream_is_not_a_finished_turn.py \
+            jaato-server/jaato_server/shared/tests/test_env_scope_catalog.py \
+            jaato-server/jaato_server/shared/tests/test_docs_do_not_contradict_the_tree.py \
+            jaato-server/jaato_server/shared/tests/test_ci_runs_every_test_file.py \
+            jaato-server/jaato_server/shared/tests/test_declared_python_floor_is_tested.py \
+            jaato-server/jaato_server/shared/tests/test_sdk_floor_is_the_sdk_we_ship.py \
+            jaato-server/jaato_server/shared/tests/test_a_predefined_plan_is_per_session_1195.py \
+            jaato-server/jaato_server/shared/tests/test_templates_handle_a_session_that_ended.py \
+            jaato-server/jaato_server/shared/tests/test_session_manager_reads_only_attributes_it_assigns.py \
+            jaato-server/jaato_server/shared/tests/test_cli_executable_by_path_1202.py
 
   # ---------------------------------------------------------------
   # The reversion meta-guard, alone, because it is not like the guards
@@ -148,7 +148,7 @@ jobs:
       - name: Every guard detects its own reversion
         run: |
           pytest -q \
-            jaato-server/shared/tests/test_every_guard_detects_its_own_reversion.py
+            jaato-server/jaato_server/shared/tests/test_every_guard_detects_its_own_reversion.py
 
   # ---------------------------------------------------------------
   # The suites, fanned out one job per leg.
@@ -222,7 +222,7 @@ jobs:
   # declarations, runs the framework-free protocol/store unit tests, and
   # drives the real UI end-to-end against the scripted mock daemon
   # (mock/daemon.ts speaks the wire protocol, so this exercises the same
-  # frames a python -m server --web-socket daemon would send).  No model
+  # frames a python -m jaato_server --web-socket daemon would send).  No model
   # provider or Python install is needed, which keeps the job cheap.
   # ---------------------------------------------------------------
   web-client:
@@ -331,8 +331,8 @@ jobs:
           - name: shared/tests
             run: |
               pytest -q --continue-on-collection-errors \
-                --ignore=jaato-server/shared/tests/test_every_guard_detects_its_own_reversion.py \
-                jaato-server/shared/tests/
+                --ignore=jaato-server/jaato_server/shared/tests/test_every_guard_detects_its_own_reversion.py \
+                jaato-server/jaato_server/shared/tests/
 
           # Until recently NO workflow ran server/tests or shared/plugins, so their
           # tests rotted silently against deliberate production changes --
@@ -371,32 +371,32 @@ jobs:
           # integration/ today, and a directory-shaped path cannot silently
           # miss a file the way a hand-listed one can -- which is also why
           # the root-level files below are a GLOB rather than a list. They
-          # sit directly in jaato-server/server/ rather than in
+          # sit directly in jaato-server/jaato_server/server/ rather than in
           # server/tests/; moving them there would make this line
           # unnecessary, and is left as its own change.
           - name: server (daemon tier)
             run: |
               rc=0
               pytest -q --continue-on-collection-errors \
-                jaato-server/server/tests/ || rc=1
+                jaato-server/jaato_server/server/tests/ || rc=1
               pytest -q --continue-on-collection-errors \
-                jaato-server/server/runner/tests/ || rc=1
+                jaato-server/jaato_server/server/runner/tests/ || rc=1
               pytest -q --continue-on-collection-errors \
-                jaato-server/server/runner_rpc_handlers/tests/ || rc=1
+                jaato-server/jaato_server/server/runner_rpc_handlers/tests/ || rc=1
               pytest -q --continue-on-collection-errors \
-                jaato-server/server/egress_proxy/tests/ || rc=1
+                jaato-server/jaato_server/server/egress_proxy/tests/ || rc=1
               pytest -q --continue-on-collection-errors \
-                jaato-server/server/test_*.py || rc=1
+                jaato-server/jaato_server/server/test_*.py || rc=1
               pytest -q --continue-on-collection-errors \
                 jaato-server/tests/ || rc=1
               pytest -q --continue-on-collection-errors \
-                jaato-server/shared/test_safe_pool.py || rc=1
+                jaato-server/jaato_server/shared/test_safe_pool.py || rc=1
               exit $rc
 
           - name: shared/plugins (plugin tier)
             run: |
               pytest -q --continue-on-collection-errors \
-                jaato-server/shared/plugins/
+                jaato-server/jaato_server/shared/plugins/
 
           # jaato-tui/tests ran in NO merge-gating workflow — only in the
           # release publish job, which runs AFTER the merge it should have
@@ -437,7 +437,7 @@ jobs:
           # extra field each, and GCEvent with no baseline at all -- an event
           # type that reached the wire and was never captured.
           #
-          # jaato-server/shared/scaffold/tests is a THIRD such directory, and
+          # jaato-server/jaato_server/shared/scaffold/tests is a THIRD such directory, and
           # the one that guards the developer-facing toolkit: `jaato-scaffold
           # explain` / `validate` / `new`, the tools the README and the SDK
           # skill tell an agent to trust INSTEAD of reading the source. Over a
@@ -480,7 +480,7 @@ jobs:
               rc=0
               pytest -q --continue-on-collection-errors jaato-sdk/tests/ || rc=1
               pytest -q --continue-on-collection-errors jaato-sdk/jaato_sdk/tests/ || rc=1
-              pytest -q --continue-on-collection-errors jaato-server/shared/scaffold/tests/ || rc=1
+              pytest -q --continue-on-collection-errors jaato-server/jaato_server/shared/scaffold/tests/ || rc=1
               pytest -q -m conformance jaato-sdk/jaato_sdk/conformance/ || rc=1
               pytest -q --continue-on-collection-errors jaato-eval/tests/ || rc=1
               exit $rc

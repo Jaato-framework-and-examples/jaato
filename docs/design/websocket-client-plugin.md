@@ -88,7 +88,7 @@ patterns an agent might need.
 
 Following the Webhook plugin's distribution model:
 
-The **plugin itself** lives in the public codebase (`shared/plugins/ws_client/`).
+The **plugin itself** lives in the public codebase (`jaato_server/shared/plugins/ws_client/`).
 It's an outbound WebSocket connector with a single optional dependency — no
 proprietary logic. Gating it would be inconsistent with the Webhook plugin
 (inbound HTTP) being public.
@@ -137,7 +137,7 @@ messages (e.g., a Slack bot waiting for mentions). The delivery mechanism must:
 
 `inject_prompt()` can start a new model turn on an idle session — but only
 when the **continuation callback** is set. This callback is configured by
-`JaatoServer.initialize()` (`server/core.py:2284`) and calls
+`JaatoServer.initialize()` (`jaato_server/server/core.py:2284`) and calls
 `_start_model_thread()` to kick off a new turn:
 
 ```python
@@ -237,7 +237,7 @@ period. The event bus singleton is shared — all plugins see the same events
 regardless of which tool name the model uses.
 
 This extraction is a prerequisite for the WebSocket plugin — without it, the
-plugin would need to import from `shared/plugins/todo/event_bus.py`, creating
+plugin would need to import from `jaato_server/shared/plugins/todo/event_bus.py`, creating
 a dependency on the todo plugin that makes no semantic sense.
 
 ### Why Not `StreamManager`?

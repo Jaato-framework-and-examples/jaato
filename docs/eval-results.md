@@ -6,7 +6,7 @@ record, appended as it lands. This page declares what a reader outside
 `jaato_eval` imports `jaato_sdk` and nothing else from this tree, so a consumer
 that imported the engine would run that rule backwards. The producer's half is
 `jaato-eval/jaato_eval/results_format.py`; the first consumer is
-`jaato-server/shared/scaffold/eval_results.py`, which renders an arm's numbers
+`jaato-server/jaato_server/shared/scaffold/eval_results.py`, which renders an arm's numbers
 into the accuracy section of an Annex IV dossier (`jaato-scaffold new dossier
 --eval-results <file>`).
 

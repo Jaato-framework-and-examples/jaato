@@ -141,10 +141,10 @@ and the gap is almost always the same: the fact is *produced* but not
 | What exists | Where | What the Act would read it as |
 |---|---|---|
 | provider trace (`JAATO_PROVIDER_TRACE` / `trace.provider_log`) — every request and response, tool ids resolved (#873) | `jaato_sdk/trace.py`, per provider | the model-facing half of the log |
-| application trace (`JAATO_TRACE_LOG` / `trace.session_log`) — `[PERMISSION] … DECISION` lines (#951, machine-readable, `asked=`, `policy=`, `user_id=`/`approver=`), `[TOOL_RUNNER] resolve/permission/result`, `BUDGET CEILING` / `BUDGET RUNG` (#955), `HISTORY_INVARIANT`, `ENRICH` | `shared/plugins/permission/plugin.py`, `shared/ai_tool_runner.py`, `shared/jaato_session.py` | events "relevant for identifying situations that may result in … a risk" (12(2)(a)) — the decision record |
-| token ledger — `response` rows (tokens, `user_id`) and `permission-check` rows (tool, args, verdict, method, caller, approver) | `shared/token_accounting.py`, written from `jaato_session.py:11851` and `ai_tool_runner.py:638` | the attributable account of what ran and who allowed it |
-| session record (2.x) — history, `profile_snapshot`, `rendered_instructions`, `agent_params`, `created_by`, `runner_identity`, `sandbox_mode`, `turn_count` | `<workspace>/.jaato/sessions/`, `shared/session_persistence.py` | "the period of each use" (12(3)(a)), and the exact configuration that produced every output |
-| telemetry — OpenInference spans, `redact_content` default true, cost with provenance | `shared/plugins/telemetry/` | post-market monitoring feed (12(2)(b), 72) |
+| application trace (`JAATO_TRACE_LOG` / `trace.session_log`) — `[PERMISSION] … DECISION` lines (#951, machine-readable, `asked=`, `policy=`, `user_id=`/`approver=`), `[TOOL_RUNNER] resolve/permission/result`, `BUDGET CEILING` / `BUDGET RUNG` (#955), `HISTORY_INVARIANT`, `ENRICH` | `jaato_server/shared/plugins/permission/plugin.py`, `jaato_server/shared/ai_tool_runner.py`, `jaato_server/shared/jaato_session.py` | events "relevant for identifying situations that may result in … a risk" (12(2)(a)) — the decision record |
+| token ledger — `response` rows (tokens, `user_id`) and `permission-check` rows (tool, args, verdict, method, caller, approver) | `jaato_server/shared/token_accounting.py`, written from `jaato_session.py:11851` and `ai_tool_runner.py:638` | the attributable account of what ran and who allowed it |
+| session record (2.x) — history, `profile_snapshot`, `rendered_instructions`, `agent_params`, `created_by`, `runner_identity`, `sandbox_mode`, `turn_count` | `<workspace>/.jaato/sessions/`, `jaato_server/shared/session_persistence.py` | "the period of each use" (12(3)(a)), and the exact configuration that produced every output |
+| telemetry — OpenInference spans, `redact_content` default true, cost with provenance | `jaato_server/shared/plugins/telemetry/` | post-market monitoring feed (12(2)(b), 72) |
 | per-session logs | `.jaato/logs/` | operational |
 
 Three gaps, in decreasing order of surprise:
@@ -156,7 +156,7 @@ Three gaps, in decreasing order of surprise:
    was the only method that wrote `LEDGER_PATH`, and it had no caller outside
    tests (measured: `grep -rn "write_ledger(" --include=*.py .` returns the
    definition and its own docstring). `JaatoServer` constructs a ledger
-   (`server/core.py:693`) and both writers append to it, so the `permission-check`
+   (`jaato_server/server/core.py:693`) and both writers append to it, so the `permission-check`
    rows with approver identity that #859 and #951 added are held in memory and
    lost with the process. The consumption aspect reads them live, which is why
    nobody noticed. That is a defect independent of the Act, and it is the Act's
@@ -339,13 +339,13 @@ what it does, where it lives, what it deliberately does not do.
 ### 4.1 A `regulatory:` block in the profile — the one fact only the author knows
 
 > **Shipped.** `RegulatoryProfileConfig` / `parse_regulatory_block`
-> (`shared/plugins/subagent/config.py`), wired into every profile ingress
+> (`jaato_server/shared/plugins/subagent/config.py`), wired into every profile ingress
 > including the isolated-runner payload; `validate` reports
 > `disclosure_absent`, escalates `HIGH_RISK_ESCALATED_CODES` to errors under
 > `risk_class: high` and adds the five `high_risk_*` findings
-> (`shared/scaffold/validate.py`); `explain profile` renders it;
+> (`jaato_server/shared/scaffold/validate.py`); `explain profile` renders it;
 > `explain oversight <profile>` reads it. Guard:
-> `shared/tests/test_regulatory_profile_block.py`. The dossier (§4.6) reads
+> `jaato_server/shared/tests/test_regulatory_profile_block.py`. The dossier (§4.6) reads
 > it too -- and documents a profile that declares no block as **UNDECLARED**
 > rather than as `minimal`.
 
@@ -388,11 +388,11 @@ regulatory:
 ### 4.2 Disclosure of AI interaction (Article 50(1))
 
 > **Shipped: all three touches.** Touches 1 and 3: `PIECE_DISCLOSURE` in
-> `shared/instruction_suppression.py`, the text in `shared/ai_disclosure.py`,
+> `jaato_server/shared/instruction_suppression.py`, the text in `jaato_server/shared/ai_disclosure.py`,
 > appended by `JaatoRuntime.get_system_instructions` beside the boundary and
 > announced at WARNING by the session when dropped (`ANNOUNCED_PIECES`);
 > `disclosure_absent` and `high_risk_disclosure_suppressed` in `validate`.
-> Guard: `shared/tests/test_ai_disclosure_piece.py`.
+> Guard: `jaato_server/shared/tests/test_ai_disclosure_piece.py`.
 >
 > Touch 2 (#1116): `announcement_for()` is the ONE predicate —
 > `JaatoServer.disclosure_announcement` and `explain oversight <profile>`
@@ -402,7 +402,7 @@ regulatory:
 > `SessionInfoEvent.disclosure_announcement` carries the same text on the
 > state snapshot (protocol 1.15) so a client attaching later can render it
 > in its own medium. `PresentationContext.client_discloses_ai` suppresses.
-> Guard: `shared/tests/test_first_interaction_announcement.py`.
+> Guard: `jaato_server/shared/tests/test_first_interaction_announcement.py`.
 >
 > Touch 4 (#1157): the announcement is RECORDED. `announcement_record()`
 > is the one writer of the `announcement` event `jaato_sdk.audit` declares
@@ -416,7 +416,7 @@ regulatory:
 > `validate` and a WARNING from the daemon. The daemon
 > appends it at creation to the file the runner's ledger continues, so it
 > precedes the first `response` in one chain. Guard:
-> `shared/tests/test_announcement_is_recorded_1157.py`; live:
+> `jaato_server/shared/tests/test_announcement_is_recorded_1157.py`; live:
 > `jaato_sdk/conformance/test_eu_ai_act_controls.py`.
 >
 > **Stated limit on the speaking-tier half.** §4.2's touch 2 proposed
@@ -465,14 +465,14 @@ find.
 > `JaatoSession._deliver_model_media` and carried through
 > `_emit_withheld_attachments_to_clients`, the runner frame and the daemon
 > dispatcher; TypeScript surface regenerated. Guard:
-> `shared/tests/test_generated_by_stamp.py`.
+> `jaato_server/shared/tests/test_generated_by_stamp.py`.
 >
 > Touch 2 (#1117): `TRAIT_OUTPUT_MARKER` in `jaato_sdk/plugins/base.py`,
 > the payload/result contract in `jaato_sdk/output_marking.py`, the
 > dispatcher `JaatoSession._mark_generated_output` invoked at both
 > delivery seams, and the in-tree `output_marker` plugin writing
 > `<file>.provenance.json`. Guard:
-> `shared/tests/test_output_marker_trait.py`. Touch 3 (#1118): the text
+> `jaato_server/shared/tests/test_output_marker_trait.py`. Touch 3 (#1118): the text
 > posture is below, and is rendered by `explain oversight` so a deployer
 > reads it off the framework rather than out of this file.
 >
@@ -576,7 +576,7 @@ loud, rather than a mechanism that looks like compliance.
 > env; relative resolves against the session workspace; an unwritable path
 > never fails the round trip), `write_ledger` flushes only what was not
 > appended, and `trace.ledger` is the typed key. Guard:
-> `shared/tests/test_ledger_reaches_disk.py`.
+> `jaato_server/shared/tests/test_ledger_reaches_disk.py`.
 >
 > #1119 added the contract and the clock: `jaato_sdk.audit.AUDIT_SCHEMA`
 > (the events, their fields, and which store each lands in),
@@ -584,14 +584,14 @@ loud, rather than a mechanism that looks like compliance.
 > `record_keeping:` block through all six profile ingresses plus the
 > isolated-runner payload, `workspace.delete`'s retention refusal, and the
 > hourly retention pass on the #812 watchdog. Guard:
-> `shared/tests/test_audit_record_contract.py`.
+> `jaato_server/shared/tests/test_audit_record_contract.py`.
 >
 > #1120 added `integrity: sha256-chain`:
 > `jaato_sdk.audit_chain` (stdlib, in the SDK so a file can be verified
 > by somebody who has the file and nothing else),
 > `TokenLedger._line` as the ONE place a record becomes bytes so both
 > write paths chain identically, and `jaato-doctor --audit-verify
-> <path>`. Guard: `shared/tests/test_audit_chain_integrity.py`.
+> <path>`. Guard: `jaato_server/shared/tests/test_audit_chain_integrity.py`.
 >
 > **The schema is ENFORCED, not described**, which is the difference
 > between a contract and a wish: a guard walks the writers named in
@@ -664,8 +664,8 @@ Not a sixth store. A **contract over the stores that exist**:
 > from their enforcers; `<profile>`: what that profile armed, resolved
 > through `discover_profiles`) and the `stop button` line in `jaato-doctor`,
 > with the `--stop` invocation read off the running daemon's argv. Guards:
-> `shared/tests/test_explain_oversight.py`,
-> `shared/tests/test_doctor_names_the_stop_button.py`.
+> `jaato_server/shared/tests/test_explain_oversight.py`,
+> `jaato_server/shared/tests/test_doctor_names_the_stop_button.py`.
 
 An earlier draft proposed a daemon-level `halt` verb: stop every loaded
 session, keep the daemon up, refuse new turns. It is not needed, and the
@@ -705,7 +705,7 @@ running framework saying the same thing.
 
 ### 4.6 A generated technical dossier (Articles 11, 13, Annex IV, 25(4))
 
-> **Shipped (#1121).** `shared/scaffold/dossier.py` renders both documents,
+> **Shipped (#1121).** `jaato_server/shared/scaffold/dossier.py` renders both documents,
 > `jaato-scaffold new dossier` writes them, and the Article 25(4) pack is
 > committed at [`docs/jaato-component-pack.md`](../jaato-component-pack.md)
 > as the first versioned instance -- a written agreement needs a document to
@@ -763,10 +763,10 @@ high-risk, because it is also the honest instructions for use.
 
 > **Shipped (#1122).** `jaato_sdk.incidents` (the record, the vocabulary
 > and the parser -- in the SDK, because the READER is `jaato-doctor`,
-> which cannot import `shared`), `shared.incidents.raise_incident` (the
+> which cannot import `shared`), `jaato_server.shared.incidents.raise_incident` (the
 > one writer, which needs a session), `IncidentEvent` (protocol 1.16),
 > an `INCIDENT` entry in `AUDIT_SCHEMA`, and `jaato-doctor --incidents
-> [--since 15d]`. Guard: `shared/tests/test_incident_register.py`.
+> [--since 15d]`. Guard: `jaato_server/shared/tests/test_incident_register.py`.
 >
 > **A query over the audit log, not a second store.** An incident is one
 > more line in the application trace -- the one artefact every
@@ -787,7 +787,7 @@ high-risk, because it is also the honest instructions for use.
 > reporting deadline.
 >
 > **Sites covered, each raising from the place that already knew:** the
-> terminal error and the budget terminal (`server/core.py`), nudge
+> terminal error and the budget terminal (`jaato_server/server/core.py`), nudge
 > exhaustion (*the same* terminal, with the kind derived from the error
 > type -- a second call site would count one dying session twice), the
 > #1023 confinement refusal (raised before the exception, because it
@@ -817,11 +817,11 @@ classifying.
 > field, `plugin_configs.memory.require_curation` gating BOTH retrieval
 > paths, and `require_curation_without_curator` in `validate` — a
 > WORKSPACE check, because the curator is a separate profile by design.
-> Guard: `shared/tests/test_memory_provenance.py`.
+> Guard: `jaato_server/shared/tests/test_memory_provenance.py`.
 >
 > **Nothing is stashed on the plugin.** The instance is shared across
 > sibling subagents, so the stamp is read per execution off
-> `shared.session_context` — the way `_get_session_id` already reads the
+> `jaato_server.shared.session_context` — the way `_get_session_id` already reads the
 > session id, and for the reason its docstring records: PR-196 stashed a
 > value on `self` and every cascade session read `None`. An AST guard
 > pins the absence, because a `self._session = …` added later is

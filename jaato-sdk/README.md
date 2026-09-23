@@ -66,7 +66,7 @@ your code  ◄──  IPCRecoveryClient  ◄──  /tmp/jaato.sock  ◄──�
                        (events)
 ```
 
-If no server is running and `auto_start=True` (the default), the client launches `python -m server --daemon` for you.
+If no server is running and `auto_start=True` (the default), the client launches `python -m jaato_server --daemon` for you.
 
 ### Transports — three ways to run the same agent
 
@@ -101,7 +101,7 @@ The wire protocol *above* the transport is identical — the same `Event` JSON f
 To start the server with WebSocket enabled:
 
 ```bash
-python -m server --ipc-socket /tmp/jaato.sock --web-socket :8080 --daemon
+python -m jaato_server --ipc-socket /tmp/jaato.sock --web-socket :8080 --daemon
 ```
 
 WS clients authenticate with a bearer token (auto-generated to `~/.jaato/ws.token` on first start) sent either as `Authorization: Bearer <token>` on the upgrade request or as `?token=<token>` for browsers that can't set headers. The server stores only the SHA-256 digest and rejects bad tokens with WS close code 1008 before any session work happens. The Python `WSClient` ships in this SDK — install the optional `websockets` dependency with `pip install 'jaato-sdk[ws]'` (`uv pip install 'jaato-sdk[ws]'`).

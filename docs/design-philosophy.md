@@ -25,7 +25,7 @@ Some systems (e.g., pi-mono) require users to choose between "steering" (Enter) 
 3. **Natural interaction** - Matches how you'd communicate with a human collaborator
 4. **Fewer wrong choices** - Users can't accidentally interrupt when they meant to queue, or vice versa
 
-**Implementation**: `shared/message_queue.py` uses a priority queue with `SourceType` (PARENT, USER, SYSTEM, CHILD), but all user messages are treated as high-priority. The model receives them at natural pause points and decides the appropriate response.
+**Implementation**: `jaato_server/shared/message_queue.py` uses a priority queue with `SourceType` (PARENT, USER, SYSTEM, CHILD), but all user messages are treated as high-priority. The model receives them at natural pause points and decides the appropriate response.
 
 ---
 
@@ -54,7 +54,7 @@ Jaato runs as a daemon with clients connecting via IPC or WebSocket. This enable
 
 | Layer | Responsibility |
 |-------|----------------|
-| **Pipeline** (`shared/plugins/`, `server/`) | Emit semantic events with structured data |
+| **Pipeline** (`jaato_server/shared/plugins/`, `jaato_server/server/`) | Emit semantic events with structured data |
 | **Client** (`jaato-tui/`) | Choose UX presentation based on context |
 
 **Example - Clarification Plugin**:
@@ -288,7 +288,7 @@ Unlike pure conversation branching, waypoints capture:
 - **Conversation metadata** - Message count, turn index, preview
 - **Ownership** - Who created it and what permissions apply
 
-**Implementation**: `shared/plugins/waypoint/` with `WaypointManager` tracking the tree structure and `BackupManager` integration for file state.
+**Implementation**: `jaato_server/shared/plugins/waypoint/` with `WaypointManager` tracking the tree structure and `BackupManager` integration for file state.
 
 ---
 
@@ -326,7 +326,7 @@ When adding a new plugin or component that handles file paths:
 
 **Full pattern documentation**: [docs/path-boundary-pattern.md](path-boundary-pattern.md)
 
-**Implementation**: `shared/path_utils.py`
+**Implementation**: `jaato_server/shared/path_utils.py`
 
 ---
 

@@ -6,7 +6,7 @@ This module defines the core types for the shared event bus that enables:
 - Plugin-to-plugin communication
 
 These types are consumed by the ``EventBus`` class in
-``jaato-server/shared/event_bus.py`` and by any plugin or session code
+``jaato-server/jaato_server/shared/event_bus.py`` and by any plugin or session code
 that publishes or subscribes to events.
 
 Previously these types lived in ``jaato_sdk.plugins.todo.models``.

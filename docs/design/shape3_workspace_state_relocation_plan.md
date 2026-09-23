@@ -60,9 +60,9 @@ The daemon is a single long-running process that spawns N runner subprocesses, o
 
 ## 2. What's wrong today
 
-`JaatoServer._resolve_session_env()` at `jaato-server/server/core.py:893` calls `dotenv_values(self.env_file)` against a path the client passed in. The daemon literally reads the client-supplied workspace `.env` from its own filesystem. Similar daemon-side workspace-file reading happens for:
+`JaatoServer._resolve_session_env()` at `jaato-server/jaato_server/server/core.py:893` calls `dotenv_values(self.env_file)` against a path the client passed in. The daemon literally reads the client-supplied workspace `.env` from its own filesystem. Similar daemon-side workspace-file reading happens for:
 
-- `<workspace>/.jaato/profiles/*.yaml` — daemon parses profile via `shared/plugins/subagent/config.py:build_inline_profile` to construct the `SubagentProfile`
+- `<workspace>/.jaato/profiles/*.yaml` — daemon parses profile via `jaato_server/shared/plugins/subagent/config.py:build_inline_profile` to construct the `SubagentProfile`
 - `<workspace>/.jaato/auth/*_auth.json` — daemon reads OAuth tokens for provider auth verification
 - `<workspace>/.jaato/agents/*.md` — daemon reads agent markdown for system-instructions assembly
 - Profile.env `pass://` URI resolution — daemon's `_resolve_secret_uri` substitutes literal values
@@ -71,7 +71,7 @@ All this happens on the daemon side, with results threaded to the runner via the
 
 **Symptoms this design closes (beyond the architectural smell):**
 
-- Profile-less `jaato --new-session` regression: daemon resolves MODEL_NAME from workspace `.env` into `server._model_name`, but `build_session_envelope` populates `envelope.model_name` only from `profile.model` (with no env-var fallback). Fixing this daemon-side adds a workspace-coupled fallback to a function that shouldn't be workspace-aware; fixing it runner-side puts the resolution where it naturally belongs.
+- Profile-less `jaato --new-session` regression: daemon resolves MODEL_NAME from workspace `.env` into `jaato_server.server._model_name`, but `build_session_envelope` populates `envelope.model_name` only from `profile.model` (with no env-var fallback). Fixing this daemon-side adds a workspace-coupled fallback to a function that shouldn't be workspace-aware; fixing it runner-side puts the resolution where it naturally belongs.
 - Phase 4 backlog `project_backlog_env_propagation_seat_flip_gap`: "env propagation across seat-flip is broken — daemon-side resolution works but resolved values don't reach runner". Closed by moving the resolution to the runner.
 - Daemon-side `pass://` resolver requires the daemon to have access to the user's GPG agent. Works today because daemon and user share a machine; structurally fragile.
 
@@ -129,13 +129,13 @@ Original scope (pre-§0.1): runner parses profile YAML + derives all profile fie
 **Revised scope (split into two layers):**
 
 - **Profile YAML structure parsing**: CAN move runner-side.  Reads the file via `_load_profile`, derives `model_name`, `provider_name`, `plugins`, `plugin_configs`, `system_instructions`, `gc`, `completion_payload_schema`, `runtime_limits`.  No exec required; no secrets in this layer.
-- **Profile.env value resolution**: STAYS daemon-side.  Daemon reads `profile.env`, runs `expand_variables`, contributes to `server._session_env`, ships via `envelope.session_env`.  Same path as workspace .env per PR #92.
+- **Profile.env value resolution**: STAYS daemon-side.  Daemon reads `profile.env`, runs `expand_variables`, contributes to `jaato_server.server._session_env`, ships via `envelope.session_env`.  Same path as workspace .env per PR #92.
 
 **Open design questions before specifying this PR:**
 
 1. Does the daemon need profile YAML to be parsed in order to populate the envelope's other fields, OR can profile.env be a separate read (`yaml.safe_load(<profile>.yaml)["env"]`) while the rest of the profile parses runner-side?  Probably yes — daemon needs `model_name` etc. for its own bookkeeping today (transports, telemetry).
 2. If daemon STILL parses profile YAML for its own needs, what does "runner reads profile YAML" actually deliver beyond a redundant re-parse?  Two answers: (a) test the runner-side parser pin against daemon-side equivalence; (b) future "daemon as pure factory" target needs runner-side parsing as a prerequisite.
-3. Is the `_load_profile` import surface clean from the runner (the audit in §0 / open question 3 of v1 doc).  Probably yes; `shared/plugins/subagent/config.py` is import-clean.
+3. Is the `_load_profile` import surface clean from the runner (the audit in §0 / open question 3 of v1 doc).  Probably yes; `jaato_server/shared/plugins/subagent/config.py` is import-clean.
 
 PR 2 specification deferred until these are answered.  Workspace state relocation is no longer a clean reorg — secret-touching layers stay daemon-side.
 
@@ -210,7 +210,7 @@ Each PR lands behind:
 
 1. **Envelope schema versioning** — PRs 2 + 3 evolve the envelope (sheds profile-derived fields). Use a `schema_version` bump to fail-fast on runner-daemon version mismatch?
 2. **Pool composition** — pre-warm pool slots (per `runner_prewarm_pool_plan.md`) inherit template state. When pool work lands, slots read their own workspace `.env` via the PR 1 path. Confirm: PR 1's `bootstrap_session` reads env at envelope-handling time (after slot is assigned to a session), not at template-fork time. This is the natural code position; just calling it out explicitly.
-3. **Profile inheritance** — daemon-side resolution walks inheritance chains and merges. Runner-side needs the same. Verify `build_inline_profile` is import-clean from the runner (it should be — it's `shared/plugins/subagent/config.py`).
+3. **Profile inheritance** — daemon-side resolution walks inheritance chains and merges. Runner-side needs the same. Verify `build_inline_profile` is import-clean from the runner (it should be — it's `jaato_server/shared/plugins/subagent/config.py`).
 4. **`workspace_path` is None edge case** — some headless / sub-spawn paths have `workspace_path=None`. Runner skips workspace file reading in that case; falls through to envelope-carried values (PR 1 keeps the fallback for this path).
 
 ## 10. Estimated effort

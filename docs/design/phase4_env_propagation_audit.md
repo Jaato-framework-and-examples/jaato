@@ -19,7 +19,7 @@ contains `pass://...`).
 ## Root cause (precise)
 
 `runner/session.py` **does not apply** `envelope.env_overrides` —
-`grep env_overrides jaato-server/server/runner/session.py` returns zero
+`grep env_overrides jaato-server/jaato_server/server/runner/session.py` returns zero
 matches.  The envelope field is built and carried; the runner just
 ignores it.
 
@@ -40,7 +40,7 @@ the literal `pass://...` string — fails to authenticate.
 runner's process doesn't have `_resolvers` populated.  Premium's
 `pass_resolver` registers via entry point `jaato.secret_resolvers`,
 but `_discover_secret_resolvers` in
-`shared/plugins/subagent/config.py:114` uses a **module-level
+`jaato_server/shared/plugins/subagent/config.py:114` uses a **module-level
 process-wide cache** that gets populated lazily on first call.
 
 But that's a red herring: even if `_resolvers` worked perfectly in
@@ -105,7 +105,7 @@ Line 1094: server.initialize()
 
 ## Concrete code changes
 
-### Change 1: `server/core.py` — extract resolution into a method
+### Change 1: `jaato_server/server/core.py` — extract resolution into a method
 
 Hoist lines 1514-1539 (the env-resolution sub-block of `initialize()`
 step 1) into a new method:
@@ -129,7 +129,7 @@ def _resolve_session_env(self) -> None:
         return
 
     from dotenv import dotenv_values
-    from shared.plugins.subagent.config import expand_variables
+    from jaato_server.shared.plugins.subagent.config import expand_variables
 
     raw_session_env = dotenv_values(self.env_file) if self.env_file else {}
     raw_filtered = {k: v for k, v in raw_session_env.items() if v is not None}
@@ -149,9 +149,9 @@ Initialize step 1 replaces its in-lined block with a call to this
 method.  The `model_name = get_config("MODEL_NAME")` lookup continues
 to read `self._session_env`.
 
-### Change 2: `server/session_manager.py:_construct_and_initialize_server` — call pre-spawn
+### Change 2: `jaato_server/server/session_manager.py:_construct_and_initialize_server` — call pre-spawn
 
-After line 1060 (`server.config_root = envelope.config_root`) and
+After line 1060 (`jaato_server.server.config_root = envelope.config_root`) and
 before line 1070 (`_provision_ipc_apparmor_and_spawn_runner`):
 
 ```python

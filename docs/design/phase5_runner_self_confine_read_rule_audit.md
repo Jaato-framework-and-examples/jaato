@@ -85,7 +85,7 @@ binary cache.
 
 ## 5. Test plan
 
-Three regression pins extending `shared/tests/test_apparmor.py`:
+Three regression pins extending `jaato_server/shared/tests/test_apparmor.py`:
 
 1. `test_template_v15_base_profile_allows_attr_current_read` —
    `_render_profile()` output contains `/proc/self/attr/current` with

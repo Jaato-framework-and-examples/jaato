@@ -96,7 +96,7 @@ group and have shipped nothing.
 ### 1.1 What Chrome actually ships (measured, not read)
 
 Probed against **Google Chrome for Testing 153.0.8010.36** with
-`shared/cdp.py`, driving a page that really registers tools.  The published
+`jaato_server/shared/cdp.py`, driving a page that really registers tools.  The published
 explainer and every secondary write-up disagree with the browser in six
 places, and a client written from the documentation would fail on all six:
 
@@ -137,7 +137,7 @@ does **not** reach the caller.  That is a real limitation for diagnostics.
 
 ## 2. Why `.mcp.json` is a dead end for this
 
-`shared/mcp_context_manager.py` is **stdio-only**.  The imports are the whole
+`jaato_server/shared/mcp_context_manager.py` is **stdio-only**.  The imports are the whole
 story:
 
 ```python
@@ -182,7 +182,7 @@ Two consequences, one of which is a live defect:
 ## 3. jaato already owns the hard part
 
 The mechanism a WebMCP client needs is not new code.  It is
-`shared/plugins/model_provider/chrome_ai/cdp.py` + `bridge.py`, which already
+`jaato_server/shared/plugins/model_provider/chrome_ai/cdp.py` + `bridge.py`, which already
 provide, with **no dependencies beyond `websockets`** (already core):
 
 | Capability | Where |
@@ -204,7 +204,7 @@ A WebMCP client on top of that is close to mechanical:
 - **churn** — register a `toolchange` listener that pushes over the existing
   binding, exactly as `bridge.py` already routes Prompt API chunks
 
-> **DONE** (step 7.3).  `cdp.py` now lives at `jaato-server/shared/cdp.py`,
+> **DONE** (step 7.3).  `cdp.py` now lives at `jaato-server/jaato_server/shared/cdp.py`,
 > raising a provider-neutral `CDPConnectionError`.  `ChromeAIConnectionError`
 > inherits from both its own base and that one, so a single
 > `except CDPConnectionError` in the provider catches either layer and
@@ -349,7 +349,7 @@ before them would be shipping a page-controlled prompt-injection surface.
 > boundary's `source`, with each description flattened to one line so a newline
 > cannot forge an extra bullet row.
 >
-> The guard is `jaato-server/shared/tests/test_untrusted_schema_is_sanitized.py`,
+> The guard is `jaato-server/jaato_server/shared/tests/test_untrusted_schema_is_sanitized.py`,
 > which declares four `REVERSIONS`, so
 > `test_every_guard_detects_its_own_reversion` puts each defect back on every
 > commit and asserts the named test notices.  That meta-guard earned its keep
@@ -395,14 +395,14 @@ it should be argued on its own merits later rather than smuggled in on WebMCP's.
 2. ~~**Close the schema-text trust gap**~~ — **DONE.**  `TRAIT_UNTRUSTED_SCHEMA`
    + `sanitize_untrusted_schema()` + a fenced system-instruction listing,
    guarded by `test_untrusted_schema_is_sanitized.py`.  See §5.
-3. ~~**Lift `cdp.py`**~~ — **DONE.**  Now `shared/cdp.py`, provider-neutral.
+3. ~~**Lift `cdp.py`**~~ — **DONE.**  Now `jaato_server/shared/cdp.py`, provider-neutral.
    First exercised against a real browser by step 4, which is what validated
    the lift: launch, target enumeration, attach, evaluate, teardown.  See §3.
 4. ~~**Spike a `webmcp` tool plugin**~~ — **DONE**, and it works end to end
    against real Chrome 153 driving a real WebMCP page (the page's DOM actually
    changed — the tools drove the application, not a simulation).
-   `shared/plugins/webmcp/` exposes `webmcp_list_tools` + `webmcp_call` behind
-   deferred discovery, on `shared/cdp.py`.  **Kept out of the default plugin
+   `jaato_server/shared/plugins/webmcp/` exposes `webmcp_list_tools` + `webmcp_call` behind
+   deferred discovery, on `jaato_server/shared/cdp.py`.  **Kept out of the default plugin
    set**: it drives a browser, and a session that did not ask for one should
    not get one.  Enable it in a profile's `plugins:` list.  23 unit tests
    (stubbed at the one CDP seam, with payloads transcribed from a real Chrome)

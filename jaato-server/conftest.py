@@ -103,7 +103,7 @@ def _credential_env_vars() -> tuple:
     that carries the disclosure fix.
     """
     try:
-        from shared.env_scope import CATALOG
+        from jaato_server.shared.env_scope import CATALOG
     except Exception:  # pragma: no cover - defensive
         return ()
     return tuple(sorted(n for n in CATALOG if _CREDENTIAL_NAME_RE.search(n)))
@@ -261,7 +261,7 @@ def isolated_session_context():
     A leak is not a *defect* in the test that causes it — the defect was
     that it escaped — so there is nothing here for anyone to act on.
     """
-    from shared.session_context import isolated_current_session
+    from jaato_server.shared.session_context import isolated_current_session
 
     with isolated_current_session():
         yield

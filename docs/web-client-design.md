@@ -151,7 +151,7 @@ npm run typecheck   # builds ../jaato-sdk-ts declarations, then tsc (strict, noU
 npm test            # vitest: protocol + store
 npm run build       # production bundle
 npm run e2e         # Playwright: starts mock/daemon.ts + Vite, drives the UI
-npm run dev         # against python -m server --web-socket :8080 (proxied at /ws)
+npm run dev         # against python -m jaato_server --web-socket :8080 (proxied at /ws)
 npm run mock-daemon # ws://127.0.0.1:8090; prompts: code, tool, permit, ask, fail, subagent
 ```
 

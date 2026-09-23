@@ -1,0 +1,1784 @@
+"""Tool execution infrastructure for the jaato framework.
+
+This module provides the ToolExecutor class for managing tool/function
+execution with support for:
+- Permission checking via PermissionPlugin
+- Auto-backgrounding for long-running tasks
+- Output callbacks for real-time feedback
+"""
+
+import contextlib
+import json
+import logging
+import os
+import subprocess
+import threading
+import time
+import traceback
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+from jaato_server.shared.safe_pool import SafeThreadPoolExecutor
+from typing import (
+    Any, Callable, Dict, List, NamedTuple, Optional, Set, Tuple, TYPE_CHECKING
+)
+
+logger = logging.getLogger(__name__)
+
+from jaato_server.shared.trace import trace as _trace_write
+from jaato_server.shared.token_accounting import TokenLedger
+from jaato_sdk.plugins.base import OutputCallback
+from jaato_sdk.plugins.model_provider.types import (
+    CancelledException,
+    WithMetadata,
+)
+
+# Callback for streaming tool output during execution
+# (chunk: str) -> None - simplified since call_id is known at call site
+ToolOutputCallback = Callable[[str], None]
+
+# Thread-local storage for tool output callbacks and cancel tokens.
+# Used for parallel tool execution where each thread needs its own state.
+_thread_local = threading.local()
+
+# Name of the tool that redeems an auto-background ``task_id``.  It is
+# registered by the ``background`` plugin (``shared/plugins/background``),
+# which a profile must load *separately* from the plugin whose tool got
+# backgrounded — ``cli`` acquires the capability through
+# ``BackgroundCapableMixin``, not by depending on ``background``.  When the
+# reader is absent the receipt is unredeemable, so the runner must not hand
+# one out as if it were (#804).
+BACKGROUND_READER_TOOL = 'getBackgroundTask'
+
+# How much longer than the auto-background threshold a tool is allowed to
+# run when no reader tool is loaded.  With nothing able to read a task_id,
+# waiting for the real output is strictly better than returning a handle
+# nobody can redeem, so the runner sits on the task up to this deadline
+# before giving up.  Bounded (rather than unbounded) because ``cli`` itself
+# imposes no wall-clock timeout unless RuntimeLimits sets one, and a
+# genuinely hung command must not wedge the session forever.
+DEFAULT_NO_READER_TIMEOUT_SECONDS = 300.0
+
+
+def _trace_runner(msg: str) -> None:
+    """Write one ``[TOOL_RUNNER]`` trace line.
+
+    This is the stage issue #951 could not see into.  ``[PERMISSION]``
+    said a check happened, ``[FILE_EDIT]`` said nothing, and between
+    them sat the executor lookup, the auto-background branch and the
+    deny short-circuit — three ways for a tool call to end without
+    running, none of which left a mark.  The lines below name the
+    outcome of each.
+    """
+    _trace_write("TOOL_RUNNER", msg)
+
+
+def _trace_permission_outcome(
+    name: str,
+    call_id: Optional[str],
+    allowed: bool,
+    perm_info: Dict[str, Any],
+) -> None:
+    """Trace what the gate answered, and what the runner will do about it.
+
+    Distinct from the permission plugin's own DECISION line: this one
+    is the *consumer's* view, so a decision made by a plugin that
+    somehow traces nothing (a stub, a wrapper, jaato-premium) is still
+    recorded at the point it takes effect.
+    """
+    verdict = "ALLOW" if allowed else "DENY"
+    _trace_runner(
+        f"permission: tool={name} call_id={call_id} verdict={verdict} "
+        f"method={perm_info.get('method', 'unknown')} "
+        f"reason={perm_info.get('reason', '')!r}"
+    )
+
+
+def _describe_executor(fn: Optional[Callable]) -> str:
+    """Name the resolved executor, or say plainly that there is none."""
+    if fn is None:
+        return "MISSING"
+    module = getattr(fn, "__module__", "?")
+    return f"{module}.{getattr(fn, '__name__', '?')}"
+
+
+def _trace_executor_resolution(
+    name: str,
+    call_id: Optional[str],
+    fn: Optional[Callable],
+) -> None:
+    """Trace whether an executor was found for an ALREADY-APPROVED call.
+
+    The pair "permission verdict=ALLOW" + "executor=MISSING" is the
+    shape that reads, from outside, as a call vanishing after the gate.
+    """
+    _trace_runner(
+        f"resolve: tool={name} call_id={call_id} "
+        f"executor={_describe_executor(fn)}"
+    )
+
+
+def _summarize_result(result: Any) -> str:
+    """Describe a tool result without putting its payload in the log.
+
+    Keys and the error string only: a trace file is not the place for
+    file contents, and the operator question this answers ("did it run,
+    and did it fail?") needs neither.
+    """
+    if isinstance(result, dict):
+        keys = ",".join(sorted(str(k) for k in result))
+        error = result.get("error")
+        suffix = f" error={error!r}" if error is not None else ""
+        return f"dict(keys={keys}){suffix}"
+    return type(result).__name__
+
+
+def _trace_tool_outcome(
+    name: str,
+    call_id: Optional[str],
+    ok: bool,
+    result: Any,
+) -> None:
+    """Trace the result the model is about to be handed."""
+    _trace_runner(
+        f"result: tool={name} call_id={call_id} ok={ok} "
+        f"{_summarize_result(result)}"
+    )
+
+
+def get_current_tool_output_callback() -> Optional[ToolOutputCallback]:
+    """Get the tool output callback for the current thread.
+
+    For use by plugins during parallel tool execution. Returns the callback
+    set for this thread, or None if not in a parallel execution context.
+
+    Returns:
+        The current thread's ToolOutputCallback, or None.
+    """
+    return getattr(_thread_local, 'tool_output_callback', None)
+
+
+def get_current_cancel_token():
+    """Get the cancel token for the current thread.
+
+    For use by plugins during tool execution to check if the operation has
+    been cancelled. Returns the token set for this thread, or None if not
+    in a tool execution context.
+
+    Returns:
+        The current thread's CancelToken, or None.
+    """
+    return getattr(_thread_local, 'cancel_token', None)
+
+
+def in_trusted_bridge_context() -> bool:
+    """Whether the current thread is executing inside a trusted tool bridge.
+
+    A "trusted bridge" is a plugin-provided interpreter (today only the
+    notebook plugin's Python tool bindings) whose **outer** invocation was
+    already permission-approved by the user.  When the flag is set, tool
+    calls made through the bridge inherit that approval — permission
+    prompts for individual inner calls would be redundant because the user
+    already saw and approved the full code (including all ``tools.X(...)``
+    calls) when they approved the outer tool.
+
+    Plugins enter the trusted context via
+    :func:`push_trusted_bridge_context` before dispatching inner tool calls
+    and exit via :func:`pop_trusted_bridge_context` after the outer call
+    returns.  The context manager
+    :func:`trusted_bridge_context` wraps both in a ``with`` block.
+
+    Consumers (currently the permission plugin) call this from
+    ``check_permission`` to short-circuit the approval check with an
+    ALLOW decision when inside a trusted context.
+
+    Returns:
+        True if the current thread is inside a trusted bridge scope,
+        False otherwise.
+    """
+    return bool(getattr(_thread_local, 'trusted_bridge_depth', 0))
+
+
+def push_trusted_bridge_context() -> None:
+    """Enter a trusted bridge scope on the current thread.
+
+    Increments a per-thread depth counter so that nested entries (e.g. a
+    bridge cell that itself uses another bridge) are correctly balanced.
+    Callers MUST pair every ``push`` with a ``pop`` — prefer
+    :func:`trusted_bridge_context` to guarantee cleanup on exceptions.
+    """
+    current = getattr(_thread_local, 'trusted_bridge_depth', 0)
+    _thread_local.trusted_bridge_depth = current + 1
+
+
+def pop_trusted_bridge_context() -> None:
+    """Exit a trusted bridge scope on the current thread.
+
+    Decrements the per-thread depth counter.  Underflow is silently
+    clamped to zero — callers that ``pop`` without a matching ``push``
+    indicate a bug but we prefer defensive clamping over exception noise
+    in exit paths.
+    """
+    current = getattr(_thread_local, 'trusted_bridge_depth', 0)
+    _thread_local.trusted_bridge_depth = max(0, current - 1)
+
+
+@contextlib.contextmanager
+def trusted_bridge_context():
+    """Context manager form of push/pop for safe nested use.
+
+    Example::
+
+        with trusted_bridge_context():
+            # Tool calls dispatched here skip permission prompts.
+            result = backend.execute(cell_code)
+
+    The scope is thread-local; other threads are unaffected.
+    """
+    push_trusted_bridge_context()
+    try:
+        yield
+    finally:
+        pop_trusted_bridge_context()
+
+if TYPE_CHECKING:
+    from jaato_server.shared.plugins.registry import PluginRegistry
+    from jaato_server.shared.plugins.permission import PermissionPlugin
+    from jaato_server.shared.plugins.background.protocol import BackgroundCapable, TaskHandle
+    from jaato_server.shared.plugins.reliability import ReliabilityPlugin
+    from jaato_server.shared.runtime_limits import RuntimeLimits
+
+
+def _permission_attribution(perm_info: Dict[str, Any]) -> Dict[str, str]:
+    """The identity keys a permission decision carries, for the ledger (#859).
+
+    ``user_id`` is the daemon-authenticated responder, ``approver`` the
+    name an external approval system attached; the permission plugin sets
+    them only for channel decisions, so a policy decision yields ``{}``
+    and the ledger record gains no key rather than a ``None``.
+    """
+    return {
+        key: perm_info[key]
+        for key in ('user_id', 'approver')
+        if perm_info.get(key)
+    }
+
+
+def _permission_caller_fields(
+    context: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """The asking session's identity keys, for the ledger (#951).
+
+    Read from the executor's per-session permission context, not from
+    the permission plugin: one plugin instance serves a parent and
+    every subagent sharing its registry, so only the caller knows who
+    the caller is.  Absent keys are omitted rather than recorded as
+    ``None``, matching :func:`_permission_attribution`.
+    """
+    ctx = context or {}
+    return {
+        key: ctx[key]
+        for key in ('agent_type', 'agent_name', 'session_id')
+        if ctx.get(key)
+    }
+
+
+class PermissionGateOutcome(NamedTuple):
+    """The verdict of one permission-gate run, with no execution attached.
+
+    Produced by :meth:`ToolExecutor.check_permission_only` and consumed by
+    two kinds of caller:
+
+    * :meth:`ToolExecutor._execute_impl` — the executor's own gate, which
+      then runs the tool body;
+    * any caller that reaches a tool by a route which does NOT pass
+      through ``execute()``.  Today that is
+      ``JaatoSession._execute_streaming_tool``, which dispatches the
+      auto-generated ``<tool>-stream`` variants straight to
+      ``StreamManager`` and so bypassed the gate entirely (#797).
+
+    The four fields exist so a non-executing caller can reproduce the
+    executor's behaviour exactly rather than re-deriving it:
+
+    Attributes:
+        allowed: Whether execution may proceed.  ``False`` means the tool
+            MUST NOT run, and ``denial`` carries the model-facing result.
+        meta: The ``_permission`` metadata block the executor injects into
+            a tool result — ``decision`` / ``reason`` / ``method``, plus
+            ``was_edited`` / ``comment`` when the responder supplied them.
+            ``None`` when no permission plugin is configured, and for
+            ``askPermission`` itself (which is always allowed).
+        args: The arguments to execute with.  Normally the caller's own,
+            but an interactive approval may EDIT them, in which case these
+            are the edited ones.  Callers must use this value rather than
+            the dict they passed in.
+        denial: The result dict to hand back to the model when ``allowed``
+            is ``False``: ``{'error': ..., '_permission': meta}`` for a
+            policy refusal, or an error-only dict when the check itself
+            raised (which denies by default).  ``None`` when allowed.
+    """
+
+    allowed: bool
+    meta: Optional[Dict[str, Any]]
+    args: Dict[str, Any]
+    denial: Optional[Dict[str, Any]]
+
+
+class ToolExecutor:
+    """Registry mapping tool names to callables.
+
+    Executors should accept a single dict-like argument and return a JSON-serializable result.
+
+    Supports optional permission checking via a PermissionPlugin. When a permission
+    plugin is set, all tool executions are checked against the permission policy
+    before execution.
+
+    Supports auto-backgrounding for BackgroundCapable plugins. When a tool execution
+    exceeds the plugin's configured threshold, it is automatically converted to a
+    background task and a handle is returned.
+    """
+    def __init__(
+        self,
+        ledger: Optional[TokenLedger] = None,
+        auto_background_enabled: bool = True,
+        auto_background_pool_size: int = 4
+    ):
+        self._map: Dict[str, Callable[[Dict[str, Any]], Any]] = {}
+        self._permission_plugin: Optional['PermissionPlugin'] = None
+        self._permission_context: Dict[str, Any] = {}
+        self._ledger: Optional[TokenLedger] = ledger
+
+        # Registry reference for plugin lookups (set via set_registry)
+        self._registry: Optional['PluginRegistry'] = None
+
+        # Output callback for real-time output from plugins
+        self._output_callback: Optional[OutputCallback] = None
+
+        # Tool-specific output callback for streaming during execution
+        # Set per-tool to route output to the correct tool tree entry
+        self._tool_output_callback: Optional[ToolOutputCallback] = None
+
+        # Auto-background support
+        self._auto_background_enabled = auto_background_enabled
+        self._auto_background_pool: Optional[ThreadPoolExecutor] = None
+        self._auto_background_pool_size = auto_background_pool_size
+
+        # Callback fired when an auto-backgrounded task completes.
+        # Set by the session before execute(), captured per-task after threshold.
+        self._task_done_callback: Optional[Callable] = None
+
+        # Reliability plugin for tracking tool failures and adaptive trust
+        self._reliability_plugin: Optional['ReliabilityPlugin'] = None
+
+        # AppArmor thread-level confinement context factory.
+        # When set, every tool execution is wrapped in this context
+        # manager, which confines the current OS thread to the session's
+        # AppArmor profile for the duration of the call.  This ensures
+        # in-process file I/O (readFile, glob_files, file_edit) is
+        # subject to the same AppArmor profile as subprocess commands.
+        # Set via set_apparmor_context() from the server layer.
+        self._apparmor_context: Optional[Callable] = None
+
+        # Per-session runtime limits surfaced to subprocess-launching
+        # plugins (cli, interactive_shell).  Set via the server layer
+        # in the same hook that installs ``_apparmor_context``.
+        #
+        # ``_cgroup_attach`` is a zero-argument callable suitable for
+        # ``subprocess.Popen(preexec_fn=...)``: it writes the forked
+        # child's PID to the session's cgroup ``cgroup.procs`` between
+        # fork() and exec(), so the new program comes up already inside
+        # the cgroup with the kernel-enforced limits in effect.
+        #
+        # ``_runtime_limits`` carries the *application-layer* caps
+        # (``tool_timeout_seconds``, ``max_output_bytes``) that have no
+        # cgroup equivalent — plugins read them via ``get_runtime_limits()``
+        # and apply them at the Python layer.  Both fields stay ``None``
+        # when no profile-level runtime_limits is configured, leaving
+        # the host's defaults in effect.
+        self._cgroup_attach: Optional[Callable[[], None]] = None
+        self._runtime_limits: Optional['RuntimeLimits'] = None
+
+        # Phase 5 §5.10c: AppArmor child-profile transition callback
+        # for subprocess-spawning plugins (cli, interactive_shell).
+        # Zero-arg callable suitable for ``Popen(preexec_fn=...)`` that
+        # writes ``changeprofile {profile}//child`` to
+        # /proc/self/attr/current between fork() and exec(), so the
+        # forked child enters the per-session ``//child`` sub-profile
+        # before the new program starts.  ``//child`` drops the three
+        # escape-vector rules the parent keeps for
+        # ``apparmor_confine.__exit__`` — closes the verified escape at
+        # apparmor.py:413-449.  ``None`` when the runner isn't confined
+        # (e.g. JAATO_RUNNER_DISABLE_CONFINE=1, or daemon-side legacy
+        # paths that never installed a session profile).
+        #
+        # Forwarded to plugins through the same channel as
+        # ``_cgroup_attach`` (plugins that implement
+        # ``set_apparmor_child_transition_callback`` get the callable;
+        # the rest stay unchanged).  See
+        # docs/design/phase5_5_10_apparmor_child_subprofile_audit.md.
+        self._apparmor_child_transition: Optional[Callable[[], None]] = None
+
+        # Zero-arg event-snapshot callable for cgroup.events (oom_kill,
+        # populated, ...).  Used by ``execute()`` to take before/after
+        # snapshots around each tool call and inject deltas into the
+        # result's ``_telemetry`` dict, where the session's tool span
+        # auto-forwards them as OTel attributes.  Returns ``None`` when
+        # cgroups are unavailable, so the wrapper is safe to invoke
+        # unconditionally.
+        self._cgroup_event_reader: Optional[Callable[[], Optional[Dict[str, int]]]] = None
+
+        # Plug-in transformer chains for the tool-dispatch boundary
+        # (seat 2 of the four-seat pseudonymization design — see
+        # docs/design/daemon-extensions.md and
+        # project_backlog_pseudonymization_plugin_surface.md).
+        # Each list entry is registered via ``register_*_transformer``;
+        # ``execute()`` runs the args chain before ``_execute_impl`` and
+        # the result chain on the returned value.  Empty lists = no-op
+        # (full backwards-compat).  Per-transformer ``trusted_tools``
+        # set lets a registration skip specific tool names so the
+        # transformer applies only to *untrusted* tools.
+        self._args_transformers: List[
+            Tuple[Callable[[str, Dict[str, Any]], Dict[str, Any]],
+                  Optional[Set[str]]]
+        ] = []
+        self._result_transformers: List[Callable[[str, Any], Any]] = []
+
+
+    def register_args_transformer(
+        self,
+        fn: Callable[[str, Dict[str, Any]], Dict[str, Any]],
+        *,
+        trusted_tools: Optional[Set[str]] = None,
+    ) -> None:
+        """Register a transformer for tool args before ``_execute_impl``.
+
+        Plug-in surface for redaction / content-filter / audit consumers
+        that need to inspect or mutate args before the tool runs.
+        Multiple transformers stack — registered in order, applied as
+        a chain.
+
+        Args:
+            fn: Callable receiving ``(tool_name, args)`` and returning
+                the args dict to actually pass to the tool.  Must
+                always return a dict (returning ``None`` would silently
+                strip args).
+            trusted_tools: Optional set of tool names this transformer
+                should NOT touch — when provided, ``fn`` is invoked
+                only for tools whose name is **not** in the set.  Use
+                this to give a redaction transformer an allowlist of
+                tools that legitimately need raw values (e.g. a tool
+                that sends an email needs the real address, not a
+                placeholder).  Default ``None`` = transformer applies
+                to every tool.
+        """
+        self._args_transformers.append((fn, trusted_tools))
+
+    def register_result_transformer(
+        self, fn: Callable[[str, Any], Any]
+    ) -> None:
+        """Register a transformer for tool results before they return.
+
+        Plug-in surface for re-redacting tool outputs (e.g. a tool
+        returns a database query result that contains PII; the
+        transformer pseudonymizes those values before the result is
+        appended to history).  Multiple transformers stack — registered
+        in order, applied as a chain.
+
+        Args:
+            fn: Callable receiving ``(tool_name, result)`` and returning
+                the value to actually surface.  ``result`` is whatever
+                the tool's executor returned (typically dict or str).
+                Must return a value of the same shape; returning
+                ``None`` would silently drop the result.
+        """
+        self._result_transformers.append(fn)
+
+    def _apply_args_transformers(
+        self, name: str, args: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Run the args transformer chain in registration order.
+
+        Each transformer's ``trusted_tools`` set determines whether it
+        runs for this tool name.  Result of one transformer feeds the
+        next.  Empty chain returns args unchanged (cheap fast path).
+        """
+        if not self._args_transformers:
+            return args
+        for fn, trusted in self._args_transformers:
+            if trusted is not None and name in trusted:
+                continue
+            args = fn(name, args)
+        return args
+
+    def _apply_result_transformers(self, name: str, result: Any) -> Any:
+        """Run the result transformer chain in registration order."""
+        if not self._result_transformers:
+            return result
+        for fn in self._result_transformers:
+            result = fn(name, result)
+        return result
+
+    def register(self, name: str, fn: Callable[[Dict[str, Any]], Any]) -> None:
+        self._map[name] = fn
+
+    def clear_executors(self) -> None:
+        """Clear all registered executors.
+
+        Useful when refreshing tools after enabling/disabling.
+        """
+        self._map.clear()
+
+    def set_ledger(self, ledger: Optional[TokenLedger]) -> None:
+        """Set the ledger for recording events."""
+        self._ledger = ledger
+
+    def set_permission_plugin(
+        self,
+        plugin: Optional['PermissionPlugin'],
+        context: Optional[Dict[str, Any]] = None
+    ) -> None:
+        """Set the permission plugin for access control.
+
+        Args:
+            plugin: PermissionPlugin instance, or None to disable permission checking.
+            context: Optional context dict passed to permission checks (e.g., session_id).
+        """
+        self._permission_plugin = plugin
+        self._permission_context = context or {}
+
+    def check_permission_only(
+        self,
+        name: str,
+        args: Dict[str, Any],
+        call_id: Optional[str] = None,
+        debug: bool = False,
+    ) -> PermissionGateOutcome:
+        """Run the permission gate WITHOUT executing the tool.
+
+        This is the ONE implementation of the gate.  :meth:`_execute_impl`
+        calls it and then runs the tool body; callers that execute a tool
+        by another route call it and run their own body — today
+        ``JaatoSession._execute_streaming_tool``, which dispatches the
+        registry's auto-generated ``<tool>-stream`` variants straight to
+        ``StreamManager`` and never touches :meth:`execute` (#797).
+
+        Factoring rather than duplicating is the point: two copies of a
+        security gate is exactly how a bypass of this class recurs.
+
+        Same plugin, same ledger ``permission-check`` record, same trace
+        lines and the same denial shape as the executor's own gate.  A
+        check that RAISES denies by default, because failing open here
+        would run a tool nobody approved.
+
+        Args:
+            name: The tool name to judge.  A caller holding a name
+                variant (``<tool>-stream``) must pass the BASE name, so
+                the variant inherits every policy, whitelist and
+                blacklist rule already written for the tool.
+            args: The proposed arguments.  Read by policy rules and
+                recorded to the ledger; an approval may return edited
+                arguments, which arrive on the outcome's ``args``.
+            call_id: The model's call id, for correlating the decision
+                with ``ToolCallStartEvent`` / ``PermissionResolvedEvent``
+                and the OTel span.
+            debug: Print the decision to stdout, as ``execute(debug=True)``
+                does.
+
+        Returns:
+            A :class:`PermissionGateOutcome`.  Callers MUST honour
+            ``allowed``, return ``denial`` unchanged to the model when it
+            is ``False``, and execute with ``args`` rather than the dict
+            they passed in.
+        """
+        # askPermission is the gate's own tool and is always allowed.
+        if self._permission_plugin is None or name == 'askPermission':
+            return PermissionGateOutcome(True, None, args, None)
+        try:
+            allowed, perm_info = self._permission_plugin.check_permission(
+                name, args, self._permission_context, call_id
+            )
+            _trace_permission_outcome(name, call_id, allowed, perm_info)
+            return self._permission_gate_verdict(
+                name, args, call_id, debug, allowed, perm_info
+            )
+        except Exception as perm_exc:
+            return self._permission_gate_failure(name, args, call_id, debug, perm_exc)
+
+    def _permission_gate_verdict(
+        self,
+        name: str,
+        args: Dict[str, Any],
+        call_id: Optional[str],
+        debug: bool,
+        allowed: bool,
+        perm_info: Dict[str, Any],
+    ) -> PermissionGateOutcome:
+        """Turn one plugin verdict into a :class:`PermissionGateOutcome`.
+
+        Builds the ``_permission`` metadata block, writes the ledger
+        ``permission-check`` record, and — on a refusal — the denial dict
+        the model is handed.  On an approval, applies any arguments the
+        responder edited during the prompt.
+
+        Split out of :meth:`check_permission_only` only to keep both
+        functions under the repository's cyclomatic-complexity ceiling;
+        it has no other caller and is not a second gate.
+        """
+        permission_meta = {
+            'decision': 'allowed' if allowed else 'denied',
+            'reason': perm_info.get('reason', ''),
+            'method': perm_info.get('method', 'unknown'),
+        }
+        if perm_info.get('was_edited'):
+            permission_meta['was_edited'] = True
+        if perm_info.get('comment') and allowed:
+            permission_meta['comment'] = perm_info['comment']
+        # Record permission check to ledger.  ``user_id`` /
+        # ``approver`` (#859) say WHO decided a channel prompt;
+        # absent for policy decisions, like the event's fields.
+        if self._ledger is not None:
+            self._ledger._record('permission-check', {
+                'tool': name,
+                'args': args,
+                'allowed': allowed,
+                'reason': perm_info.get('reason', ''),
+                'method': perm_info.get('method', 'unknown'),
+                # WHICH session asked (#951).  One shared plugin
+                # decides for a parent and every subagent under
+                # it, so a ledger row naming only the tool
+                # cannot be attributed to either.
+                **_permission_caller_fields(self._permission_context),
+                **_permission_attribution(perm_info),
+            })
+        if not allowed:
+            if debug:
+                print(f"[ai_tool_runner] permission denied for {name}: {perm_info.get('reason', '')}")
+            # For comment decisions, use the reason directly (it already
+            # contains "Tool not executed. User comment: ...") instead of
+            # wrapping with "Permission denied:" prefix which is redundant.
+            reason = perm_info.get('reason', '')
+            if perm_info.get('method') == 'user_comment':
+                error_msg = reason
+            else:
+                error_msg = f"Permission denied: {reason}"
+            denial = {'error': error_msg, '_permission': permission_meta}
+            _trace_tool_outcome(name, call_id, False, denial)
+            return PermissionGateOutcome(False, permission_meta, args, denial)
+        # Use edited arguments if the user modified them during permission
+        if perm_info.get('was_edited') and perm_info.get('modified_args'):
+            args = perm_info['modified_args']
+            if debug:
+                print(f"[ai_tool_runner] using edited args for {name}")
+        if debug:
+            print(f"[ai_tool_runner] permission granted for {name}: {perm_info.get('reason', '')}")
+        return PermissionGateOutcome(True, permission_meta, args, None)
+
+    def _permission_gate_failure(
+        self,
+        name: str,
+        args: Dict[str, Any],
+        call_id: Optional[str],
+        debug: bool,
+        perm_exc: BaseException,
+    ) -> PermissionGateOutcome:
+        """Deny by default when the permission check itself raised.
+
+        A gate that cannot reach a verdict must refuse: failing open
+        would run a tool nobody approved.  The failure is traced, logged
+        with its traceback, and recorded to the ledger as
+        ``permission-error`` (distinct from ``permission-check``, so an
+        auditor can tell a policy DENY from a broken policy).
+        """
+        _trace_runner(
+            f"permission: tool={name} call_id={call_id} verdict=DENY "
+            f"method=check_failed "
+            f"error={type(perm_exc).__name__}: {perm_exc}"
+        )
+        logger.error(f"Permission check failed for {name}", exc_info=True)
+        if debug:
+            print(f"[ai_tool_runner] permission check failed for {name}: {perm_exc}")
+        # Record permission error to ledger
+        if self._ledger is not None:
+            self._ledger._record('permission-error', {
+                'tool': name,
+                'args': args,
+                'error': str(perm_exc),
+                'traceback': traceback.format_exc(),
+            })
+        denial = {
+            'error': f'Permission check failed: {perm_exc}',
+            'traceback': traceback.format_exc(),
+        }
+        return PermissionGateOutcome(False, None, args, denial)
+
+    def update_permission_context(self, **kwargs) -> None:
+        """Update the permission context dict with additional fields.
+
+        Called by the session to inject per-turn state (turn_index,
+        model_preamble) that evaluators can inspect.
+
+        Args:
+            **kwargs: Key-value pairs to merge into the context.
+        """
+        self._permission_context.update(kwargs)
+
+    def set_reliability_plugin(self, plugin: Optional['ReliabilityPlugin']) -> None:
+        """Set the reliability plugin for tracking tool failures.
+
+        Args:
+            plugin: ReliabilityPlugin instance, or None to disable reliability tracking.
+        """
+        self._reliability_plugin = plugin
+
+    def set_registry(self, registry: Optional['PluginRegistry']) -> None:
+        """Set the plugin registry for plugin lookups.
+
+        Required for auto-background support to find BackgroundCapable plugins.
+
+        Args:
+            registry: PluginRegistry instance, or None to disable.
+        """
+        self._registry = registry
+
+    def set_apparmor_context(self, context_factory: Optional[Callable]) -> None:
+        """Set the AppArmor thread-level confinement context factory.
+
+        When set, every tool execution is wrapped in the context manager
+        returned by ``context_factory()``, which confines the current OS
+        thread to the session's AppArmor profile.
+
+        Args:
+            context_factory: A zero-argument callable returning a context
+                manager, or ``None`` to disable confinement.
+        """
+        self._apparmor_context = context_factory
+
+    def set_runtime_limits(
+        self,
+        attach_callback: Optional[Callable[[], None]],
+        limits: Optional['RuntimeLimits'],
+        event_reader: Optional[Callable[[], Optional[Dict[str, int]]]] = None,
+    ) -> None:
+        """Install per-session cgroup attach + app-layer limits + event reader.
+
+        Called by :meth:`shared.jaato_session.JaatoSession._apply_runtime_limits`
+        during ``configure()``, right after ``set_registry`` — the
+        forwarding loop below walks ``registry.list_exposed()``, so a
+        caller that ran earlier would arm nothing.  That is the ONE
+        caller (#735): every route a session can be built by converges
+        on ``configure()``, so the pool-served, cold-spawned, isolated
+        sub-runner and in-process paths cannot arm different caps.
+        Until #735 this method had no non-test caller at all, which is
+        why ``CliPlugin._runtime_limits`` was ``None`` on every path and
+        a profile's ``tool_timeout_seconds`` bounded nothing.
+
+        Subprocess-launching plugins read attach + limits via
+        :meth:`get_cgroup_attach` and :meth:`get_runtime_limits`, OR via
+        the forwarded ``set_runtime_limits`` method on the plugin if it
+        implements one — same pattern as ``set_tool_output_callback``.
+
+        The ``event_reader`` is consumed *here* in :meth:`execute` rather
+        than forwarded to plugins: snapshotting before/after each tool
+        call and injecting deltas into the result's ``_telemetry`` dict
+        means the existing OTel forwarder picks up
+        ``jaato.cgroup.oom_kill_delta`` etc. without any plugin needing
+        to know about cgroup telemetry.
+
+        Args:
+            attach_callback: Zero-argument callable suitable for use as
+                ``Popen(preexec_fn=...)``.  Migrates the forked child
+                into the session's cgroup before ``exec``.  ``None``
+                means no attach (host defaults) — which is what the
+                session passes, because the runner PROCESS is already
+                migrated into the cgroup at fork time and its children
+                inherit it.
+            limits: :class:`RuntimeLimits` carrying the app-layer caps
+                (``tool_timeout_seconds``, ``max_output_bytes``).  May
+                be ``None`` when no profile-level runtime_limits is set.
+            event_reader: Zero-arg callable returning the current
+                ``cgroup.events`` snapshot dict, or ``None`` when no
+                cgroup is available.  Used by :meth:`execute` to compute
+                per-tool deltas.
+        """
+        self._cgroup_attach = attach_callback
+        self._runtime_limits = limits
+        self._cgroup_event_reader = event_reader
+
+        # Forward attach + limits to exposed plugins that support it.
+        # event_reader is intentionally NOT forwarded — it's owned by
+        # the executor's wrapper, not by individual plugins.
+        if self._registry:
+            for plugin_name in self._registry.list_exposed():
+                plugin = self._registry.get_plugin(plugin_name)
+                if plugin and hasattr(plugin, 'set_runtime_limits'):
+                    plugin.set_runtime_limits(attach_callback, limits)
+
+    def set_apparmor_child_transition_callback(
+        self,
+        callback: Optional[Callable[[], None]],
+    ) -> None:
+        """Install the AppArmor child-profile transition callback
+        (Phase 5 §5.10c).
+
+        Called once at runner-side bootstrap with a zero-arg callable
+        built by
+        :func:`server.apparmor.make_child_transition_callback`.  The
+        callable writes ``changeprofile <session>//child`` to
+        /proc/self/attr/current, suitable for use as
+        ``Popen(preexec_fn=...)`` — runs between fork() and exec()
+        so the forked child enters the per-session ``//child``
+        sub-profile before the new program starts.
+
+        Forwarded to plugins that implement
+        ``set_apparmor_child_transition_callback`` (cli,
+        interactive_shell) via the same mechanism as
+        :meth:`set_runtime_limits`'s forwarding loop.  Plugins that
+        don't implement the method (file_edit, todo, etc.) stay
+        unaffected — only subprocess-spawning plugins care.
+
+        Args:
+            callback: Zero-arg ``preexec_fn``-style callable, or
+                ``None`` when the runner isn't AppArmor-confined
+                (e.g., JAATO_RUNNER_DISABLE_CONFINE=1 or a daemon-
+                side legacy path).  ``None`` is forwarded too — a
+                plugin that previously had a callback installed
+                gets it cleared.
+        """
+        self._apparmor_child_transition = callback
+
+        if self._registry:
+            for plugin_name in self._registry.list_exposed():
+                plugin = self._registry.get_plugin(plugin_name)
+                if plugin and hasattr(
+                    plugin, "set_apparmor_child_transition_callback",
+                ):
+                    plugin.set_apparmor_child_transition_callback(callback)
+
+    def get_apparmor_child_transition_callback(
+        self,
+    ) -> Optional[Callable[[], None]]:
+        """Return the AppArmor child-profile transition callback, or
+        ``None`` if not set.
+
+        Companion of :meth:`get_cgroup_attach`.  Subprocess-launching
+        plugins compose this with the cgroup attach in their
+        ``preexec_fn`` — AppArmor transition first, then cgroup
+        attach, then exec (the new profile must apply during the
+        cgroup write).
+        """
+        return self._apparmor_child_transition
+
+    def get_cgroup_attach(self) -> Optional[Callable[[], None]]:
+        """Return the cgroup-attach callable, or ``None`` if not set.
+
+        Subprocess-launching plugins pass the result as
+        ``Popen(preexec_fn=...)``; passing ``None`` is identical to not
+        attaching, which is the correct behaviour when the session has
+        no kernel-enforced limits.
+        """
+        return self._cgroup_attach
+
+    def get_runtime_limits(self) -> Optional['RuntimeLimits']:
+        """Return the per-session :class:`RuntimeLimits`, or ``None``.
+
+        Plugins consult this to read app-layer caps such as
+        ``tool_timeout_seconds`` and ``max_output_bytes``; the kernel
+        portion has already been written to the cgroup at provision
+        time and need not be re-read here.
+        """
+        return self._runtime_limits
+
+    def set_output_callback(self, callback: Optional[OutputCallback]) -> None:
+        """Set the output callback for real-time plugin output.
+
+        When set, plugins that support output callbacks will receive this
+        callback to emit real-time output during tool execution.
+
+        The callback is passed to plugins via their set_output_callback()
+        method if they implement it.
+
+        Args:
+            callback: OutputCallback function, or None to clear.
+        """
+        self._output_callback = callback
+
+        # Forward callback to exposed plugins that support it
+        if self._registry:
+            for plugin_name in self._registry.list_exposed():
+                plugin = self._registry.get_plugin(plugin_name)
+                if plugin and hasattr(plugin, 'set_output_callback'):
+                    plugin.set_output_callback(callback)
+
+        # Also set on permission plugin if configured
+        if self._permission_plugin and hasattr(self._permission_plugin, 'set_output_callback'):
+            self._permission_plugin.set_output_callback(callback)
+
+    def get_output_callback(self) -> Optional[OutputCallback]:
+        """Get the current output callback.
+
+        Returns:
+            The current OutputCallback, or None if not set.
+        """
+        return self._output_callback
+
+    def set_tool_output_callback(self, callback: Optional[ToolOutputCallback]) -> None:
+        """Set the callback for streaming tool output during execution.
+
+        This callback is set per-tool-call to route output to the correct
+        tool tree entry. The session sets this before each tool execution
+        with a closure that includes the call_id.
+
+        Args:
+            callback: ToolOutputCallback function (chunk: str) -> None, or None to clear.
+        """
+        self._tool_output_callback = callback
+
+        # Forward to exposed plugins that support it
+        if self._registry:
+            for plugin_name in self._registry.list_exposed():
+                plugin = self._registry.get_plugin(plugin_name)
+                if plugin and hasattr(plugin, 'set_tool_output_callback'):
+                    plugin.set_tool_output_callback(callback)
+
+    def set_task_done_callback(self, callback: Optional[Callable]) -> None:
+        """Set the callback for when an auto-backgrounded task completes.
+
+        The session sets this before each tool execution with a closure that
+        captures the call_id. The executor stores it and registers it per-task
+        on the mixin only when auto-backgrounding actually occurs.
+
+        Args:
+            callback: Callable(task_id, success, error, duration), or None to clear.
+        """
+        self._task_done_callback = callback
+
+    def get_tool_output_callback(self) -> Optional[ToolOutputCallback]:
+        """Get the current tool output callback.
+
+        For parallel tool execution, checks thread-local storage first,
+        then falls back to the instance-level callback.
+
+        Returns:
+            The current ToolOutputCallback, or None if not set.
+        """
+        # Check thread-local first (for parallel execution)
+        thread_callback = getattr(_thread_local, 'tool_output_callback', None)
+        if thread_callback is not None:
+            return thread_callback
+        # Fall back to instance-level callback (for sequential execution)
+        return self._tool_output_callback
+
+    def _get_auto_background_pool(self) -> ThreadPoolExecutor:
+        """Get or create the thread pool for auto-background execution.
+
+        Server 0.6.47+: uses :class:`SafeThreadPoolExecutor` so every
+        submitted task starts with the registered AppArmor pre-task
+        hook (defensive ``changeprofile unconfined``).  Closes the
+        residual gap where workers stuck in a prior session's profile
+        would EACCES on non-tool work scheduled here.
+        """
+        if self._auto_background_pool is None:
+            self._auto_background_pool = SafeThreadPoolExecutor(
+                max_workers=self._auto_background_pool_size
+            )
+        return self._auto_background_pool
+
+    def _get_plugin_for_tool(self, tool_name: str) -> Optional['BackgroundCapable']:
+        """Get the BackgroundCapable plugin that provides a tool.
+
+        Args:
+            tool_name: Name of the tool to look up.
+
+        Returns:
+            The BackgroundCapable plugin, or None if not found or not capable.
+        """
+        if not self._registry:
+            return None
+
+        # Import here to avoid circular imports
+        from jaato_server.shared.plugins.background.protocol import BackgroundCapable
+
+        plugin = self._registry.get_plugin_for_tool(tool_name)
+        if plugin and isinstance(plugin, BackgroundCapable):
+            return plugin
+        return None
+
+    def _background_reader_tool(self) -> Optional[str]:
+        """Return the name of the loaded background-task reader tool, if any.
+
+        An auto-background receipt (``task_id``) is only redeemable when the
+        session has a tool that accepts one.  That tool
+        (:data:`BACKGROUND_READER_TOOL`) is supplied by the ``background``
+        plugin, which is loaded independently of the plugin whose tool got
+        backgrounded — so a profile can perfectly well have auto-background
+        active with no way to read the result (#804).
+
+        The lookup is deliberately executor-level rather than
+        schema-level: the reader ships as a *deferred* tool, so it is
+        callable once discovered even though it is absent from the model's
+        initial schema surface.  What matters is whether an executor for it
+        exists in this session at all.
+
+        A failed registry lookup degrades to "no reader", which is the safe
+        direction — the caller then waits for the real output instead of
+        issuing a handle that might not be redeemable.  It is logged at
+        WARNING rather than DEBUG precisely because it is quiet otherwise:
+        the session silently changes wait behaviour, and at DEBUG the only
+        evidence would be a tool that mysteriously took minutes.
+
+        Returns:
+            :data:`BACKGROUND_READER_TOOL` when a reader is loaded, else
+            ``None``.
+        """
+        if BACKGROUND_READER_TOOL in self._map:
+            return BACKGROUND_READER_TOOL
+        if self._registry is not None:
+            try:
+                if self._registry.get_plugin_for_tool(BACKGROUND_READER_TOOL):
+                    return BACKGROUND_READER_TOOL
+            except Exception as exc:
+                logger.warning(
+                    f"Background reader lookup failed ({exc}); treating "
+                    f"'{BACKGROUND_READER_TOOL}' as unavailable, so "
+                    f"auto-background will wait for the real result instead "
+                    f"of returning a task_id."
+                )
+        return None
+
+    def _no_reader_deadline(self, threshold: float) -> float:
+        """Seconds to wait for a backgrounded tool when nothing can read it.
+
+        Used only on the no-reader path, where returning a ``task_id`` at
+        ``threshold`` would strand the caller.  Waiting longer is the
+        better trade: most commands that cross a 10s threshold (a test
+        run, a build) still finish well inside this deadline, and the
+        caller then gets the real output instead of an unredeemable handle.
+
+        The deadline is :data:`DEFAULT_NO_READER_TIMEOUT_SECONDS`, capped by
+        ``RuntimeLimits.tool_timeout_seconds`` when the session sets one —
+        waiting past the session's own wall-clock cap is pointless, since
+        the tool is due to be killed at that point anyway.  No separate env
+        knob: a profile that wants longer inline runs raises the plugin's
+        auto-background threshold instead, which is the typed lever for it.
+
+        Args:
+            threshold: The plugin's auto-background threshold, which is the
+                floor — a deadline shorter than it would defeat the point.
+
+        Returns:
+            The deadline in seconds, never below ``threshold``.
+        """
+        deadline = DEFAULT_NO_READER_TIMEOUT_SECONDS
+        limits = self._runtime_limits
+        tool_timeout = getattr(limits, 'tool_timeout_seconds', None) if limits else None
+        if tool_timeout:
+            deadline = min(deadline, float(tool_timeout))
+        return max(deadline, threshold)
+
+    def _wait_for_background_task(
+        self,
+        plugin: 'BackgroundCapable',
+        task_id: str,
+        wait_for: float,
+    ) -> Optional[str]:
+        """Poll a background task until it settles, or the window closes.
+
+        Cancellation is honoured while polling: the no-reader window can be
+        minutes long, so a stop request must not be queued behind it.  A
+        cancelled task is reported as settled, and its terminal status is
+        read back by the caller like any other.
+
+        Args:
+            plugin: The BackgroundCapable plugin owning the task.
+            task_id: Id of the task to poll.
+            wait_for: How long to poll, in seconds.
+
+        Returns:
+            The terminal status value (``'completed'``, ``'failed'``,
+            ``'cancelled'``, ``'timeout'``) when the task settled inside the
+            window, or ``None`` when it is still running.
+        """
+        start_time = time.time()
+        cancel_token = get_current_cancel_token()
+        while time.time() - start_time < wait_for:
+            status = plugin.get_status(task_id)
+            if status.value not in ('pending', 'running'):
+                return status.value
+            if cancel_token is not None and cancel_token.is_cancelled():
+                try:
+                    plugin.cancel(task_id)
+                except Exception as exc:
+                    logger.debug(f"Cancelling background task {task_id} failed: {exc}")
+                # cancel() is a request, not a guarantee - only report the
+                # task as settled if it actually reached a terminal state.
+                final = plugin.get_status(task_id).value
+                return final if final not in ('pending', 'running') else None
+            time.sleep(0.1)  # Small poll interval
+        return None
+
+    def _build_backgrounded_result(
+        self,
+        task_id: str,
+        handle: 'TaskHandle',
+        threshold: float,
+        reader: Optional[str],
+        waited: float,
+    ) -> Tuple[bool, Dict[str, Any]]:
+        """Build the result returned when a task outlives its wait window.
+
+        Two shapes, depending on whether the session can redeem the handle:
+
+        * **Reader loaded** — success.  The message names the tool and the
+          call shape (``getBackgroundTask(task_id='…')``) rather than just
+          quoting the id, so the model is told *what to do* and not merely
+          what it holds.
+        * **No reader** — failure.  The task is left running (killing a
+          half-finished install or build is worse than leaking it), but the
+          result carries ``is_error`` semantics and says plainly that the
+          output cannot be retrieved and that the ``background`` plugin is
+          what makes it retrievable.  Reporting success here is what made
+          the fault invisible: the model got a handle, no error, and no
+          way to reach the output (#804).
+
+        **Nothing reaps the leaked task in-session.**  The plugin's
+        ``shutdown()`` calls ``_shutdown_bg_executor``, which is
+        ``ThreadPoolExecutor.shutdown(wait=False)`` — that stops new work
+        being accepted, it does NOT cancel a task already running.  So the
+        task runs to its own completion and its resources go when the
+        runner process does; on a session confined to a cgroup, the
+        ``cgroup.kill`` at session teardown takes the subprocess tree with
+        it.  Neither is a reaper on any shorter timescale, and there is
+        deliberately no timeout-and-kill here: the whole reason the task
+        survives is that killing it mid-write is the worse failure.  A
+        session that must bound it should set
+        ``RuntimeLimits.tool_timeout_seconds``, which caps the wait AND is
+        the layer that actually enforces a deadline on the command.
+
+        Args:
+            task_id: Id of the still-running background task.
+            handle: The :class:`TaskHandle` from ``start_background``.
+            threshold: The plugin's auto-background threshold, in seconds.
+            reader: Name of the loaded reader tool, or ``None``.
+            waited: Seconds actually waited before giving up — equals
+                ``threshold`` on the reader path and the no-reader deadline
+                otherwise.
+
+        Returns:
+            ``(success, result)`` ready to hand back from ``execute()``.
+        """
+        result: Dict[str, Any] = {
+            "auto_backgrounded": True,
+            "task_id": task_id,
+            "plugin_name": handle.plugin_name,
+            "tool_name": handle.tool_name,
+            "threshold_seconds": threshold,
+            "background_reader_available": reader is not None,
+        }
+        if reader:
+            result["reader_tool"] = reader
+            result["message"] = (
+                f"Task exceeded {threshold}s threshold, continuing in background. "
+                f"Use {reader}(task_id='{task_id}') to check status and output."
+            )
+            return True, result
+
+        result["error"] = (
+            f"Task exceeded {waited}s and is still running, but no "
+            f"background-task reader is loaded in this session, so its "
+            f"output cannot be retrieved."
+        )
+        result["message"] = (
+            f"{result['error']} The task_id is not usable here — no tool in "
+            f"this session accepts one. Add the 'background' plugin to this "
+            f"profile to enable '{BACKGROUND_READER_TOOL}', or re-run the "
+            f"command so it produces output you can read directly (for "
+            f"example, redirect it to a file and read the file). The task is "
+            f"still running; do not assume it succeeded."
+        )
+        return False, result
+
+    def _can_resolve_executor(self, name: str) -> bool:
+        """Check whether an executor can be resolved for the given tool name.
+
+        Performs a lightweight lookup without executing anything. Used to
+        skip permission prompts for tools that have no registered executor,
+        avoiding unnecessary user interaction for calls that will
+        unconditionally fail.
+
+        Args:
+            name: Tool name to check.
+
+        Returns:
+            True if an executor can be found via direct map, registry, or
+            generic execution fallback.
+        """
+        # Direct map lookup
+        if name in self._map:
+            return True
+        # Registry/plugin fallback
+        if self._registry:
+            plugin = self._registry.get_plugin_for_tool(name)
+            if plugin and hasattr(plugin, 'get_executors'):
+                if name in plugin.get_executors():
+                    return True
+            # Core executors (client-registered tools, dismiss_stream, etc.)
+            if name in self._registry.get_core_executors():
+                return True
+        # Generic executor fallback
+        if os.environ.get('AI_EXECUTE_TOOLS', '').lower() in ('1', 'true', 'yes'):  # env: treat unregistered tools as executable via the generic executor fallback
+            return True
+        return False
+
+    def _execute_sync(self, name: str, args: Dict[str, Any]) -> Tuple[bool, Any]:
+        """Execute a tool synchronously (internal helper).
+
+        This is the core execution logic, extracted to support auto-backgrounding.
+
+        Args:
+            name: Tool name.
+            args: Arguments dict.
+
+        Returns:
+            Tuple of (success, result).
+        """
+        fn = self._map.get(name)
+        if not fn and self._registry:
+            # Fallback: try to get executor from registry
+            # This handles tools discovered after session configuration (e.g., MCP tools)
+            plugin = self._registry.get_plugin_for_tool(name)
+            if plugin and hasattr(plugin, 'get_executors'):
+                plugin_executors = plugin.get_executors()
+                fn = plugin_executors.get(name)
+                if fn:
+                    # Cache it for future calls
+                    self._map[name] = fn
+            # Also check core executors (client-registered tools, dismiss_stream, etc.)
+            if not fn:
+                core_executors = self._registry.get_core_executors()
+                fn = core_executors.get(name)
+                if fn:
+                    self._map[name] = fn
+        if not fn:
+            # Check if generic execution is allowed
+            if os.environ.get('AI_EXECUTE_TOOLS', '').lower() in ('1', 'true', 'yes'):
+                try:
+                    return _generic_executor(name, args, debug=False)
+                except Exception as exc:
+                    logger.error(f"Generic executor failed for {name}", exc_info=True)
+                    return False, {'error': str(exc), 'traceback': traceback.format_exc()}
+            return False, {'error': f'No executor registered for {name}'}
+
+        try:
+            if fn.__name__ == 'mcp_based_tool':
+                result = fn(name, args)
+            else:
+                result = fn(args)
+            return self._normalize_executor_return(result)
+        except Exception as exc:
+            logger.error(f"Tool execution failed for {name}", exc_info=True)
+            return False, {'error': str(exc), 'traceback': traceback.format_exc()}
+
+    @staticmethod
+    def _normalize_executor_return(result: Any) -> Tuple[bool, Any]:
+        """Turn an executor's raw return into ``(ok, result)``.
+
+        THREE SHAPES, and only one of them used to be distinguishable:
+
+        - :class:`WithMetadata` -- a result plus side-channel keys for the
+          session layer.  Merged, reported as success.
+        - a 2-tuple -- the ``(ok, payload)`` contract that
+          ``split_executor_result`` reads everywhere else.  Passed through
+          UNCHANGED, because it is already the shape this method returns.
+        - anything else -- a bare result, reported as success.
+
+        THE BUG THIS REPLACES: the metadata convention was a bare
+        ``(result_dict, metadata_dict)`` tuple, and this code unwrapped ANY
+        2-tuple whose second element was a dict.  ``(ok, payload)`` has
+        exactly that shape, so ``(False, receipt)`` was read as
+        result=``False`` / metadata=``receipt``; the merge was skipped
+        because ``False`` is not a dict; and the call returned
+        ``(True, False)`` -- flag inverted, payload gone.  ``(True, {...})``
+        became ``(True, True)``.  Nineteen executors return that contract.
+
+        Naming the metadata convention (:class:`WithMetadata`) is what makes
+        the bare tuple unambiguous.  Discriminating on
+        ``isinstance(x[0], bool)`` would have ARBITRATED the ambiguity
+        instead of removing it, and the next convention shaped
+        ``(bool, dict)`` would rejoin the collision silently.
+        """
+        if isinstance(result, WithMetadata):
+            merged = result.result
+            if isinstance(merged, dict):
+                merged.update(result.metadata)
+            return True, merged
+        if isinstance(result, tuple) and len(result) == 2:
+            return result[0], result[1]
+        return True, result
+
+    def _execute_with_auto_background(
+        self,
+        name: str,
+        args: Dict[str, Any],
+        plugin: 'BackgroundCapable',
+        threshold: float,
+        permission_meta: Optional[Dict[str, Any]] = None
+    ) -> Tuple[bool, Any]:
+        """Execute a tool with auto-background on timeout.
+
+        Uses the plugin's streaming executor from the start so that output
+        is captured incrementally even if the task gets auto-backgrounded.
+
+        The wait window depends on whether this session can redeem a
+        ``task_id`` at all (see :meth:`_background_reader_tool`):
+
+        * **Reader loaded** — wait ``threshold`` seconds, then hand back a
+          receipt naming the tool that reads it.
+        * **No reader** — wait up to :meth:`_no_reader_deadline` instead,
+          because real output beats a handle nobody can redeem.  If the
+          task outlives even that, the call is reported as a *failure*
+          rather than a silent success (#804).
+
+        The wait honours the thread's cancel token, so a stop request is
+        not held for the (much longer) no-reader deadline.
+
+        Args:
+            name: Tool name.
+            args: Arguments dict.
+            plugin: The BackgroundCapable plugin.
+            threshold: Timeout threshold in seconds.
+            permission_meta: Optional permission metadata to inject.
+
+        Returns:
+            Tuple of (success, result). If auto-backgrounded, result contains
+            task handle info with auto_backgrounded=True, plus
+            ``background_reader_available`` saying whether the handle can
+            actually be redeemed.
+        """
+        # Get the executor function for this tool
+        executor_fn = None
+        if hasattr(plugin, 'get_executors'):
+            executors = plugin.get_executors()
+            executor_fn = executors.get(name)
+
+        if executor_fn is None:
+            # Fall back to sync execution if no executor found
+            return self._execute_sync(name, args)
+
+        try:
+            # Start as background task immediately - this uses the streaming
+            # executor which captures output incrementally.
+            # Pass the current output callback explicitly for thread-safety
+            # (in parallel execution, the callback is in thread-local, not instance).
+            current_output_cb = self.get_tool_output_callback()
+            handle = plugin.start_background(
+                name, args, executor_fn=executor_fn,
+                output_callback=current_output_cb,
+            )
+            task_id = handle.task_id
+
+            # A receipt is only worth issuing if something in this session
+            # accepts one.  With no reader, sit on the task far longer and
+            # try to return its real output instead (#804).
+            reader = self._background_reader_tool()
+            wait_for = threshold if reader else self._no_reader_deadline(threshold)
+
+            settled = self._wait_for_background_task(plugin, task_id, wait_for)
+            if settled is not None:
+                task_result = plugin.get_result(task_id)
+                result = task_result.result
+                if permission_meta and isinstance(result, dict):
+                    result['_permission'] = permission_meta
+                if task_result.status.value != 'completed':
+                    return False, result or {
+                        'error': task_result.error
+                                 or f'Task {task_result.status.value}'
+                    }
+                return True, result
+
+            # Task outlived the wait window - register done callback for UI completion
+            if self._task_done_callback and hasattr(plugin, 'set_task_done_callback'):
+                plugin.set_task_done_callback(task_id, self._task_done_callback)
+
+            ok, result = self._build_backgrounded_result(
+                task_id, handle, threshold, reader, wait_for
+            )
+
+            # Inject permission metadata
+            if permission_meta:
+                result['_permission'] = permission_meta
+
+            # Record auto-background event
+            if self._ledger:
+                self._ledger._record('auto-background', {
+                    'tool': name,
+                    'task_id': task_id,
+                    'threshold': threshold,
+                    'waited_seconds': wait_for,
+                    'background_reader_available': reader is not None,
+                })
+
+            return ok, result
+
+        except Exception as e:
+            # If start_background fails, fall back to sync execution
+            try:
+                return self._execute_sync(name, args)
+            except Exception as inner_e:
+                return False, {'error': f'Background start failed: {e}, sync fallback failed: {inner_e}'}
+
+    def execute(
+        self,
+        name: str,
+        args: Dict[str, Any],
+        tool_output_callback: Optional[ToolOutputCallback] = None,
+        call_id: Optional[str] = None,
+        cancel_token=None,
+    ) -> Tuple[bool, Any]:
+        """Execute a tool by name with the given arguments.
+
+        Args:
+            name: Tool name to execute.
+            args: Arguments dict to pass to the tool.
+            tool_output_callback: Optional callback for streaming output during execution.
+                If provided, overrides the instance-level callback for this call only.
+                This enables thread-safe parallel execution where each tool has its own callback.
+            call_id: Optional unique identifier for this tool call (for parallel tool matching
+                in permission UI).
+            cancel_token: Optional CancelToken. When set, plugins can poll
+                get_current_cancel_token() to abort long-running operations. Stored in
+                thread-local so it is safe for parallel tool execution.
+
+        Returns:
+            Tuple of (success: bool, result: Any).
+        """
+        debug = False
+        try:
+            debug = os.environ.get('AI_TOOL_RUNNER_DEBUG', '').lower() in ('1', 'true', 'yes')  # env: verbose tool-executor debug logging
+        except Exception as exc:
+            logger.debug(f"Error checking debug env var: {exc}")
+            debug = False
+
+        # Set thread-local state for parallel execution support.
+        # Plugins call get_current_tool_output_callback() / get_current_cancel_token()
+        # from their executor to retrieve the per-thread values.
+        if tool_output_callback is not None:
+            _thread_local.tool_output_callback = tool_output_callback
+        if cancel_token is not None:
+            _thread_local.cancel_token = cancel_token
+
+        # Snapshot cgroup.events so we can attribute kernel-killed
+        # exits to *this* tool call.  No-op when cgroups are unavailable
+        # — the no-op reader returns None and the post-call comparison
+        # short-circuits.
+        before_events: Optional[Dict[str, int]] = None
+        if self._cgroup_event_reader is not None:
+            before_events = self._cgroup_event_reader()
+
+        # Apply args transformer chain (seat 2 of pseudonymization
+        # design).  Untrusted tools see redacted args; trusted tools
+        # (per each transformer's trusted_tools set) see raw args.  No
+        # transformers registered = identity, no overhead.
+        args = self._apply_args_transformers(name, args)
+
+        try:
+            success, result = self._execute_impl(name, args, debug, call_id)
+        finally:
+            if tool_output_callback is not None:
+                _thread_local.tool_output_callback = None
+            if cancel_token is not None:
+                _thread_local.cancel_token = None
+
+        # Apply result transformer chain — re-redact (or otherwise
+        # transform) what the tool returned before it reaches the
+        # session's history-append path or its caller.
+        result = self._apply_result_transformers(name, result)
+
+        # Compute event-counter deltas and inject into result's
+        # ``_telemetry`` dict.  The session's tool span already
+        # auto-forwards every key in ``_telemetry`` as an OTel
+        # attribute (jaato_session.py:4914), so adding the deltas here
+        # is the only step needed to surface them as
+        # ``jaato.cgroup.oom_kill_delta`` etc. on the span.
+        if before_events is not None and self._cgroup_event_reader is not None:
+            after_events = self._cgroup_event_reader()
+            if after_events is not None and isinstance(result, dict):
+                self._inject_cgroup_deltas(result, before_events, after_events)
+
+        return success, result
+
+    @staticmethod
+    def _inject_cgroup_deltas(
+        result: Dict[str, Any],
+        before: Dict[str, int],
+        after: Dict[str, int],
+    ) -> None:
+        """Add cgroup.events deltas to a tool result's ``_telemetry`` dict.
+
+        Only deltas > 0 are emitted — the common case (no kernel events
+        during the tool call) produces no extra attributes, keeping
+        spans clean.  ``populated`` is monotonic only in transitions
+        and isn't useful as a delta, so it's skipped.
+
+        Attribution caveat: when multiple tool calls run concurrently
+        in the same per-session cgroup, an OOM in tool A also shows up
+        as a non-zero delta on a parallel tool B that happened to
+        straddle the event.  The heuristic is good enough for
+        telemetry — operators correlating spans with dmesg can
+        disambiguate when needed.
+        """
+        # Skip 'populated' — it's a level, not a counter; deltas are
+        # noisy and uninteresting (the cgroup is "populated" while
+        # any process exists in it).
+        for key in ("oom", "oom_kill"):
+            before_val = before.get(key, 0)
+            after_val = after.get(key, 0)
+            delta = after_val - before_val
+            if delta > 0:
+                telem = result.setdefault("_telemetry", {})
+                if isinstance(telem, dict):
+                    telem[f"jaato.cgroup.{key}_delta"] = delta
+
+    def _execute_impl(
+        self,
+        name: str,
+        args: Dict[str, Any],
+        debug: bool,
+        call_id: Optional[str] = None
+    ) -> Tuple[bool, Any]:
+        """Internal implementation of execute(), separated for try/finally wrapping.
+
+        Checks executor existence before permission to avoid prompting the user
+        for tools that have no registered executor and will unconditionally fail.
+        """
+        # Early exit: skip permission prompt if no executor can be resolved.
+        # This avoids asking the user to approve a tool call that will
+        # unconditionally fail with "No executor registered".
+        if not self._can_resolve_executor(name):
+            _trace_runner(
+                f"resolve: tool={name} call_id={call_id} executor=MISSING "
+                f"— refused before the permission check"
+            )
+            if debug:
+                print(f"[ai_tool_runner] no executor resolvable for {name}, "
+                      f"skipping permission check")
+            return False, {'error': f'No executor registered for {name}'}
+
+        # Run the permission gate.  Shared verbatim with every caller that
+        # executes a tool by another route (#797) — see
+        # check_permission_only — so the two can never drift apart.
+        gate = self.check_permission_only(name, args, call_id, debug)
+        if not gate.allowed:
+            return False, gate.denial
+        # Track permission metadata for injection into result
+        permission_meta = gate.meta
+        # An interactive approval may have edited the arguments.
+        args = gate.args
+
+        # Check for auto-background capability
+        if self._auto_background_enabled and self._registry:
+            bg_plugin = self._get_plugin_for_tool(name)
+            if bg_plugin is not None:
+                try:
+                    threshold = bg_plugin.get_auto_background_threshold(name)
+                    if threshold is not None and threshold > 0:
+                        if debug:
+                            print(f"[ai_tool_runner] using auto-background for {name} "
+                                  f"(threshold={threshold}s)")
+                        _trace_runner(
+                            f"auto-background: tool={name} call_id={call_id} "
+                            f"plugin={bg_plugin.name} threshold={threshold}s "
+                            f"— execution leaves this path"
+                        )
+                        return self._execute_with_auto_background(
+                            name, args, bg_plugin, threshold, permission_meta
+                        )
+                except Exception as e:
+                    logger.warning(f"Auto-background check failed for {name}", exc_info=True)
+                    if debug:
+                        print(f"[ai_tool_runner] auto-background check failed for {name}: {e}")
+                    # Fall through to normal execution
+
+        fn = self._map.get(name)
+        if not fn and self._registry:
+            # Fallback: try to get executor from registry
+            # This handles tools discovered after session configuration (e.g., MCP tools)
+            if debug:
+                print(f"[ai_tool_runner] execute: executor not in _map for {name}, trying registry fallback")
+            plugin = self._registry.get_plugin_for_tool(name)
+            if debug:
+                print(f"[ai_tool_runner] execute: get_plugin_for_tool({name}) returned {plugin.name if plugin else None}")
+            if plugin and hasattr(plugin, 'get_executors'):
+                plugin_executors = plugin.get_executors()
+                if debug:
+                    print(f"[ai_tool_runner] execute: plugin {plugin.name} has {len(plugin_executors)} executors: {list(plugin_executors.keys())[:5]}...")
+                fn = plugin_executors.get(name)
+                if fn:
+                    # Cache it for future calls
+                    self._map[name] = fn
+                    if debug:
+                        print(f"[ai_tool_runner] execute: found executor for {name} via registry fallback")
+            # Also check core executors (client-registered tools, dismiss_stream, etc.)
+            if not fn:
+                core_executors = self._registry.get_core_executors()
+                fn = core_executors.get(name)
+                if fn:
+                    self._map[name] = fn
+                    if debug:
+                        print(f"[ai_tool_runner] execute: found executor for {name} via core executors")
+        _trace_executor_resolution(name, call_id, fn)
+        if not fn:
+            if debug:
+                print(f"[ai_tool_runner] execute: no executor registered for {name}, attempting generic execution")
+            # Check if generic execution is allowed via env var
+            if os.environ.get('AI_EXECUTE_TOOLS', '').lower() in ('1', 'true', 'yes'):
+                try:
+                    ok, res = _generic_executor(name, args, debug=debug)
+                    # Inject permission metadata if available
+                    if permission_meta and isinstance(res, dict):
+                        res['_permission'] = permission_meta
+                    return ok, res
+                except Exception as exc:
+                    logger.error(f"Generic executor failed for {name}", exc_info=True)
+                    if debug:
+                        print(f"[ai_tool_runner] generic executor failed for {name}: {exc}")
+                    return False, {'error': str(exc), 'traceback': traceback.format_exc()}
+            else:
+                return False, {'error': f'No executor registered for {name}'}
+        # Get plugin name for reliability tracking
+        plugin_name = ""
+        if self._registry:
+            plugin = self._registry.get_plugin_for_tool(name)
+            if plugin:
+                plugin_name = getattr(plugin, 'name', '')
+
+        # Notify reliability plugin before execution
+        if self._reliability_plugin:
+            try:
+                self._reliability_plugin.on_tool_called(name, args)
+            except Exception as e:
+                logger.debug(f"Reliability plugin on_tool_called failed: {e}")
+
+        try:
+            if debug:
+                print(f"[ai_tool_runner] execute: invoking {name} with args={args}")
+            # AppArmor thread-level confinement: confine by default,
+            # opt out via TRAIT_FRAMEWORK_LEVEL.  Any tool that touches
+            # the filesystem (directly or via side effects like save_to
+            # downloads) is automatically sandboxed.  Only framework-
+            # setup tools (spawn_subagent) declare the opt-out trait.
+            from jaato_sdk.plugins.model_provider.types import TRAIT_FRAMEWORK_LEVEL
+            is_framework_tool = (
+                self._registry
+                and TRAIT_FRAMEWORK_LEVEL in self._registry.get_tool_traits(name)
+            )
+
+            if is_framework_tool and self._apparmor_context:
+                # Framework-level tools must run unconfined.  The thread
+                # may be stuck in a session profile from a prior tool
+                # call whose exit failed ("could not restore unconfined").
+                # Actively try to escape confinement before executing.
+                try:
+                    import threading as _threading
+                    attr_path = f"/proc/self/task/{_threading.get_native_id()}/attr/current"
+                    with open(attr_path, "w") as _f:
+                        _f.write("changeprofile unconfined")
+                except (OSError, PermissionError):
+                    pass  # Best effort — if we can't unconfine, the tool may still work
+
+            ctx = (
+                self._apparmor_context()
+                if (self._apparmor_context and not is_framework_tool)
+                else None
+            )
+            if ctx:
+                ctx.__enter__()
+            try:
+                if fn.__name__ == 'mcp_based_tool':
+                    result = fn(name, args)
+                else:
+                    result = fn(args)
+            finally:
+                if ctx:
+                    ctx.__exit__(None, None, None)
+            # Normalize the executor's return; this path keeps the pieces
+            # separately because it injects permission metadata and notifies
+            # the reliability plugin before returning.
+            ok, result = self._normalize_executor_return(result)
+            # Inject permission metadata if available and result is a dict
+            if permission_meta and isinstance(result, dict):
+                result['_permission'] = permission_meta
+
+            # Notify the reliability plugin of the REAL outcome.  This
+            # passed a hardcoded ``True``: an executor that returned
+            # ``(False, payload)`` -- a domain failure without an exception
+            # -- was reported to reliability as a success, so its retry and
+            # circuit-breaker policies never saw the failures they exist to
+            # count.  The flag was available the whole time; nothing read it.
+            if self._reliability_plugin:
+                try:
+                    self._reliability_plugin.on_tool_result(
+                        name, args, ok, result, call_id or "", plugin_name
+                    )
+                except Exception as e:
+                    logger.debug(f"Reliability plugin on_tool_result failed: {e}")
+
+            _trace_tool_outcome(name, call_id, ok, result)
+            return ok, result
+        except CancelledException:
+            # Tool was cancelled via CancelToken — not an error, not retried.
+            # Return a structured result so the session can record it in history.
+            logger.debug(f"Tool {name} was cancelled")
+            cancelled = {'error': 'cancelled'}
+            _trace_tool_outcome(name, call_id, False, cancelled)
+            return False, cancelled
+        except Exception as exc:
+            logger.error(f"Tool execution failed for {name}", exc_info=True)
+            if debug:
+                print(f"[ai_tool_runner] execute: {name} raised {exc}")
+            error_result = {'error': str(exc), 'traceback': traceback.format_exc()}
+
+            # Notify reliability plugin of failure
+            if self._reliability_plugin:
+                try:
+                    self._reliability_plugin.on_tool_result(
+                        name, args, False, error_result, call_id or "", plugin_name
+                    )
+                except Exception as e:
+                    logger.debug(f"Reliability plugin on_tool_result failed: {e}")
+
+            _trace_tool_outcome(name, call_id, False, error_result)
+            return False, error_result
+
+
+def _generic_executor(name: str, args: Dict[str, Any], debug: bool = False) -> Tuple[bool, Any]:
+    """Generic fallback executor: attempt to run a CLI command or MCP client based on name/args.
+
+    - If `name` looks like a CLI tool (contains '-cli' or 'confluence'), shell out accordingly.
+    - If `name` looks like an MCP client command, attempt to call a MCP client function (placeholder).
+    This is intentionally conservative and returns structured errors when not possible.
+    """
+    # Heuristics for CLI tools
+    lname = name.lower() if name else ''
+    if 'confluence' in lname or 'confluence-cli' in lname or lname.endswith('_get'):
+        # Expect args to include page id; try to construct a reasonable command
+        page_id = args.get('page_id') or args.get('page') or args.get('id')
+        if not page_id:
+            return False, {'error': 'generic_executor: missing page id'}
+        cmd = ['confluence-cli', 'get', '--page', str(page_id)]
+        if debug:
+            print(f"[ai_tool_runner] generic_executor running: {' '.join(cmd)}")
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace', check=False)
+            out = proc.stdout or proc.stderr or ''
+            return True, {'raw': out}
+        except Exception as exc:
+            logger.error(f"Generic executor subprocess failed for {name}", exc_info=True)
+            return False, {'error': str(exc), 'traceback': traceback.format_exc()}
+
+    # MCP client placeholder: look for 'mcp' prefix
+    if lname.startswith('mcp') or lname.startswith('mcp_'):
+        # Placeholder: if you have an MCP client library, call it here.
+        return False, {'error': 'MCP client execution not implemented in generic executor'}
+
+    return False, {'error': f'generic_executor: cannot handle function {name}'}
+
+
+__all__ = ['ToolExecutor']
