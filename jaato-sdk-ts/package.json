@@ -1,6 +1,6 @@
 {
   "name": "@jaato/sdk",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "description": "Jaato SDK for TypeScript / JavaScript — protocol and client library for jaato-server. Mirrors the Python jaato-sdk method-for-method.",
   "license": "BUSL-1.1",
   "author": "apanoia",
