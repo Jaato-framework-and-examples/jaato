@@ -1,0 +1,39 @@
+name: gh-worker
+description: >
+  An agent that works with GitHub through `gh` / `git`, using a token the
+  daemon delivers per-user (docs/design/per-user-github-credentials.md §7).
+  The three things that have to line up are all here: the scrub exemption so
+  the token survives to the subprocess, the non-interactive git/gh defaults,
+  and (in .jaato/agents/gh-worker.md) the persona rules for handling the token.
+
+provider: anthropic
+model: claude-sonnet-4-5
+
+default_agent: gh-worker
+
+plugins:
+  - cli
+  - interactive_shell
+
+# 1. Non-interactive defaults, so a missing credential is an error the model
+#    READS rather than a prompt nobody answers.  `GH_TOKEN=app://github` is the
+#    reference the daemon resolves to the real per-user token at every spawn
+#    (#1226); a literal token works here too.  In a web deployment the
+#    `GH_TOKEN=app://…` line usually lives in the workspace .env instead — this
+#    profile carries it so the example is self-contained and `validate`-able.
+env:
+  GH_TOKEN: "app://github"
+  GH_PROMPT_DISABLED: "1"
+  GIT_TERMINAL_PROMPT: "0"
+
+# 2. The scrub exemption (the one that silently bites).  GH_TOKEN is in the
+#    default scrub_secret_env set (#863), so WITHOUT `!GH_TOKEN` it is stripped
+#    from every model-driven subprocess before `gh` runs — a valid config that
+#    does nothing.  `jaato-scaffold validate` reports gh_token_scrubbed_inert
+#    when the exemption is missing.  MCP deliberately keeps `default`: an MCP
+#    server gets no GitHub token.
+plugin_configs:
+  cli:
+    scrub_secret_env: [default, "!GH_TOKEN"]
+  interactive_shell:
+    scrub_secret_env: [default, "!GH_TOKEN"]
