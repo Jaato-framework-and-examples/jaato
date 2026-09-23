@@ -101,6 +101,12 @@ refused, not read):
 | `session.secret_file`, `ttl`, `cookie_name` | the HttpOnly, SameSite=Lax session cookie |
 | `ticket.ttl_seconds` | lifetime asked of the daemon per ticket (default 60; the daemon accepts 1..3600) |
 | `credentials.file`, `key_file` | optional: the per-user store of provider API keys (`src/credentials.ts`), encrypted at rest with a key derived from `key_file` (0600, 32+ chars). Absent = off: the bundle shows its plain key field |
+| `github.file`, `key_file` | optional: the per-user store of GitHub grants and workspace bindings (`src/github.ts`), encrypted at rest like `credentials` (0600 `key_file`, 32+ chars). Absent = off |
+| `github.client_id` | the **GitHub App**'s client id (non-secret; it rides the authorize URL) |
+| `github.client_secret_file` | the GitHub App's client secret, 0600 |
+| `github.workspace_root` | optional: the root managed workspaces live under. Set = `GH_TOKEN=app://github` / `.home/.gitconfig` writes are contained within it (symlinks resolved). Unset = those filesystem writes are **skipped** (the binding is still recorded; the `.env` write happens through the browser's `config.update` instead) |
+| `github.oauth_base_url`, `api_base_url` | optional: point at a GitHub Enterprise host (default `https://github.com` / `https://api.github.com`) |
+| `github.noreply_domain` | optional: the commit-email domain seeded into `.gitconfig` (default `users.noreply.github.com`) |
 
 ### Keys a user has used before
 
@@ -115,6 +121,40 @@ provider the daemon's `auth.setup` offer names. Owner is the OIDC `sub`.
 The daemon and the SDK know nothing of this; it is application state,
 like the session cookie. What the encryption buys and does not buy is in
 `src/credentials.ts`.
+
+### Connect GitHub, per user (#1227)
+
+With a `github:` block a signed-in user can connect one or more GitHub
+accounts and bind one to each workspace, so a session's `gh` / `git` acts
+as *that* person on GitHub without any token touching the browser or the
+workspace `.env` in cleartext. The token travels this server → daemon only,
+resolved on demand at every session spawn (`app://github`, #1226).
+
+Register a **GitHub App** (not an OAuth App) and enable **user-to-server
+token expiration** (App settings → *Optional features* / *User authorization*
+→ "Expire user authorization tokens"), so refresh tokens are issued:
+
+- **Callback URL:** `<public_url>/auth/github/callback`
+- **Permissions:** whatever your agents need — the user token's reach is the
+  intersection of the user and what the App is *installed on*, so an org can
+  scope which repositories agents may touch. `Contents: read/write` and
+  `Pull requests: read/write` are typical; `metadata: read` is implied.
+- **Request user authorization (OAuth) during installation:** on.
+- Copy the **Client ID** into `github.client_id` and a generated **client
+  secret** into the file named by `github.client_secret_file` (0600).
+
+The token never reaches the browser: there is **no reveal route** for
+GitHub (unlike a provider key), and the `github` provider is refused by the
+`credentials` store for the same reason. Refresh tokens rotate; this server
+serialises read-refresh-write per grant and re-reads after acquiring, so
+concurrent session spawns collapse to one refresh (the #683 pattern).
+*Disconnect* deletes the grant, revokes it at GitHub, and asks the daemon to
+reload the user's loaded sessions so a live `gh` call then fails. Design:
+[`docs/design/per-user-github-credentials.md`](../docs/design/per-user-github-credentials.md) §4–§6.
+
+> The settings UI (a "Connect GitHub" entry and the workspace account
+> dropdown) and the pasted fine-grained-PAT fallback are follow-ups; this
+> server exposes the endpoints the UI will call.
 
 ## Routes
 
@@ -131,10 +171,19 @@ like the session cookie. What the encryption buys and does not buy is in
 | `/api/credentials` | POST | store `{provider, secret, label?}` → 201 `{entry}`; same-origin only |
 | `/api/credentials/<id>/reveal` | POST | `{secret}`; same-origin only |
 | `/api/credentials/<id>` | DELETE | forget; same-origin only |
+| `/auth/github/login` | GET | 302 to GitHub (App user-to-server authorization) |
+| `/auth/github/callback` | GET | stores the grant, 302 to `/?github=connected` |
+| `/api/github/accounts` | GET | the user's connected accounts `{login, installations, isDefault}` — never a token |
+| `/api/github/bindings` | GET | the user's `{workspace, accountId}` bindings |
+| `/api/github/default` | POST | `{id}` — make one account the default; same-origin only |
+| `/api/github/disconnect` | POST | `{id}` — delete + revoke a grant, reload the user's sessions; same-origin only |
+| `/api/github/bind` | POST | `{workspace, account_id\|null}` — bind/clear an account on a workspace; same-origin only |
 | everything else | GET | the bundle |
 
 The four credential routes exist only with a `credentials:` block; otherwise
-they are 404 and `config.json` names no `credentialsUrl`.
+they are 404 and `config.json` names no `credentialsUrl`. The GitHub routes
+answer to a `github:` block the same way — and there is deliberately **no**
+`/api/github/<id>/reveal`: a GitHub token travels this server → daemon only.
 
 ## Develop
 

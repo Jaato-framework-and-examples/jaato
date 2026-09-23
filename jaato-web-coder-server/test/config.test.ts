@@ -81,4 +81,18 @@ session: {secret_file: session.secret}
     const empty = mkdtempSync(join(tmpdir(), "jwcs-empty-"));
     assert.throws(() => loadConfig(join(empty, "nope.yaml")), /cannot read config/);
   });
+
+  test("github: absent means off; present needs client_id + 0600 secret + 32+ key; base URLs must be https", () => {
+    assert.equal(testConfig("ws://d", "https://x").github, undefined);
+    const on = testConfig("ws://d", "https://x", {
+      github: { file: "github.json", key_file: "github.key", client_id: "Iv1.test", client_secret_file: "github-app.secret", workspace_root: "/srv/ws" },
+    });
+    assert.ok(on.github!.file.endsWith("/github.json"));
+    assert.equal(on.github!.key, "g".repeat(48));
+    assert.equal(on.github!.clientId, "Iv1.test");
+    assert.equal(on.github!.clientSecret, "gh-client-secret");
+    assert.equal(on.github!.workspaceRoot, "/srv/ws");
+    assert.throws(() => testConfig("ws://d", "https://x", { github: { file: "g.json", key_file: "github.key", client_secret_file: "github-app.secret" } }), /github\.client_id/);
+    assert.throws(() => testConfig("ws://d", "https://x", { github: { file: "g.json", key_file: "github.key", client_id: "Iv1", client_secret_file: "github-app.secret", oauth_base_url: "http://ghe" } }), /https/);
+  });
 });

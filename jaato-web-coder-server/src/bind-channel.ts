@@ -17,7 +17,14 @@
  * page retries, never into a ticket.
  */
 import { randomUUID } from "node:crypto";
-import { ConnectionState, EventTypeValue, JaatoClient, type JaatoEvent } from "@jaato/sdk";
+import {
+  ConnectionState,
+  EventTypeValue,
+  JaatoClient,
+  SecretResolveResponder,
+  type JaatoEvent,
+  type SecretResolveHandler,
+} from "@jaato/sdk";
 
 export class BindUnavailableError extends Error {
   override name = "BindUnavailableError";
@@ -56,6 +63,7 @@ export class BindChannel {
   private readonly _client: JaatoClient;
   private readonly _pending = new Map<string, Pending>();
   private readonly _timeoutMs: number;
+  private _resolveResponder: SecretResolveResponder | null = null;
 
   constructor(opts: BindChannelOptions) {
     this._timeoutMs = opts.timeoutMs ?? 10_000;
@@ -69,7 +77,22 @@ export class BindChannel {
     await this._client.connect();
   }
 
+  /**
+   * Answer the daemon's ``secret.resolve`` requests (#1226) with ``handler``.
+   * This is the daemon -> application direction on the same channel; the
+   * responder subscribes to ``secret.resolve`` and replies correlated by
+   * ``request_id``, carrying no credential policy of its own — that is the
+   * handler's.  Idempotent: a second call replaces the responder.
+   */
+  attachSecretResolver(handler: SecretResolveHandler): void {
+    this._resolveResponder?.stop();
+    this._resolveResponder = new SecretResolveResponder(this._client, handler);
+    this._resolveResponder.start();
+  }
+
   async close(): Promise<void> {
+    this._resolveResponder?.stop();
+    this._resolveResponder = null;
     for (const [id, p] of this._pending) { clearTimeout(p.timer); p.reject(new BindUnavailableError("bind channel closed")); this._pending.delete(id); }
     await this._client.close();
   }
@@ -84,7 +107,11 @@ export class BindChannel {
 
   private _onEvent(ev: Record<string, unknown>): void {
     const type = ev.type;
-    if (type !== EventTypeValue.TICKET_BIND_RESULT && type !== EventTypeValue.TICKET_REVOKE_RESULT) return;
+    if (
+      type !== EventTypeValue.TICKET_BIND_RESULT &&
+      type !== EventTypeValue.TICKET_REVOKE_RESULT &&
+      type !== EventTypeValue.SECRET_RELOAD_RESULT
+    ) return;
     const id = typeof ev.request_id === "string" ? ev.request_id : "";
     const p = this._pending.get(id);
     if (!p) return;
@@ -126,5 +153,18 @@ export class BindChannel {
   async revokeUser(user: string): Promise<{ status: string; revoked: number }> {
     const ev = await this._request({ type: EventTypeValue.TICKET_REVOKE_REQUEST, user });
     return { status: String(ev.status ?? "unknown"), revoked: Number(ev.revoked ?? 0) };
+  }
+
+  /**
+   * Ask the daemon to re-resolve ``user``'s LOADED sessions (#1226 §6.4), so a
+   * just-changed ``app://`` reference (a GitHub disconnect, a workspace -> none)
+   * drops out of a live session's environment rather than lingering.  The
+   * daemon qualifies ``user`` with this connection's app id, so one
+   * application can never reload another's ``alice``.  ``reloaded: 0`` — the
+   * user has nothing loaded — is the ordinary, non-error answer.
+   */
+  async reloadUser(user: string): Promise<{ status: string; reloaded: number }> {
+    const ev = await this._request({ type: EventTypeValue.SECRET_RELOAD_REQUEST, user });
+    return { status: String(ev.status ?? "unknown"), reloaded: Number(ev.reloaded ?? 0) };
   }
 }
