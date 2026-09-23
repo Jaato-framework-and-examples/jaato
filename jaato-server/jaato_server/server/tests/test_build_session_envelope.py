@@ -304,7 +304,7 @@ def test_plugin_configs_pass_uri_resolves_daemon_side(monkeypatch) -> None:
     # Stub the secret resolver to a known value rather than touching
     # an actual pass store on the test host.  We patch the resolver
     # so any ``pass://`` URI returns the stub value.
-    def _stub_resolve_secret_uri(value):
+    def _stub_resolve_secret_uri(value, context=None):
         if isinstance(value, str) and value.startswith("pass://"):
             return f"RESOLVED({value})"
         return value

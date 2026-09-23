@@ -1361,6 +1361,12 @@ class SessionManager:
         self._retention_sweep_interval = DEFAULT_RETENTION_SWEEP_SECONDS
         self._last_retention_sweep: float = 0.0
 
+        # #1226: the ``app://`` secret resolver, injected by the daemon wiring
+        # on the WS transport (where the bind channel lives) and handed to
+        # every session this manager constructs.  ``None`` on IPC / embedded,
+        # where ``app://`` references are dropped.
+        self._app_secret_resolver: Optional['AppSecretResolver'] = None
+
         # Path H (cycle 10): serialize concurrent async saves so
         # parallel ToolCallStartEvents (parallel tool execution)
         # don't trample each other.  atomic_write_json already
@@ -4051,6 +4057,12 @@ class SessionManager:
         # Resolving daemon-side is reliable: the daemon process has
         # premium's secret resolvers entry-point-discovered at startup
         # and the GPG-agent socket has been primed by the operator.
+        #
+        # #1226: hand the session the app:// resolver BEFORE it resolves its
+        # env, so a session spawned from ANY path (WS create, cascade stage,
+        # wake, revive) resolves app:// references against the owning
+        # application.  ``None`` on IPC / embedded leaves them dropped.
+        server.set_app_secret_resolver(self._app_secret_resolver)
         server._resolve_session_env()
 
         # Phase 3 §3.13: IPC apparmor provisioning + runner spawn
@@ -4233,6 +4245,79 @@ class SessionManager:
             callback: Called with (client_id, event) for each event.
         """
         self._event_callback = callback
+
+    def set_app_secret_resolver(
+        self, resolver: Optional['AppSecretResolver']
+    ) -> None:
+        """Inject the ``app://`` secret resolver (#1226).
+
+        Called once by the daemon wiring on the WS transport.  The manager
+        hands it to every :class:`JaatoServer` it constructs (in
+        :meth:`_construct_and_initialize_server`, before that server resolves
+        its env), so a session spawned from ANY path — WS create, cascade
+        stage, wake, revive — can resolve ``app://`` references the same way.
+        """
+        self._app_secret_resolver = resolver
+
+    def reload_owner_sessions(self, qualified_owner: str) -> int:
+        """Re-resolve the env of every LOADED session owned by ``qualified_owner``.
+
+        The daemon-side half of ``secret.reload`` (§6.4): the owning
+        application deletes a binding and asks the daemon to drop the now-dead
+        ``app://`` value from the owner's live sessions rather than let it
+        linger until each ends.  ``qualified_owner`` is ``"app:user"``, already
+        qualified by the transport with the app id the bind connection
+        authenticated as — so this can only ever touch that application's own
+        users' sessions.
+
+        A session is a match when the user OWNS its workspace (the owner
+        relation ``app://`` resolution itself uses) OR CREATED it
+        (``created_by``, #859) — the same union ``session.list`` visibility
+        uses.  Returns how many loaded sessions were re-resolved; ``0`` when
+        the owner has none loaded, which is the ordinary answer and not a
+        failure.  A mid-turn session is skipped by
+        :meth:`reload_session_env` (``was_processing``) and picked up by its
+        next spawn, exactly as any reload is.
+        """
+        with self._lock:
+            targets = [
+                sid for sid, session in self._sessions.items()
+                if self._session_owned_by(session, qualified_owner)
+            ]
+        reloaded = 0
+        for sid in targets:
+            try:
+                result = self.reload_session_env(sid)
+            except Exception:  # noqa: BLE001 -- one bad session must not stop the sweep
+                logger.warning(
+                    "secret.reload: re-resolving session %s failed", sid,
+                    exc_info=True,
+                )
+                continue
+            if result.get("found"):
+                reloaded += 1
+        logger.info(
+            "secret.reload: owner=%s matched=%d reloaded=%d",
+            qualified_owner, len(targets), reloaded,
+        )
+        return reloaded
+
+    def _session_owned_by(self, session: Any, qualified_owner: str) -> bool:
+        """Whether ``session`` belongs to ``qualified_owner`` (created OR owns workspace).
+
+        ``created_by`` is the direct fact.  The workspace-owner fact needs the
+        resolver's own owner lookup (the WS ``WorkspaceManager``), so it is
+        consulted only when one is wired; on a transport with no resolver the
+        creator relation is the whole rule, which is correct because ``app://``
+        resolution is unreachable there anyway.
+        """
+        if getattr(session, "created_by", None) == qualified_owner:
+            return True
+        resolver = self._app_secret_resolver
+        workspace = getattr(session, "workspace_path", None)
+        if resolver is not None and workspace:
+            return resolver.owner_for(workspace) == qualified_owner
+        return False
 
     def set_visible_sessions_resolver(
         self,
@@ -5239,6 +5324,85 @@ class SessionManager:
                     "record-retention sweep raised — the next pass "
                     "re-derives its state",
                 )
+            try:
+                self._sweep_app_secret_expiry()
+            except Exception:  # noqa: BLE001 — same rule, separate pass
+                logger.exception(
+                    "app:// expiry sweep raised — the next pass re-derives "
+                    "its state",
+                )
+
+    def _sweep_app_secret_expiry(self, now: Optional[float] = None) -> None:
+        """Reload sessions whose resolved ``app://`` secret is near expiry (#1226 §6.3).
+
+        A GitHub App user token lasts ~8h and sessions can outlive that, so a
+        session that resolved an ``app://`` value carrying ``expires_at`` gets
+        a ``session.reload_env`` a margin (``JAATO_OAUTH_REFRESH_MARGIN``)
+        before it: the reload re-runs the full resolution, which mints a fresh
+        token while the old one is still valid.  A session refused mid-turn
+        (``was_processing``) is simply retried on the next sweep — the token is
+        still valid through the margin, so nothing is lost.
+
+        Runs on the #812 lifetime-watchdog thread rather than a per-session
+        timer, so there is nothing to arm at the many sites that mutate a
+        session and nothing to disarm when one ends — the sweep re-derives the
+        set of near-expiry sessions each pass from the live ``_session_env``
+        resolution the daemon already holds (#735's rule).
+
+        Args:
+            now: instant to judge against; a parameter so a test states the
+                moment it means rather than betting on a clock (#996).
+        """
+        from jaato_server.shared.credential_lock import refresh_margin_seconds
+
+        stamp = time.time() if now is None else now
+        margin = refresh_margin_seconds()
+        with self._lock:
+            candidates = [
+                sid for sid, session in self._sessions.items()
+                if self._session_app_secret_due(session, stamp, margin)
+            ]
+        for sid in candidates:
+            try:
+                result = self.reload_session_env(sid)
+            except Exception:  # noqa: BLE001 — one bad session must not stop the sweep
+                logger.warning(
+                    "app:// expiry reload of session %s failed", sid,
+                    exc_info=True,
+                )
+                continue
+            if result.get("was_processing"):
+                logger.debug(
+                    "app:// expiry reload of session %s deferred (mid-turn); "
+                    "retrying next sweep", sid,
+                )
+
+    @staticmethod
+    def _session_app_secret_due(
+        session: Any, stamp: float, margin: float
+    ) -> bool:
+        """Whether ``session`` has a resolved ``app://`` value inside the margin.
+
+        Reads the per-session expiry map ``JaatoServer._app_secret_expiries``
+        (env key -> ISO-8601 UTC).  A value is due when ``stamp`` has reached
+        within ``margin`` seconds of it; any one value inside the margin makes
+        the whole session due — a reload re-resolves them all.  A value whose
+        timestamp cannot be parsed is skipped rather than forcing a reload
+        every sweep.
+        """
+        server = getattr(session, "server", None)
+        expiries = getattr(server, "_app_secret_expiries", None)
+        if not expiries:
+            return False
+        from datetime import datetime
+        for iso in expiries.values():
+            try:
+                dt = datetime.fromisoformat(iso)
+            except (TypeError, ValueError):
+                continue
+            if stamp >= dt.timestamp() - margin:
+                return True
+        return False
 
     def _maybe_sweep_retention(self) -> None:
         """Run the retention pass, at its own much coarser cadence (#1119).

@@ -19,9 +19,16 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, TYPE_CHECKING
 
+from jaato_server.server.app_secret import AppSecretResolutionError
+
 if TYPE_CHECKING:  # pragma: no cover — types only
     from jaato_server.server.runner_rpc_client import RunnerRPCClient
     from jaato_server.server.runner_spawner import SpawnedRunner
+    from jaato_server.server.app_secret import AppSecretResolver
+    from jaato_server.shared.plugins.subagent.config import (
+        AppSecretReference,
+        SecretResolveContext,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -759,6 +766,16 @@ class JaatoServer:
         """
         self.env_file = env_file
         self._env_overrides = env_overrides or {}
+        # #1226: resolver for ``app://`` secret references (per-user credentials
+        # answered by the application that owns the workspace, over the #1074
+        # bind channel).  Injected by the daemon wiring; ``None`` on the IPC /
+        # embedded / standalone paths, where an ``app://`` reference is dropped.
+        self._app_secret_resolver: Optional['AppSecretResolver'] = None
+        # env-var name -> ISO-8601 UTC expiry, for each app:// value this
+        # session resolved that carried one.  The lifetime watchdog reads it to
+        # schedule a pre-expiry ``session.reload_env`` (§6.3).  Rebuilt on every
+        # _resolve_session_env pass, so a reload re-derives it afresh.
+        self._app_secret_expiries: Dict[str, str] = {}
         self._provider = provider
         self._profile = profile
         self._system_instruction_override = system_instruction_override
@@ -1786,7 +1803,133 @@ class JaatoServer:
                         exc,
                     )
 
+        # #1226: resolve any ``app://<name>`` references against the
+        # application that owns the workspace.  Runs AFTER every other env
+        # source has been merged, because a later source could set (or, on a
+        # reload, retract) the reference.  A resolved value reaches only this
+        # dict — never the record, the snapshot or the .env, all of which keep
+        # ``app://<name>`` (§6.1), which is what makes a revive resolve afresh.
+        self._apply_app_secret_references()
+
         self._session_env_resolved = True
+
+    def set_app_secret_resolver(
+        self, resolver: Optional['AppSecretResolver']
+    ) -> None:
+        """Inject the ``app://`` resolver (#1226), or clear it.
+
+        The daemon wiring calls this on every session it constructs, on the WS
+        path where a bind channel exists.  ``None`` leaves ``app://``
+        references unresolvable — the IPC / embedded / standalone posture,
+        where they are dropped (or, strict, refuse the bootstrap) exactly as an
+        unreachable application would be.
+        """
+        self._app_secret_resolver = resolver
+
+    def _apply_app_secret_references(self) -> None:
+        """Resolve every ``app://<name>`` value in ``self._session_env`` (#1226).
+
+        For each env value that parses as an ``app://`` reference: resolve it
+        against the owning application and REPLACE it with the secret, or DROP
+        the key (never leave the literal reference, which would reach a
+        subprocess as a token that 401s).  A dropped resolution is a WARNING
+        naming the reference and the reason; the strict form ``?required``
+        turns a failure into an :class:`AppSecretResolutionError` the bootstrap
+        surfaces.  ``expires_at`` answers are recorded on
+        ``self._app_secret_expiries`` for the pre-expiry reload (§6.3).
+
+        Idempotent per call: the expiry map is rebuilt from scratch so a reload
+        re-derives it, and once a value has been resolved to its plaintext it
+        no longer parses as ``app://`` and is left alone on a second pass.
+        """
+        from jaato_server.shared.plugins.subagent.config import (
+            SecretResolveContext,
+            parse_app_secret_reference,
+        )
+
+        self._app_secret_expiries = {}
+        # Find references first so we do not mutate the dict while iterating.
+        refs = [
+            (key, ref)
+            for key, value in self._session_env.items()
+            if (ref := parse_app_secret_reference(value)) is not None
+        ]
+        if not refs:
+            return
+
+        resolver = self._app_secret_resolver
+        context = None
+        if resolver is not None:
+            owner = resolver.owner_for(self._workspace_path)
+            context = SecretResolveContext(
+                workspace_path=self._workspace_path or "",
+                workspace_owner=owner,
+                session_id=self.session_id,
+            )
+        for key, ref in refs:
+            self._apply_one_app_secret(key, ref, resolver, context)
+
+    def _apply_one_app_secret(
+        self,
+        key: str,
+        ref: 'AppSecretReference',
+        resolver: Optional['AppSecretResolver'],
+        context: Optional['SecretResolveContext'],
+    ) -> None:
+        """Resolve one ``app://`` reference into ``self._session_env[key]``.
+
+        Split from :meth:`_apply_app_secret_references` so the per-reference
+        drop / require / record logic reads as one path.  On any failure the
+        key is removed from the env (the literal is never forwarded); a
+        ``?required`` reference instead raises so the caller can refuse the
+        bootstrap.
+        """
+        reference = f"app://{ref.name}" + ("?required" if ref.required else "")
+        if resolver is None:
+            self._drop_app_secret(
+                key, reference, ref.required,
+                "no app:// resolver is wired on this transport (only a "
+                "WebSocket deployment with the #1074 bind channel can resolve "
+                "app:// references)",
+            )
+            return
+        answer = resolver.resolve_reference(ref, context)
+        if answer.ok:
+            self._session_env[key] = answer.value  # type: ignore[assignment]
+            if answer.expires_at:
+                self._app_secret_expiries[key] = answer.expires_at
+            logger.info(
+                "app:// resolved %s=%s for %s%s",
+                key, reference,
+                (context.workspace_owner if context else None) or "?",
+                f" (expires {answer.expires_at})" if answer.expires_at else "",
+            )
+            return
+        self._drop_app_secret(
+            key, reference, ref.required,
+            answer.detail or f"application answered status={answer.status!r}",
+        )
+
+    def _drop_app_secret(
+        self, key: str, reference: str, required: bool, reason: str
+    ) -> None:
+        """Drop an unresolved ``app://`` key, or raise if it was ``?required``.
+
+        The literal reference is never left in the env — a
+        ``GH_TOKEN=app://github`` reaching a subprocess is a token that fails
+        with a confusing 401, so the true state ("not logged in") is expressed
+        by the variable's absence.
+        """
+        self._session_env.pop(key, None)
+        if required:
+            raise AppSecretResolutionError(
+                f"required secret {key}={reference} could not be resolved: "
+                f"{reason}"
+            )
+        logger.warning(
+            "app:// reference %s=%s dropped (session starts WITHOUT %s): %s",
+            key, reference, key, reason,
+        )
 
     def reload_session_env(self) -> Dict[str, Any]:
         """Re-resolve this session's environment and push it to its runner.

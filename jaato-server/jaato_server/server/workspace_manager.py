@@ -486,6 +486,31 @@ class WorkspaceManager:
 
         return None
 
+    def owner_for_path(self, workspace_path: str) -> Optional[str]:
+        """The qualified owner ``app:user`` of the workspace at ``workspace_path``.
+
+        The lookup ``app://`` secret resolution uses (#1226): a session runs in
+        an absolute workspace path, and the owner is what decides which
+        application is asked to resolve its ``app://`` references.  Returns
+        ``None`` for a path that is not a known workspace and for a known but
+        UNOWNED one — both resolve nothing, correctly, since there is no owner
+        to ask.  Compared on the resolved absolute path so a symlinked or
+        non-normalised spelling of the same directory still matches.
+        """
+        if not workspace_path:
+            return None
+        try:
+            target = os.path.realpath(workspace_path)
+        except OSError:
+            target = workspace_path
+        for ws in self._workspaces.values():
+            try:
+                if os.path.realpath(ws.path) == target:
+                    return ws.owner
+            except OSError:
+                continue
+        return None
+
     @staticmethod
     def visible_to(ws_info: WorkspaceInfo, user: Optional[str]) -> bool:
         """Whether *user* may see and use *ws_info*.

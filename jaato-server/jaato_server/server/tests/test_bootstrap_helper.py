@@ -73,6 +73,16 @@ class _FakeJaatoServer:
     def _resolve_session_env(self) -> None:
         self.lifecycle_log.append("resolve_session_env")
 
+    # #1226: the bootstrap helper hands the session the app:// secret
+    # resolver BEFORE _resolve_session_env, so a session spawned from any
+    # path resolves app:// references against the owning application.  The
+    # fake records it (real JaatoServer stores it for the runner envelope).
+    def set_app_secret_resolver(self, resolver: Any) -> None:
+        # Deliberately NOT recorded in lifecycle_log: the ordering tests
+        # pin the resolve_session_env / hooks / initialize sequence, and
+        # this injection is not part of that contract.
+        self._app_secret_resolver = resolver
+
     def _with_session_env(self):
         from contextlib import contextmanager
         @contextmanager
@@ -123,6 +133,10 @@ class _FakeSessionManager:
         self.pre_init_hook_calls: List[Tuple[Any, str, Optional[str], Optional[str]]] = []
         # Capture lifecycle order across helper invocations.
         self.lifecycle_log: List[str] = []
+        # #1226: the real _bootstrap_session reads self._app_secret_resolver
+        # and hands it to the session before env resolution; None mirrors
+        # SessionManager.__init__ (IPC / embedded leave app:// dropped).
+        self._app_secret_resolver: Any = None
         # §3.13 stub: return value from
         # _provision_ipc_apparmor_and_spawn_runner.  Tests set this
         # to drive the apparmor branch without real apparmor calls.
