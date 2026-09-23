@@ -66,7 +66,7 @@ With JAATO Abstraction:
 
 ## Part 2: Provider-Agnostic Type System
 
-All orchestration logic in JAATO operates on these internal types, defined in `shared/plugins/model_provider/types.py`:
+All orchestration logic in JAATO operates on these internal types, defined in `jaato_server/shared/plugins/model_provider/types.py`:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐

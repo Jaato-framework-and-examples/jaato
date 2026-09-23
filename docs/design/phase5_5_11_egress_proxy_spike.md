@@ -210,13 +210,13 @@ Three concrete reasons:
 ### 4.1 Module layout
 
 ```
-jaato-server/server/egress_proxy/
+jaato-server/jaato_server/server/egress_proxy/
 ├── __init__.py
 ├── proxy.py            # ConnectAllowlistProxy class
 ├── manager.py          # EgressProxyManager — per-session lifecycle
 └── config.py           # AllowlistConfig schema (JSON validator)
 
-jaato-server/server/egress_proxy/tests/
+jaato-server/jaato_server/server/egress_proxy/tests/
 ├── test_proxy.py       # CONNECT happy/deny/malformed
 ├── test_manager.py     # Per-session spawn/teardown + port alloc
 ├── test_config.py      # Allowlist schema validation
@@ -498,7 +498,7 @@ a hard, non-bypassable boundary without a different enforcement layer.
 
 **Replacement — cgroup-v2-scoped netfilter egress (verified feasible):**
 - `nftables v1.0.9` present; cgroup v2 mounted; **jaato already creates a
-  per-session cgroup** (`server/cgroups.py`) — so an `nft` rule matching
+  per-session cgroup** (`jaato_server/server/cgroups.py`) — so an `nft` rule matching
   `socket cgroupv2` can allow OUTPUT only to `127.0.0.1` (the proxy) and drop
   the rest, per session, at the netfilter layer — independent of AppArmor's
   network-mediation version.  This is the doc's §6.1/§6.4 fallback, now the
@@ -578,7 +578,7 @@ TCP.  Two consequences worth stating, because both were once implicit:
    remove it.
 3. **Two prerequisites**: (a) `nft` added to the daemon's sudo NOPASSWD scope
    (today only `apparmor_parser` — mirror that grant); (b) the session must
-   have a per-session cgroup (`server/cgroups.py` — present for WS/cgroup-
+   have a per-session cgroup (`jaato_server/server/cgroups.py` — present for WS/cgroup-
    attached sessions).  Sessions without a cgroup fall back to proxy-only
    "cooperative" confinement — document the tier.
 4. DNS: v1 does not allow the stub resolver in the gate, so the confined
@@ -613,7 +613,7 @@ says in as many words that the assertion this script exists for did not run.
 
 ### §5.11d-v2 — SHIPPED + live-verified on the daemon (2026-07-04)
 
-Implemented: `server/egress_proxy/nft.py` (`EgressNftManager` + pure
+Implemented: `jaato_server/server/egress_proxy/nft.py` (`EgressNftManager` + pure
 `render_ruleset`), wired opt-in into `wireup.egress_env_for_session` behind
 `JAATO_EGRESS_NFT_ENFORCE` (default off).  44 egress unit tests + the
 `render_ruleset` round-trip proof.

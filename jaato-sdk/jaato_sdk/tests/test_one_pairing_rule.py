@@ -97,7 +97,7 @@ def test_both_carriers_produce_the_same_ledger():
 
 def test_the_server_builder_is_the_same_rule():
     """``shared.build_tool_call_ledger`` must not drift back into a copy."""
-    from shared.completion_processors import build_tool_call_ledger
+    from jaato_server.shared.completion_processors import build_tool_call_ledger
 
     assert build_tool_call_ledger(_obj_history()) == build_ledger(_obj_history())
 

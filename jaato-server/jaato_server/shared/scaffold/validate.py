@@ -1,0 +1,3104 @@
+"""The validator — checks hand-authored assets against the live registry.
+
+This is the SHARED check layer.  Both verbs use it:
+
+- ``validate`` runs it on a hand-authored profile / profile-set.
+- ``new`` runs it on the profile it just emitted (emit-then-validate), so
+  scaffolded output is valid by construction — there is no separate
+  "is the generated profile ok" code path.
+
+Profile **resolution is reused from the framework**: ``discover_profiles()``
+flattens the ``inherits`` chain and applies the ``JAATO_PROFILE_SET`` /
+``force_profile_set`` overlay exactly as the daemon does, so the validator
+checks the same *effective* profile the runtime would.  The validator only
+adds the introspect-driven checks on top: unknown provider / plugin / tool /
+config-knob / quirk — the silent-ignore failures (a mistyped
+``api_params.temprature`` is dropped without a word at runtime) this tool
+exists to surface.
+"""
+
+from __future__ import annotations
+
+import difflib
+import json
+import os
+import re
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from jaato_server.shared.plugins.model_provider.base import KNOB_LAYERS
+# The wire-type predicate lives with the contract it enforces, so this
+# static check and the two runtime spawn boundaries cannot drift apart
+# about what "string-shaped" means.  #883 ratified that contract; the
+# loader's module notes carry the decision and the rejected alternatives.
+from jaato_server.shared.spawn_schema_loader import unreachable_spawn_types
+from jaato_sdk.plugins.model_provider.types import DISCOVERABILITY_EAGER
+from jaato_server.shared.instruction_suppression import PIECE_DISCLOSURE
+from . import introspect
+
+# Layer names that nest under plugin_configs.<provider> as sub-dicts.
+# ``top_level`` is not a nesting key — its knobs sit directly under the
+# provider — so it is excluded from the "is this key a layer?" test.
+_NESTING_LAYERS = frozenset(n for n in KNOB_LAYERS if n != "top_level")
+
+#: The framework's deterministic test double.  It is deliberately absent from
+#: the ``explain providers`` catalogue (nobody should PICK it for production),
+#: but it is installed, it is what the live conformance suite runs on, and a
+#: profile naming it is legitimate — so it must not be reported as an unknown
+#: provider.  Doing so told every harness author that their working, zero-cost
+#: echo profile was invalid.
+ECHO_PROVIDER = "echo"
+
+
+@dataclass
+class Diagnostic:
+    """One validation finding."""
+
+    severity: str            # "error" | "warn" | "info"
+    code: str                # stable machine code, e.g. "unknown_provider"
+    message: str
+    profile: Optional[str] = None
+    where: Optional[str] = None   # dotted field path, e.g. "plugin_configs.nebius.api_params.temprature"
+    tier: Optional[str] = None    # source tier of the asset: "workspace" | "user".
+                                  # None = not tier-attributable (e.g. unscoped).
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "severity": self.severity, "code": self.code,
+            "message": self.message, "profile": self.profile, "where": self.where,
+            "tier": self.tier,
+        }
+
+
+# ---------------------------------------------------------------- per-profile
+
+def _check_plugins(names: Any, plugins: Dict[str, Any], add) -> None:
+    """Check a profile's ``plugins:`` list: installed, and loadable.
+
+    Two different findings, deliberately not collapsed into one:
+
+    ``unknown_plugin``
+        the name resolves to nothing installed.
+
+    ``plugin_missing_tier``
+        it IS installed and discoverable — and the runner will still
+        drop it, because tier-filtered discovery excludes a plugin whose
+        package declares no ``PLUGIN_TIER`` (issue #917).  An *error*
+        rather than a warning: the session is already broken (every tool
+        the profile asked for is absent) while the profile is valid by
+        every other measure, so nothing else in the pipeline says a
+        word.  The in-tree build gate is an AST scan of
+        ``shared/plugins/`` and cannot see the out-of-tree distribution
+        where this actually happens.
+
+    They never double-fire: an uninstalled plugin has no tier to be
+    missing.
+
+    Split out of :func:`validate_profile` rather than inlined — that
+    function is far over the complexity ceiling and frozen in the audit
+    baseline (see ``test_cyclomatic_complexity_audit``).
+
+    Args:
+        names: The profile's resolved ``plugins`` list (bare names;
+            ``(preload)`` modifiers are parsed out at profile-load time
+            into ``preloaded_plugins``).
+        plugins: The introspected inventory, keyed by plugin name.
+        add: The per-profile diagnostic sink from :func:`validate_profile`.
+    """
+    for plug in names:
+        if plug not in plugins:
+            add("error", "unknown_plugin",
+                f"plugin '{plug}' is not installed (run "
+                "`jaato-scaffold explain plugins`)", where=f"plugins.{plug}")
+            continue
+        if getattr(plugins[plug], "tier_missing", False):
+            add("error", "plugin_missing_tier",
+                f"plugin '{plug}' declares no PLUGIN_TIER, so the runner "
+                "will not load it — this session would come up without "
+                "its tools. Add PLUGIN_TIER = \"runner\" to the plugin "
+                "package's __init__.py",
+                where=f"plugins.{plug}")
+
+
+def _check_plugin_configs_expose_tools(profile: Any, plugins, add) -> None:
+    """Flag ``plugin_configs.<name>`` for a plugin the profile does not enable.
+
+    Configuring a plugin and exposing its tools are two decisions, and only
+    the second is spelled ``plugins:``.  Since #950 a config block IS applied
+    to the plugin either way — that is the point of
+    ``SessionInitEnvelope.plugin_configs`` carrying the whole map — so this is
+    NOT a "the block does nothing" finding.  What it says is narrower and
+    still worth saying: the plugin was configured and none of its tools are on
+    the model's wire, which for a tool-bearing plugin is almost always the
+    author having written half of the pair.
+
+    The shapes that are deliberately silent:
+
+    ``permission``, ``sandbox_manager``, … — plugins whose
+        ``get_tool_schemas()`` returns ``[]``.  These are configured-only by
+        construction (``permission/plugin.py``: "askPermission is not exposed
+        to the model"), so there is no tool surface to be missing and naming
+        them in ``plugins:`` would be pure ceremony.
+
+    ``introspection`` — in
+        :attr:`~shared.plugins.registry.PluginRegistry._ALWAYS_INITIALIZE_PLUGINS`,
+        and its ``list_tools`` / ``get_tool_schemas`` are core: they reach
+        every session's wire whatever ``plugins:`` says.
+
+    A plugin whose tools are not statically knowable — ``mcp``, whose tools
+    come from the servers a live session connects to — reports none offline
+    and is read the same way.  A false negative, and the right one: the
+    alternative is asserting a missing tool surface the validator cannot see.
+
+    A ``warn`` rather than an error, for the reason the whole family is warned
+    rather than failed: a base profile in an ``inherits`` chain may legitimately
+    carry a config its children enable, and validation runs on every discovered
+    profile including those bases.
+
+    Args:
+        profile: The resolved profile.
+        plugins: The introspected inventory, keyed by plugin name.
+        add: The per-profile diagnostic sink from :func:`validate_profile`.
+    """
+    from jaato_server.shared.plugins.registry import PluginRegistry
+
+    enabled = set(getattr(profile, "plugins", None) or ())
+    for cfg_name in (getattr(profile, "plugin_configs", None) or {}):
+        if cfg_name in enabled:
+            continue
+        if cfg_name in PluginRegistry._ALWAYS_INITIALIZE_PLUGINS:
+            continue
+        if introspect.resolve_provider(cfg_name) is not None:
+            continue  # a provider section — never named in plugins:
+        pinfo = plugins.get(cfg_name)
+        if pinfo is None:
+            continue  # not an installed plugin; nothing reliable to say
+        if not pinfo.tools and not pinfo.dynamic:
+            continue  # exposes no tools at all — configured-only by design
+        names = sorted(t.name for t in pinfo.tools)
+        preview = ", ".join(names[:4]) + (" …" if len(names) > 4 else "")
+        surface = f" ({preview})" if preview else ""
+        add("warn", "plugin_config_without_plugin",
+            f"'{cfg_name}' is configured but not enabled: the config applies, "
+            f"and none of the plugin's tools{surface} reach the model, because "
+            f"'{cfg_name}' is not in plugins:.  Add it to plugins: if the "
+            f"agent should be able to call them.",
+            where=f"plugin_configs.{cfg_name}")
+
+
+#: A tool name this shape belongs to an MCP server, whose inventory comes from
+#: the servers a LIVE session connects to — never from anything installed here.
+#: ``mcp/plugin.py`` normalizes every exposed name to ``mcp__<server>__<tool>``,
+#: and ``shared/tool_id_map.py`` carries the dotted ``mcp.server.tool`` form, so
+#: the shape is the signal.  Names matching it are exempt from the unknown-name
+#: check: reporting one would be the validator asserting the absence of a tool
+#: it has no way to see.
+_MCP_TOOL_SHAPE = re.compile(r"^mcp[._]")
+
+
+def _check_completion_gate_shape(profile, add) -> None:
+    """Flag ``completion_processors`` declared with no payload schema.
+
+    ``LifecycleTools._should_hide_signal_completion`` gate 1: **no declared
+    ``completion_payload_schema`` → the tool is not on the wire**, root and
+    subagent alike.  So a profile carrying processors and no schema has
+    declared a gate on a tool the model cannot call — the processors never
+    run, the agent hunts for ``signal_completion`` through ``list_tools``,
+    the framework spends its nudge budget re-prompting, and the driver is
+    handed ``None`` by a session that looked like it ran.
+
+    The fact is already written down — ``docs/design/completion-gate.md`` §9
+    is the reason ``jaato-scaffold new sweep`` emits the schema, the
+    processor and the profile keys as ONE set — and nothing enforced it for
+    a profile written by hand, which is the only way to reach this state.
+
+    **Error**, matching ``completion_asset_missing``: the two are the same
+    defect reached by different routes (a schema that does not resolve, and
+    one never declared), and both leave a session that cannot complete.
+
+    Silent for a profile that binds NEITHER ``model`` nor ``model_tiers``.
+    That is the discriminator ``missing_model`` already uses for an abstract
+    base, and it costs no coverage: processors are inherited, so every
+    concrete descendant is checked in resolved form, where the pair is
+    either completed by the child or reported against it.
+    """
+    procs = getattr(profile, "completion_processors", None) or ()
+    if not procs:
+        return
+    if getattr(profile, "completion_payload_schema", None):
+        return
+    if not (getattr(profile, "model", None)
+            or (getattr(profile, "model_tiers", None) or {})):
+        return          # abstract base — its concrete children carry the check
+    add("error", "completion_processors_without_schema",
+        f"{len(procs)} completion processor(s) declared and no "
+        f"completion_payload_schema — signal_completion is then hidden from "
+        f"the session entirely, so the gate can never run and the agent "
+        f"cannot complete at all.  Declare completion_payload_schema, or "
+        f"drop the processors (`jaato-scaffold explain completion`)",
+        where="completion_processors")
+
+
+def _profile_provider_names(profile, provider_name) -> List[str]:
+    """Every provider a session built from this profile could connect to.
+
+    The flat ``provider:`` and each ``model_tiers.<tier>.provider`` — a tier
+    binds a (provider, model) PAIR (#1036), so a profile whose planner tier
+    runs on one vendor and whose voice tier runs on another needs both SDKs
+    installed, and the second is the one nobody notices until ``enter_tier``.
+    """
+    names = [provider_name] if provider_name else []
+    for entry in (getattr(profile, "model_tiers", None) or {}).values():
+        tier_provider = entry.get("provider") if isinstance(entry, dict) else None
+        if isinstance(tier_provider, str) and tier_provider:
+            names.append(tier_provider)
+    seen: List[str] = []
+    for n in names:
+        if n not in seen:
+            seen.append(n)
+    return seen
+
+
+def _check_provider_dependencies(profile, provider_name, add) -> None:
+    """Flag a provider whose SDK is not installed.
+
+    Providers declare their vendor SDK as an optional extra — ``openai``
+    lives behind ``jaato-server[openai]``, ``boto3`` behind
+    ``[bedrock]`` — so the normal shape of a first run against a new
+    provider is a profile that validates clean and dies at ``connect()``
+    with an ``ImportError`` several layers from anything the author wrote.
+    The validator knew the provider name and never asked the question: it
+    does not import :mod:`~shared.scaffold.dependencies` at all, while both
+    halves of the answer already lived there — the AST closure of the
+    provider package, and the import-name → extra index that turns a missing
+    module into the ``pip install`` line to run.
+
+    **Warn, not error.**  Validating a workspace from a machine that is not
+    the one that will run it is legitimate — an author checking profiles in
+    CI, or a workspace whose daemon lives in a container — and an error would
+    fail that honest case.  What the message must do instead is be
+    imperative, because for the common case (one machine) it is the whole fix.
+
+    **WHAT THE MESSAGE MAY NOT SAY.**  Its first wording asserted the
+    session "will fail at connect() with an ImportError", which this check
+    cannot know and which is false for a guarded import.  The live case is
+    ``azure_openai``: its closure includes ``azure``, and
+    ``azure_identity_available()`` wraps that import in ``try/except
+    ImportError`` on a path only ``auth: aad`` takes — so a key-auth profile
+    was told it would fail, and it would not.  Same class as #937, in this
+    PR's own new code: the closure is a static fact about the package, the
+    consequence is a claim about a code path nobody walked.
+
+    Nothing is imported to answer it: :func:`~shared.scaffold.dependencies.
+    provider_import_gaps` probes with ``find_spec``, so ``validate`` stays
+    side-effect free.  A provider with no in-tree package reports nothing
+    rather than guessing.
+    """
+    from . import dependencies
+    for name in _profile_provider_names(profile, provider_name):
+        try:
+            missing, commands = dependencies.provider_import_gaps(name)
+        except Exception:       # pragma: no cover — a diagnostic must not raise
+            continue
+        if not missing:
+            continue
+        run = "; ".join(commands) if commands else f"install {', '.join(missing)}"
+        add("warn", "provider_dependency_missing",
+            f"provider '{name}' imports {', '.join(missing)}, which "
+            f"{'is' if len(missing) == 1 else 'are'} not installed here.  "
+            f"Whether a given session reaches the import depends on which "
+            f"path its configuration takes — some are guarded, some belong "
+            f"to one auth mode — so this is a gap to close before running, "
+            f"not a certain failure.  Run: {run}",
+            where=f"provider.{name}")
+
+
+def _permission_rule_tools(profile) -> List[tuple]:
+    """Every tool name named in the profile's permission whitelist / blacklist.
+
+    Returns:
+        ``(rule, name, where)`` triples, ``rule`` being ``"whitelist"`` or
+        ``"blacklist"``.  ``patterns`` is deliberately not read — a glob is
+        not a tool name, and nothing here could tell a deliberate wildcard
+        from a typo.
+    """
+    cfg = (getattr(profile, "plugin_configs", None) or {}).get("permission")
+    policy = (cfg or {}).get("policy") if isinstance(cfg, dict) else None
+    if not isinstance(policy, dict):
+        return []
+    out: List[tuple] = []
+    for rule in ("whitelist", "blacklist"):
+        block = policy.get(rule)
+        tools = block.get("tools") if isinstance(block, dict) else None
+        if not isinstance(tools, (list, tuple)):
+            continue
+        for name in tools:
+            if isinstance(name, str) and name:
+                out.append((rule, name,
+                            f"plugin_configs.permission.policy.{rule}.tools"))
+    return out
+
+
+def _tool_owners(plugins: Dict[str, Any]) -> Dict[str, List[str]]:
+    """Map every statically-knowable tool name to the plugins exposing it."""
+    owners: Dict[str, List[str]] = {}
+    for pname, pi in plugins.items():
+        if getattr(pi, "dynamic", False):
+            continue
+        for t in pi.tools:
+            owners.setdefault(t.name, []).append(pname)
+    return owners
+
+
+def _session_tool_names() -> set:
+    """Tool names the FRAMEWORK wires in, which belong to no entry in ``plugins:``.
+
+    Three sources, and a permission rule may legitimately name any of them:
+    the lifecycle tools (``signal_completion`` and friends, gated by a
+    profile's own ``completion_payload_schema`` / ``model_tiers`` rather than
+    by a plugin), and ``askPermission``, which ``ai_tool_runner`` dispatches
+    ungated and which ``permission/plugin.py`` deliberately does not expose to
+    the model.  Whitelisting the last is redundant, not wrong, so it is
+    accepted in silence rather than reported.
+    """
+    names = {"askPermission"}
+    try:
+        names |= {t.name for t in introspect.session_tools()}
+    except Exception:          # pragma: no cover - probe is best-effort
+        pass
+    return names
+
+
+def _always_initialized_plugins() -> frozenset:
+    """Plugins the registry wires whether or not ``plugins:`` names them.
+
+    Read from ``PluginRegistry._ALWAYS_INITIALIZE_PLUGINS`` rather than
+    re-spelled, so the two cannot disagree about the set.
+    ``plugin_config_without_plugin`` already exempts it and this check did
+    not — so whitelisting ``list_tools`` without naming ``introspection``
+    produced a ``permission_rule_without_plugin`` for a tool that is CORE
+    and reaches every session's wire, which is the opposite of true.
+
+    Degrades to the empty set rather than raising: a missing attribute costs
+    one over-report, an exception costs the whole validation.
+    """
+    try:
+        from jaato_server.shared.plugins.registry import PluginRegistry
+
+        return frozenset(getattr(
+            PluginRegistry, "_ALWAYS_INITIALIZE_PLUGINS", frozenset()))
+    except Exception:       # pragma: no cover — a diagnostic must not raise
+        return frozenset()
+
+
+def _check_permission_tool_lists(profile, plugins, add) -> None:
+    """Check the tool names in ``permission.policy.{white,black}list.tools``.
+
+    The same inventory ``tool_scopes`` has been checked against since the
+    validator shipped, one key over — and this is the key where getting it
+    wrong is expensive.  Under ``defaultPolicy: deny`` a name that never
+    matches is a permanent denial of a tool the author believes they
+    approved, and the runtime symptom is the one #951 exists to make
+    legible: the call reaches the gate and vanishes.  A whitelist entry is
+    also the single cheapest thing in a profile to misspell, because nothing
+    else in the file repeats the name.
+
+    Two findings, and the whitelist earns one the blacklist does not:
+
+    ``unknown_tool`` (**warn**, both lists)
+        the name is exposed by no installed plugin and is not a framework
+        session tool.  Warn rather than error because the inventory is
+        installation-shaped: a plugin the author has not installed yet is
+        indistinguishable here from a typo.
+
+    ``permission_rule_without_plugin`` (**warn**, whitelist only)
+        the tool exists and its plugin is absent from ``plugins:``, so the
+        rule governs a tool that never reaches the wire.  Deliberately NOT
+        reported for a blacklist: denying a tool the profile does not enable
+        is defence in depth, and a profile that adds the plugin later keeps
+        the protection it already wrote.
+
+    Silent by design:
+
+    * a profile whose ``plugins:`` list is EMPTY — an abstract base in an
+      ``inherits`` chain declares no surface, so it cannot be said to be
+      missing one (the rule :func:`_check_profile_identity`'s
+      ``missing_model`` already follows);
+    * a name of MCP shape (:data:`_MCP_TOOL_SHAPE`);
+    * a profile enabling ANY plugin whose tool list is not statically
+      knowable — the whole check, not just that plugin's names, because a
+      live-session inventory could supply any of them.  The same rule the
+      ``tool_scopes`` check has always applied to one plugin at a time;
+    * a tool belonging to a plugin the registry always initializes
+      (:func:`_always_initialized_plugins`) — ``introspection``'s
+      ``list_tools`` / ``get_tool_schemas`` are core and reach every wire
+      whatever ``plugins:`` says, so they are never "without plugin".
+    """
+    rules = _permission_rule_tools(profile)
+    if not rules:
+        return
+    # TWO questions, deliberately two variables.  ``declared`` is what the
+    # AUTHOR wrote, and an empty one means "this profile declares no
+    # surface" — the abstract-base carve-out.  ``enabled`` is what the
+    # session will actually hold, which includes the plugins the registry
+    # wires regardless.  Folding the framework's set into the first would
+    # make every abstract base look like it declared a surface.
+    declared = list(getattr(profile, "plugins", None) or [])
+    enabled_names = declared + [p for p in _always_initialized_plugins()
+                                if p not in declared]
+    if any(getattr(plugins.get(p), "dynamic", False) for p in declared):
+        return      # a live-session inventory: nothing here is knowable
+    owners = _tool_owners(plugins)
+    session = _session_tool_names()
+    for rule, name, where in rules:
+        if _MCP_TOOL_SHAPE.match(name) or name in session:
+            continue
+        holders = owners.get(name)
+        if not holders:
+            add("warn", "unknown_tool",
+                f"permission {rule} names '{name}', which no installed "
+                f"plugin exposes — under `defaultPolicy: deny` a rule that "
+                f"matches nothing is a permanent denial, and the call "
+                f"disappears at the gate rather than failing loudly",
+                where=where)
+            continue
+        if rule != "whitelist" or not declared:
+            continue
+        if not any(h in enabled_names for h in holders):
+            add("warn", "permission_rule_without_plugin",
+                f"permission whitelist names '{name}', exposed by "
+                f"{' / '.join(sorted(holders))} — none of which is in "
+                f"plugins:, so the tool never reaches the model and the rule "
+                f"governs nothing.  Add the plugin, or drop the rule",
+                where=where)
+
+
+def validate_profile(
+    profile: Any,
+    *,
+    providers: Dict[str, introspect.ProviderInfo],
+    plugins: Dict[str, introspect.PluginInfo],
+    gc_names: List[str],
+    env_keys: Optional[set] = None,
+) -> List[Diagnostic]:
+    """Validate one RESOLVED profile against the introspected framework.
+
+    ``profile`` is a flattened ``SubagentProfile`` (inherits already merged).
+    The introspect maps are passed in so a whole workspace is introspected
+    once, not per profile.
+
+    Args:
+        env_keys: Variable names the session's environment will carry, from
+            the workspace ``.env``.  Only ``${VAR}``-reference checks read it,
+            and only to avoid reporting a variable the author DID define as
+            undefined; omitted (a single-file validation, which has no
+            workspace) it degrades to the framework context vars plus the
+            validator's own environment.
+    """
+    name = getattr(profile, "name", "?")
+    out: List[Diagnostic] = []
+
+    def add(sev, code, msg, where=None):
+        out.append(Diagnostic(sev, code, msg, profile=name, where=where))
+
+    provider_name = getattr(profile, "provider", None)
+
+    # --- what the profile says about ITSELF ------------------------------
+    _check_profile_identity(profile, add)
+
+    # --- what it declares under the EU AI Act (regulatory:) -------------
+    _check_regulatory(profile, add, env_keys=env_keys)
+
+    # --- provider --------------------------------------------------------
+    pinfo = _resolve_and_check_provider(profile, provider_name, providers, add)
+    # model present? (a resolved, runnable profile should bind one; a pure
+    # base/abstract profile legitimately has neither provider nor model)
+    model = getattr(profile, "model", None)
+    # A provider-set profile binds a model EITHER via a flat ``model`` OR via a
+    # ``model_tiers`` map (the active model is then selected per turn from the
+    # tiers).  Only warn when NEITHER is present: a tiers-based profile that
+    # omits ``model`` is correct, not missing one — and a flat ``model`` set
+    # alongside ``model_tiers`` is silently IGNORED at runtime, so the validator
+    # must not push authors toward adding a dead one.
+    if provider_name and not model and not (
+        getattr(profile, "model_tiers", None) or {}
+    ):
+        add("warn", "missing_model",
+            f"provider '{provider_name}' set but no model and no model_tiers — "
+            "set-overlay or inherits did not bind a model", where="model")
+
+    # --- provider SDKs actually installed here ---------------------------
+    _check_provider_dependencies(profile, provider_name, add)
+
+    # --- plugins ---------------------------------------------------------
+    _check_plugins(getattr(profile, "plugins", None) or [], plugins, add)
+
+    # --- model_tiers (V2: cross-provider tiers allowed) ------------------
+    _check_model_tiers(getattr(profile, "model_tiers", None) or {}, add,
+                       getattr(profile, "provider", None))
+
+    # --- the completion gate's own shape ---------------------------------
+    _check_completion_gate_shape(profile, add)
+
+    # --- budget_control (incl. its ABSENCE, #947) -----------------------
+    _check_budget_control(profile, add)
+    _check_record_keeping(profile, add)
+
+    # --- diagnostic log paths (trace: and the two env vars) -------------
+    _check_trace_paths(profile, env_keys, add)
+
+    # --- per-plugin tool allow-lists (tool_scopes) -----------------------
+    for plug, tools in (getattr(profile, "tool_scopes", None) or {}).items():
+        pi = plugins.get(plug)
+        if pi is None:
+            continue  # unknown plugin already flagged
+        known = {t.name for t in pi.tools}
+        if pi.dynamic or not known:
+            continue  # dynamic plugin — tool list not statically knowable
+        for t in tools:
+            if t not in known:
+                add("warn", "unknown_tool",
+                    f"tool '{t}' not exposed by plugin '{plug}' "
+                    f"(has: {', '.join(sorted(known))})",
+                    where=f"tool_scopes.{plug}")
+
+    # --- permission whitelist / blacklist tool names ---------------------
+    _check_permission_tool_lists(profile, plugins, add)
+
+    # --- discovery-gated tools (the deferred-loading nuance) -------------
+    # A tool is in the model's INITIAL schema iff it is [core] OR its plugin is
+    # (preload)-ed.  [disc] tools of non-preloaded plugins are reachable only
+    # after the model calls list_tools/get_tool_schemas — introspection is
+    # always core, so they're never LOST, just deferred.  Surface them (info,
+    # not a defect) so an author who assumed a tool was immediately available
+    # isn't surprised.
+    preloaded = getattr(profile, "preloaded_plugins", None) or set()
+    gated: List[str] = []
+    for plug in getattr(profile, "plugins", None) or []:
+        pi = plugins.get(plug)
+        if pi is None or pi.dynamic or plug in preloaded:
+            continue
+        scope = (getattr(profile, "tool_scopes", None) or {}).get(plug)
+        for t in pi.tools:
+            if t.discoverability == DISCOVERABILITY_EAGER:
+                continue
+            if scope is not None and t.name not in scope:
+                continue  # scoped out entirely — not exposed at all
+            gated.append(f"{plug}.{t.name}")
+    if gated:
+        preview = ", ".join(gated[:8]) + (" …" if len(gated) > 8 else "")
+        add("info", "discovery_gated_tools",
+            f"{len(gated)} tool(s) are discovery-gated — DEFERRED, not in the "
+            f"model's initial schema (the model must call list_tools/"
+            f"get_tool_schemas to reach them): {preview}.  Add "
+            f"`<plugin>(preload)` to force a plugin's tools eager.",
+            where="plugins")
+
+    # --- plugin_configs knobs (the silent-ignore class) ------------------
+    _check_plugin_configs_expose_tools(profile, plugins, add)
+    plugin_configs = getattr(profile, "plugin_configs", None) or {}
+    for cfg_name, cfg in plugin_configs.items():
+        cfg_provider = introspect.resolve_provider(cfg_name)
+        if cfg_provider is None or cfg_provider.knobs is None:
+            # Non-provider plugin config (permission / cli / notebook / …):
+            # validate knob NAMES against the plugin's declared
+            # get_config_schema (a mistyped knob is silently ignored at
+            # runtime otherwise), and each declared knob's VALUE against the
+            # ``enum`` / ``type`` that same schema publishes (#925) — a knob
+            # violating its own declared enum used to validate clean and then
+            # fall back silently.  Nested objects are descended to every
+            # declared depth, so ``permission.policy.defaultPolicy``
+            # is checked against its own enum; descent stops at a knob
+            # declaring ``additionalProperties`` (``permission.evaluators``),
+            # where the plugin itself has said the key set is open.  A knob
+            # whose STRUCTURE decides behaviour badly enough to need more
+            # than a declared type registers a check in
+            # ``_PLUGIN_VALUE_CHECKS``.
+            _validate_plugin_knobs(cfg_name, cfg, plugins, add)
+            _check_plugin_knob_values(cfg_name, cfg, add)
+            continue
+        knobs = cfg_provider.knobs
+        if not isinstance(cfg, dict):
+            continue
+        # Credential keys declared via an ``api_key_param`` AuthSource (api_key /
+        # api_token / …) ARE valid top-level knobs honored at runtime (mapped to
+        # ProviderConfig), even though they live in PROVIDER_AUTH_RESOLUTION
+        # rather than the knob layers — so ``knobs.accepts("top_level", …)``
+        # alone would miss them and falsely flag a working credential knob
+        # (notably for providers with no ``top_level`` KnobLayer, e.g. zhipuai).
+        auth_param_keys = {
+            a.name for a in (getattr(cfg_provider, "auth", None) or ())
+            if a.kind == "api_key_param" and a.name
+        }
+        for key, val in cfg.items():
+            if key in _NESTING_LAYERS and isinstance(val, dict):
+                # a layer sub-dict — check each knob inside it
+                layer = knobs.get_layer(key)
+                if layer is None:
+                    add("warn", "unknown_layer",
+                        f"provider '{cfg_name}' has no '{key}' config layer",
+                        where=f"plugin_configs.{cfg_name}.{key}")
+                    continue
+                if layer.opaque:
+                    continue  # pass-through — any key valid
+                for subkey in val:
+                    if not knobs.accepts(key, subkey):
+                        _report_provider_unknown_knob(
+                            cfg_provider, cfg_name, key, subkey, layer.keys,
+                            add,
+                            where=f"plugin_configs.{cfg_name}.{key}.{subkey}")
+            elif key == "quirks" and isinstance(val, dict):
+                _check_quirks(val, cfg_provider, cfg_name, add)
+            else:
+                # a top_level knob (or an api_key_param credential key)
+                if key not in auth_param_keys and not knobs.accepts("top_level", key):
+                    _report_provider_unknown_knob(
+                        cfg_provider, cfg_name, "top-level", key,
+                        _known_layer_keys(knobs, "top_level", auth_param_keys),
+                        add, where=f"plugin_configs.{cfg_name}.{key}")
+
+    # --- profile-level quirks -------------------------------------------
+    prof_quirks = getattr(profile, "quirks", None)
+    if isinstance(prof_quirks, dict) and pinfo is not None:
+        _check_quirks(prof_quirks, pinfo, provider_name, add,
+                      where_prefix="quirks")
+
+    # --- secret env scrub (#863) -----------------------------------------
+    _check_secret_scrub(profile, add)
+
+    # --- gc strategy -----------------------------------------------------
+    gc = getattr(profile, "gc", None)
+    gc_type = getattr(gc, "type", None) if gc is not None else None
+    if gc_type:
+        candidates = {gc_type, f"gc_{gc_type}"}
+        if not (candidates & set(gc_names)):
+            add("warn", "unknown_gc",
+                f"gc type '{gc_type}' not among {gc_names}", where="gc.type")
+
+    # --- a declared risk class raises the stakes of everything above -----
+    _escalate_for_risk_class(profile, out)
+    return out
+
+
+def _load_spawn_schema(profile, config_root: str):
+    """Resolve a profile's ``spawn_payload_schema`` to a dict, or None.
+
+    Accepts both declared forms: an inline dict, or a path resolved against
+    ``config_root`` the way ``shared/spawn_schema_loader.py`` resolves it.
+    """
+    raw = getattr(profile, "spawn_payload_schema", None)
+    if isinstance(raw, dict):
+        return raw
+    if not isinstance(raw, str) or not raw:
+        return None
+    for candidate in (Path(config_root) / raw,
+                      Path(config_root) / "spawn_schemas" / raw):
+        if candidate.is_file():
+            try:
+                return json.loads(candidate.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return None
+    return None
+
+
+def _check_profile_identity(profile: Any, add) -> None:
+    """The two things a profile says about ITSELF, and both went unchecked.
+
+    ``description`` is REQUIRED — it has no default on ``SubagentProfile``, and
+    ``explain profile`` prints ``(required)`` beside it.  The YAML loader is
+    lenient (a missing key becomes ``""``) and inheritance does NOT rescue it:
+    the merge takes ``description=child.description``, so a tier-2 set profile
+    that omits it OVERRIDES its base's with the empty string.  Nothing fails —
+    it just becomes the empty half of the line the subagent plugin advertises
+    to the model, ``- worker:  (tools: cli)``, which is the one piece of prose
+    a model chooses a delegate from.  Every profile ``jaato-scaffold new
+    profile-set`` emitted was in exactly that state.
+
+    ``system_instructions`` is DEPRECATED in favour of a persona in
+    ``.jaato/agents/<name>.md``.  ``explain profile`` said so and ``validate``
+    did not, so the field kept working and nothing corrected an author who had
+    never found the agents directory.
+
+    Both WARN.  A profile with either is loadable and runnable, and an error
+    would fail existing workspaces wholesale — the posture ``unknown_knob``
+    and ``budget_control_absent`` already take.
+    """
+    if not (getattr(profile, "description", "") or "").strip():
+        add("warn", "missing_description",
+            "no `description` — it is a required profile field, and the "
+            "subagent tool advertises it to the model verbatim as the prose a "
+            "delegate is chosen from (an empty one renders as `- <name>:  "
+            "(tools: ...)`).  NOTE inheritance does not supply it: a child's "
+            "description REPLACES its parents', so an omitted key overrides "
+            "the base's with the empty string.",
+            where="description")
+
+    if getattr(profile, "system_instructions", None):
+        add("warn", "deprecated_system_instructions",
+            "`system_instructions` is DEPRECATED — define the persona in "
+            ".jaato/agents/<name>.md and bind it with `default_agent: <name>` "
+            "(or pass agent=\"<name>\" when creating the session).  A persona "
+            "is one LAYER of the prompt, survives "
+            "`suppress_base_instructions`, and is reusable across profiles; "
+            "this key is none of those.  See `jaato-scaffold explain agents`."
+            "  (Inherited: the value may come from a parent profile — "
+            "`system_instructions` concatenates down the inherits chain.)",
+            where="system_instructions")
+
+
+#: Findings that are WARNINGS on an ordinary profile and ERRORS under
+#: ``regulatory.risk_class: high``.  Each one is a warning for the reason
+#: the whole silent-ignore family warns -- an error would fail every
+#: existing workspace -- and that reasoning stops holding the moment the
+#: author has declared the application high-risk under the Act: an
+#: unbounded loop, a leaked credential, an unnamed delegate or an
+#: undisclosed AI are then compliance defects, not authoring conveniences.
+#: The set is a declared constant so ``explain`` can print it and a test
+#: can pin it.
+#: The retention floor Article 19(1) names for a high-risk system's logs
+#: ("a period appropriate to the intended purpose … of at least six
+#: months, unless provided otherwise").  Six months as days.  A constant
+#: rather than a literal in the message, so the page and the finding
+#: cannot disagree about the number.
+_ART_19_MINIMUM_DAYS = 180
+
+HIGH_RISK_ESCALATED_CODES = frozenset({
+    "budget_control_absent",
+    "budget_limits_without_abort",
+    "secret_scrub_disabled",
+    "missing_description",
+    "permission_rule_without_plugin",
+    "unknown_tool",
+    "disclosure_absent",
+    "disclosure_unrecorded",
+})
+
+
+def _binds_persona(profile: Any) -> bool:
+    """Whether a session built from this profile talks in SOMEBODY's voice.
+
+    A persona (``default_agent``) or the deprecated inline
+    ``system_instructions`` is what turns a profile into an application a
+    person can meet; an abstract base with neither binds no conversation
+    and owes no disclosure.
+    """
+    return bool(getattr(profile, "default_agent", None)
+                or getattr(profile, "system_instructions", None))
+
+
+def _ledger_is_named(profile: Any, env_keys=None) -> bool:
+    """Whether a session built from this profile writes its ledger to a FILE.
+
+    Three routes reach ``TokenLedger.ledger_path``: the typed
+    ``trace.ledger``, the profile's ``env: {LEDGER_PATH: ...}``, and the
+    workspace ``.env`` (``env_keys``, when a workspace is being validated).
+    Any one of them is enough; with none, every ledger record -- the
+    ``announcement`` row included -- stays in the daemon's memory.
+    """
+    if any(where in ("trace.ledger", "env.LEDGER_PATH")
+           for _v, where in _trace_path_sources(profile)):
+        return True
+    return "LEDGER_PATH" in (env_keys or ())
+
+
+def _check_regulatory(profile: Any, add, env_keys=None) -> None:
+    """The findings the ``regulatory:`` block makes possible.
+
+    ``disclosure_absent`` (**warn**; error under ``high``)
+        the profile binds a persona and declares nothing about whether
+        natural persons interact with it -- so nothing decides whether the
+        Article 50(1) announcement is owed.  An explicit ``false`` is a
+        declaration and is silent; only the ABSENCE is reported.
+
+    ``disclosure_unrecorded`` (**warn**; error under ``high``)
+        the profile declares that persons interact with it -- so the
+        announcement is OWED and emitted -- and names no ledger, so the
+        ``announcement`` audit record (#1157) proving they were told is
+        appended to memory and never reaches disk.  The daemon says the
+        same thing at WARNING once per session; this is the same fact
+        before any session exists.  Deliberately NOT ``disclosure_absent``
+        widened: that one says nothing decides whether to announce, this
+        one says the announcement cannot be proven.
+
+    The ``high_risk_*`` findings (:func:`_check_high_risk_obligations`)
+    fire only under an explicit ``risk_class: high``, and are **errors**:
+    each names an obligation the Act attaches to that class (Art. 9/12/
+    14/15) that the profile has not met with the mechanism the framework
+    already provides.
+    """
+    reg = getattr(profile, "regulatory", None)
+    if _binds_persona(profile) and (
+        reg is None or reg.interacts_with_persons is None
+    ):
+        add("warn", "disclosure_absent",
+            "binds a persona and declares nothing about whether natural "
+            "persons interact with it — set `regulatory.interacts_with_persons` "
+            "(true: the framework's disclosure piece and first-interaction "
+            "announcement apply, Art. 50(1); false: it is a component another "
+            "system drives).  Absent, nothing decides which.",
+            where="regulatory.interacts_with_persons")
+    if (reg is not None and reg.interacts_with_persons is True
+            and not _ledger_is_named(profile, env_keys)):
+        add("warn", "disclosure_unrecorded",
+            "declares that natural persons interact with it, so the Art. 50(1) "
+            "announcement is emitted at session creation — and names no ledger, "
+            "so the `announcement` audit record that proves they were told is "
+            "written to memory only and cannot be produced later.  Set "
+            "`trace.ledger` (relative = one file per session), or "
+            "`LEDGER_PATH` in `env:` / the workspace `.env`; `explain audit` "
+            "then names the file.",
+            where="trace.ledger")
+    if reg is not None and reg.is_high_risk:
+        _check_high_risk_obligations(profile, reg, add)
+
+
+def _permission_policy(profile: Any):
+    """The profile's ``plugin_configs.permission.policy`` mapping, or ``None``."""
+    configs = getattr(profile, "plugin_configs", None) or {}
+    section = configs.get("permission")
+    policy = section.get("policy") if isinstance(section, dict) else None
+    return policy if isinstance(policy, dict) and policy else None
+
+
+def _shell_confinement_required(profile: Any) -> bool:
+    """Whether ``interactive_shell`` is enabled AND told to refuse an unconfined spawn."""
+    configs = getattr(profile, "plugin_configs", None) or {}
+    shell_cfg = configs.get("interactive_shell")
+    return (isinstance(shell_cfg, dict)
+            and shell_cfg.get("require_confinement") is True)
+
+
+def _check_high_risk_obligations(profile: Any, reg: Any, add) -> None:
+    """The four things a ``risk_class: high`` profile must have declared.
+
+    Split from :func:`_check_regulatory` so neither approaches the
+    complexity ceiling; every finding here is an **error**, because the
+    author has already made the determination that raises the stakes.
+    """
+    if not reg.intended_purpose:
+        add("error", "high_risk_without_intended_purpose",
+            "risk_class: high with no `intended_purpose` — the sentence every "
+            "Annex IV section and every deployer's instructions for use start "
+            "from (Art. 11, 13(3)(b)).", where="regulatory.intended_purpose")
+
+    if _permission_policy(profile) is None:
+        add("error", "high_risk_without_oversight_policy",
+            "risk_class: high with no `plugin_configs.permission.policy` — "
+            "the permission gate is the framework's human-oversight measure "
+            "(Art. 14(4)(d): the person can decide not to use, or override, "
+            "an output).  Declare a policy (defaultPolicy, whitelist, "
+            "blacklist, an approval channel); `explain plugin permission` "
+            "prints the shape.", where="plugin_configs.permission.policy")
+
+    recorded = any(where in ("trace.session_log", "env.JAATO_TRACE_LOG")
+                   for _v, where in _trace_path_sources(profile))
+    if not recorded:
+        add("error", "high_risk_without_record_keeping",
+            "risk_class: high with no application trace configured — "
+            "`trace.session_log` (or env JAATO_TRACE_LOG) is where every "
+            "permission DECISION, budget rung and tool verdict is written, "
+            "and Art. 12 requires those events recorded automatically over "
+            "the system's lifetime.  Set `trace: {session_log: "
+            ".jaato/logs/session_trace.jsonl}`.", where="trace.session_log")
+
+    # Writing the record and KEEPING it are two obligations, and the second
+    # was not expressible before #1119.  Art. 19(1) asks a provider to keep
+    # the logs at least six months and 26(6) asks the same of the deployer;
+    # without the block, `session.delete` removes everything.
+    keeping = getattr(profile, "record_keeping", None)
+    if keeping is None or not keeping.declared:
+        add("error", "high_risk_without_retention",
+            "risk_class: high with no `record_keeping:` block — the record "
+            "is written and nothing keeps it: `session.delete` and "
+            "`workspace.delete` remove the workspace's logs along with the "
+            "conversation.  Art. 19(1) asks the provider to keep the "
+            "automatically generated logs for at least six months (26(6) "
+            "asks the same of the deployer).  Declare `record_keeping: "
+            "{retention_days: 180}`; `explain audit` prints what is "
+            "recorded and where.", where="record_keeping.retention_days")
+    elif (keeping.retention_days is not None
+            and 0 < keeping.retention_days < _ART_19_MINIMUM_DAYS):
+        add("warn", "retention_below_article_19",
+            f"record_keeping.retention_days is {keeping.retention_days}, "
+            f"below the {_ART_19_MINIMUM_DAYS} days Art. 19(1) names as a "
+            "minimum for a high-risk system's logs.  A shorter period may "
+            "be right where Union or national law says so — the Article "
+            "says 'unless otherwise provided' — which is why this is a "
+            "warning and not an error.",
+            where="record_keeping.retention_days")
+
+    if PIECE_DISCLOSURE in (getattr(profile, "suppress_base_instructions", None) or ()):
+        add("error", "high_risk_disclosure_suppressed",
+            "risk_class: high with `suppress_base_instructions` naming the "
+            "`disclosure` piece — the model is no longer told to disclose "
+            "that it is an AI system (Art. 50(1), in force since 2 Aug "
+            "2026).  Remove `disclosure` from the suppression.",
+            where="suppress_base_instructions.disclosure")
+
+    plugins = getattr(profile, "plugins", None) or []
+    if "interactive_shell" in plugins and not _shell_confinement_required(profile):
+        add("error", "high_risk_shell_unconfined",
+            "risk_class: high enables `interactive_shell` without "
+            "`plugin_configs.interactive_shell.require_confinement: true` "
+            "— without it a PTY the model drives runs unconfined when "
+            "the kernel boundary is absent, announced only at WARNING "
+            "(Art. 15: robustness and cybersecurity appropriate to the "
+            "risk).", where="plugin_configs.interactive_shell.require_confinement")
+
+
+def _escalate_for_risk_class(profile: Any, out: List[Diagnostic]) -> None:
+    """Promote :data:`HIGH_RISK_ESCALATED_CODES` to errors under ``high``.
+
+    A post-pass over the profile's own findings rather than a branch in
+    each check, so a check added later is escalated by being NAMED in the
+    set, and a check that is not named keeps its severity -- the set is the
+    whole policy.  Nothing changes for a profile that declares no class
+    or a class below ``high``.
+    """
+    reg = getattr(profile, "regulatory", None)
+    if reg is None or not reg.is_high_risk:
+        return
+    for d in out:
+        if d.severity == "warn" and d.code in HIGH_RISK_ESCALATED_CODES:
+            d.severity = "error"
+            d.message += "  (error because regulatory.risk_class is high)"
+
+
+#: Substrings that mark a profile's persona as the curator of the memory
+#: store.  A heuristic, deliberately: the curator is a persona an author
+#: names, and there is no declaration for "this agent curates".  It can
+#: only ever WITHHOLD a warning, never produce one, so being wrong costs
+#: a missing nudge rather than a false finding.
+_CURATOR_AGENT_MARKERS = ("curator", "advisor", "curador")
+
+
+def _check_memory_curation(profiles, out) -> None:
+    """``require_curation`` with nothing in the workspace that could curate.
+
+    Article 15(4) is about systems that "continue to learn after being
+    placed on the market": feedback loops must be addressed so possibly
+    biased outputs do not feed back as inputs unmitigated.  jaato's
+    learning loop is the memory plugin, and
+    ``plugin_configs.memory.require_curation`` is the mitigation --
+    memories are stored as before, and only ones a curator marked are
+    re-injected.
+
+    With the knob on and no curator ANYWHERE in the workspace, the gate
+    withholds everything.  That is a safe state and almost certainly not
+    the one the author meant: they enabled a learning loop and then
+    closed it entirely.
+
+    **A WORKSPACE check, not a per-profile one.**  The curator is a
+    separate agent with its own profile
+    (``docs/design/agent-continuity.md``), so asking whether THIS profile
+    binds one would warn on every correct setup.
+
+    Warn, not error, for the reason the whole family warns: a deployment
+    may curate by a route this cannot see -- a script, a premium
+    extension, a person editing the store.
+    """
+    profiles = profiles or {}
+    curators = sorted(
+        name for name, prof in profiles.items()
+        if any(marker in (getattr(prof, "default_agent", None) or "").lower()
+               for marker in _CURATOR_AGENT_MARKERS))
+    if curators:
+        return
+    for name, prof in sorted(profiles.items()):
+        configs = getattr(prof, "plugin_configs", None) or {}
+        if not (configs.get("memory") or {}).get("require_curation"):
+            continue
+        out.append(Diagnostic(
+            "warn", "require_curation_without_curator",
+            "plugin_configs.memory.require_curation is on and no profile in "
+            "this workspace binds a curator persona — every stored memory is "
+            "withheld from retrieval, so the knob currently means 'never "
+            "re-inject anything'. Article 15(4) asks that a learning loop be "
+            "MITIGATED, not closed: add a curator agent that promotes raw "
+            "memories (docs/design/agent-continuity.md), or turn the knob "
+            "off.",
+            profile=name,
+            where="plugin_configs.memory.require_curation"))
+
+
+def _check_spawn_schema_wire_types(profiles, config_root: str, out) -> None:
+    """Flag a ``spawn_payload_schema`` that the IPC wire can never satisfy.
+
+    ``spawn_payload_schema`` is documented as the input-boundary mirror of
+    ``completion_payload_schema`` and is validated with ``jsonschema`` against
+    the ``agent_params`` dict.  But agent_params do not cross the IPC wire as
+    JSON: ``create_session`` flattens them into ``key=value`` argv tokens, so
+    the daemon validates a dict whose every value is a **string**.
+
+    A property declared ``integer`` / ``number`` / ``boolean`` / ``object`` /
+    ``array`` therefore fails validation on EVERY spawn, no matter what the
+    caller passes.  The failure is expensive to read: the daemon logs the
+    rejection and does not answer, so the caller waits out its own timeout and
+    then reports ``SessionNotConfirmed`` — whose message says the session may
+    have been created, which for this cause it never is.
+
+    Measured 2026-09-08: a cascade's fix-loop stage declared
+    ``iteration: {type: integer}``, passed ``iteration=1`` as an int, and the
+    daemon rejected ``'1' is not of type 'integer'`` on every attempt.
+
+    #883 ratified the wire's behaviour as the contract, which makes this a
+    check on a stated rule rather than a warning about an accident.  The two
+    runtime boundaries now enforce the same rule
+    (``spawn_schema_loader.validate_spawn_params``) and append
+    ``spawn_type_contract_note`` to the refusal, so an author who never runs
+    the validator still gets told the profile is at fault.  This check remains
+    the cheap half: it fires without a spawn.
+
+    Args:
+        profiles: Mapping of profile name -> resolved profile object.
+        config_root: Directory that path-form schemas resolve against.
+        out: Diagnostic list to append to.
+    """
+    for pname, profile in sorted((profiles or {}).items()):
+        schema = _load_spawn_schema(profile, config_root)
+        if not isinstance(schema, dict):
+            continue
+        for key, offending in sorted(unreachable_spawn_types(schema).items()):
+            out.append(Diagnostic(
+                "error", "spawn_schema_type_unreachable",
+                f"spawn_payload_schema property '{key}' is typed "
+                f"{'/'.join(offending)}, which no spawn can satisfy over IPC: "
+                f"agent_params are sent as `key=value` argv tokens, so the "
+                f"daemon always validates STRINGS.  The spawn is refused "
+                f"server-side and the caller sees a 60s timeout reported as "
+                f"SessionNotConfirmed.  Declare it as a string (add a "
+                f"`pattern` if you need the shape, e.g. '^[0-9]+$') and parse "
+                f"it in the prefetch/persona.",
+                profile=pname, where=f"spawn_payload_schema.properties.{key}"))
+
+
+def _resolve_and_check_provider(
+    profile, provider_name, providers, add,
+) -> Optional[introspect.ProviderInfo]:
+    """Resolve the profile's provider, reporting what the catalogue says.
+
+    Returns the resolved ``ProviderInfo`` — the caller needs it to check
+    ``quirks`` against what that provider actually honors — or ``None``
+    when the profile names no provider, or names one the catalogue does
+    not carry.
+
+    ``echo`` is the one name that resolves to nothing and is still
+    correct: it is the framework's own deterministic test double, and it
+    is deliberately excluded from the ``explain providers`` catalogue, so
+    the plain unknown-provider error would be a false positive on every
+    conformance profile in the tree.  It gets its own checks instead.
+
+    Lives outside ``validate_profile`` because that function is over the
+    complexity ceiling and frozen at its recorded size; new provider
+    checks belong here.
+    """
+    if not provider_name:
+        return None
+    pinfo = introspect.resolve_provider(provider_name)
+    if pinfo is not None:
+        return pinfo
+    if provider_name == ECHO_PROVIDER:
+        _check_echo_profile(profile, add)
+        return None
+    add("error", "unknown_provider",
+        f"provider '{provider_name}' is not a known model provider "
+        f"(have: {', '.join(sorted(providers))})", where="provider")
+    return None
+
+
+def _check_echo_profile(profile, add) -> None:
+    """Check a profile bound to the ``echo`` test double.
+
+    Two findings, and the second is the load-bearing one.
+
+    ``echo`` is installed and legitimate — the live conformance suite runs on
+    it — but it is excluded from the ``explain providers`` catalogue, so the
+    generic branch reported it as an unknown provider.  That is a false
+    positive on a working profile, so it is stated as an ``info`` instead.
+
+    The real trap is ``usage``.  Echo reports the spend it is TOLD to and none
+    otherwise, and a turn is recorded in ``turn_accounting`` only when the
+    provider reported tokens (``jaato_session.py``: ``if turn_data['total'] >
+    0``).  The post-turn hook gated on that record
+    (``server/runner/rpc.py:_forward_post_turn_hooks``) is the single site that
+    fires BOTH ``TurnCompletedEvent`` AND ``flush_session_quiescent()`` ->
+    ``SessionTerminatedEvent``.  So an echo profile with no ``usage`` runs its
+    turn, does its work, delivers ``AgentCompletedEvent`` — and emits NO
+    terminal event at all.  Every driver that waits on the documented terminus
+    (``Session.complete`` / ``.ask`` / ``.stream``) then waits until its own
+    timeout, with no error anywhere to say why.
+
+    Measured 2026-09-08: an otherwise-correct cascade hung at its first stage
+    on exactly this, while the same profile plus a ``usage`` block returned
+    immediately.  The framework's own conformance profiles all pass
+    ``usage=TURN_USAGE`` for this reason.
+
+    Args:
+        profile: The resolved profile object under validation.
+        add: The diagnostic sink ``(severity, code, message, where=...)``.
+    """
+    add("info", "echo_is_a_test_double",
+        "provider 'echo' is the framework's deterministic test double — no "
+        "credentials, no network, fixed responses.  It is absent from "
+        "`explain providers` (nobody should pick it for production) but it IS "
+        "installed, and it is what the live conformance suite runs on.",
+        where="provider")
+    echo_cfg = (getattr(profile, "plugin_configs", None) or {}).get(ECHO_PROVIDER) or {}
+    if not echo_cfg.get("usage"):
+        add("warn", "echo_reports_no_usage",
+            "echo is configured without `usage`, so it reports ZERO tokens "
+            "every turn and a turn is entered in the usage ledger only when "
+            "the provider reported tokens.  Until #881 that ledger also gated "
+            "the post-turn hook — the one site emitting BOTH "
+            "TurnCompletedEvent and SessionTerminatedEvent — so such a "
+            "session did its work, delivered AgentCompletedEvent and emitted "
+            "NO terminal event, hanging every driver awaiting the terminus "
+            "(Session.complete/.ask/.stream).  That gate now reads a "
+            "lifecycle counter, so the session terminates normally; what is "
+            "left is an accounting hole.  This profile's consumption report "
+            "will read empty, and any budget_control ceiling on `tokens` or "
+            "`usd` is fed zero and will never fire, so a run that looks "
+            "capped is uncapped.  Declare a spend, e.g. "
+            "plugin_configs.echo.usage: {prompt_tokens: 1000, output_tokens: "
+            "200}.",
+            where=f"plugin_configs.{ECHO_PROVIDER}.usage")
+
+
+def _check_tier_exit(key, raw, add):
+    """Check a tier's ``exit_on`` trigger before a session ever runs.
+
+    An unknown value is an ERROR, not a warning, because the runtime
+    refuses it too -- and because the shape of the failure it prevents is
+    the worst kind: a misspelled trigger means the tier is never left,
+    which surfaces as a session wedged in a specialist tier with nothing
+    logged and the model simply stopping.  Catching it here turns a
+    silent hang into a line of lint.
+
+    The names considered and rejected during design (``once``,
+    ``switch_back``, ``per_request``, ``turn``) are pointed at the real
+    one rather than merely refused -- they are the spellings a reader
+    reaches for first, and ``turn`` in particular is the plausible-
+    sounding wrong answer, since a turn boundary is NOT a terminus (#767).
+    """
+    if raw is None:
+        return
+    from jaato_server.shared.model_tiers import EXIT_ON_COMPLETION, VALID_TIER_EXITS
+    where = f"model_tiers.{key}.exit_on"
+    if not isinstance(raw, str) or not raw.strip():
+        add("error", "invalid_tier_exit",
+            f"model_tiers.{key} 'exit_on' must be a non-empty string "
+            f"({', '.join(sorted(VALID_TIER_EXITS))})", where=where)
+        return
+    value = raw.strip().lower()
+    if value in VALID_TIER_EXITS:
+        return
+    hint = ""
+    if value in ("once", "single", "turn", "per_request", "switch_back"):
+        hint = f"  (did you mean '{EXIT_ON_COMPLETION}'?)"
+    add("error", "invalid_tier_exit",
+        f"model_tiers.{key} 'exit_on' {value!r} is not a known exit trigger "
+        f"({', '.join(sorted(VALID_TIER_EXITS))}){hint}", where=where)
+
+
+def _check_tier_modalities(key, raw, add, provider_name=None):
+    """Validate one tier entry's ``modalities`` declaration statically.
+
+    Mirrors ``shared.model_tiers._normalize_tier_modalities`` so an author
+    sees the defect from ``jaato-scaffold validate`` rather than at session
+    create.  Kept separate from :func:`_check_model_tiers` so neither grows
+    past the complexity ceiling.
+
+    Accepts both spellings: the list sugar (``[image]``, meaning inbound)
+    and the direction map (``{image: bidirectional}``).
+
+    Emits a **warning**, not an error, for an outbound role whose provider
+    does not declare ``output_media``: the role parses and is stored, but
+    that adapter decodes no model-generated media, so its EMISSION half is
+    inert.  Warning rather than error because a profile should be writable
+    ahead of the delivery work landing — see
+    ``docs/design/binary-media-chunks.md``.
+
+    The role as a whole is **not** inert, and the warning says so: since
+    #1001 any authored role bounds what the tier is HANDED, so
+    ``{audio: outbound}`` withholds inbound audio from that tier whatever
+    the provider can emit.  Claiming otherwise is what made this surface
+    disagree with the gate.
+
+    Args:
+        key: Tier name, for the diagnostic's ``where``.
+        raw: The entry's raw ``modalities`` value, or ``None``.
+        add: ``validate_profile``'s diagnostic collector.
+    """
+    if raw is None:
+        return
+    from jaato_server.shared.model_tiers import (
+        DIRECTION_INBOUND, VALID_MODALITY_DIRECTIONS, VALID_TIER_MODALITIES,
+    )
+    where = f"model_tiers.{key}.modalities"
+    valid = ", ".join(sorted(VALID_TIER_MODALITIES))
+
+    if isinstance(raw, dict):
+        pairs = list(raw.items())
+    elif isinstance(raw, (list, tuple)):
+        pairs = [(tok, DIRECTION_INBOUND) for tok in raw]
+    else:
+        add("error", "invalid_tier_modalities",
+            f"model_tiers.{key} modalities must be a LIST of modality names "
+            f"({valid}) or a MAP of name -> direction "
+            f"({', '.join(sorted(VALID_MODALITY_DIRECTIONS))})", where=where)
+        return
+
+    for token, direction in pairs:
+        if not isinstance(token, str) or not token.strip():
+            add("error", "invalid_tier_modalities",
+                f"model_tiers.{key} modalities entries must be non-empty "
+                "strings", where=where)
+            continue
+        kind = token.strip().lower()
+        if kind == "text":
+            add("error", "invalid_tier_modalities",
+                f"model_tiers.{key} may not declare the 'text' modality — "
+                "every model accepts text, so it asserts nothing; list only "
+                f"the non-text roles this tier fills ({valid})", where=where)
+            continue
+        if kind not in VALID_TIER_MODALITIES:
+            add("error", "invalid_tier_modalities",
+                f"model_tiers.{key} modality '{kind}' is not a modality "
+                f"({valid})", where=where)
+            continue
+        _check_modality_direction(key, kind, direction, where, add,
+                                  provider_name)
+
+
+def _delivers_output_media(provider_name) -> bool:
+    """Whether this provider's adapter can deliver model-generated media.
+
+    Reads ``ProviderCapabilities.output_media`` -- the adapter's own
+    declaration that its streaming loop decodes model media and hands it
+    to ``on_chunk`` as a ``MediaDelta``.  An unknown or unnamed provider
+    answers False, so the caller warns rather than blessing a tier it
+    cannot check.
+    """
+    if not provider_name:
+        return False
+    from .introspect import resolve_provider
+    info = resolve_provider(str(provider_name))
+    if info is None or info.capabilities is None:
+        return False
+    return bool(getattr(info.capabilities, "output_media", False))
+
+
+#: INBOUND modality role -> the ``ProviderCapabilities`` field that says
+#: whether the adapter puts that content on the wire.  A role with no entry
+#: is unchecked rather than assumed inert: ``video`` has no capability
+#: column, and warning about it would be inventing a verdict.
+_INBOUND_CAPABILITY_FOR = {
+    "image": "user_message_images",
+    "file": "pdf_input",
+    "audio": "audio_input",
+}
+
+
+def _carries_inbound_modality(provider_name, kind) -> bool:
+    """Whether this provider's converter marshals ``kind`` onto the wire.
+
+    The inbound mirror of :func:`_delivers_output_media`, and it exists for
+    the same reason: a tier role is a declaration, and a declaration the
+    adapter cannot honour is inert.  An unknown provider, or a kind with no
+    capability column, answers ``True`` — the caller must not warn about a
+    role it cannot actually check, because a false INERT is what made the
+    outbound warning tell working profiles they were broken.
+    """
+    field = _INBOUND_CAPABILITY_FOR.get(kind)
+    if field is None or not provider_name:
+        return True
+    from .introspect import resolve_provider
+    info = resolve_provider(str(provider_name))
+    if info is None or info.capabilities is None:
+        return True
+    return bool(getattr(info.capabilities, field, False))
+
+
+def _warn_inert_inbound(key, kind, value, where, add, provider_name):
+    """Flag an inbound role whose converter would drop the content.
+
+    #830's shape exactly: OpenRouter's catalog reported ``audio`` input for
+    an audio model, a profile could declare ``audio: inbound`` against it,
+    the session-time modality check passed — and the converter had no
+    branch to put the bytes on the wire, so every clip was withheld at the
+    last step with nothing upstream saying why.
+    """
+    if _carries_inbound_modality(provider_name, kind):
+        return
+    add("warning", "inbound_modality_not_marshalled",
+        f"model_tiers.{key} declares '{kind}' {value}, which parses but is "
+        f"INERT: provider '{provider_name or '<unset>'}' does not declare "
+        f"`{_INBOUND_CAPABILITY_FOR[kind]}`, so its message converter does "
+        f"not put {kind} content on the wire — it is withheld with a note "
+        f"instead.  See docs/design/provider-capability-contract.md.",
+        where=where)
+
+
+def _check_modality_direction(key, kind, direction, where, add,
+                              provider_name=None):
+    """Validate the direction of one modality role, and flag it if inert.
+
+    Both directions are checked, and a bidirectional role can be inert in
+    one and live in the other — which is why the outbound warning's "the
+    inbound half IS live" clause is itself conditional.
+
+    Split from :func:`_check_tier_modalities` to keep both under the
+    complexity ceiling.
+    """
+    from jaato_server.shared.model_tiers import (
+        DIRECTION_BIDIRECTIONAL, DIRECTION_INBOUND, DIRECTION_OUTBOUND,
+        VALID_MODALITY_DIRECTIONS,
+    )
+    if not isinstance(direction, str) or not direction.strip():
+        add("error", "invalid_tier_modalities",
+            f"model_tiers.{key} direction for '{kind}' must be a string "
+            f"({', '.join(sorted(VALID_MODALITY_DIRECTIONS))})", where=where)
+        return
+    value = direction.strip().lower()
+    if value not in VALID_MODALITY_DIRECTIONS:
+        hint = (f"  (use '{DIRECTION_BIDIRECTIONAL}')"
+                if value in ("both", "duplex", "inout", "in_out", "io") else "")
+        add("error", "invalid_tier_modalities",
+            f"model_tiers.{key} direction '{value}' for '{kind}' is not a "
+            f"direction ({', '.join(sorted(VALID_MODALITY_DIRECTIONS))})"
+            f"{hint}", where=where)
+        return
+    if value in (DIRECTION_INBOUND, DIRECTION_BIDIRECTIONAL):
+        _warn_inert_inbound(key, kind, value, where, add, provider_name)
+    if value in (DIRECTION_OUTBOUND, DIRECTION_BIDIRECTIONAL) \
+            and not _delivers_output_media(provider_name):
+        # Warn only when the adapter cannot actually deliver.  This used
+        # to fire unconditionally, saying no adapter existed -- true when
+        # written, and false the moment one did, at which point it told
+        # every author of a WORKING speaking tier that their profile was
+        # inert.  The provider's own `output_media` capability is the
+        # thing that changes, so it is the thing to ask.
+        add("warning", "outbound_modality_not_deliverable",
+            f"model_tiers.{key} declares '{kind}' {value}, whose EMISSION "
+            f"half is INERT: provider '{provider_name or '<unset>'}' does "
+            "not declare `output_media`, so its adapter does not decode "
+            "model-generated media — nothing can deliver it.  (The role "
+            "itself still takes effect: declaring it bounds what this tier "
+            f"is HANDED, so {kind} is withheld from it inbound unless it "
+            "declares that too — #1001.)  See "
+            "docs/design/binary-media-chunks.md for the three touches that "
+            "wire a provider."
+            + ("  The inbound half of this role IS live."
+               if value == DIRECTION_BIDIRECTIONAL
+               and _carries_inbound_modality(provider_name, kind) else ""),
+            where=where)
+
+
+def _check_record_keeping(profile: Any, add) -> None:
+    """A ``record_keeping:`` block on a profile that writes no record.
+
+    The other half of ``high_risk_without_retention``, and it fires at any
+    risk class: a retention policy over stores nothing writes to keeps
+    nothing.  The two findings are the pair ``budget_control_absent`` and
+    ``budget_limits_without_abort`` are -- one says you declared nothing,
+    the other says what you declared cannot act -- and neither is useful
+    without the other.
+
+    **Warn, not error**, the posture the whole silent-config family takes:
+    a base profile in an ``inherits`` chain may legitimately carry the
+    block its children pair with a ``trace:`` block, and validation runs
+    on every discovered profile including those bases.
+
+    The ``session_record`` store is NOT counted.  It is written
+    unconditionally under the workspace, so a profile declaring only
+    ``conversation_retention_days`` governs something real and is not
+    inert.
+    """
+    keeping = getattr(profile, "record_keeping", None)
+    if keeping is None or not keeping.declared:
+        return
+    # Only the two audit clocks need a log to act on; a conversation
+    # retention acts on the session record, which always exists.
+    governs_logs = (keeping.retention_days is not None
+                    or keeping.integrity != "none")
+    if not governs_logs:
+        return
+    writes = any(where in ("trace.session_log", "env.JAATO_TRACE_LOG",
+                           "trace.ledger", "env.LEDGER_PATH",
+                           "trace.provider_log", "env.JAATO_PROVIDER_TRACE")
+                 for _v, where in _trace_path_sources(profile))
+    if not writes:
+        add("warn", "record_keeping_inert",
+            "declares `record_keeping:` and no `trace:` paths — the "
+            "retention and integrity settings govern stores this profile "
+            "never writes to, so they keep nothing and chain nothing. "
+            "Add `trace: {session_log: .jaato/logs/session_trace.jsonl, "
+            "ledger: .jaato/logs/ledger.jsonl}`; `explain audit <profile>` "
+            "prints which stores a profile writes and which it does not.",
+            where="record_keeping")
+
+
+def _check_budget_control(profile: Any, add) -> None:
+    """Check a profile's ``budget_control`` — starting with its ABSENCE (#947).
+
+    ``budget_control`` is fully implemented and entirely opt-in, and nothing
+    told an author their profile had no ceiling.  The failure mode is silent
+    by construction: an unbudgeted profile behaves identically to a budgeted
+    one right up until something loops, and then it does not stop.  Observed
+    as a subagent retrying a tool whose result never reached its history —
+    127 identical calls, ~57k tokens a request, killed by hand.
+
+    Two findings here, ordered by how protected the profile LOOKS while it
+    is not.  The second is the load-bearing one:
+
+    ``budget_control_absent``
+        no block at all, so every dimension is unbounded.
+
+    ``budget_limits_without_abort``
+        ``limits`` are declared and nothing enforces them.  A ceiling in
+        ``limits`` is observed, never enforced — the ``degrade`` ladder is
+        the only consumer of :meth:`BudgetTracker.usage_fraction`, so a
+        profile with ceilings and no ``abort`` rung crosses them in
+        silence.  Without this check the fix for the first finding is
+        actively misleading: an author warned "you have no budget" writes
+        ``limits: {usd: 5}``, the warning goes away, and the loop is still
+        unbounded.
+
+    **Warnings, not errors**, on the reasoning the issue sets out: an
+    unbudgeted profile is a legitimate choice for a short-lived local
+    agent, and these would otherwise fail every existing workspace at
+    once.  Surfacing the knob must not break the people who need it.
+
+    The ladder's own shape checks (``budget_overlay_*``) live in
+    :func:`_check_budget_overlays`, called from here — split so neither
+    function approaches the complexity ceiling, and so that
+    :func:`validate_profile` (baselined far above it) gets smaller rather
+    than larger.
+
+    Args:
+        profile: The resolved profile object.
+        add: The per-profile diagnostic sink from :func:`validate_profile`.
+    """
+    from jaato_server.shared.budget_control import DIMENSIONS
+
+    budget = getattr(profile, "budget_control", None)
+    if budget is None:
+        add("warn", "budget_control_absent",
+            "declares no budget_control, so this session is unbounded on "
+            f"every dimension ({', '.join(DIMENSIONS)}) — nothing stops a "
+            "tool-call loop, and the first sign is the provider bill. "
+            "Declare a ceiling AND a rung that enforces it, e.g. "
+            "budget_control: {limits: {tool_calls: 200, usd: 5.0}, "
+            "degrade: [{at: 100, action: abort}]}."
+            + _backgrounded_profile_note(profile),
+            where="budget_control")
+        return
+
+    # getattr, like every other read in this module: a validator that raises
+    # tells the author nothing at all.  The default is the fail-LOUD direction
+    # — an object that cannot answer "do you abort?" is treated as one that
+    # does not, so an unrecognised shape draws the warning rather than a
+    # clean bill.
+    if not getattr(budget, "has_abort_rung", False):
+        limits = getattr(budget, "limits", None) or {}
+        add("warn", "budget_limits_without_abort",
+            f"budget_control declares limits ({', '.join(sorted(limits))}) "
+            f"but {_ladder_shape(budget)} — the ceilings are observed, never "
+            "enforced. The degrade ladder is the only consumer of the usage "
+            "fraction, so this run crosses 100% in silence; of the three "
+            "actions only 'abort' stops it (finalize and escalate are latched "
+            "for a layer above and are advice a looping model can decline). "
+            "Add a terminal rung: degrade: [{at: 100, action: abort}]."
+            + _backgrounded_profile_note(profile),
+            where="budget_control.degrade")
+
+    _check_budget_overlays(profile, budget, add)
+
+
+def _ladder_shape(budget: Any) -> str:
+    """Describe what the ladder does instead of aborting, for the message.
+
+    "no degrade ladder at all" and "a ladder that ends in finalize" are the
+    same defect and want the same code, but not the same sentence — telling
+    an author who wrote a three-rung ladder that they have none reads as a
+    validator bug and gets the finding dismissed.
+    """
+    rungs = tuple(getattr(budget, "degrade", ()) or ())
+    if not rungs:
+        return "declares no degrade ladder at all"
+    last = rungs[-1]
+    # Ladder order, deduped — not sorted: the message reads as a description
+    # of the author's own ladder, and re-alphabetising it ("escalate/finalize"
+    # for a finalize-then-escalate ladder) reads as a different ladder.
+    actions = list(dict.fromkeys(r.action for r in rungs if r.action))
+    if not actions:
+        return (f"its {len(rungs)}-rung ladder only rebinds tiers (a brownout, "
+                f"never a stop)")
+    return (f"its ladder ends at {last.at_percent:g}% with "
+            f"{'/'.join(actions)}, and no rung aborts")
+
+
+def _backgrounded_profile_note(profile: Any) -> str:
+    """Extra sentence for a profile that is bound to a persona (#947).
+
+    The danger is not uniform.  A profile spawned as a subagent outlives
+    the thing that would have noticed: ``spawn_subagent`` backgrounds it,
+    and the parent's shutdown deliberately preserves it ("Subagent plugin
+    shutdown (running subagents preserved)") — correct behaviour, and
+    exactly what leaves an unbudgeted loop with nothing left in the
+    session to stop it.  In the incident the parent had been gone for two
+    minutes and the child was still spending.
+
+    ``default_agent`` is the honest discriminator available here.  Every
+    discovered profile is reachable by name through ``spawn_subagent``, so
+    "is it spawnable" cannot separate anything; a profile that names its
+    own persona is one built to be spawned by profile name alone, which is
+    what #944 added ``default_agent`` for.  The signal is therefore used
+    ONE WAY — to strengthen a message that fires regardless — never to
+    weaken or suppress one, because its absence proves nothing.
+
+    Returns a leading-space sentence, or ``""``.
+    """
+    if not getattr(profile, "default_agent", None):
+        return ""
+    return (" This profile binds a default_agent, so it is built to be spawned "
+            "by name — and a subagent is deliberately preserved when its "
+            "parent shuts down, so an unbounded loop here outlives the "
+            "session that could have noticed it.")
+
+
+def _check_budget_overlays(profile: Any, budget: Any, add) -> None:
+    """Check a degrade ladder's tier overlays against the profile's tiers.
+
+    The block is already parsed + structurally validated at profile-load
+    time (``BudgetControlConfig.from_dict``; a malformed one surfaces as
+    ``parse_error``, so it never reaches here).  What load time CANNOT know
+    is (a) which providers are installed and (b) how the ladder relates to
+    the profile's own ``model_tiers`` — both checked here, reusing the exact
+    same resolve_provider / tier-name machinery :func:`_check_model_tiers`
+    uses (an overlay IS a tier table, so it inherits the same defect
+    classes).
+
+    Args:
+        profile: The resolved profile object.
+        budget: Its non-``None`` :class:`~shared.budget_control.BudgetControlConfig`.
+        add: The per-profile diagnostic sink from :func:`validate_profile`.
+    """
+    # Local import: _check_model_tiers imports these inside its own body,
+    # which may not have run (a profile can declare a budget ladder with no
+    # tiers — exactly the case flagged below).
+    from jaato_server.shared.model_tiers import RESERVED_KEYS
+    declared_tiers = {
+        k for k in (getattr(profile, "model_tiers", None) or {})
+        if k not in RESERVED_KEYS
+    }
+    for i, rung in enumerate(getattr(budget, "degrade", ()) or ()):
+        overlay = getattr(rung, "model_tiers", None) or {}
+        if overlay and not declared_tiers:
+            # An overlay patches the session's tier table; with no
+            # model_tiers there is no table to patch, so the rung would
+            # silently do nothing at runtime.
+            add("error", "budget_overlay_without_tiers",
+                f"budget_control.degrade[{i}] overlays model_tiers "
+                f"({', '.join(sorted(overlay))}) but the profile declares no "
+                "model_tiers — the overlay would have no table to rebind. "
+                "Declare model_tiers, or use an action-only rung "
+                "(finalize / abort / escalate).",
+                where=f"budget_control.degrade[{i}].model_tiers")
+            continue
+        for tier_name, entry in overlay.items():
+            if tier_name not in declared_tiers:
+                add("warn", "budget_overlay_undeclared_tier",
+                    f"budget_control.degrade[{i}] rebinds tier "
+                    f"'{tier_name}', which the profile's model_tiers does "
+                    f"not declare (has: {', '.join(sorted(declared_tiers))})"
+                    " — degrading would ADD a tier the agent could not "
+                    "reach before.",
+                    where=f"budget_control.degrade[{i}].model_tiers.{tier_name}")
+            tprov = getattr(entry, "provider", None)
+            if tprov and introspect.resolve_provider(tprov) is None:
+                add("error", "unknown_provider",
+                    f"budget_control.degrade[{i}].model_tiers.{tier_name} "
+                    f"provider '{tprov}' is not installed (a degrade overlay "
+                    "may cross providers, but must name a real one — see "
+                    "`jaato-scaffold explain providers`)",
+                    where=f"budget_control.degrade[{i}].model_tiers."
+                          f"{tier_name}.provider")
+
+
+def _check_model_tiers(mt_cfg, add, provider_name=None):
+    """Static checks on a profile's ``model_tiers`` table.
+
+    Catches, before a session is ever created, what
+    :class:`~shared.model_tiers.ModelTierConfig` would only raise at
+    session-create time: tier-name typos, a deployment-named tier with no
+    ``description`` to stand in for the prose the framework cannot supply,
+    a cross-provider tier naming an uninstalled provider, and a malformed
+    ``description``.  See
+    ``jaato-scaffold explain tiers``.  (``model_tiers`` survives the
+    inherits/set merge — see ``config._merge_profiles``.)
+
+    Split out of :func:`validate_profile` to keep that function under the
+    complexity ceiling.
+
+    Args:
+        mt_cfg: The profile's raw ``model_tiers`` dict (possibly empty).
+        add: ``validate_profile``'s diagnostic collector,
+            ``add(severity, code, message, where=...)``.
+    """
+    if not mt_cfg:
+        return
+    from jaato_server.shared.model_tiers import (
+        CANONICAL_TIER_NAMES, RESERVED_KEYS, is_canonical_tier_name,
+        tier_name_error,
+    )
+    for key, entry in mt_cfg.items():
+        if key in RESERVED_KEYS:
+            continue
+        reason = tier_name_error(key)
+        if reason is not None:
+            add("error", "unknown_tier",
+                f"model_tiers key {reason}",
+                where=f"model_tiers.{key}")
+            continue
+        # A deployment-named tier has no framework prose behind it, so
+        # ``description`` is required rather than optional — caught here as
+        # well as at session-create time, because this is the surface an
+        # author runs BEFORE paying for a session.  The shorthand
+        # (``coder: some-model``) can never satisfy it, hence the check
+        # sitting above the dict guard.
+        #
+        # The control-key hint rides along because a MISSPELLED control key
+        # (``initail: executor``) now reads as a perfectly legal tier name
+        # the framework has never heard of, and lands here rather than in
+        # the branch above.  "needs a description" alone would be a true
+        # statement about the wrong problem.
+        if not is_canonical_tier_name(key):
+            described = isinstance(entry, dict) and entry.get("description")
+            if not described:
+                add("error", "tier_description_required",
+                    f"model_tiers.{key} needs a 'description' — the "
+                    f"framework only has prose for "
+                    f"{', '.join(sorted(CANONICAL_TIER_NAMES))}, so without "
+                    f"one the model is told only which model this tier "
+                    f"routes to, which is not a reason to enter it.  (If "
+                    f"'{key}' was meant to be a control key, those are "
+                    f"{', '.join(sorted(RESERVED_KEYS))}.)",
+                    where=f"model_tiers.{key}")
+        if not isinstance(entry, dict):
+            continue
+        tprov = entry.get("provider")
+        if tprov and introspect.resolve_provider(tprov) is None:
+            add("error", "unknown_provider",
+                f"model_tiers.{key} provider '{tprov}' is not installed "
+                "(V2 cross-provider tiers must name a real provider — see "
+                "`jaato-scaffold explain providers`)",
+                where=f"model_tiers.{key}.provider")
+        # ``description`` reaches the MODEL (it becomes this tier's bullet
+        # in the enter_tier tool schema), so a malformed one is worth
+        # catching before a session pays to discover it.
+        tdesc = entry.get("description")
+        if tdesc is not None and (
+            not isinstance(tdesc, str) or not tdesc.strip()
+        ):
+            add("error", "invalid_tier_description",
+                f"model_tiers.{key} description must be a non-empty string "
+                "— it is rendered verbatim as this tier's bullet in the "
+                "enter_tier tool description",
+                where=f"model_tiers.{key}.description")
+        # ``modalities`` declares which input roles this tier fills.  A typo
+        # here is silent at runtime in the worst way: the content gate finds
+        # no tier for an image and the agent is told none exists, while the
+        # profile plainly declares one.
+        _check_tier_exit(key, entry.get("exit_on"), add)
+        _check_tier_modalities(key, entry.get("modalities"), add,
+                               entry.get("provider") or provider_name)
+
+
+def _effective_scrub_value(profile, surface):
+    """The ``scrub_secret_env`` value surface ``surface`` will resolve.
+
+    Mirrors the runtime precedence exactly — ``plugin_configs.<surface>``
+    wins when it names the key at all, else the profile-level key, else
+    ``None`` (which the plugin reads as the framework default).  Returns
+    ``(value, where)`` so a finding can point at the field that decided.
+    """
+    cfg = (getattr(profile, "plugin_configs", None) or {}).get(surface)
+    if isinstance(cfg, dict) and "scrub_secret_env" in cfg:
+        return cfg["scrub_secret_env"], f"plugin_configs.{surface}.scrub_secret_env"
+    return getattr(profile, "scrub_secret_env", None), "scrub_secret_env"
+
+
+#: ``${VAR}`` reference, matching what ``_expand_string`` substitutes.  The
+#: ``(?<!\\$)`` in the trace-placeholder regex has no counterpart here: a
+#: ``$${X}`` is not a thing this codebase produces.
+_VAR_REF_RE = re.compile(r"\$\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
+
+#: The two context vars that resolve to the DAEMON's notion of a workspace on
+#: the main-session path (``JaatoServer._resolve_session_env`` has no session
+#: workspace yet).  Legal, and almost never what someone writing a per-session
+#: log path means -- so a finding, not a refusal.
+_DAEMON_SCOPED_CONTEXT_VARS = ("workspaceRoot", "cwd")
+
+
+def _trace_path_sources(profile) -> List[tuple]:
+    """Every trace path this profile sets, as ``(value, where)`` pairs.
+
+    Both routes, because both reach ``jaato_sdk.trace`` and an author may use
+    either: the typed ``trace:`` block and the ``env:`` map's two trace vars.
+    The block wins where they collide, which is itself a finding
+    (``trace_env_shadowed``) rather than something to silently prefer here.
+    """
+    from jaato_server.shared.plugins.subagent.config import TRACE_ENV_VARS
+
+    out: List[tuple] = []
+    trace = getattr(profile, "trace", None)
+    for key in TRACE_ENV_VARS:
+        value = getattr(trace, key, None) if trace else None
+        if value:
+            out.append((value, f"trace.{key}"))
+    env = getattr(profile, "env", None) or {}
+    for key, var in TRACE_ENV_VARS.items():
+        if env.get(var):
+            out.append((env[var], f"env.{var}"))
+    return out
+
+
+def _check_one_trace_path(value: str, where: str, known_vars, add) -> None:
+    """Report what is wrong with ONE trace path that already loaded.
+
+    Only the soft cases live here.  A switch, a directory and an unknown
+    ``{token}`` are refused at profile LOAD by ``_validate_trace_path`` /
+    ``validate_profile_env_paths``, so a profile carrying one never reaches
+    ``validate_profile`` — it surfaces as ``parse_error`` with the loader's own
+    message.  The exception is the ``env:`` route, where only the switch is
+    refused; an unknown placeholder there is caught right here, which is why
+    this check is not redundant with the loader.
+
+    Args:
+        value: The raw path as the author wrote it.
+        where: Dotted field path for the finding.
+        known_vars: Names ``${VAR}`` may legitimately reference — the
+            framework context vars plus every key the session's environment
+            will actually carry.
+        add: The diagnostic sink.
+    """
+    from jaato_sdk.trace import (TRACE_PATH_PLACEHOLDERS,
+                                 unknown_trace_placeholders)
+
+    for token in unknown_trace_placeholders(value):
+        add("error", "trace_path_placeholder_unknown",
+            f"{where}={value!r} names {token}, which nothing substitutes — it "
+            f"survives into the path and is CREATED as a literal directory "
+            f"(#775). Known: {', '.join(sorted(TRACE_PATH_PLACEHOLDERS))}",
+            where=where)
+
+    for var in _VAR_REF_RE.findall(value):
+        if var in _DAEMON_SCOPED_CONTEXT_VARS:
+            add("warn", "trace_path_daemon_scoped_var",
+                f"{where}={value!r} uses ${{{var}}}, which expands to the "
+                f"DAEMON's workspace on the main-session path (the session's "
+                f"is not known yet) — every session using this profile then "
+                f"shares one file. A RELATIVE path is the per-session idiom: "
+                f"jaato_sdk.trace resolves it against each session's own "
+                f"workspace",
+                where=where)
+        elif var not in known_vars:
+            add("warn", "trace_path_unexpanded_var",
+                f"{where}={value!r} references ${{{var}}}, which nothing in "
+                f"this workspace defines — an undefined name is left LITERAL, "
+                f"so the path gains a directory called '${{{var}}}'",
+                where=where)
+
+
+def _check_trace_paths(profile, env_keys, add) -> None:
+    """Validate the profile's diagnostic log paths (both routes).
+
+    ``validate`` knew nothing about ``trace:`` at all, which made it the one
+    profile block whose silent-ignore failures had no reporter — the family
+    #910 / #925 / #947 / #950 each closed for a different knob.
+
+    Args:
+        profile: The resolved profile.
+        env_keys: Keys the workspace ``.env`` defines (``None`` for a
+            single-file validation, which has no workspace).  Unioned here
+            with the profile's own ``env:`` keys, so a ``${VAR}`` the author
+            legitimately defined is not reported as undefined.
+        add: The diagnostic sink.
+    """
+    from jaato_server.shared.plugins.subagent.config import (EXPANSION_CONTEXT_VARS,
+                                                TRACE_ENV_VARS)
+
+    sources = _trace_path_sources(profile)
+    if not sources:
+        return
+
+    known_vars = (set(EXPANSION_CONTEXT_VARS)
+                  | set(env_keys or ())
+                  | set(getattr(profile, "env", None) or {})
+                  | set(os.environ))
+    for value, where in sources:
+        _check_one_trace_path(value, where, known_vars, add)
+
+    # Both routes set for one var: the typed block outranks the map, so the
+    # map's value is DEAD.  Exactly the shape `plugin_config_without_plugin`
+    # and `unknown_knob` exist to make audible.
+    trace = getattr(profile, "trace", None)
+    env = getattr(profile, "env", None) or {}
+    for key, var in TRACE_ENV_VARS.items():
+        if getattr(trace, key, None) and env.get(var):
+            add("warn", "trace_env_shadowed",
+                f"env.{var}={env[var]!r} is never used: the typed "
+                f"`trace.{key}` outranks it and is set to "
+                f"{getattr(trace, key)!r}. Drop one",
+                where=f"env.{var}")
+
+
+def _check_secret_scrub(profile, add):
+    """Flag a subprocess surface that runs with the runner's full environment.
+
+    The scrub is ON by default (#863), so a profile that says nothing is
+    fine.  What this surfaces is the DELIBERATE leaky posture — a profile
+    (or one of its ``plugin_configs`` sections) that resolves to no scrub
+    pattern for a plugin that spawns model-driven subprocesses — and the
+    two defects around it: a value the grammar rejects (which the plugin
+    fails CLOSED on, so the author's intent is silently replaced by the
+    default set) and a profile-level key with no surface to apply to.
+    """
+    from jaato_server.shared.secret_scrub import (
+        SCRUB_HINT, SCRUB_SURFACES, is_scrub_disabled, normalize_scrub_patterns,
+    )
+    enabled = [s for s in SCRUB_SURFACES
+               if s in (getattr(profile, "plugins", None) or [])]
+    profile_value = getattr(profile, "scrub_secret_env", None)
+    if profile_value is not None and not enabled:
+        add("info", "scrub_secret_env_inert",
+            "scrub_secret_env is set but the profile enables none of the "
+            f"plugins it applies to ({', '.join(SCRUB_SURFACES)}) — it "
+            "changes nothing here", where="scrub_secret_env")
+    for surface in enabled:
+        value, where = _effective_scrub_value(profile, surface)
+        try:
+            patterns = normalize_scrub_patterns(value)
+        except ValueError as exc:
+            add("error", "invalid_scrub_secret_env",
+                f"{exc} — the {surface} plugin fails CLOSED on this (the "
+                "framework default set is applied and the value ignored)",
+                where=where)
+            continue
+        if is_scrub_disabled(patterns):
+            add("warn", "secret_scrub_disabled",
+                f"plugin '{surface}' spawns model-driven subprocesses with the "
+                "runner's FULL environment — every provider API key and token "
+                "the daemon holds is readable by any command the model runs "
+                f"(`env`, `echo $GITHUB_TOKEN`).  {SCRUB_HINT}.",
+                where=where)
+
+
+# A declared type token → the predicate a value must satisfy.  Two
+# vocabularies reach here and both are the plugin author's own: JSON Schema
+# (``integer`` / ``boolean`` / ``array`` / ``object``) from a raw-dict
+# ``get_config_schema``, and Python-ish names (``int`` / ``bool`` / ``dict``)
+# from the ``PluginSetting`` object form.  A token in neither is UNKNOWN and
+# checks nothing — the table is a source of findings, never of guesses.
+#
+# ``bool`` is excluded from the numeric predicates deliberately: Python makes
+# ``True`` an ``int``, so ``timeout: true`` would otherwise satisfy a knob
+# declared ``integer`` — which is exactly the silent-ignore shape this check
+# exists to catch.
+_KNOB_TYPE_PREDICATES = {
+    "string":  lambda v: isinstance(v, str),
+    "str":     lambda v: isinstance(v, str),
+    "integer": lambda v: isinstance(v, int) and not isinstance(v, bool),
+    "int":     lambda v: isinstance(v, int) and not isinstance(v, bool),
+    "number":  lambda v: isinstance(v, (int, float)) and not isinstance(v, bool),
+    "float":   lambda v: isinstance(v, (int, float)) and not isinstance(v, bool),
+    "boolean": lambda v: isinstance(v, bool),
+    "bool":    lambda v: isinstance(v, bool),
+    "array":   lambda v: isinstance(v, (list, tuple)),
+    "list":    lambda v: isinstance(v, (list, tuple)),
+    "object":  lambda v: isinstance(v, dict),
+    "dict":    lambda v: isinstance(v, dict),
+    "null":    lambda v: v is None,
+}
+
+# ``scheme://…`` — a secret URI (``pass://``, ``vault://``) the daemon
+# resolves at spawn, or a plain URL.
+_KNOB_URI_RE = re.compile(r"^[a-z][a-z0-9_+.-]*://")
+
+
+def _knob_value_is_deferred(value) -> bool:
+    """True when a knob's value is not this validator's to judge.
+
+    A ``${VAR}`` placeholder and a ``scheme://`` secret URI are both resolved
+    LATER — by ``expand_variables`` at session-prep, against an environment
+    the validator does not have.  Their literal form is a ``str`` whatever the
+    knob declares, so checking it would report ``timeout: ${HTTP_TIMEOUT}``
+    as a type error and ``lookup_strategy: ${STRATEGY}`` as an enum
+    violation.  Deferring matches what ``subagent.config`` already does at
+    every other boundary that meets an unexpanded value.
+    """
+    return isinstance(value, str) and (
+        "${" in value or bool(_KNOB_URI_RE.match(value)))
+
+
+def _check_knob_value(cfg_name, path, value, setting, add):
+    """Check one knob's VALUE against the plugin's own declared schema (#925).
+
+    ``path`` is the knob's dotted path beneath ``plugin_configs.<plugin>`` —
+    a bare name at the top level, ``policy.defaultPolicy`` inside a declared
+    object — so a finding points at the line the author wrote.
+
+    Two findings, and their severities differ because the declarations differ
+    in strength:
+
+    * ``invalid_knob_value`` (**error**) — the value is outside the knob's
+      declared ``enum``.  A plugin that spells out ``["memory","file",
+      "hybrid"]`` has left nothing to be generous about: either way the
+      profile asks for something the plugin does not offer.
+    * ``knob_type_mismatch`` (**warn**) — the value does not match the
+      declared ``type``.  Softer on purpose: YAML scalar typing is easy to
+      trip over (a quoted ``"30"``), a plugin may coerce, and a declared type
+      can be an incomplete summary of what the knob accepts.
+
+    WHAT NEITHER MESSAGE MAY SAY (#937).  Both tails used to assert what the
+    runtime does with the bad value — "silently replaced by a fallback",
+    "assigned without coercion" — and the validator is reading a JSON Schema,
+    so it cannot know.  Both were false for a real out-of-tree plugin, in
+    opposite directions: ``jaato-m365`` RAISES on an unknown ``cloud``, and
+    COERCES ``max_body_chars: "8000"`` to ``8000``.  The severities were
+    already reasoned correctly — this docstring's own "a plugin may coerce"
+    is what the emitted string denied — so only the strings changed.  One
+    plugin's behaviour is an illustration, not a consequence to promise of
+    every plugin: ``todo.storage_type: sqlite`` does fall back silently
+    (``create_storage`` raises, ``todo/plugin.py`` catches, prints to daemon
+    stdout, and installs ``InMemoryStorage``), and that story belongs in
+    ``explain`` and the docs, where it is attributed to ``todo``.
+
+    Both are generic, driven by the declaration a plugin already publishes, so
+    an OUT-OF-TREE plugin gets them with nothing to register — unlike
+    ``_PLUGIN_VALUE_CHECKS``, which is a hardcoded jaato-server dict keyed by
+    plugin name and therefore unreachable from a third-party distribution.
+    That dict stays for genuinely structural knobs
+    (``template.file_conventions``), which no declared type can describe.
+    """
+    where = f"plugin_configs.{cfg_name}.{path}"
+    # ``None`` is "unset", not "wrongly typed" — many knobs default to it.
+    if value is None or _knob_value_is_deferred(value):
+        return
+    if setting.enum is not None and value not in setting.enum:
+        valid = ", ".join(repr(c) for c in setting.enum)
+        add("error", "invalid_knob_value",
+            f"{cfg_name}.{path} = {value!r} is not one of the values the "
+            f"plugin declares ({valid}) — what happens next is the plugin's "
+            f"choice: it may raise, or fall back silently", where=where)
+        return
+    predicates = [_KNOB_TYPE_PREDICATES[tok]
+                  for tok in setting.type.split("|")
+                  if tok in _KNOB_TYPE_PREDICATES]
+    if not predicates:
+        return          # undeclared or unrecognised type — nothing asserted
+    if not any(pred(value) for pred in predicates):
+        add("warn", "knob_type_mismatch",
+            f"{cfg_name}.{path} = {value!r} ({type(value).__name__}) does not "
+            f"match the declared type '{setting.type}' — the plugin may "
+            f"coerce it, reject it, or carry it downstream as-is", where=where)
+
+
+def _report_undeclared_name(cfg_name, key, declared, sites, add):
+    """Report one knob name the plugin's schema does not declare (#910).
+
+    Which finding, and which tail, is decided by EVIDENCE — what the scan of
+    the plugin's own source established, and nothing beyond it:
+
+    * the source reads a config key by that name → ``undeclared_knob``
+      (**warn**), quoting the site.  The knob is live and merely absent from
+      the plugin's published surface, so ``explain plugin <name>`` will not
+      list it;
+    * the source was scanned and reads no such key → ``unknown_knob``
+      (**warn**), saying that and only that;
+    * the source is not in the scanned tree (an out-of-tree distribution) →
+      ``unknown_knob`` (**warn**) with the absence of evidence stated, not
+      dressed up as evidence of absence.
+
+    Why not the old single tail.  It read "silently ignored at runtime", which
+    the validator cannot know and which was **false** for the two knobs #910
+    found: ``memory.global_storage_path`` and ``references.exclude_tools`` are
+    both read, both work, and an author told a knob is ignored reasonably
+    deletes it — silently moving where memories are stored.  A check that
+    cries wolf is worse than no check, because the real typo then hides in
+    the noise the check itself created.
+    """
+    where = f"plugin_configs.{cfg_name}.{key}"
+    site = sites.get(key) if sites else None
+    if site:
+        add("warn", "undeclared_knob",
+            f"'{key}' is absent from the {cfg_name} plugin's "
+            f"get_config_schema(), but the plugin's source reads a config "
+            f"key by that name ({site}) — so it is live and undocumented, "
+            f"and 'explain plugin {cfg_name}' will not show it",
+            where=where)
+        return
+    valid = ", ".join(sorted(declared))
+    tail = ("and no config read site for it appears in the plugin's source "
+            "either, so it is most likely a typo"
+            if sites is not None else
+            "and the plugin's source is not in the scanned tree, so whether "
+            "it is read anyway was not checked")
+    add("warn", "unknown_knob",
+        f"'{key}' is not a declared {cfg_name} config knob — {tail} "
+        f"(known: {valid})", where=where)
+
+
+def _validate_plugin_knobs(cfg_name, cfg, plugins, add):
+    """Flag knob names — and values — a non-provider plugin rejects, at any depth.
+
+    Uses the plugin's introspected ``get_config_schema``
+    (``config_settings``).  Only validates when the plugin declares a schema —
+    a plugin that declares none opts out (we cannot tell a typo from an
+    accepted free-form key).
+
+    An undeclared NAME emits ``warn`` (not ``error``): a plugin's schema may
+    be incomplete — demonstrably so, which is why the finding splits into
+    ``undeclared_knob`` and ``unknown_knob`` by what
+    :func:`~shared.scaffold.introspect.plugin_config_read_sites` found.  See
+    :func:`_report_undeclared_name`.  That generosity does not carry over to
+    a declared knob's VALUE — see :func:`_check_knob_value`, which is where a
+    declared ``enum`` or ``type`` is actually checked.
+
+    NESTED structures are descended now.  They used to be skipped,
+    and the knob that mattered most was the one that cost it:
+    ``permission.policy`` carries ``defaultPolicy`` with a declared
+    ``enum`` of ``allow`` / ``deny`` / ``ask``, and every misspelling of it
+    validated clean.  The declaration was machine-readable the whole time;
+    only the walk stopped short.
+    """
+    if not isinstance(cfg, dict):
+        return
+    pinfo = plugins.get(cfg_name)
+    if pinfo is None or not pinfo.config_settings:
+        return
+    # Kept as a named local rather than inlined into the call: it is the
+    # EVIDENCE #910 asked for, ``test_validate_claims_only_what_it_knows``
+    # declares a reversion against this exact line, and a reversion whose
+    # target text has been refactored away sabotages nothing — the guard
+    # then passes decoratively, which is the one failure mode that suite
+    # exists to prevent.
+    sites = introspect.plugin_config_read_sites(cfg_name)
+    _walk_knobs(cfg_name, cfg, pinfo.config_settings, "", sites, True, add)
+
+
+def _nested_sites(cfg_name):
+    """Read-site evidence for names INSIDE an object-valued knob.
+
+    Wrapped so a scanner failure degrades to "no evidence" rather than
+    taking a validation down; the caller reads ``None`` as "not checked",
+    which is also what an out-of-tree plugin returns.
+    """
+    try:
+        return introspect.plugin_nested_config_read_sites(cfg_name)
+    except Exception:       # pragma: no cover — a diagnostic must not raise
+        return None
+
+
+def _walk_knobs(cfg_name, cfg, settings, prefix, sites, strict, add) -> None:
+    """Check one level of a plugin config against its declared settings.
+
+    Args:
+        cfg_name: The plugin name — the ``plugin_configs.<name>`` segment.
+        cfg: The authored mapping at this level.
+        settings: The :class:`~shared.scaffold.introspect.ConfigSetting` list
+            declared for this level.
+        prefix: Dotted path of the level, ``""`` at the top, so a finding
+            reads ``permission.policy.whitelist.tools`` rather than ``tools``.
+        sites: Config read sites from the plugin's source, or ``None``.  Only
+            meaningful at the top level: the scan finds ``config.get("x")``
+            calls, which say nothing about a key nested inside a value.
+        strict: Whether an undeclared NAME at this level is reportable.
+            ``False`` under a ``free_form`` parent — ``permission.evaluators``
+            maps tool names to scripts, so every key there is authored and
+            none is a typo.
+        add: The per-profile diagnostic sink.
+    """
+    declared = {s.name: s for s in settings}
+    for key, value in cfg.items():
+        path = f"{prefix}{key}"
+        setting = declared.get(key)
+        if setting is None:
+            if not strict:
+                continue
+            if prefix:
+                _report_unknown_nested_knob(cfg_name, path, declared,
+                                            _nested_sites(cfg_name), add)
+            else:
+                _report_undeclared_name(cfg_name, path, declared, sites, add)
+            continue
+        if isinstance(value, dict) and (setting.children or setting.free_form):
+            _walk_knobs(cfg_name, value, setting.children or [],
+                        f"{path}.", None, not setting.free_form, add)
+            continue
+        _check_knob_value(cfg_name, path, value, setting, add)
+
+
+def _report_unknown_nested_knob(cfg_name, path, declared, sites, add) -> None:
+    """Report a key the plugin's schema does not declare INSIDE an object knob.
+
+    The #910 evidence split, one layer down, and it has to be: a declared
+    ``properties`` block is NOT a completeness claim, and treating it as one
+    inverts this whole family's thesis.  Measured on ``permission``, whose
+    ``policy`` tree is the deepest in the tree: ``PermissionPolicy.from_config``
+    reads ``cwd``, ``sanitization.custom_blocked_commands`` and
+    ``path_scope.resolve_symlinks``, and the schema declares none of them.
+    Called typos, all three would have sent an author to delete a line that
+    was working — the exact failure ``_report_undeclared_name`` exists to
+    avoid, reached from the other side.
+
+    ``sites`` comes from :func:`~shared.scaffold.introspect.
+    plugin_nested_config_read_sites` rather than its top-level sibling,
+    because a nested key is read off a local (``ps_cfg.get("…")``) that the
+    narrow top-level receiver set deliberately excludes.
+
+    Three outcomes, by what the scan established and nothing beyond it:
+
+    * a read site exists → ``undeclared_knob`` (**warn**), quoting it: the
+      key is live and merely absent from the published schema;
+    * scanned, no site → ``unknown_knob`` (**warn**), saying the parent
+      declares a narrower set than the plugin reads and that this name is in
+      neither;
+    * not scanned (an out-of-tree plugin) → ``unknown_knob`` with the
+      absence of evidence stated as such.
+    """
+    where = f"plugin_configs.{cfg_name}.{path}"
+    key = path.rsplit(".", 1)[-1]
+    parent = path.rsplit(".", 1)[0]
+    site = sites.get(key) if sites else None
+    if site:
+        add("warn", "undeclared_knob",
+            f"'{path}' is absent from the {cfg_name} plugin's "
+            f"get_config_schema(), but the plugin's source reads a config "
+            f"key by that name ({site}) — so it is most likely live and "
+            f"undocumented, and 'explain plugin {cfg_name}' will not show it",
+            where=where)
+        return
+    valid = ", ".join(sorted(declared)) or "(none)"
+    tail = ("and no config read site for it appears in the plugin's source "
+            "either, so it is most likely a typo"
+            if sites is not None else
+            "and the plugin's source is not in the scanned tree, so whether "
+            "it is read anyway was not checked")
+    add("warn", "unknown_knob",
+        f"'{path}' is not declared by the {cfg_name} plugin — {tail} "
+        f"('{parent}' declares: {valid})", where=where)
+
+
+def _check_template_routing(cfg, add):
+    """Validate ``plugin_configs.template.file_conventions``'s shape (#900).
+
+    The generic knob check (:func:`_validate_plugin_knobs`) verifies knob
+    NAMES and deliberately does not descend into a knob's value.  Routing
+    earns the exception: the plugin drops a malformed rule and carries on,
+    so a bad table is not an error at runtime — it is *no routing*, and
+    generated files then land outside the declared source root, where a
+    validator gate does not look.  The gate examines zero files and
+    reports a clean verdict over nothing.
+
+    Also flags the one case the precedence rule makes surprising: a
+    profile that declares ``file_conventions`` WITHOUT an
+    ``output_path_routing`` list.  A knowledge base's stack declaration
+    carries other keys under that name (``source_dirs``,
+    ``source_extension``, ``build_file``), and carrying such a block into
+    the profile verbatim suppresses ``template_routing.yaml`` — the key
+    being present IS the declaration — while declaring no rules of its
+    own.  Routing then silently stops.
+    """
+    if not isinstance(cfg, dict) or "file_conventions" not in cfg:
+        return
+    where = "plugin_configs.template.file_conventions"
+    conventions = cfg["file_conventions"]
+    if not isinstance(conventions, dict):
+        add("error", "invalid_template_routing",
+            f"file_conventions must be a mapping carrying "
+            f"'output_path_routing', got {type(conventions).__name__} — the "
+            "plugin reads it as no routing and, because the key is present, "
+            "reads no template_routing.yaml either", where=where)
+        return
+
+    if "output_path_routing" not in conventions:
+        add("warn", "template_routing_empty",
+            "file_conventions declares no 'output_path_routing' — the key's "
+            "presence alone suppresses template_routing.yaml, so this "
+            "profile routes nothing.  Declare the rules here, or drop the "
+            "key to keep the file", where=where)
+        return
+
+    rules = conventions["output_path_routing"]
+    where_rules = f"{where}.output_path_routing"
+    if not isinstance(rules, list):
+        add("error", "invalid_template_routing",
+            f"output_path_routing must be a list of {{glob, prefix}} entries, "
+            f"got {type(rules).__name__} (dropped at runtime — no routing)",
+            where=where_rules)
+        return
+
+    for i, rule in enumerate(rules):
+        rule_where = f"{where_rules}[{i}]"
+        if not isinstance(rule, dict):
+            add("error", "invalid_template_routing",
+                f"entry must be a mapping with 'glob' (and optionally "
+                f"'prefix'), got {type(rule).__name__} (dropped at runtime)",
+                where=rule_where)
+            continue
+        glob, prefix = rule.get("glob"), rule.get("prefix", "")
+        if not isinstance(glob, str) or not glob:
+            add("error", "invalid_template_routing",
+                f"entry needs a non-empty string 'glob', got {glob!r} "
+                "(dropped at runtime)", where=f"{rule_where}.glob")
+        if not isinstance(prefix, str):
+            add("error", "invalid_template_routing",
+                f"'prefix' must be a string ('' means match-and-leave-alone), "
+                f"got {type(prefix).__name__} (dropped at runtime)",
+                where=f"{rule_where}.prefix")
+
+
+#: Per-plugin value-shape checks, keyed by ``plugin_configs`` name.  The
+#: generic name check (:func:`_validate_plugin_knobs`) deliberately does not
+#: descend into a knob's value; an entry here is a knob whose CONTENT decides
+#: behaviour badly enough to earn the exception.
+_PLUGIN_VALUE_CHECKS = {
+    "template": _check_template_routing,
+}
+
+
+def _check_plugin_knob_values(cfg_name, cfg, add):
+    """Run the per-plugin value-shape check for ``cfg_name``, if any."""
+    check = _PLUGIN_VALUE_CHECKS.get(cfg_name)
+    if check is not None:
+        check(cfg, add)
+
+
+def _check_quirks(quirks_dict, pinfo, provider_name, add, where_prefix=None):
+    """Flag quirk names the provider does not honor (silently dropped)."""
+    for q in quirks_dict:
+        if q not in pinfo.quirks:
+            valid = ", ".join(sorted(pinfo.quirks)) or "(none — provider honors no quirks)"
+            where = f"{where_prefix}.{q}" if where_prefix else \
+                f"plugin_configs.{provider_name}.quirks.{q}"
+            add("error", "unknown_quirk",
+                f"quirk '{q}' is not honored by provider '{provider_name}' "
+                f"(silently dropped at runtime; valid: {valid})", where=where)
+
+
+# --------------------------------------------------------------------- .env
+
+def _parse_env(text: str) -> Dict[str, str]:
+    """Parse a ``.env`` into a dict (KEY=VALUE; ``#`` comments / blanks skipped)."""
+    out: Dict[str, str] = {}
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        out[key.strip()] = val.strip()
+    return out
+
+
+def validate_env(workspace: str) -> List[Diagnostic]:
+    """Validate a workspace ``.env``'s registry cross-references.
+
+    Checks the two vars that name framework entities (so a typo is caught
+    before it silently selects the wrong thing at runtime):
+
+    - ``JAATO_PROVIDER`` must be a known provider.
+    - ``JAATO_PROFILE_SET`` must name an existing set directory under
+      ``.jaato/profiles/`` (the high-value catch — a mistyped set silently
+      falls back to the base/wrong profiles).
+
+    The ``.env``'s *absence* is not flagged here — that's the doctor's
+    runtime-preflight job (the env_file=None handshake-crash surface).
+    """
+    ws = Path(workspace).resolve()
+    envf = ws / ".env"
+    out: List[Diagnostic] = []
+    if not envf.exists():
+        return out
+    env = _parse_env(envf.read_text(encoding="utf-8"))
+
+    prov = env.get("JAATO_PROVIDER")
+    if prov and introspect.resolve_provider(prov) is None:
+        out.append(Diagnostic(
+            "error", "unknown_provider",
+            f".env JAATO_PROVIDER='{prov}' is not a known provider "
+            f"(have: {', '.join(sorted(introspect.providers()))})",
+            profile=".env", where="JAATO_PROVIDER"))
+
+    pset = env.get("JAATO_PROFILE_SET")
+    if pset and not (ws / ".jaato" / "profiles" / pset).is_dir():
+        out.append(Diagnostic(
+            "error", "unknown_profile_set",
+            f".env JAATO_PROFILE_SET='{pset}' has no matching set directory "
+            f"under .jaato/profiles/ — the run will silently use base/wrong "
+            f"profiles (see `jaato-scaffold explain sets`)",
+            profile=".env", where="JAATO_PROFILE_SET"))
+
+    # typo HINT (info, not error): a JAATO_* var no installed FRAMEWORK code
+    # reads.  Deliberately INFO — it cannot distinguish a typo from a
+    # legitimate app-level var read by the workspace's OWN cascade scripts /
+    # reactors (e.g. kb's JAATO_INPUTS_DIR), so it must never fail a
+    # workspace.  Scoped to our namespace (avoids HTTPS_PROXY etc.); safelists
+    # vars read via session-context rather than a literal os.getenv.
+    known = set(introspect.env_vars())
+    known.update({"JAATO_PROFILE_SET"})
+    for key in env:
+        if key.startswith("JAATO_") and key not in known:
+            out.append(Diagnostic(
+                "info", "unread_env_var",
+                f".env {key} is not read by installed framework code — a typo, "
+                f"or an app-level var your own scripts read "
+                f"(see `jaato-scaffold explain env`)",
+                profile=".env", where=key))
+    return out
+
+
+def validate_gitignore(workspace: str) -> List[Diagnostic]:
+    """Validate what the workspace ``.gitignore`` does to ``.jaato/``.
+
+    ``.jaato/`` mixes authored assets (profiles, agents, schemas,
+    processors) with runtime state (sessions, logs, memories, caches, and
+    the ``<provider>_auth.json`` a stored credential lands in), so a
+    ``.gitignore`` is wrong in one of two directions: it ignores the
+    directory wholesale, and the assets cannot be committed, or it ignores
+    nothing under it, and the state is one ``git add -A`` from a remote.
+    Judged by EFFECT through the daemon's own parser
+    (:func:`shared.scaffold.gitignore.assess`), never by spelling — a file
+    that reaches the right result with its own lines is not reported.
+
+    Three findings, all ``warn``: a workspace need not be a repository, and
+    the remedy is one command that leaves every existing line in place.
+
+    - ``gitignore_missing`` — the workspace is a repository ROOT (a
+      ``.git`` beside ``.jaato/``) with no ``.gitignore`` at all.  A nested
+      workspace with no file of its own is not reported: its parent's rules
+      are unknown here, and reading their absence as "unignored" would warn
+      on every eval workspace sitting under an ignored parent.
+    - ``gitignore_hides_jaato_assets`` — authored entries are ignored.  Says
+      so explicitly when a rule excludes ``.jaato/`` itself, because that is
+      the one case no later ``!.jaato/<x>/`` line can repair.
+    - ``gitignore_leaks_jaato_state`` — state probes are NOT ignored.
+
+    Read-only, like the rest of ``validate``; the fix is
+    ``jaato-scaffold new gitignore``, which every finding names.  Silent
+    when the workspace has no ``.jaato/`` — there is nothing to protect.
+    """
+    from . import gitignore as _gitignore
+
+    ws = Path(workspace).resolve()
+    out: List[Diagnostic] = []
+    if not (ws / ".jaato").is_dir():
+        return out
+    verdict = _gitignore.assess(ws)
+    fix = f"jaato-scaffold new gitignore --workspace {ws}"
+    if not verdict.exists:
+        if (ws / ".git").exists():
+            out.append(Diagnostic(
+                "warn", "gitignore_missing",
+                "no .gitignore in this repository root — .jaato/ carries "
+                "runtime state beside the authored assets, so sessions/, "
+                "logs/, memories/ and any stored <provider>_auth.json are "
+                f"one `git add -A` from being committed.  Run: {fix}",
+                profile=".gitignore"))
+        return out
+    if verdict.hidden_authored:
+        # A wholesale rule hides every entry; listing all of them would bury
+        # the one fact that matters — that no `!` line can repair it.
+        hidden = ("every authored entry (profiles/, agents/, scripts/, ...) — "
+                  "a rule excludes .jaato/ itself, so no later `!.jaato/<x>/` "
+                  "line can re-include anything beneath it"
+                  if verdict.dir_excluded
+                  else ", ".join(verdict.hidden_authored))
+        out.append(Diagnostic(
+            "warn", "gitignore_hides_jaato_assets",
+            f".gitignore ignores {hidden} under .jaato/; the authored half "
+            f"of this workspace cannot be committed.  Run: {fix} (appends "
+            f"`!.jaato/` + `.jaato/*` + a re-include per authored entry; "
+            f"your existing lines are left in place)",
+            profile=".gitignore"))
+    if verdict.unignored_state:
+        leaked = ", ".join(probe for probe, _ in verdict.unignored_state)
+        cred = (" — including a stored provider credential"
+                if any("CREDENTIAL" in what
+                       for _, what in verdict.unignored_state) else "")
+        out.append(Diagnostic(
+            "warn", "gitignore_leaks_jaato_state",
+            f".gitignore does not ignore {leaked} under .jaato/{cred}: "
+            f"runtime state is one `git add -A` from being committed.  "
+            f"Run: {fix}",
+            profile=".gitignore"))
+    return out
+
+
+# ------------------------------------------------------------- single file
+
+def validate_profile_file(file_path: str) -> List[Diagnostic]:
+    """Validate a STANDALONE profile file directly against the live registry.
+
+    ``validate_workspace`` only sees profiles under the canonical
+    ``<ws>/.jaato/profiles[/<set>]/`` layout (it goes through
+    ``discover_profiles``).  A profile file *outside* that layout — a docs
+    example, an ad-hoc ``/tmp/foo.yaml`` — previously resolved to a bogus
+    workspace where ``discover_profiles`` found nothing, so the per-profile
+    checks never ran and the file was silently reported "valid — no findings"
+    (a false pass; the exact ``plugin_configs`` typo the tool exists to catch
+    slipped through).
+
+    This loads the file itself, reusing the framework scanner + inheritance
+    resolver so the built profile matches what the runtime would construct
+    (``plugins`` modifiers, ``plugin_configs``, ``gc``, …), then runs the full
+    :func:`validate_profile` checks on it.  Inheritance is resolved within the
+    file's own directory (sibling base profiles are picked up); a sibling that
+    fails to parse does not affect the target — only the target profile's
+    diagnostics are returned.
+    """
+    from jaato_server.shared.plugins.subagent.config import (
+        SubagentProfile,
+        _parse_profile_file,
+        _scan_profiles_dir,
+        resolve_profiles,
+    )
+
+    fp = Path(file_path).resolve()
+    name, data, err = _parse_profile_file(fp)
+    if err:
+        return [Diagnostic("error", "parse_error", err, profile=fp.stem)]
+    if not data:
+        return [Diagnostic(
+            "error", "parse_error",
+            f"'{fp.name}' is not a profile file (expected a YAML/JSON object)",
+            profile=fp.stem)]
+
+    # Build via the framework scanner so the profile object matches runtime.
+    scanned: Dict[str, SubagentProfile] = {}
+    scan_errors: Dict[str, str] = {}
+    _scan_profiles_dir(fp.parent, scanned, scan_errors)
+    resolved, resolve_errors = resolve_profiles(scanned)
+
+    out: List[Diagnostic] = []
+    if name in resolve_errors:
+        out.append(Diagnostic(
+            "error", "inherit_error", resolve_errors[name], profile=name))
+
+    target = (resolved.get(name) or scanned.get(name)
+              or resolved.get(fp.stem) or scanned.get(fp.stem))
+    if target is None:
+        se = scan_errors.get(fp.stem) or scan_errors.get(name)
+        return [Diagnostic(
+            "error", "parse_error",
+            se or f"could not load profile from '{fp.name}'",
+            profile=name or fp.stem)]
+
+    out.extend(_profile_key_findings(data, name or fp.stem))
+    out.extend(validate_profile(
+        target,
+        providers=introspect.providers(),
+        plugins=introspect.plugins(),
+        gc_names=list(introspect.gc_strategies().keys()),
+    ))
+    return out
+
+
+# ---------------------------------------------------------------- workspace
+
+#: Suffixes :func:`~shared.plugins.subagent.config._scan_profiles_dir` reads.
+_PROFILE_SUFFIXES = (".yaml", ".yml", ".json")
+
+
+def _profile_key_findings(data: Any, name: str) -> List[Diagnostic]:
+    """Report top-level profile keys the loader does not read.
+
+    The outermost layer of the silent-ignore family (#910 / #925 / #947 /
+    #950), and the one layer none of those closed.  ``SubagentProfile``
+    construction is keyword-explicit — ``config.py`` says so in as many
+    words — so a key outside
+    :data:`~shared.plugins.subagent.config.PROFILE_FILE_KEYS` is never read,
+    by anything, ever.  No warning is logged, the profile resolves, the
+    session starts, and the author is left believing a line works.
+
+    That is not hypothetical.  A 2026-09 workspace bring-up added
+    ``config_root: .jaato`` to two base profiles to fix unresolvable
+    completion assets; ``config_root`` is a session/SDK parameter and not a
+    profile key at all, so the line did nothing.  What actually fixed it was
+    the duplicated ``.jaato/`` path prefix removed in the same edit (now
+    ``redundant_config_root_prefix``).  The session ended successfully with
+    a wrong belief baked into the workspace, and nothing in the framework
+    would ever contradict it.
+
+    Three findings, because three mistakes with the same symptom want
+    different fixes:
+
+    ``unknown_profile_key`` (**warn**)
+        the key is read by nobody.  A near-miss from the accepted set is
+        named when there is one, since the overwhelmingly common case is a
+        typo (``plugins_configs``) or a key borrowed from a neighbouring
+        surface (``config_root``, ``tools``).
+
+    ``removed_profile_key`` (**warn**)
+        the key used to be read and is not any more, so the author mistyped
+        nothing — the field was withdrawn under them.  The message names the
+        successor instead of guessing at a near-miss, which is what an
+        ``unknown_profile_key`` would have done here (``max_turns`` has no
+        close match in the accepted set, so it would have offered no fix at
+        all).  See ``PROFILE_REMOVED_FIELDS``.
+
+    ``derived_profile_key`` (**warn**)
+        the key IS a ``SubagentProfile`` field — so it appears in ``explain
+        profile`` — and is DERIVED rather than read from the file:
+        ``preloaded_plugins`` and ``tool_scopes`` come out of the
+        ``plugins:`` list's own modifiers.  Writing them is the mistake
+        ``explain profile`` actively invites, so the message names the
+        modifier to write instead.
+
+    **Warn, not error**, for the reason this whole family warns: an
+    ``inherits`` base may carry a key a later framework version reads, a
+    profile snapshot may be newer than this installation, and failing every
+    existing workspace over a key that has always been inert is a worse
+    trade than saying so.
+    """
+    from jaato_server.shared.plugins.subagent.config import (
+        PROFILE_DERIVED_FIELDS, PROFILE_FILE_KEYS, PROFILE_REMOVED_FIELDS,
+    )
+
+    if not isinstance(data, dict):
+        return []
+    out: List[Diagnostic] = []
+    for key in data:
+        if not isinstance(key, str) or key in PROFILE_FILE_KEYS:
+            continue
+        if key in PROFILE_REMOVED_FIELDS:
+            out.append(Diagnostic(
+                "warn", "removed_profile_key",
+                f"'{key}' is no longer a profile key — "
+                f"{PROFILE_REMOVED_FIELDS[key]}.  The line loads without "
+                f"error and is read by nobody",
+                profile=name, where=key))
+            continue
+        if key in PROFILE_DERIVED_FIELDS:
+            out.append(Diagnostic(
+                "warn", "derived_profile_key",
+                f"'{key}' is a SubagentProfile field but NOT a profile-file "
+                f"key — it is {PROFILE_DERIVED_FIELDS[key]}.  Written here "
+                f"it is read by nobody",
+                profile=name, where=key))
+            continue
+        near = difflib.get_close_matches(key, sorted(PROFILE_FILE_KEYS), n=1,
+                                         cutoff=0.75)
+        hint = f" — did you mean '{near[0]}'?" if near else "."
+        out.append(Diagnostic(
+            "warn", "unknown_profile_key",
+            f"'{key}' is not a profile key{hint}  The loader builds "
+            f"SubagentProfile keyword by keyword, so this line is read by "
+            f"nobody and nothing at runtime will say so "
+            f"(`jaato-scaffold explain profile` lists every key)",
+            profile=name, where=key))
+    return out
+
+
+def _check_profile_file_keys(config_root: str, out: List[Diagnostic]) -> None:
+    """Run :func:`_profile_key_findings` over every workspace profile FILE.
+
+    Reads the raw files rather than the resolved profiles, because the whole
+    point is a key the resolver has already thrown away: by the time
+    ``discover_profiles`` hands back a ``SubagentProfile``, an unknown key
+    has left no trace on the object for any later check to find.
+
+    Workspace tier only.  The user tier (``~/.jaato/profiles``) is merged
+    into the effective set and is not the author's to edit from here, and a
+    finding about a file they cannot see in their own checkout is noise.
+    """
+    from jaato_server.shared.plugins.subagent.config import _parse_profile_file
+
+    root = Path(config_root) / "profiles"
+    if not root.is_dir():
+        return
+    for fp in sorted(root.rglob("*")):
+        if not fp.is_file() or fp.suffix not in _PROFILE_SUFFIXES:
+            continue
+        try:
+            name, data, err = _parse_profile_file(fp)
+        except Exception:       # pragma: no cover — a diagnostic must not raise
+            continue
+        if err or not isinstance(data, dict):
+            continue            # already reported as parse_error
+        if "plugins" not in data:
+            # ``plugins:`` is REQUIRED, and ``_scan_profiles_dir`` refuses
+            # the file by name when it is absent — so this is either a
+            # profile whose real error is already reported, or a YAML file
+            # under profiles/ that is not a profile at all.  Listing its
+            # other keys as unknown is noise on top of a reported error in
+            # the first case and an invented error in the second.
+            continue
+        out.extend(_profile_key_findings(data, name or fp.stem))
+
+
+def _check_prefetch_directives(
+    ws: Path, config_root: str, out: List[Diagnostic],
+) -> None:
+    """Validate ``{{!py[?]:...}}`` prefetch directives in agent personas + base
+    instructions: the referenced script must RESOLVE and define a top-level
+    ``def render(context, args)``.  A MANDATORY directive (``{{!py:}}``) whose
+    script is missing raises PrefetchError at session-prep; an OPTIONAL one
+    (``{{!py?:}}``) silently degrades — so the model never sees the content.
+
+    AST-only — does NOT import/execute the script (validate must be side-effect
+    free); it checks the contract structurally, not by running render().
+    """
+    import ast
+    from jaato_server.shared.script_loader import resolve_script_path
+    from jaato_server.shared.dynamic_instructions import _PY_PLACEHOLDER
+
+    for sub in ("agents", "instructions"):
+        d = ws / ".jaato" / sub
+        if not d.is_dir():
+            continue
+        for md in sorted(d.rglob("*.md")):
+            try:
+                content = md.read_text()
+            except (OSError, UnicodeDecodeError):
+                continue
+            if "{{!py" not in content:
+                continue
+            where = str(md.relative_to(ws))
+            for m in _PY_PLACEHOLDER.finditer(content):
+                is_optional = bool(m.group(1))
+                script_ref = m.group(2)
+                directive = f"{{{{!py{'?' if is_optional else ''}:{script_ref}}}}}"
+                path = resolve_script_path(
+                    script_ref, workspace_path=str(ws), config_root=config_root)
+                if path is None:
+                    out.append(Diagnostic(
+                        "warn" if is_optional else "error",
+                        "prefetch_script_missing",
+                        f"{directive} references a prefetch script that does not "
+                        f"resolve (searched <config_root>/ then ~/.jaato/)"
+                        + (" — optional, so it degrades at runtime"
+                           if is_optional else
+                           " — MANDATORY: session-prep will raise PrefetchError"),
+                        where=where))
+                    continue
+                try:
+                    tree = ast.parse(Path(path).read_text())
+                except (OSError, SyntaxError) as exc:
+                    out.append(Diagnostic(
+                        "error", "prefetch_script_syntax_error",
+                        f"{directive}: prefetch script {script_ref} fails to "
+                        f"parse: {exc}", where=where))
+                    continue
+                renders = [n for n in tree.body
+                           if isinstance(n, ast.FunctionDef) and n.name == "render"]
+                if not renders:
+                    out.append(Diagnostic(
+                        "error", "prefetch_render_missing",
+                        f"{directive}: prefetch script {script_ref} resolves but "
+                        f"defines no top-level `def render(context, args)` — it "
+                        f"will fail at session-prep", where=where))
+                    continue
+                a = renders[0].args
+                if len(a.args) < 2 and a.vararg is None:
+                    out.append(Diagnostic(
+                        "warn", "prefetch_render_signature",
+                        f"{directive}: prefetch script {script_ref} `render` takes "
+                        f"{len(a.args)} positional param(s); the contract is "
+                        f"`render(context, args)` (2)", where=where))
+
+
+#: Every completion-asset path is resolved by joining it onto the config root
+#: (``<config_root>/<path>``, i.e. ``<workspace>/.jaato/<path>`` by default),
+#: so writing the prefix yourself asks for ``<ws>/.jaato/.jaato/...``.
+_REDUNDANT_PATH_PREFIXES = (".jaato/", "./.jaato/")
+
+
+def _redundant_prefix(ref: str) -> Optional[str]:
+    """The ``.jaato/`` prefix a path should not carry, or ``None``.
+
+    ``resolve_completion_schema`` / ``resolve_script_path`` join a relative
+    reference onto the CONFIG ROOT — which is ``<workspace>/.jaato`` unless a
+    client overrode it — so ``.jaato/completion_schemas/x.json`` resolves to
+    ``<ws>/.jaato/.jaato/completion_schemas/x.json``.  That path never exists,
+    the resolver returns ``None``, and the consequence is silent: with no
+    schema the gate is dropped, ``signal_completion`` is hidden from the model,
+    and the session ends without ever completing.
+
+    The prefix is easy to write precisely because every OTHER path a profile
+    author touches — the workspace paths in tool calls, the paths in
+    ``explain paths`` — is spelled from the workspace root.
+    """
+    for prefix in _REDUNDANT_PATH_PREFIXES:
+        if ref.startswith(prefix):
+            return prefix
+    return None
+
+
+def _check_completion_assets(profiles, ws: Path, config_root: str, out) -> None:
+    """Every file a profile's completion gate names must RESOLVE.
+
+    Nothing checked these.  A ``completion_payload_schema`` or a
+    ``completion_processors[].script`` that does not resolve is a WARNING in
+    the runner log and nothing else: the schema-less gate hides
+    ``signal_completion`` entirely (``_should_hide_signal_completion``), so the
+    agent cannot signal, the framework spends its nudges re-prompting a model
+    that is hunting for a tool it will never find, and the driver gets ``None``
+    back from a session that looks like it ran.
+
+    Two findings, and the first is the cheap one:
+
+    ``redundant_config_root_prefix`` (**error**) — the path starts ``.jaato/``,
+    which the resolver adds itself.  Deterministically unresolvable, and named
+    separately because "file not found" sends an author looking on disk for a
+    file that is sitting exactly where they put it.
+
+    ``completion_asset_missing`` (**error**) — it resolves nowhere.  Error, not
+    warn, for the same reason ``prefetch_script_missing`` is one: this is a
+    declared asset the session cannot start correctly without, not a knob
+    somebody might be ignoring on purpose.
+
+    Side-effect free, like the rest of ``validate``: paths are LOCATED, never
+    loaded — importing a processor would execute it.
+    """
+    from jaato_server.shared.script_loader import resolve_script_path
+    from jaato_server.shared.completion_schema_loader import _resolve_schema_path
+
+    for pname, profile in sorted(profiles.items()):
+        # (reference, where, resolver, what an unresolved one COSTS)
+        _SCHEMA_COST = ("signal_completion is then HIDDEN from the model "
+                        "entirely, so the agent cannot signal and the session "
+                        "never completes")
+        _SCRIPT_COST = ("the gate then fails to load, and a processor that "
+                        "cannot load blocks every completion it was meant to "
+                        "check")
+        refs = []
+        schema = getattr(profile, "completion_payload_schema", None)
+        if isinstance(schema, str) and schema:
+            refs.append((schema, "completion_payload_schema",
+                         _resolve_schema_path, _SCHEMA_COST))
+        for i, entry in enumerate(getattr(profile, "completion_processors", None) or ()):
+            script = getattr(entry, "script", None)
+            if isinstance(script, str) and script:
+                refs.append((script, f"completion_processors[{i}].script",
+                             resolve_script_path, _SCRIPT_COST))
+
+        for ref, where, resolver, cost in refs:
+            prefix = _redundant_prefix(ref)
+            if prefix is not None:
+                out.append(Diagnostic(
+                    "error", "redundant_config_root_prefix",
+                    f"{ref!r} starts with {prefix!r} — the resolver joins this "
+                    f"path onto the config root (<workspace>/.jaato by "
+                    f"default), so it resolves to "
+                    f"<config_root>/{prefix}{ref[len(prefix):]}, which does not "
+                    f"exist.  Drop the prefix: {ref[len(prefix):]!r}.  Nothing "
+                    f"fails loudly: {cost}.",
+                    profile=pname, where=where))
+                continue
+            if Path(ref).is_absolute():
+                continue     # an absolute path is the author's own business
+            if resolver(ref, str(ws), config_root) is None:
+                out.append(Diagnostic(
+                    "error", "completion_asset_missing",
+                    f"{ref!r} resolves in no tier (tried <config_root>/{ref} "
+                    f"then ~/.jaato/{ref}).  Nothing fails loudly: {cost}.",
+                    profile=pname, where=where))
+
+
+def _check_initial_plans(profiles, ws: Path, config_root: str, out) -> None:
+    """A profile's predefined plan (``plugin_configs.todo.initial_plan_name``,
+    #1195) must name a plan that LOADS.
+
+    At runtime the same defect refuses the session (the knob is read by
+    ``JaatoSession.configure()``, which raises rather than start a session
+    without the plan its profile promised), so this is the cheap half: it
+    fires before any session exists.  Resolved and parsed by the SAME
+    function the session calls (:func:`~shared.plugins.todo.initial_plan.
+    load_initial_plan`), so the validator and the runtime cannot disagree
+    about which file a name means or whether it is a plan.  Reading a YAML
+    file with ``safe_load`` runs nothing, so validate stays side-effect free.
+
+    Three **error** findings, the posture ``completion_asset_missing`` and
+    ``default_agent_missing`` take for a declared asset the session cannot
+    start without:
+
+    * ``initial_plan_name_invalid`` — the value is not a plan id (a path, a
+      suffix, empty);
+    * ``initial_plan_missing`` — ``<config_root>/plans/<id>.yaml`` is absent;
+    * ``initial_plan_invalid`` — the file is not readable YAML, or not a
+      plan (no ``title``, no ``steps``, a step with no ``description``).
+    """
+    from jaato_server.shared.plugins.todo.initial_plan import (
+        INITIAL_PLAN_KNOB, InitialPlanError, load_initial_plan,
+    )
+
+    for pname, profile in sorted((profiles or {}).items()):
+        block = (getattr(profile, "plugin_configs", None) or {}).get("todo")
+        if not isinstance(block, dict) or INITIAL_PLAN_KNOB not in block:
+            continue
+        root = block.get("config_root") or config_root
+        try:
+            load_initial_plan(block[INITIAL_PLAN_KNOB], root, str(ws))
+        except InitialPlanError as exc:
+            out.append(Diagnostic(
+                "error", exc.code,
+                f"{exc} — a session of this profile is refused rather than "
+                f"started without its predefined plan",
+                profile=pname, where=f"plugin_configs.todo.{INITIAL_PLAN_KNOB}"))
+
+
+def _check_default_agent_exists(profiles, ws: Path, config_root: str, out) -> None:
+    """Flag a profile whose ``default_agent`` is not on disk (#944).
+
+    ``default_agent`` binds a profile's persona to the profile, so
+    ``spawn_subagent(profile=...)`` alone yields a subagent that has both
+    tools and instructions.  A name that resolves to no file fails at the
+    spawn — the one moment the caller can do nothing about it, since the
+    caller passed no agent at all.  This is the cheap half: it fires
+    without a spawn, like :func:`_check_spawn_schema_wire_types`.
+
+    Lookup only (:func:`find_agent_file`), never a render: rendering a
+    persona executes its ``{{!py:...}}`` prefetch scripts, and validate is
+    side-effect free.
+
+    Args:
+        profiles: Mapping of profile name -> resolved profile object.
+        ws: Workspace root.
+        config_root: Directory that the workspace agent tier resolves against.
+        out: Diagnostic list to append to.
+    """
+    from jaato_server.shared.plugins.subagent.config import find_agent_file
+
+    for pname, profile in sorted((profiles or {}).items()):
+        agent_name = getattr(profile, "default_agent", None)
+        if not agent_name:
+            continue
+        if find_agent_file(agent_name, str(ws), config_root) is not None:
+            continue
+        out.append(Diagnostic(
+            "error", "default_agent_missing",
+            f"profile declares default_agent '{agent_name}', which resolves "
+            f"to no file under <config_root>/agents|prompts/ or "
+            f"~/.jaato/agents|prompts/ — every spawn_subagent(profile="
+            f"'{pname}') that names no agent will fail",
+            profile=pname, where="default_agent"))
+
+
+def validate_workspace(
+    workspace: str,
+    *,
+    profile_set: Optional[str] = None,
+    only: Optional[str] = None,
+    config_root: Optional[str] = None,
+) -> List[Diagnostic]:
+    """Resolve + validate every profile in a workspace (optionally one set).
+
+    Reuses the framework's ``discover_profiles`` for resolution so the
+    effective profiles match what the daemon would load.  ``config_root``
+    overrides the ``<workspace>/.jaato`` tier the same way a client's
+    ``config_root`` does at session creation (the doctor passes its own).
+    """
+    from jaato_server.shared.plugins.subagent.config import discover_profiles
+
+    ws = Path(workspace).resolve()
+    config_root = str(Path(config_root).resolve()) if config_root else str(ws / ".jaato")
+    result = discover_profiles(
+        profiles_dir=".jaato/profiles",
+        base_path=str(ws),
+        config_root=config_root,
+        force_profile_set=profile_set,
+    )
+
+    # Source tier per profile.  ``discover_profiles`` merges the workspace tier
+    # AND the inherited user tier (~/.jaato/profiles) into one EFFECTIVE set (as
+    # the daemon resolves), so a workspace validation can surface findings from
+    # user-tier profiles the author doesn't own.  Tag each finding with its tier
+    # so the author can tell "mine" (workspace) from "inherited" (user): a
+    # profile is ``workspace`` iff a file with its name lives under
+    # ``<ws>/.jaato/profiles`` (the config_root tier); else it came from the user
+    # tier.  Workspace-level checks (.env, prefetch) are ``workspace``.
+    _ws_profiles = Path(config_root) / "profiles"
+    ws_stems = {
+        p.stem for p in _ws_profiles.rglob("*")
+        if p.is_file() and p.suffix in (".yaml", ".yml", ".json")
+    } if _ws_profiles.is_dir() else set()
+
+    def _tier(pname: Optional[str]) -> str:
+        return "workspace" if pname in ws_stems else "user"
+
+    out: List[Diagnostic] = []
+    for stem, err in (result.errors or {}).items():
+        out.append(Diagnostic("error", "parse_error", err, profile=stem,
+                              tier=_tier(stem)))
+
+    # workspace-level checks: .env cross-references (provider / profile-set)
+    # and what .gitignore does to .jaato/ (assets committable, state not)
+    for d in validate_env(str(ws)) + validate_gitignore(str(ws)):
+        d.tier = "workspace"
+        out.append(d)
+
+    providers = introspect.providers()
+    plugins = introspect.plugins()
+    gc_names = list(introspect.gc_strategies().keys())
+
+    # Names the workspace .env defines, so a trace path referencing one is not
+    # reported as an undefined ${VAR}.  Read here rather than per profile —
+    # every profile in the workspace resolves against the same file.
+    env_path = ws / ".env"
+    ws_env_keys = set(_parse_env(env_path.read_text(encoding="utf-8", errors="replace"))
+                      ) if env_path.is_file() else set()
+
+    items = result.profiles.items()
+    for pname, profile in sorted(items):
+        if only and pname != only:
+            continue
+        tier = _tier(pname)
+        for d in validate_profile(
+            profile, providers=providers, plugins=plugins, gc_names=gc_names,
+            env_keys=ws_env_keys,
+        ):
+            d.tier = tier
+            out.append(d)
+
+    # Prefetch directives in agent personas + base instructions: a {{!py:...}}
+    # pointing at a missing script (or a script without render()) raises
+    # PrefetchError at session-prep — surface it here, before runtime.  These are
+    # workspace-tier assets.
+    _before = len(out)
+    _check_profile_file_keys(config_root, out)
+    _check_prefetch_directives(ws, config_root, out)
+    _check_spawn_schema_wire_types(result.profiles, config_root, out)
+    _check_completion_assets(result.profiles, ws, config_root, out)
+    _check_initial_plans(result.profiles, ws, config_root, out)
+    _check_default_agent_exists(result.profiles, ws, config_root, out)
+    _check_memory_curation(result.profiles, out)
+    _check_regulatory_declared(result.profiles, out)
+    for d in out[_before:]:
+        d.tier = "workspace"
+    return out
+
+
+def _check_regulatory_declared(profiles, out) -> None:
+    """No profile in the workspace declares ``regulatory:`` at all.
+
+    Every other EU AI Act finding needs a declaration to bite on:
+    ``disclosure_absent`` fires on a persona-bound profile, the
+    ``high_risk_*`` errors under a declared class, ``record_keeping_inert``
+    on a declared block.  A workspace generated the documented way -- two
+    stages from ``new profile-set`` -- declared none of them and got a clean
+    bill, so the author who most needed to hear that the keys exist was the
+    one ``validate`` said nothing to.  Measured before this finding: a fresh
+    set validated with ``budget_control_absent`` and nothing else.
+
+    A NUDGE, and only that.  ``warn``, the posture ``budget_control_absent``
+    takes for a knob whose absence is a legitimate choice for a local tool
+    and a silent one for a deployment.  Once, for the workspace, not per
+    profile: the block describes the application, and one declaration
+    anywhere in the tree (a tier-1 base every set inherits) is the normal
+    shape.  And it asserts nothing about the class -- absent is undeclared,
+    which the framework documents as unknown and never as ``minimal``.
+
+    Silent only for a workspace with no profiles (nothing to declare on).
+    Deliberately NOT the ``missing_model`` carve-out for abstract bases: a
+    tier-1 base is where the block belongs (it describes the application,
+    every set inherits it), and ``validate <workspace>`` with no ``--set``
+    sees exactly those bases -- so exempting them would silence the nudge
+    on the one invocation a fresh workspace's author is likeliest to run.
+    """
+    if not profiles:
+        return
+    if any(getattr(prof, "regulatory", None) is not None for prof in profiles.values()):
+        return
+    out.append(Diagnostic(
+        "warn", "regulatory_undeclared",
+        "no profile in this workspace declares a `regulatory:` block, so "
+        "nothing here says what the application is for, who provides it, or "
+        "whether natural persons interact with it — and every other EU AI "
+        "Act check (disclosure_absent, the high_risk_* errors, "
+        "record_keeping_inert) waits on that declaration.  Absent is "
+        "UNDECLARED, never minimal: the determination is the provider's "
+        "(Art. 6(4)).  Add it to the tier-1 base every set inherits — "
+        "`regulatory: {intended_purpose, risk_class, interacts_with_persons, "
+        "provider: {name, contact}}` — then `explain oversight <profile>` and "
+        "`explain audit <profile>` say what it armed.  `new profile-set` "
+        "emits the block commented out.",
+        profile=None, where="regulatory",
+    ))
+
+
+def _provider_knob_tail(cfg_provider, cfg_name, layer_name, key):
+    """What to SAY about an undeclared provider knob, and at what severity.
+
+    The contract was violated — that much the validator always knows, and it
+    is why this family is ``error`` rather than ``warn``: ``PROVIDER_KNOBS`` is
+    a closed declared set, and ``layer.opaque`` already exempts the genuinely
+    pass-through layers.  What happens NEXT is a different claim, and the old
+    single tail asserted the one outcome that is most often wrong (#1008)::
+
+        "(silently ignored at runtime)"
+
+    For the fourteen providers whose request builder allow-lists ``api_params``
+    (``_openai_compat`` and its inheritors) an unrecognized key is dropped
+    BEFORE the request and ``_read_api_params`` logs a WARNING naming it —
+    loudly ignored, not silently.  Elsewhere the key might instead be
+    forwarded into a vendor 400.  So the consequence is stated only where the
+    tree establishes it, and the evidence is quoted the way #1005 quotes a
+    plugin's read site.
+
+    Three answers, from what
+    :func:`~shared.scaffold.introspect.provider_api_params_forwarding`
+    established:
+
+    * an allow-list governs the layer and does NOT contain the key → it is
+      dropped before the request, with a warning.  ``error``;
+    * an allow-list governs the layer and DOES contain the key → the
+      provider's code forwards a key its own declaration omits, so the
+      DECLARATION is what is incomplete and the author's profile works.
+      ``warn`` / ``undeclared_knob``, mirroring #1005's plugin-side split;
+    * no allow-list, or one that could not be read statically → say the
+      declaration was violated and stop there.
+
+    Returns ``(severity, code, tail)``.
+    """
+    fwd = (introspect.provider_api_params_forwarding(cfg_provider.dir_name)
+           if layer_name == "api_params" else None)
+    forwarded = fwd["forwarded"] if fwd else None
+    if forwarded is not None and key in forwarded:
+        return ("warn", "undeclared_knob",
+                f"absent from {cfg_name}'s declared {layer_name} knobs, but "
+                f"the provider's own forwarding allow-list names it "
+                f"({fwd['where']}) — so it does reach the request, and "
+                f"'explain provider {cfg_name}' will not list it")
+    if forwarded is not None:
+        return ("error", "unknown_knob",
+                f"not a valid {cfg_name} {layer_name} knob — the provider "
+                f"allow-lists the {layer_name} it forwards ({fwd['where']}) "
+                f"and this key is outside it, so it is dropped before the "
+                f"request reaches the vendor, with a WARNING naming it")
+    return ("error", "unknown_knob",
+            f"not a valid {cfg_name} {layer_name} knob — PROVIDER_KNOBS "
+            f"declares the accepted set and this key is outside it; what the "
+            f"provider does with it next was not established here")
+
+
+def _known_layer_keys(knobs, layer_name, extra=()):
+    """The accepted key names of one declared layer, plus *extra*.
+
+    A helper rather than an expression at the call site: ``validate_profile``
+    is baselined by the complexity ratchet at its current size, and a layer
+    that may be absent costs a branch there.
+    """
+    layer = knobs.get_layer(layer_name)
+    return (set(layer.keys) if layer is not None else set()) | set(extra)
+
+
+def _report_provider_unknown_knob(cfg_provider, cfg_name, layer_name, key,
+                                  known, add, where):
+    """Emit one undeclared-provider-knob finding, evidence-first (#1008)."""
+    severity, code, tail = _provider_knob_tail(
+        cfg_provider, cfg_name, layer_name, key)
+    known_txt = f" (known: {', '.join(sorted(known))})" if known else ""
+    add(severity, code, f"'{key}' is {tail}{known_txt}", where=where)

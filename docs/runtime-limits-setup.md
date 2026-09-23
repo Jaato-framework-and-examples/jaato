@@ -213,16 +213,16 @@ Explicit control is available too:
 
 ```bash
 # Auto-detect (default)
-python -m server.websocket --host 0.0.0.0 --port 8089 --workspace-root ~/.jaato/workspaces
+python -m jaato_server.websocket --host 0.0.0.0 --port 8089 --workspace-root ~/.jaato/workspaces
 
 # Explicitly enable — logs a warning if prerequisites are missing
-python -m server.websocket --host 0.0.0.0 --port 8089 --workspace-root ~/.jaato/workspaces --cgroups
+python -m jaato_server.websocket --host 0.0.0.0 --port 8089 --workspace-root ~/.jaato/workspaces --cgroups
 
 # Explicitly disable (app-layer caps still apply)
-python -m server.websocket --host 0.0.0.0 --port 8089 --workspace-root ~/.jaato/workspaces --no-cgroups
+python -m jaato_server.websocket --host 0.0.0.0 --port 8089 --workspace-root ~/.jaato/workspaces --no-cgroups
 
 # Custom cgroup root
-python -m server.websocket --host 0.0.0.0 --port 8089 --workspace-root ~/.jaato/workspaces --cgroups-root /sys/fs/cgroup/my-jaato
+python -m jaato_server.websocket --host 0.0.0.0 --port 8089 --workspace-root ~/.jaato/workspaces --cgroups-root /sys/fs/cgroup/my-jaato
 ```
 
 Check the log:
@@ -449,6 +449,6 @@ Both features auto-detect, fall back gracefully, and use the same `--{feature}` 
 ## See also
 
 - [AppArmor Workspace Isolation](apparmor-setup.md) — the orthogonal sandboxing axis.
-- [`server/cgroups.py`](../jaato-server/server/cgroups.py) — `RuntimeLimits` dataclass + `CgroupsManager` lifecycle.
-- [`shared/runtime_limits.py`](../jaato-server/shared/runtime_limits.py) — the dataclass shared between server and subagent profile schema.
+- [`jaato_server/server/cgroups.py`](../jaato-server/jaato_server/server/cgroups.py) — `RuntimeLimits` dataclass + `CgroupsManager` lifecycle.
+- [`jaato_server/shared/runtime_limits.py`](../jaato-server/jaato_server/shared/runtime_limits.py) — the dataclass shared between server and subagent profile schema.
 - [OpenTelemetry design](opentelemetry-design.md) — span hierarchy this hooks into.

@@ -594,7 +594,7 @@ nobody*, never *guess*. Positive evidence only, the posture #1014 and
 which is legitimate there and is the whole reason the two accessors must
 not be the same function.
 
-**One ContextVar, one definition.** `shared/session_context.py` imports
+**One ContextVar, one definition.** `jaato_server/shared/session_context.py` imports
 the trio rather than declaring its own (`:82-86`), because — its
 docstring again — *"a second copy in the SDK would read empty, fall
 through to `os.environ`, and reintroduce the bug in a form that looks

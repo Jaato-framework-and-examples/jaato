@@ -1,0 +1,803 @@
+"""Shell session wrapper around pexpect/wexpect with idle-based output detection.
+
+Instead of requiring the caller to specify expect patterns, this module
+uses idle detection: it reads until the process stops producing output
+for a configurable period. This lets the calling model read whatever
+appeared and make its own decisions about what to send next.
+
+Backend selection:
+- Unix/macOS: pexpect (PTY-based, full terminal emulation)
+- Windows + MSYS2: pexpect.PopenSpawn (subprocess pipes with timeout support)
+  because wexpect's Windows console APIs don't work reliably with
+  Cygwin-based MSYS2 executables (bash, etc.), causing hangs.
+  If pexpect is unavailable, falls back to wexpect.
+- Windows (native): wexpect (Windows console and named pipes)
+"""
+
+import logging
+import os
+import sys
+import time
+import threading
+from typing import Callable, Optional, Dict, Any, Sequence
+
+from .ansi import strip_ansi
+from ..workspace_venv import apply_venv_to_env
+from jaato_server.shared.secret_scrub import scrub_env as _scrub_secret_env
+from jaato_server.shared.ai_tool_runner import get_current_cancel_token
+from jaato_sdk.plugins.model_provider.types import CancelledException
+
+IS_WINDOWS = sys.platform == "win32"
+
+# Detect MSYS2 early — before choosing backend.
+# In MSYS2, wexpect (Windows console APIs) doesn't work reliably with
+# Cygwin-based executables (bash, python3, etc.), causing blocking reads
+# that never return.  We prefer pexpect's PopenSpawn instead.
+IS_MSYS2 = False
+if IS_WINDOWS:
+    try:
+        from jaato_server.shared.path_utils import is_msys2_environment
+        IS_MSYS2 = is_msys2_environment()
+    except ImportError:
+        IS_MSYS2 = False
+
+# Backend function/exception references.  On Windows these are populated
+# lazily so the module can be imported (and the plugin registered) even
+# when wexpect/pexpect is not yet installed.
+_spawn = None
+_TIMEOUT = None
+_EOF = None
+_BACKEND_ERROR: Optional[str] = None
+
+# Which backend is in use: 'pexpect', 'popen_spawn', or 'wexpect'.
+# Used to select the correct spawn parameters, idle-detection path,
+# and process cleanup strategy.
+_BACKEND: Optional[str] = None
+
+
+def _try_import_wexpect() -> bool:
+    """Try to import wexpect, installing a pkg_resources stub if needed.
+
+    wexpect has a bare ``import pkg_resources`` at module level (no
+    try/except guard).  On Python 3.12+ pkg_resources is only available
+    when setuptools is installed.  We inject a minimal stub so the import
+    succeeds — wexpect only uses it for version detection and already
+    has its own fallback for that.
+
+    Returns:
+        True if wexpect was imported successfully and _spawn/_TIMEOUT/_EOF
+        were set.  False otherwise (with _BACKEND_ERROR set).
+    """
+    global _spawn, _TIMEOUT, _EOF, _BACKEND, _BACKEND_ERROR
+
+    try:
+        import pkg_resources  # noqa: F401 — test if it's available
+    except ImportError:
+        import types as _types
+        _stub = _types.ModuleType("pkg_resources")
+        _stub.require = lambda *a, **kw: (_ for _ in ()).throw(  # type: ignore[attr-defined]
+            Exception("pkg_resources stub")
+        )
+        sys.modules["pkg_resources"] = _stub
+
+    try:
+        import wexpect
+        _spawn = wexpect.spawn
+        _TIMEOUT = wexpect.TIMEOUT
+        _EOF = wexpect.EOF
+        _BACKEND = 'wexpect'
+        return True
+    except ImportError as _exc:
+        if "pkg_resources" in str(_exc):
+            _BACKEND_ERROR = (
+                "wexpect failed to import because pkg_resources is missing. "
+                "On Python 3.12+ pkg_resources is no longer bundled by default. "
+                "Install it with: pip install setuptools wexpect"
+            )
+        else:
+            _BACKEND_ERROR = (
+                "wexpect is required for interactive shell sessions on Windows. "
+                "Install it with: pip install wexpect"
+            )
+        return False
+
+
+if IS_WINDOWS and IS_MSYS2:
+    # -----------------------------------------------------------------
+    # MSYS2 environment (Git Bash / MINGW64 / UCRT64 / etc.)
+    #
+    # wexpect spawns processes via Windows console APIs and communicates
+    # through named pipes.  Cygwin-based MSYS2 executables don't write
+    # to those pipes in the expected way, causing read_nonblocking() to
+    # block indefinitely.
+    #
+    # Strategy:
+    #  1. Try pexpect.spawn (requires the pty module — available in MSYS
+    #     Python but not in MINGW Python).
+    #  2. Fall back to pexpect.popen_spawn.PopenSpawn which uses
+    #     subprocess.Popen with stdin/stdout pipes and a background reader
+    #     thread for non-blocking I/O.  No PTY, but reliable timeout
+    #     behavior on all platforms.
+    #  3. Last resort: wexpect (may still hang with MSYS2 commands, but
+    #     at least the user gets a clear message).
+    # -----------------------------------------------------------------
+    _imported = False
+
+    # (1) Try pexpect.spawn — full PTY support (MSYS Python only)
+    if not _imported:
+        try:
+            import pty as _pty_check  # noqa: F401 — probe for pty availability
+            import pexpect
+            _spawn = pexpect.spawn
+            _TIMEOUT = pexpect.TIMEOUT
+            _EOF = pexpect.EOF
+            _BACKEND = 'pexpect'
+            _imported = True
+        except ImportError:
+            pass
+
+    # (2) Try pexpect.popen_spawn.PopenSpawn — subprocess pipes
+    if not _imported:
+        try:
+            import pexpect
+            from pexpect.popen_spawn import PopenSpawn as _PopenSpawn
+            _spawn = _PopenSpawn
+            _TIMEOUT = pexpect.TIMEOUT
+            _EOF = pexpect.EOF
+            _BACKEND = 'popen_spawn'
+            _imported = True
+        except ImportError:
+            pass
+
+    # (3) Last resort: wexpect
+    if not _imported:
+        if not _try_import_wexpect():
+            # _BACKEND_ERROR already set by _try_import_wexpect()
+            if not _BACKEND_ERROR:
+                _BACKEND_ERROR = (
+                    "No interactive shell backend available for MSYS2. "
+                    "Install pexpect (recommended): pip install pexpect  — or — "
+                    "wexpect: pip install wexpect"
+                )
+
+elif IS_WINDOWS:
+    # -----------------------------------------------------------------
+    # Regular Windows (not MSYS2) — use wexpect for console interaction.
+    # -----------------------------------------------------------------
+    _try_import_wexpect()
+
+else:
+    # -----------------------------------------------------------------
+    # Unix / macOS — use pexpect with full PTY support.
+    # -----------------------------------------------------------------
+    import pexpect
+    _spawn = pexpect.spawn
+    _TIMEOUT = pexpect.TIMEOUT
+    _EOF = pexpect.EOF
+    _BACKEND = 'pexpect'
+
+
+logger = logging.getLogger(__name__)
+
+# Default PTY dimensions
+DEFAULT_ROWS = 24
+DEFAULT_COLS = 80
+
+# Default idle detection: how long (seconds) the process must be silent
+# before we consider its output "settled" and return it to the caller.
+DEFAULT_IDLE_TIMEOUT = 0.5
+
+# Hard ceiling on how long to wait for output in a single read call.
+DEFAULT_MAX_WAIT = 30.0
+
+# Maximum output buffer size per session (bytes).
+DEFAULT_MAX_BUFFER = 64 * 1024
+
+# Default session lifetime ceiling (seconds).
+DEFAULT_MAX_LIFETIME = 600  # 10 minutes
+
+
+def _verify_cwd_within(
+    cwd: Optional[str],
+    workspace_root: Optional[str],
+) -> None:
+    """Refuse a spawn whose working directory escapes the workspace.
+
+    The ``cwd`` half of jaato issue #503: a PTY started outside the
+    session workspace makes every relative path the model types an escape
+    before it is typed, so the boundary has to hold at the spawn.  Both
+    sides are canonicalised first, for the reason
+    :func:`shared.plugins.sandbox_utils.is_under_temp_path` documents — a
+    directory compared as written admits a symlink for where the link
+    lives rather than where it points.
+
+    Args:
+        cwd: Working directory for the process, or ``None`` (inherit the
+            parent's, which is not this function's business to judge).
+        workspace_root: The boundary, or ``None`` when the caller asserts
+            none — in which case any *cwd* is accepted, matching the
+            "no sandboxing configured" branch every other path check has.
+
+    Raises:
+        ValueError: If *cwd* resolves outside *workspace_root*.  A raise
+            rather than a returned verdict because a half-started session
+            in the wrong directory is worse than no session: the caller
+            (``InteractiveShellPlugin._exec_spawn``) turns it into a tool
+            error like any other spawn failure.
+    """
+    if not cwd or not workspace_root:
+        return
+    real_cwd = os.path.realpath(cwd)
+    real_root = os.path.realpath(workspace_root)
+    if real_cwd != real_root and not real_cwd.startswith(
+        real_root.rstrip(os.sep) + os.sep
+    ):
+        raise ValueError(
+            f"working directory {cwd!r} is outside the session workspace "
+            f"{workspace_root!r}"
+        )
+
+
+class ShellSession:
+    """Wraps a single pexpect/wexpect-spawned process with idle-based I/O.
+
+    The key insight: instead of expect(pattern), we use read_until_idle()
+    which returns all output the process produced until it goes quiet.
+    The model then reads that output and decides what to do.
+
+    Backend selection (determined at module import time):
+    - pexpect: Full PTY support (Unix, macOS, MSYS Python with pty).
+    - popen_spawn: subprocess.Popen with piped I/O (MSYS2 with MINGW Python).
+      No real PTY — child isatty() returns False, no terminal dimensions —
+      but reliable timeout behavior via pexpect's background reader thread.
+    - wexpect: Windows console APIs and named pipes (native Windows).
+
+    The active backend is stored in the module-level ``_BACKEND`` variable.
+
+    Lifetime and the state that measures it
+    ---------------------------------------
+    A session is born in ``__init__`` (the process is spawned there, so a
+    constructed ``ShellSession`` is always a running one or an exception)
+    and dies in :meth:`close`, which is the only transition out.  Three
+    attributes carry the clock, and the plugin's reaper thread — not this
+    class — is what acts on them:
+
+    ============================ ===========================================
+    ``created_at``               spawn time.  :attr:`age_seconds` is
+                                 measured from it against ``max_lifetime``.
+    ``last_interaction``         bumped by every read/write; the plugin's
+                                 ``max_idle`` is measured from it.
+    ``max_lifetime``             the ceiling itself, held here so the
+                                 reaper can ask a session rather than
+                                 remember a value per session.
+    ============================ ===========================================
+
+    So the object holds the measurements and the *policy lives one level
+    up*: ``InteractiveShellPlugin`` owns the reaper thread, the
+    ``max_idle`` ceiling and the session map, and calls :meth:`close` on
+    whatever has expired.  A closed session stays in that map until the
+    reaper removes it; :attr:`is_alive` is what distinguishes the two.
+
+    Containment: the spawn ``cwd`` is verified against *workspace_root*
+    before the process starts (jaato #503) — see
+    :func:`_verify_cwd_within`.  What the model may *type* into a live
+    session is not this class's question; ``InteractiveShellPlugin``
+    answers it (#722).
+    """
+
+    # Polling interval for wexpect's non-blocking reads (seconds).
+    _POLL_INTERVAL = 0.05
+
+    def __init__(
+        self,
+        command: str,
+        session_id: str,
+        rows: int = DEFAULT_ROWS,
+        cols: int = DEFAULT_COLS,
+        idle_timeout: float = DEFAULT_IDLE_TIMEOUT,
+        max_wait: float = DEFAULT_MAX_WAIT,
+        max_lifetime: float = DEFAULT_MAX_LIFETIME,
+        env: Optional[Dict[str, str]] = None,
+        cwd: Optional[str] = None,
+        preexec_fn: Optional[Callable[[], None]] = None,
+        workspace_venv: Optional[str] = None,
+        scrub_env: Optional[Sequence[str]] = None,
+        workspace_root: Optional[str] = None,
+    ):
+        """Spawn an interactive process and prepare idle-based I/O.
+
+        Args:
+            command: Shell command to run (e.g. ``"python3"``, ``"bash --norc"``).
+            session_id: Unique identifier for this session.
+            rows: PTY height.  **Ignored by the ``popen_spawn`` backend** (MSYS2)
+                because ``PopenSpawn`` uses plain pipes with no terminal.
+            cols: PTY width.  Same caveat as *rows*.
+            idle_timeout: Seconds of silence before output is considered settled.
+            max_wait: Hard ceiling on any single read operation.
+            max_lifetime: Session lifetime ceiling (seconds).
+            env: Extra environment variables merged into ``os.environ``.
+            cwd: Working directory for the spawned process.
+            workspace_venv: Absolute path to a pre-created workspace venv to
+                activate for this session (venv ``bin`` prepended to ``PATH``,
+                ``VIRTUAL_ENV`` set, site-packages prepended to ``PYTHONPATH``).
+                ``None`` = no venv activation.  The caller (plugin) is
+                responsible for resolving the path and creating the venv.
+            preexec_fn: Optional zero-arg callable run between fork() and
+                exec() in the child.  Used by the cgroups runtime to
+                attach the spawned PTY child to a per-session cgroup
+                before the new program starts.  Honoured by the
+                ``pexpect`` and ``popen_spawn`` backends.  Ignored by
+                ``wexpect`` (Windows native — no fork).
+            scrub_env: Secret env-var name globs (see
+                :mod:`shared.secret_scrub`) removed from the INHERITED
+                ``os.environ`` copy before *env* is overlaid — so a
+                variable the caller hands over explicitly is a grant that
+                survives, while the runner's own credentials do not reach
+                a model-driven shell.  ``None`` / empty = no scrubbing (the
+                plugin resolves the policy; the session only applies it).
+            workspace_root: Session workspace the *cwd* must stay inside
+                (jaato issue #503).  ``None`` = the caller asserts no
+                boundary, which is what a standalone / unsandboxed use
+                means and what every pre-#722 caller got.  The plugin
+                always passes its own ``_workspace_root``, where *cwd* is
+                that same directory — so the check is a tautology on
+                today's only caller, and that is the point: the invariant
+                is enforced at the seam that spawns rather than left as a
+                property of one call site that a later caller could drop.
+                Both sides are resolved (``realpath``) before comparison,
+                so a symlinked *cwd* pointing out of the workspace is
+                refused rather than admitted for where the link lives.
+
+        Raises:
+            ImportError: If no backend is available (``_spawn is None``).
+            ValueError: If *cwd* resolves outside *workspace_root*.
+        """
+        if _spawn is None:
+            raise ImportError(_BACKEND_ERROR or "No PTY backend available")
+
+        _verify_cwd_within(cwd, workspace_root)
+
+        self.session_id = session_id
+        self.command = command
+        self.idle_timeout = idle_timeout
+        self.max_wait = max_wait
+        self.max_lifetime = max_lifetime
+        self.created_at = time.time()
+        self.last_interaction = time.time()
+
+        # Merge extra env vars with current environment.  The inherited copy
+        # is scrubbed FIRST (secrets-broker, #503/#863); the caller's
+        # explicit ``env`` is overlaid afterwards and never scrubbed, the
+        # same grant rule the MCP spawn applies to a server's own ``env``.
+        spawn_env = _scrub_secret_env(os.environ, scrub_env or ())
+        # Disable pager programs that would block
+        spawn_env['PAGER'] = 'cat'
+        spawn_env['GIT_PAGER'] = 'cat'
+        # Force dumb terminal to reduce escape sequences
+        spawn_env['TERM'] = 'dumb'
+        # Prevent spawned shells from writing to the user's history file
+        spawn_env['HISTFILE'] = ''
+        spawn_env['HISTSIZE'] = '0'
+        spawn_env['SAVEHIST'] = '0'
+        spawn_env['fish_history'] = ''
+        if env:
+            spawn_env.update(env)
+        # Activate the workspace venv last so its PATH/PYTHONPATH prepend wins
+        # over any caller-supplied env.
+        if workspace_venv:
+            apply_venv_to_env(spawn_env, workspace_venv)
+
+        if _BACKEND == 'popen_spawn':
+            # PopenSpawn: subprocess.Popen with piped stdin/stdout.
+            # No PTY (no terminal dimensions, child isatty() returns False)
+            # but reliable timeout behavior on all platforms including MSYS2.
+            # PopenSpawn forwards **kwargs to subprocess.Popen, so
+            # preexec_fn passes through unchanged.
+            popen_kwargs: Dict[str, Any] = {}
+            if preexec_fn is not None:
+                popen_kwargs['preexec_fn'] = preexec_fn
+            self._process = _spawn(
+                command,
+                encoding='utf-8',
+                timeout=max_wait,
+                env=spawn_env,
+                cwd=cwd,
+                **popen_kwargs,
+            )
+        elif _BACKEND == 'wexpect':
+            # wexpect uses codepage instead of encoding, and doesn't
+            # support the dimensions parameter.  codepage=65001 → UTF-8.
+            # No preexec_fn equivalent on Windows (no fork model);
+            # cgroups don't apply on this platform anyway.
+            self._process = _spawn(
+                command,
+                timeout=max_wait,
+                env=spawn_env,
+                cwd=cwd,
+                codepage=65001,
+            )
+        else:
+            # pexpect with full PTY support (Unix or MSYS Python with pty).
+            # pexpect.spawn accepts preexec_fn directly — runs in the
+            # forked child between fork() and exec() of the PTY slave.
+            spawn_kwargs: Dict[str, Any] = {}
+            if preexec_fn is not None:
+                spawn_kwargs['preexec_fn'] = preexec_fn
+            self._process = _spawn(
+                command,
+                encoding='utf-8',
+                timeout=max_wait,
+                dimensions=(rows, cols),
+                env=spawn_env,
+                cwd=cwd,
+                **spawn_kwargs,
+            )
+
+        # Lock for thread-safe access to the process
+        self._lock = threading.Lock()
+
+    @property
+    def is_alive(self) -> bool:
+        """Check if the underlying process is still running."""
+        return self._process.isalive()
+
+    @property
+    def age_seconds(self) -> float:
+        """Seconds since this session was created."""
+        return time.time() - self.created_at
+
+    @property
+    def idle_seconds(self) -> float:
+        """Seconds since the last interaction (send or read)."""
+        return time.time() - self.last_interaction
+
+    @property
+    def is_expired(self) -> bool:
+        """Whether this session has exceeded its max lifetime."""
+        return self.age_seconds > self.max_lifetime
+
+    def read_initial_output(self) -> str:
+        """Read initial output after spawning, using idle detection.
+
+        Called once right after spawn to capture the program's first
+        output (banner, prompt, etc.).
+
+        Returns:
+            Clean text output from the process.
+        """
+        return self._read_until_idle()
+
+    def send_input(self, text: str) -> str:
+        """Send text input to the process and return the response.
+
+        Sends the text (which should include \\n if Enter is intended),
+        then waits for the process to settle via idle detection.
+
+        Args:
+            text: Text to send to the process. Include \\n for Enter.
+
+        Returns:
+            Clean text output that appeared after sending the input.
+        """
+        with self._lock:
+            self.last_interaction = time.time()
+            self._process.send(text)
+            return self._read_until_idle()
+
+    def send_control(self, key: str) -> str:
+        """Send a control character to the process.
+
+        Args:
+            key: Control key identifier. Supported:
+                "c-c" or "c": Ctrl+C (SIGINT)
+                "c-d" or "d": Ctrl+D (EOF)
+                "c-z" or "z": Ctrl+Z (SIGTSTP)
+                "c-\\\\" or "\\\\": Ctrl+\\ (SIGQUIT)
+                "c-l" or "l": Ctrl+L (clear screen)
+
+        Returns:
+            Clean text output that appeared after the control signal.
+        """
+        control_map = {
+            'c-c': '\x03',
+            'c': '\x03',
+            'c-d': '\x04',
+            'd': '\x04',
+            'c-z': '\x1a',
+            'z': '\x1a',
+            'c-\\': '\x1c',
+            '\\': '\x1c',
+            'c-l': '\x0c',
+            'l': '\x0c',
+        }
+
+        char = control_map.get(key)
+        if char is None:
+            raise ValueError(
+                f"Unknown control key: {key!r}. "
+                f"Supported: {', '.join(sorted(control_map.keys()))}"
+            )
+
+        with self._lock:
+            self.last_interaction = time.time()
+            self._process.send(char)
+            return self._read_until_idle()
+
+    def read_output(self, timeout: Optional[float] = None) -> str:
+        """Non-blocking read of any pending output.
+
+        Useful for checking on long-running operations without sending
+        input, or reading output that arrived between tool calls.
+
+        Args:
+            timeout: How long to wait for output. Defaults to idle_timeout.
+
+        Returns:
+            Clean text output, possibly empty if nothing new.
+        """
+        with self._lock:
+            self.last_interaction = time.time()
+            return self._read_until_idle(
+                idle_timeout=timeout or self.idle_timeout
+            )
+
+    def close(self) -> Dict[str, Any]:
+        """Gracefully terminate the session.
+
+        Escalation strategy (adapts to backend):
+        1. Send EOF and read remaining output.
+        2. Request graceful termination (SIGTERM / terminate(force=False)).
+        3. Force-kill if still alive (SIGKILL / terminate(force=True)).
+
+        PopenSpawn uses subprocess.Popen internally and lacks pexpect's
+        terminate(force=bool); we fall back to proc.terminate()/proc.kill().
+
+        Returns:
+            Dict with exit_status and final_output.
+        """
+        final_output = ""
+
+        with self._lock:
+            if self._process.isalive():
+                try:
+                    # Try graceful EOF first
+                    self._process.sendeof()
+                    # Read any final output
+                    final_output = self._read_until_idle(idle_timeout=1.0)
+                except (_EOF, OSError):
+                    pass
+
+            if self._process.isalive():
+                try:
+                    if hasattr(self._process, 'terminate'):
+                        # pexpect.spawn / wexpect.spawn
+                        self._process.terminate(force=False)
+                        self._process.wait()
+                    elif hasattr(self._process, 'proc'):
+                        # PopenSpawn: use the underlying subprocess.Popen
+                        self._process.proc.terminate()
+                        self._process.proc.wait(timeout=5)
+                except Exception:
+                    pass
+
+            if self._process.isalive():
+                try:
+                    if hasattr(self._process, 'terminate'):
+                        self._process.terminate(force=True)
+                    elif hasattr(self._process, 'proc'):
+                        self._process.proc.kill()
+                except Exception:
+                    pass
+
+        exit_status = self._process.exitstatus
+        # PopenSpawn may not set exitstatus until wait() is called;
+        # fall back to Popen.returncode.
+        if exit_status is None and hasattr(self._process, 'proc'):
+            exit_status = self._process.proc.returncode
+        # signalstatus is Unix-only (not available in wexpect or PopenSpawn)
+        signal_status = getattr(self._process, 'signalstatus', None)
+
+        return {
+            'exit_status': exit_status if exit_status is not None else signal_status,
+            'final_output': strip_ansi(final_output),
+        }
+
+    def _read_until_idle(
+        self,
+        idle_timeout: Optional[float] = None,
+        max_wait: Optional[float] = None,
+    ) -> str:
+        """Read output until the process stops producing it.
+
+        Uses adaptive idle detection: reads in short bursts and considers
+        output "settled" when no new data arrives for idle_timeout seconds.
+
+        On Unix (pexpect), ``read_nonblocking(size, timeout)`` handles the
+        idle wait internally.  On Windows (wexpect), ``read_nonblocking``
+        is truly non-blocking (no *timeout* parameter), so we poll with
+        a short sleep and track the idle interval ourselves.
+
+        Args:
+            idle_timeout: Seconds of silence before output is considered settled.
+                Defaults to self.idle_timeout.
+            max_wait: Hard ceiling on total wait time.
+                Defaults to self.max_wait.
+
+        Returns:
+            Raw text output since last read (may contain ANSI escape sequences).
+            Callers should use strip_ansi() when preparing output for the model.
+        """
+        idle_timeout = idle_timeout if idle_timeout is not None else self.idle_timeout
+        max_wait = max_wait if max_wait is not None else self.max_wait
+        deadline = time.time() + max_wait
+        chunks: list[str] = []
+        total_bytes = 0
+
+        if _BACKEND == 'wexpect':
+            # wexpect's read_nonblocking is blocking (win32file.ReadFile);
+            # needs the special peek-before-read loop.
+            return self._read_until_idle_windows(
+                idle_timeout, deadline, chunks, total_bytes,
+            )
+        else:
+            # Both pexpect.spawn and PopenSpawn support a timeout parameter
+            # in read_nonblocking (pexpect uses PTY poll, PopenSpawn uses a
+            # Queue with timeout), so the Unix-style loop works for both.
+            return self._read_until_idle_unix(
+                idle_timeout, deadline, chunks, total_bytes,
+            )
+
+    def _read_until_idle_unix(
+        self,
+        idle_timeout: float,
+        deadline: float,
+        chunks: list[str],
+        total_bytes: int,
+    ) -> str:
+        """pexpect path: read_nonblocking handles the idle wait internally."""
+        cancel_token = get_current_cancel_token()
+        while time.time() < deadline:
+            if cancel_token is not None and cancel_token.is_cancelled:
+                raise CancelledException("Interactive shell read cancelled")
+            try:
+                chunk = self._process.read_nonblocking(
+                    size=4096,
+                    timeout=idle_timeout,
+                )
+                if chunk:
+                    chunks.append(chunk)
+                    total_bytes += len(chunk)
+                    # Safety: cap buffer to prevent runaway accumulation
+                    if total_bytes > DEFAULT_MAX_BUFFER:
+                        break
+            except _TIMEOUT:
+                # No data for idle_timeout — output has settled
+                break
+            except _EOF:
+                # Process exited
+                break
+
+        return ''.join(chunks)
+
+    def _wexpect_read_with_timeout(self, size: int, timeout: float) -> str:
+        """Run wexpect's blocking read_nonblocking in a daemon thread with a timeout.
+
+        wexpect's ``read_nonblocking`` calls ``win32file.ReadFile`` which blocks
+        indefinitely when no data is available and ``PeekNamedPipe`` is not
+        usable. This helper offloads the blocking call to a daemon thread and
+        joins it with a timeout so the caller always regains control.
+
+        The daemon thread is abandoned (not forcibly killed) on timeout.  It
+        will unblock and exit when ``close()`` terminates the child process,
+        causing ``ReadFile`` to error out.
+
+        Args:
+            size: Maximum bytes to read.
+            timeout: Seconds to wait before giving up.
+
+        Returns:
+            Data read from the process (str or bytes depending on wexpect version).
+
+        Raises:
+            _TIMEOUT: If the thread did not complete within *timeout*.
+            _EOF: Propagated from read_nonblocking if the process exited.
+        """
+        result = [None]  # [data | Exception]
+
+        def _reader():
+            try:
+                result[0] = self._process.read_nonblocking(size=size)
+            except Exception as exc:
+                result[0] = exc
+
+        t = threading.Thread(target=_reader, daemon=True)
+        t.start()
+        t.join(timeout=timeout)
+
+        if t.is_alive():
+            # Thread still blocked — treat as timeout
+            raise _TIMEOUT("wexpect read_nonblocking timed out")
+
+        if isinstance(result[0], Exception):
+            raise result[0]
+
+        return result[0]
+
+    def _read_until_idle_windows(
+        self,
+        idle_timeout: float,
+        deadline: float,
+        chunks: list[str],
+        total_bytes: int,
+    ) -> str:
+        """wexpect path: SpawnPipe.read_nonblocking blocks (win32file.ReadFile),
+        so we must peek the pipe before reading to avoid hanging forever."""
+        last_data_time = time.time()
+        cancel_token = get_current_cancel_token()
+
+        # SpawnPipe stores the Win32 pipe handle as self.pipe.  We use
+        # PeekNamedPipe to check data availability before calling the
+        # blocking read_nonblocking.  SpawnSocket has a built-in 0.2 s
+        # socket timeout instead, so no peek is needed there.
+        _peek = None
+        pipe_handle = getattr(self._process, 'pipe', None)
+        if pipe_handle is not None:
+            try:
+                import win32pipe as _win32pipe
+                _peek = lambda: _win32pipe.PeekNamedPipe(pipe_handle, 0)[1]
+            except ImportError:
+                logger.warning(
+                    "PeekNamedPipe unavailable (win32pipe not installed); "
+                    "wexpect reads will use thread-based timeout fallback"
+                )
+
+        while time.time() < deadline:
+            if cancel_token is not None and cancel_token.is_cancelled:
+                raise CancelledException("Interactive shell read cancelled")
+            try:
+                # When we have a pipe handle, peek first to avoid blocking.
+                if _peek is not None:
+                    try:
+                        available = _peek()
+                    except Exception:
+                        break  # pipe broken → treat as EOF
+                    if available == 0:
+                        if time.time() - last_data_time >= idle_timeout:
+                            break
+                        time.sleep(self._POLL_INTERVAL)
+                        continue
+                    chunk = self._process.read_nonblocking(size=4096)
+                else:
+                    # No peek available — use thread-based timeout to prevent
+                    # an indefinite hang on win32file.ReadFile.
+                    remaining = min(idle_timeout, deadline - time.time())
+                    if remaining <= 0:
+                        break
+                    chunk = self._wexpect_read_with_timeout(
+                        size=4096, timeout=remaining,
+                    )
+
+                if chunk:
+                    # Ensure we always have str (wexpect may return bytes
+                    # depending on version/codepage configuration)
+                    if isinstance(chunk, bytes):
+                        chunk = chunk.decode('utf-8', errors='replace')
+                    chunks.append(chunk)
+                    total_bytes += len(chunk)
+                    last_data_time = time.time()
+                    if total_bytes > DEFAULT_MAX_BUFFER:
+                        break
+                else:
+                    # Empty read — check idle elapsed
+                    if time.time() - last_data_time >= idle_timeout:
+                        break
+                    time.sleep(self._POLL_INTERVAL)
+            except _TIMEOUT:
+                # No data available right now — check idle elapsed
+                if time.time() - last_data_time >= idle_timeout:
+                    break
+                time.sleep(self._POLL_INTERVAL)
+            except _EOF:
+                break
+
+        return ''.join(chunks)

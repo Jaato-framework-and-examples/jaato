@@ -128,7 +128,7 @@ The server uses this trait to find all auth plugins, then matches
 
 Usage::
 
-    from shared.plugins.base import TRAIT_AUTH_PROVIDER
+    from jaato_server.shared.plugins.base import TRAIT_AUTH_PROVIDER
 
     class MyAuthPlugin:
         plugin_traits = frozenset({TRAIT_AUTH_PROVIDER})
@@ -978,7 +978,7 @@ class ToolPlugin(Protocol):
     #         shared.plugins.reliability.types.
     #
     #     Example:
-    #         from shared.plugins.reliability.types import (
+    #         from jaato_server.shared.plugins.reliability.types import (
     #             PrerequisitePolicy, PatternSeverity, NudgeType
     #         )
     #         return [PrerequisitePolicy(

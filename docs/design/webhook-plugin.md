@@ -59,7 +59,7 @@ existing `TaskEventBus`, enabling event-driven agent sessions.
 
 ## Distribution: Public Plugin, Premium Profiles
 
-The **plugin itself** lives in the public codebase (`shared/plugins/webhook/`).
+The **plugin itself** lives in the public codebase (`jaato_server/shared/plugins/webhook/`).
 It's a straightforward HTTP→EventBus bridge built on stdlib — no proprietary
 logic, and all its dependencies (`TaskEventBus`, config precedence, plugin base)
 are already public. Gating it behind premium would feel wrong given that more
@@ -615,7 +615,7 @@ instructs the model to subscribe and loop:
 
 ```bash
 # Start the jaato server daemon
-.venv/bin/python -m server --ipc-socket /tmp/jaato.sock --daemon
+.venv/bin/python -m jaato_server --ipc-socket /tmp/jaato.sock --daemon
 
 # Create a daemon session from the profile
 # (via TUI or programmatically via SDK)

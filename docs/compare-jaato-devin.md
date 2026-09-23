@@ -195,7 +195,7 @@ python3 -m venv .venv
 .venv/bin/pip install -e jaato-sdk/. -e "jaato-server/.[all]" -e "jaato-tui/.[all]"
 
 # Run as daemon
-.venv/bin/python -m server --ipc-socket /tmp/jaato.sock --daemon
+.venv/bin/python -m jaato_server --ipc-socket /tmp/jaato.sock --daemon
 
 # Connect client
 .venv/bin/python jaato-tui/rich_client.py --connect /tmp/jaato.sock

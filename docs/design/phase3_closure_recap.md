@@ -277,7 +277,7 @@ three cases the actual gap was one layer upstream:
 | Cycle | User diagnosis | Worker correction |
 |---|---|---|
 | 4 | "Runtime not connected — fix connect call" | Envelope schema gap; `project` + `location` not threaded through (Path C) |
-| 9 | "Missing `server.emit(ToolCallStartEvent)` inside `ServerAgentHooks.on_tool_call_start`" | All 12 hooks already emit; gap is downstream (eventually closed as Path H) |
+| 9 | "Missing `jaato_server.server.emit(ToolCallStartEvent)` inside `ServerAgentHooks.on_tool_call_start`" | All 12 hooks already emit; gap is downstream (eventually closed as Path H) |
 | 12 | "TUI permission-prompt rendering gap (client-side)" | TUI grep showed zero subscribers for `PermissionRequestedEvent`; TUI listens for `PermissionInputModeEvent`; producer never emits it post-§7c (Path J) |
 
 **Meta-lesson recorded**: when verdict diagnoses "missing X in layer

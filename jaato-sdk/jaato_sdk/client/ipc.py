@@ -1251,7 +1251,7 @@ class IPCClient:
             ipc_arg = self.socket_path
 
         cmd = [
-            sys.executable, "-m", "server",
+            sys.executable, "-m", "jaato_server",
             "--ipc-socket", ipc_arg,
             "--daemon",
         ]

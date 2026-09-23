@@ -1,6 +1,6 @@
 # Template Rendering Tool Design
 
-> **Status: Implemented** - See `shared/plugins/template/` for the implementation.
+> **Status: Implemented** - See `jaato_server/shared/plugins/template/` for the implementation.
 > The plugin includes both the `renderTemplateToFile` tool and automatic template extraction
 > via prompt enrichment.
 
@@ -20,7 +20,7 @@ The template plugin has been implemented with two key features:
    enrichment pipeline (priority 40) to detect embedded templates in documentation (MODULE.md,
    SKILL.md, etc.) and automatically extract them to `.jaato/template_extracts/` for later use.
 
-See `shared/plugins/template/README.md` for usage documentation.
+See `jaato_server/shared/plugins/template/README.md` for usage documentation.
 
 ## Where Should It Live?
 
@@ -70,7 +70,7 @@ template plugin needs these same utilities for permission preview. Options:
 | Duplicate code | Maintenance burden; inconsistency risk |
 | Extract to shared location | Clean; one-time refactor |
 
-**Recommendation**: Extract `diff_utils.py` to `shared/utils/` before implementing template plugin.
+**Recommendation**: Extract `diff_utils.py` to `jaato_server/shared/utils/` before implementing template plugin.
 
 ```
 shared/
@@ -84,7 +84,7 @@ shared/
 ```
 
 **Refactor steps**:
-1. Create `shared/utils/diff_utils.py` (move existing code)
+1. Create `jaato_server/shared/utils/diff_utils.py` (move existing code)
 2. Update `file_edit` imports: `from shared.utils.diff_utils import ...`
 3. Template plugin uses same import path
 
@@ -453,20 +453,20 @@ Template rendering requires approval since it writes files."""
 
 | Aspect | Decision |
 |--------|----------|
-| Location | New `shared/plugins/template/` plugin |
+| Location | New `jaato_server/shared/plugins/template/` plugin |
 | Tool Name | `renderTemplateToFile` |
 | Template Sources | Inline (`template`) or file (`template_path`) |
 | Syntax | Jinja2 (restricted: no include/import) |
 | Template Storage | `.templates/` convention, any path allowed |
 | Permissions | Requires approval (shows rendered diff) |
 | Discovery Tool | Not initially; use file tools |
-| Shared Utilities | Extract `diff_utils.py` to `shared/utils/` |
+| Shared Utilities | Extract `diff_utils.py` to `jaato_server/shared/utils/` |
 
 ## Next Steps
 
-1. **Extract shared utilities**: Move `diff_utils.py` from `file_edit` to `shared/utils/`
+1. **Extract shared utilities**: Move `diff_utils.py` from `file_edit` to `jaato_server/shared/utils/`
 2. Update `file_edit` imports to use new location
-3. Create `shared/plugins/template/` directory structure
+3. Create `jaato_server/shared/plugins/template/` directory structure
 4. Implement `TemplatePlugin` following existing patterns
 5. Add Jinja2 dependency to `pyproject.toml` dependencies
 6. **Register in pyproject.toml**: Add entry point under `[project.entry-points."jaato.plugins"]`:

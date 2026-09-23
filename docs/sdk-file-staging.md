@@ -89,8 +89,8 @@ Fatal (aborts the remainder of the stream):
 
 | Limit | Default | Where enforced |
 |-------|---------|----------------|
-| Per-file size | 10 MB | `DEFAULT_STAGE_PER_FILE_LIMIT` in `server/websocket.py` |
-| Total payload size | 50 MB | `DEFAULT_STAGE_TOTAL_LIMIT` in `server/websocket.py` |
+| Per-file size | 10 MB | `DEFAULT_STAGE_PER_FILE_LIMIT` in `jaato_server/server/websocket.py` |
+| Total payload size | 50 MB | `DEFAULT_STAGE_TOTAL_LIMIT` in `jaato_server/server/websocket.py` |
 
 These will become per-deployment configurable when the next consumer
 needs different values.
@@ -120,7 +120,7 @@ staging into a single request, which suits the auto-provision flow
 where the workspace doesn't exist before `session.new` runs.
 
 The two paths share the same write code (`_write_staged_payload` in
-`server/websocket.py`). New SDK-built clients should prefer
+`jaato_server/server/websocket.py`). New SDK-built clients should prefer
 `StageFilesRequest` because:
 
 - It avoids base64 inflation.
@@ -312,7 +312,7 @@ client                                                      server
   the header, so the TS SDK refuses below `MIN_FILE_FETCH_PROTOCOL`
   (`"1.20"`) rather than waiting out a reply nobody will send.
 
-The rules live in `jaato-server/server/workspace_download.py`; the
+The rules live in `jaato-server/jaato_server/server/workspace_download.py`; the
 handler is `JaatoWSServer._handle_file_fetch_request`.
 
 ## Future work

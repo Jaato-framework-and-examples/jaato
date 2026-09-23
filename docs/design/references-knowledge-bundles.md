@@ -1,7 +1,7 @@
 # References as Knowledge Bundles
 
 Status: Proposed (2026-04)
-Scope: `shared/plugins/references/`, `.jaato/references/` layout, `gen-references` indexer contract.
+Scope: `jaato_server/shared/plugins/references/`, `.jaato/references/` layout, `gen-references` indexer contract.
 
 ## Problem
 

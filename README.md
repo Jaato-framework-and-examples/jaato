@@ -174,7 +174,7 @@ jaato ships with **40+ built-in plugins** organized by function. Plugins are aut
 
 Plus additional plugins for caching (per-provider), output formatting (code blocks, diffs, tables, Mermaid, notebooks), templating, content filtering, and per-provider authentication (OAuth flows + API-key managers).
 
-For the complete reference, see the **[Plugin Documentation](https://jaato-framework-and-examples.github.io/jaato/web/api-reference/plugins/index.html)**. For plugin development, see [Plugin Development Guide](jaato-server/shared/plugins/README.md).
+For the complete reference, see the **[Plugin Documentation](https://jaato-framework-and-examples.github.io/jaato/web/api-reference/plugins/index.html)**. For plugin development, see [Plugin Development Guide](jaato-server/jaato_server/shared/plugins/README.md).
 
 ## Quick Start
 
@@ -240,16 +240,16 @@ uv pip install "jaato-tui/.[all]"
 
 ```bash
 # Start server as daemon with IPC socket
-.venv/bin/python -m server --ipc-socket /tmp/jaato.sock --daemon
+.venv/bin/python -m jaato_server --ipc-socket /tmp/jaato.sock --daemon
 
 # Start with both IPC and WebSocket (for remote/web clients).
 # WS clients present a bearer token; the daemon auto-generates one at
 # ~/.jaato/ws.token on first WS start (override with --ws-token / --ws-token-file).
-.venv/bin/python -m server --ipc-socket /tmp/jaato.sock --web-socket :8080 --daemon
+.venv/bin/python -m jaato_server --ipc-socket /tmp/jaato.sock --web-socket :8080 --daemon
 
 # Server management
-.venv/bin/python -m server --status    # Check if running
-.venv/bin/python -m server --stop      # Stop the daemon
+.venv/bin/python -m jaato_server --status    # Check if running
+.venv/bin/python -m jaato_server --stop      # Stop the daemon
 ```
 
 ### Connecting Clients
@@ -479,7 +479,7 @@ integration that plugs into jaato's prefetch seam), see the
 | [Design Philosophy](docs/design-philosophy.md) | Opinionated design decisions and rationale |
 | [EU AI Act Evidence Manual](docs/eu-ai-act-manual.md) | Every control for Regulation (EU) 2024/1689, with a capture of each from a live run; the [assessment](docs/design/eu-ai-act.md) behind it |
 | [Plugin Reference](https://jaato-framework-and-examples.github.io/jaato/web/api-reference/plugins/index.html) | All built-in plugins with configuration and examples |
-| [Plugin Development](jaato-server/shared/plugins/README.md) | Guide for creating custom plugins |
+| [Plugin Development](jaato-server/jaato_server/shared/plugins/README.md) | Guide for creating custom plugins |
 | [Provider Setup](https://jaato-framework-and-examples.github.io/jaato/web/api-reference/providers/index.html) | Configuration guides for each model provider |
 | [GCP/Vertex AI Setup](docs/gcp-setup.md) | Google Cloud Platform setup walkthrough |
 | [OpenTelemetry Design](docs/opentelemetry-design.md) | Tracing integration architecture |

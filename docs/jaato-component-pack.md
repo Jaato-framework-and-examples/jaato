@@ -19,13 +19,13 @@ Each row names the thing that ENFORCES it. A guarantee with no enforcer is a cla
 
 **Provider capability declarations.** `PROVIDER_CAPABILITIES` per provider plugin. A capability a provider does not declare is not used: `jaato-scaffold validate` flags an outbound modality role on a provider that does not declare `output_media`, rather than letting it fail at runtime.
 
-**History pairing across every provider.** `shared/history_invariant.py` repairs the per-request copy at the one seam every `provider.complete()` call reads, so a cancelled batch, a GC pass, a rewind or a wire that streamed a tool call with no id cannot produce a request the upstream rejects.
+**History pairing across every provider.** `jaato_server/shared/history_invariant.py` repairs the per-request copy at the one seam every `provider.complete()` call reads, so a cancelled batch, a GC pass, a rewind or a wire that streamed a tool call with no id cannot produce a request the upstream rejects.
 
 **One permission verdict, one exit.** `check_permission` is a single-exit wrapper: every terminal decision is traced with `asked=`, and an AST guard fails the build if a branch returns a verdict without recording one.
 
 **Per-thread confinement verification.** `verify_thread_confinement` walks `/proc/self/task/*/attr/current` and REFUSES the bootstrap on divergence. It fails closed, and only positive evidence counts — a label that could not be read proves nothing and does not refuse.
 
-**Enforcement mode, not merely attachment.** `shared/apparmor_label.py` is the one parser; `sandbox_mode` distinguishes `apparmor` from `apparmor-complain`, so a profile attached in complain mode is never recorded as a boundary.
+**Enforcement mode, not merely attachment.** `jaato_server/shared/apparmor_label.py` is the one parser; `sandbox_mode` distinguishes `apparmor` from `apparmor-complain`, so a profile attached in complain mode is never recorded as a boundary.
 
 **Secret scrubbing on every model-driven subprocess.** ON by default since #863. `cli`, `interactive_shell` and `mcp` strip the framework secret set from the inherited environment; opting out is announced at WARNING.
 

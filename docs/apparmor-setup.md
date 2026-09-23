@@ -122,13 +122,13 @@ If you run the WebSocket server standalone, you can explicitly control AppArmor:
 
 ```bash
 # Auto-detect (default)
-python -m server.websocket --host 0.0.0.0 --port 8089 --workspace-root ~/.jaato/workspaces
+python -m jaato_server.websocket --host 0.0.0.0 --port 8089 --workspace-root ~/.jaato/workspaces
 
 # Explicitly enable — logs a warning if prerequisites are missing
-python -m server.websocket --host 0.0.0.0 --port 8089 --workspace-root ~/.jaato/workspaces --apparmor
+python -m jaato_server.websocket --host 0.0.0.0 --port 8089 --workspace-root ~/.jaato/workspaces --apparmor
 
 # Explicitly disable
-python -m server.websocket --host 0.0.0.0 --port 8089 --workspace-root ~/.jaato/workspaces --no-apparmor
+python -m jaato_server.websocket --host 0.0.0.0 --port 8089 --workspace-root ~/.jaato/workspaces --no-apparmor
 ```
 
 Check the log to confirm which mode is active:
@@ -204,7 +204,7 @@ Two consequences worth knowing before you deploy:
 `maps` / `smaps` are deliberately **not** denied at the kernel layer: they
 leak address layout rather than credentials, and the distribution's own
 `abstractions/base` may grant them for the C library's use. The
-application-layer denylist in `shared/plugins/sandbox_utils.py` — which
+application-layer denylist in `jaato_server/shared/plugins/sandbox_utils.py` — which
 gates only model-driven path-taking tools (`readFile`, `glob_files`,
 `file_edit`), and so can afford to be stricter — does cover them, along with
 everything above. That gate applies whether or not AppArmor is available,
@@ -356,7 +356,7 @@ dmesg | grep "apparmor=\"DENIED\""
 ```
 
 Common causes:
-- Tool needs access to a path not in the profile (add it to the template in `server/apparmor.py`)
+- Tool needs access to a path not in the profile (add it to the template in `jaato_server/server/apparmor.py`)
 - Python package outside the venv path (install in the server's venv)
 
 ## Docker / container considerations

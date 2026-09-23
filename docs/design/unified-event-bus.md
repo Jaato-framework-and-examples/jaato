@@ -2,7 +2,7 @@
 
 ## Goal
 
-Make the EventBus the single internal event backbone. All events — plan/step lifecycle, tool calls, text responses, agent lifecycle — flow through the EventBus first. `server.emit()` becomes a subscriber that forwards events to IPC/WebSocket clients.
+Make the EventBus the single internal event backbone. All events — plan/step lifecycle, tool calls, text responses, agent lifecycle — flow through the EventBus first. `jaato_server.server.emit()` becomes a subscriber that forwards events to IPC/WebSocket clients.
 
 This enables plugins to subscribe to **any** event type through one mechanism.
 
@@ -194,7 +194,7 @@ class EventFilter:
 
 ## 4. Server emit → EventBus publish bridge
 
-**File:** `jaato-server/server/core.py`
+**File:** `jaato-server/jaato_server/server/core.py`
 
 `JaatoServer.emit()` publishes to the EventBus. A built-in subscriber forwards to IPC/WebSocket clients (the current behavior).
 
@@ -308,9 +308,9 @@ def emit(self, event: ServerEvent) -> None:
 
 ## 5. Plan events — dual publish eliminated
 
-Currently, the todo plugin publishes to EventBus (`STEP_STARTED`, `STEP_COMPLETED`) AND the `LivePlanReporter` emits `PlanUpdatedEvent` via `server.emit()`. These are parallel paths for the same state change.
+Currently, the todo plugin publishes to EventBus (`STEP_STARTED`, `STEP_COMPLETED`) AND the `LivePlanReporter` emits `PlanUpdatedEvent` via `jaato_server.server.emit()`. These are parallel paths for the same state change.
 
-After unification, the todo plugin publishes to EventBus only. The client forwarder subscriber handles delivery to clients. The `LivePlanReporter` callbacks become EventBus subscribers instead of direct `server.emit()` callers.
+After unification, the todo plugin publishes to EventBus only. The client forwarder subscriber handles delivery to clients. The `LivePlanReporter` callbacks become EventBus subscribers instead of direct `jaato_server.server.emit()` callers.
 
 This eliminates the dual-publish for plan events.
 
@@ -318,13 +318,13 @@ This eliminates the dual-publish for plan events.
 
 ## 6. Activity detector plugin — subscribing
 
-**File:** `jaato-server/shared/plugins/activity_detector/__init__.py`
+**File:** `jaato-server/jaato_server/shared/plugins/activity_detector/__init__.py`
 
 ```python
 PLUGIN_KIND = "enrichment"
 ```
 
-**File:** `jaato-server/shared/plugins/activity_detector/plugin.py`
+**File:** `jaato-server/jaato_server/shared/plugins/activity_detector/plugin.py`
 
 The plugin subscribes to the EventBus during `set_session()` auto-wiring. It filters for the five event types it cares about.
 
@@ -468,7 +468,7 @@ The migration is incremental — both paths work during transition.
 
 ### Phase 3: Eliminate dual-publish for plan events
 - `LivePlanReporter` callbacks become EventBus subscribers
-- Remove direct `server.emit(PlanUpdatedEvent)` from plan hooks
+- Remove direct `jaato_server.server.emit(PlanUpdatedEvent)` from plan hooks
 - Plan events flow: todo plugin → EventBus → client forwarder → clients
 
 ### Phase 4: Activity detector plugin

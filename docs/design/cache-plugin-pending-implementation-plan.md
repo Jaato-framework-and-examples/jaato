@@ -70,9 +70,9 @@ The `GoogleGenAICachePlugin` supports two modes:
 
 | Path | Purpose |
 |------|---------|
-| `shared/plugins/cache_google_genai/__init__.py` | Package init, `PLUGIN_KIND = "cache"`, `create_plugin()` |
-| `shared/plugins/cache_google_genai/plugin.py` | `GoogleGenAICachePlugin` — active + monitoring modes |
-| `shared/plugins/cache_google_genai/tests/test_plugin.py` | 61 unit tests |
+| `jaato_server/shared/plugins/cache_google_genai/__init__.py` | Package init, `PLUGIN_KIND = "cache"`, `create_plugin()` |
+| `jaato_server/shared/plugins/cache_google_genai/plugin.py` | `GoogleGenAICachePlugin` — active + monitoring modes |
+| `jaato_server/shared/plugins/cache_google_genai/tests/test_plugin.py` | 61 unit tests |
 | `model_provider/google_genai/provider.py` | `set_cache_plugin()`, `_get_cached_content_config()`, 5 send method integrations |
 
 **Entry point:** Added to `pyproject.toml` under `[project.entry-points."jaato.cache_plugins"]`.

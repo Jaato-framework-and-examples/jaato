@@ -21,7 +21,7 @@ The assessment correctly identifies a real enforceability gap. However, it predo
 
 ### 1. The Root Cause Is Real
 
-`setStepStatus` in `jaato-server/shared/plugins/todo/plugin.py` (line 952) accepts `status='completed'` from any caller unconditionally. The only guard is instruction text at lines 781-792 stating "NEVER fabricate completion" — a soft constraint the model can bypass.
+`setStepStatus` in `jaato-server/jaato_server/shared/plugins/todo/plugin.py` (line 952) accepts `status='completed'` from any caller unconditionally. The only guard is instruction text at lines 781-792 stating "NEVER fabricate completion" — a soft constraint the model can bypass.
 
 ### 2. The Audit Trail Gap Is Real
 

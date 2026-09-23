@@ -57,11 +57,11 @@ semantic tier labels (see §4).
 
 | Concern | Existing surface |
 |---|---|
-| Token usage + context % | `TokenLedger` (`shared/token_accounting.py`); `turn.progress` payload carries `percent_used`; `context.updated` carries `total_tokens` / `percent_used`. |
-| Dollar cost | `UsageBreakdown.cost_usd`, resolved provider-reported → `pricing.json` estimate → `None` (`server/core.py:_build_usage_breakdown` / `shared/pricing.py`). Same precedence the telemetry span cost uses. |
+| Token usage + context % | `TokenLedger` (`jaato_server/shared/token_accounting.py`); `turn.progress` payload carries `percent_used`; `context.updated` carries `total_tokens` / `percent_used`. |
+| Dollar cost | `UsageBreakdown.cost_usd`, resolved provider-reported → `pricing.json` estimate → `None` (`jaato_server/server/core.py:_build_usage_breakdown` / `jaato_server/shared/pricing.py`). Same precedence the telemetry span cost uses. |
 | Wall-clock, tool-calls, turns | `turn.completed` (`duration_seconds`, `function_calls`), `tool.call_completed` (`duration_seconds`), turn counter (a `degrade` rung whose `action` is `abort` is the only hard cap). |
 | Threshold-crossing reactions | The reactor engine already dispatches actions on bus events with JMESPath `where` clauses (see [`reactor-implementation.md`](../reactor-implementation.md)). |
-| Model vocabulary + per-turn switch | `model_tiers` profile field + `ModelTierConfig` (`shared/model_tiers.py`); the model moves between tiers via the `enter_tier` lifecycle tool. |
+| Model vocabulary + per-turn switch | `model_tiers` profile field + `ModelTierConfig` (`jaato_server/shared/model_tiers.py`); the model moves between tiers via the `enter_tier` lifecycle tool. |
 | Runtime model swap (incl. cross-provider) | `JaatoSession.switch_tier` (`jaato_session.py:9357`) → `provider.connect(model, skip_model_test=True)`, with a per-provider instance cache (`_provider_for_tier`, `jaato_session.py:9326`) keyed by `provider_name`. History is provider-neutral (`Message`/`Part`), so it flows across a swap. |
 
 So the mechanism is all present. What is missing is a **`BudgetTracker`**
@@ -465,7 +465,7 @@ a block that skips it is a silent-ignore footgun):
    `dataclasses.fields(SubagentProfile)` and reads each field's
    `metadata["description"]`. → `budget_control` must be a real
    dataclass field on `SubagentProfile`
-   (`shared/plugins/subagent/config.py`) with a `default_factory` and
+   (`jaato_server/shared/plugins/subagent/config.py`) with a `default_factory` and
    `metadata={"description": …}`. Without the field,
    `SubagentProfile.from_dict` silently drops a `budget_control:` YAML
    key (it reads only known keys) and `explain` never shows it.
@@ -516,7 +516,7 @@ regression to the ignore path).
 ## 7. Inheritance
 
 `budget_control` follows the profile-inheritance conventions in
-`shared/plugins/subagent/config.py`:
+`jaato_server/shared/plugins/subagent/config.py`:
 
 - **`limits`: min-wins.** A child may only *tighten* a dimension:
   `effective[dim] = min(child[dim], parent[dim])`. A child can never
@@ -558,12 +558,12 @@ Landed (config + discoverability):
 
 | Piece | Where |
 |---|---|
-| `BudgetControlConfig` / `DegradeRung` / `merge_limits`, parsing + validation | `shared/budget_control.py` (new; modelled on `shared/runtime_limits.py`) |
-| Profile field + all 4 loaders + JSON-validation helper | `shared/plugins/subagent/config.py` |
+| `BudgetControlConfig` / `DegradeRung` / `merge_limits`, parsing + validation | `jaato_server/shared/budget_control.py` (new; modelled on `jaato_server/shared/runtime_limits.py`) |
+| Profile field + all 4 loaders + JSON-validation helper | `jaato_server/shared/plugins/subagent/config.py` |
 | Inheritance (`limits` min-wins, `degrade` scalar-override) | `config._merge_budget_control` |
-| `explain profile` constraint surfacing (§6.3.1–2) | `shared/scaffold/introspect.py` |
-| Validator branch (§6.3.3) — uninstalled overlay provider, `budget_overlay_without_tiers`, `budget_overlay_undeclared_tier` | `shared/scaffold/validate.py` |
-| 45 tests | `shared/tests/test_budget_control.py`, `shared/tests/test_scaffold_budget_control.py` |
+| `explain profile` constraint surfacing (§6.3.1–2) | `jaato_server/shared/scaffold/introspect.py` |
+| Validator branch (§6.3.3) — uninstalled overlay provider, `budget_overlay_without_tiers`, `budget_overlay_undeclared_tier` | `jaato_server/shared/scaffold/validate.py` |
+| 45 tests | `jaato_server/shared/tests/test_budget_control.py`, `jaato_server/shared/tests/test_scaffold_budget_control.py` |
 
 Deliberate parse-time invariants (fail loud at profile load, not at
 session start): unknown dimension; non-positive limit; `at` outside
@@ -576,14 +576,14 @@ Landed (runtime):
 
 | Piece | Where |
 |---|---|
-| `BudgetTracker` + `BudgetUsage` + `overlay_tier_table` (§6.1) | `shared/budget_control.py` — pure logic, no session coupling |
-| §6.2 resolved-entry re-resolve + extracted `_is_connected_to` / `_connect_tier_entry` | `shared/jaato_session.py:switch_tier` |
+| `BudgetTracker` + `BudgetUsage` + `overlay_tier_table` (§6.1) | `jaato_server/shared/budget_control.py` — pure logic, no session coupling |
+| §6.2 resolved-entry re-resolve + extracted `_is_connected_to` / `_connect_tier_entry` | `jaato_server/shared/jaato_session.py:switch_tier` |
 | Observation hooks (tokens+usd per response; tool_calls+seconds per completed call / batch (#955); turns + the unobserved remainder at turn end) | `jaato_session._budget_observe_response` / `_budget_observe_tool_calls` / `_budget_observe_turn`, folded into the EXISTING `_record_token_usage`, the three tool-execution paths and turn-end accounting — no new measurement path |
 | Rung application (brownout + `abort`) | `jaato_session._apply_budget_rungs` / `_reconnect_active_tier_if_rebound` |
-| Wire: envelope v5 `budget_control` + `to_dict`/`from_dict` round-trip | `shared/session_envelope.py`, `server/session_manager.py` |
-| Plumbing: profile → session | `server/core.py`, `server/runner/session.py`, `jaato_runtime.create_session`, `JaatoSession.configure` |
-| 17 runtime tests | `shared/tests/test_budget_runtime.py` |
-| Mid-turn binding + trace lines + AST guard (#955) | `shared/tests/test_budget_mid_turn_955.py` |
+| Wire: envelope v5 `budget_control` + `to_dict`/`from_dict` round-trip | `jaato_server/shared/session_envelope.py`, `jaato_server/server/session_manager.py` |
+| Plumbing: profile → session | `jaato_server/server/core.py`, `jaato_server/server/runner/session.py`, `jaato_runtime.create_session`, `JaatoSession.configure` |
+| 17 runtime tests | `jaato_server/shared/tests/test_budget_runtime.py` |
+| Mid-turn binding + trace lines + AST guard (#955) | `jaato_server/shared/tests/test_budget_mid_turn_955.py` |
 
 Cost resolution reuses `_resolve_span_cost` (provider-reported → pricing
 table → `None`), so the budget and the telemetry span always agree, and
