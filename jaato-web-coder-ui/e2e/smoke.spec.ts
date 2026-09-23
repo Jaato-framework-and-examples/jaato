@@ -247,6 +247,15 @@ test("files panel: hide drops an entry from the view, show-hidden brings it back
   await panel.getByRole("button", { name: "hide hidden" }).click();
   await expect(panel.getByText("~ app.py")).toBeVisible();
 
+  // collapse (the TUI's Left/Right): the arrow folds a directory to one
+  // line that says how many files it holds, and unfolds it again.
+  await panel.getByRole("button", { name: "Collapse src/", exact: true }).click();
+  await expect(panel.getByText("~ app.py")).toHaveCount(0);
+  await expect(panel.getByRole("button", { name: "Expand src/", exact: true })).toHaveAttribute("aria-expanded", "false");
+  await expect(panel.getByRole("button", { name: "Expand src/", exact: true })).toContainText("(1)");
+  await panel.getByRole("button", { name: "Expand src/", exact: true }).click();
+  await expect(panel.getByText("~ app.py")).toBeVisible();
+
   // ignore (the TUI's ``i``): through the daemon, whose answer is the notice.
   await panel.getByRole("button", { name: "Add src/app.py to .gitignore" }).click();
   await expect(panel.getByRole("status")).toHaveText("src/app.py added to .gitignore");

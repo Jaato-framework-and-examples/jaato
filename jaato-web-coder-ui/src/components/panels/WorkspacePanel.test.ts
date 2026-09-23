@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { countHiddenFiles, entryId, isHidden } from "./WorkspacePanel";
+import { countFiles, countHiddenFiles, entryId, isHidden } from "./WorkspacePanel";
 
 describe("Files panel hide set", () => {
   it("uses the TUI's entry ids: a directory carries a trailing slash", () => {
@@ -14,5 +14,14 @@ describe("Files panel hide set", () => {
   });
   it("counts the files a hide set removes from view", () => {
     expect(countHiddenFiles({ "a/b.py": "created", "a/c.py": "modified", "d.py": "modified" }, ["a/"])).toBe(2);
+  });
+});
+
+describe("Files panel collapse", () => {
+  it("a folded directory reports every file beneath it, however deep", () => {
+    const leaf = { children: new Map() };
+    const sub = { children: new Map([["x", leaf], ["y", leaf]]) };
+    const dir = { children: new Map<string, unknown>([["a", leaf], ["sub", sub]]) };
+    expect(countFiles(dir as never)).toBe(3);
   });
 });

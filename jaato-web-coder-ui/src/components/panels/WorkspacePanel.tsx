@@ -21,6 +21,10 @@
  *   change (``store/workspaceView.ts``), and is dropped, with a notice, when
  *   it cannot be honoured.
  *
+ * - **collapse** (TUI Left/Right): the arrow in front of a directory folds
+ *   it to one line carrying how many files it holds.  Every directory
+ *   starts expanded and a reset expands them all again, as in the TUI.
+ *
  * Entry ids match the TUI's: a directory is its path with a trailing ``/``,
  * a file is its workspace-relative path.  The section header (``Files``
  * and the count) is the rail's; this is the body.
@@ -57,6 +61,13 @@ export function isHidden(id: string, hidden: readonly string[]): boolean {
   return hidden.some((h) => h === id || (h.endsWith("/") && id.startsWith(h)));
 }
 
+/** Files under a directory node, however deep. */
+export function countFiles(n: Pick<Node, "children">): number {
+  let total = 0;
+  for (const c of n.children.values()) total += c.children.size ? countFiles(c) : 1;
+  return total;
+}
+
 /** Files (not directories) that the hide set removes from view. */
 export function countHiddenFiles(files: Record<string, string>, hidden: readonly string[]): number {
   return Object.keys(files).filter((p) => isHidden(p, hidden)).length;
@@ -83,7 +94,18 @@ function RowActions({ id, hidden, ignored }: { id: string; hidden: boolean; igno
   );
 }
 
-function Tree({ node, depth, hidden, showHidden, ignored }: { node: Node; depth: number; hidden: readonly string[]; showHidden: boolean; ignored: Record<string, boolean> }) {
+interface TreeProps { node: Node; depth: number; hidden: readonly string[]; showHidden: boolean; ignored: Record<string, boolean>; collapsed: readonly string[] }
+
+function DirToggle({ node, id, folded }: { node: Node; id: string; folded: boolean }) {
+  const toggle = useJaato((s) => s.toggleWorkspaceCollapsed);
+  return (
+    <button type="button" className="text-text-muted hover:text-steel text-left" onClick={() => toggle(id)} aria-expanded={!folded} aria-label={`${folded ? "Expand" : "Collapse"} ${id}`}>
+      {folded ? "▸" : "▾"} {node.name}/{folded && <span className="ml-1.5 text-[10px]">({countFiles(node)})</span>}
+    </button>
+  );
+}
+
+function Tree({ node, depth, hidden, showHidden, ignored, collapsed }: TreeProps) {
   const entries = [...node.children.values()].sort((a, b) => (a.children.size ? 0 : 1) - (b.children.size ? 0 : 1) || a.name.localeCompare(b.name));
   return (
     <ul className="list-none m-0 p-0">
@@ -92,8 +114,9 @@ function Tree({ node, depth, hidden, showHidden, ignored }: { node: Node; depth:
         const isDir = n.children.size > 0;
         const hid = isHidden(id, hidden);
         if (hid && !showHidden) return null;
+        const folded = isDir && collapsed.includes(id);
         const label = isDir
-          ? <span className="text-text-muted">▾ {n.name}/</span>
+          ? <DirToggle node={n} id={id} folded={folded} />
           : <span className={CHANGE_CLS[n.change ?? ""] ?? ""} title={n.change}>{n.change === "deleted" ? "−" : n.change === "created" || n.change === "added" ? "+" : "~"} {n.name}</span>;
         return (
           <li key={n.path} className="font-mono text-[11.5px] leading-[1.8]">
@@ -103,7 +126,7 @@ function Tree({ node, depth, hidden, showHidden, ignored }: { node: Node; depth:
               {ignored[id] && <span className="text-text-muted text-[10px]" title="In .gitignore">i</span>}
               <RowActions id={id} hidden={hid} ignored={ignored[id]} />
             </div>
-            {isDir && <Tree node={n} depth={depth + 1} hidden={hidden} showHidden={showHidden} ignored={ignored} />}
+            {isDir && !folded && <Tree node={n} depth={depth + 1} hidden={hidden} showHidden={showHidden} ignored={ignored} collapsed={collapsed} />}
           </li>
         );
       })}
@@ -143,6 +166,7 @@ export function WorkspacePanel() {
   const hidden = useJaato((s) => s.workspaceHidden);
   const showHidden = useJaato((s) => s.workspaceShowHidden);
   const toggleShowHidden = useJaato((s) => s.toggleWorkspaceShowHidden);
+  const collapsed = useJaato((s) => s.workspaceCollapsed);
   const ignored = useJaato((s) => s.workspaceIgnored);
   const notice = useJaato((s) => s.workspaceNotice);
   const tree = useMemo(() => build(files), [files]);
@@ -154,7 +178,7 @@ export function WorkspacePanel() {
         <div role="status" className={`text-[11px] mb-2 ${notice.error ? "text-error" : "text-text-muted"}`}>{notice.text}</div>
       )}
       <ResetBar total={total} isReset={isReset} />
-      {total === 0 ? <div className="text-xs text-text-muted italic">{isReset ? "No files changed since the reset." : "No files changed yet."}</div> : <Tree node={tree} depth={0} hidden={hidden} showHidden={showHidden} ignored={ignored} />}
+      {total === 0 ? <div className="text-xs text-text-muted italic">{isReset ? "No files changed since the reset." : "No files changed yet."}</div> : <Tree node={tree} depth={0} hidden={hidden} showHidden={showHidden} ignored={ignored} collapsed={collapsed} />}
       {hiddenCount > 0 && (
         <div className="mt-2 text-[11px] text-text-muted flex items-center gap-2">
           <span>{hiddenCount} hidden</span>
