@@ -133,6 +133,35 @@ def resolve_plan_path(name: Any, config_root: Optional[str],
     return root / f"{plan_id}{PLAN_SUFFIX}"
 
 
+#: The authored plan file's fields, for the authoring surface to render
+#: beneath the ``initial_plan_name`` knob (#1222).  This DESCRIBES what
+#: :func:`parse_plan_document` accepts and is co-located with it so the two
+#: cannot drift: ``required`` here is exactly the set the ``_require`` calls
+#: below enforce, and ``test_plan_file_schema_matches_the_parser`` drives
+#: :func:`parse_plan_document` with each ``required`` field absent to prove
+#: it.  ``jaato-scaffold explain plugin todo`` reads this so an author learns
+#: the file's layout without opening the README; the full field table
+#: (``sequence`` / ``validation_required`` / ``depends_on`` / …) lives in the
+#: plugin README's "Plan file schema" section, and this is the minimum an
+#: author must know to write a file the loader will accept.
+#:
+#: Each entry is ``(field, required, meaning)``.
+PLAN_FILE_FIELDS = (
+    ("title", True,
+     "Plan summary — a non-empty string."),
+    ("steps", True,
+     "A non-empty list; each entry is a mapping."),
+    ("steps[].description", True,
+     "What the step does — a non-empty string."),
+    ("started", False,
+     "Defaults to true: the authored file is the approval startPlan "
+     "otherwise asks for.  Write started: false to make the agent confirm "
+     "the plan first."),
+    ("context", False,
+     "Free-form mapping; initial_plan_name is recorded in it."),
+)
+
+
 def _require(cond: bool, path: Path, what: str) -> None:
     if not cond:
         raise InitialPlanError(f"{path}: {what}", code="initial_plan_invalid")
