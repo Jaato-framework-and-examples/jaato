@@ -57,6 +57,7 @@ from jaato_server.shared.plugins.runner_forwarding import RunnerForwardingMixin
 from jaato_server.shared.secret_scrub import DEFAULT_SECRET_ENV_PATTERNS, resolve_scrub_patterns
 from jaato_server.shared.command_analysis import UnanalyzableCommand
 from ..command_containment import first_denied_path
+from ..workspace_home import resolve_home_path
 from ..workspace_venv import (
     resolve_venv_path, ensure_workspace_venv, pip_apparmor_rules,
 )
@@ -125,6 +126,10 @@ class InteractiveShellPlugin(RunnerForwardingMixin):
         # Workspace-scoped venv path for spawned sessions (None/empty = off).
         # See shared/plugins/workspace_venv.py.
         self._workspace_venv: Optional[str] = None
+        # Workspace-scoped HOME for spawned PTY children (None/empty = off,
+        # #1225).  Points HOME + XDG at ``<ws>/<home>`` so shell history,
+        # ~/.gitconfig etc. stay per-workspace.  See workspace_home.py.
+        self._workspace_home: Optional[str] = None
         # Secrets-broker scrub (#10 / #503 / #863): env-var name globs
         # stripped from the inherited environment of every spawned PTY
         # session, so a model-driven REPL cannot ``echo $GITHUB_TOKEN``.
@@ -237,6 +242,8 @@ class InteractiveShellPlugin(RunnerForwardingMixin):
                     )
             if 'workspace_venv' in config:
                 self._workspace_venv = config['workspace_venv']
+            if 'workspace_home' in config:
+                self._workspace_home = config['workspace_home']
             if 'require_confinement' in config:
                 self._require_confinement = bool(config['require_confinement'])
 
@@ -389,6 +396,20 @@ class InteractiveShellPlugin(RunnerForwardingMixin):
                         "resolve against the workspace root. Created if "
                         "absent with --system-site-packages. Recommended: "
                         ".jaato/tool-venv"
+                    ),
+                },
+                "workspace_home": {
+                    "type": "string",
+                    "default": "",
+                    "description": (
+                        "Path to a workspace-scoped HOME for spawned PTY "
+                        "children (#1225; empty = off). HOME + the XDG base "
+                        "dirs are pointed at it so shell history, "
+                        "~/.gitconfig etc. stay per-workspace instead of "
+                        "shared across the daemon's HOME. Usually set once "
+                        "under plugin_configs.cli.workspace_home and mirrored "
+                        "here by the daemon; the runner's own HOME is "
+                        "unchanged. Do NOT store secrets here."
                     ),
                 },
             },
@@ -1096,6 +1117,11 @@ IMPORTANT NOTES:
         if venv_path:
             ensure_workspace_venv(venv_path)
 
+        # Workspace HOME (#1225): the daemon already created the directory
+        # before spawn; here we resolve the path so the PTY child runs with
+        # HOME + XDG pointed at it.
+        home_path = resolve_home_path(self._workspace_home, self._workspace_root)
+
         try:
             session = ShellSession(
                 command=spawn_command,
@@ -1107,6 +1133,7 @@ IMPORTANT NOTES:
                 cwd=self._workspace_root,
                 preexec_fn=self._build_subprocess_preexec_fn(),
                 workspace_venv=venv_path,
+                workspace_home=home_path,
                 scrub_env=self._scrub_secret_env or None,
                 # Same value as cwd, passed as the boundary rather than
                 # assumed from it (#503): ShellSession verifies one
