@@ -456,6 +456,33 @@ def install(name: str, dest: Path, *, force: bool = False,
         + [f"  + {f}" for f in files]
 
 
+def refresh(name: str, dest: Path, *, dry_run: bool = False) -> Dict[str, Any]:
+    """Apply ``integration <name> --refresh`` and report the transition (#1261).
+
+    The programmatic form of the ``--refresh`` flag.  It re-applies a copy that
+    is ``absent`` / ``stale`` / ``outdated`` and leaves an ``edited`` /
+    ``diverged`` / ``unstamped`` / ``current`` one untouched — a decision made
+    ENTIRELY by :func:`install` with ``refresh=True`` and
+    :data:`REFRESH_WRITE_STATES`, not re-derived here.  This function only
+    assembles the four fields the outcome is reported by, so the CLI
+    (``_run_refresh``) and the daemon verb (``scaffold.integration``, #1263)
+    produce ONE answer rather than two that can drift.
+
+    Returns ``{state_before, state_after, changed, skipped_reason, lines}``.
+    A skipped refresh is ``changed=False`` with a non-empty ``skipped_reason``
+    (the same ``state: detail`` :func:`compare` produces) — a correct outcome,
+    not a failure.
+    """
+    state_before, detail_before = compare(name, dest)
+    changed, lines = install(name, dest, refresh=True, dry_run=dry_run)
+    state_after, _ = compare(name, dest)
+    skipped_reason = ""
+    if not changed and not dry_run and state_before not in REFRESH_WRITE_STATES:
+        skipped_reason = f"{state_before}: {detail_before}"
+    return {"state_before": state_before, "state_after": state_after,
+            "changed": changed, "skipped_reason": skipped_reason, "lines": lines}
+
+
 def listing() -> Tuple[Dict[str, Any], str]:
     """What this build can integrate with, and where each one currently stands.
 

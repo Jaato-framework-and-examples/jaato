@@ -1,0 +1,16 @@
+{
+  "type": "scaffold.integration.result",
+  "timestamp": "<TIMESTAMP>",
+  "session_id": "",
+  "integration": "",
+  "ok": true,
+  "changed": false,
+  "state_before": "",
+  "state_after": "",
+  "skipped_reason": "",
+  "target": "",
+  "text": "",
+  "error": "",
+  "available": [],
+  "server_version": ""
+}

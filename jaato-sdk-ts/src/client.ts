@@ -152,6 +152,15 @@ export const MIN_WORKSPACE_IGNORE_PROTOCOL = "1.12";
 export const MIN_FILE_FETCH_PROTOCOL = "1.20";
 
 /**
+ * Protocol floor for {@link JaatoClient.runScaffoldIntegration}.  Same rule
+ * as {@link MIN_WORKSPACE_IGNORE_PROTOCOL}: an older daemon ignores
+ * ``scaffold.integration`` silently, and a client that then reported the
+ * skill as installed would be describing a copy nobody wrote.  So the call
+ * is refused below this version rather than sent blind.
+ */
+export const MIN_SCAFFOLD_INTEGRATION_PROTOCOL = "1.21";
+
+/**
  * How long {@link JaatoClient.stageFiles} waits for the daemon's
  * ``workspace.files.staged`` response before giving up (default 120 s, the
  * sibling {@link JaatoClient.fetchWorkspaceFile} value).  The wait had no
@@ -1004,6 +1013,61 @@ export class JaatoClient {
       type: EventTypeValue.COMMAND,
       command: "workspace.ignore",
       args: [path],
+    } as CommandRequest);
+  }
+
+  /**
+   * Run ``jaato-scaffold integration <name>`` on the daemon (protocol 1.21)
+   * — install or refresh an integration payload, the ``jaato-sdk`` skill
+   * among them, into the workspace this connection is in.  The sibling of
+   * ``scaffold.explain``: the command must run on the install that serves
+   * the session, because the copy it writes is stamped with THAT
+   * ``jaato-server``'s version and the workspace directory is on THAT host —
+   * so the daemon runs it rather than the caller shelling out to its own
+   * venv, and the application never carries (and so never drifts) a copy of
+   * the skill's text.
+   *
+   * The daemon keeps the copy current with the ``--refresh`` contract: it
+   * re-applies an ``absent`` / ``stale`` / ``outdated`` copy and LEAVES an
+   * ``edited`` / ``diverged`` / ``unstamped`` one alone.  It answers with one
+   * ``scaffold.integration.result`` event whatever happened — ``ok`` with
+   * ``changed`` / ``state_before`` / ``state_after`` / ``skipped_reason``, or
+   * ``ok: false`` with the reason and the ``available`` integrations it
+   * ships.  A refresh it declined to apply is ``ok: true`` with a
+   * ``skipped_reason``, so a client reports it in a notice, not as an error.
+   * Mirror of Python ``IPCClient.run_integration``.
+   *
+   * The integration installs into the caller's OWN workspace, resolved
+   * daemon-side (the same entitlement path ``workspace.file.fetch`` uses), so
+   * there is no directory parameter.
+   *
+   * @param name The integration to run, e.g. ``"claude-code"``.
+   * @throws Error against a daemon below
+   *   {@link MIN_SCAFFOLD_INTEGRATION_PROTOCOL}, which would ignore the
+   *   command silently — indistinguishable from the skill having been
+   *   installed, which a caller must not report.
+   */
+  async runScaffoldIntegration(name: string): Promise<void> {
+    if (
+      this._serverProtocolVersion === null ||
+      !isProtocolCompatible(
+        this._serverProtocolVersion,
+        MIN_SCAFFOLD_INTEGRATION_PROTOCOL,
+      )
+    ) {
+      throw new Error(
+        `runScaffoldIntegration: this daemon speaks protocol ` +
+          `${this._serverProtocolVersion ?? "unknown"} and does not serve ` +
+          `scaffold.integration (needs >= ${MIN_SCAFFOLD_INTEGRATION_PROTOCOL}).  ` +
+          `It would ignore the command silently, which is indistinguishable ` +
+          `from the skill having been installed.  Upgrade the daemon, or run ` +
+          `jaato-scaffold integration in the daemon's own virtualenv.`,
+      );
+    }
+    await this._sendEvent({
+      type: EventTypeValue.COMMAND,
+      command: "scaffold.integration",
+      args: [name],
     } as CommandRequest);
   }
 

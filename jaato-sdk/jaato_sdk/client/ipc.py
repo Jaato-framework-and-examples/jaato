@@ -2207,6 +2207,63 @@ class IPCClient:
             args=[topic or "", name or ""],
         ))
 
+    MIN_SCAFFOLD_INTEGRATION_PROTOCOL = "1.21"
+
+    async def run_integration(self, name: str) -> None:
+        """Run ``jaato-scaffold integration <name>`` on the daemon (1.21).
+
+        The sibling of :meth:`explain_topic`.  ``jaato-scaffold integration``
+        installs an integration payload — the ``jaato-sdk`` skill is the one
+        that ships — with a version-and-digest stamp, and keeps it current
+        with ``--refresh``: it re-applies a copy that is ``absent`` /
+        ``stale`` / ``outdated`` and leaves an ``edited`` / ``diverged`` /
+        ``unstamped`` one alone.  The command must run on the install that
+        serves the session — the stamp records THAT ``jaato-server``'s
+        version, and the workspace directory is on THAT host — so the daemon
+        runs it rather than the caller shelling out to its own venv.
+
+        The daemon answers with one :class:`ScaffoldIntegrationEvent` whatever
+        happened: ``ok`` with ``changed`` / ``state_before`` / ``state_after``
+        / ``skipped_reason``, or ``ok=False`` with ``error`` and the
+        ``available`` integrations its OWN install ships — the list that
+        makes an unknown-name refusal actionable.  A refresh the daemon
+        DECLINED to apply (an edited copy) is ``ok=True`` with a
+        ``skipped_reason``, because leaving a local edit alone is the correct
+        behaviour rather than a failure.
+
+        The integration installs into the caller's OWN workspace, which the
+        daemon resolves from the session the caller is attached to or the
+        workspace it declared — both entitlement-checked at the handshake, the
+        same path :meth:`explain_topic` and ``workspace.file.fetch`` use.
+        There is deliberately no workspace parameter, for the same reason.
+
+        Args:
+            name: The integration to run, e.g. ``"claude-code"``.
+
+        Raises:
+            ValueError: Against a daemon below
+                :attr:`MIN_SCAFFOLD_INTEGRATION_PROTOCOL`, which would ignore
+                the command silently — and silence is indistinguishable from
+                "the skill was installed", so a caller must not read it as a
+                success.
+        """
+        if not _protocol_compatible(
+                self.server_protocol_version,
+                self.MIN_SCAFFOLD_INTEGRATION_PROTOCOL):
+            spoken = self.server_protocol_version or "unknown (not connected)"
+            raise ValueError(
+                f"run_integration: this daemon speaks protocol {spoken} and "
+                f"does not serve scaffold.integration (needs >= "
+                f"{self.MIN_SCAFFOLD_INTEGRATION_PROTOCOL}).  It would ignore "
+                f"the command silently, which is indistinguishable from the "
+                f"skill having been installed.  Upgrade the daemon, or run "
+                f"jaato-scaffold integration in the daemon's own virtualenv."
+            )
+        await self._send_event(CommandRequest(
+            command="scaffold.integration",
+            args=[name or ""],
+        ))
+
     async def list_profiles(self) -> None:
         """Request list of available agent profiles.
 

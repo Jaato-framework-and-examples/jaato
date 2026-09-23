@@ -386,7 +386,28 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 # negotiate.  ``secret.reload`` from an application predating 1.20 is a verb
 # that application never sends.  The new EVENTS degrade the 1.8 way: a client
 # that receives one it does not know logs and continues.
-PROTOCOL_VERSION = "1.20"
+#
+# 1.21 -- ``scaffold.integration`` + ``ScaffoldIntegrationEvent``.  The
+# sibling of ``scaffold.explain`` (1.18): where that renders a topic on the
+# DAEMON's install, this RUNS a named ``jaato-scaffold integration`` into the
+# caller's OWN workspace on the daemon's install and host.  The application
+# holds no copy of the payload (the ``jaato-sdk`` skill) and cannot drift from
+# the framework; it asks the daemon to keep the copy current with the same
+# ``--refresh`` contract the CLI has (apply on absent / stale / outdated, skip
+# edited / diverged / unstamped), and the event reports ``state_before`` /
+# ``state_after`` / ``changed`` / ``skipped_reason`` so a client can say a
+# refresh was left alone rather than silently failing.  It resolves the
+# workspace daemon-side (the ``scaffold.explain`` / ``workspace.file.fetch``
+# entitlement path), so there is no path parameter to check.
+#
+# A NEW verb (the 1.7 rule): an older daemon ignores the command silently,
+# and silence there is indistinguishable from "the skill was installed", so a
+# client that reported an install would be reporting one that never happened.
+# Both SDKs therefore refuse below ``MIN_SCAFFOLD_INTEGRATION_PROTOCOL`` rather
+# than wait out a reply nobody will send.  The result event degrades the 1.8
+# way: an older client that somehow receives one it does not know logs and
+# continues.
+PROTOCOL_VERSION = "1.21"
 
 
 # =============================================================================
@@ -587,6 +608,7 @@ class EventType(str, Enum):
     WORKSPACE_FILES_SNAPSHOT = "workspace.files_snapshot"  # Full state on reconnect
     WORKSPACE_IGNORE_RESULT = "workspace.ignore.result"  # Answer to `workspace.ignore <path>` (1.12)
     SCAFFOLD_EXPLAIN_RESULT = "scaffold.explain.result"  # Answer to `scaffold.explain <topic>` (1.18)
+    SCAFFOLD_INTEGRATION_RESULT = "scaffold.integration.result"  # Answer to `scaffold.integration <name>` (1.21)
 
     # External events (Client -> Server, from web components)
     EVENT_EXTERNAL = "event.external"
@@ -2291,6 +2313,66 @@ class ScaffoldExplainEvent(Event):
     data: Any = Field(default_factory=dict)
     topics: List[Dict[str, Any]] = Field(default_factory=list)
     error: str = ""
+    server_version: str = ""
+
+
+class ScaffoldIntegrationEvent(Event):
+    """The result of running ``jaato-scaffold integration`` on the DAEMON (1.21).
+
+    The sibling of :class:`ScaffoldExplainEvent`.  ``explain`` renders a topic
+    from the daemon's install; this RUNS a named integration — the
+    ``jaato-sdk`` skill is the one that ships — into the caller's own
+    workspace, on the daemon's install and host.  The point is the same: the
+    stamp records the version of whichever ``jaato-server`` runs it, and the
+    workspace directory is on that host, so the install that serves the
+    session is the one that must write the skill.  An application that carried
+    its own copy of the payload could drift from the framework; asking the
+    daemon means it never can.
+
+    The daemon applies the ``--refresh`` contract: it re-applies a copy that
+    is ``absent`` / ``stale`` / ``outdated`` (nothing local is lost) and
+    LEAVES an ``edited`` / ``diverged`` / ``unstamped`` copy untouched, saying
+    which in ``skipped_reason``.  A skipped refresh is correct behaviour, not
+    a failure — ``ok`` stays ``True`` — so a client reports it in a notice
+    rather than as an error.
+
+    Fields:
+        integration: The integration name asked for, echoed to correlate.
+        ok: Whether the verb ran.  ``False`` only for a verb-level refusal —
+            an unknown integration, no resolvable workspace, or the daemon
+            could not load its own scaffold code.  A refresh the daemon
+            declined to apply (an edited copy) is ``ok=True`` with a
+            ``skipped_reason``.
+        changed: Whether files were written.  ``False`` for a copy already
+            current, and for a skipped one.
+        state_before: The ``compare()`` state the copy was in — ``absent`` /
+            ``current`` / ``stale`` / ``outdated`` / ``edited`` / ``diverged``
+            / ``unstamped``.
+        state_after: The state after the verb ran.
+        skipped_reason: Why the refresh was left alone, with the same detail
+            text ``compare()`` produces, or ``""`` when it was applied.
+        target: The absolute path the integration installs at, so a client
+            can point a reader at the file it wrote.
+        text: The human rendering, the lines the CLI would print.
+        error: Why not, when ``ok`` is ``False``.
+        available: Every integration THIS daemon ships, so a refusal that
+            names an unknown one is actionable — the caller's own list is by
+            construction the wrong one.
+        server_version: The daemon's ``jaato-server`` version — the version
+            the stamp records, so a client reports WHOSE install wrote the
+            skill.
+    """
+    type: EventType = Field(default=EventType.SCAFFOLD_INTEGRATION_RESULT)
+    integration: str = ""
+    ok: bool = True
+    changed: bool = False
+    state_before: str = ""
+    state_after: str = ""
+    skipped_reason: str = ""
+    target: str = ""
+    text: str = ""
+    error: str = ""
+    available: List[str] = Field(default_factory=list)
     server_version: str = ""
 
 
@@ -4155,6 +4237,7 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.WORKSPACE_FILES_SNAPSHOT.value: WorkspaceFilesSnapshotEvent,
     EventType.WORKSPACE_IGNORE_RESULT.value: WorkspaceIgnoreResultEvent,
     EventType.SCAFFOLD_EXPLAIN_RESULT.value: ScaffoldExplainEvent,
+    EventType.SCAFFOLD_INTEGRATION_RESULT.value: ScaffoldIntegrationEvent,
     # Workspace file staging (multi-frame: TEXT request + N BINARY blobs)
     EventType.WORKSPACE_FILES_STAGE_REQUEST.value: StageFilesRequest,
     EventType.WORKSPACE_FILES_STAGED.value: StageFilesEvent,

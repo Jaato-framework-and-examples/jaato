@@ -17,6 +17,7 @@ import {
   MIN_ATTACHMENT_RESUME_PROTOCOL,
   MIN_SESSION_RELOAD_ENV_PROTOCOL,
   MIN_WORKSPACE_IGNORE_PROTOCOL,
+  MIN_SCAFFOLD_INTEGRATION_PROTOCOL,
   MIN_FILE_FETCH_PROTOCOL,
   MIN_PROTOCOL_VERSION,
   STAGE_FILES_TIMEOUT_MS,
@@ -651,6 +652,27 @@ describe("JaatoClient session management", () => {
 
   test("toggleWorkspaceIgnore is refused below protocol 1.12", async () => {
     await assert.rejects(() => client.toggleWorkspaceIgnore("x"), /workspace\.ignore/);
+    assert.equal(getSent().length, 0);
+  });
+
+  test("runScaffoldIntegration sends scaffold.integration with the name as its one arg", async () => {
+    await client.close();
+    installMockWebSocket();
+    client = new JaatoClient({ url: "ws://localhost:8080" });
+    await connectAndAck(client, MIN_SCAFFOLD_INTEGRATION_PROTOCOL);
+    if (lastInstance) lastInstance.sent = [];
+    await client.runScaffoldIntegration("claude-code");
+    const [ev] = getSent();
+    assert.equal(ev.type, EventTypeValue.COMMAND);
+    assert.equal((ev as { command?: string }).command, "scaffold.integration");
+    assert.deepEqual((ev as { args?: string[] }).args, ["claude-code"]);
+  });
+
+  test("runScaffoldIntegration is refused below protocol 1.21 with nothing sent", async () => {
+    await assert.rejects(
+      () => client.runScaffoldIntegration("claude-code"),
+      /scaffold\.integration/,
+    );
     assert.equal(getSent().length, 0);
   });
 

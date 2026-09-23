@@ -693,20 +693,21 @@ def _run_refresh(_install, name, dest, *, json_out: bool, dry_run: bool) -> int:
     copy is correct behaviour, not a failure (#1261).  Split out of
     `_cmd_integration` so that function stays under the complexity ceiling.
     """
-    state_before, detail_before = _install.compare(name, dest)
-    changed, lines = _install.install(name, dest, refresh=True, dry_run=dry_run)
-    state_after, _ = _install.compare(name, dest)
-    skipped_reason = None
-    if not changed and not dry_run \
-            and state_before not in _install.REFRESH_WRITE_STATES:
-        skipped_reason = f"{state_before}: {detail_before}"
+    # One computation, shared with the ``scaffold.integration`` daemon verb
+    # (#1263): the CLI and the daemon must report the same transition, so both
+    # read it from ``integrations.refresh`` rather than each assembling it.
+    result = _install.refresh(name, dest, dry_run=dry_run)
     if json_out:
+        # ``skipped_reason`` is "" when it applied; the CLI's --json has always
+        # printed ``null`` there, so keep that byte-for-byte.
         print(json.dumps({"asset": name, "dest": str(dest),
-                          "state_before": state_before, "state_after": state_after,
-                          "changed": changed, "skipped_reason": skipped_reason,
+                          "state_before": result["state_before"],
+                          "state_after": result["state_after"],
+                          "changed": result["changed"],
+                          "skipped_reason": result["skipped_reason"] or None,
                           "version": _install.framework_version()}, indent=2))
     else:
-        for line in lines:
+        for line in result["lines"]:
             print(line)
     return 0
 

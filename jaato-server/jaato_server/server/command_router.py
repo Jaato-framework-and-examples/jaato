@@ -93,6 +93,37 @@ def _daemon_version() -> str:
         return ""
 
 
+def _integration_refresh_fields(result: Any) -> Dict[str, Any]:
+    """Read the ``--refresh`` contract's four fields off whatever it returned.
+
+    ``scaffold.integration`` (1.21) surfaces the ``jaato-scaffold integration
+    --refresh`` result the ``integrations`` module produces — deliberately
+    NOT re-deriving the safe-state rule (#1261 owns it), only reading its
+    documented ``--json`` shape: ``state_before`` / ``state_after`` /
+    ``changed`` / ``skipped_reason``, plus the human ``lines``.
+
+    Tolerant of a mapping (the ``--json`` dict) or an object carrying the
+    same attributes, and of missing keys, so the handler shapes one event
+    however the contract is spelled — a diagnostic verb must not fail on the
+    provenance of its own result.
+    """
+    def field(key: str, default: Any) -> Any:
+        if isinstance(result, dict):
+            return result.get(key, default)
+        return getattr(result, key, default)
+
+    lines = field("lines", [])
+    if not isinstance(lines, list):
+        lines = []
+    return {
+        "state_before": str(field("state_before", "") or ""),
+        "state_after": str(field("state_after", "") or ""),
+        "changed": bool(field("changed", False)),
+        "skipped_reason": str(field("skipped_reason", "") or ""),
+        "text": "\n".join(str(line) for line in lines),
+    }
+
+
 class CommandRouter:
     """Transport-agnostic command dispatcher for the Jaato daemon.
 
@@ -499,6 +530,10 @@ class CommandRouter:
             self._handle_scaffold_explain(
                 client_id, args, workspace_path, session_id=session_id)
             return True
+        if cmd == "scaffold.integration":
+            self._handle_scaffold_integration(
+                client_id, args, workspace_path, session_id=session_id)
+            return True
         return False
 
     def resolve_caller_workspace(
@@ -699,6 +734,121 @@ class CommandRouter:
         logger.info("scaffold.explain: client=%s topic=%r ok=%s", client_id,
                     topic, ok)
         answer(ok=ok, text=text, data=_json_safe(data), error=error)
+
+    def _handle_scaffold_integration(
+        self, client_id: str, args: list, client_workspace: Optional[str],
+        session_id: Optional[str] = None,
+    ) -> None:
+        """Handle ``scaffold.integration <name>`` (protocol 1.21).
+
+        The sibling of :meth:`_handle_scaffold_explain`.  ``explain`` renders
+        a topic from the daemon's install; this RUNS ``jaato-scaffold
+        integration <name> --refresh`` into the caller's own workspace, on the
+        daemon's install and host.  The point is the same "which install?"
+        answer: the payload the integration writes (the ``jaato-sdk`` skill)
+        carries a stamp naming the version of whichever ``jaato-server`` runs
+        it, and the workspace directory is on that host — so the install that
+        serves the session is the one that must write it.  An application that
+        carried its own copy of the skill could drift from the framework;
+        asking the daemon means it never can.
+
+        **The ``--refresh`` rule is #1261's, not this handler's.**  It calls
+        :func:`integrations.refresh` — the one place the safe-state decision
+        (apply ``absent`` / ``stale`` / ``outdated``, leave ``edited`` /
+        ``diverged`` / ``unstamped`` alone) lives — and reads its documented
+        ``--json`` fields off the result rather than re-deriving them, so the
+        daemon cannot grow a second opinion about when a local edit is
+        overwritten.
+
+        The workspace is the caller's own, from
+        :meth:`resolve_caller_workspace` — the same entitlement path
+        ``scaffold.explain`` and ``workspace.file.fetch`` use, so there is no
+        directory parameter to check.  Every outcome answers with one
+        :class:`ScaffoldIntegrationEvent`, because the caller is blocked on a
+        reply and silence would be indistinguishable from a daemon that does
+        not serve the verb — the state the protocol floor keeps visible.  A
+        refresh the contract DECLINED to apply (an edited copy) is ``ok=True``
+        with a ``skipped_reason``: leaving a local edit alone is correct, not
+        a failure.
+        """
+        from jaato_sdk.events import ScaffoldIntegrationEvent
+
+        name = (args[0] if args else "") or ""
+        available: list = []
+
+        def answer(**fields: Any) -> None:
+            # `available` rides EVERY outcome so an unknown-name refusal is
+            # actionable: the caller's own list of integrations is by
+            # construction the wrong one, exactly as `scaffold.explain`'s
+            # `topics` is.
+            self._event_sink.send_event(
+                client_id,
+                ScaffoldIntegrationEvent(integration=name,
+                                         available=available,
+                                         server_version=_daemon_version(),
+                                         **fields))
+
+        try:
+            from jaato_server.shared.scaffold import integrations
+        except Exception as exc:                  # pragma: no cover - defensive
+            logger.warning("scaffold.integration: client=%s cannot load the "
+                           "scaffold integrations module: %s", client_id, exc)
+            answer(ok=False,
+                   error=f"scaffold.integration: this daemon cannot load its "
+                         f"own scaffold code: {exc}")
+            return
+
+        try:
+            available = list(integrations.available())
+        except Exception:                         # pragma: no cover - defensive
+            available = []
+
+        if not name:
+            answer(ok=False,
+                   error=f"scaffold.integration: an integration name is "
+                         f"required; this daemon ships: "
+                         f"{', '.join(available) or '(none)'}")
+            return
+
+        # Validate the name against what this build ships BEFORE resolving a
+        # workspace or calling refresh — an unknown integration is the
+        # caller's mistake and wants a listing, not a stack trace from the
+        # payload copier.
+        if name not in available:
+            answer(ok=False,
+                   error=f"scaffold.integration: unknown integration "
+                         f"{name!r}; this daemon ships: "
+                         f"{', '.join(available) or '(none)'}")
+            return
+
+        workspace, sources = self.resolve_caller_workspace(
+            client_id, client_workspace, session_id)
+        if not workspace:
+            checked = ", ".join(
+                f"{k}={'none' if v is None else repr(v)}"
+                for k, v in sources.items())
+            logger.warning("scaffold.integration: client=%s session=%s has no "
+                           "resolvable workspace (%s)", client_id,
+                           session_id or "-", checked)
+            answer(ok=False,
+                   error=f"scaffold.integration: the caller has no workspace "
+                         f"({checked})")
+            return
+
+        try:
+            dest = integrations.target_dir(name, user=False, workspace=workspace)
+            result = integrations.refresh(name, dest)
+        except Exception as exc:
+            logger.warning("scaffold.integration: client=%s name=%r raised: %s",
+                           client_id, name, exc)
+            answer(ok=False, error=f"scaffold.integration {name!r}: {exc}")
+            return
+
+        fields = _integration_refresh_fields(result)
+        logger.info("scaffold.integration: client=%s name=%r %s->%s changed=%s",
+                    client_id, name, fields["state_before"],
+                    fields["state_after"], fields["changed"])
+        answer(ok=True, target=str(dest), **fields)
 
     def _dispatch_cascade_command(
         self, cmd: str, client_id: str, args: list, payload: Any = None,

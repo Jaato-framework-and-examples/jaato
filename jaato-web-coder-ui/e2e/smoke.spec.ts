@@ -1112,3 +1112,18 @@ test("the model offers a file with offer_download and the chat draws a button th
   await expect(page.getByText("I could not offer it: .env: holds credentials")).toBeVisible();
   await expect(page.getByRole("button", { name: "Download .env", exact: true })).toHaveCount(0);
 });
+
+test("the jaato-sdk skill is bootstrapped into the workspace on session start (#1263)", async ({ page }) => {
+  // On session start the client asks the daemon to run
+  // ``jaato-scaffold integration claude-code --refresh`` into its
+  // workspace; the daemon writes the skill and its monitor reports the
+  // files, so the Files panel lists ``.claude/skills/jaato-sdk/SKILL.md``
+  // and the notice names the version the copy was stamped with.
+  await openSession(page);
+  await page.getByRole("button", { name: "Toggle workspace changes (Alt+W)" }).click();
+  const panel = page.getByRole("region", { name: "Files" });
+  await expect(
+    panel.getByRole("button", { name: "Download .claude/skills/jaato-sdk/SKILL.md", exact: true }),
+  ).toBeVisible();
+  await expect(page.getByText(/claude-code skill installed \(jaato-server mock-0\.0\.1\)/)).toBeVisible();
+});
