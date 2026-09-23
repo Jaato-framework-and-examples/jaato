@@ -40,6 +40,8 @@ import { dirname, isAbsolute, join, sep } from "node:path";
 import type { SecretResolveOutcome } from "@jaato/sdk";
 import { GitHubApiError, GitHubGrantRevoked, type GitHubApi, type GitHubTokenSet } from "./github-api.js";
 import { FileGitHubStore, GitHubStoreError, type GitHubAccount, type GitHubBinding, type GrantSecret } from "./github-store.js";
+import { githubGuidanceFile } from "./github-guidance.js";
+import { removeManagedFile, writeManagedFile } from "./managed-files.js";
 
 /** A user token minted this far before its expiry is refreshed rather than reused (the #683 / JAATO_OAUTH_REFRESH_MARGIN default). */
 export const TOKEN_REFRESH_MARGIN_SECONDS = 300;
@@ -61,9 +63,16 @@ export interface BindResult {
   envWritten: boolean;
   /** Whether ``<ws>/.home/.gitconfig`` was seeded (only on bind-to-account). */
   gitconfigSeeded: boolean;
+  /**
+   * Whether ``.jaato/instructions/40-github.md`` was written or refreshed on
+   * this bind.  ``false`` when it was left untouched (already current, the
+   * user replaced it, or no workspace filesystem write happened at all); the
+   * reason for a skip / overwrite is on {@link BindResult.note}.
+   */
+  guidanceWritten: boolean;
   /** How many loaded sessions the daemon re-resolved (0 is the ordinary answer). */
   reloaded: number;
-  /** Set when a filesystem write was skipped, so the caller never believes a write happened silently. */
+  /** Set when a filesystem write was skipped or a managed file was overwritten, so the caller never believes a write happened silently. */
   note?: string;
 }
 
@@ -212,19 +221,27 @@ export class GitHubService {
 
     let envWritten = false;
     let gitconfigSeeded = false;
-    let note: string | undefined;
+    let guidanceWritten = false;
+    const notes: string[] = [];
     const resolved = this._resolveWorkspace(workspace);
     if (resolved === null) {
-      note = this._workspaceRoot
-        ? "workspace is outside the configured workspace_root or does not exist; GH_TOKEN not written to .env"
-        : "no workspace_root configured; GH_TOKEN not written to .env (the browser config.update path writes it instead)";
+      notes.push(this._workspaceRoot
+        ? "workspace is outside the configured workspace_root or does not exist; GH_TOKEN not written to .env (nor the GitHub guidance file)"
+        : "no workspace_root configured; GH_TOKEN not written to .env (the browser config.update path writes it instead); the GitHub guidance file is not written here either");
     } else {
       envWritten = this._writeEnv(resolved, accountId !== null);
       if (accountId !== null && account) gitconfigSeeded = this._seedGitConfig(resolved, account);
+      const g = this._applyGuidance(resolved, accountId !== null);
+      guidanceWritten = g.written;
+      if (g.note) notes.push(g.note);
     }
 
     const { reloaded } = await this._reload(user, accountId === null ? `unbind ${workspace}` : `bind ${account!.login} -> ${workspace}`);
-    return { binding: accountId === null ? "cleared" : "set", envWritten, gitconfigSeeded, reloaded, note };
+    return {
+      binding: accountId === null ? "cleared" : "set",
+      envWritten, gitconfigSeeded, guidanceWritten, reloaded,
+      note: notes.length ? notes.join("; ") : undefined,
+    };
   }
 
   // ---- secret.resolve (the SecretResolveResponder handler) ---------------
@@ -335,6 +352,35 @@ export class GitHubService {
     } catch (e) {
       this._log(`github bind: could not seed ${path}: ${(e as Error).message}`);
       return false;
+    }
+  }
+
+  /**
+   * Write / refresh (on bind-to-account) or remove (on bind-to-none) the
+   * GitHub working-guidance file, through the generic managed-file mechanism.
+   * Returns whether a write happened and a human note for a skip / overwrite —
+   * a clean write, a no-op, or a removal is silent (the model reads the file;
+   * the operator does not need a note that it worked).
+   */
+  private _applyGuidance(workspace: string, present: boolean): { written: boolean; note?: string } {
+    const file = githubGuidanceFile();
+    if (!present) {
+      const outcome = removeManagedFile(workspace, file, this._log);
+      if (outcome.action === "skipped-user-file") {
+        return { written: false, note: `left your own ${file.relativePath} in place (its jaato-managed marker was removed)` };
+      }
+      return { written: false };
+    }
+    const outcome = writeManagedFile(workspace, file, atomicWrite, this._log);
+    switch (outcome.action) {
+      case "skipped-user-file":
+        return { written: false, note: `kept your own ${file.relativePath} (its jaato-managed marker was removed); the shipped GitHub guidance was not written` };
+      case "written":
+        return outcome.reason === "version-changed"
+          ? { written: true, note: `refreshed ${file.relativePath} to the current GitHub guidance` }
+          : { written: true };
+      default:
+        return { written: false };
     }
   }
 }

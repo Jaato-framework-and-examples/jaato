@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+# gh-worktree — rules 1..5 of .jaato/instructions/40-github.md as one command.
+#
+# A workspace may be shared between sessions running at the same time, so each
+# session works in its OWN git worktree off a SHARED clone, on a per-session
+# branch, all inside the workspace so path containment allows it:
+#
+#   shared clone   <workspace>/repos/<owner>/<repo>
+#   your worktree  <workspace>/worktrees/<session_id>/<repo>
+#   your branch    jaato/<session_id>/<topic>
+#
+# The <session_id> is NOT read from the environment: it is not reliably present
+# in a cli subprocess. Get it from get_environment(aspect="session") (its
+# session_id field) and pass it as the first argument.
+#
+# Usage:
+#   gh-worktree open  <session_id> <owner>/<repo> [topic] [base-branch]
+#   gh-worktree close <session_id> <repo>
+#   gh-worktree path  <session_id> <repo>
+#
+# `gh` / `git` read GH_TOKEN from the environment; this script never prints it.
+set -euo pipefail
+
+# The workspace root is this script's grandparent (.jaato/bin/ -> workspace),
+# so the layout is correct whatever the current directory is (rule 2: a cd does
+# not persist between cli commands).
+SELF="$(cd "$(dirname "$0")" && pwd)"
+WS="$(cd "$SELF/../.." && pwd)"
+
+die() { echo "gh-worktree: $*" >&2; exit 2; }
+
+# A concurrent fetch can fail on an index/ref .lock while another session's
+# operation holds it (rule 4). Retry a few times; NEVER delete the lock — the
+# worktrees share one .git and deleting it corrupts the other operation.
+retry_fetch() {
+  local dir="$1" i
+  for i in 1 2 3 4 5; do
+    if git -C "$dir" fetch --prune origin 2>/tmp/gh-worktree-fetch.$$; then
+      rm -f /tmp/gh-worktree-fetch.$$ 2>/dev/null || true
+      return 0
+    fi
+    if grep -qi 'lock' /tmp/gh-worktree-fetch.$$ 2>/dev/null; then
+      echo "gh-worktree: fetch hit a lock (another session is busy); retry $i/5" >&2
+      sleep 2
+      continue
+    fi
+    cat /tmp/gh-worktree-fetch.$$ >&2 || true
+    rm -f /tmp/gh-worktree-fetch.$$ 2>/dev/null || true
+    return 1
+  done
+  echo "gh-worktree: fetch still blocked by a lock after 5 tries; leave it and retry later" >&2
+  rm -f /tmp/gh-worktree-fetch.$$ 2>/dev/null || true
+  return 1
+}
+
+cmd_open() {
+  local session_id="${1:-}" spec="${2:-}" topic="${3:-work}" base="${4:-}"
+  [ -n "$session_id" ] || die "open needs <session_id> (from get_environment(aspect=\"session\"))"
+  [ -n "$spec" ] || die "open needs <owner>/<repo>"
+  case "$spec" in */*) : ;; *) die "repo must be <owner>/<repo>, got '$spec'";; esac
+  local repo; repo="${spec#*/}"
+
+  local clone="$WS/repos/$spec"
+  local wt="$WS/worktrees/$session_id/$repo"
+  local branch="jaato/$session_id/$topic"
+
+  if [ ! -d "$clone/.git" ]; then
+    mkdir -p "$(dirname "$clone")"
+    # gh supplies the credential over HTTPS (rule 6/7); no token in the URL.
+    gh repo clone "$spec" "$clone" -- --no-checkout >&2
+  fi
+  retry_fetch "$clone"
+
+  # Resolve the base once: an explicit base, else the clone's default branch.
+  if [ -z "$base" ]; then
+    base="$(git -C "$clone" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')"
+    [ -n "$base" ] || base="main"
+  fi
+
+  mkdir -p "$WS/worktrees/$session_id"
+  if [ -d "$wt" ]; then
+    echo "gh-worktree: reusing existing worktree $wt" >&2
+  elif git -C "$clone" show-ref --verify --quiet "refs/heads/$branch"; then
+    git -C "$clone" worktree add "$wt" "$branch" >&2
+  else
+    git -C "$clone" worktree add -b "$branch" "$wt" "origin/$base" >&2
+  fi
+
+  # The one line on stdout is the worktree path, so a caller can capture it and
+  # then `git -C <that>` every subsequent command (rule 2).
+  echo "$wt"
+}
+
+cmd_close() {
+  local session_id="${1:-}" repo="${2:-}"
+  [ -n "$session_id" ] || die "close needs <session_id>"
+  [ -n "$repo" ] || die "close needs <repo>"
+  local wt="$WS/worktrees/$session_id/$repo"
+  [ -d "$wt" ] || { echo "gh-worktree: no worktree at $wt (already removed?)" >&2; return 0; }
+  # Find the shared clone that owns this worktree and remove it from there.
+  local gitfile owner_clone
+  if [ -f "$wt/.git" ]; then
+    gitfile="$(sed -n 's/^gitdir: //p' "$wt/.git")"
+    owner_clone="${gitfile%%/.git/worktrees/*}"
+  fi
+  if [ -n "${owner_clone:-}" ] && [ -d "$owner_clone/.git" ]; then
+    git -C "$owner_clone" worktree remove --force "$wt" >&2
+  else
+    rm -rf "$wt"
+    echo "gh-worktree: removed $wt (its shared clone was not found; pruning refs is up to that clone)" >&2
+  fi
+}
+
+cmd_path() {
+  local session_id="${1:-}" repo="${2:-}"
+  [ -n "$session_id" ] || die "path needs <session_id>"
+  [ -n "$repo" ] || die "path needs <repo>"
+  echo "$WS/worktrees/$session_id/$repo"
+}
+
+main() {
+  local sub="${1:-}"; shift || true
+  case "$sub" in
+    open)  cmd_open  "$@" ;;
+    close) cmd_close "$@" ;;
+    path)  cmd_path  "$@" ;;
+    ""|-h|--help|help)
+      sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+      ;;
+    *) die "unknown subcommand '$sub' (open | close | path)" ;;
+  esac
+}
+
+main "$@"
