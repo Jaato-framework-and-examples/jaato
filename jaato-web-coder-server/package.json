@@ -1,6 +1,6 @@
 {
   "name": "@jaato/web-coder-server",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "private": true,
   "type": "module",
   "description": "Sign-in and ticket-custody backend for the jaato-web-coder browser client.",

@@ -16,6 +16,7 @@ import { summarizeToolCalls } from "@/protocol/turnStats";
 import { formatSessionList, normalizeSessionList, type SessionSummary } from "@/protocol/sessions";
 import { formatHistoryListing, historyBlocks } from "@/protocol/history";
 import { clampRailWidth, loadRailWidth, saveRailWidth } from "@/store/railWidth";
+import { loadRailSplits, sanitizeSplits, saveRailSplits, type RailSplits } from "@/store/railSplits";
 import { applyChanged, applySnapshot, markReset, type WorkspaceReset } from "@/store/workspaceView";
 import { toolIdMappings } from "@/protocol/toolIds";
 import type { SessionNote } from "@/app/notes";
@@ -248,6 +249,13 @@ export interface JaatoState {
     popupCallId?: string | null;
     /** Width of the session rail in px, dragged via the handle on its left edge; remembered per browser. */
     railWidth: number;
+    /**
+     * How the rail's open sections share its height, as a weight per section
+     * id, dragged via the horizontal handle between two open sections;
+     * remembered per browser.  Normalised to fractions over the open set at
+     * render time — see ``@/store/railSplits``.
+     */
+    railSplits: RailSplits;
   };
 
   // ── actions ──
@@ -318,6 +326,8 @@ export interface JaatoState {
   setPopup: (callId: string | null) => void;
   /** Clamped to the rail's bounds and persisted. */
   setRailWidth: (w: number) => void;
+  /** Replace the rail section split weights (from a drag or a reset) and persist. */
+  setRailSplits: (splits: RailSplits) => void;
   addUploads: (items: StagedUpload[]) => void;
   updateUpload: (id: string, patch: Partial<StagedUpload>) => void;
   removeUpload: (id: string) => void;
@@ -375,6 +385,16 @@ function without<T>(rec: Record<string, T>, key: string): Record<string, T> {
 /** Stamp ``key`` with now, unless it is already stamped (the clock must not restart). */
 function startedAt(rec: Record<string, number>, key: string): Record<string, number> {
   return key in rec ? rec : { ...rec, [key]: Date.now() };
+}
+
+/**
+ * The context an upload belongs to (#1250): the active session once one
+ * exists, else ``""`` (the picker, before a session opens).  Stamped onto
+ * each upload at attach time and re-read to filter the attach strip, so a
+ * file attached in one session is not shown in another.
+ */
+export function uploadScope(st: { sessionId?: string | null }): string {
+  return st.sessionId ? `session:${st.sessionId}` : "";
 }
 
 function agentOf(ev: AnyEvent): string {
@@ -890,6 +910,17 @@ export function reduce(s: JaatoState, raw: JaatoEvent): JaatoState {
       break;
     case EventTypeValue.SESSION_INFO: {
       const sid = ev.session_id as string | undefined;
+      // A session opening adopts the picker's uploads: files attached
+      // before any session existed carry scope ``""``, and the one session
+      // they were staged for is the one that now opens (#1250).  Re-stamp
+      // only unscoped uploads, so another session's files are never
+      // reassigned.  Only on the null -> session transition.
+      if (sid && !s.sessionId) {
+        const adopted = `session:${sid}`;
+        if (s.uploads.some((u) => u.scope === "")) {
+          s.uploads = s.uploads.map((u) => (u.scope === "" ? { ...u, scope: adopted } : u));
+        }
+      }
       if (sid) s.sessionId = sid;
       if (Array.isArray(ev.sessions)) s.sessions = normalizeSessionList(ev.sessions);
       s.session = {
@@ -1072,7 +1103,7 @@ export const useJaato = create<JaatoState>()((set, get) => ({
   commands: mergeCommandSpecs([]),
   uploads: [],
   ...emptySessionState(),
-  ui: { showPlan: false, showBudget: false, showWorkspace: false, showTools: false, showSessions: false, theme: "light", popupCallId: null, railWidth: loadRailWidth() },
+  ui: { showPlan: false, showBudget: false, showWorkspace: false, showTools: false, showSessions: false, theme: "light", popupCallId: null, railWidth: loadRailWidth(), railSplits: loadRailSplits() },
 
   dispatch: (events) =>
     set((state) => {
@@ -1159,12 +1190,18 @@ export const useJaato = create<JaatoState>()((set, get) => ({
   setTheme: (theme) => set((st) => ({ ui: { ...st.ui, theme } })),
   setPopup: (callId) => set((st) => ({ ui: { ...st.ui, popupCallId: callId } })),
   setRailWidth: (w) => set((st) => { const railWidth = clampRailWidth(w); saveRailWidth(railWidth); return { ui: { ...st.ui, railWidth } }; }),
+  setRailSplits: (splits) => set((st) => { const railSplits = sanitizeSplits(splits); saveRailSplits(railSplits); return { ui: { ...st.ui, railSplits } }; }),
   addUploads: (items) => set((st) => ({ uploads: [...st.uploads, ...items] })),
   updateUpload: (id, patch) => set((st) => ({ uploads: st.uploads.map((u) => (u.id === id ? { ...u, ...patch } : u)) })),
   removeUpload: (id) => set((st) => ({ uploads: st.uploads.filter((u) => u.id !== id) })),
   takeUploads: () => {
-    const staged = get().uploads.filter((u) => u.status === "staged").map((u) => u.path);
-    set((st) => ({ uploads: st.uploads.filter((u) => u.status === "queued" || u.status === "staging") }));
+    // Only the ACTIVE context's staged files are named in the message and
+    // its settled chips (staged + failed) cleared; another session's uploads
+    // (a different scope) are left untouched (#1250).  A file still
+    // queued/staging in this context is kept for the next send, as before.
+    const active = uploadScope(get());
+    const staged = get().uploads.filter((u) => u.scope === active && u.status === "staged").map((u) => u.path);
+    set((st) => ({ uploads: st.uploads.filter((u) => u.scope !== active || u.status === "queued" || u.status === "staging") }));
     return staged;
   },
   resetSessionState: () => set(() => ({ ...emptySessionState() })),

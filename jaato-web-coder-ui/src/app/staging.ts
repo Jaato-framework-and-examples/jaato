@@ -24,7 +24,7 @@
  * renders, this holds what the wire needs.
  */
 import { EventTypeValue } from "@jaato/sdk";
-import { MAIN_AGENT, useJaato } from "@/store/store";
+import { MAIN_AGENT, uploadScope, useJaato } from "@/store/store";
 import type { StagedUpload } from "@/store/types";
 import { checkSizes, stagedName } from "@/protocol/attachments";
 import { getClient, isConnected, reassertAfterReconnect } from "@/sdk/connection";
@@ -63,15 +63,19 @@ useJaato.subscribe((st, prev) => {
 export function attachFiles(files: File[], folder: string): void {
   if (!files.length) return;
   const st = useJaato.getState();
+  // The context these files belong to, captured now: the active session,
+  // or "" on the picker before one opens (#1250).  The strip shows only
+  // the active scope's uploads, so they do not follow into another session.
+  const scope = uploadScope(st);
   const verdicts = checkSizes(files.map((f) => f.size));
   const items: StagedUpload[] = files.map((f, i) => {
     const id = `up-${++seq}`;
     const rel = (f as File & { webkitRelativePath?: string }).webkitRelativePath ?? "";
     const path = stagedName(f.name, rel, folder);
     const reason = path === null ? "name must be a non-empty workspace-relative path with no '..' components" : verdicts[i]!.reason;
-    if (reason) return { id, path: path ?? f.name, size: f.size, status: "failed", error: reason };
+    if (reason) return { id, path: path ?? f.name, size: f.size, status: "failed", scope, error: reason };
     bytesOf.set(id, f);
-    return { id, path: path!, size: f.size, status: "queued" };
+    return { id, path: path!, size: f.size, status: "queued", scope };
   });
   st.addUploads(items);
   if (canStageNow()) stageQueued().catch(() => undefined);

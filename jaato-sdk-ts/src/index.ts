@@ -25,6 +25,7 @@ export {
   MIN_ATTACHMENT_RESUME_PROTOCOL,
   MIN_WORKSPACE_IGNORE_PROTOCOL,
   MIN_FILE_FETCH_PROTOCOL,
+  STAGE_FILES_TIMEOUT_MS,
   isProtocolCompatible,
   type WorkspaceFileFetchResult,
   type JaatoClientOptions,

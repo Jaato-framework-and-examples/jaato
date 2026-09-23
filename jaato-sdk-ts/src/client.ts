@@ -152,6 +152,18 @@ export const MIN_WORKSPACE_IGNORE_PROTOCOL = "1.12";
 export const MIN_FILE_FETCH_PROTOCOL = "1.20";
 
 /**
+ * How long {@link JaatoClient.stageFiles} waits for the daemon's
+ * ``workspace.files.staged`` response before giving up (default 120 s, the
+ * sibling {@link JaatoClient.fetchWorkspaceFile} value).  The wait had no
+ * deadline: if the response never arrived (lost, the daemon errored before
+ * emitting it, the connection stalled without closing) the promise never
+ * settled and the caller's ``staging`` indicator pulsed forever with no
+ * error to react to.  The timeout rejects with a clear message so a caller's
+ * ``catch`` marks the upload ``failed`` instead of hanging (#1248).
+ */
+export const STAGE_FILES_TIMEOUT_MS = 120_000;
+
+/**
  * What {@link JaatoClient.fetchWorkspaceFile} resolves with.  ``event`` is
  * the daemon's header; ``data`` is the file's bytes when it was fetched
  * (``null`` for a metadata-only fetch or a refusal).
@@ -1448,8 +1460,13 @@ export class JaatoClient {
    * @param files Each entry needs ``name`` (workspace-relative
    *   path) and ``data`` (the bytes).  ``contentType`` and ``mode``
    *   are optional informational hints.
+   * @param options.timeoutMs How long to wait for the daemon's response
+   *   before rejecting (default {@link STAGE_FILES_TIMEOUT_MS}).  Pass 0 to
+   *   wait indefinitely (the pre-#1248 behaviour).
    * @returns The server's ``StageFilesEvent`` reporting per-file
    *   success / failure.
+   * @throws Error if no ``workspace.files.staged`` response arrives within
+   *   the timeout — so a lost response is a settled rejection, not a hang.
    */
   async stageFiles(
     workspaceId: string,
@@ -1459,6 +1476,7 @@ export class JaatoClient {
       contentType?: string;
       mode?: number;
     }>,
+    options: { timeoutMs?: number } = {},
   ): Promise<StageFilesEvent> {
     if (this._state !== ConnectionState.CONNECTED) {
       throw this._state === ConnectionState.RECONNECTING
@@ -1484,9 +1502,16 @@ export class JaatoClient {
     }) as StagedFileSpec);
 
     // Set up the response waiter BEFORE sending — otherwise the
-    // server's response could race with handler installation.
+    // server's response could race with handler installation.  The wait
+    // is bounded (#1248): a response that never arrives would otherwise
+    // leave this promise unsettled forever, and the caller's status stuck
+    // on "staging".
     const responsePromise = this._waitForNextEvent<StageFilesEvent>(
       (e) => e.type === EventTypeValue.WORKSPACE_FILES_STAGED,
+      {
+        timeoutMs: options.timeoutMs ?? STAGE_FILES_TIMEOUT_MS,
+        label: "stageFiles: no workspace.files.staged response",
+      },
     );
 
     transport.sendEvent({
@@ -1510,17 +1535,34 @@ export class JaatoClient {
    *
    * One-shot subscription used by request/response methods like
    * {@link stageFiles}.  Auto-unsubscribes after the first match.
+   *
+   * With ``options.timeoutMs`` set (> 0), the wait is bounded: if no
+   * matching event arrives in time it **rejects** with an ``Error`` naming
+   * ``options.label`` and the deadline, and unsubscribes — so a request
+   * whose response is lost surfaces as a settled promise the caller can
+   * catch, not a hang (#1248).  Omit ``timeoutMs`` (or pass 0) to keep the
+   * resolve-only behaviour.
    */
   private _waitForNextEvent<T extends JaatoEvent = JaatoEvent>(
     predicate: (event: JaatoEvent) => boolean,
+    options: { timeoutMs?: number; label?: string } = {},
   ): Promise<T> {
-    return new Promise<T>((resolve) => {
+    return new Promise<T>((resolve, reject) => {
+      let timer: ReturnType<typeof setTimeout> | null = null;
       const unsub = this.subscribeAll((event) => {
         if (predicate(event)) {
+          if (timer) clearTimeout(timer);
           unsub();
           resolve(event as T);
         }
       });
+      const timeoutMs = options.timeoutMs ?? 0;
+      if (timeoutMs > 0) {
+        timer = setTimeout(() => {
+          unsub();
+          reject(new Error(`${options.label ?? "waitForNextEvent: no matching event"} after ${timeoutMs} ms`));
+        }, timeoutMs);
+      }
     });
   }
 

@@ -304,6 +304,39 @@ test("batch clarification walks its questions and replies once", async ({ page }
   await expect(page.locator("p", { hasText: /you chose/ })).toContainText("Svelte 5");
 });
 
+test("long clarification choices wrap inside the plate, not off its edge (#1245)", async ({ page }) => {
+  // Reported with a screenshot: ~300-char choices rendered as one uppercase
+  // non-wrapping line running past the plate, across the transcript and over
+  // the rail.  An unlayered ``.btn { white-space: nowrap; text-transform:
+  // uppercase }`` outranked the button's ``normal-case`` / ``whitespace-normal``
+  // utilities.  Measured, not styled: each choice's box must lie inside the
+  // clarification plate AND inside the transcript column, and the text must
+  // not be uppercase-transformed.
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await openSession(page);
+  await composer(page).fill("ask long");
+  await composer(page).press("Enter");
+  await expect(page.getByText("Which framework should the client use?")).toBeVisible();
+  const plate = page.getByRole("group", { name: "Clarification" });
+  // The plate's footer "cancel" is also a <button>, so filter to the choices.
+  const buttons = plate.getByRole("button").filter({ hasNotText: /^cancel$/ });
+  const count = await buttons.count();
+  expect(count).toBe(3);
+  const plateBox = (await plate.boundingBox())!;
+  const main = (await page.locator("main").boundingBox())!;
+  for (let i = 0; i < count; i++) {
+    const b = buttons.nth(i);
+    const box = (await b.boundingBox())!;
+    // Inside the plate's box (a nowrap line overflows it to the right).
+    expect(box.x).toBeGreaterThanOrEqual(plateBox.x - 1);
+    expect(box.x + box.width).toBeLessThanOrEqual(plateBox.x + plateBox.width + 1);
+    // Inside the transcript column — so it cannot cross onto the rail.
+    expect(box.x + box.width).toBeLessThanOrEqual(main.x + main.width + 1);
+    // The label is body text, not chrome: no uppercase transform.
+    expect(await b.evaluate((el) => getComputedStyle(el).textTransform)).not.toBe("uppercase");
+  }
+});
+
 test("subagents get their own tab", async ({ page }) => {
   await openSession(page);
   await composer(page).fill("subagent");
@@ -819,6 +852,54 @@ test("the rail's drag handle resizes it, by pointer and by keyboard", async ({ p
   expect(Math.round((await page.getByRole("complementary", { name: "Session rail" }).boundingBox())!.width)).toBe(404);
 });
 
+test("dragging the boundary between two rail sections moves height between them, and survives a reload (#1244)", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await openSession(page);
+  await page.getByRole("button", { name: "Open Plan" }).click();
+  await page.getByRole("button", { name: "Open Sessions" }).click();
+
+  const plan = page.getByRole("region", { name: "Plan" });
+  const sessions = page.getByRole("region", { name: "Sessions" });
+  const rail = page.locator("[data-rail]");
+  const handle = page.getByRole("separator", { name: "Resize between Plan and Sessions" });
+
+  const planBefore = (await plan.boundingBox())!;
+  const sessionsBefore = (await sessions.boundingBox())!;
+
+  // Measured from the page, not from styles.  Drag the boundary UP, so Plan
+  // shrinks and Sessions grows by the same amount.
+  const hb = (await handle.boundingBox())!;
+  await page.mouse.move(hb.x + hb.width / 2, hb.y + hb.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(hb.x + hb.width / 2, hb.y + hb.height / 2 - 120, { steps: 6 });
+  await page.mouse.up();
+
+  const planAfter = (await plan.boundingBox())!;
+  const sessionsAfter = (await sessions.boundingBox())!;
+  expect(planAfter.height).toBeLessThan(planBefore.height - 40);
+  expect(sessionsAfter.height).toBeGreaterThan(sessionsBefore.height + 40);
+  // Split-pane: what one loses the other gains.
+  const shrank = planBefore.height - planAfter.height;
+  const grew = sessionsAfter.height - sessionsBefore.height;
+  expect(Math.abs(shrank - grew)).toBeLessThan(2);
+
+  // The rail as a whole does not scroll: the open sections divide its height.
+  expect(await rail.evaluate((el) => el.scrollHeight - el.clientHeight)).toBeLessThanOrEqual(1);
+
+  // Remembered per browser: reload, reopen the two sections, the proportion holds.
+  const ratio = planAfter.height / sessionsAfter.height;
+  await page.reload();
+  await page.getByPlaceholder("ws://host:8080").fill("ws://127.0.0.1:8097");
+  await page.getByRole("button", { name: "Connect" }).click();
+  await page.getByRole("button", { name: /default/ }).click();
+  await expect(page.getByText("Connected to the mock daemon")).toBeVisible();
+  await page.getByRole("button", { name: "Open Plan" }).click();
+  await page.getByRole("button", { name: "Open Sessions" }).click();
+  const planReload = (await page.getByRole("region", { name: "Plan" }).boundingBox())!;
+  const sessionsReload = (await page.getByRole("region", { name: "Sessions" }).boundingBox())!;
+  expect(planReload.height / sessionsReload.height).toBeCloseTo(ratio, 1);
+});
+
 test("files attached in the composer are staged into the workspace, listed in Files, and named by the next message", async ({ page }) => {
   await openSession(page);
   // A pick through the strip's hidden input (a drop or a paste reach the same call).
@@ -871,6 +952,25 @@ test("files attached on the session picker are in the workspace when the session
   await expect(page.getByText("Staged into the workspace: brief.txt")).toBeVisible();
   await page.getByRole("button", { name: "Toggle workspace changes (Alt+W)" }).click();
   await expect(page.getByRole("region", { name: "Files" }).getByText("+ brief.txt")).toBeVisible();
+});
+
+test("an attached file does not follow you into another session (#1250)", async ({ page }) => {
+  // The reported bug: uploads were one flat global list, so a file attached
+  // in session A sat above session B's composer too.  They are scoped to the
+  // session now, so switching away hides them.
+  await openSession(page);
+  await page.getByLabel("Attach files").setInputFiles([
+    { name: "switchme.txt", mimeType: "text/plain", buffer: Buffer.from("mine only") },
+  ]);
+  const strip = page.getByRole("group", { name: "Attached files" });
+  await expect(strip.getByText("switchme.txt")).toBeVisible();
+  await expect(strip.locator("li[data-status=staged]")).toHaveCount(1);
+
+  // Switch to an unrelated session: the file belongs to the one it was
+  // attached in, so the strip in this one does not show it.
+  await composer(page).fill("session attach 20260916_090000");
+  await composer(page).press("Enter");
+  await expect(page.getByText("switchme.txt")).toHaveCount(0);
 });
 
 test("a note written on the exit plate survives Escape, is kept, and is the rail's copy too", async ({ page }) => {

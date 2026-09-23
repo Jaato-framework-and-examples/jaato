@@ -40,7 +40,7 @@ import { downloadFromPanel, servesDownloads } from "@/app/downloads";
 
 interface Node { name: string; path: string; change?: string; children: Map<string, Node> }
 
-function build(files: Record<string, string>): Node {
+export function build(files: Record<string, string>): Node {
   const root: Node = { name: "", path: "", children: new Map() };
   for (const [p, change] of Object.entries(files)) {
     const parts = p.split("/").filter(Boolean);
