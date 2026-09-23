@@ -376,6 +376,19 @@ class NotebookPlugin(StreamingCapable, RunnerForwardingMixin):
                         "installs persist there. Recommended: .jaato/tool-venv"
                     ),
                 },
+                "workspace_home": {
+                    "type": "string",
+                    "default": "",
+                    "description": (
+                        "Path to a workspace-scoped HOME for the kernel "
+                        "subprocess (#1225; empty = off). HOME + the XDG base "
+                        "dirs are pointed at it so a cell's ~ writes stay "
+                        "per-workspace instead of shared across the daemon's "
+                        "HOME. Usually set once under "
+                        "plugin_configs.cli.workspace_home and mirrored here "
+                        "by the daemon. Do NOT store secrets here."
+                    ),
+                },
             },
         }
 

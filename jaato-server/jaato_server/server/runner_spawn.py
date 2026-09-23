@@ -56,6 +56,9 @@ from jaato_server.server.confinement_id import (
 # profile's declared block (#735) rather than duck-typing it, and a lazy
 # import inside a per-session helper would pay the lookup on every spawn.
 from jaato_server.shared.runtime_limits import RuntimeLimits
+from jaato_server.shared.plugins.workspace_home import (
+    ensure_workspace_home_dir, inject_workspace_home,
+)
 from jaato_server.shared.utils.errors import exc_message
 
 
@@ -132,6 +135,7 @@ def spawn_session_runner(
     cgroup_attach: Optional[Callable[[], None]] = None,
     pool_manager: Any = None,
     cascade_driver_id: Optional[str] = None,
+    managed_workspace_root: Optional[str] = None,
 ) -> None:
     """Spawn the per-session runner subprocess and wire its RPC handle
     onto the JaatoServer.
@@ -173,6 +177,13 @@ def spawn_session_runner(
             after provisioning the cgroup.  ``None`` means no
             cgroup attach — the IPC session path (no cgroup
             provisioned) passes ``None``.
+        managed_workspace_root: The WS server's provisioning root
+            (#1225).  Non-None means this session's workspace is one the
+            daemon manages, so the workspace HOME (``<ws>/.home/``)
+            defaults on; ``None`` (IPC / user-CWD sessions) leaves it
+            opt-in via ``plugin_configs.cli.workspace_home``.  Used only
+            to create the home directory + its gitignore before spawn,
+            as the session tmpdir is (#1171).
         cascade_driver_id: Phase 2 cascade-sharing tenant ID.  When
             non-None, the pool acquire walks for a slot already
             affined to this cascade (warm plugin state, warm LSP
@@ -251,6 +262,22 @@ def spawn_session_runner(
     # which is #1171 itself — so this must not fail silently, and must
     # not take down a session that would otherwise run.
     _ensure_session_tmpdir(session_id, profile_name)
+
+    # ----- The session's workspace HOME, before either branch (#1225) -----
+    # The daemon creates ``<ws>/.home/`` (+ its ``*`` gitignore) here, for
+    # the same reason and at the same seam as the tmpdir above: a confined
+    # runner cannot be relied on to make it, and one call covers both the
+    # cold-spawn and pool-served branches.  The plugins (cli /
+    # interactive_shell / notebook) only redirect HOME at the env they build;
+    # they do not create the directory.  Best-effort and audible inside the
+    # helper, which no-ops for a falsy workspace / an off session -- so it is
+    # called unconditionally (a guard here would only add a decision point to
+    # a ratcheted function).
+    ensure_workspace_home_dir(
+        getattr(server, "_profile", None),
+        workspace_path,
+        managed_workspace_root,
+    )
 
     # ----- Pool routing (pool PR 4 + 5a) -----
     # Pool-served path is gated to sessions that:
@@ -755,6 +782,7 @@ def build_session_envelope(
     session_id: str,
     workspace_path: Optional[str],
     profile_name: str,
+    managed_workspace_root: Optional[str] = None,
 ) -> "SessionInitEnvelope":
     """Build a :class:`SessionInitEnvelope` from a pre-init JaatoServer.
 
@@ -1125,6 +1153,17 @@ def build_session_envelope(
 
     _apply_egress_env(session_id, agent_params_dict, resolved_session_env)
 
+    # Workspace HOME (#1225): fold the effective ``workspace_home`` into the
+    # cli / interactive_shell / notebook sections so each plugin reads it
+    # from its own namespace, beneath any explicit per-surface value.  Placed
+    # here (not inside the ``profile is not None`` block above) so a
+    # profile-less WS-provisioned session -- the bare ``.env`` shape every
+    # web-created workspace has -- still gets the managed default.  The
+    # daemon created the directory in ``spawn_session_runner``.
+    inject_workspace_home(
+        plugin_configs_dict, workspace_path, managed_workspace_root,
+    )
+
     return SessionInitEnvelope(
         session_id=session_id,
         workspace_path=workspace_path,
@@ -1196,6 +1235,7 @@ def dispatch_bootstrap_envelope(
     workspace_path: Optional[str],
     profile_name: str,
     timeout: float = 30.0,
+    managed_workspace_root: Optional[str] = None,
 ) -> None:
     """Send the ``session.bootstrap`` RPC so the runner-side
     :class:`shared.jaato_session.JaatoSession` host is populated.
@@ -1223,6 +1263,10 @@ def dispatch_bootstrap_envelope(
         timeout: Wall-clock cap on the bootstrap RPC, seconds.
             Default 30s — generous to absorb runner-side plugin
             discovery + provider connect latency.
+        managed_workspace_root: The WS provisioning root (#1225),
+            forwarded to :func:`build_session_envelope` so the
+            workspace-HOME default is folded into the plugin configs
+            for daemon-managed workspaces.  ``None`` for IPC / user-CWD.
     """
     rpc = server.runner_rpc
     if rpc is None:
@@ -1268,6 +1312,7 @@ def dispatch_bootstrap_envelope(
             session_id=session_id,
             workspace_path=workspace_path,
             profile_name=profile_name,
+            managed_workspace_root=managed_workspace_root,
         )
         result = rpc.bootstrap_session_threadsafe(envelope, timeout=timeout)
         _note_bootstrap_outcome(server, None)

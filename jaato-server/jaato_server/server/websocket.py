@@ -915,6 +915,11 @@ class JaatoWSServer:
                     # _construct_and_initialize_server (see
                     # session_manager.py — same pattern as _agent_params).
                     cascade_driver_id=getattr(server, "_cascade_driver_id", None),
+                    # #1225: this hook only runs for WS-provisioned sessions
+                    # under the server's workspace_root (gated at the top), so
+                    # passing that root turns the workspace HOME default on
+                    # for exactly the sessions the daemon manages.
+                    managed_workspace_root=ws_workspace_root,
                 )
             except Exception as exc:  # noqa: BLE001 — spawn boundary
                 logger.warning(
@@ -939,6 +944,10 @@ class JaatoWSServer:
                 session_id=session_id,
                 workspace_path=workspace_path,
                 profile_name=profile_name,
+                # #1225: fold the workspace-HOME default into the envelope's
+                # cli / interactive_shell / notebook configs for this managed
+                # workspace.
+                managed_workspace_root=ws_workspace_root,
             )
 
         def _apparmor_session_hook(server: JaatoServer, session_id: str) -> None:
