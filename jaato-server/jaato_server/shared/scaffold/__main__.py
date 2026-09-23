@@ -179,6 +179,8 @@ _SCOPES = {
                           render_named=_explain.audit_profile,
                           blurb="the AUDIT RECORD (EU AI Act Arts. 12, 19)"),
     "paths": ExplainScope(_explain.paths),
+    "gh": ExplainScope(_explain.gh,
+                       blurb="driving `gh` / `git` with a per-user token"),
     "prefetch": ExplainScope(_explain.prefetch),
     "completion": ExplainScope(_explain.completion,
                                blurb="the OUTPUT-side hook"),

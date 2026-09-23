@@ -2991,6 +2991,97 @@ def paths() -> Rendered:
     return data, "\n".join(lines)
 
 
+def gh() -> Rendered:
+    """How a session drives ``gh`` / ``git`` with a per-user token (#1228).
+
+    Three things have to line up once ``GH_TOKEN`` reaches a session (as a
+    literal, or resolved from ``GH_TOKEN=app://github`` by the daemon at spawn
+    — docs/design/per-user-github-credentials.md), and none of them is obvious
+    from reading a profile.  The load-bearing one is the scrub: ``GH_TOKEN`` is
+    in the default ``scrub_secret_env`` set (#863), so WITHOUT an exemption it
+    is stripped from every model-driven subprocess before ``gh`` runs — a valid
+    configuration that silently does nothing.
+
+    Every fact here is READ from the tree: that ``GH_TOKEN`` is in the default
+    scrub set, which surfaces the scrub covers, and the fix string all come
+    from ``shared.secret_scrub``, so this cannot drift from what
+    ``validate``'s ``gh_token_scrubbed_inert`` finding enforces.
+    """
+    from jaato_server.shared.secret_scrub import (
+        DEFAULT_SECRET_ENV_PATTERNS, SCRUB_SURFACES, matches_secret,
+    )
+    # The two surfaces that run the model's own gh/git.  MCP is in
+    # SCRUB_SURFACES but deliberately keeps `default` (no GitHub token).
+    shell_surfaces = [s for s in SCRUB_SURFACES if s != "mcp"]
+    gh_scrubbed_by_default = matches_secret("GH_TOKEN",
+                                            DEFAULT_SECRET_ENV_PATTERNS)
+    exemption = "[default, \"!GH_TOKEN\"]"
+    data = {
+        "token_delivery": "GH_TOKEN reaches the session as a literal in the "
+                          "workspace .env / profile env:, or as GH_TOKEN="
+                          "app://github resolved by the daemon per spawn (#1226)",
+        "scrub_exemption": {
+            "gh_token_in_default_scrub_set": gh_scrubbed_by_default,
+            "surfaces_needing_exemption": shell_surfaces,
+            "mcp": "keeps `default` — an MCP server gets no GitHub token",
+            "profile": {s: {"scrub_secret_env": exemption}
+                        for s in shell_surfaces},
+        },
+        "non_interactive_env": {
+            "GH_PROMPT_DISABLED": "1",
+            "GIT_TERMINAL_PROMPT": "0",
+        },
+        "persona_guidance": [
+            "use `gh` (and `git` over https) for GitHub work",
+            "never print or echo the token",
+            "on a 401, report it — do not run `gh auth login` (there is "
+            "nothing on disk to repair)",
+        ],
+    }
+    lines = [
+        "using `gh` / `git` with a per-user token (#1228):",
+        "",
+        "  GH_TOKEN reaches a session two ways — a literal in the workspace",
+        "  .env / a profile's env:, or `GH_TOKEN=app://github`, which the daemon",
+        "  resolves to the real token at every spawn (#1226; cascade, wake and",
+        "  revived sessions get it too, and nothing resolved is persisted).",
+        "  Once it is there, three things must line up:",
+        "",
+        "  1. SCRUB EXEMPTION (the one that silently bites).",
+        f"     GH_TOKEN is in the default scrub set: {gh_scrubbed_by_default}.",
+        "     So by default every model-driven subprocess has it STRIPPED before",
+        "     `gh` runs — a valid config that does nothing.  Exempt it on the",
+        "     surfaces that run the model's shell:",
+        "",
+        "       plugin_configs:",
+    ] + [
+        f"         {s}: {{scrub_secret_env: {exemption}}}"
+        for s in shell_surfaces
+    ] + [
+        "       # mcp keeps `default`: an MCP server gets no GitHub token",
+        "",
+        "  2. NON-INTERACTIVE DEFAULTS, in the session env (profile env: or the",
+        "     workspace .env), so a missing credential is an error the model",
+        "     READS rather than a prompt nobody answers:",
+        "",
+        "       env:",
+        "         GH_PROMPT_DISABLED: \"1\"",
+        "         GIT_TERMINAL_PROMPT: \"0\"",
+        "",
+        "  3. PERSONA GUIDANCE (.jaato/agents/<name>.md):",
+        "       - use `gh` (and `git` over https) for GitHub work;",
+        "       - never print or echo the token;",
+        "       - on a 401, report it rather than running `gh auth login` —",
+        "         there is nothing on disk for the agent to repair.",
+        "",
+        "  `jaato-scaffold validate` reports `gh_token_scrubbed_inert` (warn)",
+        "  when GH_TOKEN=app://… is declared and a cli / interactive_shell",
+        "  surface still scrubs it.  See the `gh` example in the web examples,",
+        "  and docs/design/per-user-github-credentials.md §7.",
+    ]
+    return data, "\n".join(lines)
+
+
 def completion() -> Rendered:
     """The completion-processor capability — the OUTPUT-side script hook.
 
