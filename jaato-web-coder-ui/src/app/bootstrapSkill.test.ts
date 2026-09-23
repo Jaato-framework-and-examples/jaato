@@ -76,9 +76,9 @@ describe("the store subscription fires the daemon verb", () => {
     await import("@/app/bootstrapSkill");
     const st = useJaato.getState();
 
-    st.setWorkspaceSelected?.("project-a");
-    // Fallback for stores that expose selection differently: set directly.
-    useJaato.setState((s) => ({ workspace: { ...s.workspace, selected: "project-a" } }));
+    // The real store action that sets ``workspace.selected`` — what a
+    // ``config.status`` reduces into after ``workspace.select``.
+    st.selectWorkspace("project-a");
     await Promise.resolve();
     expect(runScaffoldIntegration).toHaveBeenCalledWith("claude-code");
     const afterWorkspace = runScaffoldIntegration.mock.calls.length;
