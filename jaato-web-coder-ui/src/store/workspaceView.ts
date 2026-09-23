@@ -56,6 +56,32 @@ function statusOf(o: Record<string, unknown>): string {
   return String(o.status ?? o.change ?? o.type ?? "modified");
 }
 
+/**
+ * The canonical key for a workspace path (#1247).
+ *
+ * The Files panel's hidden-state id -- ``WorkspacePanel``'s ``entryId``,
+ * stored in ``workspaceHidden`` -- is re-derived from a file's key in
+ * ``files`` on every render (``build`` -> ``entryId``).  So the key must be
+ * the SAME string every time the same file is reported, or the hidden match
+ * is silently lost and the file reappears in the default view -- and, worse,
+ * the divergent key lingers as a second row, since a ``deleted`` event keys
+ * off the exact string too.  ``build`` already drops empty segments
+ * (``split("/").filter(Boolean)``) but keeps a ``.`` segment, so a later
+ * report of ``./x`` yields a different id than the ``x`` that was hidden.
+ *
+ * Canonicalising here, at the one boundary that writes ``files`` / ``seqs``,
+ * makes every key stable across the forms a producer might use (a leading
+ * ``./``, a redundant ``//``, a trailing ``/``) so the existing
+ * ``workspaceHidden`` array keeps matching.  A single leading ``/`` (a
+ * sandbox-path absolute key) is preserved -- ``build`` strips it for the
+ * tree exactly as before, so display is unchanged.  For the already-canonical
+ * relative paths ``os.path.relpath`` produces it is a no-op.
+ */
+export function canonicalPath(p: string): string {
+  const parts = p.split("/").filter((s) => s && s !== ".");
+  return (p.startsWith("/") ? "/" : "") + parts.join("/");
+}
+
 /** ``workspace.files_changed`` -- one batch, one number. */
 export function applyChanged(cur: WorkspaceNumbering, ev: Record<string, unknown>): WorkspaceApplied {
   const numbered = typeof ev.seq === "number" && typeof ev.epoch === "string";
@@ -67,7 +93,9 @@ export function applyChanged(cur: WorkspaceNumbering, ev: Record<string, unknown
   const files = { ...cur.files };
   const seqs = switched ? {} : { ...cur.seqs };
   for (const ch of (ev.changes as Record<string, unknown>[] | undefined) ?? []) {
-    const p = (ch.path ?? ch.file) as string | undefined;
+    const raw = (ch.path ?? ch.file) as string | undefined;
+    if (!raw) continue;
+    const p = canonicalPath(raw);
     if (!p) continue;
     const status = statusOf(ch);
     if (status === "deleted") { delete files[p]; delete seqs[p]; }
@@ -92,10 +120,14 @@ export function applySnapshot(cur: WorkspaceNumbering, ev: Record<string, unknow
       status = statusOf(o);
     }
     if (!p || status === "deleted") continue;
-    files[p] = status;
+    const key = canonicalPath(p);
+    if (!key) continue;
+    files[key] = status;
     // No number for a path means "changed before this monitor numbered
-    // anything" -- older than any mark taken in this epoch.
-    seqs[p] = typeof given[p] === "number" ? (given[p] as number) : 0;
+    // anything" -- older than any mark taken in this epoch.  ``given`` is
+    // keyed by the path the daemon reported, so it is looked up by the raw
+    // ``p`` and stored under the canonical ``key`` (#1247).
+    seqs[key] = typeof given[p] === "number" ? (given[p] as number) : 0;
   }
   const epoch = typeof ev.epoch === "string" ? ev.epoch : null;
   const seq = typeof ev.seq === "number" ? ev.seq : 0;
