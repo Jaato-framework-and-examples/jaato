@@ -44,6 +44,8 @@ from .config import (
     SubagentConfig, SubagentProfile, SubagentResult,
     ProfileDiscoveryResult, discover_profiles,
     SecretResolver, SecretResolutionError,
+    SecretResolveContext, AppSecretReference,
+    APP_SECRET_SCHEME, parse_app_secret_reference,
     reset_secret_resolvers,
 )
 
@@ -57,5 +59,9 @@ __all__ = [
     'create_plugin',
     'SecretResolver',
     'SecretResolutionError',
+    'SecretResolveContext',
+    'AppSecretReference',
+    'APP_SECRET_SCHEME',
+    'parse_app_secret_reference',
     'reset_secret_resolvers',
 ]

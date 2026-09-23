@@ -9,7 +9,7 @@ import sys
 import threading
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
-from typing import Any, Callable, Dict, FrozenSet, List, Optional, Protocol, Tuple, Union
+from typing import Any, Callable, Dict, FrozenSet, List, NamedTuple, Optional, Protocol, Tuple, Union
 from typing import runtime_checkable
 
 from jaato_sdk.trace import (
@@ -57,6 +57,92 @@ _SECRET_URI_RE = re.compile(
 _NETWORK_SCHEMES = frozenset({"http", "https", "ws", "wss", "ftp", "ftps"})
 
 
+class SecretResolveContext(NamedTuple):
+    """Who a secret is being resolved FOR (#1226).
+
+    ``SecretResolver.resolve`` historically had no notion of who is asking:
+    every existing scheme (``pass``, ``vault``, ``awssm``, …) resolves the
+    same value for every session, so a scheme-and-path is a complete question.
+    The ``app://`` scheme is the first that needs to know the *workspace* (to
+    find the owner) and the *owner* (to pick the application to ask), so an
+    optional context is threaded through :func:`_resolve_secret_uri` by the
+    one caller that has it — ``JaatoServer._resolve_session_env``.
+
+    Existing resolvers ignore it (their ``resolve`` signature does not accept
+    it, and the dispatch below only passes it to a resolver that does).  The
+    in-tree ``app://`` resolver REFUSES when the context is absent rather than
+    guessing — an ``app://`` reference anywhere but the session-env resolution
+    path has no owner and cannot be answered.
+
+    Attributes:
+        workspace_path: Absolute path of the workspace the session runs in.
+        workspace_owner: The QUALIFIED owner ``"app:user"`` of that workspace
+            (``WorkspaceInfo.owner``, stamped from a #1074 ticket identity), or
+            ``None`` for an unowned workspace — which resolves nothing.
+        session_id: The session being spawned, for diagnostics.
+    """
+
+    workspace_path: str
+    workspace_owner: Optional[str]
+    session_id: Optional[str] = None
+
+
+#: The ``app://`` scheme (#1226): a per-user secret reference resolved at spawn
+#: by the application that owns the workspace, over the #1074 bind channel.
+#: Deferred by :func:`_resolve_secret_uri` (never warned about, never resolved
+#: through the entry-point registry) because its resolution needs the workspace
+#: owner, which only ``JaatoServer._resolve_session_env`` holds.
+APP_SECRET_SCHEME = "app"
+
+
+class AppSecretReference(NamedTuple):
+    """A parsed ``app://<name>[?required]`` reference (#1226).
+
+    Attributes:
+        name: The reference name — ``github`` in ``app://github``.
+        required: ``True`` when the strict form ``app://github?required`` was
+            used, which turns an unresolved reference into a bootstrap refusal
+            rather than a dropped variable.
+    """
+
+    name: str
+    required: bool
+
+
+def parse_app_secret_reference(value: Any) -> Optional[AppSecretReference]:
+    """Parse an ``app://<name>[?required]`` reference, or return ``None``.
+
+    Returns ``None`` for anything that is not a well-formed ``app://`` URI —
+    a non-string, a ``${VAR}``-bearing value (still pending expansion), any
+    other scheme, or an ``app://`` with an empty or malformed name.  The one
+    query token understood is ``required``; any other query makes the whole
+    thing not an app reference (returned ``None``) so a typo is not silently
+    treated as the lenient form.
+    """
+    if not isinstance(value, str) or "${" in value:
+        return None
+    m = _SECRET_URI_RE.match(value)
+    if not m or m.group("scheme") != APP_SECRET_SCHEME:
+        return None
+    if m.group("key") is not None:
+        # A `#fragment` has no meaning for app:// and is refused rather than
+        # ignored, so `app://github#x` is not silently read as `app://github`.
+        return None
+    path = m.group("path")
+    required = False
+    if "?" in path:
+        name, _, query = path.partition("?")
+        if query != "required":
+            return None
+        required = True
+    else:
+        name = path
+    name = name.strip("/")
+    if not name or "/" in name:
+        return None
+    return AppSecretReference(name=name, required=required)
+
+
 @runtime_checkable
 class SecretResolver(Protocol):
     """Protocol for secret backend resolvers.
@@ -80,13 +166,23 @@ class SecretResolver(Protocol):
         """
         ...
 
-    def resolve(self, scheme: str, path: str, key: Optional[str] = None) -> str:
+    def resolve(
+        self,
+        scheme: str,
+        path: str,
+        key: Optional[str] = None,
+        context: Optional[SecretResolveContext] = None,
+    ) -> str:
         """Resolve a secret reference to its plaintext value.
 
         Args:
             scheme: The URI scheme (e.g. ``"vault"``).
             path: The path portion of the URI (e.g. ``"secret/myapp"``).
             key: Optional key/field within the secret (from the ``#fragment``).
+            context: Who the secret is being resolved for (#1226).  Optional
+                and ignored by every existing resolver — the dispatch only
+                passes it to a resolver whose signature accepts it.  The
+                in-tree ``app://`` resolver refuses without it.
 
         Returns:
             The resolved secret value as a string.
@@ -251,7 +347,10 @@ def _discover_secret_resolvers_uncached() -> Dict[str, 'SecretResolver']:
     return resolvers
 
 
-def _resolve_secret_uri(value: str) -> str:
+def _resolve_secret_uri(
+    value: str,
+    context: Optional[SecretResolveContext] = None,
+) -> str:
     """If *value* is a ``scheme://path[#key]`` URI with a registered resolver, resolve it.
 
     Returns the original string unchanged if:
@@ -261,7 +360,20 @@ def _resolve_secret_uri(value: str) -> str:
       0.6.57+).
     - The value contains ``${VAR}`` substitution markers — they're
       pending env-var expansion, not secret URIs (server 0.6.57+).
+    - The scheme is ``app`` (#1226) — resolved by
+      ``JaatoServer._resolve_session_env``'s dedicated pass, which is the only
+      place holding the workspace owner.  Passed through here literally and
+      WITHOUT a warning, because the generic path has no owner to resolve it
+      for; the dedicated pass then resolves it or DROPS it (never forwards the
+      literal).
     - No resolver is registered for the scheme.
+
+    Args:
+        value: The candidate ``scheme://path[#key]`` string.
+        context: Who the secret is being resolved for (#1226).  Forwarded to a
+            resolver whose ``resolve`` signature accepts a ``context`` keyword;
+            every existing (premium) resolver has a three-arg signature and is
+            called exactly as before.
 
     Raises:
         SecretResolutionError: Propagated from the resolver on failure.
@@ -291,6 +403,17 @@ def _resolve_secret_uri(value: str) -> str:
     if scheme in _NETWORK_SCHEMES:
         return value
 
+    # #1226: the ``app`` scheme is resolved by the dedicated pass in
+    # ``JaatoServer._resolve_session_env`` (the only site holding the
+    # workspace owner), NOT through the entry-point registry.  Deferring it
+    # here — pass through literally, no "no resolver registered" warning —
+    # keeps a stray ``app://`` value inert on every OTHER expand_variables
+    # path rather than raising or warning; the session-env pass then either
+    # resolves it against the owning application or drops it (§6.1: an
+    # unresolved app:// is never forwarded as a literal).
+    if scheme == APP_SECRET_SCHEME:
+        return value
+
     resolvers = _discover_secret_resolvers()
     resolver = resolvers.get(scheme)
     if resolver is None:
@@ -306,11 +429,45 @@ def _resolve_secret_uri(value: str) -> str:
     key = m.group('key')  # May be None
 
     try:
-        return resolver.resolve(scheme, path, key)
+        return _call_resolver(resolver, scheme, path, key, context)
     except SecretResolutionError:
         raise
     except Exception as exc:
         raise SecretResolutionError(value, str(exc)) from exc
+
+
+def _call_resolver(
+    resolver: 'SecretResolver',
+    scheme: str,
+    path: str,
+    key: Optional[str],
+    context: Optional[SecretResolveContext],
+) -> str:
+    """Call ``resolver.resolve``, passing ``context`` only if it accepts it.
+
+    Every pre-#1226 resolver has a three-argument ``resolve(scheme, path,
+    key)`` signature and must be called unchanged — passing an unexpected
+    ``context=`` would raise ``TypeError``.  A resolver that opts into the
+    new argument (its signature names ``context``, or accepts ``**kwargs``)
+    receives it.  The check is by signature introspection rather than a
+    try/except on ``TypeError`` because a genuine ``TypeError`` from inside a
+    resolver must not be misread as "does not accept context".
+    """
+    if context is not None and _resolver_accepts_context(resolver):
+        return resolver.resolve(scheme, path, key, context=context)
+    return resolver.resolve(scheme, path, key)
+
+
+def _resolver_accepts_context(resolver: 'SecretResolver') -> bool:
+    """Whether ``resolver.resolve`` accepts a ``context`` keyword argument."""
+    import inspect
+    try:
+        params = inspect.signature(resolver.resolve).parameters
+    except (TypeError, ValueError):
+        return False
+    if "context" in params:
+        return True
+    return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
 
 
 def looks_like_unresolved_secret_uri(value: Any) -> bool:
@@ -623,7 +780,8 @@ PATH_TYPED_ENV_VARS: Dict[str, Optional[str]] = {
 def expand_variables(
     value: Any,
     context: Optional[Dict[str, str]] = None,
-    workspace_root_override: Optional[str] = None
+    workspace_root_override: Optional[str] = None,
+    resolve_context: Optional[SecretResolveContext] = None,
 ) -> Any:
     """Expand ${variable} references in a value.
 
@@ -638,6 +796,12 @@ def expand_variables(
         workspace_root_override: Explicit workspace root to use instead of auto-detection.
             This is useful when the calling code knows the correct workspace root
             (e.g., from parent agent's config or environment).
+        resolve_context: Who a secret is being resolved for (#1226), forwarded
+            to the secret-URI resolver.  Only ``_resolve_session_env`` passes
+            it; every other caller leaves it ``None`` and existing resolvers
+            are unaffected.  The ``app://`` scheme is resolved by that method's
+            dedicated pass rather than here regardless, so this only reaches
+            premium resolvers that opt into a ``context`` argument.
 
     Returns:
         Value with variables expanded
@@ -685,16 +849,22 @@ def expand_variables(
     effective_context = {**default_context, **context}
 
     if isinstance(value, str):
-        return _expand_string(value, effective_context)
+        return _expand_string(value, effective_context, resolve_context)
     elif isinstance(value, dict):
-        return {k: expand_variables(v, context, workspace_root_override) for k, v in value.items()}
+        return {k: expand_variables(v, context, workspace_root_override, resolve_context)
+                for k, v in value.items()}
     elif isinstance(value, list):
-        return [expand_variables(item, context, workspace_root_override) for item in value]
+        return [expand_variables(item, context, workspace_root_override, resolve_context)
+                for item in value]
     else:
         return value
 
 
-def _expand_string(s: str, context: Dict[str, str]) -> str:
+def _expand_string(
+    s: str,
+    context: Dict[str, str],
+    resolve_context: Optional[SecretResolveContext] = None,
+) -> str:
     """Expand ``${variable}`` references and secret URIs in a string.
 
     Two-phase expansion:
@@ -754,7 +924,7 @@ def _expand_string(s: str, context: Dict[str, str]) -> str:
         s = re.sub(pattern, replace_var, s)
 
     # Phase 2: secret URI resolution (entire-string match only)
-    return _resolve_secret_uri(s)
+    return _resolve_secret_uri(s, resolve_context)
 
 
 def _resolve_workspace_path(path: str) -> str:

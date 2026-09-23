@@ -632,6 +632,15 @@ class JaatoDaemon:
             self._ipc_server._on_client_disconnect = self._command_router.handle_client_disconnect
         if self._ws_server:
             self._ws_server.set_command_router(self._command_router)
+            # #1226: hand the WS server's app:// resolver to the session
+            # manager, so every session it constructs resolves app:// secret
+            # references (e.g. GH_TOKEN=app://github) against the application
+            # that owns the workspace, over that server's #1074 bind channel.
+            # Only the WS transport has bind channels; the IPC / embedded
+            # paths leave the resolver unset and app:// references are dropped.
+            self._session_manager.set_app_secret_resolver(
+                self._ws_server.app_secret_resolver
+            )
 
         # Wire composite sink as session manager's event callback
         self._session_manager.set_event_callback(composite_sink.send_event)

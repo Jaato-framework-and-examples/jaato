@@ -347,7 +347,27 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 # client validates them as such.  A client against an older daemon sees no
 # epoch and falls back to "reset until the next snapshot" -- the TUI's
 # behaviour before this, and no worse than it.  No SDK minimum.
-PROTOCOL_VERSION = "1.19"
+#
+# 1.20 -- ``secret.resolve`` / ``secret.resolve.result`` and ``secret.reload``
+# / ``secret.reload.result`` (#1226), the keystone of the per-user-GitHub
+# epic.  A workspace ``.env`` (or profile ``env:``) carries a REFERENCE, not a
+# secret -- ``GH_TOKEN=app://github`` -- and the daemon resolves it at every
+# session spawn by asking the application that OWNS the workspace, over the
+# same #1074 bind channel the ticket verbs ride.  This is the first
+# daemon -> application request direction on that channel; ``secret.reload`` is
+# the application -> daemon revocation counterpart (§6.4).
+#
+# A NEW verb (the 1.7 rule) would ordinarily force an SDK minimum, and here it
+# deliberately does NOT, because the party that would refuse is the wrong one:
+# the DAEMON sends ``secret.resolve`` and an application that does not answer
+# (an older SDK, no handler wired) is handled by the daemon's own deadline --
+# the reference is dropped exactly as a refusal drops it (or, for
+# ``app://name?required``, the bootstrap is refused).  So an unanswered request
+# degrades identically to a ``denied`` result, and there is nothing to
+# negotiate.  ``secret.reload`` from an application predating 1.20 is a verb
+# that application never sends.  The new EVENTS degrade the 1.8 way: a client
+# that receives one it does not know logs and continues.
+PROTOCOL_VERSION = "1.20"
 
 
 # =============================================================================
@@ -588,6 +608,18 @@ class EventType(str, Enum):
     TICKET_BIND_RESULT = "ticket.bind.result"          # Server -> Client
     TICKET_REVOKE_REQUEST = "ticket.revoke"            # Client -> Server
     TICKET_REVOKE_RESULT = "ticket.revoke.result"      # Server -> Client
+
+    # app:// secret resolution (#1226) — the ONE request direction that runs
+    # daemon -> application, over the same bind channel #1074's ticket verbs
+    # ride (application -> daemon).  The daemon asks the owning application to
+    # resolve a per-user secret reference (e.g. GH_TOKEN=app://github) at spawn;
+    # the application answers.  See "app:// secret references" below.
+    SECRET_RESOLVE_REQUEST = "secret.resolve"          # Server -> Application
+    SECRET_RESOLVE_RESULT = "secret.resolve.result"    # Application -> Server
+    # Revocation (#1226 §6.4): the application asks the daemon to
+    # session.reload_env the owner's loaded sessions, scoped by ownership.
+    SECRET_RELOAD_REQUEST = "secret.reload"            # Application -> Server
+    SECRET_RELOAD_RESULT = "secret.reload.result"      # Server -> Application
 
     # Event subscription notifications (Server -> Client)
     EVENTS_SUBSCRIBED = "events.subscribed"
@@ -2970,6 +3002,137 @@ class TicketRevokeResultEvent(Event):
     detail: Optional[str] = None
 
 
+class SecretResolveRequest(Event):
+    """Ask the owning application to resolve an ``app://`` secret reference (#1226).
+
+    The ONE request direction that runs **daemon -> application**.  Every other
+    verb on the #1074 bind channel is application -> daemon (``ticket.bind`` /
+    ``ticket.revoke``); this rides the same authenticated connection in the
+    opposite direction, correlated by ``request_id``, with a daemon-side
+    deadline.  It is sent when ``JaatoServer._resolve_session_env`` meets a
+    value like ``GH_TOKEN=app://github`` in a workspace owned by ``app:user``:
+    the daemon identifies the application from the qualified owner and asks
+    *that* application, and only that one, to mint the secret for *that* user.
+
+    The application is free not to answer (an older SDK, no handler wired): the
+    daemon's deadline then elapses and the reference is dropped with a WARNING
+    (or, for the strict form ``app://github?required``, the bootstrap is
+    refused).  So there is no SDK minimum to negotiate — a request that goes
+    unanswered degrades exactly as a refusal does.
+
+    Attributes:
+        request_id: Correlates this request with the
+            :class:`SecretResolveResultEvent` that answers it.  One bind
+            channel serves every workspace of every user the application owns,
+            so a result that cannot be attributed to a request is useless.
+        user: The **unqualified** identity to resolve for — the ``user`` half
+            of the workspace owner ``app:user``.  The application already knows
+            which ``app_id`` it is (the credential it authenticated the bind
+            channel with), so it is never sent: the daemon has resolved the
+            application from the owner precisely so it can pick the connection
+            to ask, and echoing the app id would let a request name an
+            application other than the one it reaches.
+        workspace: The absolute workspace path the session runs in, so the
+            application can key a per-workspace binding (``(sub, workspace) ->
+            credential`` in the design's picture).
+        name: The reference name — ``github`` in ``app://github`` — naming
+            which of that user's secrets to mint.
+    """
+    type: EventType = Field(default=EventType.SECRET_RESOLVE_REQUEST)
+    request_id: str = ""
+    user: str = ""
+    workspace: str = ""
+    name: str = ""
+
+
+class SecretResolveResultEvent(Event):
+    """The application's answer to :class:`SecretResolveRequest` (#1226).
+
+    ``status`` is one of:
+
+    * ``"ok"``        — the secret was resolved; ``value`` carries it and
+      ``expires_at`` MAY carry an ISO-8601 UTC instant it stops being valid.
+    * ``"not_found"`` — the application has no binding for this
+      ``(user, workspace, name)``.  The reference is dropped.
+    * ``"denied"``    — the application refuses to resolve it.  Dropped.
+    * ``"error"``     — the application tried and failed; ``detail`` says why.
+      Dropped.
+
+    Only ``"ok"`` carries a ``value``.  Every other status drops the reference
+    from the session's environment — a literal ``app://github`` reaching a
+    subprocess is a token that fails with a confusing 401, so the daemon never
+    forwards the unresolved form (#1226 §6.1).
+
+    Attributes:
+        value: The resolved secret, present only when ``status == "ok"``.  It
+            reaches the bootstrap envelope's env dict and **nowhere else** — not
+            the session record, not the snapshot, not the workspace ``.env``,
+            all of which keep ``app://<name>`` so a revived session resolves
+            afresh (which is also what lets revocation take effect).
+        expires_at: ISO-8601 UTC instant the value stops being valid, when the
+            application knows one (a GitHub App user token lasts ~8h).  The
+            daemon schedules a ``session.reload_env`` a margin before it
+            (``JAATO_OAUTH_REFRESH_MARGIN``) so the session never holds a dead
+            token.  Absent means "no expiry known": the value is used until the
+            session is next re-resolved for another reason.
+        detail: Human-readable elaboration, omitted when there is nothing to
+            say.  Never the secret.
+    """
+    type: EventType = Field(default=EventType.SECRET_RESOLVE_RESULT)
+    request_id: str = ""
+    status: str = ""
+    value: Optional[str] = None
+    expires_at: Optional[str] = None
+    detail: Optional[str] = None
+
+
+class SecretReloadRequest(Event):
+    """The application asks the daemon to re-resolve a user's loaded sessions (#1226 §6.4).
+
+    The revocation path: the application deletes a binding (a *Disconnect
+    GitHub*, a *workspace -> none*) and tells the daemon to
+    ``session.reload_env`` every LOADED session the affected user owns, so the
+    now-revoked ``app://`` reference drops out of the environment rather than
+    lingering until the process ends.  Sent application -> daemon on the bind
+    channel, like ``ticket.revoke``, and **scoped to the calling application**:
+    the daemon qualifies ``user`` with the ``app_id`` the bind connection
+    authenticated as, so one application can never reload another's ``alice``.
+
+    Attributes:
+        request_id: Correlates with :class:`SecretReloadResultEvent`.
+        user: The **unqualified** identity whose sessions to reload.  The
+            daemon qualifies it itself (``f"{app_id}:{user}"``) exactly as
+            ``ticket.bind`` does, so the app id is never a request field.
+    """
+    type: EventType = Field(default=EventType.SECRET_RELOAD_REQUEST)
+    request_id: str = ""
+    user: str = ""
+
+
+class SecretReloadResultEvent(Event):
+    """The daemon's answer to :class:`SecretReloadRequest` (#1226 §6.4).
+
+    ``status`` is one of:
+
+    * ``"ok"``      — the owner's loaded sessions were re-resolved; ``reloaded``
+      says how many.  ``0`` is the ordinary answer when the user has no session
+      loaded, and is not a failure.
+    * ``"denied"``  — this connection may not ask (not an app-credential
+      connection, or no app credentials configured on this daemon).
+
+    Attributes:
+        reloaded: How many loaded sessions were re-resolved.  ``0`` whenever
+            ``status`` is not ``"ok"``, and the ordinary answer for a user with
+            nothing loaded.
+        detail: Human-readable elaboration, omitted when there is nothing to say.
+    """
+    type: EventType = Field(default=EventType.SECRET_RELOAD_RESULT)
+    request_id: str = ""
+    status: str = ""
+    reloaded: int = 0
+    detail: Optional[str] = None
+
+
 # =============================================================================
 # Workspace Management Requests (Client -> Server)
 # =============================================================================
@@ -3947,6 +4110,10 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.TICKET_BIND_RESULT.value: TicketBindResultEvent,
     EventType.TICKET_REVOKE_REQUEST.value: TicketRevokeRequest,
     EventType.TICKET_REVOKE_RESULT.value: TicketRevokeResultEvent,
+    EventType.SECRET_RESOLVE_REQUEST.value: SecretResolveRequest,
+    EventType.SECRET_RESOLVE_RESULT.value: SecretResolveResultEvent,
+    EventType.SECRET_RELOAD_REQUEST.value: SecretReloadRequest,
+    EventType.SECRET_RELOAD_RESULT.value: SecretReloadResultEvent,
 }
 
 

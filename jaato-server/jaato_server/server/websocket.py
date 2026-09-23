@@ -11,6 +11,7 @@ Usage:
 """
 
 import asyncio
+import concurrent.futures
 import errno
 import hashlib
 import hmac
@@ -18,6 +19,7 @@ import json
 import logging
 import os
 import ssl
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -79,7 +81,14 @@ from jaato_sdk.events import (
     TicketBindResultEvent,
     TicketRevokeRequest,
     TicketRevokeResultEvent,
+    # app:// secret resolution (#1226) — the bind channel's daemon->app verb
+    # and its application->daemon revocation counterpart.
+    SecretResolveRequest,
+    SecretResolveResultEvent,
+    SecretReloadRequest,
+    SecretReloadResultEvent,
 )
+from .app_secret import AppSecretAnswer, AppSecretResolver
 from .workspace_manager import WorkspaceManager
 from .event_sink import EventSink
 
@@ -430,6 +439,24 @@ def _peek_request_id(message: str) -> str:
     return value if isinstance(value, str) else ""
 
 
+def _answer_from_result(result: "SecretResolveResultEvent") -> AppSecretAnswer:
+    """Translate an application's ``secret.resolve.result`` into an :class:`AppSecretAnswer`.
+
+    An ``ok`` status with no ``value`` is downgraded to ``error`` — the
+    application claimed success and delivered nothing, which must not read as a
+    resolved empty secret (dropping is the honest outcome).
+    """
+    if result.status == "ok":
+        if result.value is None:
+            return AppSecretAnswer(
+                status="error", detail="application answered ok with no value",
+            )
+        return AppSecretAnswer(
+            status="ok", value=result.value, expires_at=result.expires_at,
+        )
+    return AppSecretAnswer(status=result.status or "error", detail=result.detail)
+
+
 #: Connection kinds a WS client can be accepted as.  ``AUTH_KIND_APP`` is the
 #: only one that may call the ``ticket.*`` verbs, and the only one that may
 #: NOT drive a session — see :meth:`JaatoWSServer._dispatch_client_message`.
@@ -444,6 +471,16 @@ AUTH_KIND_TICKET = "ticket"  #: a per-user ticket — carries an identity
 TICKET_VERBS = frozenset({
     EventType.TICKET_BIND_REQUEST.value,
     EventType.TICKET_REVOKE_REQUEST.value,
+})
+
+#: The bind-channel verbs #1226 adds, both from an app-credential connection:
+#: ``secret.resolve.result`` (the app answering the daemon's ``secret.resolve``)
+#: and ``secret.reload`` (the app asking the daemon to re-resolve an owner's
+#: sessions).  Routed like ``TICKET_VERBS`` — refused for any connection that
+#: is not an app credential — so the "bind-only" boundary covers them too.
+SECRET_BIND_VERBS = frozenset({
+    EventType.SECRET_RESOLVE_RESULT.value,
+    EventType.SECRET_RELOAD_REQUEST.value,
 })
 
 
@@ -622,6 +659,25 @@ class JaatoWSServer:
                 len(self._app_credentials.app_ids()),
                 ", ".join(self._app_credentials.app_ids()),
             )
+
+        # #1226: outstanding ``secret.resolve`` requests, request_id -> Future.
+        # The daemon sends a ``secret.resolve`` to an app-credential connection
+        # (from an executor thread, via run_coroutine_threadsafe) and blocks on
+        # the future; the ``secret.resolve.result`` frame the application sends
+        # back resolves it.  A thread lock rather than the asyncio lock, because
+        # the transport is entered from a worker thread and the result is
+        # delivered on the event loop.
+        self._pending_secret_resolves: Dict[
+            str, "concurrent.futures.Future[SecretResolveResultEvent]"
+        ] = {}
+        self._pending_secret_lock = threading.Lock()
+        # The in-tree app:// resolver, handed to every session this server's
+        # SessionManager constructs.  Its two callables are bound methods, so
+        # it is safe to build before the event loop or workspace manager exist.
+        self._app_secret_resolver = AppSecretResolver(
+            owner_of=self._owner_for_workspace_path,
+            transport=self._resolve_app_secret_over_bind_channel,
+        )
 
         # Connection interceptors registered by daemon extensions.
         # See ``set_connection_interceptor()`` for the protocol.
@@ -1786,6 +1842,9 @@ class JaatoWSServer:
         if verb in TICKET_VERBS:
             await self._handle_ticket_message(client_id, verb, message)
             return
+        if verb in SECRET_BIND_VERBS:
+            await self._handle_secret_bind_message(client_id, verb, message)
+            return
         if self._client_auth_kind(client_id) == AUTH_KIND_APP:
             await self._send_error(
                 client_id,
@@ -1950,6 +2009,187 @@ class JaatoWSServer:
             status="revoked" if revoked else "not_found",
             revoked=revoked,
         )
+
+    # =========================================================================
+    # app:// secret resolution (#1226)
+    # =========================================================================
+
+    @property
+    def app_secret_resolver(self) -> AppSecretResolver:
+        """The in-tree ``app://`` resolver this server offers (#1226).
+
+        Handed to the daemon's ``SessionManager`` by the wiring in
+        ``server/__main__.py`` so every session it constructs resolves
+        ``app://`` references against the application that owns the workspace,
+        over this server's bind channel.
+        """
+        return self._app_secret_resolver
+
+    def _owner_for_workspace_path(self, workspace_path: str) -> Optional[str]:
+        """The qualified owner ``app:user`` of the workspace at ``workspace_path``.
+
+        Reads ``WorkspaceManager``, so ``None`` on a server with no workspace
+        manager (which cannot own workspaces anyway) and for a path that is not
+        a known, owned workspace.
+        """
+        manager = self._workspace_manager
+        if manager is None:
+            return None
+        return manager.owner_for_path(workspace_path)
+
+    async def _handle_secret_bind_message(
+        self, client_id: str, verb: str, message: str
+    ) -> None:
+        """Dispatch a ``secret.*`` bind-channel frame from an app credential.
+
+        Both verbs require an app-credential connection, refused BEFORE parsing
+        so the refusal cannot depend on the body — the same rule
+        :meth:`_handle_ticket_message` applies.  ``secret.resolve.result`` is
+        the application answering the daemon's ``secret.resolve`` and carries no
+        reply; ``secret.reload`` is a request the daemon answers.
+        """
+        app_id = self.get_client_app(client_id)
+        if self._client_auth_kind(client_id) != AUTH_KIND_APP or not app_id:
+            # A result frame from a non-app connection is simply dropped (no
+            # reply is expected for it); a reload request is denied by name.
+            if verb == EventType.SECRET_RELOAD_REQUEST.value:
+                await self._send_to_client(
+                    client_id, self._secret_reload_denied(message)
+                )
+            else:
+                logger.debug(
+                    "dropping %s from non-app connection %s", verb, client_id,
+                )
+            return
+        try:
+            event = deserialize_event(message)
+        except (json.JSONDecodeError, ValueError) as exc:
+            await self._send_error(client_id, f"Invalid {verb} request: {exc}")
+            return
+        if isinstance(event, SecretResolveResultEvent):
+            self._deliver_secret_result(event)
+            return
+        if isinstance(event, SecretReloadRequest):
+            await self._send_to_client(
+                client_id, self._reload_owner_sessions(app_id, event)
+            )
+            return
+        await self._send_error(client_id, f"Unhandled secret verb: {verb}")
+
+    def _secret_reload_denied(self, message: str) -> "SecretReloadResultEvent":
+        """Build the ``denied`` answer for a ``secret.reload`` from a non-app connection."""
+        detail = (
+            "secret.reload requires a connection authenticated by an "
+            "application credential"
+        )
+        if not self._app_credentials:
+            detail += "; this daemon has none configured (--ws-app-credentials)"
+        return SecretReloadResultEvent(
+            request_id=_peek_request_id(message), status="denied", detail=detail
+        )
+
+    def _deliver_secret_result(self, event: "SecretResolveResultEvent") -> None:
+        """Resolve the pending future for a ``secret.resolve.result`` frame.
+
+        A result whose ``request_id`` matches no outstanding request (a late
+        answer after the daemon's deadline, or a duplicate) is dropped: the
+        caller has already given up and dropped the reference.
+        """
+        with self._pending_secret_lock:
+            fut = self._pending_secret_resolves.pop(event.request_id, None)
+        if fut is None or fut.done():
+            return
+        fut.set_result(event)
+
+    def _reload_owner_sessions(
+        self, app_id: str, event: "SecretReloadRequest"
+    ) -> "SecretReloadResultEvent":
+        """Re-resolve the env of the calling application's sessions for one user (§6.4).
+
+        ``app_id`` is the connection's own authenticated application, so the
+        owner is qualified here (``f"{app_id}:{user}"``) and the reload can only
+        touch that application's users — one application can never reload
+        another's ``alice``.
+        """
+        if not event.user:
+            return SecretReloadResultEvent(
+                request_id=event.request_id, status="denied",
+                detail="secret.reload requires a non-empty 'user'",
+            )
+        qualified = f"{app_id}:{event.user}"
+        reloaded = 0
+        sm = self._command_router._session_manager if self._command_router else None
+        if sm is not None and hasattr(sm, "reload_owner_sessions"):
+            reloaded = sm.reload_owner_sessions(qualified)
+        logger.info(
+            "secret.reload: app=%s user=%s reloaded=%d",
+            app_id, event.user, reloaded,
+        )
+        return SecretReloadResultEvent(
+            request_id=event.request_id, status="ok", reloaded=reloaded,
+        )
+
+    def _resolve_app_secret_over_bind_channel(
+        self, app_id: str, user: str, workspace: str, name: str, timeout: float,
+    ) -> AppSecretAnswer:
+        """Send ``secret.resolve`` to application ``app_id`` and await its answer.
+
+        The :class:`AppSecretResolver`'s transport (#1226).  Called from an
+        executor thread (``_resolve_session_env`` runs off the event loop), so
+        it schedules the send on the loop and blocks on a future the
+        ``secret.resolve.result`` frame resolves.  Never raises for an absent
+        application, a closed loop or a timeout — each is an
+        :class:`AppSecretAnswer` the caller drops on.
+        """
+        target = self._app_connection_for(app_id)
+        if target is None:
+            return AppSecretAnswer(
+                status="unreachable",
+                detail=f"application {app_id!r} has no bind connection",
+            )
+        loop = self._event_loop
+        if loop is None:
+            return AppSecretAnswer(
+                status="unreachable", detail="WS event loop not running",
+            )
+        request_id = uuid.uuid4().hex
+        fut: "concurrent.futures.Future[SecretResolveResultEvent]" = (
+            concurrent.futures.Future()
+        )
+        with self._pending_secret_lock:
+            self._pending_secret_resolves[request_id] = fut
+        request = SecretResolveRequest(
+            request_id=request_id, user=user, workspace=workspace, name=name,
+        )
+        try:
+            asyncio.run_coroutine_threadsafe(
+                self._send_to_client(target, request), loop,
+            )
+            result = fut.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            with self._pending_secret_lock:
+                self._pending_secret_resolves.pop(request_id, None)
+            return AppSecretAnswer(
+                status="unreachable",
+                detail=f"no secret.resolve.result within {timeout:g}s",
+            )
+        except Exception as exc:  # noqa: BLE001 -- any transport error is a drop
+            with self._pending_secret_lock:
+                self._pending_secret_resolves.pop(request_id, None)
+            return AppSecretAnswer(status="unreachable", detail=str(exc))
+        return _answer_from_result(result)
+
+    def _app_connection_for(self, app_id: str) -> Optional[str]:
+        """A client_id of a live app-credential connection for ``app_id``, or ``None``.
+
+        Several connections may authenticate as one application (the BFF's bind
+        channel plus its own reconnects); any one of them can answer, so the
+        first match is returned.
+        """
+        for cid, conn in self._clients.items():
+            if conn.auth_kind == AUTH_KIND_APP and conn.app_id == app_id:
+                return cid
+        return None
 
     async def _handle_message(self, client_id: str, message: str) -> None:
         """Handle an incoming message from a client.
