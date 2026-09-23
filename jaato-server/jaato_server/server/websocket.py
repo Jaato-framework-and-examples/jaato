@@ -105,6 +105,61 @@ def _env_flag(name: str) -> bool:
     return os.environ.get(name, "").lower() in ("1", "true", "yes")
 
 
+def _record_bootstrap_refusal(server: Any, reason: str) -> None:
+    """#1253: record a bootstrap-outcome refusal on *server*.
+
+    The WS pre-init hook fails a confinement-required session CLOSED by
+    returning without spawning; ``session_manager.initialize_or_refuse``
+    reads ``server.runner_bootstrap_error`` afterwards to refuse the session
+    by name (``RunnerBootstrapFailed``) rather than letting it come up and
+    run model-driven work with no kernel boundary.  Best-effort — a server
+    object that predates ``note_runner_bootstrap_outcome`` (a test double)
+    simply records nothing, which reads downstream as "nothing known to be
+    wrong", the same answer a session with no runner gives.
+    """
+    note = getattr(server, "note_runner_bootstrap_outcome", None)
+    if callable(note):
+        note(reason)
+
+
+def _report_confined_spawn_failure(
+    server: Any,
+    session_id: str,
+    exc: BaseException,
+    confinement_required: bool,
+) -> None:
+    """#1253: handle a WS runner-spawn failure per the confinement invariant.
+
+    A confinement-required session's spawn failure is REFUSED — an in-process
+    fallback would run the model's tools in the daemon process with no
+    AppArmor boundary, the same silent bypass the provisioning-failure path
+    refuses.  A genuinely-unconfined session keeps the in-process fallback it
+    always had.  Extracted from ``_apparmor_pre_init_hook`` so the hook does
+    not grow past its complexity baseline (the #812 / #1167 / #1179 move).
+    """
+    if confinement_required:
+        logger.warning(
+            "AppArmor pre-init: runner spawn failed for session %s "
+            "(%s: %s) but confinement is required — REFUSING the session "
+            "rather than falling back to unconfined in-process tool "
+            "execution (#1253)",
+            session_id, type(exc).__name__, exc, exc_info=True,
+        )
+        _record_bootstrap_refusal(
+            server,
+            "AppArmor confinement required but runner spawn failed "
+            f"({type(exc).__name__}: {exc}); refusing to fall back to "
+            "unconfined in-process execution (#1253)",
+        )
+        return
+    logger.warning(
+        "AppArmor pre-init: runner spawn failed for session %s "
+        "(%s: %s) — falling back to in-process tool execution; "
+        "post-init hook will downgrade to soft mode",
+        session_id, type(exc).__name__, exc, exc_info=True,
+    )
+
+
 # Default path for servers.json (contains TLS config)
 _SERVERS_JSON = Path.home() / ".jaato" / "servers.json"
 
@@ -866,7 +921,23 @@ class JaatoWSServer:
             # ----- Apparmor (opt-in via host availability) -----
             apparmor = ws_server._apparmor
             profile_name = ""  # empty = unconfined (disable_confine=True)
-            if apparmor is not None and apparmor.is_available():
+            # #1253: a WS-provisioned session is CONFIGURED for confinement
+            # whenever the daemon holds an available AppArmorManager — there
+            # is no per-session WS opt-out; every such session gets a profile.
+            # That fact is SEPARATE from whether ``profile_name`` ends up
+            # populated: if provisioning fails, profile_name stays empty but
+            # confinement was still required, and spawning a runner then would
+            # serve model-driven work with NO kernel boundary while the
+            # session record still reports ``sandbox_mode: apparmor`` — a
+            # silent bypass (#1100 deferred this; the live evidence is #1253).
+            # ``confinement_required`` is the invariant's discriminator: it
+            # rides the envelope to the runner (defence in depth), and below
+            # it turns a provisioning/spawn failure into a REFUSED session
+            # rather than an unconfined one.
+            confinement_required = (
+                apparmor is not None and apparmor.is_available()
+            )
+            if confinement_required:
                 # Phase 0/1 (template v20+, 2026-05-16): resolve plugin-
                 # contributed rules so the WS-spawned session profile
                 # mirrors the IPC path's plugin-contribution flow.
@@ -893,13 +964,30 @@ class JaatoWSServer:
                 ):
                     profile_name = apparmor.get_profile_name(session_id)
                 else:
+                    # #1253 FAIL CLOSED: confinement was required and the
+                    # profile did NOT provision.  Refuse the session rather
+                    # than spawn a runner that would serve work unconfined.
+                    # ``_record_bootstrap_refusal`` is what
+                    # ``session_manager.initialize_or_refuse`` reads after the
+                    # pre-init hooks run, so recording the failure here (and
+                    # returning without spawning) turns the whole session into
+                    # a named ``RunnerBootstrapFailed`` refusal.  This is the
+                    # ordering-note posture #1014 established for a weakened
+                    # boundary: never silent, never a downgrade to unconfined.
                     logger.warning(
                         "AppArmor pre-init: provision_profile failed for "
-                        "session %s — runner will spawn unconfined; "
-                        "post-init hook will downgrade to soft mode",
+                        "session %s but confinement is required (an AppArmor "
+                        "profile could not be loaded) — REFUSING the session "
+                        "rather than spawning an unconfined runner (#1253)",
                         session_id,
                     )
-                    # profile_name stays empty → unconfined spawn
+                    _record_bootstrap_refusal(
+                        server,
+                        "AppArmor confinement required but profile "
+                        "provisioning failed; refusing to spawn an "
+                        "unconfined runner (#1253)",
+                    )
+                    return
 
             # ----- Cgroups (opt-in via host availability) -----
             # Phase 3 §7d: provision the per-session cgroup BEFORE
@@ -978,13 +1066,14 @@ class JaatoWSServer:
                     managed_workspace_root=ws_workspace_root,
                 )
             except Exception as exc:  # noqa: BLE001 — spawn boundary
-                logger.warning(
-                    "AppArmor pre-init: runner spawn failed for "
-                    "session %s (%s: %s) — falling back to in-process "
-                    "tool execution; post-init hook will downgrade to "
-                    "soft mode",
-                    session_id, type(exc).__name__, exc, exc_info=True,
-                )
+                # #1253: a confinement-required session's spawn failure is
+                # REFUSED (an in-process fallback would run the model's tools
+                # unconfined in the daemon process); a genuinely-unconfined
+                # session keeps its in-process fallback.  The decision lives
+                # in ``_report_confined_spawn_failure`` so the hook stays at
+                # its complexity baseline (the #812 / #1167 / #1179 move).
+                _report_confined_spawn_failure(
+                    server, session_id, exc, confinement_required)
                 return
 
             # Phase 3 §7c step 2: dispatch the session.bootstrap RPC
@@ -1000,6 +1089,15 @@ class JaatoWSServer:
                 session_id=session_id,
                 workspace_path=workspace_path,
                 profile_name=profile_name,
+                # #1253: carry the invariant to the runner.  On this core
+                # path provisioning already succeeded (a failure returned
+                # above), so profile_name is populated and the runner-side
+                # gate is a no-op; the flag is the defence-in-depth backstop
+                # for any spawn path — a pre-warm slot, or a peer daemon —
+                # that reaches the runner with confinement required and no
+                # profile.  ``_maybe_self_confine`` then RAISES rather than
+                # running the session unconfined.
+                confinement_required=confinement_required,
                 # #1225: fold the workspace-HOME default into the envelope's
                 # cli / interactive_shell / notebook configs for this managed
                 # workspace.

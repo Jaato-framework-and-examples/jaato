@@ -16,6 +16,10 @@ from ..plugin import (
     COMMAND_TIMEOUT,
     PARAM_GRAMMAR_DOC,
     NAMED_PARAM_PATTERN,
+    KIND_REFERENCE,
+    KIND_TASK,
+    LISTING_DESCRIPTION_CAP,
+    LISTING_PROMPT_CAP,
     tokenize_prompt_args,
 )
 
@@ -1076,12 +1080,354 @@ class TestParamGrammarDoc:
     def test_system_instructions_cite_the_doc(self):
         plugin = PromptLibraryPlugin()
         # Stub discovery so the block is produced regardless of the environment.
-        plugin._discover_prompts = lambda: {"demo": object()}
+        # The listing renders name/description/kind, so the stub must be a real
+        # PromptInfo rather than a bare object().
+        plugin._discover_prompts = lambda: {
+            "demo": PromptInfo(
+                name="demo", description="A demo prompt",
+                source="project", path=Path("/x/demo.md"),
+            )
+        }
         instructions = plugin.get_system_instructions()
         assert PARAM_GRAMMAR_DOC in instructions
         # f-string braces rendered, not a literal placeholder leak.
         assert "{PARAM_GRAMMAR_DOC}" not in instructions
         assert "{{focus:security}}" in instructions
+
+
+class TestPromptKind:
+    """Tests for entry-kind resolution (#1262).
+
+    A ``SKILL.md`` entry is reference material; a ``PROMPT.md`` entry or a
+    single-file prompt is a task; a frontmatter ``kind:`` key overrides either
+    default.
+    """
+
+    def test_skill_md_directory_is_reference(self):
+        plugin = PromptLibraryPlugin()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plugin.set_workspace_path(tmpdir)
+            skill_dir = Path(tmpdir) / ".jaato" / "skills" / "my-skill"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / SKILL_ENTRY_FILE).write_text(
+                "---\ndescription: A skill\n---\nGuidance."
+            )
+            prompts = plugin._discover_prompts()
+            assert prompts["my-skill"].kind == KIND_REFERENCE
+
+    def test_prompt_md_directory_is_task(self):
+        plugin = PromptLibraryPlugin()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plugin.set_workspace_path(tmpdir)
+            prompt_dir = Path(tmpdir) / ".jaato" / "prompts" / "api-design"
+            prompt_dir.mkdir(parents=True)
+            (prompt_dir / PROMPT_ENTRY_FILE).write_text(
+                "---\ndescription: Design\n---\nDo it."
+            )
+            prompts = plugin._discover_prompts()
+            assert prompts["api-design"].kind == KIND_TASK
+
+    def test_single_file_is_task(self):
+        plugin = PromptLibraryPlugin()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plugin.set_workspace_path(tmpdir)
+            prompts_dir = Path(tmpdir) / ".jaato" / "prompts"
+            prompts_dir.mkdir(parents=True)
+            (prompts_dir / "review.md").write_text(
+                "---\ndescription: Review\n---\nReview it."
+            )
+            prompts = plugin._discover_prompts()
+            assert prompts["review"].kind == KIND_TASK
+
+    def test_frontmatter_kind_overrides_skill_to_task(self):
+        plugin = PromptLibraryPlugin()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plugin.set_workspace_path(tmpdir)
+            skill_dir = Path(tmpdir) / ".jaato" / "skills" / "runme"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / SKILL_ENTRY_FILE).write_text(
+                "---\ndescription: A runnable\nkind: task\n---\nDo it."
+            )
+            prompts = plugin._discover_prompts()
+            assert prompts["runme"].kind == KIND_TASK
+
+    def test_frontmatter_kind_overrides_prompt_to_reference(self):
+        plugin = PromptLibraryPlugin()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plugin.set_workspace_path(tmpdir)
+            prompts_dir = Path(tmpdir) / ".jaato" / "prompts"
+            prompts_dir.mkdir(parents=True)
+            (prompts_dir / "guide.md").write_text(
+                "---\ndescription: A guide\nkind: reference\n---\nGuidance."
+            )
+            prompts = plugin._discover_prompts()
+            assert prompts["guide"].kind == KIND_REFERENCE
+
+    def test_unknown_kind_falls_back_to_filename_default(self):
+        plugin = PromptLibraryPlugin()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plugin.set_workspace_path(tmpdir)
+            skill_dir = Path(tmpdir) / ".jaato" / "skills" / "weird"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / SKILL_ENTRY_FILE).write_text(
+                "---\ndescription: Weird\nkind: nonsense\n---\nGuidance."
+            )
+            prompts = plugin._discover_prompts()
+            # Unknown value ignored -> SKILL.md default (reference).
+            assert prompts["weird"].kind == KIND_REFERENCE
+
+
+class TestPromptResultFraming:
+    """Tests that a prompt tool's result is framed by its kind (#1262)."""
+
+    def test_skill_returns_reference_framing(self):
+        plugin = PromptLibraryPlugin()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plugin.set_workspace_path(tmpdir)
+            skill_dir = Path(tmpdir) / ".jaato" / "skills" / "my-skill"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / SKILL_ENTRY_FILE).write_text(
+                "---\ndescription: A skill\n---\nReference guidance here."
+            )
+
+            result = plugin._execute_prompt_tool("my-skill", {})
+
+            assert result["kind"] == KIND_REFERENCE
+            instruction = result["instruction"]
+            # Reference framing: inform, do not execute wholesale/silently.
+            assert "reference material" in instruction
+            assert "do not execute it wholesale" in instruction
+            assert "Execute the instructions in the content above" not in instruction
+            assert "Execute silently" not in instruction
+            # skill_path is still present for relative-path resolution.
+            assert result["skill_path"] == str(skill_dir)
+            assert str(skill_dir) in instruction
+
+    def test_prompt_returns_task_framing(self):
+        plugin = PromptLibraryPlugin()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plugin.set_workspace_path(tmpdir)
+            prompts_dir = Path(tmpdir) / ".jaato" / "prompts"
+            prompts_dir.mkdir(parents=True)
+            (prompts_dir / "review.md").write_text(
+                "---\ndescription: Review\n---\nReview the code."
+            )
+
+            result = plugin._execute_prompt_tool("review", {})
+
+            assert result["kind"] == KIND_TASK
+            instruction = result["instruction"]
+            assert "Execute the instructions in the content above" in instruction
+            assert "Execute silently" in instruction
+            assert "reference material" not in instruction
+
+    def test_kind_frontmatter_flips_framing(self):
+        """A SKILL.md declaring kind: task gets task framing."""
+        plugin = PromptLibraryPlugin()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plugin.set_workspace_path(tmpdir)
+            skill_dir = Path(tmpdir) / ".jaato" / "skills" / "runme"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / SKILL_ENTRY_FILE).write_text(
+                "---\ndescription: A runnable\nkind: task\n---\nDo it."
+            )
+
+            result = plugin._execute_prompt_tool("runme", {})
+
+            assert result["kind"] == KIND_TASK
+            assert "Execute the instructions in the content above" in result["instruction"]
+
+    def test_relative_paths_resolve_for_both_kinds(self):
+        """skill_path (relative-path root) is present for reference and task."""
+        plugin = PromptLibraryPlugin()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plugin.set_workspace_path(tmpdir)
+
+            skill_dir = Path(tmpdir) / ".jaato" / "skills" / "with-refs"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / SKILL_ENTRY_FILE).write_text(
+                "---\ndescription: Skill\n---\nSee references/x.md and check.sh"
+            )
+            prompt_dir = Path(tmpdir) / ".jaato" / "prompts" / "with-refs-task"
+            prompt_dir.mkdir(parents=True)
+            (prompt_dir / PROMPT_ENTRY_FILE).write_text(
+                "---\ndescription: Task\n---\nRun ./go.sh"
+            )
+
+            skill_res = plugin._execute_prompt_tool("with-refs", {})
+            task_res = plugin._execute_prompt_tool("with-refs-task", {})
+
+            assert skill_res["skill_path"] == str(skill_dir)
+            assert task_res["skill_path"] == str(prompt_dir)
+            assert str(skill_dir) in skill_res["instruction"]
+            assert str(prompt_dir) in task_res["instruction"]
+
+
+class TestSystemInstructionsListing:
+    """The system-prompt listing renders each entry with its description,
+    stays byte-stable, truncates long descriptions, and always lists skills
+    while capping prompts (#1262).
+    """
+
+    def test_listing_shows_descriptions(self):
+        plugin = PromptLibraryPlugin()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plugin.set_workspace_path(tmpdir)
+            prompts_dir = Path(tmpdir) / ".jaato" / "prompts"
+            prompts_dir.mkdir(parents=True)
+            (prompts_dir / "review.md").write_text(
+                "---\ndescription: Review code for security issues\n---\nBody."
+            )
+            skills_dir = Path(tmpdir) / ".jaato" / "skills" / "helper"
+            skills_dir.mkdir(parents=True)
+            (skills_dir / SKILL_ENTRY_FILE).write_text(
+                "---\ndescription: A helpful reference skill\n---\nGuidance."
+            )
+
+            instructions = plugin.get_system_instructions()
+
+            assert "prompt.review: Review code for security issues" in instructions
+            assert "prompt.helper: A helpful reference skill" in instructions
+            # Skills are grouped separately from tasks.
+            assert "Skills (reference material" in instructions
+            assert "Prompts (saved tasks" in instructions
+
+    def test_listing_is_byte_stable(self):
+        plugin = PromptLibraryPlugin()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plugin.set_workspace_path(tmpdir)
+            prompts_dir = Path(tmpdir) / ".jaato" / "prompts"
+            prompts_dir.mkdir(parents=True)
+            for n in ("zeta", "alpha", "mid"):
+                (prompts_dir / f"{n}.md").write_text(
+                    f"---\ndescription: Desc for {n}\n---\nBody."
+                )
+
+            first = plugin.get_system_instructions()
+            # Force a fresh walk and render again.
+            plugin._prompt_cache_signature = None
+            second = plugin.get_system_instructions()
+
+            assert first == second
+            # Alphabetical within the group: alpha before mid before zeta.
+            assert first.index("prompt.alpha") < first.index("prompt.mid") < first.index("prompt.zeta")
+
+    def test_listing_truncates_long_description(self):
+        plugin = PromptLibraryPlugin()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plugin.set_workspace_path(tmpdir)
+            prompts_dir = Path(tmpdir) / ".jaato" / "prompts"
+            prompts_dir.mkdir(parents=True)
+            long_desc = "word " * 100  # ~500 chars, multi-line-collapsible
+            (prompts_dir / "verbose.md").write_text(
+                f"---\ndescription: {long_desc}\n---\nBody."
+            )
+
+            instructions = plugin.get_system_instructions()
+
+            line = next(
+                l for l in instructions.splitlines() if l.startswith("- prompt.verbose:")
+            )
+            rendered_desc = line[len("- prompt.verbose: "):]
+            assert len(rendered_desc) <= LISTING_DESCRIPTION_CAP
+            assert rendered_desc.endswith("…")
+
+    def test_skills_always_listed_prompts_capped(self):
+        plugin = PromptLibraryPlugin()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plugin.set_workspace_path(tmpdir)
+            prompts_dir = Path(tmpdir) / ".jaato" / "prompts"
+            prompts_dir.mkdir(parents=True)
+            # More task prompts than the cap.
+            n_prompts = LISTING_PROMPT_CAP + 5
+            for i in range(n_prompts):
+                (prompts_dir / f"task{i:02d}.md").write_text(
+                    f"---\ndescription: Task {i}\n---\nBody."
+                )
+            # A skill well past the cap alphabetically.
+            skill_dir = Path(tmpdir) / ".jaato" / "skills" / "zzz-skill"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / SKILL_ENTRY_FILE).write_text(
+                "---\ndescription: A skill that must not be dropped\n---\nGuidance."
+            )
+
+            instructions = plugin.get_system_instructions()
+
+            # The skill is listed despite sorting last overall.
+            assert "prompt.zzz-skill" in instructions
+            # Task prompts are capped with a "more" indicator.
+            listed_tasks = [
+                l for l in instructions.splitlines()
+                if l.startswith("- prompt.task")
+            ]
+            assert len(listed_tasks) == LISTING_PROMPT_CAP
+            assert f"{n_prompts - LISTING_PROMPT_CAP} more prompts" in instructions
+
+    def test_important_line_describes_both_kinds(self):
+        plugin = PromptLibraryPlugin()
+        plugin._discover_prompts = lambda: {
+            "s": PromptInfo(
+                name="s", description="skill", source="project",
+                path=Path("/x/s"), is_directory=True, kind=KIND_REFERENCE,
+            ),
+        }
+        instructions = plugin.get_system_instructions()
+        assert "**IMPORTANT**" in instructions
+        # Both kinds described.
+        assert "skill" in instructions and "inform" in instructions
+        assert "saved task" in instructions and "execute" in instructions.lower()
+
+
+class TestJaatoSdkPayloadLoadsAsReference:
+    """Guard: the shipped jaato-sdk Claude-Code payload loads as a reference
+    entry with its description visible in the system instructions (#1262).
+
+    This is the exact skill `jaato-scaffold integration claude-code` installs;
+    it must work end to end as reference material in a jaato session.
+    """
+
+    def _payload_dir(self) -> Path:
+        import jaato_server.shared.scaffold as scaffold
+        return (
+            Path(scaffold.__file__).parent
+            / "integrations" / "claude-code" / "payload"
+        )
+
+    def test_payload_is_a_reference_with_visible_description(self):
+        import shutil
+
+        payload = self._payload_dir()
+        assert (payload / SKILL_ENTRY_FILE).exists(), (
+            f"payload SKILL.md missing at {payload}"
+        )
+
+        plugin = PromptLibraryPlugin()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plugin.set_workspace_path(tmpdir)
+            skills_root = Path(tmpdir) / ".claude" / "skills"
+            skills_root.mkdir(parents=True)
+            shutil.copytree(payload, skills_root / "jaato-sdk")
+
+            prompts = plugin._discover_prompts()
+            assert "jaato-sdk" in prompts
+            info = prompts["jaato-sdk"]
+            # Loaded from SKILL.md -> reference.
+            assert info.kind == KIND_REFERENCE
+            # Relative-path resolution points at the skill directory so its
+            # references/*.md and check.sh resolve.
+            assert info.is_directory is True
+
+            result = plugin._execute_prompt_tool("jaato-sdk", {})
+            assert result["kind"] == KIND_REFERENCE
+            assert "reference material" in result["instruction"]
+
+            instructions = plugin.get_system_instructions()
+            assert "prompt.jaato-sdk:" in instructions
+            # A distinctive prefix of the real description is visible (within
+            # the truncation cap).
+            assert "Build, run, validate and debug" in instructions
+            # Listed as a skill, not a task.
+            assert "Skills (reference material" in instructions
 
 
 class TestGitHubPathFetch:
