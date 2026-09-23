@@ -797,13 +797,13 @@ End-to-end flow from configuration to code generation:
 
 | Component | Path | Purpose |
 |-----------|------|---------|
-| References plugin | `shared/plugins/references/plugin.py` | Core plugin with selection, transitive resolution, enrichment |
-| Reference models | `shared/plugins/references/models.py` | `ReferenceSource`, `SourceType`, `InjectionMode` |
-| Selection channels | `shared/plugins/references/channels.py` | Console, Webhook, File, Queue channel implementations |
-| Config loader | `shared/plugins/references/config_loader.py` | Config file parsing, validation, auto-discovery |
-| Template plugin | `shared/plugins/template/plugin.py` | Template extraction, index, rendering, standalone discovery |
-| Reference tests | `shared/plugins/references/tests/` | Registry integration, transitive resolution, enrichment |
-| Template tests | `shared/plugins/template/tests/` | Template index, discovery, rendering, cross-plugin integration |
+| References plugin | `jaato_server/shared/plugins/references/plugin.py` | Core plugin with selection, transitive resolution, enrichment |
+| Reference models | `jaato_server/shared/plugins/references/models.py` | `ReferenceSource`, `SourceType`, `InjectionMode` |
+| Selection channels | `jaato_server/shared/plugins/references/channels.py` | Console, Webhook, File, Queue channel implementations |
+| Config loader | `jaato_server/shared/plugins/references/config_loader.py` | Config file parsing, validation, auto-discovery |
+| Template plugin | `jaato_server/shared/plugins/template/plugin.py` | Template extraction, index, rendering, standalone discovery |
+| Reference tests | `jaato_server/shared/plugins/references/tests/` | Registry integration, transitive resolution, enrichment |
+| Template tests | `jaato_server/shared/plugins/template/tests/` | Template index, discovery, rendering, cross-plugin integration |
 
 ---
 

@@ -6,7 +6,7 @@ WS request and send it over the wire.  These tests intercept
 the daemon.
 
 Together with the server-side handler tests in
-``jaato-server/server/test_sdk_parity_handlers.py`` and the
+``jaato-server/jaato_server/server/test_sdk_parity_handlers.py`` and the
 wire-format baseline in ``test_events_wire_format.py``, the
 three layers cover the full SDK feature parity contract — see
 ``project_backlog_sdk_feature_parity.md``.

@@ -1,0 +1,304 @@
+"""Daemon-side ``client.request_clarification`` handler.
+
+Symmetric counterpart of
+:mod:`server.runner_rpc_handlers.prompt_operator` (the permission ASK
+relay), for clarification.  Post-seat-flip the clarification plugin
+runs runner-side; its ``QueueChannel`` has no daemon connection (the
+daemon-side ``_setup_queue_channels`` wiring targets the daemon plugin
+instance, not the runner one), so a runner-tier (confined / pool)
+session could never deliver a clarification to the connected client —
+``request_clarification`` returned ``cancelled`` immediately.  This
+handler closes that gap exactly the way ``prompt_operator`` closed it
+for permissions.
+
+Wire flow:
+
+1. Runner-side clarification plugin resolves a
+   :class:`shared.plugins.clarification.runner_rpc_channel.RunnerRPCClarificationChannel`
+   (preferred when ``registry.runner_rpc_client`` is present) and calls
+   ``request_clarification`` on it.
+2. The channel builds a batch payload and calls
+   ``rpc_client.request_clarification(payload)``.
+3. **THIS handler** emits a :class:`ClarificationBatchEvent` — the same
+   event the legacy daemon-side hook emits, but stamped
+   ``batch_only=True``, because here it is the whole delivery: nothing
+   else about this clarification ever reaches the client.  It then
+   awaits the matching answers on a request-id-keyed futures dict.
+4. The connected client surfaces the questions, collects answers, and
+   sends back a ``ClarificationBatchResponseRequest`` which the daemon
+   transport routes into :meth:`JaatoServer.respond_to_clarification_batch`.
+5. That method calls :meth:`resolve_response`, which sets the future's
+   result; step 3's await returns and the handler replies over the RPC.
+
+Batch-only: a clarification is delivered as one batch (all questions at
+once) and answered as one batch (ordered answer strings), matching the
+``ClarificationBatchEvent`` / ``respond_to_clarification_batch``
+contract.  Per-question streaming (the TUI's legacy in-process flow) is
+unchanged for daemon-local sessions; runner-tier sessions use the batch
+relay.
+
+``batch_only=True`` is what lets a client tell the two apart.  The
+daemon-local hook in ``server.core`` emits the batch event as an
+optional *preview* of a per-question flow that follows it, so a client
+rendering both would prompt twice; this relay emits it as the only
+prompt there will be, so a client ignoring it hangs the turn (#704).
+Same event type, opposite obligations — hence the flag.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
+from typing import Any, Callable, Dict, List, Optional
+
+from jaato_sdk.events import ClarificationBatchEvent
+
+from jaato_server.server.awaiting import oldest
+
+
+logger = logging.getLogger(__name__)
+
+
+# Emit an event to the connected client(s).  Bound to ``JaatoServer.emit``
+# in production; tests pass a stub.
+EmitEventFn = Callable[[Any], None]
+
+
+class ClarificationRelayHandler:
+    """Stateful handler for the ``client.request_clarification`` RPC.
+
+    Owns a futures dict keyed by ``request_id`` so concurrent
+    clarifications resolve independently.
+
+    Lifecycle (mirror of :class:`PromptOperatorHandler`):
+
+    1. Constructed + registered in
+       :meth:`JaatoServer.set_runner_rpc` (next to the prompt-operator
+       handler) for every session with a runner RPC handle.
+    2. :meth:`resolve_response` is called by
+       :meth:`JaatoServer.respond_to_clarification_batch` when the
+       client's answers arrive.
+    3. :meth:`shutdown` (from ``JaatoServer.shutdown``) cancels
+       in-flight clarifications with a clean error.
+    """
+
+    def __init__(
+        self,
+        emit_event: EmitEventFn,
+        *,
+        prompt_timeout: Optional[float] = None,
+    ) -> None:
+        """Construct the handler.
+
+        Args:
+            emit_event: Publishes a :class:`ClarificationBatchEvent`
+                to the connected client.  Bound to ``JaatoServer.emit``
+                in production.
+            prompt_timeout: Optional wall-clock cap on how long a
+                clarification waits for a client response.  ``None``
+                (production default) means hold until the client
+                answers or the handler shuts down.  Tests pass a small
+                value.
+        """
+        self._emit_event = emit_event
+        self._prompt_timeout = prompt_timeout
+        # request_id -> Future[{"cancelled": bool, "answers": List[str],
+        #                       "answer_attachments": {...}}]
+        self._pending: Dict[str, "asyncio.Future[Dict[str, Any]]"] = {}
+        # request_id -> how many questions that batch asked.  Kept because
+        # an ANSWER may now carry attachments keyed by question index
+        # (#989), and the daemon has to be able to refuse an index that
+        # names no question -- the alternative is forwarding it to a
+        # runner that will silently drop it.  Same lifetime as the
+        # future: registered in ``handle``, dropped in its ``finally``.
+        self._question_counts: Dict[str, int] = {}
+        # request_id -> the wall-clock instant the batch was raised (#1138).
+        # THIS handler is where a clarification is pending on the DEFAULT
+        # (runner-served) path -- the clarification plugin is
+        # ``PLUGIN_TIER = "runner"``, so the daemon-side hook that writes
+        # ``JaatoServer._pending_clarification_request_id`` is not in the
+        # loop and that field stays ``None``.
+        # ``SessionManager.list_sessions`` asks here instead, through
+        # :meth:`has_pending_prompt` / :meth:`pending_since`.
+        #
+        # Same lifetime as the future and as ``_question_counts`` above --
+        # registered on the next line, dropped in the same ``finally``.
+        self._raised_at: Dict[str, float] = {}
+        self._closed = False
+
+    def has_pending_prompt(self) -> bool:
+        """Whether any clarification batch relayed here is unanswered."""
+        return bool(self._pending)
+
+    def pending_since(self) -> Optional[float]:
+        """Epoch seconds at which the OLDEST in-flight batch was raised.
+
+        ``None`` when nothing is in flight, and also when what is in flight
+        carries no stamp -- "not measured" rather than "just now".
+        """
+        # A SNAPSHOT, never the live containers.  This is read from the
+        # listing thread while ``handle`` registers and drops entries on the
+        # daemon's asyncio loop, so iterating either dict directly is the
+        # #938 shape -- ``RuntimeError: dictionary changed size during
+        # iteration``, raised inside a listing, for a fact the listing is
+        # only reporting.  ``.get`` for the same reason: a key can vanish
+        # between the snapshot and the lookup, and a prompt that finished
+        # while we were counting is one that is no longer pending.
+        stamps = self._raised_at
+        return oldest([
+            stamp for stamp in
+            (stamps.get(request_id) for request_id in list(self._pending))
+            if stamp is not None
+        ])
+
+    async def handle(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """RPC handler entry point.
+
+        Registers the request, emits the batch event, awaits the
+        answers, returns ``{"cancelled": bool, "answers": List[str]}``.
+        Raises on timeout or shutdown (the runner-side channel treats
+        any raise as a fail-closed cancel).
+        """
+        if self._closed:
+            raise RuntimeError("ClarificationRelayHandler is closed")
+
+        request_id = str(args.get("request_id", ""))
+        if not request_id:
+            raise ValueError(
+                "request_clarification: payload.request_id is required"
+            )
+        if request_id in self._pending:
+            raise ValueError(
+                f"request_clarification: duplicate request_id={request_id!r}"
+            )
+
+        questions = list(args.get("questions") or [])
+
+        loop = asyncio.get_running_loop()
+        fut: "asyncio.Future[Dict[str, Any]]" = loop.create_future()
+        self._pending[request_id] = fut
+        self._question_counts[request_id] = len(questions)
+        self._raised_at[request_id] = time.time()
+
+        event = ClarificationBatchEvent(
+            agent_id=str(args.get("agent_id", "") or ""),
+            request_id=request_id,
+            tool_name=str(args.get("tool_name", "request_clarification")),
+            context=str(args.get("context", "") or ""),
+            questions=questions,
+            # This relay is the ONLY delivery: no AgentOutputEvent carrying
+            # the question text, no per-question ClarificationInputModeEvent,
+            # no ClarificationResolvedEvent follows it.  The flag says so, so
+            # a client can tell this apart from the daemon-local batch event
+            # (which is an optional preview of a per-question flow) and
+            # prompt exactly once.  A client that ignores it blocks the turn
+            # forever — see #704.
+            batch_only=True,
+        )
+        try:
+            self._emit_event(event)
+        except Exception:
+            self._pending.pop(request_id, None)
+            self._question_counts.pop(request_id, None)
+            self._raised_at.pop(request_id, None)
+            raise
+
+        try:
+            if self._prompt_timeout is not None:
+                result = await asyncio.wait_for(fut, self._prompt_timeout)
+            else:
+                result = await fut
+            return result
+        finally:
+            self._pending.pop(request_id, None)
+            self._question_counts.pop(request_id, None)
+            self._raised_at.pop(request_id, None)
+
+    def pending_question_count(self, request_id: str) -> Optional[int]:
+        """How many questions the pending batch *request_id* asked.
+
+        ``None`` when nothing by that id is waiting here — which is how
+        ``JaatoServer.respond_to_clarification_batch`` tells a relayed
+        clarification apart from a daemon-local one before it validates
+        an answer's attachments (#989).  The count is the batch's own,
+        recorded when the questions were emitted, so an attachment keyed
+        to a question that does not exist is refused rather than
+        forwarded to a runner that would drop it.
+        """
+        return self._question_counts.get(request_id)
+
+    def resolve_response(
+        self,
+        request_id: str,
+        answers: List[str],
+        *,
+        cancelled: bool = False,
+        answer_attachments: Optional[Dict[int, List[Dict[str, Any]]]] = None,
+    ) -> bool:
+        """Resolve the pending future for *request_id*.
+
+        Called by ``JaatoServer.respond_to_clarification_batch`` when
+        the client's ordered answer strings arrive.  Returns ``True`` if
+        a future was pending and got resolved; ``False`` otherwise (no
+        future waiting — e.g. a daemon-local session whose answers go
+        through the legacy input queue instead).
+
+        Args:
+            request_id: The batch being answered.
+            answers: Ordered answer strings, one per question.
+            cancelled: Abandon the clarification; ``answers`` ignored.
+            answer_attachments: Media attached to individual answers
+                (#989), keyed by 1-based question index, each entry a
+                canonical ``{mime_type, data, display_name,
+                attachment_id}`` wire dict.  Already validated by the
+                caller — this method forwards, it does not judge.  The
+                key is rendered as a decimal STRING on the wire because
+                the result crosses the runner RPC as JSON, whose object
+                keys are strings; the runner-side channel parses it back.
+        """
+        fut = self._pending.get(request_id)
+        if fut is None or fut.done():
+            return False
+        result: Dict[str, Any] = {
+            "cancelled": bool(cancelled),
+            "answers": list(answers),
+        }
+        if answer_attachments:
+            result["answer_attachments"] = {
+                str(index): list(entries)
+                for index, entries in answer_attachments.items()
+            }
+        fut.set_result(result)
+        return True
+
+    def shutdown(self) -> None:
+        """Cancel all in-flight clarifications with a clean error.
+
+        Pending futures get a ``RuntimeError("shutting down")``; the
+        runner-side channel translates the raise into a clean cancelled
+        response.
+        """
+        if self._closed:
+            return
+        self._closed = True
+        self._question_counts.clear()
+        self._raised_at.clear()
+        for request_id, fut in list(self._pending.items()):
+            if not fut.done():
+                fut.set_exception(
+                    RuntimeError(
+                        f"request_clarification: shutting down "
+                        f"(in-flight request_id={request_id!r})"
+                    )
+                )
+        self._pending.clear()
+
+
+def register(
+    rpc_server: Any,  # server.runner_rpc_server.RunnerRPCServer
+    handler: ClarificationRelayHandler,
+) -> None:
+    """Register *handler*'s ``handle`` as the ``client.request_clarification``
+    RPC method on *rpc_server* (mirror of ``prompt_operator.register``)."""
+    rpc_server.register("client.request_clarification", handler.handle)

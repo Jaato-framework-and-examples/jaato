@@ -7,7 +7,7 @@ for the full design and the §8 decisions this implements.
 
 > **This is reference code, not a wired plugin.** It targets premium reactor
 > infrastructure (`jaato_premium.reactors`) and reuses the public
-> `shared.plugins.reliability` types, so it is **not executed or registered in
+> `jaato_server.shared.plugins.reliability` types, so it is **not executed or registered in
 > this repo** (no premium reactor engine in jaato-server; CI does not import
 > it). Copy/adapt it into a tenant package — or a premium example package —
 > and register it via a `jaato.premium_reactors` entry point.
@@ -29,9 +29,9 @@ is `ctx.emit_event("reliability.escalated" | "reliability.pattern_detected", …
 
 ## What it reuses (logic stays public)
 
-- `shared.plugins.reliability.types`: `FailureKey`, `EscalationRule`,
+- `jaato_server.shared.plugins.reliability.types`: `FailureKey`, `EscalationRule`,
   `TrustState`, `BehavioralPattern`.
-- `shared.plugins.reliability.patterns.PatternDetector` — instantiated
+- `jaato_server.shared.plugins.reliability.patterns.PatternDetector` — instantiated
   per-session; the migration moves the *wiring* to a reactor, not the logic.
 - SDK substrate: the `reliability.*` event types (#318) and the
   `is_error_result` field on `tool.call_completed` (#319).

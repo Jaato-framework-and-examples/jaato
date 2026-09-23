@@ -16,6 +16,8 @@ import { summarizeToolCalls } from "@/protocol/turnStats";
 import { formatSessionList, normalizeSessionList, type SessionSummary } from "@/protocol/sessions";
 import { formatHistoryListing, historyBlocks } from "@/protocol/history";
 import { clampRailWidth, loadRailWidth, saveRailWidth } from "@/store/railWidth";
+import { applyChanged, applySnapshot, markReset, type WorkspaceReset } from "@/store/workspaceView";
+import { toolIdMappings } from "@/protocol/toolIds";
 import type { SessionNote } from "@/app/notes";
 
 /**
@@ -42,6 +44,7 @@ import type {
   ConfigStatus,
   ConnectionPhase,
   BudgetState,
+  GcState,
   ContextState,
   InitProgress,
   OutputBlock,
@@ -156,10 +159,33 @@ export interface JaatoState {
   context: Record<string, ContextState>;
   /** What the window is spent ON, by instruction source (see BudgetState). */
   budget: Record<string, BudgetState>;
+  /** GC policy and last pass, per agent (see GcState). */
+  gc: Record<string, GcState>;
   /** Budget source layers whose children are showing — the TUI panel's drill-down. */
   budgetExpanded: string[];
   commands: CommandSpec[];
+  /** Every file the session changed, path -> status: the FULL list, whatever the panel's reset point. */
   workspaceFiles: Record<string, string>;
+  /**
+   * Hashed tool / category id -> the name a person knows, from
+   * ``tools.id_registry`` and ``session.info.tool_id_mappings``
+   * (``protocol/toolIds.ts``).  Replaced wholesale on each receive -- the
+   * daemon always sends the full current set.
+   */
+  toolIdNames: Record<string, string>;
+  /** Path -> the daemon's number for its latest change (#1189, ``store/workspaceView.ts``). */
+  workspaceSeqs: Record<string, number>;
+  /** The workspace monitor those numbers belong to; ``null`` from a daemon that numbers nothing. */
+  workspaceEpoch: string | null;
+  /** The highest change number seen -- what a reset records. */
+  workspaceSeq: number;
+  /**
+   * The Files panel's reset point (the TUI's ``workspace_clear``): when set,
+   * the panel shows only files changed after it.  Per viewer and in memory,
+   * like ``workspaceHidden``; voided -- with a notice -- when the daemon's
+   * numbering says it can no longer be honoured.
+   */
+  workspaceReset: WorkspaceReset | null;
   /**
    * Entries hidden from the Files panel this session — the TUI panel's
    * ``h`` key.  A directory is stored with its trailing ``/`` and hides
@@ -260,6 +286,10 @@ export interface JaatoState {
   toggleBudgetSource: (source: string) => void;
   toggleWorkspaceHidden: (entryId: string) => void;
   toggleWorkspaceShowHidden: () => void;
+  /** Reset the Files panel: from now on it shows only files that change after this moment. */
+  resetWorkspaceView: () => void;
+  /** Drop the reset point and show every file the session changed. */
+  showAllWorkspace: () => void;
   setWorkspaceNotice: (n: JaatoState["workspaceNotice"]) => void;
   /** The workspace SCREEN's status line (``workspace.notice``), as opposed to the Files panel's above. */
   setWorkspaceListNotice: (n: JaatoState["workspace"]["notice"]) => void;
@@ -295,8 +325,14 @@ const emptySessionState = () => ({
   plan: {} as Record<string, PlanState>,
   context: {} as Record<string, ContextState>,
   budget: {} as Record<string, BudgetState>,
+  gc: {} as Record<string, GcState>,
   budgetExpanded: [] as string[],
+  toolIdNames: {} as Record<string, string>,
   workspaceFiles: {} as Record<string, string>,
+  workspaceSeqs: {} as Record<string, number>,
+  workspaceEpoch: null as string | null,
+  workspaceSeq: 0,
+  workspaceReset: null as WorkspaceReset | null,
   workspaceHidden: [] as string[],
   workspaceShowHidden: false,
   workspaceIgnored: {} as Record<string, boolean>,
@@ -842,6 +878,42 @@ export function reduce(s: JaatoState, raw: JaatoEvent): JaatoState {
         profile: (ev.profile_name as string | null | undefined) ?? s.session.profile ?? null,
         models: (ev.models as string[] | undefined) ?? s.session.models,
       };
+      {
+        const names = toolIdMappings(ev.tool_id_mappings);
+        if (names && Object.keys(names).length) s.toolIdNames = names;
+      }
+      break;
+    }
+    case EventTypeValue.GC_CONFIG: {
+      const id = (ev.agent_id as string) || "main";
+      const num = (v: unknown) => (typeof v === "number" ? v : null);
+      s.gc = { ...s.gc, [id]: { ...s.gc[id], config: {
+        strategy: typeof ev.strategy === "string" && ev.strategy ? ev.strategy : null,
+        threshold: num(ev.threshold), targetPercent: num(ev.target_percent), continuous: ev.continuous_mode === true,
+      } } };
+      break;
+    }
+    case EventTypeValue.GC: {
+      const id = (ev.agent_id as string) || "main";
+      const cur = s.gc[id] ?? {};
+      const num = (v: unknown) => (typeof v === "number" ? v : null);
+      if (ev.phase === "started") s.gc = { ...s.gc, [id]: { ...cur, running: true } };
+      else if (ev.phase === "completed") {
+        const at = Date.parse(String(ev.timestamp ?? ""));
+        s.gc = { ...s.gc, [id]: { ...cur, running: false, lastPass: {
+          at: Number.isFinite(at) ? at : Date.now(),
+          success: ev.success !== false,
+          tokensFreed: num(ev.tokens_freed), tokensBefore: num(ev.tokens_before), tokensAfter: num(ev.tokens_after),
+          trigger: typeof ev.trigger_reason === "string" ? ev.trigger_reason : null,
+          strategy: typeof ev.strategy === "string" ? ev.strategy : null,
+          error: typeof ev.error === "string" ? ev.error : null,
+        } } };
+      }
+      break;
+    }
+    case EventTypeValue.TOOL_ID_REGISTRY: {
+      const names = toolIdMappings(ev.mappings);
+      if (names) s.toolIdNames = names;
       break;
     }
     case EventTypeValue.SESSION_PROFILES:
@@ -928,32 +1000,18 @@ export function reduce(s: JaatoState, raw: JaatoEvent): JaatoState {
       s.workspace = { ...s.workspace, config: cfg, selected: cfg.workspace || s.workspace.selected };
       break;
     }
-    case EventTypeValue.WORKSPACE_FILES_CHANGED: {
-      const next = { ...s.workspaceFiles };
-      // WorkspaceFilesChangedEvent.changes is [{path, status}] — ``status`` is
-      // the daemon's key; ``change`` / ``type`` are tolerated for older feeds.
-      for (const ch of (ev.changes as Record<string, string>[] | undefined) ?? []) {
-        const p = ch.path ?? ch.file;
-        if (!p) continue;
-        const status = ch.status ?? ch.change ?? ch.type ?? "modified";
-        if (status === "deleted") delete next[p];
-        else next[p] = status;
-      }
-      s.workspaceFiles = next;
-      break;
-    }
+    case EventTypeValue.WORKSPACE_FILES_CHANGED:
     case EventTypeValue.WORKSPACE_FILES_SNAPSHOT: {
-      const next: Record<string, string> = {};
-      for (const f of (ev.files as unknown[] | undefined) ?? []) {
-        if (typeof f === "string") next[f] = "modified";
-        else if (f && typeof f === "object") {
-          const o = f as Record<string, string>;
-          const p = o.path ?? o.file;
-          const status = o.status ?? o.change ?? o.type ?? "modified";
-          if (p && status !== "deleted") next[p] = status;
-        }
-      }
-      s.workspaceFiles = next;
+      // #1189: both go through workspaceView.ts, which keeps the change
+      // numbers the panel's reset point is measured against.
+      const cur = { files: s.workspaceFiles, seqs: s.workspaceSeqs, epoch: s.workspaceEpoch, seq: s.workspaceSeq, reset: s.workspaceReset };
+      const out = ev.type === EventTypeValue.WORKSPACE_FILES_SNAPSHOT ? applySnapshot(cur, ev) : applyChanged(cur, ev);
+      s.workspaceFiles = out.files;
+      s.workspaceSeqs = out.seqs;
+      s.workspaceEpoch = out.epoch;
+      s.workspaceSeq = out.seq;
+      s.workspaceReset = out.reset;
+      if (out.voided) s.workspaceNotice = { text: out.voided };
       break;
     }
     case EventTypeValue.WORKSPACE_IGNORE_RESULT: {
@@ -1064,6 +1122,8 @@ export const useJaato = create<JaatoState>()((set, get) => ({
       : [...st.workspaceHidden, entryId],
   })),
   toggleWorkspaceShowHidden: () => set((st) => ({ workspaceShowHidden: !st.workspaceShowHidden })),
+  resetWorkspaceView: () => set((st) => ({ workspaceReset: markReset({ epoch: st.workspaceEpoch, seq: st.workspaceSeq }), workspaceNotice: null })),
+  showAllWorkspace: () => set(() => ({ workspaceReset: null, workspaceNotice: null })),
   setWorkspaceNotice: (n) => set(() => ({ workspaceNotice: n })),
   setWorkspaceListNotice: (n) => set((st) => ({ workspace: { ...st.workspace, notice: n } })),
   setTheme: (theme) => set((st) => ({ ui: { ...st.ui, theme } })),

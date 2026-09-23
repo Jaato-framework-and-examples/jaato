@@ -9,7 +9,7 @@
 
 ## 1. Why this migration
 
-The `reliability` plugin (`jaato-server/shared/plugins/reliability/`) is fully built but **never runs in the shipped daemon**. The original design (pre-dating the event bus) wired it through bespoke imperative hooks the session/executor call directly. The event bus now exists, and the `drift_monitor` premium reactor proves the same class of job — *observe the turn stream, steer via `inject_prompt`* — is done cleanly as an event-subscribing reactor with **one** activation seam (an entry point) instead of several.
+The `reliability` plugin (`jaato-server/jaato_server/shared/plugins/reliability/`) is fully built but **never runs in the shipped daemon**. The original design (pre-dating the event bus) wired it through bespoke imperative hooks the session/executor call directly. The event bus now exists, and the `drift_monitor` premium reactor proves the same class of job — *observe the turn stream, steer via `inject_prompt`* — is done cleanly as an event-subscribing reactor with **one** activation seam (an entry point) instead of several.
 
 ### It isn't just unwired once — it's TRIPLE-dead
 
@@ -152,7 +152,7 @@ Add the §5 branch on `client_type`:
 4. **Payload enrichment** — **YES.** Enrich `tool.call_completed` with `is_error_result` so success=True-but-error-body failures are still counted.
 
 ### Consequence to confirm — reactor home / premium-gating
-The reactor engine + entry point (`jaato.premium_reactors`, `jaato_premium/reactors/`) is **premium-only** — there is no public reactor mechanism. So the reliability *reactor* (the activation/wiring) lives in **jaato-premium**, which makes reliability-**active** a premium capability (like `drift_monitor`). This is NOT a regression of a working feature (reliability is dead/unwired today), and the **logic stays public**: the reactor imports the public `shared/plugins/reliability` module (`FailureKey`/`EscalationRule`/`PatternDetector`/state). A third party can still self-wire the public plugin via the original `configure_plugins(reliability_plugin=…)` seam; the premium reactor is just the supported, maintained activation path. Confirm this productization split is intended.
+The reactor engine + entry point (`jaato.premium_reactors`, `jaato_premium/reactors/`) is **premium-only** — there is no public reactor mechanism. So the reliability *reactor* (the activation/wiring) lives in **jaato-premium**, which makes reliability-**active** a premium capability (like `drift_monitor`). This is NOT a regression of a working feature (reliability is dead/unwired today), and the **logic stays public**: the reactor imports the public `jaato_server/shared/plugins/reliability` module (`FailureKey`/`EscalationRule`/`PatternDetector`/state). A third party can still self-wire the public plugin via the original `configure_plugins(reliability_plugin=…)` seam; the premium reactor is just the supported, maintained activation path. Confirm this productization split is intended.
 
 ---
 

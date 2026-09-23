@@ -188,7 +188,7 @@ def _build_messages(self, new_message: str) -> List[Dict]:
 ### converters.py
 
 ```python
-from shared.plugins.model_provider.types import (
+from jaato_server.shared.plugins.model_provider.types import (
     ToolSchema, Message, Part, Role, FunctionCall, ToolResult, ProviderResponse
 )
 
@@ -382,8 +382,8 @@ def count_tokens(self, content: str) -> int:
 ### Example Usage
 
 ```python
-from shared.plugins.model_provider.anthropic import AnthropicProvider
-from shared.plugins.model_provider.base import ProviderConfig
+from jaato_server.shared.plugins.model_provider.anthropic import AnthropicProvider
+from jaato_server.shared.plugins.model_provider.base import ProviderConfig
 
 provider = AnthropicProvider()
 provider.initialize(ProviderConfig(

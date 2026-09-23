@@ -1,7 +1,7 @@
 """The results file as a CONTRACT, not as whatever ``ArmResult`` happens to hold.
 
 A results file is read by things outside this package — today the dossier
-generator in ``jaato-server/shared/scaffold/eval_results.py``, which renders an
+generator in ``jaato-server/jaato_server/shared/scaffold/eval_results.py``, which renders an
 arm's numbers into the accuracy section of an Annex IV dossier (jaato #1124).
 That reader may **not** import this engine: ``jaato_eval`` imports ``jaato_sdk``
 and nothing else from the tree, and a consumer that imported the producer would

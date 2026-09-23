@@ -145,7 +145,7 @@ exactly the class of operation that should not happen at all.
 
 ### 4.1 Profile field
 
-Add to `SubagentProfile` (`shared/plugins/subagent/config.py`):
+Add to `SubagentProfile` (`jaato_server/shared/plugins/subagent/config.py`):
 
 ```python
 # Whether this session's cgroup is provisioned in container mode

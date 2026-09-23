@@ -156,7 +156,7 @@ sequenceDiagram
 
     alt Socket does not exist AND auto_start=True
         IPCClient->>IPCClient: _start_server()
-        IPCClient->>Daemon: subprocess: python -m server<br/>--ipc-socket /tmp/jaato.sock --daemon
+        IPCClient->>Daemon: subprocess: python -m jaato_server<br/>--ipc-socket /tmp/jaato.sock --daemon
         Daemon->>Daemon: Write PID file
         Daemon->>IPCServer: start()
         IPCServer->>Socket: Create Unix domain socket
@@ -1021,20 +1021,20 @@ sequenceDiagram
 | **IPCClient** | `jaato-tui/ipc_client.py` | Client-side IPC connection |
 | **PTDisplay** | `jaato-tui/pt_display.py` | prompt_toolkit display layout |
 | **Backend** | `jaato-tui/backend.py` | Backend abstraction (Direct/IPC) |
-| **JaatoDaemon** | `server/__main__.py` | Daemon process, PID management |
-| **JaatoIPCServer** | `server/ipc.py` | Server-side IPC handling |
-| **JaatoWSServer** | `server/websocket.py` | WebSocket server |
-| **SessionManager** | `server/session_manager.py` | Multi-session orchestration |
-| **JaatoServer** | `server/core.py` | Per-session request handler |
-| **Events** | `server/events.py` | Event types, serialization |
-| **JaatoClient** | `shared/jaato_client.py` | Core facade |
-| **JaatoRuntime** | `shared/jaato_runtime.py` | Shared resources |
-| **JaatoSession** | `shared/jaato_session.py` | Per-agent state |
-| **ToolExecutor** | `shared/ai_tool_runner.py` | Tool execution |
-| **TokenLedger** | `shared/token_accounting.py` | Token tracking |
-| **PluginRegistry** | `shared/plugins/registry.py` | Plugin discovery |
-| **PermissionPlugin** | `shared/plugins/permission/` | Permission control |
-| **ModelProviderPlugin** | `shared/plugins/model_provider/` | Provider abstraction |
+| **JaatoDaemon** | `jaato_server/server/__main__.py` | Daemon process, PID management |
+| **JaatoIPCServer** | `jaato_server/server/ipc.py` | Server-side IPC handling |
+| **JaatoWSServer** | `jaato_server/server/websocket.py` | WebSocket server |
+| **SessionManager** | `jaato_server/server/session_manager.py` | Multi-session orchestration |
+| **JaatoServer** | `jaato_server/server/core.py` | Per-session request handler |
+| **Events** | `jaato_server/server/events.py` | Event types, serialization |
+| **JaatoClient** | `jaato_server/shared/jaato_client.py` | Core facade |
+| **JaatoRuntime** | `jaato_server/shared/jaato_runtime.py` | Shared resources |
+| **JaatoSession** | `jaato_server/shared/jaato_session.py` | Per-agent state |
+| **ToolExecutor** | `jaato_server/shared/ai_tool_runner.py` | Tool execution |
+| **TokenLedger** | `jaato_server/shared/token_accounting.py` | Token tracking |
+| **PluginRegistry** | `jaato_server/shared/plugins/registry.py` | Plugin discovery |
+| **PermissionPlugin** | `jaato_server/shared/plugins/permission/` | Permission control |
+| **ModelProviderPlugin** | `jaato_server/shared/plugins/model_provider/` | Provider abstraction |
 
 ### Event Types Quick Reference
 

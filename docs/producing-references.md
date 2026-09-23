@@ -569,13 +569,13 @@ All three fields are required. If any is missing, the config is ignored (logged 
 
 | File | Contents |
 |---|---|
-| `shared/plugins/references/models.py` | `ReferenceSource`, `SourceType`, `InjectionMode`, `EmbeddingMetadata`, `ReferenceContents`, `SelectionRequest`, `SelectionResponse` dataclasses |
-| `shared/plugins/references/config_loader.py` | `load_config()`, `discover_references()`, `validate_config()`, `validate_reference_file()`, `validate_source()`, `resolve_source_paths()`, `_load_embedding_config()`, `ReferencesConfig`, `ConfigValidationError` |
-| `shared/plugins/references/plugin.py` | Core plugin: `selectReferences`, `listReferences`, `validateReference`, `compute_embedding` tool handlers; selection, transitive resolution, enrichment logic |
-| `shared/plugins/references/channels.py` | Console, Webhook, File, Queue channel implementations for selection interaction |
-| `shared/plugins/references/tests/` | Tests for registry integration, transitive resolution, enrichment |
-| `shared/plugins/template/plugin.py` | Template extraction, index, rendering, standalone discovery |
-| `shared/plugins/template/tests/` | Template index, discovery, rendering, cross-plugin integration tests |
+| `jaato_server/shared/plugins/references/models.py` | `ReferenceSource`, `SourceType`, `InjectionMode`, `EmbeddingMetadata`, `ReferenceContents`, `SelectionRequest`, `SelectionResponse` dataclasses |
+| `jaato_server/shared/plugins/references/config_loader.py` | `load_config()`, `discover_references()`, `validate_config()`, `validate_reference_file()`, `validate_source()`, `resolve_source_paths()`, `_load_embedding_config()`, `ReferencesConfig`, `ConfigValidationError` |
+| `jaato_server/shared/plugins/references/plugin.py` | Core plugin: `selectReferences`, `listReferences`, `validateReference`, `compute_embedding` tool handlers; selection, transitive resolution, enrichment logic |
+| `jaato_server/shared/plugins/references/channels.py` | Console, Webhook, File, Queue channel implementations for selection interaction |
+| `jaato_server/shared/plugins/references/tests/` | Tests for registry integration, transitive resolution, enrichment |
+| `jaato_server/shared/plugins/template/plugin.py` | Template extraction, index, rendering, standalone discovery |
+| `jaato_server/shared/plugins/template/tests/` | Template index, discovery, rendering, cross-plugin integration tests |
 | `docs/jaato_knowledge_management.md` | Architecture overview of the full knowledge pipeline |
 | `docs/compute-embedding-tool-spec.md` | Specification for the `compute_embedding` tool and embedding infrastructure |
 | `docs/jaato_subagent_profiles_reference.md` | Related: how subagent profiles can pre-select references |

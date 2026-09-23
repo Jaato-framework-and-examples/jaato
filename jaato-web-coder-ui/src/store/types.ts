@@ -285,6 +285,31 @@ export interface BudgetState {
   entries: Record<string, BudgetEntry>;
 }
 
+/**
+ * What the Instructions panel says about garbage collection (#1190), per
+ * agent: the policy in force (``gc.config``) and the last pass (``gc``).
+ * Both are replayed by the daemon to a client that attaches late, so an
+ * absent ``lastPass`` means "none reported", not "never ran" -- a daemon
+ * that predates the replay says nothing about passes before the attach.
+ */
+export interface GcState {
+  /** ``undefined`` until the daemon has said; ``strategy: null`` is "no GC configured". */
+  config?: { strategy: string | null; threshold: number | null; targetPercent: number | null; continuous: boolean };
+  lastPass?: {
+    /** When the pass completed (the event's own timestamp, ms since epoch). */
+    at: number;
+    success: boolean;
+    tokensFreed: number | null;
+    tokensBefore: number | null;
+    tokensAfter: number | null;
+    trigger: string | null;
+    strategy: string | null;
+    error: string | null;
+  };
+  /** A pass is under way: between ``started`` and ``completed``. */
+  running?: boolean;
+}
+
 export interface WorkspaceInfo {
   name: string;
   configured: boolean;

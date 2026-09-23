@@ -82,7 +82,7 @@ Node's built-in WebSocket).
 
 ## Configuration
 
-`server.yaml`; every secret is a file beside it, mode 0600 (looser is
+`jaato_server.server.yaml`; every secret is a file beside it, mode 0600 (looser is
 refused, not read):
 
 | Key | Meaning |

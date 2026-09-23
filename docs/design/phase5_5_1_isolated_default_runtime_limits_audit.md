@@ -40,7 +40,7 @@ hardening target.  §5.1 closes it.
 In-scope:
 
 - Add a module-level `ISOLATED_SUBAGENT_DEFAULT_RUNTIME_LIMITS` constant in
-  `shared/runtime_limits.py` that carries the conservative default
+  `jaato_server/shared/runtime_limits.py` that carries the conservative default
   (2 GiB / 128 pids / cpu.weight=100 / 120s tool timeout / 1 MiB output).
 - Add an `apply_isolated_defaults(supplied)` helper in the same module
   that returns a per-field merge: supplied wins when non-None, default
@@ -152,7 +152,7 @@ change.  Mitigations:
 
 ## 4. Test plan
 
-Regression pins in `server/tests/test_spawn_isolated_runner_helper.py`
+Regression pins in `jaato_server/server/tests/test_spawn_isolated_runner_helper.py`
 (or a new sibling if signal volume warrants).  Each test names the
 property it pins, never the implementation:
 
@@ -176,7 +176,7 @@ property it pins, never the implementation:
    with the same input returns equal-but-distinct instances; no aliasing
    of the module-level default.
 
-Plus one merge-helper unit test in `shared/tests/test_runtime_limits.py`
+Plus one merge-helper unit test in `jaato_server/shared/tests/test_runtime_limits.py`
 (or sibling) — `test_apply_isolated_defaults_merges_per_field`.
 
 ## 5. Real-host verification recommendation

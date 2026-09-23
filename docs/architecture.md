@@ -10,7 +10,7 @@ The framework supports a server-first architecture where the core logic runs as 
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                     python -m server                             │
+│                     python -m jaato_server                             │
 │  (Daemon - persists independently of clients)                   │
 ├─────────────────────────────────────────────────────────────────┤
 │  SessionManager                                                  │
@@ -34,11 +34,11 @@ The framework supports a server-first architecture where the core logic runs as 
 
 | Component | Location | Purpose |
 |-----------|----------|---------|
-| `JaatoServer` | `server/core.py` | Core logic extracted from RichClient, UI-agnostic |
-| `SessionManager` | `server/session_manager.py` | Multi-session orchestration with persistence |
-| `JaatoIPCServer` | `server/ipc.py` | Unix domain socket for local clients |
-| `JaatoWSServer` | `server/websocket.py` | WebSocket for remote/web clients |
-| `Event Protocol` | `server/events.py` | 25+ typed events for client-server communication |
+| `JaatoServer` | `jaato_server/server/core.py` | Core logic extracted from RichClient, UI-agnostic |
+| `SessionManager` | `jaato_server/server/session_manager.py` | Multi-session orchestration with persistence |
+| `JaatoIPCServer` | `jaato_server/server/ipc.py` | Unix domain socket for local clients |
+| `JaatoWSServer` | `jaato_server/server/websocket.py` | WebSocket for remote/web clients |
+| `Event Protocol` | `jaato_server/server/events.py` | 25+ typed events for client-server communication |
 
 ### Event-Driven Communication
 
@@ -164,16 +164,16 @@ Session Lifecycle:
 
 ```bash
 # Start server as daemon
-python -m server --ipc-socket /tmp/jaato.sock --daemon
+python -m jaato_server --ipc-socket /tmp/jaato.sock --daemon
 
 # Start with WebSocket for remote access
-python -m server --ipc-socket /tmp/jaato.sock --web-socket :8080 --daemon
+python -m jaato_server --ipc-socket /tmp/jaato.sock --web-socket :8080 --daemon
 
 # Check server status
-python -m server --status
+python -m jaato_server --status
 
 # Stop server
-python -m server --stop
+python -m jaato_server --stop
 
 # Connect TUI client
 python rich_client.py --connect /tmp/jaato.sock
@@ -412,7 +412,7 @@ The framework supports streaming responses and mid-turn cancellation for respons
 The `CancelToken` class provides thread-safe cancellation signaling:
 
 ```python
-from shared.plugins.model_provider.types import CancelToken, CancelledException
+from jaato_server.shared.plugins.model_provider.types import CancelToken, CancelledException
 
 token = CancelToken()
 
@@ -484,7 +484,7 @@ client.set_streaming_enabled(False)  # Batched output, simpler but no mid-stream
 The retry logic respects cancellation during backoff sleeps:
 
 ```python
-from shared.retry_utils import with_retry, interruptible_sleep
+from jaato_server.shared.retry_utils import with_retry, interruptible_sleep
 
 # Retry with cancellation support
 token = CancelToken()
@@ -727,7 +727,7 @@ Tool plugins can provide:
 GC plugins implement the `GCPlugin` protocol and manage context window overflow. They are **not** managed by `PluginRegistry` - they have their own discovery and loading system:
 
 ```python
-from shared.plugins.gc import discover_gc_plugins, load_gc_plugin
+from jaato_server.shared.plugins.gc import discover_gc_plugins, load_gc_plugin
 
 plugins = discover_gc_plugins()  # Uses jaato.gc_plugins entry point
 gc_plugin = load_gc_plugin('gc_truncate')
@@ -744,7 +744,7 @@ GC plugins have a completely different interface focused on history management:
 Session plugins implement the `SessionPlugin` protocol and manage conversation persistence. Like GC plugins, they are **not** managed by `PluginRegistry` - they connect directly to JaatoClient:
 
 ```python
-from shared.plugins.session import create_plugin, SessionConfig, load_session_config
+from jaato_server.shared.plugins.session import create_plugin, SessionConfig, load_session_config
 
 # Load config from .jaato/.sessions.json (or use defaults)
 config = load_session_config()
@@ -780,12 +780,12 @@ Configuration is stored in `.jaato/.sessions.json`:
 Model provider plugins implement the `ModelProviderPlugin` protocol and abstract away SDK-specific details, enabling support for multiple AI providers:
 
 ```python
-from shared.plugins.model_provider import (
+from jaato_server.shared.plugins.model_provider import (
     ModelProviderPlugin,
     ProviderConfig,
     load_provider,
 )
-from shared.plugins.model_provider.types import ToolSchema, Message
+from jaato_server.shared.plugins.model_provider.types import ToolSchema, Message
 
 # Load a provider (auto-discovered or from known implementations)
 provider = load_provider('google_genai')
@@ -813,7 +813,7 @@ Model provider plugins provide:
 
 #### Provider-Agnostic Types
 
-All plugins use internal types defined in `shared/plugins/model_provider/types.py`:
+All plugins use internal types defined in `jaato_server/shared/plugins/model_provider/types.py`:
 
 | Type | Purpose | Replaces |
 |------|---------|----------|
@@ -1271,7 +1271,7 @@ ToolPlugin <|.. MultimodalPlugin
 ## Typical Client Usage
 
 ```python
-from shared import JaatoClient, PluginRegistry, TokenLedger
+from jaato_server.shared import JaatoClient, PluginRegistry, TokenLedger
 
 model_name = 'gemini-2.5-flash'
 
@@ -1354,7 +1354,7 @@ print(f"Context: {usage['percent_used']:.1f}% used")
 ```
 server/                          # Server package (top-level)
 ├── __init__.py                  # Package exports
-├── __main__.py                  # Entry point: python -m server
+├── __main__.py                  # Entry point: python -m jaato_server
 ├── core.py                      # JaatoServer - UI-agnostic core logic
 ├── events.py                    # Event protocol (25+ typed events)
 ├── session_manager.py           # Multi-session orchestration

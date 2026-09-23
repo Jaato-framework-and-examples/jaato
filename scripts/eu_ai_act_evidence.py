@@ -182,7 +182,7 @@ class Daemon:
     def start(self) -> None:
         env = dict(os.environ)
         env.setdefault("JAATO_RUNNER_POOL_ENABLED", "false")
-        subprocess.run([sys.executable, "-m", "server", "--ipc-socket", self.socket,
+        subprocess.run([sys.executable, "-m", "jaato_server", "--ipc-socket", self.socket,
                         "--pid-file", self.pidfile, "--daemon"],
                        cwd=_server_dir(), env=env, check=True,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -198,13 +198,13 @@ class Daemon:
         raise RuntimeError(f"daemon on {self.socket} did not accept a connection")
 
     def stop(self) -> None:
-        subprocess.run([sys.executable, "-m", "server", "--stop", "--ipc-socket", self.socket,
+        subprocess.run([sys.executable, "-m", "jaato_server", "--stop", "--ipc-socket", self.socket,
                         "--pid-file", self.pidfile], cwd=_server_dir(),
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def _server_dir() -> str:
-    import server  # noqa: F401 -- resolves the installed tree
+    import jaato_server.server  # noqa: F401 -- resolves the installed tree
     return str(Path(server.__file__).resolve().parent.parent)
 
 
@@ -309,7 +309,7 @@ def _strip_noise(text: str) -> str:
 
 
 def scaffold(*args: str, cwd: Optional[Path] = None) -> str:
-    return run([sys.executable, "-m", "shared.scaffold", *args], cwd=cwd)
+    return run([sys.executable, "-m", "jaato_server.shared.scaffold", *args], cwd=cwd)
 
 
 def doctor(*args: str, cwd: Optional[Path] = None) -> str:
@@ -542,7 +542,7 @@ def collect(root: Path, ws: Dict[str, Path], daemon: Daemon) -> List[Capture]:
                 "sed -i '2s/\"output_tokens\": 7/\"output_tokens\": 700/' ledger.jsonl && jaato-doctor --audit-verify ledger.jsonl",
                 doctor("--audit-verify", str(tampered)), "audit"))
     add(Capture("17-retention-sweep", "record_keeping: the retention pass, per profile and per clock",
-                "python -c 'from server.record_retention import ...'   # a sweep over backdated files",
+                "python -c 'from jaato_server.server.record_retention import ...'   # a sweep over backdated files",
                 _retention_demo(root), "audit"))
 
     # ---- Arts. 72/73: the incident register
@@ -654,7 +654,7 @@ def _fmt_results(results: List[Dict[str, Any]]) -> str:
 def _synthetic_chained_ledger(where: Path) -> Path:
     """A chained ledger written in-process, for the verifier captures when the
     live one is absent.  Labelled in the capture that uses it."""
-    from shared.token_accounting import TokenLedger
+    from jaato_server.shared.token_accounting import TokenLedger
     path = where / "synthetic-ledger.jsonl"
     os.environ["LEDGER_PATH"] = str(path)
     os.environ["JAATO_LEDGER_INTEGRITY"] = "sha256-chain"
@@ -667,7 +667,7 @@ def _synthetic_chained_ledger(where: Path) -> Path:
 
 def _retention_demo(root: Path) -> str:
     """Backdate two files under two profiles and let the real judge speak."""
-    from server.record_retention import declared_retentions, expired_paths
+    from jaato_server.server.record_retention import declared_retentions, expired_paths
     ws = root / "retention"
     (ws / ".jaato" / "profiles").mkdir(parents=True, exist_ok=True)
     (ws / ".jaato" / "logs").mkdir(parents=True, exist_ok=True)
@@ -698,7 +698,7 @@ def _retention_demo(root: Path) -> str:
 def _marker_demo(root: Path) -> str:
     from jaato_sdk.events import ai_generated_by
     from jaato_sdk.output_marking import OutputPayload
-    from shared.plugins.output_marker.plugin import create_plugin
+    from jaato_server.shared.plugins.output_marker.plugin import create_plugin
     where = root / "marker"; where.mkdir(exist_ok=True)
     png = where / "chart.png"; png.write_bytes(_PNG)
     plugin = create_plugin(); plugin.initialize({})

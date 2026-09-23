@@ -24,7 +24,7 @@ fields the post-§7c emit does NOT populate.
 **What**: `PermissionInputModeEvent.call_id` is currently `None`.
 
 **Why missing**: `PromptPayload` (the runner→daemon ASK payload at
-`shared/plugins/permission/types.py:26`) doesn't carry a `call_id` field.
+`jaato_server/shared/plugins/permission/types.py:26`) doesn't carry a `call_id` field.
 The runner-side permission plugin's ASK origin has the call_id but
 doesn't propagate it through the RPC payload.
 
@@ -60,7 +60,7 @@ if schema and schema.editable:
 ```
 
 `PromptOperatorHandler` doesn't have a reference to
-`server.permission_plugin` (it's constructed in `JaatoServer.set_runner_rpc`
+`jaato_server.server.permission_plugin` (it's constructed in `JaatoServer.set_runner_rpc`
 with only the `emit_event` callback per Step 7.1).
 
 **Impact**: The TUI's "edit and approve" flow can't activate — users
@@ -102,6 +102,6 @@ These sub-gaps stay deferred until ONE of:
 - Path J audit: `docs/design/per_session_confined_runner_phase3_3c_rpc_surface.md`
   §"Path J pre-implementation audit (cycle 12 — sixth chain)"
 - Path J code: commit `1a8a37e4`
-- Path J tests: `jaato-server/server/runner_rpc_handlers/tests/test_permission_input_mode_emit_path_j.py`
+- Path J tests: `jaato-server/jaato_server/server/runner_rpc_handlers/tests/test_permission_input_mode_emit_path_j.py`
   (pins `call_id is None` and `editable_metadata is None` explicitly
   so future fixes break these pins and force re-audit)

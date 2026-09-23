@@ -1083,8 +1083,8 @@ class BackgroundConfig:
 ## Implementation Plan
 
 ### Phase 1: Protocol & Core Infrastructure
-1. Define `BackgroundCapable` protocol in `shared/plugins/background/protocol.py`
-2. Implement `BackgroundPlugin` orchestrator in `shared/plugins/background/plugin.py`
+1. Define `BackgroundCapable` protocol in `jaato_server/shared/plugins/background/protocol.py`
+2. Implement `BackgroundPlugin` orchestrator in `jaato_server/shared/plugins/background/plugin.py`
 3. Add integration hooks in `JaatoClient`
 4. Extend `ToolExecutor` with auto-background support:
    - Add thread pool for tool execution

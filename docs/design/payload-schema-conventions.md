@@ -67,8 +67,8 @@ are validated*, not *both boundaries are typed alike*.
 
 | Schema | Path | Resolver |
 |---|---|---|
-| `spawn_payload_schema`      | `<config_root>/spawn_schemas/<name>.json` (canonical) or `<workspace>/.jaato/spawn_schemas/<name>.json` (workspace-tier) | `shared/spawn_schema_loader.py` |
-| `completion_payload_schema` | `<config_root>/completion_schemas/<name>.json` (canonical) or `<workspace>/.jaato/completion_schemas/<name>.json` (workspace-tier) | `shared/completion_schema_loader.py` |
+| `spawn_payload_schema`      | `<config_root>/spawn_schemas/<name>.json` (canonical) or `<workspace>/.jaato/spawn_schemas/<name>.json` (workspace-tier) | `jaato_server/shared/spawn_schema_loader.py` |
+| `completion_payload_schema` | `<config_root>/completion_schemas/<name>.json` (canonical) or `<workspace>/.jaato/completion_schemas/<name>.json` (workspace-tier) | `jaato_server/shared/completion_schema_loader.py` |
 
 Both resolvers accept either an inline dict OR a string path
 (absolute / config_root-relative / workspace-relative / `~/.jaato/`-relative).
@@ -80,7 +80,7 @@ an INFO-level deprecation hint when the legacy path resolves.
 
 | Schema | Enforcement site | Failure mode |
 |---|---|---|
-| `spawn_payload_schema`      | `server/session_manager.py:~1109` — runs BEFORE session creation | Returns structured error to the caller; session is NOT created. The cascade hasn't happened yet, so retry is cheap. |
+| `spawn_payload_schema`      | `jaato_server/server/session_manager.py:~1109` — runs BEFORE session creation | Returns structured error to the caller; session is NOT created. The cascade hasn't happened yet, so retry is cheap. |
 | `completion_payload_schema` | Provider-side (Anthropic/OpenAI/Google/Ollama/LM Studio constrain tool-call shape at sampling time) AND server-side via `jsonschema.validate` as defense-in-depth | Returns structured error to the model so it can self-correct on its next turn. Self-correction is non-deterministic — the rules in §4 below exist to limit the resulting drift. |
 
 Boundary asymmetry: spawn validation can fail-loud-and-fast at
@@ -567,8 +567,8 @@ continuity-aware spawning would work without modification.
 - [`agent-continuity.md`](./agent-continuity.md) — the continuity
   pattern that interacts with spawn schemas via `agent_params`
   (see §6.1 above).
-- Module docstrings: `shared/lifecycle_tools.py` (signal_completion),
-  `shared/spawn_schema_loader.py`, `shared/completion_schema_loader.py`
+- Module docstrings: `jaato_server/shared/lifecycle_tools.py` (signal_completion),
+  `jaato_server/shared/spawn_schema_loader.py`, `jaato_server/shared/completion_schema_loader.py`
   — quick reference alongside the actual implementations.
 - `docs/design/agent-presentation-awareness.md` — sibling doc on
   how the model adapts output format based on client context.

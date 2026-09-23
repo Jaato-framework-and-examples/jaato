@@ -27,16 +27,16 @@ uv pip install -e jaato-sdk/. -e "jaato-server/.[all]" -e "jaato-tui/.[all]"
 ### Running the Server (Multi-Client Mode)
 ```bash
 # Start server as daemon with IPC socket
-.venv/bin/python -m server --ipc-socket /tmp/jaato.sock --daemon
+.venv/bin/python -m jaato_server --ipc-socket /tmp/jaato.sock --daemon
 
 # Start server with both IPC and WebSocket
-.venv/bin/python -m server --ipc-socket /tmp/jaato.sock --web-socket :8080 --daemon
+.venv/bin/python -m jaato_server --ipc-socket /tmp/jaato.sock --web-socket :8080 --daemon
 
 # Check server status
-.venv/bin/python -m server --status
+.venv/bin/python -m jaato_server --status
 
 # Stop server
-.venv/bin/python -m server --stop
+.venv/bin/python -m jaato_server --stop
 
 # Connect TUI client to running server
 .venv/bin/python jaato-tui/rich_client.py --connect /tmp/jaato.sock
@@ -45,25 +45,25 @@ uv pip install -e jaato-sdk/. -e "jaato-server/.[all]" -e "jaato-tui/.[all]"
 ### Running Tests
 ```bash
 .venv/bin/pytest                                        # All tests
-.venv/bin/pytest jaato-server/shared/tests/             # Core tests
-.venv/bin/pytest jaato-server/shared/plugins/cli/tests/ # Plugin tests
+.venv/bin/pytest jaato-server/jaato_server/shared/tests/             # Core tests
+.venv/bin/pytest jaato-server/jaato_server/shared/plugins/cli/tests/ # Plugin tests
 .venv/bin/pytest -v                                     # Verbose output
 ```
 
 Test organization:
-- Core tests: `jaato-server/shared/tests/`
-- Plugin tests: `jaato-server/shared/plugins/<plugin>/tests/`
-- Provider tests: `jaato-server/shared/plugins/model_provider/<provider>/tests/`
+- Core tests: `jaato-server/jaato_server/shared/tests/`
+- Plugin tests: `jaato-server/jaato_server/shared/plugins/<plugin>/tests/`
+- Provider tests: `jaato-server/jaato_server/shared/plugins/model_provider/<provider>/tests/`
 
 ## Architecture
 
 See [docs/architecture.md](docs/architecture.md) for detailed diagrams and component interactions.
 
-### Server Components (`jaato-server/server/`)
+### Server Components (`jaato-server/jaato_server/server/`)
 
 The framework uses a server-first architecture where the server runs as a daemon and clients connect via IPC or WebSocket.
 
-- **`server/__main__.py`**: Entry point with daemon mode, PID management
+- **`jaato_server/server/__main__.py`**: Entry point with daemon mode, PID management
   - `--ipc-socket PATH`: Unix domain socket for local clients
   - `--web-socket [HOST:]PORT`: WebSocket for remote clients
   - `--socket-mode MODE`: Octal file permissions for the IPC socket (default: `660`, owner and group only). Pass `666` to opt into world-accessible (e.g. cross-user containers on a trusted host). The socket's mode is still the only thing deciding WHO may connect; what the daemon does with a connection it accepted is bounded by the peer check below.
@@ -76,19 +76,19 @@ The framework uses a server-first architecture where the server runs as a daemon
 
   **WS auth contract:** clients send `Authorization: Bearer <token>` on the Upgrade request (Python/curl/proxies) or pass `?token=<token>` as a query parameter (browsers, which can't set custom headers from `new WebSocket()`). The server stores only the SHA-256 digest and compares with `hmac.compare_digest`. Auth runs after connection-interceptors but before any session work, so a bad token is closed with WS code 1008 immediately. The `set_client_user()` hook for jaato-premium SSO is unchanged — premium can still attach an identity after the bearer check passes. Since #1074 the same check also resolves an **application credential** and a **user ticket**, in that order, from the same presented value; with neither configured it is the one digest comparison it always was.
 
-- **`server/core.py`**: `JaatoServer` - UI-agnostic core logic
+- **`jaato_server/server/core.py`**: `JaatoServer` - UI-agnostic core logic
   - Wraps `JaatoClient` with event emission instead of callbacks
   - Handles permission requests, tool execution, streaming
 
-- **`server/events.py`**: Event protocol (25+ typed events)
+- **`jaato_server/server/events.py`**: Event protocol (25+ typed events)
   - Server→Client: `AgentOutputEvent`, `PermissionRequestedEvent`, `PlanUpdatedEvent`, etc.
   - Client→Server: `SendMessageRequest`, `PermissionResponseRequest`, `StopRequest`, etc.
 
-- **`server/session_manager.py`**: Multi-session orchestration with disk persistence
-- **`server/ipc.py`**: Unix domain socket server (length-prefixed framing)
-- **`server/websocket.py`**: WebSocket server for remote clients
+- **`jaato_server/server/session_manager.py`**: Multi-session orchestration with disk persistence
+- **`jaato_server/server/ipc.py`**: Unix domain socket server (length-prefixed framing)
+- **`jaato_server/server/websocket.py`**: WebSocket server for remote clients
 
-### Core Components (`jaato-server/shared/`)
+### Core Components (`jaato-server/jaato_server/shared/`)
 
 - **jaato_client.py**: `JaatoClient` - Backwards-compatible facade wrapping `JaatoRuntime` + `JaatoSession`
   - `connect()`, `configure_tools()`, `send_message()` - core methods
@@ -120,7 +120,7 @@ The framework uses a server-first architecture where the server runs as a daemon
   [WebMCP assessment](docs/design/webmcp.md) found that reaching a browser
   required importing from a model provider.
 
-### Plugin System (`jaato-server/shared/plugins/`)
+### Plugin System (`jaato-server/jaato_server/shared/plugins/`)
 
 Four plugin types:
 
@@ -296,11 +296,11 @@ fine, and only the **delivery** of `runtime_limits` was broken.
 **The env pair was never the session's enforcement path.**
 `JAATO_RUNNER_TOOL_TIMEOUT_SECONDS` / `JAATO_RUNNER_MAX_OUTPUT_CHARS` arrive
 correctly — the runner's own startup line prints them — and configure
-`server/runner/tool_executor.ToolExecutor`, the **Phase-2, cli-only**
+`jaato_server/server/runner/tool_executor.ToolExecutor`, the **Phase-2, cli-only**
 `execute_fn`. `RunnerRPC._dispatch_method` uses that object only as a fallback
 and routes to `host.session._executor` whenever a session host exists, which
 is on every path that dispatches `session.bootstrap` — all of them. A
-session's tools run through `shared.ai_tool_runner.ToolExecutor`, whose
+session's tools run through `jaato_server.shared.ai_tool_runner.ToolExecutor`, whose
 `set_runtime_limits` had **no non-test caller**, so `CliPlugin._runtime_limits`
 was `None` everywhere. The issue's own table marked cold-spawn ✅ for
 forwarding the values; it forwarded them to an executor the session does not
@@ -311,7 +311,7 @@ use.
 | Seat | What it does |
 |------|--------------|
 | `build_session_envelope` + the isolated sub-runner builder | stamp the whole resolved block onto `SessionInitEnvelope.runtime_limits` (**envelope v7**), outside any spawn branch, so pool-served and cold-spawned sessions carry the same thing |
-| `server/runner/session.py` | `_runtime_limits_from_envelope` re-parses it; a block this runner cannot parse degrades to "nobody declared limits" with a WARNING rather than refusing the bootstrap |
+| `jaato_server/server/runner/session.py` | `_runtime_limits_from_envelope` re-parses it; a block this runner cannot parse degrades to "nobody declared limits" with a WARNING rather than refusing the bootstrap |
 | `JaatoSession.configure()` | `_apply_runtime_limits` calls `executor.set_runtime_limits(None, limits)` **after** `set_registry` — the forwarding loop walks `registry.list_exposed()`, so a caller that ran earlier would arm nothing |
 
 `configure()` rather than the runner bootstrap is what makes it *one*
@@ -331,7 +331,7 @@ Phase-2 executor has, and that surface is still live for a runner with no
 session host (cli-only runners, harnesses, tests); deleting it would silently
 drop those back to compile-time defaults — the same class of regression, in
 the same direction. Both surfaces read the one source of truth
-(`server._profile.runtime_limits`), so they cannot disagree about a number;
+(`jaato_server.server._profile.runtime_limits`), so they cannot disagree about a number;
 they bound different executors. What changed is that the comments no longer
 claim the env pair enforces a session's caps — including the slot-mode
 docstring in `runner/__main__.py` and the `JaatoServer.set_runtime_limits`
@@ -349,7 +349,7 @@ enables no subprocess plugin, so the cap bounds nothing".
 Anything built on the SDK used to introduce itself upstream as **jaato** —
 the framework's name and repo were hardcoded as OpenRouter's app-attribution
 headers, so every integrator's harness collapsed into one row on the
-dashboard. `shared/app_identity.py` separates the two: `AppIdentity` is the
+dashboard. `jaato_server/shared/app_identity.py` separates the two: `AppIdentity` is the
 *application*, and the framework rides along in a `(powered by jaato)` suffix.
 
 ```bash
@@ -363,7 +363,7 @@ export JAATO_APP_CATEGORIES="chat-bot"   # optional; no marketplace listing with
 ```
 
 ```python
-from shared.app_identity import AppIdentity
+from jaato_server.shared.app_identity import AppIdentity
 runtime = JaatoRuntime(app_identity=AppIdentity(name="Acme Copilot",
                                                 url="https://acme.example",
                                                 version="1.4.0"))
@@ -394,7 +394,7 @@ profile block — in [Application Identity](docs/design/app-identity.md).
 
 Sessions can be created with a predefined agent profile that configures model, provider, plugins, and GC strategy. Profiles are YAML files in `.jaato/profiles/` (preferred; JSON is also accepted).
 
-**Profile schema** (same as `SubagentProfile` in `shared/plugins/subagent/config.py`):
+**Profile schema** (same as `SubagentProfile` in `jaato_server/shared/plugins/subagent/config.py`):
 ```yaml
 name: researcher
 description: Deep research profile
@@ -533,9 +533,9 @@ re-prompts the model — a **nudge** — and re-enters the loop; the budget boun
 how many times, before it gives up and emits `NudgeExhausted`.
 
 That budget was a function-local `MAX_COMPLETION_NUDGES = 2` in **three**
-files — `server/core.py` (the daemon's top-level guard),
+files — `jaato_server/server/core.py` (the daemon's top-level guard),
 `jaato_embedded/client.py` (the in-process lead) and
-`shared/plugins/subagent/plugin.py` (the subagent loop). Nothing kept the three
+`jaato_server/shared/plugins/subagent/plugin.py` (the subagent loop). Nothing kept the three
 equal, and none was reachable from a profile — which made it the one bound in
 the completion path a deployment could not express:
 
@@ -570,13 +570,13 @@ that model class, not something persona prose fixes.
   wants no nudging keeps `signal_completion` out of the surface.
 - **Inheritance**: child overrides outright, else the minimum across the
   parents that declared one.
-- **One definition.** `shared/completion_nudge.py` owns
+- **One definition.** `jaato_server/shared/completion_nudge.py` owns
   `DEFAULT_MAX_COMPLETION_NUDGES` and the resolver every site now calls, so the
   three paths cannot drift again. A profile predating the field — an older
   session snapshot, or no profile at all — resolves to the default rather than
   raising, so an unconfigured deployment behaves exactly as before.
   `jaato_eval.sign_off` restates the number deliberately (the eval engine must
-  not import `server.*` / `shared.*`); that copy is a reporting ceiling, and is
+  not import `jaato_server.server.*` / `jaato_server.shared.*`); that copy is a reporting ceiling, and is
   stale in exactly one direction against a profile that raised its own.
 
 **Whose turn spent it (#934).** The budget lives in one counter,
@@ -732,7 +732,7 @@ General env table) opt back into re-deriving either half; both default to
 `persisted`, and both fall back to re-deriving automatically when nothing
 was persisted, so records written before 2.8 revive exactly as before. The
 rationale for these being env vars rather than profile keys, and the matrix
-of which combination each workflow needs, live in `server/revive_policy.py`.
+of which combination each workflow needs, live in `jaato_server/server/revive_policy.py`.
 
 Both are **per-process, not per-invocation**: they are resolved once when the
 `SessionManager` is constructed and held for the life of the daemon, so
@@ -960,6 +960,37 @@ profile of that name. The stub satisfies the schema and changes nothing about
 what the peer runs. `spawn_subagent`'s own `server` parameter description says
 so, so the model reads it where it chooses.
 
+**`inherit` is the one reserved `profile` value (#1198), and it does NOT
+reopen inline spawning.** `spawn_subagent(profile="inherit")` spawns a
+subagent from a **frozen snapshot of the parent's profile at spawn time** —
+the parent's plugin set and the parent's assembled system instruction (carried
+as `create_session(system_instruction_override=...)` so the child runs the
+parent's exact framing rather than re-assembling, and doubling, its own). It
+succeeds under `allow_inline: false` (the headline point: the "spawn a child
+like me" pattern was only reachable through the opt-in #944 switched off),
+because `inherit` NAMES a profile and passes the profile-first gate. It is
+added to `_spawn_profile_enum` whenever the enum is offered and slots in
+alphabetically under `sorted`; the discovery scan REFUSES a profile file that
+would load as `inherit` (`RESERVED_PROFILE_NAMES` in `config.py`, rejected in
+`_parse_profile_file`) so a workspace cannot shadow the reserved value.
+
+**The self-replication guard is the triage's smaller, local mitigation, not a
+depth bound.** An `inherit` snapshot includes the persona that makes the parent
+delegate, so an `inherit` child is primed to call
+`spawn_subagent(profile="inherit")` itself — and there is no spawn-depth bound
+(#680), so leaving it in would make unbounded self-replication the path of least
+resistance. So `_build_inherit_profile` strips the `subagent` plugin from the
+inherited set: an `inherit` child can neither spawn nor message siblings, and a
+caller that needs a spawning child names a real profile. (`_parent_plugins` is
+already `subagent`-free upstream, so the strip is a property of THIS code rather
+than an accident of how that list is populated.) "Frozen" is a deep copy via the
+#787 snapshot round-trip, so later parent mutation cannot reach the child;
+`agent=` / `default_agent` are ignored (the override is authoritative); and
+`inherit` is refused — with a clear message — on the remote `server=` path (the
+snapshot is local), under the isolated-runner opt-in (the override cannot cross
+that boundary), and when there is no parent session to snapshot. Guard:
+`shared/tests/test_inherit_profile_snapshot_1198.py`, five reversions.
+
 ### A Failure the Framework Was Told Was a Success (#1053)
 
 `ToolExecutor` hands the reliability plugin one flag — `ok` — and derives it
@@ -1024,7 +1055,7 @@ beside* the payload so it survives leaving jaato.
 | the trait | `jaato_sdk/plugins/base.py`, beside `TRAIT_AUTH_PROVIDER` — a plugin capability, **not** a `ToolSchema` trait |
 | the contract | `jaato_sdk/output_marking.py`: `OutputPayload` in, `MarkResult` out |
 | the dispatcher | `JaatoSession._mark_generated_output`, called from `_deliver_model_media` and `_emit_withheld_attachments_to_clients` |
-| the one in-tree marker | `shared/plugins/output_marker/` — `<file>.provenance.json` |
+| the one in-tree marker | `jaato_server/shared/plugins/output_marker/` — `<file>.provenance.json` |
 
 **Three rules the FRAMEWORK enforces, so a marker cannot get them wrong.**
 
@@ -1112,7 +1143,7 @@ table above.
 
 ### Streaming & Cancellation
 
-Key types in `shared/plugins/model_provider/types.py`:
+Key types in `jaato_server/shared/plugins/model_provider/types.py`:
 - `CancelToken`: Thread-safe cancellation signaling
 - `CancelledException`: Raised when operation is cancelled
 - `FinishReason.CANCELLED`: Indicates cancelled generation
@@ -1139,7 +1170,7 @@ jaato ships through two channels and, until now, asked neither anything:
 
 So a production release or a staged candidate could sit on an index with
 nothing in the framework that would ever mention it; the only way to learn one
-existed was to open the project page. `shared/scaffold/dependencies.py` knew
+existed was to open the project page. `jaato_server/shared/scaffold/dependencies.py` knew
 every installed jaato distribution and its version, and compared it only
 against the SOURCE TREE beside it (`dependency coherence`, the editable-install
 skew check) — never against what had been published.
@@ -1237,16 +1268,16 @@ shipped package (`jaato-premium` today) be release-checked with no edit here.
 
 `JAATO_RELEASE_CHECK` is read in **exactly one place**, the SDK module, and
 the `shared` surfaces honour it by calling that module rather than growing a
-second reader. That is also why it is absent from `shared/env_scope.py`: that
-catalog is re-derived by an AST scan of `server/` and `shared/`, so an
+second reader. That is also why it is absent from `jaato_server/shared/env_scope.py`: that
+catalog is re-derived by an AST scan of `jaato_server/server/` and `jaato_server/shared/`, so an
 SDK-only entry would be reported as stale in both directions.
 
 Tests: `jaato-sdk/jaato_sdk/tests/test_release_channels.py` (ordering
 cross-checked pairwise against `packaging` where it is installed, channel
 semantics, cache, offline degradation — no test touches the network or the
 real cache), `.../test_doctor_package_releases.py` (the preflight rendering),
-`jaato-server/shared/scaffold/tests/test_explain_releases.py`, and
-`jaato-server/shared/tests/test_release_check_notices_a_new_version.py`, which
+`jaato-server/jaato_server/shared/scaffold/tests/test_explain_releases.py`, and
+`jaato-server/jaato_server/shared/tests/test_release_check_notices_a_new_version.py`, which
 carries the four `REVERSIONS` — trusting `info.version`, reading unreachable
 as current, ordering versions as strings, and a check `run_checks` does not
 call.
@@ -1256,7 +1287,7 @@ call.
 The framework monitors token usage during streaming and automatically triggers GC when thresholds are exceeded:
 
 ```python
-from shared.plugins.gc import GCConfig
+from jaato_server.shared.plugins.gc import GCConfig
 
 gc_config = GCConfig(
     threshold_percent=80.0,    # Trigger when context is 80% full
@@ -1280,7 +1311,7 @@ charge rather than silently overriding it.
 
 `JaatoSession._gc_plugin` has two writers, both inside `set_gc_plugin` /
 `remove_gc_plugin`, and its callers were the **embedded** client and
-**in-process subagents**. Nothing under `server/runner/` called it, and nothing
+**in-process subagents**. Nothing under `jaato_server/server/runner/` called it, and nothing
 there read `envelope.gc` either — so on the **runner-served path, the default**,
 a session had no GC plugin whatever its profile declared. Every collection site
 opens `if not self._gc_plugin or not self._gc_config: return`, so nothing
@@ -1316,7 +1347,7 @@ far a collection goes and when PRESERVABLE may be touched), and `from_dict`
 |--------|-------|
 | `GCProfileConfig.to_dict()` — derived from the dataclass fields, so it cannot be edited out of date | `subagent/config.py` |
 | the producer and both halves of the snapshot serializer call it | `runner_spawn.py`, `subagent/serializer.py` |
-| `_install_gc` resolves and installs at bootstrap | `server/runner/session.py` |
+| `_install_gc` resolves and installs at bootstrap | `jaato_server/server/runner/session.py` |
 
 `_install_gc` adds a **caller, not a second definition**: precedence is the
 daemon's — profile `gc:` first, then `<workspace>/.jaato/gc.json` — through the
@@ -1331,7 +1362,7 @@ bootstrap; the failure logs at WARNING instead, because a GC strategy that does
 not install is exactly what this issue is about and must not become invisible
 twice. A successful install logs the strategy and its thresholds.
 
-The guard is `server/tests/test_envelope_carries_gc.py`, third in the family
+The guard is `jaato_server/server/tests/test_envelope_carries_gc.py`, third in the family
 with `test_envelope_carries_budget_control.py` and
 `test_envelope_carries_runtime_limits.py`. Its consumer test asserts the **call
 site** by AST walk, not the installer's behaviour: a test that imports
@@ -1416,7 +1447,7 @@ id puts a call into history no result can ever match. Enforcing at each site
 means auditing five subsystems plus every future GC plugin; enforcing at the
 boundary is one place.
 
-`shared/history_invariant.py` is that place. `validate_history` reports
+`jaato_server/shared/history_invariant.py` is that place. `validate_history` reports
 defects (`unmatched_call`, `orphan_result`, `missing_call_id`,
 `duplicate_call_id`, `empty_content`); `repair_history` fixes them in four
 ordered passes — mint missing ids, drop orphan results, **answer** unmatched
@@ -1488,17 +1519,17 @@ untouched record stays corrupt on disk until one of those happens. Rewriting
 persisted session records is a migration with its own failure modes; the two
 paths above cover every route this tree reads history by.
 
-Tests: `shared/tests/test_history_invariant.py` (unit per defect kind,
+Tests: `jaato_server/shared/tests/test_history_invariant.py` (unit per defect kind,
 seeded property tests over all four GC strategies / cancel-at-turn-N / every
 suffix / every partial-batch width, plus the **prose** wire — `_prose_tools`
 carries the pairing in text, so a repair that is pair-safe on the Anthropic
 wire is not automatically pair-safe there; both pairing survival *and*
 byte-stability are asserted on it, since the prose form re-serialises the
 whole result including its `(call <id>)` label),
-`shared/plugins/gc/tests/test_utils.py` (the stored-history half — the
+`jaato_server/shared/plugins/gc/tests/test_utils.py` (the stored-history half — the
 `{A,B}`/answer-`A`/USER regression, and the renamed tests that used to
 encode the deletion policy) and
-`shared/plugins/model_provider/_openai_compat/tests/test_streamed_tool_call_without_id_674.py`
+`jaato_server/shared/plugins/model_provider/_openai_compat/tests/test_streamed_tool_call_without_id_674.py`
 (drives the real streaming loop of three providers; verified to fail 9/15
 when the mint is neutralised, because a test that cannot fail proves
 nothing).
@@ -1692,7 +1723,7 @@ fresh slot bootstrapped, a reused one refused — which is exactly why it read
 as intermittent.
 
 **The guard was right; the naming was wrong.** So the profile is named after
-the BOUNDARY (`server/confinement_id.py`), and the key contains it:
+the BOUNDARY (`jaato_server/server/confinement_id.py`), and the key contains it:
 
 | property the slot carries | in the key |
 |---|---|
@@ -1892,7 +1923,7 @@ predates 0.16.0 and so does `confinement_id_of`. What changed is how often
 a session reaches the path where the disagreement bites.
 
 **The pool was hiding it, and hiding a second defect underneath.**
-`shared/plugins/sandbox_utils.py` resolves `tempfile.gettempdir()` at
+`jaato_server/shared/plugins/sandbox_utils.py` resolves `tempfile.gettempdir()` at
 **module scope**, reached through `cli` / `file_edit` / `filesystem_query`
 during `registry.discover(tier_filter="runner")`. `gettempdir()` PROBES —
 it creates and deletes a file — and caches the winner in a module global:
@@ -1928,7 +1959,7 @@ surviving configuration was surviving on the absence of a temp write.
 
 | # | Change | Why alone it is not enough |
 |---|---|---|
-| 1 | `server/confinement_id.session_tmpdir` — `/tmp/jaato-<confinement_id>/<session_id>` | fixes cold spawn; the pool path has already cached `/tmp` |
+| 1 | `jaato_server/server/confinement_id.session_tmpdir` — `/tmp/jaato-<confinement_id>/<session_id>` | fixes cold spawn; the pool path has already cached `/tmp` |
 | 2 | `_pin_session_tmpdir` assigns `tempfile.tempdir` in the runner, after confinement, before any plugin import | fixes the pool path; without (1) it would pin a path nothing grants |
 | 3 | `sandbox_utils` tolerates a failing resolution | it classifies paths and never writes one — a probe should not decide whether a module can be imported |
 | 4 | the daemon creates the directory in `spawn_session_runner`, before either branch | `RunnerSpawner.spawn` mkdirs only on the branch that calls it, and the confined runner cannot make the boundary directory itself |
@@ -2138,16 +2169,16 @@ and it passed while the kernel blocked nothing. The fifth is why the only
 visible symptom was a notebook cell failing to `import numpy`.
 
 And it was **silent**: grepping `complain` against `logger|warn` in
-`server/apparmor.py` returned nothing — no WARNING at generation, at
+`jaato_server/server/apparmor.py` returned nothing — no WARNING at generation, at
 provisioning or at startup, while every other weakened boundary here
 announces itself (`scrub_secret_env: none`, `--ws-unsafe-no-auth`,
 `notebook.allow_uncontained_exec`).
 
-**One definition, in one module.** `shared/apparmor_label.py` parses an
+**One definition, in one module.** `jaato_server/shared/apparmor_label.py` parses an
 `attr/current` value into profile + mode and is the only place either
 question is answered. Pure stdlib with zero jaato imports, the shape
-`shared/runtime_limits.py` already has, because `shared/` cannot import
-`server/` and `server.runner.bootstrap` must stay importable before plugin
+`jaato_server/shared/runtime_limits.py` already has, because `jaato_server/shared/` cannot import
+`jaato_server/server/` and `jaato_server.server.runner.bootstrap` must stay importable before plugin
 discovery — that is the bootstrap's one documented cross-import, and a
 guard test pins the module's import set. `apparmor_enforced_profile()` is
 unchanged in behaviour and now delegates; it was the one right answer, and
@@ -2213,7 +2244,7 @@ model emits speech), and **tool -> client** (a tool produces bytes a *person*
 consumes; the model may never see them). See
 [Binary Media Chunks](docs/design/binary-media-chunks.md).
 
-**One chunk primitive.** `StreamChunk` (`shared/plugins/streaming/protocol.py`)
+**One chunk primitive.** `StreamChunk` (`jaato_server/shared/plugins/streaming/protocol.py`)
 carries text, bytes, or both. `inline_data` mirrors `Part.inline_data`
 (`{mime_type, data}`) so one shape serves inbound parts, tool attachments and
 chunks alike. New fields are appended, so positional construction and every
@@ -2307,7 +2338,7 @@ the batched call it always got. See
 did nothing. `SessionManager.handle_request` decided whether a
 `SendMessageRequest` becomes a model turn by reading the message **text** and
 nothing else, so a blank-text send returned with a synthetic
-`TurnCompletedEvent` and never called `server.send_message` — while
+`TurnCompletedEvent` and never called `jaato_server.server.send_message` — while
 `event.attachments` sat on the same object, read twenty lines later on the
 path that branch had already returned from. The same 88 KB `audio/wav`
 attachment *with* text reached the provider (and was refused by it, per #837);
@@ -2604,7 +2635,7 @@ client, the `subscribeToEvents` agent tool and the `EventBus` all light up with
 no new API. A whole-blob delivery is a single-chunk stream (`sequence=0,
 final=True`).
 
-> **Binary bypasses the formatter.** `server/core.py` `on_tool_output` runs text
+> **Binary bypasses the formatter.** `jaato_server/server/core.py` `on_tool_output` runs text
 > through `agent_pipeline.process_chunk()` for highlighting and marker
 > transformation. That pipeline reflows its input and would corrupt bytes, so a
 > media chunk skips it entirely.
@@ -2635,7 +2666,7 @@ Three fixes, one per layer:
 
 | Layer | Before | Now |
 |-------|--------|-----|
-| encoding | `default=str` reached bytes | `server/runner/json_codec.py` — bytes become `{"__bytes_b64__": ...}` and decode back to bytes; `str` stays the fallback for genuinely diagnostic objects (a datetime, an enum). Used by **both** ends, so daemon→runner bytes stop raising `TypeError` too |
+| encoding | `default=str` reached bytes | `jaato_server/server/runner/json_codec.py` — bytes become `{"__bytes_b64__": ...}` and decode back to bytes; `str` stays the fallback for genuinely diagnostic objects (a datetime, an enum). Used by **both** ends, so daemon→runner bytes stop raising `TypeError` too |
 | the payload that broke | `agent_history_updated` handed raw `Message` objects to that encoder, which stringified each whole message | serialised with the canonical session serializer — the shape `session.get_history` already used (1.33x, and `AgentState.history` holds `Message`s again instead of repr strings the reconnect replay reads `msg.role` off) |
 | the blast radius | an oversized frame was written, and the reader — which consumes the length prefix but not the body — could only close the channel | oversized frames are refused at the **write** side: the runner answers that one call with `FrameTooLargeError` and keeps serving, the daemon raises it to that one caller before anything reaches the socket |
 
@@ -2748,7 +2779,7 @@ model_tiers:
 
 ### Tool IDs on the Wire and in the Trace (#873)
 
-Tool names reach the model as hashed ids (`t_<8 hex>`, `shared/tool_id_map.py`)
+Tool names reach the model as hashed ids (`t_<8 hex>`, `jaato_server/shared/tool_id_map.py`)
 because upstreams enforce `^[a-zA-Z0-9_-]{1,128}$` and MCP names like
 `mcp.server.tool` do not pass. The reverse map is an **in-process dict**
 populated as a side effect of hashing, not a function of the id — so a
@@ -2816,7 +2847,7 @@ Three properties, each attached to a way it could go wrong:
   exception and not an unguarded double emission. `RunnerRPC._turns_ran_snapshot`
   falls back to the ledger length for a duck-typed double or an out-of-tree
   session class; a real `JaatoSession` never takes that path.
-- **The in-process path (`shared/jaato_client.py`) already fired
+- **The in-process path (`jaato_server/shared/jaato_client.py`) already fired
   unconditionally**, with a comment saying why ("Some providers report 0 tokens;
   skipping the hook would leave buffered content stuck in the pipeline"). The
   two paths disagreed, and the runner path — the default — was the wrong one.
@@ -2913,7 +2944,7 @@ caught what the other would have let through, so neither could be shown to do
 anything. Duplicated validation is not defence in depth when it makes every
 copy individually unreachable.
 
-Tests: `shared/tests/test_unreported_usage_is_not_zero_688.py` — 28 cases,
+Tests: `jaato_server/shared/tests/test_unreported_usage_is_not_zero_688.py` — 28 cases,
 six REVERSIONS. The wire-level cases drive the **real** streaming loop of three
 providers against a usage-omitting stream, which is what could not be exercised
 when this was first sized (`openai` was not installed then). The three-way
@@ -3068,7 +3099,7 @@ Tools can declare semantic **traits** on their `ToolSchema` via the `traits` fie
 3. Ensure the tool result dict includes the required keys (`path`, `files_modified`, or `changes`)
 
 **Defining a new tool trait:**
-1. Add a `TRAIT_*` constant in `shared/plugins/model_provider/types.py` with a docstring documenting the contract
+1. Add a `TRAIT_*` constant in `jaato_server/shared/plugins/model_provider/types.py` with a docstring documenting the contract
 2. Update consumers (session, plugins) to query `get_tool_traits()` for the new trait
 
 ### Tool-Result Enrichment Reaches Every Dict Result (#922)
@@ -3100,7 +3131,7 @@ present name from the conventional six (so tools already using one keep
 receiving hints exactly where they did), else the **wordiest** string field.
 Wordiest rather than longest is what stops a one-word `status: "success"`
 out-weighing a short sentence. `tool_result_text_view` /
-`apply_text_view_enrichment` (`shared/tool_result_builder.py`) are the two
+`apply_text_view_enrichment` (`jaato_server/shared/tool_result_builder.py`) are the two
 halves, and the write-back is what makes one text view serve both enricher
 shapes: whatever still carries the header is the anchor's new value, so an
 appended hint block (`memory`) and an in-place `@ref-id` expansion
@@ -3245,7 +3276,7 @@ and `output_marker` are capabilities rather than lifetimes.
 3. Implement the contract (e.g., `provider_name` property for auth plugins)
 
 **Defining a new plugin trait:**
-1. Add a `TRAIT_*` constant in `shared/plugins/base.py` with a docstring documenting the contract
+1. Add a `TRAIT_*` constant in `jaato_server/shared/plugins/base.py` with a docstring documenting the contract
 2. Update consumers (server, daemon) to query `getattr(plugin, 'plugin_traits', frozenset())`
 
 ### A Topic the CLI Could Not Answer and the Daemon Could
@@ -3275,7 +3306,7 @@ What was missing was a way to ask the other process.
 
 **One dispatch, asked over a socket.** `scaffold.explain` (protocol **1.18**,
 answered by one `ScaffoldExplainEvent`) calls
-`shared.scaffold.__main__.render_topic` — the SAME function the CLI calls,
+`jaato_server.shared.scaffold.__main__.render_topic` — the SAME function the CLI calls,
 contributed topics and contributed `extends` sections included. A second
 dispatch daemon-side would be free to disagree with the CLI's about what a
 topic answers, which is this defect reproduced over a socket rather than fixed;
@@ -3356,7 +3387,7 @@ handshake ([Two Principals on One Socket](#two-principals-on-one-socket)).
 Letting a read-only report name a directory would add a second, unchecked path
 ingress for the sake of a diagnostic.
 
-Guards: `shared/tests/test_explain_asks_the_daemon_that_has_the_topic.py`
+Guards: `jaato_server/shared/tests/test_explain_asks_the_daemon_that_has_the_topic.py`
 (four reversions) and
 `jaato-sdk/jaato_sdk/tests/test_explain_topic_refuses_an_old_daemon.py`. Two
 drafts of the `auto_start` guard were decorative and the reversion meta-guard
@@ -3439,9 +3470,9 @@ contaminated that way (we never put a binary on `PATH`) but is not absolute
 either: a harness outside this process's `PATH` reads as absent, which loses a
 nudge rather than inventing noise — the safer direction to be wrong in.
 
-**A guard with `REVERSIONS` lives in `jaato-server/shared/tests/`**, whatever
-package its subject is in — the meta-suite walks only `shared/tests` and
-`server/tests`, so a reversion declared elsewhere is silently unexercised.
+**A guard with `REVERSIONS` lives in `jaato-server/jaato_server/shared/tests/`**, whatever
+package its subject is in — the meta-suite walks only `jaato_server/shared/tests` and
+`jaato_server/server/tests`, so a reversion declared elsewhere is silently unexercised.
 `test_doctor_detects_checkout_skew_823.py` is the precedent: it sits there and
 targets `jaato-sdk/jaato_sdk/doctor.py`. Widening that walk is not a
 mechanical change — `_collect_nodeids` keys by BASENAME and a collision
@@ -3458,14 +3489,14 @@ scan skips any name already registered.  Left unguarded, that made every
 built-in overridable by any distribution sharing the venv, silently
 (#684).
 
-The policy lives in `shared/plugins/entry_point_trust.py` and is applied
+The policy lives in `jaato_server/shared/plugins/entry_point_trust.py` and is applied
 by `PluginRegistry._gate_entry_point`:
 
 | Rule | Effect |
 |------|--------|
-| **Built-in names are reserved** | The reserved set is the module listing of `shared/plugins/` (read with `pkgutil.iter_modules` — a directory listing, no imports). A foreign entry point claiming one is refused. |
+| **Built-in names are reserved** | The reserved set is the module listing of `jaato_server/shared/plugins/` (read with `pkgutil.iter_modules` — a directory listing, no imports). A foreign entry point claiming one is refused. |
 | **Refusal precedes `ep.load()`** | Every decision is made from the entry point's metadata (`ep.name` / `ep.value` / `ep.dist`), so a refused claim never has its module imported. `ep.load()` executes code — being installed must not be enough to run it. |
-| **The framework's own declaration is exempt** | jaato-server publishes its built-ins through the same groups; an entry point targeting `shared.plugins.*` is the framework, not a claim. |
+| **The framework's own declaration is exempt** | jaato-server publishes its built-ins through the same groups; an entry point targeting `jaato_server.shared.plugins.*` is the framework, not a claim. |
 | **A security-critical subset is never shadowable** | `permission`, `cli`, `file_edit`, `mcp`, `sandbox_manager`, `interactive_shell` — refused even with the opt-in below. |
 | **Operator opt-in** | `JAATO_PLUGIN_ALLOW_SHADOW=<name>[,<name>]` lets a distribution replace a non-critical built-in. The substitution is announced at WARNING, never silent. |
 | **Optional distribution allowlist** | `JAATO_PLUGIN_ENTRY_POINT_ALLOWLIST=<dist>[,<dist>]` narrows which distributions may contribute plugins at all, so a transitive dependency nobody chose stops participating. Names compare under PEP 503 normalisation. |
@@ -3489,7 +3520,7 @@ extension point is *for* — and both failed silently.
 Discovery is tier-filtered and the filter is not the same on both
 sides: the runner, the runner's `__main__` and `jaato_embedded` pass
 `tier_filter="runner"`; the daemon-side registry and
-`shared/scaffold/introspect.py` pass none.  A plugin whose package
+`jaato_server/shared/scaffold/introspect.py` pass none.  A plugin whose package
 declares no `PLUGIN_TIER` is excluded under **any** filter — the
 deliberate "annotate or be excluded" contract — so the split ran
 straight through the diagnostic: the author installed the
@@ -3497,7 +3528,7 @@ distribution, ran `jaato-scaffold plugins`, saw the plugin listed with
 its provenance line, wrote `plugins: [m365]` in a profile, and the
 session came up without the tools.  No error, no warning, one debug
 `_trace`.  `test_plugin_tier_partition` fails the build on this, but
-its walk is an AST scan of `shared/plugins/` and cannot see a
+its walk is an AST scan of `jaato_server/shared/plugins/` and cannot see a
 distribution outside that path; nothing in the third party's own repo
 knows the rule exists.  Worse than a trust refusal, which at least
 avoids executing code: `ep.load()` has already run when the tier is
@@ -3528,7 +3559,7 @@ surface.**  The plugin contract is otherwise cleanly SDK-shaped —
 `ToolSchema` from `jaato_sdk.plugins.model_provider.types`, and
 `jaato-sdk` never imports `shared` — with one hole, sitting where a
 connector's credential handling goes.  The session-scoped read lived
-only in `shared/session_context.py`, so a third-party plugin either
+only in `jaato_server/shared/session_context.py`, so a third-party plugin either
 took a hard dependency on jaato-server or wrote `os.environ.get(...)`.
 
 That is not a missed abstraction.  `JaatoServer._with_session_env()`
@@ -3544,7 +3575,7 @@ from jaato_sdk.session_env import get_session_env    # also jaato_sdk,
 token = get_session_env("GRAPH_CLIENT_SECRET")
 ```
 
-`shared/session_context.py` imports the three functions back, so every
+`jaato_server/shared/session_context.py` imports the three functions back, so every
 in-tree caller keeps its import path and — the part that makes the fix
 real rather than cosmetic — there is exactly **one `ContextVar`
 object**: the one the daemon sets is the one the plugin reads.  A
@@ -3759,7 +3790,7 @@ wire as `ProfileSummary.max_turns`, rendered by `explain profile`, and
 ```
 
 It was compared against a turn counter **nowhere**. `grep -c max_turns
-jaato-server/shared/jaato_session.py` returned **0** — the class that owns the
+jaato-server/jaato_server/shared/jaato_session.py` returned **0** — the class that owns the
 turn loop had never heard of it — and the four `turns >= config.max_turns`
 comparisons in the tree are all `GCConfig.max_turns`, a garbage-collection
 trigger that happens to share the name. The four reads of
@@ -3937,7 +3968,7 @@ connection number (`client_ipc_14`). So the choice was killing a
 circumstantially-identified process on a daemon shared with another live
 session, or waiting for the budget to burn.
 
-`server/session_identity.py` is the record — runner pid, `pool_served` + slot
+`jaato_server/server/session_identity.py` is the record — runner pid, `pool_served` + slot
 pid, cascade, AppArmor profile — written to three places because they answer
 different questions: `Session.runner_identity` (live), the session record
 (**version 2.10**), and the daemon-owned workspace index (the cross-workspace
@@ -3972,12 +4003,12 @@ cascade, so neither could stop the one session an operator was looking at.
 **Stopping is cancellation, not a kill.** Nothing signals the runner pid —
 killing a pool-served runner destroys a slot other stages of the same cascade
 expect to reuse, and stopping by id lets the daemon unwind its own bookkeeping.
-It reaches `server.stop()`, the same cancel token `budget_control`'s `abort`
+It reaches `jaato_server.server.stop()`, the same cancel token `budget_control`'s `abort`
 rung trips, so a mid-turn session stops at its next check point and is then
 saved to disk.
 
 **The bound.** `runtime_limits` gains two wall-clock fields, enforced
-DAEMON-side by a `SessionManager` sweep (`server/session_lifetime.py`) — the
+DAEMON-side by a `SessionManager` sweep (`jaato_server/server/session_lifetime.py`) — the
 odd ones out in *where* they apply, which is the whole point: they are held by
 the one process that is still there when the client dies, and they do not wait
 for the session to end.
@@ -4080,7 +4111,7 @@ saved a session from a blip, and only by accident — it holds the session
 while a turn is in flight and the turn-tracking handler unloads it the moment
 the model goes `done`. An **idle** session with a blinking client was torn
 down on the spot: saved, log handlers closed, workspace monitor stopped,
-isolated subagents torn down, `server.shutdown()`, pool slot returned. The
+isolated subagents torn down, `jaato_server.server.shutdown()`, pool slot returned. The
 browser came back holding an id the daemon no longer had in memory and every
 send was answered `[SessionError] Session not found:`.
 
@@ -4141,7 +4172,7 @@ unambiguous and the watchdog stays the outer bound.
 from the two bounds in the same block, where `0` means "never stop this" and
 is the *least* restrictive thing a layer can say. Both are min-wins across an
 `inherits:` chain, so the two readings need two rules
-(`_MIN_WINS_ZERO_TIGHTEST_FIELDS`, `shared/plugins/subagent/config.py`):
+(`_MIN_WINS_ZERO_TIGHTEST_FIELDS`, `jaato_server/shared/plugins/subagent/config.py`):
 routing the grace through the 0-as-infinity branch would let a parent's 60 s
 overrule a child that asked for none.
 
@@ -4182,7 +4213,7 @@ distinguishable from "nothing has got round to unloading it".
 
 **A re-attach inside the grace costs nothing** — not "the unload aborts", but
 the unload thread is never started, so there is no save, no handler close, no
-`server.shutdown` and no slot return to undo. `_do_session_unload`'s existing
+`jaato_server.server.shutdown` and no slot return to undo. `_do_session_unload`'s existing
 under-the-lock re-check remains, now as a backstop rather than the only
 defence.
 
@@ -4301,7 +4332,7 @@ the two facts are orthogonal. The TUI has the same blind spot and now the
 same field; it renders `SessionListEvent` already, so what it needs is a
 render change rather than a daemon one.
 
-Guard: `shared/tests/test_a_session_waiting_on_a_human_is_visible_1138.py`,
+Guard: `jaato_server/shared/tests/test_a_session_waiting_on_a_human_is_visible_1138.py`,
 six reversions. The relay cases drive the real `handle()` coroutine rather
 than poking the handlers' dicts — a case that registered the future by hand
 would pass against a handler that never stamped.
@@ -4322,8 +4353,8 @@ if plugins is None or plugin_name in plugins:      # the block, or nothing
 
 A top-level session never noticed — its configs reach the plugins through
 `expose_all(plugin_configs)` at bootstrap, and `permission` gets an explicit
-merge on both the daemon (`server/core.py`) and runner
-(`server/runner/session.py` Step 8) paths. **A subagent reuses the parent's
+merge on both the daemon (`jaato_server/server/core.py`) and runner
+(`jaato_server/server/runner/session.py` Step 8) paths. **A subagent reuses the parent's
 already-bootstrapped registry**, so that loop was the only place its own
 profile's configs could land. A `documentalista` profile whose
 `plugin_configs.permission` whitelisted `writeNewFile` therefore produced 55
@@ -4399,7 +4430,7 @@ The block had two routes, and both were wrong:
 
 | Path | Enforcer | What `registry.expose_tool("permission", block)` did |
 |------|----------|------------------------------------------------------|
-| daemon (`server/core.py`), runner (`runner/session.py` Step 8) | constructed separately, seeded from the root block | re-initialized the registry's **unread copy**; the enforcer kept the parent's policy — #957 as reported |
+| daemon (`jaato_server/server/core.py`), runner (`runner/session.py` Step 8) | constructed separately, seeded from the root block | re-initialized the registry's **unread copy**; the enforcer kept the parent's policy — #957 as reported |
 | in-process (`jaato_embedded`) | the registry's instance | `shutdown()` + `initialize(child block)` on the enforcer: the parent was now judged by the **child's** policy, and its in-process ASK channel was replaced by a console one — the maintainer's in-tree repro "found the opposite" because it was the same defect from the other side |
 
 **Now: one enforcer, one policy per session.** `PermissionPlugin` keeps
@@ -4538,7 +4569,7 @@ Not done: a revived session re-runs `configure()` and so re-preloads a fresh
 copy rather than resuming the one it had — the per-session state is not
 persisted, which matches what a revive does for every other todo plan today.
 
-Guard: `shared/tests/test_a_predefined_plan_is_per_session_1195.py`, eleven
+Guard: `jaato_server/shared/tests/test_a_predefined_plan_is_per_session_1195.py`, eleven
 reversions — among them the instance-wide gate (a sibling session must still
 see `createPlan`), the hint recorded before the load, the preload losing to a
 carried plan, a subagent binding into its parent's key, and `safe_load`
@@ -4683,7 +4714,7 @@ line.** `policy  object  Permission policy rules` — while
 `get_config_schema()` has always declared `defaultPolicy` with its
 `allow`/`deny`/`ask` enum, `whitelist.tools`, `blacklist.patterns` and the
 four-deep `sanitization.path_scope.*` tree. So the only honest route to the
-shape was `shared/plugins/permission/policy.py`, and the transcript took it —
+shape was `jaato_server/shared/plugins/permission/policy.py`, and the transcript took it —
 for a page whose entire job is to make that unnecessary.
 
 `ConfigSetting` gains `children` and `free_form`, and both surfaces descend:
@@ -4781,7 +4812,7 @@ into the first would make every abstract base look like it declared a
 surface.
 
 **`validate` never asked whether the provider's SDK was installed.** It did
-not import `shared/scaffold/dependencies.py` at all, while both halves of the
+not import `jaato_server/shared/scaffold/dependencies.py` at all, while both halves of the
 answer lived there: the AST closure of the provider package, and the
 import-name → extra index that turns a missing module into the `pip install`
 line. So `provider: azure_openai` with no `openai` validated clean and died
@@ -4902,7 +4933,7 @@ payload schemas, prefetch scripts and completion processors, service
 specs, the template catalog) and **runtime state** (`sessions/`, `logs/`,
 `memories/`, caches, language-server data, and the `<provider>_auth.json`
 a stored credential lands in). The split was already written down — once,
-as the `audit deny .../.jaato/<x> wlk` rules in `server/apparmor.py` that
+as the `audit deny .../.jaato/<x> wlk` rules in `jaato_server/server/apparmor.py` that
 name the "user-authored config subpaths" a confined runner may not
 rewrite, and in prose on `explain paths` — and expressed nowhere a
 repository could read. `new profile-set` ignored `.env` and nothing else,
@@ -4911,7 +4942,7 @@ ignored `.jaato/` wholesale and lost the profiles its sessions ran under;
 the TUI's own `.jaato.example/README.md` documented the second posture as
 the default, with a hand-typed re-include list as the remedy.
 
-`shared/scaffold/gitignore.py` declares the split as data (`AUTHORED`,
+`jaato_server/shared/scaffold/gitignore.py` declares the split as data (`AUTHORED`,
 each entry carrying what it holds and whether the template write-denies
 it), and three consumers read it so they cannot disagree:
 
@@ -5061,7 +5092,7 @@ profile's own list is a promise to the author.
 
 **`config_root` was documented as defaulting and did not.** The contract is
 written down three times — the SDK parameter's own docstring,
-`shared/config_resolver.py`, `explain paths` — and applied in one place: the
+`jaato_server/shared/config_resolver.py`, `explain paths` — and applied in one place: the
 in-process client, whose comment names the reason ("config-rooted plugins like
 `file_edit` fail to init without a config_root"). The daemon transports left it
 `None`, so the same driver got a different session depending on how it
@@ -5193,7 +5224,7 @@ The runner legitimately holds secrets in its own `os.environ` — the
 provider key, the tokens `web_fetch` expands into headers.  A shell
 command, PTY session or MCP server the *model* drives inherits that
 environment, so `env` or `echo $GITHUB_TOKEN` hands every credential to
-model-controlled code.  `shared/secret_scrub.py` removes a set of secret
+model-controlled code.  `jaato_server/shared/secret_scrub.py` removes a set of secret
 names from the environment *given to the subprocess* (never from the
 runner's own), at three surfaces: the `cli` subprocess boundary, every
 `interactive_shell` spawn, and MCP stdio spawn.
@@ -5269,7 +5300,7 @@ different reach:
 | Layer | Covers | Applies when |
 |-------|--------|--------------|
 | AppArmor template **v30** — `audit deny` on `/proc/*/{environ,mem,pagemap,auxv,cmdline}` and each `task/<tid>/` twin, in base, `tool_hat`, `//child` and the isolated sub-runner | every read from a confined process, in-process tool or subprocess alike | AppArmor is available and the session is confined |
-| `is_sensitive_proc_path` in `shared/plugins/sandbox_utils.py` — the same set plus `maps` / `smaps`, minus `cmdline` | a path handed to a model-driven **file** tool (`readFile`, `glob_files`, `file_edit`) | always, including `workspace_root` unset and the degraded posture of #504 |
+| `is_sensitive_proc_path` in `jaato_server/shared/plugins/sandbox_utils.py` — the same set plus `maps` / `smaps`, minus `cmdline` | a path handed to a model-driven **file** tool (`readFile`, `glob_files`, `file_edit`) | always, including `workspace_root` unset and the degraded posture of #504 |
 
 The rules are written `/proc/*/...` and never `/proc/self/...`: AppArmor
 resolves that symlink to `/proc/<pid>/` **before** matching, so a
@@ -5338,8 +5369,8 @@ they all do their job perfectly — they lock the runner INTO that tree. The
 only place the question is answerable is before the path is accepted, where
 the peer credential exists and the session does not.
 
-`shared/peer_identity.py` is that place: stdlib-only, the shape
-`shared/apparmor_label.py` already has, so the transport can import it before
+`jaato_server/shared/peer_identity.py` is that place: stdlib-only, the shape
+`jaato_server/shared/apparmor_label.py` already has, so the transport can import it before
 plugin discovery and so the answer cannot be derived twice.
 
 | Half | What it does |
@@ -5392,8 +5423,8 @@ decision about the process model; this is what makes the current one honest.
 Unchanged for everyone else, by construction: a WS deployment (no peer to
 read), a Windows pipe, and any connection from the daemon's own account.
 
-Tests: `shared/tests/test_peer_identity.py` (the rule) and
-`server/tests/test_ipc_peer_entitlement.py` (the wiring — the three places a
+Tests: `jaato_server/shared/tests/test_peer_identity.py` (the rule) and
+`jaato_server/server/tests/test_ipc_peer_entitlement.py` (the wiring — the three places a
 correct mechanism could still be inert). Every deny case is paired with the
 same call one `chmod` apart, because a refusal that would have happened
 anyway proves nothing; the fixture roots at `/tmp` rather than using
@@ -5462,7 +5493,7 @@ workspace inside it a client may select. Per-tenant roots are not
 expressible today, and are the same shape as the other WS singletons (one
 bearer-token digest, one `SSOAuth` realm, one cookie secret).
 
-Tests: `server/tests/test_workspace_name_containment.py`. Every deny case
+Tests: `jaato_server/server/tests/test_workspace_name_containment.py`. Every deny case
 points at a directory that EXISTS, because the refusal has to come from the
 containment check rather than from the `exists()` test one line below it —
 against the unfixed code those selections SUCCEEDED, so a test using an
@@ -5493,7 +5524,7 @@ cheap fix findable: **overwrite** fails because the file is `644 root:root` —
 a permissions problem; **delete** fails only when the parent directory is
 root-owned too.
 
-**And the daemon never noticed.** `grep -rn 'geteuid'` across `server/`
+**And the daemon never noticed.** `grep -rn 'geteuid'` across `jaato_server/server/`
 returned the egress proxy's sudo decision and a cgroups writability message,
 and nothing else — while every other weakened posture in this tree announces
 itself at WARNING (`scrub_secret_env: none`, `--ws-unsafe-no-auth`,
@@ -5501,7 +5532,7 @@ complain-mode AppArmor, `interactive_shell` without `require_confinement`).
 The deployment guides are already written around a service user
 (`docs/apparmor-setup.md` and `docs/runtime-limits-setup.md` both
 `chown jaato:jaato`), so a root daemon is off the documented path; it simply
-was not *said*. `server/process_posture.py` says it, once per daemon process
+was not *said*. `jaato_server/server/process_posture.py` says it, once per daemon process
 — naming the consequence, the fix (run as a service user) and the mitigation
 below, in that order.
 
@@ -5515,7 +5546,7 @@ and `/proc/<pid>/status` reports `Umask: 0002` on the daemon, on the pre-warm
 template forked from it and on both pool slots forked from that.
 
 ```bash
-python -m server --ipc-socket /tmp/jaato.sock --umask 002   # or JAATO_UMASK=002
+python -m jaato_server --ipc-socket /tmp/jaato.sock --umask 002   # or JAATO_UMASK=002
 chgrp jaato /srv/workspaces/mine && chmod g+ws /srv/workspaces/mine
 ```
 
@@ -5527,7 +5558,7 @@ Four properties, each attached to a way it could go wrong:
   already running — unimplementable, not merely undesirable. It would also
   miss the files the **daemon itself** puts in a workspace (session records,
   `.jaato/logs`, the provisioned tree), which no session-scoped knob reaches.
-  The catalog entry in `shared/env_scope.py` says so, and there is no
+  The catalog entry in `jaato_server/shared/env_scope.py` says so, and there is no
   `AWAITING_TYPED_KEY` row because `host` knobs do not want one.
 - **Applied at step 0 of `start()`, before anything forks.** The pre-warm
   template is forked from this process and every pool slot forks from the
@@ -5568,7 +5599,7 @@ Daemon-tier artifacts stay root-owned under either mitigation, deliberately:
 session records, `~/.jaato/session_workspace_index.json` and the daemon log
 are written by the daemon process and are not the agent's output.
 
-Guard: `server/tests/test_a_root_daemon_says_so_1168.py`, six reversions. The
+Guard: `jaato_server/server/tests/test_a_root_daemon_says_so_1168.py`, six reversions. The
 uid is substituted in **both** directions — patched to 0 for the warning
 cases and to an ordinary uid for the control — because patching only one side
 makes the verdict depend on the uid the suite happens to run under: on a
@@ -5605,8 +5636,8 @@ in-process `threading.Lock` is **not sufficient**: it does not exist
 across the runner boundary, and a lock object held at fork time is
 inherited in a state the child cannot reason about.
 
-`shared/credential_lock.py` is the one mechanism, the shape
-`shared/completion_nudge.py` and `shared/apparmor_label.py` already have:
+`jaato_server/shared/credential_lock.py` is the one mechanism, the shape
+`jaato_server/shared/completion_nudge.py` and `jaato_server/shared/apparmor_label.py` already have:
 one definition, so four auth plugins cannot drift apart on it.
 
 **A lock alone is not the fix.** It converts the race into a queue — N
@@ -5720,7 +5751,7 @@ backend calls `ticket.bind`, gets a ticket, hands it to that user's client;
 the client connects with it; the daemon resolves it **during the Upgrade**
 and stamps the identity on the `ClientConnection`. No JWKS, no `aud`/`iss`
 validation, no per-tenant `SSOAuth` — the realm never enters the daemon, and
-`server/ws_tickets.py` is stdlib-only with no realm vocabulary in it.
+`jaato_server/server/ws_tickets.py` is stdlib-only with no realm vocabulary in it.
 
 **`_check_ws_token` becomes a lookup, and costs nothing extra.** It already
 computed `sha256(presented)`; `_resolve_connection_auth` hashes once and asks
@@ -5917,7 +5948,7 @@ ErrorEvent(error="Unknown request type: ExternalEventRequest",
 this is a missing feature that announces itself rather than a member of the
 silent-ignore family (#910 / #925 / #947 / #950 / #1133). What it cost is
 still real — that WS publish was the only `EXTERNAL_EVENT` producer under
-`server/`, so an IPC-only deployment ran a daemon-wide reactor engine nothing
+`jaato_server/server/`, so an IPC-only deployment ran a daemon-wide reactor engine nothing
 could externally trigger. `session.wake` is not a substitute: it drives a turn
 on one session and publishes no bus event. The one workaround, the `webhook`
 plugin's listener (the tree's other producer, transport-independent), costs a
@@ -5929,13 +5960,13 @@ IPC branch alone would have given the tree TWO answers to *what an external
 event looks like on the bus* — the shape this file already names as a defect
 in its own right, because each copy masks the other and neither can be shown
 to do anything (#688's `on_unmetered` validation, which the reversion
-meta-guard correctly called decorative). `server/external_event.py` is the one
+meta-guard correctly called decorative). `jaato_server/server/external_event.py` is the one
 answer; each transport keeps only what is genuinely its own, which is
 resolving WHICH session the caller is driving.
 
 | Surface | |
 |---|---|
-| `publish_external_event(server, *, name, data, timestamp, source)` | `server/external_event.py`. Resolves `server._runtime.event_bus`, builds the bus event, publishes. Returns an `ExternalEventDelivery` — never raises for a missing bus, because both callers answer their client and a transport handler that raised would cost the connection |
+| `publish_external_event(server, *, name, data, timestamp, source)` | `jaato_server/server/external_event.py`. Resolves `jaato_server.server._runtime.event_bus`, builds the bus event, publishes. Returns an `ExternalEventDelivery` — never raises for a missing bus, because both callers answer their client and a transport handler that raised would cost the connection |
 | `SessionManager._handle_external_event_request` | the IPC arm, `source="ipc"` |
 | `JaatoWSServer._handle_external_event` | unchanged behaviour, now a caller, `source="websocket"` |
 | `IPCClient.send_external_event()` / `JaatoClient.sendExternalEvent()` | the SDK methods |
@@ -5951,13 +5982,13 @@ rather than `None` — a name with no payload is a legitimate ping.
 
 **`source` names the transport, and that is checkable rather than assumed.**
 It is rendered to the model as `Source: <x>` by
-`shared.event_bus_tools._format_event_notification`, so the parameter has no
+`jaato_server.shared.event_bus_tools._format_event_notification`, so the parameter has no
 default: a module that guessed one would be making a provenance claim on every
 caller's behalf. `SessionManager.handle_request` serves BOTH transports and
 cannot ask which one it is on — it may say `ipc` only because
 `JaatoWSServer._handle_message` intercepts and returns *before* delegating to
 the `CommandRouter`. That ordering is an invariant, and
-`server/tests/test_external_event_over_ipc_1167.py` fails if the interception
+`jaato_server/server/tests/test_external_event_over_ipc_1167.py` fails if the interception
 is removed, rather than letting WS traffic quietly start arriving at the IPC
 arm and being labelled `ipc`.
 
@@ -5989,9 +6020,9 @@ expressible:
 | Obligation | Mechanism |
 |---|---|
 | 6(4) document the risk determination | `regulatory:` profile block — `{intended_purpose, risk_class: minimal\|limited\|high, annex_iii, provider: {name, contact}, interacts_with_persons, disclosure_text}`. Declared, never inferred. `risk_class` inherits most-restrictive-wins, the rest child-replaces. Rides every ingress incl. the isolated-runner payload |
-| 50(1) say you are an AI | the `disclosure` instruction piece (`shared/ai_disclosure.py`), fourth beside `disk` / `constants` / `security`; kept by the blanket `suppress_base_instructions: true`, dropped only by name and then announced at WARNING (`ANNOUNCED_PIECES`) |
+| 50(1) say you are an AI | the `disclosure` instruction piece (`jaato_server/shared/ai_disclosure.py`), fourth beside `disk` / `constants` / `security`; kept by the blanket `suppress_base_instructions: true`, dropped only by name and then announced at WARNING (`ANNOUNCED_PIECES`) |
 | 50(1) *before* the first turn | the announcement `announcement_for()` decides and `SessionManager._announce_ai_interaction` emits once at session creation — `AgentOutputEvent(source="system")` plus `SessionInfoEvent.disclosure_announcement` (protocol 1.15) for a client that owns a medium the framework cannot reach. `PresentationContext.client_discloses_ai` is the "unless this is obvious" suppression, asserted by the only party that can see the screen |
-| 50(1) *prove* they were told | the `announcement` audit event (#1157), in the LEDGER because that is the store that chains: `text` as delivered, `client_type` + `locale` off the client's `PresentationContext` (`locale` is new, BCP 47, declared by the client and never defaulted), the `provider` / `model` pair, `session_id`, `created_by`. Written by `shared/ai_disclosure.py::announcement_record` through `JaatoServer.record_disclosure_announcement` on **every** outcome: `delivered: true` with the text, or `delivered: false` with a `withheld_reason` from a closed vocabulary — `client_discloses` (the client took the obligation), `headless` (no transport serves the client id, so the emit reached no person), `decision_failed` (the predicate raised, now at WARNING rather than collapsing to "declared nothing"), `wake` / `reattach` (a revive, no new emit, and WHICH kind — a long-lived session accumulates many reattaches and no wakes). Absent is not a record of anything; a profile that declared nothing gets no row. A row with no file to land in is announced at WARNING naming `trace.ledger` / `LEDGER_PATH`, and `validate` reports the same profile as `disclosure_unrecorded` (warn; error under `risk_class: high`) before any session exists. The daemon appends it at creation, before the first turn, to the same file the runner's ledger continues (#1120: the chain belongs to the file), so it precedes the first `response`; `event_index` is per writer, the chain is the order. Found while writing it: `PresentationContext.to_dict` / `from_dict` carried neither `client_discloses_ai` nor `renderable_media`, so the #1116 suppression never held over the wire — both ride now |
+| 50(1) *prove* they were told | the `announcement` audit event (#1157), in the LEDGER because that is the store that chains: `text` as delivered, `client_type` + `locale` off the client's `PresentationContext` (`locale` is new, BCP 47, declared by the client and never defaulted), the `provider` / `model` pair, `session_id`, `created_by`. Written by `jaato_server/shared/ai_disclosure.py::announcement_record` through `JaatoServer.record_disclosure_announcement` on **every** outcome: `delivered: true` with the text, or `delivered: false` with a `withheld_reason` from a closed vocabulary — `client_discloses` (the client took the obligation), `headless` (no transport serves the client id, so the emit reached no person), `decision_failed` (the predicate raised, now at WARNING rather than collapsing to "declared nothing"), `wake` / `reattach` (a revive, no new emit, and WHICH kind — a long-lived session accumulates many reattaches and no wakes). Absent is not a record of anything; a profile that declared nothing gets no row. A row with no file to land in is announced at WARNING naming `trace.ledger` / `LEDGER_PATH`, and `validate` reports the same profile as `disclosure_unrecorded` (warn; error under `risk_class: high`) before any session exists. The daemon appends it at creation, before the first turn, to the same file the runner's ledger continues (#1120: the chain belongs to the file), so it precedes the first `response`; `event_index` is per writer, the chain is the order. Found while writing it: `PresentationContext.to_dict` / `from_dict` carried neither `client_discloses_ai` nor `renderable_media`, so the #1116 suppression never held over the wire — both ride now |
 | 50(2) mark generated output, on the wire | `ToolOutputEvent.generated_by` (protocol 1.14): `{"kind": "ai", provider, model, session_id, agent_id}` on the model's own media, stamped in `_deliver_model_media`; `Attachment.generated_by` for a producer's claim; nothing on a relayed file |
 | 50(2) mark it so it SURVIVES the wire | `TRAIT_OUTPUT_MARKER` + `JaatoSession._mark_generated_output` at both delivery seams; the in-tree `output_marker` plugin writes `<file>.provenance.json`. The seam walks `registry.list_enabled()`, **never `list_exposed()`** — a marker provides no tools, so it is an ENRICHMENT plugin and can never be in the tool-bearing set; reading that one made the mechanism inert in the only configuration that uses it. An AST guard fails any future `Attachment` producer that neither stamps nor is a declared relay |
 | 12 keep the logs | `TokenLedger` appends per record to `LEDGER_PATH`; `trace.ledger` is the typed key (relative = per session); `write_ledger` flushes only what was not appended — and the runner holds a ledger of its own (see *A ledger the runner never held*, below) |
@@ -5999,7 +6030,7 @@ expressible:
 | 73(6) prove they were not altered | `record_keeping.integrity: sha256-chain` — each record carries `prev_digest` + `digest` over canonical bytes; `jaato-doctor --audit-verify <path>` walks a file with nothing but the stdlib. It proves the file was not edited IN PLACE and **not** who wrote it, which the verifier's own output says. An unchained file reports as unchained, never as intact. The chain belongs to the FILE: every chained append takes an exclusive lock, reads the tail digest back off disk and links to THAT, so a restart, a shared absolute `trace.ledger` and two concurrent appenders continue one chain rather than each starting a rival one — holding the pointer in memory alone made the mechanism accuse its own normal deployment. Stated cost: a chained file cannot be pruned from the front, so retention rotates whole files |
 | 19 / 26(6) keep them long enough | `record_keeping: {retention_days, conversation_retention_days, integrity}` — two clocks, because the audit record and the conversation are kept for different reasons, and they resolve differently across profiles: `retention_days` governs the files a profile NAMES, so **each profile's files are judged under its own clock** (pooling them let one profile's 30 days unlink a sibling's `retention_days: 0` record), while a session record is named by no profile, so the workspace has ONE conversation clock and the only safe reading of several is the longest. A trace path is EXPANDED, not taken literally — the provider channel splits per agent, so the siblings are globbed. Declared, never defaulted: it changes what DELETE MEANS. `workspace.delete` refuses a held record; the #812 watchdog runs an hourly pass that removes audit files past `retention_days` and session records past `conversation_retention_days`, never a loaded session's own |
 | 15(4) don't feed bias back | `Memory.generated_by` (which model wrote it — stamped by the PLUGIN, never from the tool's arguments) + `curated_by` (who approved it: a second field, because who wrote it and who approved it are two facts, stamped on EVERY promotion path — the model's `update_memory` and the human curator's `%memory edit`, both through one helper — and CLEARED on demotion, since an approval that was withdrawn must not keep reading as one; an AST guard fails any future writer of `maturity` that does not stamp, because a promotion that skips it is withheld by `require_curation` with no error anywhere) + `plugin_configs.memory.require_curation`, which withholds uncurated memories from BOTH retrieval paths and says how many. `validate` warns when the knob closes the learning loop instead of mitigating it |
-| 72 / 73 know what to report | `IncidentEvent` (protocol 1.16) + an `INCIDENT:` line in the application trace, raised by `shared.incidents.raise_incident` from the five sites that already knew; `jaato-doctor --incidents [--since 15d]` renders all three Art. 73 windows beside each row. It carries **no severity**: whether an entry is a serious incident under Art. 3(49) is a determination about consequences no log line holds. Unreadable is reported as unread, never as "none" |
+| 72 / 73 know what to report | `IncidentEvent` (protocol 1.16) + an `INCIDENT:` line in the application trace, raised by `jaato_server.shared.incidents.raise_incident` from the five sites that already knew; `jaato-doctor --incidents [--since 15d]` renders all three Art. 73 windows beside each row. It carries **no severity**: whether an entry is a serious incident under Art. 3(49) is a determination about consequences no log line holds. Unreadable is reported as unread, never as "none" |
 | 14(4) human oversight | `jaato-scaffold explain oversight [<profile>]` — the two stop verbs, the permission gate, the built-in constraints, reversibility, read from their enforcers; `jaato-doctor` prints the exact `jaato-server --stop` for the running daemon |
 | 11 / 13 draw up the documentation | `jaato-scaffold new dossier --profile <p>` — the Annex IV skeleton, computed from the same helpers `explain` reads so it cannot disagree with them; **every one of the nine headings is present**, because a section dropped for having nothing to say reads as *nothing to declare*. `--component` emits the Art. 25(4) pack for jaato itself, committed at [docs/jaato-component-pack.md](docs/jaato-component-pack.md) as the first versioned instance |
 | 15(3) / 9(8) declare the accuracy | `--eval-results <file>` fills Annex IV §4 from a `jaato-eval` run: pass rate per (task, profile set), blocked arms out of the denominator, a **TODO** threshold on every row. The harness's own caveats ride IN the results file (`results_version`, `caveats`; [docs/eval-results.md](docs/eval-results.md)) and are rendered verbatim, so a number cannot be separated from the limits of the instrument that produced it. A file whose declared format this reader does not know is refused BY NAME — an absent version is an unknown version |
@@ -6033,7 +6064,7 @@ says once per workspace that nothing declares it (`regulatory_undeclared`,
 warn — the `budget_control_absent` posture, and never inferring `minimal`),
 and the Claude Code integration skill lists `explain oversight`, `explain
 audit` and the `dossier` archetype. Guard:
-`shared/tests/test_scaffold_surfaces_know_the_compliance_keys.py`, which also
+`jaato_server/shared/tests/test_scaffold_surfaces_know_the_compliance_keys.py`, which also
 checks that every topic and archetype the skill lists is one the CLI has.
 
 **A ledger the runner never held.** Everything above about the ledger was
@@ -6045,10 +6076,10 @@ runner-served session wrote no `response` and no `permission-check` record
 anywhere, and `explain audit <profile>` said the ledger was written: a key
 parsed, validated, rendered and enforced by nothing, the #735 shape, found
 by driving a live daemon for the evidence manual (#1139). The runner now
-constructs its own `TokenLedger` (Step 9 of `server/runner/session.py`); the
+constructs its own `TokenLedger` (Step 9 of `jaato_server/server/runner/session.py`); the
 path and the integrity posture are read per record through the session-scoped
 env the bootstrap already applied, so it is one file per session as
-documented. Guard: `shared/tests/test_runner_session_holds_a_ledger.py`.
+documented. Guard: `jaato_server/shared/tests/test_runner_session_holds_a_ledger.py`.
 
 **And the controls are driven live in CI, not only unit-guarded.** Every
 mechanism above has a unit guard with a reversion, and #1139 shows what that
@@ -6174,7 +6205,7 @@ The trace is the ONE artefact every deployment gets: the ledger's
 process, and the event (below) is opt-in. So the DECISION line is
 machine-readable by construction — scalar `key=value` fields first, the
 free-text `reason=` **last**, read back by
-`shared.plugins.permission.plugin.parse_decision_trace`:
+`jaato_server.shared.plugins.permission.plugin.parse_decision_trace`:
 
 ```
 [PERMISSION] check_permission: DECISION tool=writeNewFile call_id=call_1 \
@@ -6343,7 +6374,7 @@ survived and the call returned `False`, so the daemon answered
 `Session '<id>' not found.` — and the session was back in the next listing.
 
 The daemon knew the workspace the whole time.
-`server/session_workspace_index.py` exists for exactly this and its own
+`jaato_server/server/session_workspace_index.py` exists for exactly this and its own
 first paragraph says so — *"locating a COLD (unloaded) session's record
 requires knowing its workspace"* — and it was consulted here only to
 `forget` the entry, twenty lines BELOW the delete that needed it. An
@@ -6656,7 +6687,7 @@ verb that resolved a name passes it to `_analyze_workspace`, so the cache
 key and `WorkspaceInfo.name` cannot disagree for a symlinked entry either.
 Containment is still checked first, so a traversal is refused as one and
 before existence. Tests:
-`server/tests/test_workspace_root_is_not_a_workspace.py`.
+`jaato_server/server/tests/test_workspace_root_is_not_a_workspace.py`.
 
 ### A Plan Nobody Was Watching, and a Step That Was Not a Failure
 
@@ -6694,7 +6725,7 @@ with the same shape on success and is covered by the same line. The todo
 plugin also stops spelling a step's own failure as the tool's: a step the
 model marked `failed` is the tool doing what it was asked, so its text
 travels as `step_error`. Tests:
-`server/runner/tests/test_plan_reporter_bridge.py`,
+`jaato_server/server/runner/tests/test_plan_reporter_bridge.py`,
 `jaato_sdk/tests/test_tool_result_is_error.py`.
 
 **Two web-client touches from a tablet.** The Files panel's `hide` / `ignore`
@@ -6901,7 +6932,7 @@ It is a display question, the two are distinguishable at the client by
 `agent_id`, and answering it means deciding what a parent tab should show
 about its children.
 
-Guard: `server/tests/test_a_subagent_nobody_could_see.py`, five reversions.
+Guard: `jaato_server/server/tests/test_a_subagent_nobody_could_see.py`, five reversions.
 It asserts the plugin's slot rather than the session's, because filling the
 session's is precisely what the broken tree did.
 
@@ -6996,7 +7027,7 @@ in a third place. The honest fix is for the runner-side plugin to announce
 its own policy change, which is a notification frame rather than a pull, and
 its own change.
 
-Guard: `server/tests/test_a_policy_the_enforcer_did_not_hold.py`, four
+Guard: `jaato_server/server/tests/test_a_policy_the_enforcer_did_not_hold.py`, four
 reversions. The `emit_current_state` case is an **AST walk of the call
 sites** rather than a drive of the method: it reaches a dozen subsystems, so
 a test that stubbed enough of a server to run it would be asserting the
@@ -7110,7 +7141,7 @@ workspace the client had selected and the session was running in.
 reached `provision_workspace()` directly — the one path that stamps it
 without telling the adapter or the router.
 
-Guard: `server/tests/test_a_file_staged_where_the_session_is_not.py`,
+Guard: `jaato_server/server/tests/test_a_file_staged_where_the_session_is_not.py`,
 three reversions. It drives the real `CommandRouter.resolve_caller_workspace`
 rather than a stub of it, because a stub would assert the test's opinion
 of the ordering instead of the daemon's.
@@ -7192,9 +7223,202 @@ write whole markers), so it is a latent gap rather than a live one. The
 "FOLLOW INPUT" control in the #1193 screenshot is the tool row's existing
 live-output **Follow** toggle, not a notebook feature.
 
-Guards: `shared/tests/test_markup_that_leaked_into_the_transcript.py` (four
+Guards: `jaato_server/shared/tests/test_markup_that_leaked_into_the_transcript.py` (four
 reversions) and the web client's `nbmarkup.test.ts` / `JMarkup.test.tsx`
 plus two e2e cases.
+
+### Prose Drawn as a Code Block, Because a Fence Never Closed
+
+Reported with a web-client screenshot: the second half of an ordinary reply
+(the model's headings, its questions to the user, its closing line) rendered
+monospaced, line-numbered and syntax-coloured as one `<j-code>` block
+running to the end of the message. Clients draw a `<j-code>` block
+faithfully, so the defect is where the block is decided:
+`code_block_formatter`.
+
+Its opener was `` ```(\w*)\n `` and its closer any line that STARTED with
+three backticks. So an opener the pattern did not recognise was passed
+through as text, and ITS closer then opened a block that nothing closed:
+
+| Input | What went wrong |
+|---|---|
+| `` ```c++ ``, `` ```shell-session ``, `` ```text `` (trailing space), `` ```python title="x" `` | the opener was not seen |
+| a four-backtick fence quoting a three-backtick one | the inner fence closed the outer, and every later fence was read the wrong way round |
+| a closer indented inside a list item | never seen at all |
+
+The rule is CommonMark's now, in one place (`open_fence` / `Fence` in
+`code_block_formatter/plugin.py`), and the table formatter imports it, as
+#1191 requires:
+
+- an opener at a line start takes any info string, and the language is its
+  first word;
+- a closer is a line holding only a run of the **same** character, at least
+  as long as the opener's run;
+- both may be indented, and the opener's indent is removed from the code;
+- `~~~` fences work.
+
+The old mid-line opener (`` text ```py ``) is kept, with its old narrow info
+string, because models write it. The text held back while streaming is
+unchanged: only an incomplete line that could still turn out to be an
+opener waits for its newline. One behaviour changes: a closer now needs its
+line to end, so a block completes when the closer's newline arrives, or at
+`flush`, rather than on the closer's backticks alone.
+
+Guard: `shared/tests/test_prose_drawn_as_a_code_block.py`, three
+reversions. Every fixture is also streamed one character at a time and in
+random pieces.
+
+### A Reset the Next Reconnect Undid (#1189)
+
+The TUI's workspace panel has `workspace_clear` (Delete): empty the list so
+only files that change from now on appear. It is a reset of the starting
+point, not a hide — a file the agent touches again after the reset comes
+back. The web Files panel had no equivalent, and after a long session it
+listed thousands of entries with no way to clear them short of a reload.
+
+**Kept only in the client, a reset does not survive a reconnect.** An
+attaching client gets a `WorkspaceFilesSnapshotEvent` it applies wholesale,
+and a snapshot entry is `{path, status}` — nothing says *when* it changed.
+The TUI rarely reattaches; a browser does it routinely (a tablet sleeps, a
+network blips), so a naive port works in testing and stops working in use.
+
+**The daemon numbers changes** (protocol **1.19**). The workspace monitor
+stamps every flushed batch with `seq`, one more than the last, and each
+tracked path remembers its latest `seq`:
+
+| Event | Carries |
+|---|---|
+| `WorkspaceFilesChangedEvent` | `seq`, `epoch` for the batch |
+| `WorkspaceFilesSnapshotEvent` | `seq` (latest), `epoch`, `seqs` (path → seq) |
+
+A counter rather than a clock: nothing to skew between daemon and browser,
+and ordering is all the filter needs. `seqs` is a parallel map rather than a
+third key on each `files` entry because those entries are `Dict[str, str]`
+and an older client validates them as such — an integer there fails its
+whole event, while an unknown top-level field is ignored. The monitor hands
+its callback a `ChangeBatch`, a `list` subclass carrying `seq` / `epoch`, so
+every existing callback keeps receiving exactly what it did.
+
+**The epoch is what keeps it from failing silently.** A session reload
+rebuilds the monitor, which counts from 0 again; a mark of 500 compared
+against the new counter hides every new change and empties the panel with
+nothing saying why. `epoch` names the monitor instance and is not
+persisted, so a mark from before a reload is recognisably void — dropped,
+the full list shown, and the panel says so. Restored entries carry no
+number of their own and read as 0. The snapshot is now sent even when
+empty: it is the only way a reconnecting client learns the epoch changed.
+
+| Client | What the reset does |
+|---|---|
+| web (`store/workspaceView.ts`) | keeps the FULL list plus the numbers, filters past the mark — so **show everything** is possible. Per viewer, in memory, like hide |
+| TUI (`workspace_panel.py`) | `clear()` records the mark; a reattach's snapshot keeps only entries past it |
+| either, against a daemon below 1.19 | changes numbered locally between snapshots; a snapshot drops the mark (the web client says why) — the old behaviour, stated |
+
+**Not reset on the daemon**, deliberately: the monitor is per session and
+shared by every attached client, so a daemon-side reset would empty the list
+for everyone else watching.
+
+Guards: `server/tests/test_a_reset_that_survives_a_reconnect_1189.py` (three
+reversions), `jaato-tui/tests/test_workspace_clear_survives_a_reattach_1189.py`,
+`src/store/workspaceView.test.ts`, and an e2e case that resets, touches a
+listed file again, drops the connection and checks the reset held. A first
+draft cleared the restored entries' numbers inside `restore()`; the
+reversion meta-guard reported it decorative — unreachable, since only paths
+this monitor numbered are reported — and it would have erased a number the
+new monitor genuinely assigned, so it went.
+
+### A Category Id Nobody Could Read
+
+A discovery call reached the web transcript as
+`LIST_TOOLS  category_id=c_bbc5e661`. Tool names reach the MODEL as
+hash-derived ids (`t_<8 hex>`, `c_<8 hex>`; `shared/tool_id_map.py`), so a
+call's arguments carry them, and the agreement is that anything user-facing
+shows the name a person knows — the TUI has done so since the ids shipped
+(`ui_utils.resolve_tool_ids`). The daemon already sent the mapping for
+exactly this, twice: `tools.id_registry` (`ToolIdRegistryEvent`, the full
+set each time) and `session.info`'s `tool_id_mappings`. The web client read
+neither.
+
+`src/protocol/toolIds.ts` is the TUI's function, and the store keeps the map
+(`toolIdNames`), replaced wholesale on each receive. Two properties:
+
+- **Resolved at render time, not at reduce time.** The registry is sent after
+  tool configuration and again when deferred tools activate, so it can arrive
+  after the call that used an id; a row rendered from the stored arguments
+  picks the name up whenever it lands. The e2e sends the mapping after the
+  call for that reason, and fails with the resolution removed.
+- **Only a value that IS an id is replaced.** An id the map does not name is
+  left as it is — showing the id is honest, inventing a name is not — and a
+  string merely containing one is untouched.
+
+Both argument displays use it: the tool row and the permission card's
+argument grid.
+
+### When GC Last Ran, What It Freed, and Which Policy (#1190)
+
+The Instructions panel showed what each layer held and each layer's GC
+glyph, and nothing about collection itself: not when a pass last ran, not
+what it freed, not which policy was in force. All three were already on the
+wire — `GCConfigEvent` (strategy, threshold, target, continuous) at
+initialisation and on reconfigure, `GCEvent` for each phase of a pass with
+`tokens_freed` on `completed` — and the web client read neither.
+
+**Neither was replayed, and that is the daemon half.** `emit_current_state`
+is the one door for "tell a client arriving mid-session what the state is",
+and it sent neither event. A tab that attached after a pass — a second tab,
+a session switch, a resume from the picker — read "no GC" about a session
+that had collected an hour ago, and never learned the strategy at all.
+`JaatoServer._emit_gc_state` replays both:
+
+- **The last completed pass is kept as the event that announced it**
+  (`_last_gc_pass`), so the replay carries the pass's ORIGINAL timestamp.
+  "When did GC last run" answered with the attach time would be a readout
+  that lies. Not persisted: a revived session starts with no record, which
+  the panel reports as "no GC pass reported yet", never as "never collected".
+- **The policy is replayed whatever it is, including no strategy.** A session
+  with no GC is the state an operator most needs to see (#1133 is what it
+  cost when invisible); the panel renders it as a warning line.
+
+The panel (`src/protocol/gc.ts` for the wording) adds two lines under the
+heading, subordinate to the tracked total: `◷ last GC 12 min ago · freed
+14.2k tokens` (hover: absolute time, trigger, before → after; `collecting…`
+between `started` and `completed`; a failed pass in the error tone) and
+`GC: budget · runs at 80% · down to 60%` (or `after every turn above N%`
+when continuous). They show even before any usage is reported — the policy
+is known first. The legend's glyphs carry one-line tooltips, and a caption
+says the icons describe what GC **may** reclaim from each layer, not what
+it recently did — `never collected` read as "data was never collected".
+
+Guards: `server/tests/test_the_gc_state_reaches_a_late_client_1190.py` (two
+reversions; its call-site check parses `core.py` from beside the test
+rather than via `inspect.getsource`, which the reversion meta-guard's
+sandbox cannot see through), `BudgetPanel.test.tsx` / `gc.test.ts`, and an
+e2e case in which a SECOND tab attaches after the pass and must be told —
+verified to fail with the replay removed. A reconnect of the same tab could
+not have proved it: it keeps what the tab already knew.
+
+### A Popup That Floated Off the Page
+
+Reported with a screenshot: the live tool-output popup of a running
+`cli_based_tool` was cut off on the left edge of the transcript. The
+component was correct (`absolute right-5 bottom-[104px]` inside a `relative`
+`<main>`); the stylesheet was not. `.plate { position: relative }` in
+`theme.css` was an **unlayered** rule, and in Tailwind v4 an unlayered rule
+outranks every utility whatever its specificity. So each floating plate lost
+its `absolute`. The popup sat in normal flow, and `right-5` then shifted it
+20px past the left edge. The command-proposal list had the same defect: laid
+out in flow, it grew the composer strip upward and shrank the transcript by
+its own height every time a proposal appeared.
+
+The rule now lives in `@layer components`. A plate is still positioned by
+default (its corner marks need it), and a caller's utility can override
+that. Two e2e cases measure the result rather than the styling: the popup's
+box lies inside the transcript column, above the input and against its right
+edge; and the composer strip's top does not move when proposals open. Both
+fail against the unlayered rule. Measuring the input's own position would
+not have caught the second case, because it is pinned to the bottom. The
+mock gained a `live` turn that keeps a tool running with output until
+`session.stop`, because the popup only exists in that window.
 
 ### An Exit That Never Asked
 
@@ -7627,7 +7851,7 @@ deliberately: it emits `SessionTerminatedEvent` so cascade observers see the
 death, and it calls `mark_runner_ready()` so a warm pool slot cannot strand a
 client-tool push on a readiness timeout. Both are right and both still happen.
 What did not happen is anyone being **told**, so session creation carried
-straight on into `server.initialize()` — which asks the runner for its context
+straight on into `jaato_server.server.initialize()` — which asks the runner for its context
 usage with no guard, two dozen lines below the one call in that function that
 IS guarded, whose comment names this exact contingency (*"the runner-side
 handler may return `stage="no_session"` if `session.bootstrap` RPC hasn't
@@ -7737,7 +7961,7 @@ the extra iterations bought nothing: a dropped cancel is dropped
 *permanently* — the frame is consumed and no later cancel-check can recover it
 — measured at 2000 iterations under the same load, still `ok=True`, at 105.1 s
 instead of 10.9 s. The count is back at 200, and
-`server/runner/tests/test_cancel_before_worker_registers_988.py` reproduces
+`jaato_server/server/runner/tests/test_cancel_before_worker_registers_988.py` reproduces
 the loaded case **with no clock at all**: one work-lane worker, held by a
 gated call, so the cancelled call is provably still queued; wire ordering is
 established by a control-lane probe rather than by polling. It fails
@@ -7793,7 +8017,7 @@ un-baselined one; `_finish_turn` enters at 26, irreducible here by
 construction — rewriting 300 lines of wind-down in the same change would
 have made the one behavioural difference unreviewable.
 
-Guard: `server/tests/test_no_return_in_finally_1077.py`. Its AST scan needs
+Guard: `jaato_server/server/tests/test_no_return_in_finally_1077.py`. Its AST scan needs
 two exclusions to be satisfiable, and both are pinned by a discrimination
 test: a `return` inside a function *declared in* the `finally` is the shape
 of the fix, and a `break` bound to a loop inside the `finally` transfers
@@ -7864,7 +8088,7 @@ call on the handle is dead, so it raises. `CLEAN_TERMINAL_REASONS` is the
 exception and it has a consumer in this tree: a scaffolded `client` drives a
 completion-gated profile with `ask`, and its one successful turn ends the
 session with `natural` — raising there would fail every such run
-(`shared/scaffold/tests/test_client_template_completion_wait.py`, which is
+(`jaato_server/shared/scaffold/tests/test_client_template_completion_wait.py`, which is
 what caught it). It is an **allow-list**, so a reason that does not exist yet
 raises rather than passing quietly: #1007 *is* a new reason arriving and going
 unconsidered, and a deny-list would let the next one do it again. The ending
@@ -7909,7 +8133,7 @@ Tests: `jaato-sdk/jaato_sdk/tests/test_a_turn_that_ended_the_session_says_so.py`
 (deterministic — `ScriptedClient` delivers one event per loop tick, so "did it
 return before the terminal arrived?" is a counter, not a clock; 17 of its 24
 fail on the parent commit) and
-`jaato-server/shared/tests/test_one_settle_rule_1007.py` (an AST guard that no
+`jaato-server/jaato_server/shared/tests/test_one_settle_rule_1007.py` (an AST guard that no
 verb decides a terminus outside `_TurnWatch`, and that the watch still wires
 all four settle events — dropping `ERROR` restores the hang exactly).
 
@@ -8101,7 +8325,7 @@ display output rather than an answer, so the call still ends in a
 response, and a per-chunk error would arrive interleaved with real output
 as though the model had said it.
 
-### Interactive Shell Sessions (`shared/plugins/interactive_shell/`)
+### Interactive Shell Sessions (`jaato_server/shared/plugins/interactive_shell/`)
 
 The `interactive_shell` plugin lets the model drive any user-interactive command by spawning persistent PTY sessions. Unlike `cli/` (which uses `subprocess` and can only run non-interactive commands), this plugin uses `pexpect` to provide a real pseudo-terminal where the model can read output and send input back and forth.
 
@@ -8155,7 +8379,7 @@ analyzer this is). The check refuses the direct attempt, in a vocabulary the
 model can act on, and claims nothing more.
 
 **The enforcement point is one module, not two.** `cli`'s classification and
-workspace test moved to `shared/plugins/command_containment.py`
+workspace test moved to `jaato_server/shared/plugins/command_containment.py`
 (`classify_command_paths`, `path_within_workspace`, `first_denied_path`); `cli`
 keeps its result-shaping (an explicit `cli containment (workspace boundary):`
 refusal naming `plugin_configs.cli.extra_paths` — until #1202 it mimicked "No
@@ -8202,14 +8426,14 @@ a tautology on today's only caller — which is the point: the invariant holds a
 the seam that spawns, rather than being a property of one call site a later
 caller could drop.
 
-### WebMCP Plugin (`shared/plugins/webmcp/`)
+### WebMCP Plugin (`jaato_server/shared/plugins/webmcp/`)
 
 Invokes the tools a **web page** declares for agents via
 [WebMCP](https://github.com/webmachinelearning/webmcp)
 (`document.modelContext`) — so the model drives a web app through its own
 declared operations instead of scraping and clicking. WebMCP is *not* an MCP
 transport (no server, no JSON-RPC); it is an in-page JS API, so the plugin
-drives a browser over `shared/cdp.py`.
+drives a browser over `jaato_server/shared/cdp.py`.
 
 **Not in the default plugin set** — it drives a browser. Enable it explicitly
 in a profile's `plugins:` list.
@@ -8247,7 +8471,7 @@ property reaches the page as `undefined`. See
 
 Requires Chrome/Edge 149+ (origin trial), or `chrome://flags/#enable-webmcp-testing`.
 
-### Webhook Plugin (`shared/plugins/webhook/`)
+### Webhook Plugin (`jaato_server/shared/plugins/webhook/`)
 
 The webhook plugin provides an inbound HTTP listener for receiving external webhooks (GitHub, Slack, Jira, etc.) and delivering them to agent sessions via subscribe/poll tools. Enables long-running daemon sessions that react to external events.
 
@@ -8433,7 +8657,7 @@ Also confirmed clean in the same pass, as the issue reported: the unbounded
 pre-auth body read. `do_POST` compares `Content-Length` against
 `config.max_body_size` **before** `self.rfile.read(content_length)`.
 
-Tests: `shared/plugins/webhook/tests/test_replay_protection_713.py` — the
+Tests: `jaato_server/shared/plugins/webhook/tests/test_replay_protection_713.py` — the
 vendor vectors, a replayed request refused and a fresh one accepted on each
 scheme, an expired and a future-dated timestamp, a tampered body and a tampered
 timestamp, the cache-poisoning refusal, and the bounded-cache eviction counter.
@@ -8454,7 +8678,7 @@ See [Webhook Plugin Design](docs/design/webhook-plugin.md) for full design doc.
 
 The UI rendering follows a strict separation between data production and presentation:
 
-**Pipeline Layer** (`shared/plugins/`, `server/`):
+**Pipeline Layer** (`jaato_server/shared/plugins/`, `jaato_server/server/`):
 - Produces **structured data** (e.g., Q&A pairs, tool results, plan steps)
 - Emits **lifecycle events** with semantic content
 - Is UI-agnostic - no formatting, colors, or layout decisions
@@ -8749,7 +8973,7 @@ plugin_configs:
 | `ANTHROPIC_AUTH_TOKEN` | OAuth token for Claude Pro/Max subscription |
 
 **Authentication Options (in priority order):**
-1. **PKCE OAuth Login** (recommended for subscription): `oauth_login()` from `shared.plugins.model_provider.anthropic`
+1. **PKCE OAuth Login** (recommended for subscription): `oauth_login()` from `jaato_server.shared.plugins.model_provider.anthropic`
 2. **OAuth Token** (`sk-ant-oat01-...`): From `claude setup-token`
 3. **API Key** (`sk-ant-api03-...`): Uses API credits
 
@@ -9482,7 +9706,7 @@ Benefits:
 | `JAATO_ANTIGRAVITY_THINKING_BUDGET` | Claude thinking budget (default: 8192) |
 | `JAATO_ANTIGRAVITY_AUTO_ROTATE` | Enable multi-account rotation (default: `true`) |
 
-Auth: `oauth_login()` from `shared.plugins.model_provider.antigravity`
+Auth: `oauth_login()` from `jaato_server.shared.plugins.model_provider.antigravity`
 
 Available Models:
 - Antigravity quota: `antigravity-gemini-3-pro/flash`, `antigravity-claude-sonnet-4-5[-thinking]`
@@ -9554,7 +9778,7 @@ one profile block whose silent-ignore failures had no reporter, the family
 ### General
 
 Every env var the installed tree reads is tagged with a **scope** in
-`jaato-server/shared/env_scope.py` — `session` (a knob two sessions on one host
+`jaato-server/jaato_server/shared/env_scope.py` — `session` (a knob two sessions on one host
 may legitimately differ on), `host` (process-scoped; a per-session value would
 be a lie), `ambient` (the host environment being read, not a knob) or `internal`
 (a framework-to-framework handoff) — together with the typed profile key that
@@ -9584,7 +9808,7 @@ covers it, where one exists. `jaato-scaffold explain env` renders the tags;
 | `JAATO_IPC_EVENT_QUEUE_MAX` | Per-client IPC event-queue bound (default 2048). Beyond it, lossy tool-output chunks are evicted oldest-first (media before text); essential lifecycle events are queued past the bound rather than dropped, because losing one desynchronises the client permanently. A non-numeric or non-positive value falls back to the default — "unbounded" is the bug this exists to fix. See [Binary Media Chunks](docs/design/binary-media-chunks.md). |
 | `JAATO_CREDENTIAL_LOCK_TIMEOUT` | Seconds a caller waits for another process to finish refreshing a rotating OAuth credential before giving up (default 60). Host-scoped for the reason `JAATO_RUNNER_ACK_TIMEOUT` is: what is bounded is contention on a FILE, and the contenders — daemon, runner subprocesses, pool slots — serve sessions that have no say in each other's timeouts. A non-numeric or non-positive value falls back to the default; "unbounded" is the bug this exists to fix. See [A Refresh Token That Rotates](#a-refresh-token-that-rotates-and-two-sessions-refreshing-it-683). |
 | `JAATO_OAUTH_REFRESH_MARGIN` | Seconds before real expiry at which an OAuth access token is treated as stale and refreshed (default 300 — the value each provider previously hardcoded). Host-scoped because every process sharing one credential file must agree on when that file's token is stale. Note what it does **not** do: a fixed margin does not disperse a thundering herd (every process crosses it at the same instant), it makes the refresh happen while the old token is still valid — which is what lets a transient failure fall back on it instead of logging the user out. |
-| `JAATO_RELEASE_CHECK` | Set to `off` (also `0`/`no`/`false`/`none`/`never`) to stop `jaato-doctor` and `jaato-scaffold explain releases` asking PyPI / TestPyPI whether a newer jaato package is published. On by default — a notification nobody enables is a notification nobody gets — and bounded: a 3s per-index deadline, cached 6h at `~/.jaato/release_check.json`, never a FAIL, and an index that does not answer is reported as UNKNOWN rather than as currency. An unrecognised value reads as ON, because a typo that silently disables the notifier reproduces the state it exists to fix. Read only in `jaato_sdk/release_channels.py`, which is why it is not in `shared/env_scope.py` (that catalog is derived by a scan of `server/` and `shared/`). See [A Release Nobody Was Told About](#a-release-nobody-was-told-about). |
+| `JAATO_RELEASE_CHECK` | Set to `off` (also `0`/`no`/`false`/`none`/`never`) to stop `jaato-doctor` and `jaato-scaffold explain releases` asking PyPI / TestPyPI whether a newer jaato package is published. On by default — a notification nobody enables is a notification nobody gets — and bounded: a 3s per-index deadline, cached 6h at `~/.jaato/release_check.json`, never a FAIL, and an index that does not answer is reported as UNKNOWN rather than as currency. An unrecognised value reads as ON, because a typo that silently disables the notifier reproduces the state it exists to fix. Read only in `jaato_sdk/release_channels.py`, which is why it is not in `jaato_server/shared/env_scope.py` (that catalog is derived by a scan of `jaato_server/server/` and `jaato_server/shared/`). See [A Release Nobody Was Told About](#a-release-nobody-was-told-about). |
 | `JAATO_AMBIGUOUS_WIDTH` | Width for East Asian Ambiguous chars in tables (`1` default, `2` for CJK terminals) |
 | `JAATO_SESSION_LOG_DIR` | Per-session log directory, relative to workspace (default: `.jaato/logs`) |
 | `JAATO_CGROUPS_ROOT` | Parent cgroup v2 directory for the WS server's per-session cgroup tree (default: `/sys/fs/cgroup/jaato`). Override when the host has subtree_control delegated under a different path. Must already exist with `memory`, `pids`, `cpu` in `cgroup.subtree_control`. |
@@ -9641,7 +9865,7 @@ doubleword-auth login/key/logout/status # Doubleword API key
 
 Every provider whose `PROVIDER_AUTH_RESOLUTION` names a `stored` command has
 a plugin registering it, and
-`shared/tests/test_a_named_auth_command_exists.py` derives both halves from
+`jaato_server/shared/tests/test_a_named_auth_command_exists.py` derives both halves from
 the tree so a new provider cannot advertise a command nothing provides
 (#888). A `stored` entry naming a FILE instead — `openai_auth.json`,
 `~/.aws/credentials`, `GOOGLE_APPLICATION_CREDENTIALS` — has no command and
@@ -9828,7 +10052,7 @@ ratchet for a resolving `typed_key`.
 ### Cyclomatic Complexity
 
 New functions must score **15 or below** under radon. The gate is
-`jaato-server/shared/tests/test_cyclomatic_complexity_audit.py`, which runs in the
+`jaato-server/jaato_server/shared/tests/test_cyclomatic_complexity_audit.py`, which runs in the
 required `contract-guards` CI job.
 
 It is a **ratchet, not a threshold**. The tree already carried 416 functions over
@@ -9844,7 +10068,7 @@ scores. Three rules follow:
 Regenerate the whole baseline (deliberate re-freeze only) with:
 
 ```bash
-python jaato-server/shared/tests/test_cyclomatic_complexity_audit.py
+python jaato-server/jaato_server/shared/tests/test_cyclomatic_complexity_audit.py
 ```
 
 Note that radon counts `and`/`or` and comprehensions as decision points, so a run
@@ -9857,13 +10081,13 @@ the test module's docstring for the measurements behind the choice.
 `docs/compare-*.md` and the multimodal design doc carry claims an evaluator
 quotes — the licence, whether AppArmor is free, which wires carry images —
 and both comparison docs had drifted once before (#866). The guard is
-`jaato-server/shared/tests/test_docs_do_not_contradict_the_tree.py`, in the
+`jaato-server/jaato_server/shared/tests/test_docs_do_not_contradict_the_tree.py`, in the
 required `contract-guards` job:
 
 - no line a comparison doc attributes to jaato may call it MIT or open source
   (the identifier is read from `jaato-server/pyproject.toml`; a competitor's
   licence on its own line or in its own column is fine);
-- no comparison-doc line may call AppArmor premium while `server/apparmor.py`
+- no comparison-doc line may call AppArmor premium while `jaato_server/server/apparmor.py`
   ships in the free package;
 - the "Where jaato is now" table in `docs/design/multimodal-model-support.md`
   must name exactly the providers whose `PROVIDER_CAPABILITIES` declare the
@@ -9883,7 +10107,7 @@ whose only trigger is a version nobody runs.
 #1076 offers two honest resolutions — test the declared range, or declare
 the tested range. This tree takes the second. The floor is **`>=3.12`** in
 all four published `pyproject.toml` files, the 3.10 / 3.11 classifiers are
-gone, and `jaato-server/shared/tests/test_declared_python_floor_is_tested.py`
+gone, and `jaato-server/jaato_server/shared/tests/test_declared_python_floor_is_tested.py`
 (in the required `contract-guards` job) is what stops the two drifting apart
 again. It asserts four things and nothing more:
 
@@ -9911,7 +10135,7 @@ floor is its author's to choose.
 
 ### The Reversion Meta-Guard Never Writes to Your Checkout (#995)
 
-`jaato-server/shared/tests/test_every_guard_detects_its_own_reversion.py`
+`jaato-server/jaato_server/shared/tests/test_every_guard_detects_its_own_reversion.py`
 proves each contract guard is not decorative by putting its defect **back** —
 rewriting a source file, running the one guard test that must fail, and
 restoring. Until #995 it rewrote the file **in the working tree** and restored
@@ -10019,7 +10243,7 @@ This is not optional cleanup — treat missing or inaccurate docstrings as a def
 - [Reliability Policies Config](docs/reliability-policies-config.md) - JSON schema, per-tool thresholds, prerequisite policies, usage examples
 - [Daemon Extensions](docs/design/daemon-extensions.md) - Extension points for external packages (session hooks, WS interceptors, custom aspects, remote handlers)
 - [Application Identity](docs/design/app-identity.md) - Naming the application an integrator built, rather than reporting every SDK-based harness upstream as "jaato". `AppIdentity` + the four-tier precedence (provider knob → provider env → `JaatoRuntime(app_identity=)` → `JAATO_APP_*`), the `(powered by jaato)` suffix, header-safety sanitisation, and why the env vars are `host`-scoped.
-- [Env Vars vs Profile Keys](docs/design/env-vars-vs-profile-keys.md) - Which of the 186 env vars earned a typed profile/`plugin_configs` key, and which are correctly env-only. The tagged catalog lives in `shared/env_scope.py` (scope: `session` / `host` / `ambient` / `internal`, plus the typed key where one exists) and is enforced by `test_env_scope_catalog.py`; 38 session-scoped knobs with no typed key sit in a may-only-shrink ratchet, each carrying a tier and a **proposed** key (`explain env untyped` prints both). Includes the credential policy for the three providers whose peers expose an `api_key` knob and they don't.
+- [Env Vars vs Profile Keys](docs/design/env-vars-vs-profile-keys.md) - Which of the 186 env vars earned a typed profile/`plugin_configs` key, and which are correctly env-only. The tagged catalog lives in `jaato_server/shared/env_scope.py` (scope: `session` / `host` / `ambient` / `internal`, plus the typed key where one exists) and is enforced by `test_env_scope_catalog.py`; 38 session-scoped knobs with no typed key sit in a may-only-shrink ratchet, each carrying a tier and a **proposed** key (`explain env untyped` prints both). Includes the credential policy for the three providers whose peers expose an `api_key` knob and they don't.
 - [The Self-Bounding Completion Gate](docs/design/completion-gate.md) - What `completion_processors` is for and the seven rules a working one had to get right, each attached to the incident that produced it. Covers `max_refusals:` / `on_exhausted:` (the gate's own refusal ceiling, distinct from `budget_control`, which is the retry budget since #1068 removed the `max_turns` field that used to claim the role), the `faults[]` channel that keeps an unfixable environment fault from burning the retry budget, why a broken gate must never read as a passing one, and the load-once-per-session caching the counter used to depend on as folklore. Start from `jaato-scaffold explain completion` and `jaato-scaffold new processor` — both are computed from the framework, so they cannot drift the way the prose can. §9 covers why the gate is three files rather than one: `jaato-scaffold new sweep` emits the checks (`acceptance.sh`, shared with the post-hoc graders), the processor, and the profile's `completion_processors:` + `completion_payload_schema:` as ONE set (`--no-gate` opts out), because a profile carrying processors and no schema has no lenient gate — `_should_hide_signal_completion` removes `signal_completion` entirely, so the agent cannot signal and the gate never runs. §11 covers why a session that completed is still drivable: `signal_completion` ends the TURN, and the continuation it skips was also the only writer of that batch's results into history, so a completed conversation used to end on a `tool_calls` block nothing answered and every later request — `send_message` and `session.wake` alike — was rejected by the provider (#913). `_record_terminal_tool_results` writes them without the round-trip, which is what makes "complete every turn to enforce a contract, then keep talking" usable.
 - [Payload-Schema Conventions](docs/design/payload-schema-conventions.md) - Symmetric authoring guide for `spawn_payload_schema` (input boundary) and `completion_payload_schema` (output boundary) — symmetric in everything but the type system: a completion payload is JSON the model emitted, a spawn payload crosses the IPC wire as `key=value` argv tokens, so **every spawn property is a `string`** (`pattern` carries the shape, the consumer parses). #883 ratified that rather than reopening the transport, and both spawn boundaries now validate the same string view — the in-process `spawn_subagent` call used to accept a typed value the wire could never deliver, so one profile meant two things. A refusal caused by the schema names the profile; `jaato-scaffold validate` catches it before any spawn as `spawn_schema_type_unreachable`. Mirror prefetch required-keys; always carry `warnings[]` / `errors[]` escape hatches; persona ↔ schema consistency check; canonical-hash strip rules; `agent_params` interaction with agent-continuity (§6).
 - [Competitor Memory Systems](docs/design/competitor-memory-systems.md) - Survey of nine agent-memory products, sorted by what a *framework* owes: pattern (nothing) / seam (an extension point) / fidelity (a fix) / not ours. Records which items were already expressible as cascade patterns, which memory hot paths are not pluggable, and why the pattern corpus needs `certify/`-style contract tests run against `main`.

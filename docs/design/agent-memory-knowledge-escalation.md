@@ -448,7 +448,7 @@ escalate_memory(memory_id, reference_id, name, description, content, tags, mode,
 
 **New reference type: `learned`**
 
-The `SourceType` enum in `shared/plugins/references/models.py` gains a new
+The `SourceType` enum in `jaato_server/shared/plugins/references/models.py` gains a new
 value:
 
 ```python

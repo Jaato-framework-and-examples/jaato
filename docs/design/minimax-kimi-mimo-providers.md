@@ -603,7 +603,7 @@ gets a parametrised sibling per provider.
 
 | Site | Change |
 |---|---|
-| `shared/env_scope.py` | `JAATO_<NAME>_API_KEY` / `_BASE_URL` / `_CONTEXT_LENGTH` / `_MODEL` (SESSION, typed key); the vendor key vars (`MINIMAX_API_KEY`, `MOONSHOT_API_KEY`, `MIMO_API_KEY`) as SESSION with the same typed key, like `NEBIUS_API_KEY` |
+| `jaato_server/shared/env_scope.py` | `JAATO_<NAME>_API_KEY` / `_BASE_URL` / `_CONTEXT_LENGTH` / `_MODEL` (SESSION, typed key); the vendor key vars (`MINIMAX_API_KEY`, `MOONSHOT_API_KEY`, `MIMO_API_KEY`) as SESSION with the same typed key, like `NEBIUS_API_KEY` |
 | `tests/test_provider_capability_conformance.py` | `_CONVERTERS["<name>"] = ("_openai_compat/converters.py", "message_to_openai")` |
 | `plugins/model_provider/tests/test_modalities.py` | the `(pkg, Class)` list |
 | `plugins/model_provider/tests/test_profile_api_key_location.py` | the parametrised env-module list |

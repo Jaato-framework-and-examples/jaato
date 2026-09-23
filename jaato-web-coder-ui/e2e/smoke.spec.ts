@@ -691,6 +691,81 @@ test("a reconnect re-selects the workspace, so a file attached after it still la
   await expect(page.getByText("Staged into the workspace: after.txt")).toBeVisible();
 });
 
+test("the Files panel's reset shows only later changes, and survives a reconnect (#1189)", async ({ page }) => {
+  await openSession(page);
+  await composer(page).fill("please touch old.py kept.py");
+  await composer(page).press("Enter");
+  await expect(page.getByText("Touched old.py, kept.py.")).toBeVisible();
+  await page.getByRole("button", { name: "Toggle workspace changes (Alt+W)" }).click();
+  const panel = page.getByRole("region", { name: "Files" });
+  await expect(panel.getByText("~ old.py")).toBeVisible();
+
+  await panel.getByRole("button", { name: "reset", exact: true }).click();
+  await expect(panel.getByText("No files changed since the reset.")).toBeVisible();
+
+  // kept.py was already listed: touching it again is what the reset is for.
+  await composer(page).fill("please touch kept.py new.py");
+  await composer(page).press("Enter");
+  await expect(page.getByText("Touched kept.py, new.py.")).toBeVisible();
+  await expect(panel.getByText("~ kept.py")).toBeVisible();
+  await expect(panel.getByText("~ new.py")).toBeVisible();
+  await expect(panel.getByText("~ old.py")).toHaveCount(0);
+
+  // The reconnect's snapshot replaces the list wholesale; the numbering on
+  // it is what lets the reset survive.
+  await composer(page).fill("mock-drop");
+  await composer(page).press("Enter");
+  await expect(page.getByText(/^reconnecting/)).toBeVisible();
+  await expect(page.getByText("connected", { exact: true })).toBeVisible();
+  await expect(panel.getByText("~ new.py")).toBeVisible();
+  await expect(panel.getByText("~ old.py")).toHaveCount(0);
+
+  await panel.getByRole("button", { name: "show everything" }).click();
+  await expect(panel.getByText("~ old.py")).toBeVisible();
+});
+
+test("a hashed category id in a tool call is shown by its name", async ({ page }) => {
+  await openSession(page);
+  await composer(page).fill("please discover tools");
+  await composer(page).press("Enter");
+  await expect(page.getByText("I have a system category.")).toBeVisible();
+  const row = page.getByRole("button", { name: /list_tools/ });
+  // The mapping arrived after the call: the row resolves when it does.
+  await expect(row).toContainText("category_id=system");
+  await expect(row).not.toContainText("c_bbc5e661");
+});
+
+test("the Instructions panel says when GC last ran, what it freed, and the policy -- to a tab that attached later too (#1190)", async ({ page }) => {
+  await openSession(page);
+  await composer(page).fill("please collect garbage");
+  await composer(page).press("Enter");
+  await expect(page.getByText("Collected.")).toBeVisible();
+  const budgetToggle = page.getByRole("button", { name: /Open Budget/ });
+  if (await budgetToggle.count()) await budgetToggle.click();
+  const gc = page.getByTestId("gc-summary");
+  // The mock stamps the pass 12 minutes in the past: the panel must show
+  // the pass's own time, not the moment the event arrived.
+  await expect(gc).toContainText("last GC 12 min ago · freed 14.2k tokens");
+  await expect(gc).toContainText("GC: budget · runs at 80% · down to 60%");
+
+  // A second tab attaching to the same session never saw the pass.  Only
+  // the daemon's replay can tell it -- a reconnect of THIS tab would not
+  // prove that, since it keeps what the tab already knew.
+  const sessionId = await page.locator("span[title]").filter({ hasText: /^session / }).first().getAttribute("title");
+  expect(sessionId).toBeTruthy();
+  const other = await page.context().newPage();
+  await other.goto("/");
+  await other.getByPlaceholder("ws://host:8080").fill(WS);
+  await other.getByRole("button", { name: "Connect" }).click();
+  await other.getByRole("button", { name: "Go to the prompt without a session" }).click();
+  await composer(other).fill(`session attach ${sessionId}`);
+  await composer(other).press("Enter");
+  const otherToggle = other.getByRole("button", { name: /Open Budget/ });
+  if (await otherToggle.count()) await otherToggle.click();
+  await expect(other.getByTestId("gc-summary")).toContainText("last GC 12 min ago · freed 14.2k tokens");
+  await expect(other.getByTestId("gc-summary")).toContainText("GC: budget");
+});
+
 test("the workspace list says who is signed in and offers the backend's Sign out", async ({ page }) => {
   await page.route("**/config.json", (route) =>
     route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ daemon: WS_WORKSPACES, ticketUrl: "/api/ticket", autoConnect: true }) }),
@@ -853,4 +928,45 @@ test("deleting a session forgets the note written about it", async ({ page }) =>
   await expect
     .poll(() => page.evaluate(() => localStorage.getItem("jaato.web-coder.notes.v1") ?? ""))
     .not.toContain("grace period");
+});
+
+test("the live tool-output popup floats inside the transcript, not off its edge", async ({ page }) => {
+  // Reported with a screenshot of the CLI's popup cut off on the left.  An
+  // unlayered ``.plate { position: relative }`` outranked Tailwind's
+  // ``absolute``, so the popup sat in normal flow and ``right-5`` pushed it
+  // off the left edge.  Measured, not styled: the box must lie inside the
+  // transcript column and above the composer.
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await openSession(page);
+  await composer(page).fill("live");
+  await composer(page).press("Enter");
+  const popup = page.getByRole("dialog", { name: "Live tool output" });
+  await expect(popup).toContainText("src/slow.test.ts");
+  const box = (await popup.boundingBox())!;
+  const main = (await page.locator("main").boundingBox())!;
+  const input = (await composer(page).boundingBox())!;
+  expect(box.x).toBeGreaterThanOrEqual(main.x);
+  expect(box.x + box.width).toBeLessThanOrEqual(main.x + main.width);
+  expect(box.y).toBeGreaterThanOrEqual(main.y);
+  expect(box.y + box.height).toBeLessThanOrEqual(input.y);
+  // Anchored to the right, as the design draws it -- in flow it hugs the left.
+  expect(main.x + main.width - (box.x + box.width)).toBeLessThan(40);
+});
+
+test("the command proposals float above the composer instead of pushing the layout", async ({ page }) => {
+  // The same unlayered rule cancelled this list's ``absolute bottom-full``:
+  // it was laid out in flow, so the composer's strip grew upward and the
+  // transcript shrank by the list's height every time a proposal appeared.
+  // The input itself does not move (it is pinned to the bottom), which is
+  // why the strip's TOP is what is measured.
+  await openSession(page);
+  const strip = page.locator("main > div.border-t");
+  const before = (await strip.boundingBox())!;
+  await composer(page).fill("mo");
+  const listbox = page.getByRole("listbox", { name: "Command proposals" });
+  await expect(listbox).toBeVisible();
+  const list = (await listbox.boundingBox())!;
+  const after = (await strip.boundingBox())!;
+  expect(after.y).toBe(before.y);
+  expect(list.y + list.height).toBeLessThanOrEqual((await composer(page).boundingBox())!.y);
 });

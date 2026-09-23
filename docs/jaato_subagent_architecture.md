@@ -403,15 +403,24 @@ Creates a one-off subagent with tools from the `inline_allowed_plugins` list. **
 
 ### Comparison
 
-| Aspect | Profile-Based | Inline |
-|--------|--------------|--------|
-| Configuration | Pre-defined, version-controlled | Ad-hoc per request |
-| Tools available | Profile's plugin list | `inline_allowed_plugins` whitelist (or the parent's whole set when unset) |
-| Instructions | The profile's `default_agent`, or an explicit `agent=` | **None**, unless `inline_config.system_instructions` supplies them |
-| Auto-approval | Configurable per profile | Follows default policy |
-| Model override | Per-profile setting | Inherits parent's model |
-| GC strategy | Per-profile configuration | Parent's default |
-| Use case | Repeatable specialized tasks | One-off explorations |
+| Aspect | Profile-Based | Inline | `inherit` (#1198) |
+|--------|--------------|--------|--------|
+| Configuration | Pre-defined, version-controlled | Ad-hoc per request | Frozen snapshot of the parent at spawn time |
+| Tools available | Profile's plugin list | `inline_allowed_plugins` whitelist (or the parent's whole set when unset) | The parent's plugin set **minus `subagent`** |
+| Instructions | The profile's `default_agent`, or an explicit `agent=` | **None**, unless `inline_config.system_instructions` supplies them | The parent's assembled system instruction, applied as an override |
+| Auto-approval | Configurable per profile | Follows default policy | Inherits the parent's posture |
+| Model override | Per-profile setting | Inherits parent's model | Inherits parent's model |
+| GC strategy | Per-profile configuration | Parent's default | Parent's default |
+| Needs `allow_inline` | No | **Yes** (off by default, #944) | **No** — `inherit` is an enum value, not an inline spawn |
+| Can itself spawn | Per its plugins | Per `inline_allowed_plugins` | **No** — the `subagent` plugin is stripped so an `inherit` child cannot recursively spawn (self-replication guard; there is no spawn-depth bound, #680) |
+| Use case | Repeatable specialized tasks | One-off explorations | "Spawn a helper that behaves like me" |
+
+`inherit` is a reserved value of the `profile` argument: it captures the
+parent's plugin set and system instructions at the moment of the call, deep-copies
+them (later parent mutation does not reach the child), and strips the `subagent`
+plugin so the child cannot itself spawn. It is refused on the remote (`server=`)
+path — the snapshot is local — and a profile file named `inherit` is rejected at
+discovery so it cannot shadow the reserved value.
 
 ---
 

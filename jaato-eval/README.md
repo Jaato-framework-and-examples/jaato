@@ -784,7 +784,7 @@ blocks every schema-driven arm as truncated.
 
 ## Constraint: SDK only
 
-This package imports `jaato_sdk` and never `shared.*`. If something here
+This package imports `jaato_sdk` and never `jaato_server.shared.*`. If something here
 cannot be built on the SDK, that is an SDK gap to be fixed in the SDK.
 
 That is not hypothetical: building this found the tool-call ledger
