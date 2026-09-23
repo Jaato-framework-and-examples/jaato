@@ -16,6 +16,7 @@ import { summarizeToolCalls } from "@/protocol/turnStats";
 import { formatSessionList, normalizeSessionList, type SessionSummary } from "@/protocol/sessions";
 import { formatHistoryListing, historyBlocks } from "@/protocol/history";
 import { clampRailWidth, loadRailWidth, saveRailWidth } from "@/store/railWidth";
+import { loadRailSplits, sanitizeSplits, saveRailSplits, type RailSplits } from "@/store/railSplits";
 import { applyChanged, applySnapshot, markReset, type WorkspaceReset } from "@/store/workspaceView";
 import { toolIdMappings } from "@/protocol/toolIds";
 import type { SessionNote } from "@/app/notes";
@@ -248,6 +249,13 @@ export interface JaatoState {
     popupCallId?: string | null;
     /** Width of the session rail in px, dragged via the handle on its left edge; remembered per browser. */
     railWidth: number;
+    /**
+     * How the rail's open sections share its height, as a weight per section
+     * id, dragged via the horizontal handle between two open sections;
+     * remembered per browser.  Normalised to fractions over the open set at
+     * render time — see ``@/store/railSplits``.
+     */
+    railSplits: RailSplits;
   };
 
   // ── actions ──
@@ -318,6 +326,8 @@ export interface JaatoState {
   setPopup: (callId: string | null) => void;
   /** Clamped to the rail's bounds and persisted. */
   setRailWidth: (w: number) => void;
+  /** Replace the rail section split weights (from a drag or a reset) and persist. */
+  setRailSplits: (splits: RailSplits) => void;
   addUploads: (items: StagedUpload[]) => void;
   updateUpload: (id: string, patch: Partial<StagedUpload>) => void;
   removeUpload: (id: string) => void;
@@ -1072,7 +1082,7 @@ export const useJaato = create<JaatoState>()((set, get) => ({
   commands: mergeCommandSpecs([]),
   uploads: [],
   ...emptySessionState(),
-  ui: { showPlan: false, showBudget: false, showWorkspace: false, showTools: false, showSessions: false, theme: "light", popupCallId: null, railWidth: loadRailWidth() },
+  ui: { showPlan: false, showBudget: false, showWorkspace: false, showTools: false, showSessions: false, theme: "light", popupCallId: null, railWidth: loadRailWidth(), railSplits: loadRailSplits() },
 
   dispatch: (events) =>
     set((state) => {
@@ -1159,6 +1169,7 @@ export const useJaato = create<JaatoState>()((set, get) => ({
   setTheme: (theme) => set((st) => ({ ui: { ...st.ui, theme } })),
   setPopup: (callId) => set((st) => ({ ui: { ...st.ui, popupCallId: callId } })),
   setRailWidth: (w) => set((st) => { const railWidth = clampRailWidth(w); saveRailWidth(railWidth); return { ui: { ...st.ui, railWidth } }; }),
+  setRailSplits: (splits) => set((st) => { const railSplits = sanitizeSplits(splits); saveRailSplits(railSplits); return { ui: { ...st.ui, railSplits } }; }),
   addUploads: (items) => set((st) => ({ uploads: [...st.uploads, ...items] })),
   updateUpload: (id, patch) => set((st) => ({ uploads: st.uploads.map((u) => (u.id === id ? { ...u, ...patch } : u)) })),
   removeUpload: (id) => set((st) => ({ uploads: st.uploads.filter((u) => u.id !== id) })),
