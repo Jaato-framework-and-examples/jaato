@@ -35,6 +35,66 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from jaato_server.shared.tests.reversion import Reversion
+
+
+# ----------------------------------------------------------------------
+# Reversions — read by
+# ``shared/tests/test_every_guard_detects_its_own_reversion.py``.  The two
+# #1253 Layer-1 (daemon WS hook) reversions live HERE, beside the tests they
+# name, because the meta-guard resolves a reversion's ``test`` WITHIN the
+# module that DECLARES it (#1065).  The runner-side gate and the envelope
+# round-trip are guarded from ``test_confinement_before_serve_1253.py``,
+# whose tests live there.
+# ----------------------------------------------------------------------
+_WS = "jaato-server/jaato_server/server/websocket.py"
+
+REVERSIONS = [
+    # Layer 1 — the daemon refuses a provisioning failure.  Falling through
+    # (``return`` -> ``pass``) spawns an unconfined runner for a session that
+    # required confinement: exactly the #1253 bypass.
+    Reversion(
+        target=_WS,
+        find=(
+            '                        "unconfined runner (#1253)",\n'
+            "                    )\n"
+            "                    return"
+        ),
+        replace=(
+            '                        "unconfined runner (#1253)",\n'
+            "                    )\n"
+            "                    pass  # #1253 reversion: fall through to spawn"
+        ),
+        test="test_ws_hook_refuses_when_provisioning_fails",
+        because=(
+            "the WS hook again spawns an unconfined runner when profile "
+            "provisioning fails instead of refusing the session"
+        ),
+    ),
+    # Layer 1 — a confined session's spawn failure must refuse, not fall back
+    # to unconfined in-process execution.  Neutering the gate in
+    # ``_report_confined_spawn_failure`` restores the in-process fallback for
+    # a session that required confinement.
+    Reversion(
+        target=_WS,
+        find=(
+            "    if confinement_required:\n"
+            "        logger.warning(\n"
+            '            "AppArmor pre-init: runner spawn failed for session %s "'
+        ),
+        replace=(
+            "    if False:  # #1253 reversion\n"
+            "        logger.warning(\n"
+            '            "AppArmor pre-init: runner spawn failed for session %s "'
+        ),
+        test="test_ws_hook_spawn_failure_refuses_a_confined_session",
+        because=(
+            "a confined session whose runner spawn fails again falls back to "
+            "unconfined in-process tool execution instead of being refused"
+        ),
+    ),
+]
+
 
 # ----------------------------------------------------------------------
 # Fakes

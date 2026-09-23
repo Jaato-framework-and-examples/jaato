@@ -70,8 +70,12 @@ except Exception:  # pragma: no cover
 
 _SESSION = "jaato-server/jaato_server/server/runner/session.py"
 _ENVELOPE = "jaato-server/jaato_server/shared/session_envelope.py"
-_WS = "jaato-server/jaato_server/server/websocket.py"
 
+# The two Layer-1 (daemon WS hook) reversions are declared in
+# ``test_ws_always_spawn_runner.py``, beside the behavioural tests they name:
+# the meta-guard resolves a reversion's ``test`` WITHIN the module that
+# declares the REVERSIONS list (#1065), so a reversion here naming a test that
+# lives there would resolve to no test and be reported BLOCKED.
 REVERSIONS = [] if Reversion is None else [
     # Layer 2 — the runner-side gate.  Disabling the raise restores the
     # pre-#1253 behaviour: an empty profile with confinement required falls
@@ -101,49 +105,6 @@ REVERSIONS = [] if Reversion is None else [
         because=(
             "confinement_required no longer survives the daemon->runner wire, "
             "so the runner gate can never see that confinement was required"
-        ),
-    ),
-    # Layer 1 — the daemon refuses a provisioning failure.  Falling through
-    # (``return`` -> ``pass``) spawns an unconfined runner for a session that
-    # required confinement: exactly the #1253 bypass.
-    Reversion(
-        target=_WS,
-        find=(
-            '                        "unconfined runner (#1253)",\n'
-            "                    )\n"
-            "                    return"
-        ),
-        replace=(
-            '                        "unconfined runner (#1253)",\n'
-            "                    )\n"
-            "                    pass  # #1253 reversion: fall through to spawn"
-        ),
-        test="test_ws_hook_refuses_when_provisioning_fails",
-        because=(
-            "the WS hook again spawns an unconfined runner when profile "
-            "provisioning fails instead of refusing the session"
-        ),
-    ),
-    # Layer 1 — a confined session's spawn failure must refuse, not fall back
-    # to unconfined in-process execution.  Neutering the gate in
-    # ``_report_confined_spawn_failure`` restores the in-process fallback for
-    # a session that required confinement.
-    Reversion(
-        target=_WS,
-        find=(
-            "    if confinement_required:\n"
-            "        logger.warning(\n"
-            '            "AppArmor pre-init: runner spawn failed for session %s "'
-        ),
-        replace=(
-            "    if False:  # #1253 reversion\n"
-            "        logger.warning(\n"
-            '            "AppArmor pre-init: runner spawn failed for session %s "'
-        ),
-        test="test_ws_hook_spawn_failure_refuses_a_confined_session",
-        because=(
-            "a confined session whose runner spawn fails again falls back to "
-            "unconfined in-process tool execution instead of being refused"
         ),
     ),
 ]
