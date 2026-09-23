@@ -64,6 +64,8 @@ import {
   type PermissionClearRequest,
   type PermissionSetDefaultRequest,
   type PermissionPolicySnapshotRequest,
+  type WorkspaceFileContentEvent,
+  type WorkspaceFileFetchRequest,
 } from "./events.js";
 import type {
   CatchallEventHandler,
@@ -140,6 +142,24 @@ export const MIN_SESSION_RELOAD_ENV_PROTOCOL = "1.11";
  * describing a ``.gitignore`` nobody changed.
  */
 export const MIN_WORKSPACE_IGNORE_PROTOCOL = "1.12";
+
+/**
+ * Protocol floor for {@link JaatoClient.fetchWorkspaceFile}.  A missing
+ * VERB: an older daemon answers ``ErrorEvent("Unknown message type")`` and
+ * never the ``workspace.file.content`` the call waits on, so the call is
+ * refused below this version rather than left to time out.
+ */
+export const MIN_FILE_FETCH_PROTOCOL = "1.20";
+
+/**
+ * What {@link JaatoClient.fetchWorkspaceFile} resolves with.  ``event`` is
+ * the daemon's header; ``data`` is the file's bytes when it was fetched
+ * (``null`` for a metadata-only fetch or a refusal).
+ */
+export interface WorkspaceFileFetchResult {
+  event: WorkspaceFileContentEvent;
+  data: Uint8Array | null;
+}
 
 /**
  * Parse ``"MAJOR.MINOR"`` into ``[major, minor]``.  Extra components
@@ -283,6 +303,8 @@ export class JaatoClient {
   private _state: ConnectionState = ConnectionState.DISCONNECTED;
   private _serverVersion: string | null = null;
   private _serverProtocolVersion: string | null = null;
+  /** Monotonic part of each ``fetchWorkspaceFile`` request id. */
+  private _fileFetchSeq = 0;
   private _clientId: string | null = null;
   private _sessionId: string | null = null;
   private _statusHandlers: Array<(s: ConnectionStatus) => void> = [];
@@ -971,6 +993,66 @@ export class JaatoClient {
       command: "workspace.ignore",
       args: [path],
     } as CommandRequest);
+  }
+
+  /**
+   * Download one file from the workspace this connection is in (protocol
+   * 1.20, WS only) -- the reverse of {@link stageFiles}.
+   *
+   * ``path`` is workspace-relative (or absolute inside the workspace).  The
+   * daemon answers with a ``workspace.file.content`` header and, on success,
+   * one binary frame the transport attaches to it, so the result carries
+   * the bytes.  A refusal is NOT thrown: it resolves with ``event.ok ===
+   * false`` and ``event.category`` naming why (``not_found``,
+   * ``unsafe_path``, ``credential``, ``too_large``, ...), because a caller
+   * renders those differently.
+   *
+   * Calls are correlated by ``request_id``, so several may be in flight.
+   *
+   * @param options.metadataOnly Ask whether the file exists, its size and
+   *   type, without transferring it.
+   * @param options.timeoutMs Give up after this long (default 120 s).
+   * @throws Error against a daemon below {@link MIN_FILE_FETCH_PROTOCOL},
+   *   or on timeout.
+   */
+  async fetchWorkspaceFile(
+    path: string,
+    options: { metadataOnly?: boolean; timeoutMs?: number } = {},
+  ): Promise<WorkspaceFileFetchResult> {
+    if (
+      this._serverProtocolVersion === null ||
+      !isProtocolCompatible(this._serverProtocolVersion, MIN_FILE_FETCH_PROTOCOL)
+    ) {
+      throw new Error(
+        `fetchWorkspaceFile: this daemon speaks protocol ` +
+          `${this._serverProtocolVersion ?? "unknown"} and does not serve ` +
+          `workspace.file.fetch (needs >= ${MIN_FILE_FETCH_PROTOCOL}).  ` +
+          `Upgrade the daemon to download workspace files.`,
+      );
+    }
+    const requestId = `dl-${++this._fileFetchSeq}-${Date.now().toString(36)}`;
+    const timeoutMs = options.timeoutMs ?? 120_000;
+    const answer = new Promise<WorkspaceFileFetchResult>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        unsub();
+        reject(new Error(`fetchWorkspaceFile: no answer for ${path} after ${timeoutMs} ms`));
+      }, timeoutMs);
+      const unsub = this.subscribeAll((raw) => {
+        const event = raw as WorkspaceFileContentEvent & { data?: Uint8Array };
+        if (event.type !== EventTypeValue.WORKSPACE_FILE_CONTENT) return;
+        if (event.request_id !== requestId) return;
+        clearTimeout(timer);
+        unsub();
+        resolve({ event, data: event.data ?? null });
+      });
+    });
+    await this._sendEvent({
+      type: EventTypeValue.WORKSPACE_FILE_FETCH_REQUEST,
+      request_id: requestId,
+      path,
+      metadata_only: options.metadataOnly ?? false,
+    } as WorkspaceFileFetchRequest);
+    return answer;
   }
 
   /**

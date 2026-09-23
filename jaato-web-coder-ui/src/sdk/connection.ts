@@ -1,7 +1,7 @@
 /**
  * Adapter between ``@jaato/sdk``'s ``JaatoClient`` and the store.
  *
- * Owns exactly three things:
+ * Owns exactly four things:
  *   1. the client's lifecycle (one live client per page; ``connect`` /
  *      ``disconnect``), mirrored into ``state.connection``;
  *   2. event delivery — every wire event is queued and flushed into the
@@ -9,7 +9,9 @@
  *      commit per frame (the SDK already preserves order; we preserve
  *      it too by flushing the queue in FIFO);
  *   3. the request helpers the UI needs that the SDK exposes only as raw
- *      verbs (workspace list/select/create, config update).
+ *      verbs (workspace list/select/create, config update);
+ *   4. wiring the ``offer_download`` host tool onto each client
+ *      (``app/downloads.ts`` owns what it does).
  *
  * The client identifies itself as ``client_type: "web"`` with
  * ``supports_expandable_content: true`` — the model is told its output
@@ -18,6 +20,7 @@
  */
 import { EventTypeValue, JaatoClient, type ConnectionStatus, type JaatoEvent, type TokenProvider } from "@jaato/sdk";
 import { useJaato } from "@/store/store";
+import { wireDownloadTool } from "@/app/downloads";
 
 export interface ConnectOptions {
   url: string;
@@ -112,6 +115,8 @@ export async function connect(opts: ConnectOptions): Promise<JaatoClient> {
   sawReconnecting = false;
   c.onStatus(onStatus);
   c.subscribeAll((ev) => enqueue(ev));
+  // The ``offer_download`` host tool (protocol 1.20): registered per session.
+  wireDownloadTool(c);
   client = c;
   try {
     await c.connect();

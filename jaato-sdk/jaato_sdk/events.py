@@ -347,7 +347,23 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 # client validates them as such.  A client against an older daemon sees no
 # epoch and falls back to "reset until the next snapshot" -- the TUI's
 # behaviour before this, and no worse than it.  No SDK minimum.
-PROTOCOL_VERSION = "1.19"
+# 1.20 -- ``workspace.file.fetch`` / ``workspace.file.content``: DOWNLOAD a
+# file from the caller's workspace (WS only).  The reverse of
+# ``StageFilesRequest``: a remote client could put bytes into a workspace
+# and had no way to take any out, so an asset the agent produced was
+# reachable only through somebody with a shell on the host.  The answer is
+# one TEXT header followed, on success, by ONE raw BINARY frame of exactly
+# ``size`` bytes -- sent back to back under the connection's send lock, so
+# nothing interleaves between the two.  ``metadata_only`` asks for the
+# header alone (does the file exist, how big, what type), which is what a
+# host tool offering a download checks before it offers one.
+#
+# A missing VERB (the 1.7 rule): an older daemon answers ``ErrorEvent
+# ("Unknown message type")`` and never the content event a caller is
+# waiting on, so the TS SDK refuses below ``MIN_FILE_FETCH_PROTOCOL`` rather
+# than wait.  The result is client-initiated (the 1.10 shape), so an old
+# client never receives it unprompted.
+PROTOCOL_VERSION = "1.20"
 
 
 # =============================================================================
@@ -534,6 +550,11 @@ class EventType(str, Enum):
     # docs/sdk-file-staging.md for the wire protocol.
     WORKSPACE_FILES_STAGE_REQUEST = "workspace.files.stage_request"  # Client -> Server
     WORKSPACE_FILES_STAGED = "workspace.files.staged"  # Server -> Client
+    # File download from a workspace (Client <-> Server, WS only, 1.20).
+    # The server answers with one TEXT content header, followed on success
+    # by ONE raw BINARY frame of ``size`` bytes.  See docs/sdk-file-staging.md.
+    WORKSPACE_FILE_FETCH_REQUEST = "workspace.file.fetch"  # Client -> Server
+    WORKSPACE_FILE_CONTENT = "workspace.file.content"  # Server -> Client
 
     # Agent profiles (Client <-> Server)
     SESSION_PROFILES = "session.profiles"  # Server -> Client: available profiles
@@ -3107,6 +3128,65 @@ class StageFilesEvent(Event):
     failed: List[Dict[str, str]] = Field(default_factory=list)  # [{"name", "category", "error"}]
 
 
+class WorkspaceFileFetchRequest(Event):
+    """Download one file from the caller's workspace (WS only, protocol 1.20).
+
+    The reverse of :class:`StageFilesRequest`.  ``path`` is relative to the
+    workspace root, or absolute when it lies inside it; the daemon resolves
+    it against the workspace THIS connection is in (the session's, else the
+    one it selected) and refuses anything that resolves outside it, symlinks
+    followed first.
+
+    **Wire protocol:** the server answers with one TEXT
+    :class:`WorkspaceFileContentEvent` carrying the same ``request_id``.
+    When ``ok`` is true and ``metadata_only`` was false, exactly ONE raw
+    BINARY frame of ``size`` bytes follows it immediately -- the two are
+    written back to back under the connection's send lock, so no other
+    frame can arrive between them.
+
+    ``metadata_only`` asks for the header alone: whether the file exists,
+    its size and type.  A host tool offering a download asks this first, so
+    the model is told "no such file" instead of offering a link that fails.
+    """
+    type: EventType = Field(default=EventType.WORKSPACE_FILE_FETCH_REQUEST)
+    request_id: str = ""
+    path: str = ""
+    metadata_only: bool = False
+
+
+class WorkspaceFileContentEvent(Event):
+    """Server's answer to :class:`WorkspaceFileFetchRequest` (protocol 1.20).
+
+    ``request_id`` echoes the request.  ``path`` is the file's path relative
+    to the workspace root (normalised, so a client can key on it), ``name``
+    its basename, ``size`` its length in bytes and ``mime_type`` a guess
+    from its name (``application/octet-stream`` when there is none).
+
+    On failure ``ok`` is false, no binary frame follows, and ``category``
+    is one of:
+
+    - ``"workspace_not_found"`` -- this connection is in no workspace.
+    - ``"unsafe_path"`` -- empty, or resolves outside the workspace.
+    - ``"not_found"`` -- nothing at that path.
+    - ``"not_a_file"`` -- a directory or another non-regular file.
+    - ``"credential"`` -- a file that holds credentials (the workspace
+      ``.env``, a stored ``*_auth.json``); refused by name so a download
+      link can never carry a key out of the workspace.
+    - ``"too_large"`` -- over the daemon's download cap.
+    - ``"io_error"`` -- the read failed; ``error`` carries the OS message.
+    """
+    type: EventType = Field(default=EventType.WORKSPACE_FILE_CONTENT)
+    request_id: str = ""
+    ok: bool = False
+    path: str = ""
+    name: str = ""
+    size: int = 0
+    mime_type: str = ""
+    metadata_only: bool = False
+    category: str = ""
+    error: str = ""
+
+
 class ClientType(str, Enum):
     """Presentation-layer categories for PresentationContext.
 
@@ -3912,6 +3992,9 @@ _EVENT_CLASSES: Dict[str, type] = {
     # Workspace file staging (multi-frame: TEXT request + N BINARY blobs)
     EventType.WORKSPACE_FILES_STAGE_REQUEST.value: StageFilesRequest,
     EventType.WORKSPACE_FILES_STAGED.value: StageFilesEvent,
+    # Workspace file download (TEXT header + one BINARY frame, 1.20)
+    EventType.WORKSPACE_FILE_FETCH_REQUEST.value: WorkspaceFileFetchRequest,
+    EventType.WORKSPACE_FILE_CONTENT.value: WorkspaceFileContentEvent,
     # Peer channel
     EventType.PEER_HEARTBEAT.value: PeerHeartbeatEvent,
     EventType.PEER_SPAWN_REQUEST.value: PeerSpawnRequestEvent,
