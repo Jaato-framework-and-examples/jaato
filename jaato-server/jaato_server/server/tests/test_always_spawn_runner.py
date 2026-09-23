@@ -20,10 +20,12 @@ Tests pin:
 - IPC session WITH apparmor opt-in → runner is spawned with the
   apparmor profile_name + ``disable_confine=False``.
 - Apparmor unavailable on host (opt-in but kernel module missing)
-  → spawn STILL fires with ``disable_confine=True``; sandbox_mode
-  returns ``"soft"``.
-- Apparmor provisioning failure → same as unavailable: spawn
-  fires; sandbox_mode is ``"soft"``.
+  → genuinely unconfined: spawn STILL fires with
+  ``disable_confine=True``; sandbox_mode returns ``"soft"``.
+- Apparmor provisioning failure on a SUPPORTING host (#1253) →
+  confinement was required but no profile provisioned, so the
+  session is REFUSED (a bootstrap outcome is recorded for
+  ``initialize_or_refuse``) rather than spawning unconfined.
 - Spawn failure with no apparmor opt-in → returns None (silent;
   the opt-in case still surfaces ``"soft"`` for telemetry
   attribution).
@@ -243,9 +245,22 @@ def test_apparmor_unavailable_still_spawns_unconfined(
     assert spawn_calls[0]["disable_confine"] is True
 
 
-def test_apparmor_provision_failure_still_spawns_unconfined(
+def test_apparmor_provision_failure_refuses_rather_than_spawning_unconfined(
     fake_session_manager, tmp_path, _patch_apparmor_and_spawn,
 ) -> None:
+    """#1253: apparmor opt-in on a host that SUPPORTS AppArmor, but profile
+    provisioning FAILS — the session is REFUSED (a bootstrap outcome is
+    recorded for ``initialize_or_refuse``) rather than spawning an unconfined
+    runner.
+
+    Pre-#1253 this spawned unconfined (``disable_confine=True``, empty
+    ``profile_name``) while the session record still claimed
+    ``sandbox_mode: apparmor`` — the silent bypass #1100 deferred and #1253
+    measured live on this SessionManager path.  The ``§7a`` "always have a
+    runner" intent must not mean "an unconfined runner for an apparmor
+    session".  Contrast ``test_apparmor_unavailable_still_spawns_unconfined``:
+    a host with NO AppArmor is genuinely unconfined and still spawns.
+    """
     sm = fake_session_manager
     sm._client_config["c-1"] = {"apparmor": True}
     sm.set_apparmor_dependencies(ws_server=None, daemon_loop="<loop>")
@@ -255,20 +270,27 @@ def test_apparmor_provision_failure_still_spawns_unconfined(
 
     def _failing_init(self, **kwargs):
         original_init(self, **kwargs)
+        # available (host supports AppArmor) but provisioning fails
         self.provision_outcome = False
+
+    server = _server_stub()
+    outcomes: list = []
+    server.note_runner_bootstrap_outcome = outcomes.append
 
     with patch.object(_FakeAppArmorManager, "__init__", _failing_init):
         sandbox_mode = sm._provision_ipc_apparmor_and_spawn_runner(
-            server=_server_stub(),
+            server=server,
             session_id="s-prov-fail",
             workspace_path=str(tmp_path),
             client_id="c-1",
         )
 
+    # FAIL CLOSED: no unconfined runner spawned, and the refusal is recorded
+    # so initialize_or_refuse turns the session into a RunnerBootstrapFailed.
+    assert _patch_apparmor_and_spawn["spawn_calls"] == []
+    assert outcomes, "provisioning failure must record a bootstrap outcome"
+    assert "1253" in outcomes[-1]
     assert sandbox_mode == "soft"
-    spawn_calls = _patch_apparmor_and_spawn["spawn_calls"]
-    assert len(spawn_calls) == 1
-    assert spawn_calls[0]["disable_confine"] is True
 
 
 # ----------------------------------------------------------------------

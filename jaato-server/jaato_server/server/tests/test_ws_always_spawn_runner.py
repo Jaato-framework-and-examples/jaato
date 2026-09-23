@@ -35,6 +35,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from jaato_server.shared.apparmor_label import SANDBOX_MODE_SOFT
 from jaato_server.shared.tests.reversion import Reversion
 
 
@@ -93,6 +94,32 @@ REVERSIONS = [
             "unconfined in-process tool execution instead of being refused"
         ),
     ),
+    # Point 3 — the POST-init resilience hook must not SILENTLY downgrade a
+    # required-but-failed boundary to soft.  It runs after the runner already
+    # spawned (so it cannot un-spawn — the pre-init hook fails that closed),
+    # but a silent ``sandbox_mode=soft`` is exactly the invisible boundary loss
+    # #1253 is about.  Removing the WARNING restores the silent downgrade.
+    Reversion(
+        target=_WS,
+        find=(
+            "                logger.warning(\n"
+            "                    \"AppArmor confinement required for session %s (WS-\"\n"
+            "                    \"provisioned, host supports it) but profile provisioning \"\n"
+            "                    \"failed in the post-init hook — the runner is NOT kernel-\"\n"
+            "                    \"confined; recording sandbox_mode=soft rather than \"\n"
+            "                    \"silently claiming enforcement (#1253/#1014)\",\n"
+            "                    session_id,\n"
+            "                )"
+        ),
+        replace=(
+            "                pass  # #1253 reversion: silent soft downgrade restored"
+        ),
+        test="test_ws_session_hook_announces_a_required_boundary_it_could_not_apply",
+        because=(
+            "the post-init hook again downgrades a WS-provisioned confined "
+            "session to soft mode with no WARNING when provisioning fails"
+        ),
+    ),
 ]
 
 
@@ -140,16 +167,30 @@ class _FakeAppArmor:
         )
 
 
+class _FakeSession:
+    """The two attributes the post-init ``_apparmor_session_hook`` reads on
+    the provision-failure path: a workspace under the WS root, and a
+    ``sandbox_mode`` it writes the (truthful) ``soft`` verdict onto."""
+
+    def __init__(self, workspace_path: str) -> None:
+        self.workspace_path = workspace_path
+        self.sandbox_mode: Optional[str] = None
+
+
 class _FakeSM:
     def __init__(self) -> None:
         self.pre_init_hooks: List[Any] = []
         self.session_hooks: List[Any] = []
+        self._sessions: Dict[str, _FakeSession] = {}
 
     def add_pre_initialize_hook(self, hook: Any) -> None:
         self.pre_init_hooks.append(hook)
 
     def add_session_hook(self, hook: Any) -> None:
         self.session_hooks.append(hook)
+
+    def get_session(self, session_id: str) -> Optional[_FakeSession]:
+        return self._sessions.get(session_id)
 
 
 class _FakeRouter:
@@ -182,6 +223,18 @@ def _register_and_get_hook(ws: Any) -> Any:
     JaatoWSServer.set_command_router(ws, router)
     assert router._session_manager.pre_init_hooks, "hook not registered"
     return router._session_manager.pre_init_hooks[0]
+
+
+def _register_and_get_session_hook(ws: Any) -> "Tuple[Any, _FakeSM]":
+    """Register the hooks + return the POST-init ``_apparmor_session_hook``
+    (the resilience re-run) and the fake SM, so the caller can install the
+    fake session the hook resolves via ``sm.get_session``."""
+    from jaato_server.server.websocket import JaatoWSServer
+    router = _FakeRouter()
+    JaatoWSServer.set_command_router(ws, router)
+    sm = router._session_manager
+    assert sm.session_hooks, "session hook not registered"
+    return sm.session_hooks[0], sm
 
 
 @pytest.fixture(autouse=True)
@@ -506,3 +559,60 @@ def test_ws_hook_dispatches_bootstrap_on_unconfined_path(
     # #1253: a genuinely-unconfined session (no AppArmor manager available)
     # carries confinement_required=False, so the runner gate stays inert.
     assert _patch_spawn["bootstrap_calls"][0]["confinement_required"] is False
+
+
+# ----------------------------------------------------------------------
+# #1253 point 3 — the post-init resilience hook announces a required boundary
+# it could not apply, rather than silently downgrading to soft.
+# ----------------------------------------------------------------------
+
+
+def test_ws_session_hook_announces_a_required_boundary_it_could_not_apply(
+    tmp_path, monkeypatch, caplog,
+) -> None:
+    """A WS-provisioned session on an AppArmor-available host whose profile
+    FAILS to provision in the post-init hook must WARN (never a silent
+    downgrade of a boundary — the #1014 posture) while recording the truthful
+    ``soft`` mode.
+
+    Reaching the provision-failure branch means confinement was REQUIRED: the
+    host has an available ``AppArmorManager`` and the workspace is under the WS
+    root.  The pre-init hook (#1260) fails that closed BEFORE spawn on the core
+    path; this resilience re-run runs after the runner already spawned, so it
+    cannot un-spawn — but it must not lie by omission.
+    """
+    ws_root = tmp_path / "ws_root"
+    ws_root.mkdir()
+    sess_dir = ws_root / "session_dir"
+    sess_dir.mkdir()
+
+    apparmor = _FakeAppArmor()
+    apparmor.available = True
+    apparmor.provision_outcome = False  # provisioning FAILS in the hook
+    ws = _make_ws_server(str(ws_root), apparmor)
+
+    # The hook imports resolve_plugin_apparmor_rules inside the function.
+    monkeypatch.setattr(
+        "jaato_server.server.apparmor.resolve_plugin_apparmor_rules",
+        lambda **kwargs: None,
+    )
+
+    session_hook, sm = _register_and_get_session_hook(ws)
+    sess = _FakeSession(str(sess_dir))
+    sm._sessions["s-postinit-fail"] = sess
+
+    server = _server_stub()  # no _profile -> no cgroup limits, skips that block
+
+    with caplog.at_level("WARNING"):
+        session_hook(server, "s-postinit-fail")
+
+    # Truthful record: soft, not a false apparmor claim.
+    assert sess.sandbox_mode == SANDBOX_MODE_SOFT
+    # And it is AUDIBLE — a WARNING naming the issue, not a silent downgrade.
+    warnings = [
+        r.getMessage() for r in caplog.records if r.levelname == "WARNING"
+    ]
+    assert any("1253" in m for m in warnings), (
+        "a required-but-failed boundary must be announced at WARNING, not "
+        f"silently downgraded; got warnings: {warnings}"
+    )
