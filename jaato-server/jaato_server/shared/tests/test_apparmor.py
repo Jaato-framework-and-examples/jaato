@@ -307,8 +307,8 @@ class TestRenderProfile:
         assert child_start > 0, "//child sub-profile marker missing"
         return rendered[child_start:]
 
-    def test_v18_child_subprofile_drops_broad_ix_grants(self, manager):
-        """Template v18 (2026-05-15) regression pin.
+    def test_v18_child_subprofile_drops_broad_ix_grants_when_scoped(self, manager):
+        """Template v18 (2026-05-15) regression pin, narrowed by #1251.
 
         Pre-v18 the //child sub-profile mirrored the base body
         verbatim including ``/usr/bin/** ix``, ``/usr/local/bin/**
@@ -319,12 +319,21 @@ class TestRenderProfile:
         improvised ``curl`` when ``mvn dependency:get`` failed
         even though the fragment only listed java/mvn).
 
-        v18 strips the three broad ``ix`` grants from //child
-        SPECIFICALLY.  Parent + tool_hat keep them (framework
-        code paths depend on them).  Fragments become the SOLE
-        source of exec authority for agent-controlled subprocesses.
+        v18 strips the three broad ``ix`` grants from //child.
+        Parent + tool_hat keep them (framework code paths depend on
+        them).  #1251 narrowed *when*: a session that OPTED INTO
+        per-stage exec scoping — i.e. declared ``apparmor_fragments``
+        (a list, incl. ``[]``, → ``requested_fragments`` is a list) —
+        keeps v18's guarantee that ``apparmor_fragments`` is the SOLE
+        source of exec authority in //child, so the curl-fallback
+        escape stays closed.  Rendered here with an explicit
+        (fragment-scoped) request; a NON-scoping session is the
+        separate #1251 case below.
         """
-        rendered = manager._render_profile("v18_test", "/workspace")
+        rendered = manager._render_profile(
+            "v18_test", "/workspace",
+            requested_fragments=["host_validator"],
+        )
         child_body = self._slice_child_body(rendered)
 
         for broad_rule in (
@@ -333,13 +342,74 @@ class TestRenderProfile:
             "/bin/**              ix,",
         ):
             assert broad_rule not in child_body, (
-                f"//child sub-profile must NOT grant the broad "
-                f"rule {broad_rule!r}.  Per-profile "
-                f"apparmor_fragments is the sole source of exec "
-                f"authority in //child post-v18; this rule "
-                f"shadows fragments and breaks per-stage scoping. "
-                f"Peer's v83 verified this empirically with the "
-                f"curl-fallback escape."
+                f"//child sub-profile of a SCOPED session (declared "
+                f"apparmor_fragments) must NOT grant the broad rule "
+                f"{broad_rule!r}.  Per-profile apparmor_fragments is the "
+                f"sole source of exec authority there; this rule shadows "
+                f"fragments and breaks per-stage scoping.  Peer's v83 "
+                f"verified this empirically with the curl-fallback escape."
+            )
+
+    def test_1251_child_subprofile_grants_broad_ix_when_unscoped(self, manager):
+        """#1251 (template v34): a session that declared NO
+        ``apparmor_fragments`` (``requested_fragments is None`` — the
+        plain WS/IPC session, the majority shape) never opted into
+        v18's per-stage exec scoping, so its //child MUST carry the
+        broad in-PATH execs.
+
+        Without them every ``cli`` / ``interactive_shell`` subprocess —
+        which transitions into //child — is EACCES-denied on ``exec()``
+        of ``/bin/sh`` / ``/usr/bin/gh`` / ``/usr/bin/git``, i.e. ``cli``
+        is entirely non-functional under confinement.  That is the
+        reported failure: after a WS detach/reattach cold-revived the
+        session onto a genuinely-confined runner, every bare ``gh`` and
+        every shell command returned ``[Errno 13] Permission denied``.
+        """
+        rendered = manager._render_profile("v34_test", "/workspace")
+        child_body = self._slice_child_body(rendered)
+
+        for broad_rule in (
+            "/usr/bin/**          ix,",
+            "/usr/local/bin/**    ix,",
+            "/bin/**              ix,",
+        ):
+            assert broad_rule in child_body, (
+                f"//child of a NON-scoping session (no apparmor_fragments) "
+                f"must grant {broad_rule!r} so its cli subprocesses can "
+                f"exec /bin/sh, gh, git and coreutils; without it cli is "
+                f"dead under confinement (#1251)."
+            )
+
+    def test_1251_child_broad_ix_grant_does_not_widen_file_access(self, manager):
+        """#1251: the fix grants only the ``ix`` exec capability.  The
+        //child body of a non-scoping session must still carry the
+        workspace-integrity and procfs-credential denies unchanged, and
+        must NOT reintroduce the dropped escape-vector rules.
+        """
+        rendered = manager._render_profile("v34_test", "/workspace")
+        child_body = self._slice_child_body(rendered)
+
+        # File-access denies untouched by the exec grant.
+        for deny in (
+            "audit deny /workspace/.jaato/agents/**             wlk,",
+            "audit deny /proc/*/environ            r,",
+        ):
+            assert deny in child_body, (
+                f"//child must keep {deny!r} — the #1251 exec grant widens "
+                f"exec authority only, never file access."
+            )
+
+        # The three escape-vector lines stay DROPPED — only their
+        # DROP-comment mentions them, never an actual rule.
+        real_rules = [
+            line.strip()
+            for line in child_body.splitlines()
+            if line.strip() and not line.strip().startswith("#")
+        ]
+        for escape in real_rules:
+            assert not escape.startswith("change_profile"), (
+                f"//child must not grant a change_profile rule; found "
+                f"{escape!r}.  #1251 grants exec, not profile transitions."
             )
 
     def test_v18_parent_and_tool_hat_keep_broad_ix(self, manager):
