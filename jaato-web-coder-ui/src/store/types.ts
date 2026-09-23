@@ -392,6 +392,16 @@ export interface StagedUpload {
   path: string;
   size: number;
   status: "queued" | "staging" | "staged" | "failed";
+  /**
+   * Which session (or picker) this upload belongs to, so the strip shows
+   * only the active context's files rather than one flat global list an
+   * upload in session A visibly followed into unrelated session B (#1250).
+   * Stamped at attach time as ``uploadScope(state)`` — ``session:<id>`` once
+   * a session exists, else ``""`` (the picker, before one opens).  A ``""``
+   * upload is re-stamped to the session it opens, so a picker attachment
+   * ends up scoped to the session it was staged for.
+   */
+  scope: string;
   /** The daemon's (or the client-side precheck's) reason, when ``failed``. */
   error?: string;
 }

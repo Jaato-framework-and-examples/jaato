@@ -377,6 +377,16 @@ function startedAt(rec: Record<string, number>, key: string): Record<string, num
   return key in rec ? rec : { ...rec, [key]: Date.now() };
 }
 
+/**
+ * The context an upload belongs to (#1250): the active session once one
+ * exists, else ``""`` (the picker, before a session opens).  Stamped onto
+ * each upload at attach time and re-read to filter the attach strip, so a
+ * file attached in one session is not shown in another.
+ */
+export function uploadScope(st: { sessionId?: string | null }): string {
+  return st.sessionId ? `session:${st.sessionId}` : "";
+}
+
 function agentOf(ev: AnyEvent): string {
   const a = ev.agent_id;
   return typeof a === "string" && a ? a : MAIN_AGENT;
@@ -890,6 +900,17 @@ export function reduce(s: JaatoState, raw: JaatoEvent): JaatoState {
       break;
     case EventTypeValue.SESSION_INFO: {
       const sid = ev.session_id as string | undefined;
+      // A session opening adopts the picker's uploads: files attached
+      // before any session existed carry scope ``""``, and the one session
+      // they were staged for is the one that now opens (#1250).  Re-stamp
+      // only unscoped uploads, so another session's files are never
+      // reassigned.  Only on the null -> session transition.
+      if (sid && !s.sessionId) {
+        const adopted = `session:${sid}`;
+        if (s.uploads.some((u) => u.scope === "")) {
+          s.uploads = s.uploads.map((u) => (u.scope === "" ? { ...u, scope: adopted } : u));
+        }
+      }
       if (sid) s.sessionId = sid;
       if (Array.isArray(ev.sessions)) s.sessions = normalizeSessionList(ev.sessions);
       s.session = {
@@ -1163,8 +1184,13 @@ export const useJaato = create<JaatoState>()((set, get) => ({
   updateUpload: (id, patch) => set((st) => ({ uploads: st.uploads.map((u) => (u.id === id ? { ...u, ...patch } : u)) })),
   removeUpload: (id) => set((st) => ({ uploads: st.uploads.filter((u) => u.id !== id) })),
   takeUploads: () => {
-    const staged = get().uploads.filter((u) => u.status === "staged").map((u) => u.path);
-    set((st) => ({ uploads: st.uploads.filter((u) => u.status === "queued" || u.status === "staging") }));
+    // Only the ACTIVE context's staged files are named in the message and
+    // its settled chips (staged + failed) cleared; another session's uploads
+    // (a different scope) are left untouched (#1250).  A file still
+    // queued/staging in this context is kept for the next send, as before.
+    const active = uploadScope(get());
+    const staged = get().uploads.filter((u) => u.scope === active && u.status === "staged").map((u) => u.path);
+    set((st) => ({ uploads: st.uploads.filter((u) => u.scope !== active || u.status === "queued" || u.status === "staging") }));
     return staged;
   },
   resetSessionState: () => set(() => ({ ...emptySessionState() })),

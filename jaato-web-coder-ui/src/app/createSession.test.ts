@@ -35,7 +35,7 @@ describe("createSession", () => {
   });
 
   it("keeps the files waiting to be staged, which the picker opens the session for", async () => {
-    useJaato.getState().addUploads([{ id: "u1", path: "brief.txt", size: 3, status: "queued" }]);
+    useJaato.getState().addUploads([{ id: "u1", path: "brief.txt", size: 3, status: "queued", scope: "" }]);
     await createSession("researcher");
     expect(useJaato.getState().uploads.map((u) => u.id)).toEqual(["u1"]);
     expect(sdkCreateSession).toHaveBeenCalledWith({ profile: "researcher" });

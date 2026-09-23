@@ -873,6 +873,25 @@ test("files attached on the session picker are in the workspace when the session
   await expect(page.getByRole("region", { name: "Files" }).getByText("+ brief.txt")).toBeVisible();
 });
 
+test("an attached file does not follow you into another session (#1250)", async ({ page }) => {
+  // The reported bug: uploads were one flat global list, so a file attached
+  // in session A sat above session B's composer too.  They are scoped to the
+  // session now, so switching away hides them.
+  await openSession(page);
+  await page.getByLabel("Attach files").setInputFiles([
+    { name: "switchme.txt", mimeType: "text/plain", buffer: Buffer.from("mine only") },
+  ]);
+  const strip = page.getByRole("group", { name: "Attached files" });
+  await expect(strip.getByText("switchme.txt")).toBeVisible();
+  await expect(strip.locator("li[data-status=staged]")).toHaveCount(1);
+
+  // Switch to an unrelated session: the file belongs to the one it was
+  // attached in, so the strip in this one does not show it.
+  await composer(page).fill("session attach 20260916_090000");
+  await composer(page).press("Enter");
+  await expect(page.getByText("switchme.txt")).toHaveCount(0);
+});
+
 test("a note written on the exit plate survives Escape, is kept, and is the rail's copy too", async ({ page }) => {
   // The whole loop in a real browser, with no BFF -- which is the shape a
   // local `npx @jaato/web-coder-ui` has, so the store behind it is this

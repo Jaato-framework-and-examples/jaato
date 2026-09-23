@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { useJaato, MAIN_AGENT } from "./store";
+import { useJaato, MAIN_AGENT, uploadScope } from "./store";
 import { agentPhase, anyBusy, isBusy } from "./phase";
 import type { JaatoEvent } from "@jaato/sdk";
 
@@ -392,9 +392,9 @@ describe("uploads: the attachment strip's state", () => {
   it("takeUploads hands back the staged paths and keeps what is still in flight", () => {
     const st = useJaato.getState();
     st.addUploads([
-      { id: "u1", path: "a.pdf", size: 10, status: "queued" },
-      { id: "u2", path: "docs/b.md", size: 20, status: "queued" },
-      { id: "u3", path: "c.bin", size: 30, status: "queued" },
+      { id: "u1", path: "a.pdf", size: 10, status: "queued", scope: "" },
+      { id: "u2", path: "docs/b.md", size: 20, status: "queued", scope: "" },
+      { id: "u3", path: "c.bin", size: 30, status: "queued", scope: "" },
     ]);
     st.updateUpload("u1", { status: "staged" });
     st.updateUpload("u2", { status: "failed", error: "unsafe_path" });
@@ -408,10 +408,57 @@ describe("uploads: the attachment strip's state", () => {
 
   it("survives the reset an attach performs, so files queued on the picker reach the session", () => {
     const st = useJaato.getState();
-    st.addUploads([{ id: "u9", path: "brief.txt", size: 5, status: "queued" }]);
+    st.addUploads([{ id: "u9", path: "brief.txt", size: 5, status: "queued", scope: "" }]);
     st.resetSessionState();
     expect(useJaato.getState().uploads.map((u) => u.id)).toEqual(["u9"]);
     useJaato.getState().removeUpload("u9");
+  });
+
+  // #1250: uploads carry the session they belong to, so the strip (and
+  // takeUploads) show one context's files, never another's.
+  it("scopes an upload to a session, hides it from another, and shows it again on return", () => {
+    const st = useJaato.getState();
+    st.addUploads([{ id: "a1", path: "a.txt", size: 5, status: "staged", scope: "session:A" }]);
+    // Active session A: its upload is visible.
+    const visibleIn = (sid: string) =>
+      useJaato.getState().uploads.filter((u) => u.scope === uploadScope({ sessionId: sid })).map((u) => u.id);
+    expect(visibleIn("A")).toEqual(["a1"]);
+    // Switch to B: A's upload is hidden, and a send in B names none of it.
+    expect(visibleIn("B")).toEqual([]);
+    // The store still holds it (nothing wiped on navigation).
+    expect(useJaato.getState().uploads.map((u) => u.id)).toEqual(["a1"]);
+    // Back to A: visible again.
+    expect(visibleIn("A")).toEqual(["a1"]);
+    useJaato.getState().removeUpload("a1");
+  });
+
+  it("takeUploads leaves another session's staged files untouched", () => {
+    const st = useJaato.getState();
+    st.addUploads([
+      { id: "act", path: "here.txt", size: 5, status: "staged", scope: "session:A" },
+      { id: "other", path: "there.txt", size: 5, status: "staged", scope: "session:B" },
+    ]);
+    // SESSION_INFO for A makes A the active scope.
+    st.dispatch([{ type: "session.info", session_id: "A" } as never]);
+    expect(useJaato.getState().takeUploads()).toEqual(["here.txt"]);
+    // B's staged file is not consumed by A's send.
+    expect(useJaato.getState().uploads.map((u) => u.id)).toEqual(["other"]);
+    useJaato.getState().removeUpload("other");
+  });
+
+  // #1250: a file attached before any session exists (scope "") is adopted
+  // by the session that opens, so the picker stages into the session it is
+  // about to open.
+  it("re-stamps an unscoped upload onto the session that opens", () => {
+    const st = useJaato.getState();
+    st.resetSessionState();
+    st.addUploads([{ id: "pk", path: "picked.txt", size: 5, status: "queued", scope: "" }]);
+    st.dispatch([{ type: "session.info", session_id: "S1" } as never]);
+    expect(useJaato.getState().uploads.find((u) => u.id === "pk")?.scope).toBe("session:S1");
+    // A later SESSION_INFO for the same session does not re-stamp again.
+    st.dispatch([{ type: "session.info", session_id: "S1" } as never]);
+    expect(useJaato.getState().uploads.find((u) => u.id === "pk")?.scope).toBe("session:S1");
+    useJaato.getState().removeUpload("pk");
   });
 });
 
