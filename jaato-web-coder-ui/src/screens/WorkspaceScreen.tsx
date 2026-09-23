@@ -24,6 +24,8 @@ import { exitToConnect } from "@/app/actions";
 import { credentialsApi } from "@/app/credentials";
 import { Plate } from "@/components/layout/Plate";
 import { CredentialPicker, type KeyChoice } from "@/components/workspace/CredentialPicker";
+import { GitHubAccountPicker } from "@/components/workspace/GitHubAccountPicker";
+import { GitHubConnect } from "@/components/workspace/GitHubConnect";
 import { createWorkspace, deleteWorkspace, requestWorkspaceList, selectWorkspace, updateConfig } from "@/sdk/connection";
 import { useJaato } from "@/store/store";
 
@@ -45,6 +47,8 @@ export function WorkspaceScreen() {
   const setScreen = useJaato((s) => s.setScreen);
   const setWorkspaceNotice = useJaato((s) => s.setWorkspaceListNotice);
   const credentialsUrl = useJaato((s) => s.credentialsUrl);
+  const githubUrl = useJaato((s) => s.githubUrl);
+  const githubLoginUrl = useJaato((s) => s.githubLoginUrl);
   const backend = useJaato((s) => s.backend);
   const [newName, setNewName] = useState("");
   const [provider, setProvider] = useState("");
@@ -56,6 +60,8 @@ export function WorkspaceScreen() {
   const [busy, setBusy] = useState(false);
   const [manual, setManual] = useState<string | null>(null); // workspace whose manual form is open
   const [confirming, setConfirming] = useState<string | null>(null); // workspace whose delete is awaiting confirmation
+  const [showGithub, setShowGithub] = useState(false); // the "Connect GitHub" settings plate
+  const [githubReload, setGithubReload] = useState(0); // bumped when the account set changed, so the picker relists
 
   useEffect(() => { requestWorkspaceList().catch(() => undefined); }, []);
   useEffect(() => {
@@ -131,6 +137,9 @@ export function WorkspaceScreen() {
             <div className="font-mono text-xs text-text-muted">{ws.root ?? "workspace mode"} · {ws.list.length} {ws.list.length === 1 ? "entry" : "entries"}</div>
             <div className="text-xs text-text-muted">
               {backend?.user && <>Signed in as <span className="font-semibold text-text">{backend.user}</span> · </>}
+              {/* Per-user GitHub connection: present only when the backend has a
+                  ``github:`` block (``githubUrl`` set). Opens the settings plate below. */}
+              {githubUrl && <><button type="button" onClick={() => setShowGithub((v) => !v)} className="link" aria-expanded={showGithub}>Connect GitHub</button> · </>}
               {backend ? (
                 <a href={backend.logoutUrl} className="link">Sign out</a>
               ) : (
@@ -140,6 +149,18 @@ export function WorkspaceScreen() {
           </div>
         </header>
         {ws.notice && <div role="status" className={`text-xs ${ws.notice.error ? "text-error" : "text-text-muted"}`}>{ws.notice.text}</div>}
+
+        {showGithub && githubUrl && (
+          <Plate>
+            <GitHubConnect
+              githubUrl={githubUrl}
+              githubLoginUrl={githubLoginUrl}
+              onError={(text) => setWorkspaceNotice({ text, error: true })}
+              onNotice={(text) => setWorkspaceNotice({ text })}
+              onChanged={() => setGithubReload((v) => v + 1)}
+            />
+          </Plate>
+        )}
 
         <Plate className="overflow-x-auto">
           <table className="w-full border-collapse text-sm">
@@ -219,6 +240,17 @@ export function WorkspaceScreen() {
                 </label>
                 <label className="block"><span className="field-label">Model</span><input value={model} onChange={(e) => setModel(e.target.value)} className="input input-mono" /></label>
                 <CredentialPicker credentialsUrl={credentialsUrl} provider={provider} value={keyChoice} onChange={setKeyChoice} reloadKey={keyListVersion} onError={(text) => setWorkspaceNotice({ text, error: true })} />
+                {/* Binds a connected GitHub account to this workspace (BFF state,
+                    not config.update); absent unless the backend has a github: block. */}
+                {githubUrl && (
+                  <GitHubAccountPicker
+                    githubUrl={githubUrl}
+                    workspace={cfg.workspace}
+                    reloadKey={githubReload}
+                    onError={(text) => setWorkspaceNotice({ text, error: true })}
+                    onNotice={(text) => setWorkspaceNotice({ text })}
+                  />
+                )}
               </div>
               <div className="flex items-center gap-2 border-t hairline pt-4">
                 <button type="submit" disabled={busy} className="btn btn-steel">Save configuration</button>
