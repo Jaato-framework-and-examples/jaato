@@ -17,6 +17,7 @@ import {
   MIN_ATTACHMENT_RESUME_PROTOCOL,
   MIN_SESSION_RELOAD_ENV_PROTOCOL,
   MIN_WORKSPACE_IGNORE_PROTOCOL,
+  MIN_FILE_FETCH_PROTOCOL,
   MIN_PROTOCOL_VERSION,
 } from "./client.js";
 import {
@@ -789,6 +790,110 @@ describe("JaatoClient.stageFiles", () => {
     const specs = requestFrame.files as Array<{ size: number }>;
     assert.equal(specs[0].size, 16);
     assert.equal(lastInstance!.sentBinary[0].byteLength, 16);
+  });
+});
+
+describe("JaatoClient.fetchWorkspaceFile (protocol 1.20)", () => {
+  let client: JaatoClient;
+
+  beforeEach(async () => {
+    installMockWebSocket();
+    client = new JaatoClient({ url: "ws://localhost:8080" });
+    await connectAndAck(client, MIN_FILE_FETCH_PROTOCOL);
+    if (lastInstance) lastInstance.sent = [];
+  });
+
+  afterEach(async () => {
+    await client.close();
+    restoreWebSocket();
+  });
+
+  const tick = (): Promise<void> => new Promise<void>((resolve) => setTimeout(resolve, 0));
+  const lastRequest = (): Record<string, unknown> =>
+    JSON.parse(lastInstance!.sent[lastInstance!.sent.length - 1]!) as Record<string, unknown>;
+  const header = (requestId: unknown, fields: Record<string, unknown>): object => ({
+    type: EventTypeValue.WORKSPACE_FILE_CONTENT,
+    timestamp: new Date().toISOString(),
+    request_id: requestId,
+    ...fields,
+  });
+  const binary = (bytes: Uint8Array): void => {
+    const buf = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    lastInstance!.onmessage!({ data: buf } as any);
+  };
+
+  test("the binary frame after a header is that file's bytes", async () => {
+    const promise = client.fetchWorkspaceFile("out/report.pdf");
+    await tick();
+    const req = lastRequest();
+    assert.equal(req.type, EventTypeValue.WORKSPACE_FILE_FETCH_REQUEST);
+    assert.equal(req.path, "out/report.pdf");
+    assert.equal(req.metadata_only, false);
+    const bytes = new TextEncoder().encode("%PDF-1.7");
+    lastInstance!.emit(header(req.request_id, { ok: true, path: "out/report.pdf", name: "report.pdf", size: bytes.byteLength }));
+    binary(bytes);
+    const result = await promise;
+    assert.equal(result.event.ok, true);
+    assert.deepEqual(result.data, bytes);
+  });
+
+  test("a text frame after the binary is parsed as an event again", async () => {
+    const promise = client.fetchWorkspaceFile("a.txt");
+    await tick();
+    const req = lastRequest();
+    lastInstance!.emit(header(req.request_id, { ok: true, path: "a.txt", size: 1 }));
+    binary(new Uint8Array([65]));
+    await promise;
+    const seen: string[] = [];
+    client.subscribeAll((e) => { seen.push(String(e.type)); });
+    lastInstance!.emit({ type: EventTypeValue.SYSTEM_MESSAGE, timestamp: new Date().toISOString(), message: "hi" });
+    await tick();
+    assert.ok(seen.includes(EventTypeValue.SYSTEM_MESSAGE));
+  });
+
+  test("a metadata-only answer and a refusal carry no bytes and wait for none", async () => {
+    const meta = client.fetchWorkspaceFile("a.txt", { metadataOnly: true });
+    await tick();
+    const r1 = lastRequest();
+    assert.equal(r1.metadata_only, true);
+    lastInstance!.emit(header(r1.request_id, { ok: true, metadata_only: true, size: 3 }));
+    const m = await meta;
+    assert.equal(m.data, null);
+    assert.equal(m.event.size, 3);
+
+    const refused = client.fetchWorkspaceFile(".env");
+    await tick();
+    lastInstance!.emit(header(lastRequest().request_id, { ok: false, category: "credential" }));
+    const r = await refused;
+    assert.equal(r.data, null);
+    assert.equal(r.event.category, "credential");
+  });
+
+  test("concurrent fetches are matched by request_id, not by arrival order", async () => {
+    const first = client.fetchWorkspaceFile("one.txt");
+    await tick();
+    const id1 = lastRequest().request_id;
+    const second = client.fetchWorkspaceFile("two.txt");
+    await tick();
+    const id2 = lastRequest().request_id;
+    assert.notEqual(id1, id2);
+    lastInstance!.emit(header(id2, { ok: true, path: "two.txt", size: 1 }));
+    binary(new Uint8Array([2]));
+    lastInstance!.emit(header(id1, { ok: true, path: "one.txt", size: 1 }));
+    binary(new Uint8Array([1]));
+    assert.deepEqual((await first).data, new Uint8Array([1]));
+    assert.deepEqual((await second).data, new Uint8Array([2]));
+  });
+
+  test("is refused below protocol 1.20 and sends nothing", async () => {
+    await client.close();
+    installMockWebSocket();
+    client = new JaatoClient({ url: "ws://localhost:8080" });
+    await connectAndAck(client, "1.19");
+    if (lastInstance) lastInstance.sent = [];
+    await assert.rejects(() => client.fetchWorkspaceFile("a.txt"), /workspace\.file\.fetch/);
+    assert.equal(getSent().length, 0);
   });
 });
 

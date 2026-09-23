@@ -35,6 +35,10 @@
  *                 AFTER the call, as the daemon may send it
  *   "…collect garbage" → one GC pass (``gc`` started, then completed,
  *                 freeing 14 200 tokens), remembered and replayed on attach
+ *   "…offer <path>" → the model calls the ``offer_download`` host tool the
+ *                 client registered (protocol 1.20): the daemon sends
+ *                 ``tool.execute_request``, waits for the client's
+ *                 ``tool.execute_result``, and the call lands as a tool row
  *   "subagent"  → spawns a subagent that streams in its own tab
  *   "model this is broken" (verbatim test) → echoes the text back
  *   anything else → a short streamed markdown reply
@@ -79,6 +83,8 @@ interface Client {
    * drained so the stream stays aligned.
    */
   staging: { workspaceId: string; specs: { name: string; size: number }[]; frames: Buffer[]; refused: Record<string, string>[] | null } | null;
+  /** Host tools this connection registered (``tools.register_client``). */
+  clientTools: Set<string>;
 }
 const STAGE_PER_FILE_LIMIT = 10 * 1024 * 1024;
 const STAGE_TOTAL_LIMIT = 50 * 1024 * 1024;
@@ -127,6 +133,30 @@ function sendWorkspaceSnapshot(c: Client): void {
   const files = [...m.files.entries()].map(([path, v]) => ({ path, status: v.status }));
   const seqs = Object.fromEntries([...m.files.entries()].map(([path, v]) => [path, v.seq]));
   send(c, { type: "workspace.files_snapshot", files, total: files.length, seq: m.seq, epoch: m.epoch, seqs });
+}
+
+/**
+ * ``workspace.file.fetch`` (protocol 1.20), with the daemon's rules
+ * (``server/workspace_download.py``): a path that climbs out is
+ * ``unsafe_path`` before anything else, ``.env`` is ``credential``, and a
+ * file exists here when the session's monitor has reported it.  On success
+ * the header is followed by ONE binary frame -- the mock's content is the
+ * path itself, so a test can check it got the right file.
+ */
+function answerFileFetch(c: Client, ev: Record<string, unknown>): void {
+  const requestId = String(ev.request_id ?? "");
+  const metadataOnly = ev.metadata_only === true;
+  const path = String(ev.path ?? "").replace(/^\.\//, "");
+  const answer = (fields: Record<string, unknown>) => send(c, { type: "workspace.file.content", request_id: requestId, metadata_only: metadataOnly, ...fields });
+  if (!c.selected && !c.provisioned && !c.sessionId) { answer({ ok: false, path, category: "workspace_not_found", error: "No workspace selected" }); return; }
+  if (!path || path.startsWith("/") || path.split("/").includes("..")) { answer({ ok: false, path, category: "unsafe_path", error: `${path} is outside the workspace` }); return; }
+  const name = path.split("/").pop() ?? path;
+  if (name === ".env") { answer({ ok: false, path, category: "credential", error: `${path} holds credentials and cannot be downloaded` }); return; }
+  const status = monitorFor(c).files.get(path)?.status;
+  if (!status || status === "deleted") { answer({ ok: false, path, category: "not_found", error: `no file at ${path}` }); return; }
+  const data = Buffer.from(`mock content of ${path}\n`);
+  answer({ ok: true, path, name, size: data.length, mime_type: name.endsWith(".txt") ? "text/plain" : "application/octet-stream" });
+  if (!metadataOnly && c.ws.readyState === c.ws.OPEN) c.ws.send(data);
 }
 
 function finishStaging(c: Client): void {
@@ -250,6 +280,24 @@ async function turn(c: Client, text: string, agentId = "main"): Promise<void> {
     send(c, { type: "tool.call_end", agent_id: agentId, tool_name: "list_tools", call_id: callId, success: true, duration_seconds: 0.01, error_message: null, show_output: false });
     send(c, { type: "tools.id_registry", mappings: { c_bbc5e661: "system", t_a3f2b1c0: "cli_based_tool" } });
     await stream(c, agentId, "I have a system category.");
+  } else if (/\boffer\s+\S+/.test(lower)) {
+    // The model calls the client's ``offer_download`` host tool.  As on the
+    // daemon, the execution is a round trip to the client that registered it,
+    // and the call reaches the transcript as an ordinary tool row.
+    const path = (/\boffer\s+(\S+)/i.exec(text)?.[1]) ?? "";
+    if (path === "out/report.txt") emitWorkspaceChanges(c, [{ path, status: "created" }]);
+    const callId = randomUUID().slice(0, 8);
+    const args = { path };
+    send(c, { type: "tool.call_start", agent_id: agentId, tool_name: "offer_download", tool_args: args, call_id: callId });
+    if (!c.clientTools.has("offer_download")) {
+      send(c, { type: "tool.call_end", agent_id: agentId, tool_name: "offer_download", call_id: callId, success: false, error_message: "No client registered offer_download" });
+    } else {
+      send(c, { type: "tool.execute_request", call_id: callId, agent_id: "", tool_name: "offer_download", tool_args: args });
+      const result = (await waitFor(c, `tool:${callId}`)) as { error?: string };
+      const ok = !result.error;
+      send(c, { type: "tool.call_end", agent_id: agentId, tool_name: "offer_download", call_id: callId, success: ok, error_message: ok ? null : result.error, is_error_result: !ok, duration_seconds: 0.02, show_output: false });
+      await stream(c, agentId, ok ? "Here it is -- use the button above." : `I could not offer it: ${result.error}`);
+    }
   } else if (lower.includes("subagent")) {
     const subId = `sub-${randomUUID().slice(0, 6)}`;
     send(c, { type: "agent.created", agent_id: subId, agent_name: "researcher", agent_type: "subagent", parent_agent_id: agentId, profile_name: "researcher" });
@@ -393,10 +441,10 @@ wss.on("connection", (ws, req) => {
 
   const c: Client = {
     ws, id: `client_${++clientSeq}`, sessionId: null, pending: new Map(), ignored: new Set(),
-    selected: null, provisioned: false, staging: null,
+    selected: null, provisioned: false, staging: null, clientTools: new Set(),
     policy: { effective_default: "ask", suspension_scope: null },
   };
-  send(c, { type: "connected", protocol_version: "1.12", server_info: { server_version: "mock-0.0.1", client_id: randomUUID() } });
+  send(c, { type: "connected", protocol_version: "1.20", server_info: { server_version: "mock-0.0.1", client_id: randomUUID() } });
 
   ws.on("message", async (raw, isBinary) => {
     if (c.staging) {
@@ -423,6 +471,15 @@ wss.on("connection", (ws, req) => {
         if (!specs.length) finishStaging(c);
         break;
       }
+      case "workspace.file.fetch":
+        answerFileFetch(c, ev);
+        break;
+      case "tools.register_client":
+        for (const t of (ev.tools as { name?: string }[] | undefined) ?? []) if (t.name) c.clientTools.add(t.name);
+        break;
+      case "tool.execute_result":
+        c.pending.get(`tool:${String(ev.call_id)}`)?.(ev);
+        break;
       case "workspace.list":
         if (!WORKSPACES) send(c, { type: "error", error: "Workspace mode not enabled", error_type: "WorkspaceModeDisabled", recoverable: true });
         else send(c, { type: "workspace.list_response", root: "/srv/workspaces", workspaces: [

@@ -266,6 +266,55 @@ a server round-trip.
 | `bot.py` | No changes needed (wiring is in session_pool/transport) |
 | `handlers/` | Call `pool.stage_files()` from file-handling handlers after user sends a document |
 
+## The other direction: downloading a file (protocol 1.20)
+
+`workspace.file.fetch` takes one file back out of the same workspace
+staging writes into. The answer is one TEXT header followed, on
+success, by ONE raw BINARY frame:
+
+```
+client                                                      server
+  │  TEXT  WorkspaceFileFetchRequest                           │
+  │ ─────────────────────────────────────────────────────────► │
+  │  {"type": "workspace.file.fetch", "request_id": "dl-1",    │
+  │   "path": "out/report.pdf", "metadata_only": false}        │
+  │                                                            │
+  │               TEXT  WorkspaceFileContentEvent              │
+  │ ◄───────────────────────────────────────────────────────── │
+  │               {"type": "workspace.file.content",           │
+  │                "request_id": "dl-1", "ok": true,           │
+  │                "path": "out/report.pdf", "name":           │
+  │                "report.pdf", "size": 184320,               │
+  │                "mime_type": "application/pdf"}             │
+  │                                                            │
+  │               BINARY  <184320 bytes>                        │
+  │ ◄───────────────────────────────────────────────────────── │
+```
+
+- **The binary frame is the next frame after its header.** The daemon
+  writes both under the connection's send lock, so nothing can land
+  between them. The header carries no id the frame could be matched by;
+  adjacency IS the protocol. The TS SDK's transport holds the header
+  until its frame arrives and delivers them as one event, and
+  `JaatoClient.fetchWorkspaceFile(path)` resolves with both.
+- **`request_id` correlates the answer**, so several fetches may be in
+  flight on one connection.
+- **`metadata_only: true`** asks for the header alone (does the file
+  exist, its size, its type). No frame follows.
+- **A refusal is a header with `ok: false` and no frame.** Categories:
+  `workspace_not_found`, `unsafe_path` (empty, or resolves outside the
+  workspace, with symlinks followed first), `not_found`, `not_a_file`,
+  `credential` (the workspace `.env` or a `.jaato/*_auth.json`, refused by
+  name), `too_large` (over 50 MB, the staging total cap), `io_error`.
+- **WS only**, like staging. An IPC client is on the daemon's host and
+  reads the filesystem directly.
+- An older daemon answers `ErrorEvent("Unknown message type")` and never
+  the header, so the TS SDK refuses below `MIN_FILE_FETCH_PROTOCOL`
+  (`"1.20"`) rather than waiting out a reply nobody will send.
+
+The rules live in `jaato-server/jaato_server/server/workspace_download.py`; the
+handler is `JaatoWSServer._handle_file_fetch_request`.
+
 ## Future work
 
 Already on the design backlog (see `project_backlog_sdk_file_staging`):

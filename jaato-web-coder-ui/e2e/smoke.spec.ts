@@ -979,3 +979,36 @@ test("the command proposals float above the composer instead of pushing the layo
   expect(after.y).toBe(before.y);
   expect(list.y + list.height).toBeLessThanOrEqual((await composer(page).boundingBox())!.y);
 });
+
+test("a file in the Files panel downloads when its name is clicked (protocol 1.20)", async ({ page }) => {
+  await openSession(page);
+  await composer(page).fill("please touch out/report.txt");
+  await composer(page).press("Enter");
+  await expect(page.getByText("Touched out/report.txt.")).toBeVisible();
+  await page.getByRole("button", { name: "Toggle workspace changes (Alt+W)" }).click();
+  const panel = page.getByRole("region", { name: "Files" });
+  const downloading = page.waitForEvent("download");
+  await panel.getByRole("button", { name: "Download out/report.txt", exact: true }).click();
+  const download = await downloading;
+  expect(download.suggestedFilename()).toBe("report.txt");
+  const body = await (await download.createReadStream()).toArray();
+  expect(Buffer.concat(body).toString()).toBe("mock content of out/report.txt\n");
+});
+
+test("the model offers a file with offer_download and the chat draws a button that downloads it", async ({ page }) => {
+  await openSession(page);
+  await composer(page).fill("please offer out/report.txt");
+  await composer(page).press("Enter");
+  await expect(page.getByText("Here it is -- use the button above.")).toBeVisible();
+  const chip = page.getByTestId("tool-block").getByRole("button", { name: "Download out/report.txt", exact: true });
+  const downloading = page.waitForEvent("download");
+  await chip.click();
+  const download = await downloading;
+  expect(download.suggestedFilename()).toBe("report.txt");
+
+  // A file that must not leave is refused to the MODEL, and no button is drawn.
+  await composer(page).fill("please offer .env");
+  await composer(page).press("Enter");
+  await expect(page.getByText("I could not offer it: .env: holds credentials")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Download .env", exact: true })).toHaveCount(0);
+});
