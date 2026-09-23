@@ -39,6 +39,7 @@ from jaato_server.shared.session_context import get_workspace_root
 from ...workspace_venv import (
     resolve_venv_path, ensure_workspace_venv, apply_venv_to_env, venv_python,
 )
+from ...workspace_home import resolve_home_path, apply_home_to_env
 from .base import NotebookBackend
 from .. import kernel_protocol as proto
 from ..kernel_sandbox import (
@@ -140,6 +141,10 @@ class SubprocessKernelBackend(NotebookBackend):
         # model's in-notebook pip installs persist and imports resolve.
         # See shared/plugins/workspace_venv.py.
         self._workspace_venv: Optional[str] = None
+        # Workspace-scoped HOME for the kernel subprocess (None/empty = off,
+        # #1225).  Points HOME + XDG at ``<ws>/<home>`` so a cell's ~ writes
+        # stay per-workspace.  See shared/plugins/workspace_home.py.
+        self._workspace_home: Optional[str] = None
         self._kernels: Dict[str, _Kernel] = {}
         self._lock = threading.Lock()
         # The runner's tool executor (``ToolExecutor.execute`` shape:
@@ -229,6 +234,8 @@ class SubprocessKernelBackend(NotebookBackend):
             self._workspace_root = config.get("workspace_root") or self._workspace_root
             if "workspace_venv" in config:
                 self._workspace_venv = config.get("workspace_venv")
+            if "workspace_home" in config:
+                self._workspace_home = config.get("workspace_home")
             if "allow_uncontained_exec" in config:
                 self._allow_uncontained = bool(config.get("allow_uncontained_exec"))
             if "allow_read_paths" in config:
@@ -538,6 +545,17 @@ class SubprocessKernelBackend(NotebookBackend):
             kernel_python = venv_python(venv_path)
             kernel_env = os.environ.copy()
             apply_venv_to_env(kernel_env, venv_path)
+
+        # Workspace HOME (#1225): point HOME + XDG at ``<ws>/<home>`` so a
+        # cell's ~ writes land per-workspace.  The daemon created the
+        # directory before spawn.  ``kernel_env`` may still be None (no venv),
+        # so materialise it from os.environ before redirecting -- otherwise
+        # Popen would inherit the daemon's HOME wholesale.
+        home_path = resolve_home_path(self._workspace_home, workspace)
+        if home_path:
+            if kernel_env is None:
+                kernel_env = os.environ.copy()
+            apply_home_to_env(kernel_env, home_path)
 
         r2k_r, r2k_w = os.pipe()   # runner → kernel
         k2r_r, k2r_w = os.pipe()   # kernel → runner

@@ -23,6 +23,7 @@ from typing import Callable, Optional, Dict, Any, Sequence
 
 from .ansi import strip_ansi
 from ..workspace_venv import apply_venv_to_env
+from ..workspace_home import apply_home_to_env
 from jaato_server.shared.secret_scrub import scrub_env as _scrub_secret_env
 from jaato_server.shared.ai_tool_runner import get_current_cancel_token
 from jaato_sdk.plugins.model_provider.types import CancelledException
@@ -301,6 +302,7 @@ class ShellSession:
         cwd: Optional[str] = None,
         preexec_fn: Optional[Callable[[], None]] = None,
         workspace_venv: Optional[str] = None,
+        workspace_home: Optional[str] = None,
         scrub_env: Optional[Sequence[str]] = None,
         workspace_root: Optional[str] = None,
     ):
@@ -322,6 +324,12 @@ class ShellSession:
                 ``VIRTUAL_ENV`` set, site-packages prepended to ``PYTHONPATH``).
                 ``None`` = no venv activation.  The caller (plugin) is
                 responsible for resolving the path and creating the venv.
+            workspace_home: Absolute path to a workspace-scoped HOME (#1225).
+                When set, ``HOME`` and the XDG base dirs are pointed at it so
+                the PTY child's ~ writes (shell history, ~/.gitconfig, ...)
+                land per-workspace rather than in the daemon's HOME.  The
+                caller resolves the path; the daemon creates the directory
+                before spawn.  ``None`` = the inherited HOME is left alone.
             preexec_fn: Optional zero-arg callable run between fork() and
                 exec() in the child.  Used by the cgroups runtime to
                 attach the spawned PTY child to a per-session cgroup
@@ -386,6 +394,11 @@ class ShellSession:
         # over any caller-supplied env.
         if workspace_venv:
             apply_venv_to_env(spawn_env, workspace_venv)
+        # Redirect HOME + XDG at the workspace home (#1225).  Applied after
+        # the inherited copy + caller env so a daemon-exported HOME / XDG_*
+        # cannot leak the shared home into the child.
+        if workspace_home:
+            apply_home_to_env(spawn_env, workspace_home)
 
         if _BACKEND == 'popen_spawn':
             # PopenSpawn: subprocess.Popen with piped stdin/stdout.

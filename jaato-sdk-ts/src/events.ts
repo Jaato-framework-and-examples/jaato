@@ -106,6 +106,8 @@ export type JaatoEvents =
   | ScaffoldExplainEvent
   | StageFilesRequest
   | StageFilesEvent
+  | WorkspaceFileFetchRequest
+  | WorkspaceFileContentEvent
   | PeerHeartbeatEvent
   | PeerSpawnRequestEvent
   | PeerSpawnAcceptedEvent
@@ -231,6 +233,8 @@ export type EventType =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -366,6 +370,8 @@ export type EventType1 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -506,6 +512,8 @@ export type EventType2 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -644,6 +652,8 @@ export type EventType3 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -781,6 +791,8 @@ export type EventType4 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -926,6 +938,8 @@ export type EventType5 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -1068,6 +1082,8 @@ export type EventType6 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -1209,6 +1225,8 @@ export type EventType7 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -1344,6 +1362,8 @@ export type EventType8 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -1483,6 +1503,8 @@ export type EventType9 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -1620,6 +1642,8 @@ export type EventType10 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -1766,6 +1790,8 @@ export type EventType11 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -1911,6 +1937,8 @@ export type EventType12 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -2055,6 +2083,8 @@ export type EventType13 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -2202,6 +2232,8 @@ export type EventType14 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -2344,6 +2376,8 @@ export type EventType15 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -2480,6 +2514,8 @@ export type EventType16 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -2619,6 +2655,8 @@ export type EventType17 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -2758,6 +2796,8 @@ export type EventType18 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -2903,6 +2943,8 @@ export type EventType19 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -3041,6 +3083,8 @@ export type EventType20 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -3183,6 +3227,8 @@ export type EventType21 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -3320,6 +3366,8 @@ export type EventType22 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -3458,6 +3506,8 @@ export type EventType23 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -3596,6 +3646,8 @@ export type EventType24 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -3732,6 +3784,8 @@ export type EventType25 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -3873,6 +3927,8 @@ export type EventType26 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -4010,6 +4066,8 @@ export type EventType27 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -4146,6 +4204,8 @@ export type EventType28 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -4290,6 +4350,8 @@ export type EventType29 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -4428,6 +4490,8 @@ export type EventType30 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -4567,6 +4631,8 @@ export type EventType31 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -4721,6 +4787,8 @@ export type EventType32 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -4856,6 +4924,8 @@ export type EventType33 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -5008,6 +5078,8 @@ export type EventType34 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -5147,6 +5219,8 @@ export type EventType35 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -5282,6 +5356,8 @@ export type EventType36 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -5425,6 +5501,8 @@ export type EventType37 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -5564,6 +5642,8 @@ export type EventType38 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -5700,6 +5780,8 @@ export type EventType39 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -5835,6 +5917,8 @@ export type EventType40 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -5974,6 +6058,8 @@ export type EventType41 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -6115,6 +6201,8 @@ export type EventType42 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -6254,6 +6342,8 @@ export type EventType43 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -6391,6 +6481,8 @@ export type EventType44 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -6538,6 +6630,8 @@ export type EventType45 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -6695,6 +6789,8 @@ export type EventType46 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -6832,6 +6928,8 @@ export type EventType47 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -6969,6 +7067,8 @@ export type EventType48 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -7106,6 +7206,8 @@ export type EventType49 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -7241,6 +7343,8 @@ export type EventType50 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -7401,6 +7505,8 @@ export type EventType51 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -7540,6 +7646,8 @@ export type EventType52 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -7679,6 +7787,8 @@ export type EventType53 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -7816,6 +7926,8 @@ export type EventType54 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -7951,6 +8063,8 @@ export type EventType55 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -8086,6 +8200,8 @@ export type EventType56 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -8222,6 +8338,8 @@ export type EventType57 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -8361,6 +8479,8 @@ export type EventType58 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -8496,6 +8616,8 @@ export type EventType59 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -8630,6 +8752,8 @@ export type EventType60 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -8767,6 +8891,8 @@ export type EventType61 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -8901,6 +9027,8 @@ export type EventType62 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -9039,6 +9167,8 @@ export type EventType63 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -9173,6 +9303,8 @@ export type EventType64 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -9308,6 +9440,8 @@ export type EventType65 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -9445,6 +9579,8 @@ export type EventType66 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -9582,6 +9718,8 @@ export type EventType67 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -9719,6 +9857,8 @@ export type EventType68 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -9854,6 +9994,8 @@ export type EventType69 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -9995,6 +10137,8 @@ export type EventType70 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -10139,6 +10283,8 @@ export type EventType71 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -10275,6 +10421,8 @@ export type EventType72 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -10410,6 +10558,8 @@ export type EventType73 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -10552,6 +10702,8 @@ export type EventType74 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -10693,6 +10845,8 @@ export type EventType75 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -10829,6 +10983,8 @@ export type EventType76 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -10966,6 +11122,8 @@ export type EventType77 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -11100,6 +11258,8 @@ export type EventType78 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -11238,6 +11398,8 @@ export type EventType79 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -11373,6 +11535,8 @@ export type EventType80 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -11509,6 +11673,8 @@ export type EventType81 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -11644,6 +11810,8 @@ export type EventType82 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -11781,6 +11949,8 @@ export type EventType83 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -11916,6 +12086,8 @@ export type EventType84 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -12056,6 +12228,8 @@ export type EventType85 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -12193,6 +12367,8 @@ export type EventType86 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -12332,6 +12508,8 @@ export type EventType87 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -12471,6 +12649,8 @@ export type EventType88 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -12611,6 +12791,8 @@ export type EventType89 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -12750,6 +12932,8 @@ export type EventType90 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -12892,6 +13076,8 @@ export type EventType91 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -13032,6 +13218,8 @@ export type EventType92 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -13171,6 +13359,8 @@ export type EventType93 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -13214,20 +13404,9 @@ export type EventType93 =
   | "gates.snapshot";
 export type Timestamp93 = string;
 export type SessionId93 = string;
-export type ServerId = string;
-export type ServerName = string;
-export type ServerVersion1 = string;
-export type ActiveSessions = number;
-export type ActiveAgents = number;
-export type AvailableProviders1 = string[];
-export type AvailableModels1 = string[];
-export type Tags = string[];
-export type CpuPercent = number;
-export type MemoryPercent = number;
-export type UptimeSeconds = number;
-export type TrustState = string;
-export type SuccessRate1H = number;
-export type EscalatedTools = number;
+export type RequestId22 = string;
+export type Path2 = string;
+export type MetadataOnly = boolean;
 /**
  * All event types in the protocol.
  */
@@ -13319,6 +13498,8 @@ export type EventType94 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -13362,17 +13543,15 @@ export type EventType94 =
   | "gates.snapshot";
 export type Timestamp94 = string;
 export type SessionId94 = string;
-export type RequestId22 = string;
-export type OriginServer = string;
-export type AgentName1 = string;
-export type Task = string;
-export type Context1 = string;
-export type ProfileJson = string;
-export type InlineConfigJson = string;
-export type WorkspaceGitUrl = string;
-export type WorkspaceBranch = string;
-export type WorkspaceCommit = string;
-export type WorkspaceTempBranch = string;
+export type RequestId23 = string;
+export type Ok3 = boolean;
+export type Path3 = string;
+export type Name9 = string;
+export type Size1 = number;
+export type MimeType1 = string;
+export type MetadataOnly1 = boolean;
+export type Category = string;
+export type Error11 = string;
 /**
  * All event types in the protocol.
  */
@@ -13464,6 +13643,8 @@ export type EventType95 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -13507,8 +13688,20 @@ export type EventType95 =
   | "gates.snapshot";
 export type Timestamp95 = string;
 export type SessionId95 = string;
-export type RequestId23 = string;
-export type RemoteAgentId = string;
+export type ServerId = string;
+export type ServerName = string;
+export type ServerVersion1 = string;
+export type ActiveSessions = number;
+export type ActiveAgents = number;
+export type AvailableProviders1 = string[];
+export type AvailableModels1 = string[];
+export type Tags = string[];
+export type CpuPercent = number;
+export type MemoryPercent = number;
+export type UptimeSeconds = number;
+export type TrustState = string;
+export type SuccessRate1H = number;
+export type EscalatedTools = number;
 /**
  * All event types in the protocol.
  */
@@ -13600,6 +13793,8 @@ export type EventType96 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -13644,7 +13839,16 @@ export type EventType96 =
 export type Timestamp96 = string;
 export type SessionId96 = string;
 export type RequestId24 = string;
-export type Reason1 = string;
+export type OriginServer = string;
+export type AgentName1 = string;
+export type Task = string;
+export type Context1 = string;
+export type ProfileJson = string;
+export type InlineConfigJson = string;
+export type WorkspaceGitUrl = string;
+export type WorkspaceBranch = string;
+export type WorkspaceCommit = string;
+export type WorkspaceTempBranch = string;
 /**
  * All event types in the protocol.
  */
@@ -13736,6 +13940,8 @@ export type EventType97 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -13780,9 +13986,7 @@ export type EventType97 =
 export type Timestamp97 = string;
 export type SessionId97 = string;
 export type RequestId25 = string;
-export type RemoteAgentId1 = string;
-export type Text5 = string;
-export type Source1 = string;
+export type RemoteAgentId = string;
 /**
  * All event types in the protocol.
  */
@@ -13874,6 +14078,8 @@ export type EventType98 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -13918,11 +14124,7 @@ export type EventType98 =
 export type Timestamp98 = string;
 export type SessionId98 = string;
 export type RequestId26 = string;
-export type RemoteAgentId2 = string;
-export type Success4 = boolean;
-export type Summary = string;
-export type Error11 = string;
-export type WorkspaceModified = boolean;
+export type Reason1 = string;
 /**
  * All event types in the protocol.
  */
@@ -14014,6 +14216,8 @@ export type EventType99 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -14058,7 +14262,9 @@ export type EventType99 =
 export type Timestamp99 = string;
 export type SessionId99 = string;
 export type RequestId27 = string;
-export type RemoteAgentId3 = string;
+export type RemoteAgentId1 = string;
+export type Text5 = string;
+export type Source1 = string;
 /**
  * All event types in the protocol.
  */
@@ -14150,6 +14356,8 @@ export type EventType100 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -14194,7 +14402,11 @@ export type EventType100 =
 export type Timestamp100 = string;
 export type SessionId100 = string;
 export type RequestId28 = string;
-export type RemoteAgentId4 = string;
+export type RemoteAgentId2 = string;
+export type Success4 = boolean;
+export type Summary = string;
+export type Error12 = string;
+export type WorkspaceModified = boolean;
 /**
  * All event types in the protocol.
  */
@@ -14286,6 +14498,8 @@ export type EventType101 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -14329,10 +14543,8 @@ export type EventType101 =
   | "gates.snapshot";
 export type Timestamp101 = string;
 export type SessionId101 = string;
-export type GateName = string;
-export type TenantId = string;
-export type Owner = string;
-export type AnnouncedAt = string;
+export type RequestId29 = string;
+export type RemoteAgentId3 = string;
 /**
  * All event types in the protocol.
  */
@@ -14424,6 +14636,8 @@ export type EventType102 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -14467,14 +14681,8 @@ export type EventType102 =
   | "gates.snapshot";
 export type Timestamp102 = string;
 export type SessionId102 = string;
-export type GateName1 = string;
-export type TenantId1 = string;
-export type Owner1 = string;
-export type Outcome = {
-  [k: string]: unknown;
-} | null;
-export type ReleasedAt = string;
-export type WasAnnounced = boolean;
+export type RequestId30 = string;
+export type RemoteAgentId4 = string;
 /**
  * All event types in the protocol.
  */
@@ -14566,6 +14774,8 @@ export type EventType103 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -14609,17 +14819,10 @@ export type EventType103 =
   | "gates.snapshot";
 export type Timestamp103 = string;
 export type SessionId103 = string;
-export type GateName2 = string;
-export type TenantId2 = string;
-export type State = string;
-export type Owner2 = string | null;
-export type Intent1 = {
-  [k: string]: unknown;
-} | null;
-export type AcquiredAt = string | null;
-export type ExpiresAt = string | null;
-export type Gates = GateState[];
-export type SnapshotAt = string;
+export type GateName = string;
+export type TenantId = string;
+export type Owner = string;
+export type AnnouncedAt = string;
 /**
  * All event types in the protocol.
  */
@@ -14711,6 +14914,8 @@ export type EventType104 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -14754,13 +14959,14 @@ export type EventType104 =
   | "gates.snapshot";
 export type Timestamp104 = string;
 export type SessionId104 = string;
-export type Text6 = string;
-export type SourceType = string;
-export type SourceId = string | null;
-export type Attachments1 = {
+export type GateName1 = string;
+export type TenantId1 = string;
+export type Owner1 = string;
+export type Outcome = {
   [k: string]: unknown;
-}[];
-export type RequestId29 = string | null;
+} | null;
+export type ReleasedAt = string;
+export type WasAnnounced = boolean;
 /**
  * All event types in the protocol.
  */
@@ -14852,6 +15058,8 @@ export type EventType105 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -14895,9 +15103,17 @@ export type EventType105 =
   | "gates.snapshot";
 export type Timestamp105 = string;
 export type SessionId105 = string;
-export type RequestId30 = string;
-export type Status3 = string;
-export type Detail = string | null;
+export type GateName2 = string;
+export type TenantId2 = string;
+export type State = string;
+export type Owner2 = string | null;
+export type Intent1 = {
+  [k: string]: unknown;
+} | null;
+export type AcquiredAt = string | null;
+export type ExpiresAt = string | null;
+export type Gates = GateState[];
+export type SnapshotAt = string;
 /**
  * All event types in the protocol.
  */
@@ -14989,6 +15205,8 @@ export type EventType106 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -15032,13 +15250,13 @@ export type EventType106 =
   | "gates.snapshot";
 export type Timestamp106 = string;
 export type SessionId106 = string;
-export type RequestId31 = string;
-export type Messages =
-  | {
-      [k: string]: unknown;
-    }[]
-  | null;
-export type TimeoutSeconds = number;
+export type Text6 = string;
+export type SourceType = string;
+export type SourceId = string | null;
+export type Attachments1 = {
+  [k: string]: unknown;
+}[];
+export type RequestId31 = string | null;
 /**
  * All event types in the protocol.
  */
@@ -15130,6 +15348,8 @@ export type EventType107 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -15174,8 +15394,8 @@ export type EventType107 =
 export type Timestamp107 = string;
 export type SessionId107 = string;
 export type RequestId32 = string;
-export type ResponseText = string;
-export type Error12 = string;
+export type Status3 = string;
+export type Detail = string | null;
 /**
  * All event types in the protocol.
  */
@@ -15267,6 +15487,8 @@ export type EventType108 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -15311,9 +15533,12 @@ export type EventType108 =
 export type Timestamp108 = string;
 export type SessionId108 = string;
 export type RequestId33 = string;
-export type AfterMessage = number | null;
-export type AfterToolCall = string | null;
-export type AfterTimestamp = string | null;
+export type Messages =
+  | {
+      [k: string]: unknown;
+    }[]
+  | null;
+export type TimeoutSeconds = number;
 /**
  * All event types in the protocol.
  */
@@ -15405,6 +15630,8 @@ export type EventType109 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -15449,7 +15676,7 @@ export type EventType109 =
 export type Timestamp109 = string;
 export type SessionId109 = string;
 export type RequestId34 = string;
-export type ForkIndex = number;
+export type ResponseText = string;
 export type Error13 = string;
 /**
  * All event types in the protocol.
@@ -15542,6 +15769,8 @@ export type EventType110 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -15585,11 +15814,10 @@ export type EventType110 =
   | "gates.snapshot";
 export type Timestamp110 = string;
 export type SessionId110 = string;
-export type WakeRef = string;
-export type Outcome1 = string;
-export type Detail1 = string;
-export type ExpiresAt1 = number;
-export type Endpoint = string;
+export type RequestId35 = string;
+export type AfterMessage = number | null;
+export type AfterToolCall = string | null;
+export type AfterTimestamp = string | null;
 /**
  * All event types in the protocol.
  */
@@ -15681,6 +15909,8 @@ export type EventType111 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -15724,8 +15954,9 @@ export type EventType111 =
   | "gates.snapshot";
 export type Timestamp111 = string;
 export type SessionId111 = string;
-export type WakeRef1 = string;
-export type Source2 = string;
+export type RequestId36 = string;
+export type ForkIndex = number;
+export type Error14 = string;
 /**
  * All event types in the protocol.
  */
@@ -15817,6 +16048,8 @@ export type EventType112 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -15860,8 +16093,11 @@ export type EventType112 =
   | "gates.snapshot";
 export type Timestamp112 = string;
 export type SessionId112 = string;
-export type Tools3 = string[];
-export type Patterns = string[];
+export type WakeRef = string;
+export type Outcome1 = string;
+export type Detail1 = string;
+export type ExpiresAt1 = number;
+export type Endpoint = string;
 /**
  * All event types in the protocol.
  */
@@ -15953,6 +16189,8 @@ export type EventType113 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -15996,8 +16234,8 @@ export type EventType113 =
   | "gates.snapshot";
 export type Timestamp113 = string;
 export type SessionId113 = string;
-export type Tools4 = string[];
-export type Patterns1 = string[];
+export type WakeRef1 = string;
+export type Source2 = string;
 /**
  * All event types in the protocol.
  */
@@ -16089,6 +16327,8 @@ export type EventType114 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -16132,9 +16372,8 @@ export type EventType114 =
   | "gates.snapshot";
 export type Timestamp114 = string;
 export type SessionId114 = string;
-export type Target = string;
-export type Tools5 = string[];
-export type Patterns2 = string[];
+export type Tools3 = string[];
+export type Patterns = string[];
 /**
  * All event types in the protocol.
  */
@@ -16226,6 +16465,8 @@ export type EventType115 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -16269,7 +16510,8 @@ export type EventType115 =
   | "gates.snapshot";
 export type Timestamp115 = string;
 export type SessionId115 = string;
-export type Target1 = string;
+export type Tools4 = string[];
+export type Patterns1 = string[];
 /**
  * All event types in the protocol.
  */
@@ -16361,6 +16603,8 @@ export type EventType116 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -16404,7 +16648,9 @@ export type EventType116 =
   | "gates.snapshot";
 export type Timestamp116 = string;
 export type SessionId116 = string;
-export type Policy = string;
+export type Target = string;
+export type Tools5 = string[];
+export type Patterns2 = string[];
 /**
  * All event types in the protocol.
  */
@@ -16496,6 +16742,8 @@ export type EventType117 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -16539,7 +16787,7 @@ export type EventType117 =
   | "gates.snapshot";
 export type Timestamp117 = string;
 export type SessionId117 = string;
-export type RequestId35 = string;
+export type Target1 = string;
 /**
  * All event types in the protocol.
  */
@@ -16631,6 +16879,8 @@ export type EventType118 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -16674,15 +16924,7 @@ export type EventType118 =
   | "gates.snapshot";
 export type Timestamp118 = string;
 export type SessionId118 = string;
-export type RequestId36 = string;
-export type DefaultPolicy = string;
-export type SessionDefaultPolicy = string | null;
-export type WhitelistTools = string[];
-export type WhitelistPatterns = string[];
-export type BlacklistTools = string[];
-export type BlacklistPatterns = string[];
-export type SessionWhitelist = string[];
-export type SessionBlacklist = string[];
+export type Policy = string;
 /**
  * All event types in the protocol.
  */
@@ -16774,6 +17016,8 @@ export type EventType119 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -16818,9 +17062,6 @@ export type EventType119 =
 export type Timestamp119 = string;
 export type SessionId119 = string;
 export type RequestId37 = string;
-export type User = string;
-export type TtlSeconds = number;
-export type SingleUse = boolean;
 /**
  * All event types in the protocol.
  */
@@ -16912,6 +17153,8 @@ export type EventType120 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -16956,12 +17199,14 @@ export type EventType120 =
 export type Timestamp120 = string;
 export type SessionId120 = string;
 export type RequestId38 = string;
-export type Status4 = string;
-export type Ticket = string;
-export type Qualified = string;
-export type AppId = string;
-export type ExpiresAt2 = string;
-export type Detail2 = string | null;
+export type DefaultPolicy = string;
+export type SessionDefaultPolicy = string | null;
+export type WhitelistTools = string[];
+export type WhitelistPatterns = string[];
+export type BlacklistTools = string[];
+export type BlacklistPatterns = string[];
+export type SessionWhitelist = string[];
+export type SessionBlacklist = string[];
 /**
  * All event types in the protocol.
  */
@@ -17053,6 +17298,8 @@ export type EventType121 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -17097,8 +17344,9 @@ export type EventType121 =
 export type Timestamp121 = string;
 export type SessionId121 = string;
 export type RequestId39 = string;
-export type Ticket1 = string;
-export type User1 = string;
+export type User = string;
+export type TtlSeconds = number;
+export type SingleUse = boolean;
 /**
  * All event types in the protocol.
  */
@@ -17190,6 +17438,8 @@ export type EventType122 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -17234,9 +17484,12 @@ export type EventType122 =
 export type Timestamp122 = string;
 export type SessionId122 = string;
 export type RequestId40 = string;
-export type Status5 = string;
-export type Revoked = number;
-export type Detail3 = string | null;
+export type Status4 = string;
+export type Ticket = string;
+export type Qualified = string;
+export type AppId = string;
+export type ExpiresAt2 = string;
+export type Detail2 = string | null;
 /**
  * All event types in the protocol.
  */
@@ -17328,6 +17581,8 @@ export type EventType123 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -17372,9 +17627,8 @@ export type EventType123 =
 export type Timestamp123 = string;
 export type SessionId123 = string;
 export type RequestId41 = string;
-export type User2 = string;
-export type Workspace3 = string;
-export type Name9 = string;
+export type Ticket1 = string;
+export type User1 = string;
 /**
  * All event types in the protocol.
  */
@@ -17466,6 +17720,8 @@ export type EventType124 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -17510,10 +17766,9 @@ export type EventType124 =
 export type Timestamp124 = string;
 export type SessionId124 = string;
 export type RequestId42 = string;
-export type Status6 = string;
-export type Value = string | null;
-export type ExpiresAt3 = string | null;
-export type Detail4 = string | null;
+export type Status5 = string;
+export type Revoked = number;
+export type Detail3 = string | null;
 /**
  * All event types in the protocol.
  */
@@ -17605,6 +17860,8 @@ export type EventType125 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -17649,7 +17906,9 @@ export type EventType125 =
 export type Timestamp125 = string;
 export type SessionId125 = string;
 export type RequestId43 = string;
-export type User3 = string;
+export type User2 = string;
+export type Workspace3 = string;
+export type Name10 = string;
 /**
  * All event types in the protocol.
  */
@@ -17741,6 +18000,8 @@ export type EventType126 =
   | "config.updated"
   | "workspace.files.stage_request"
   | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
   | "session.profiles"
   | "workspace.files_changed"
   | "workspace.files_snapshot"
@@ -17785,6 +18046,285 @@ export type EventType126 =
 export type Timestamp126 = string;
 export type SessionId126 = string;
 export type RequestId44 = string;
+export type Status6 = string;
+export type Value = string | null;
+export type ExpiresAt3 = string | null;
+export type Detail4 = string | null;
+/**
+ * All event types in the protocol.
+ */
+export type EventType127 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "scaffold.explain.result"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp127 = string;
+export type SessionId127 = string;
+export type RequestId45 = string;
+export type User3 = string;
+/**
+ * All event types in the protocol.
+ */
+export type EventType128 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "scaffold.explain.result"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp128 = string;
+export type SessionId128 = string;
+export type RequestId46 = string;
 export type Status7 = string;
 export type Reloaded = number;
 export type Detail5 = string | null;
@@ -19741,6 +20281,69 @@ export interface StageFilesEvent {
   failed?: Failed;
 }
 /**
+ * Download one file from the caller's workspace (WS only, protocol 1.20).
+ *
+ * The reverse of :class:`StageFilesRequest`.  ``path`` is relative to the
+ * workspace root, or absolute when it lies inside it; the daemon resolves
+ * it against the workspace THIS connection is in (the session's, else the
+ * one it selected) and refuses anything that resolves outside it, symlinks
+ * followed first.
+ *
+ * **Wire protocol:** the server answers with one TEXT
+ * :class:`WorkspaceFileContentEvent` carrying the same ``request_id``.
+ * When ``ok`` is true and ``metadata_only`` was false, exactly ONE raw
+ * BINARY frame of ``size`` bytes follows it immediately -- the two are
+ * written back to back under the connection's send lock, so no other
+ * frame can arrive between them.
+ *
+ * ``metadata_only`` asks for the header alone: whether the file exists,
+ * its size and type.  A host tool offering a download asks this first, so
+ * the model is told "no such file" instead of offering a link that fails.
+ */
+export interface WorkspaceFileFetchRequest {
+  type?: EventType93;
+  timestamp?: Timestamp93;
+  session_id?: SessionId93;
+  request_id?: RequestId22;
+  path?: Path2;
+  metadata_only?: MetadataOnly;
+}
+/**
+ * Server's answer to :class:`WorkspaceFileFetchRequest` (protocol 1.20).
+ *
+ * ``request_id`` echoes the request.  ``path`` is the file's path relative
+ * to the workspace root (normalised, so a client can key on it), ``name``
+ * its basename, ``size`` its length in bytes and ``mime_type`` a guess
+ * from its name (``application/octet-stream`` when there is none).
+ *
+ * On failure ``ok`` is false, no binary frame follows, and ``category``
+ * is one of:
+ *
+ * - ``"workspace_not_found"`` -- this connection is in no workspace.
+ * - ``"unsafe_path"`` -- empty, or resolves outside the workspace.
+ * - ``"not_found"`` -- nothing at that path.
+ * - ``"not_a_file"`` -- a directory or another non-regular file.
+ * - ``"credential"`` -- a file that holds credentials (the workspace
+ *   ``.env``, a stored ``*_auth.json``); refused by name so a download
+ *   link can never carry a key out of the workspace.
+ * - ``"too_large"`` -- over the daemon's download cap.
+ * - ``"io_error"`` -- the read failed; ``error`` carries the OS message.
+ */
+export interface WorkspaceFileContentEvent {
+  type?: EventType94;
+  timestamp?: Timestamp94;
+  session_id?: SessionId94;
+  request_id?: RequestId23;
+  ok?: Ok3;
+  path?: Path3;
+  name?: Name9;
+  size?: Size1;
+  mime_type?: MimeType1;
+  metadata_only?: MetadataOnly1;
+  category?: Category;
+  error?: Error11;
+}
+/**
  * Heartbeat sent between peer servers at a configurable interval.
  *
  * Contains server identity, workload metrics, and health data used by the
@@ -19748,9 +20351,9 @@ export interface StageFilesEvent {
  * to expose cluster state to the model.
  */
 export interface PeerHeartbeatEvent {
-  type?: EventType93;
-  timestamp?: Timestamp93;
-  session_id?: SessionId93;
+  type?: EventType95;
+  timestamp?: Timestamp95;
+  session_id?: SessionId95;
   server_id?: ServerId;
   server_name?: ServerName;
   server_version?: ServerVersion1;
@@ -19775,10 +20378,10 @@ export interface PeerHeartbeatEvent {
  * this spawn lifecycle.
  */
 export interface PeerSpawnRequestEvent {
-  type?: EventType94;
-  timestamp?: Timestamp94;
-  session_id?: SessionId94;
-  request_id?: RequestId22;
+  type?: EventType96;
+  timestamp?: Timestamp96;
+  session_id?: SessionId96;
+  request_id?: RequestId24;
   origin_server?: OriginServer;
   agent_name?: AgentName1;
   task?: Task;
@@ -19797,10 +20400,10 @@ export interface PeerSpawnRequestEvent {
  * ephemeral session and is about to start processing.
  */
 export interface PeerSpawnAcceptedEvent {
-  type?: EventType95;
-  timestamp?: Timestamp95;
-  session_id?: SessionId95;
-  request_id?: RequestId23;
+  type?: EventType97;
+  timestamp?: Timestamp97;
+  session_id?: SessionId97;
+  request_id?: RequestId25;
   remote_agent_id?: RemoteAgentId;
 }
 /**
@@ -19810,10 +20413,10 @@ export interface PeerSpawnAcceptedEvent {
  * capacity limits, missing provider, unknown profile).
  */
 export interface PeerSpawnRejectedEvent {
-  type?: EventType96;
-  timestamp?: Timestamp96;
-  session_id?: SessionId96;
-  request_id?: RequestId24;
+  type?: EventType98;
+  timestamp?: Timestamp98;
+  session_id?: SessionId98;
+  request_id?: RequestId26;
   reason?: Reason1;
 }
 /**
@@ -19824,10 +20427,10 @@ export interface PeerSpawnRejectedEvent {
  * to the parent session via ``inject_prompt``.
  */
 export interface PeerAgentOutputEvent {
-  type?: EventType97;
-  timestamp?: Timestamp97;
-  session_id?: SessionId97;
-  request_id?: RequestId25;
+  type?: EventType99;
+  timestamp?: Timestamp99;
+  session_id?: SessionId99;
+  request_id?: RequestId27;
   remote_agent_id?: RemoteAgentId1;
   text?: Text5;
   source?: Source1;
@@ -19840,14 +20443,14 @@ export interface PeerAgentOutputEvent {
  * populated only when ``success`` is False.
  */
 export interface PeerAgentCompletedEvent {
-  type?: EventType98;
-  timestamp?: Timestamp98;
-  session_id?: SessionId98;
-  request_id?: RequestId26;
+  type?: EventType100;
+  timestamp?: Timestamp100;
+  session_id?: SessionId100;
+  request_id?: RequestId28;
   remote_agent_id?: RemoteAgentId2;
   success?: Success4;
   summary?: Summary;
-  error?: Error11;
+  error?: Error12;
   workspace_modified?: WorkspaceModified;
 }
 /**
@@ -19857,20 +20460,20 @@ export interface PeerAgentCompletedEvent {
  * a previously spawned remote subagent.
  */
 export interface PeerStopRequestEvent {
-  type?: EventType99;
-  timestamp?: Timestamp99;
-  session_id?: SessionId99;
-  request_id?: RequestId27;
+  type?: EventType101;
+  timestamp?: Timestamp101;
+  session_id?: SessionId101;
+  request_id?: RequestId29;
   remote_agent_id?: RemoteAgentId3;
 }
 /**
  * Confirmation that a remote peer received and processed the stop request.
  */
 export interface PeerStopAcknowledgedEvent {
-  type?: EventType100;
-  timestamp?: Timestamp100;
-  session_id?: SessionId100;
-  request_id?: RequestId28;
+  type?: EventType102;
+  timestamp?: Timestamp102;
+  session_id?: SessionId102;
+  request_id?: RequestId30;
   remote_agent_id?: RemoteAgentId4;
 }
 /**
@@ -19882,9 +20485,9 @@ export interface PeerStopAcknowledgedEvent {
  * observe the spawned session's events.
  */
 export interface GateAnnouncedEvent {
-  type?: EventType101;
-  timestamp?: Timestamp101;
-  session_id?: SessionId101;
+  type?: EventType103;
+  timestamp?: Timestamp103;
+  session_id?: SessionId103;
   gate_name?: GateName;
   tenant_id?: TenantId;
   owner?: Owner;
@@ -19904,9 +20507,9 @@ export interface Intent {
  * on TTL expiry.
  */
 export interface GateReleasedEvent {
-  type?: EventType102;
-  timestamp?: Timestamp102;
-  session_id?: SessionId102;
+  type?: EventType104;
+  timestamp?: Timestamp104;
+  session_id?: SessionId104;
   gate_name?: GateName1;
   tenant_id?: TenantId1;
   owner?: Owner1;
@@ -19922,9 +20525,9 @@ export interface GateReleasedEvent {
  * the registry replays the live state once at subscription time.
  */
 export interface GatesSnapshotEvent {
-  type?: EventType103;
-  timestamp?: Timestamp103;
-  session_id?: SessionId103;
+  type?: EventType105;
+  timestamp?: Timestamp105;
+  session_id?: SessionId105;
   gates?: Gates;
   snapshot_at?: SnapshotAt;
 }
@@ -19975,14 +20578,14 @@ export interface GateState {
  * patterns via the priority dimension.
  */
 export interface InjectPromptRequest {
-  type?: EventType104;
-  timestamp?: Timestamp104;
-  session_id?: SessionId104;
+  type?: EventType106;
+  timestamp?: Timestamp106;
+  session_id?: SessionId106;
   text?: Text6;
   source_type?: SourceType;
   source_id?: SourceId;
   attachments?: Attachments1;
-  request_id?: RequestId29;
+  request_id?: RequestId31;
 }
 /**
  * Server's response to :class:`InjectPromptRequest`.
@@ -20034,10 +20637,10 @@ export interface InjectPromptRequest {
  * absence is left checkable instead of forgeable.
  */
 export interface InjectPromptResultEvent {
-  type?: EventType105;
-  timestamp?: Timestamp105;
-  session_id?: SessionId105;
-  request_id?: RequestId30;
+  type?: EventType107;
+  timestamp?: Timestamp107;
+  session_id?: SessionId107;
+  request_id?: RequestId32;
   status?: Status3;
   detail?: Detail;
 }
@@ -20056,10 +20659,10 @@ export interface InjectPromptResultEvent {
  * flows compose this with ``resolve_fork_point``.
  */
 export interface ReplayMessagesRequest {
-  type?: EventType106;
-  timestamp?: Timestamp106;
-  session_id?: SessionId106;
-  request_id?: RequestId31;
+  type?: EventType108;
+  timestamp?: Timestamp108;
+  session_id?: SessionId108;
+  request_id?: RequestId33;
   messages?: Messages;
   timeout_seconds?: TimeoutSeconds;
 }
@@ -20067,12 +20670,12 @@ export interface ReplayMessagesRequest {
  * Server's response to :class:`ReplayMessagesRequest`.
  */
 export interface ReplayMessagesResultEvent {
-  type?: EventType107;
-  timestamp?: Timestamp107;
-  session_id?: SessionId107;
-  request_id?: RequestId32;
+  type?: EventType109;
+  timestamp?: Timestamp109;
+  session_id?: SessionId109;
+  request_id?: RequestId34;
   response_text?: ResponseText;
-  error?: Error12;
+  error?: Error13;
 }
 /**
  * Resolve a fork point in the session's history to a message index.
@@ -20090,10 +20693,10 @@ export interface ReplayMessagesResultEvent {
  * tool uses internally.
  */
 export interface ResolveForkPointRequest {
-  type?: EventType108;
-  timestamp?: Timestamp108;
-  session_id?: SessionId108;
-  request_id?: RequestId33;
+  type?: EventType110;
+  timestamp?: Timestamp110;
+  session_id?: SessionId110;
+  request_id?: RequestId35;
   after_message?: AfterMessage;
   after_tool_call?: AfterToolCall;
   after_timestamp?: AfterTimestamp;
@@ -20102,12 +20705,12 @@ export interface ResolveForkPointRequest {
  * Server's response to :class:`ResolveForkPointRequest`.
  */
 export interface ResolveForkPointResultEvent {
-  type?: EventType109;
-  timestamp?: Timestamp109;
-  session_id?: SessionId109;
-  request_id?: RequestId34;
+  type?: EventType111;
+  timestamp?: Timestamp111;
+  session_id?: SessionId111;
+  request_id?: RequestId36;
   fork_index?: ForkIndex;
-  error?: Error13;
+  error?: Error14;
 }
 /**
  * Server returns the result of ``session.bind_wake`` / ``session.unbind_wake``.
@@ -20119,9 +20722,9 @@ export interface ResolveForkPointResultEvent {
  * binding's Unix expiry — the values the caller's waker keys on.
  */
 export interface WakeBindResultEvent {
-  type?: EventType110;
-  timestamp?: Timestamp110;
-  session_id?: SessionId110;
+  type?: EventType112;
+  timestamp?: Timestamp112;
+  session_id?: SessionId112;
   wake_ref?: WakeRef;
   outcome?: Outcome1;
   detail?: Detail1;
@@ -20148,9 +20751,9 @@ export interface WakeBindResultEvent {
  * notification is a signal to attach, not the untrusted payload).
  */
 export interface SessionWokenEvent {
-  type?: EventType111;
-  timestamp?: Timestamp111;
-  session_id?: SessionId111;
+  type?: EventType113;
+  timestamp?: Timestamp113;
+  session_id?: SessionId113;
   wake_ref?: WakeRef1;
   source?: Source2;
 }
@@ -20163,9 +20766,9 @@ export interface SessionWokenEvent {
  * additive.
  */
 export interface PermissionAddWhitelistRequest {
-  type?: EventType112;
-  timestamp?: Timestamp112;
-  session_id?: SessionId112;
+  type?: EventType114;
+  timestamp?: Timestamp114;
+  session_id?: SessionId114;
   tools?: Tools3;
   patterns?: Patterns;
 }
@@ -20177,9 +20780,9 @@ export interface PermissionAddWhitelistRequest {
  * both lists are additive.
  */
 export interface PermissionAddBlacklistRequest {
-  type?: EventType113;
-  timestamp?: Timestamp113;
-  session_id?: SessionId113;
+  type?: EventType115;
+  timestamp?: Timestamp115;
+  session_id?: SessionId115;
   tools?: Tools4;
   patterns?: Patterns1;
 }
@@ -20190,9 +20793,9 @@ export interface PermissionAddBlacklistRequest {
  * ``"blacklist"``.  Empty lists are no-ops.
  */
 export interface PermissionRemoveRequest {
-  type?: EventType114;
-  timestamp?: Timestamp114;
-  session_id?: SessionId114;
+  type?: EventType116;
+  timestamp?: Timestamp116;
+  session_id?: SessionId116;
   target?: Target;
   tools?: Tools5;
   patterns?: Patterns2;
@@ -20206,9 +20809,9 @@ export interface PermissionRemoveRequest {
  * session-level overrides.
  */
 export interface PermissionClearRequest {
-  type?: EventType115;
-  timestamp?: Timestamp115;
-  session_id?: SessionId115;
+  type?: EventType117;
+  timestamp?: Timestamp117;
+  session_id?: SessionId117;
   target?: Target1;
 }
 /**
@@ -20219,19 +20822,19 @@ export interface PermissionClearRequest {
  * the base default for this session only.
  */
 export interface PermissionSetDefaultRequest {
-  type?: EventType116;
-  timestamp?: Timestamp116;
-  session_id?: SessionId116;
+  type?: EventType118;
+  timestamp?: Timestamp118;
+  session_id?: SessionId118;
   policy?: Policy;
 }
 /**
  * Request a structured snapshot of the current permission policy.
  */
 export interface PermissionPolicySnapshotRequest {
-  type?: EventType117;
-  timestamp?: Timestamp117;
-  session_id?: SessionId117;
-  request_id?: RequestId35;
+  type?: EventType119;
+  timestamp?: Timestamp119;
+  session_id?: SessionId119;
+  request_id?: RequestId37;
 }
 /**
  * Structured permission policy snapshot.
@@ -20242,10 +20845,10 @@ export interface PermissionPolicySnapshotRequest {
  * the stringly-typed ``permissions check`` command.
  */
 export interface PermissionPolicySnapshotEvent {
-  type?: EventType118;
-  timestamp?: Timestamp118;
-  session_id?: SessionId118;
-  request_id?: RequestId36;
+  type?: EventType120;
+  timestamp?: Timestamp120;
+  session_id?: SessionId120;
+  request_id?: RequestId38;
   default_policy?: DefaultPolicy;
   session_default_policy?: SessionDefaultPolicy;
   whitelist_tools?: WhitelistTools;
@@ -20294,10 +20897,10 @@ export interface PermissionPolicySnapshotEvent {
  *         socket for a side channel, and a weaker posture either way.
  */
 export interface TicketBindRequest {
-  type?: EventType119;
-  timestamp?: Timestamp119;
-  session_id?: SessionId119;
-  request_id?: RequestId37;
+  type?: EventType121;
+  timestamp?: Timestamp121;
+  session_id?: SessionId121;
+  request_id?: RequestId39;
   user?: User;
   ttl_seconds?: TtlSeconds;
   single_use?: SingleUse;
@@ -20345,10 +20948,10 @@ export interface TicketBindRequest {
  *         say — a reader of ``"unknown"`` is back where they started.
  */
 export interface TicketBindResultEvent {
-  type?: EventType120;
-  timestamp?: Timestamp120;
-  session_id?: SessionId120;
-  request_id?: RequestId38;
+  type?: EventType122;
+  timestamp?: Timestamp122;
+  session_id?: SessionId122;
+  request_id?: RequestId40;
   status?: Status4;
   ticket?: Ticket;
   qualified?: Qualified;
@@ -20385,10 +20988,10 @@ export interface TicketBindResultEvent {
  *         application instead.
  */
 export interface TicketRevokeRequest {
-  type?: EventType121;
-  timestamp?: Timestamp121;
-  session_id?: SessionId121;
-  request_id?: RequestId39;
+  type?: EventType123;
+  timestamp?: Timestamp123;
+  session_id?: SessionId123;
+  request_id?: RequestId41;
   ticket?: Ticket1;
   user?: User1;
 }
@@ -20414,10 +21017,10 @@ export interface TicketRevokeRequest {
  *         say.
  */
 export interface TicketRevokeResultEvent {
-  type?: EventType122;
-  timestamp?: Timestamp122;
-  session_id?: SessionId122;
-  request_id?: RequestId40;
+  type?: EventType124;
+  timestamp?: Timestamp124;
+  session_id?: SessionId124;
+  request_id?: RequestId42;
   status?: Status5;
   revoked?: Revoked;
   detail?: Detail3;
@@ -20459,13 +21062,13 @@ export interface TicketRevokeResultEvent {
  *         which of that user's secrets to mint.
  */
 export interface SecretResolveRequest {
-  type?: EventType123;
-  timestamp?: Timestamp123;
-  session_id?: SessionId123;
-  request_id?: RequestId41;
+  type?: EventType125;
+  timestamp?: Timestamp125;
+  session_id?: SessionId125;
+  request_id?: RequestId43;
   user?: User2;
   workspace?: Workspace3;
-  name?: Name9;
+  name?: Name10;
 }
 /**
  * The application's answer to :class:`SecretResolveRequest` (#1226).
@@ -20501,10 +21104,10 @@ export interface SecretResolveRequest {
  *         say.  Never the secret.
  */
 export interface SecretResolveResultEvent {
-  type?: EventType124;
-  timestamp?: Timestamp124;
-  session_id?: SessionId124;
-  request_id?: RequestId42;
+  type?: EventType126;
+  timestamp?: Timestamp126;
+  session_id?: SessionId126;
+  request_id?: RequestId44;
   status?: Status6;
   value?: Value;
   expires_at?: ExpiresAt3;
@@ -20529,10 +21132,10 @@ export interface SecretResolveResultEvent {
  *         ``ticket.bind`` does, so the app id is never a request field.
  */
 export interface SecretReloadRequest {
-  type?: EventType125;
-  timestamp?: Timestamp125;
-  session_id?: SessionId125;
-  request_id?: RequestId43;
+  type?: EventType127;
+  timestamp?: Timestamp127;
+  session_id?: SessionId127;
+  request_id?: RequestId45;
   user?: User3;
 }
 /**
@@ -20553,10 +21156,10 @@ export interface SecretReloadRequest {
  *     detail: Human-readable elaboration, omitted when there is nothing to say.
  */
 export interface SecretReloadResultEvent {
-  type?: EventType126;
-  timestamp?: Timestamp126;
-  session_id?: SessionId126;
-  request_id?: RequestId44;
+  type?: EventType128;
+  timestamp?: Timestamp128;
+  session_id?: SessionId128;
+  request_id?: RequestId46;
   status?: Status7;
   reloaded?: Reloaded;
   detail?: Detail5;
@@ -20669,6 +21272,8 @@ export const EventTypeValue = {
   CONFIG_UPDATED: "config.updated",
   WORKSPACE_FILES_STAGE_REQUEST: "workspace.files.stage_request",
   WORKSPACE_FILES_STAGED: "workspace.files.staged",
+  WORKSPACE_FILE_FETCH_REQUEST: "workspace.file.fetch",
+  WORKSPACE_FILE_CONTENT: "workspace.file.content",
   SESSION_PROFILES: "session.profiles",
   WORKSPACE_FILES_CHANGED: "workspace.files_changed",
   WORKSPACE_FILES_SNAPSHOT: "workspace.files_snapshot",

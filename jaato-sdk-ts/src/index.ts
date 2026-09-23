@@ -24,7 +24,9 @@ export {
   MIN_PROTOCOL_VERSION,
   MIN_ATTACHMENT_RESUME_PROTOCOL,
   MIN_WORKSPACE_IGNORE_PROTOCOL,
+  MIN_FILE_FETCH_PROTOCOL,
   isProtocolCompatible,
+  type WorkspaceFileFetchResult,
   type JaatoClientOptions,
   type TokenProvider,
 } from "./client.js";

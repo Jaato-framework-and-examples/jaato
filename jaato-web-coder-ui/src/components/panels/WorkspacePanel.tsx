@@ -21,6 +21,9 @@
  *   change (``store/workspaceView.ts``), and is dropped, with a notice, when
  *   it cannot be honoured.
  *
+ * - **download**: a file's name is a button that downloads it through
+ *   the daemon's ``workspace.file.fetch`` (protocol 1.20, ``app/downloads``).
+ *   Deleted files, and every file against an older daemon, stay plain text.
  * - **collapse** (TUI Left/Right): the arrow in front of a directory folds
  *   it to one line carrying how many files it holds.  Every directory
  *   starts expanded and a reset expands them all again, as in the TUI.
@@ -33,6 +36,7 @@ import { useMemo } from "react";
 import { useJaato } from "@/store/store";
 import { toggleWorkspaceIgnore } from "@/app/actions";
 import { visibleFiles } from "@/store/workspaceView";
+import { downloadFromPanel, servesDownloads } from "@/app/downloads";
 
 interface Node { name: string; path: string; change?: string; children: Map<string, Node> }
 
@@ -105,6 +109,25 @@ function DirToggle({ node, id, folded }: { node: Node; id: string; folded: boole
   );
 }
 
+/**
+ * A file's row label.  A file that still exists is a button that
+ * downloads it (protocol 1.20); a deleted one, or any file against a
+ * daemon that cannot serve the download, is plain text.
+ */
+function FileLabel({ node }: { node: Node }) {
+  const downloadable = useJaato((s) => s.connection.phase === "connected" && servesDownloads(s.connection.protocolVersion));
+  const glyph = node.change === "deleted" ? "−" : node.change === "created" || node.change === "added" ? "+" : "~";
+  const cls = CHANGE_CLS[node.change ?? ""] ?? "";
+  if (node.change === "deleted" || !downloadable) {
+    return <span className={cls} title={node.change}>{glyph} {node.name}</span>;
+  }
+  return (
+    <button type="button" className={`${cls} text-left hover:underline`} onClick={() => { void downloadFromPanel(node.path); }} aria-label={`Download ${node.path}`} title={node.change ? `${node.change} -- click to download` : "Click to download"}>
+      {glyph} {node.name}
+    </button>
+  );
+}
+
 function Tree({ node, depth, hidden, showHidden, ignored, collapsed }: TreeProps) {
   const entries = [...node.children.values()].sort((a, b) => (a.children.size ? 0 : 1) - (b.children.size ? 0 : 1) || a.name.localeCompare(b.name));
   return (
@@ -117,7 +140,7 @@ function Tree({ node, depth, hidden, showHidden, ignored, collapsed }: TreeProps
         const folded = isDir && collapsed.includes(id);
         const label = isDir
           ? <DirToggle node={n} id={id} folded={folded} />
-          : <span className={CHANGE_CLS[n.change ?? ""] ?? ""} title={n.change}>{n.change === "deleted" ? "−" : n.change === "created" || n.change === "added" ? "+" : "~"} {n.name}</span>;
+          : <FileLabel node={n} />;
         return (
           <li key={n.path} className="font-mono text-[11.5px] leading-[1.8]">
             <div className={`group flex items-center gap-1 pr-1 ${hid ? "opacity-50" : ""}`} style={{ paddingLeft: depth * 12 }} data-hidden={hid || undefined}>

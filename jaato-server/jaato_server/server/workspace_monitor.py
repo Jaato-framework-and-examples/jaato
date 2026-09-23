@@ -46,8 +46,20 @@ from watchdog.events import (
 from watchdog.observers import Observer
 
 from jaato_server.shared.utils.gitignore import GitignoreParser
+from jaato_server.shared.plugins.workspace_home import DEFAULT_WORKSPACE_HOME
 
 logger = logging.getLogger(__name__)
+
+# #1225: the workspace HOME (``<ws>/.home/`` by default) holds tool dotfiles
+# and caches, not the user's project files, so it must not clutter the Files
+# panel.  Its own nested ``.gitignore`` is not enough: ``GitignoreParser``
+# reads only ``<workspace>/.gitignore``, so the monitor is told about the home
+# directly, as an ``extra_patterns`` entry passed to every parser it builds.
+# The framework default is what daemon-managed workspaces get; a workspace
+# configured with a non-default relative home name still keeps the home out of
+# git (its nested ``*`` gitignore) but that custom name is not auto-hidden
+# from the panel.
+_WORKSPACE_HOME_IGNORE = (f"{DEFAULT_WORKSPACE_HOME}/",)
 
 # How long (seconds) to wait after the last filesystem event before flushing
 # the accumulated changes as a single batched event.
@@ -250,7 +262,8 @@ class WorkspaceMonitor:
         # add_sandbox_path() may be called pre-start and needs to filter the
         # sandbox baseline against the workspace's .gitignore patterns.
         self._gitignore: Optional[GitignoreParser] = GitignoreParser(
-            Path(self.workspace_path), include_defaults=True
+            Path(self.workspace_path), include_defaults=True,
+            extra_patterns=list(_WORKSPACE_HOME_IGNORE),
         )
         self._observer: Optional[Observer] = None
         self._accumulator = _ChangeAccumulator(on_flush=self._handle_flush)
@@ -690,7 +703,8 @@ class WorkspaceMonitor:
         against the new ruleset.
         """
         self._gitignore = GitignoreParser(
-            Path(self.workspace_path), include_defaults=True
+            Path(self.workspace_path), include_defaults=True,
+            extra_patterns=list(_WORKSPACE_HOME_IGNORE),
         )
 
     def _on_fs_event(

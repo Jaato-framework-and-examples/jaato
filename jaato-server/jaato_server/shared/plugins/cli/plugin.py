@@ -23,6 +23,7 @@ from jaato_sdk.plugins.model_provider.types import (
     DISCOVERABILITY_DEFERRED,
 )
 from ..sandbox_utils import detect_jaato_symlink
+from ..workspace_home import resolve_home_path, apply_home_to_env
 from ..workspace_venv import (
     resolve_venv_path, ensure_workspace_venv, apply_venv_to_env, pip_apparmor_rules,
 )
@@ -165,6 +166,13 @@ class CLIToolPlugin(BackgroundCapableMixin, RunnerForwardingMixin):
         # ``pip install`` persists there and later imports resolve.  See
         # shared/plugins/workspace_venv.py.
         self._workspace_venv: Optional[str] = None
+        # Workspace-scoped HOME for tool subprocesses (None/empty = off, #1225).
+        # When set, commands run with HOME + the XDG base dirs pointed at
+        # ``<ws>/<home>/`` so ~/.gitconfig, ~/.config/gh, npm/pip caches etc.
+        # stay per-workspace instead of shared across every tenant on the
+        # daemon.  The runner's own HOME is untouched.  See
+        # shared/plugins/workspace_home.py.
+        self._workspace_home: Optional[str] = None
         # Plugin registry for checking authorized external paths
         self._plugin_registry = None
 
@@ -239,6 +247,10 @@ class CLIToolPlugin(BackgroundCapableMixin, RunnerForwardingMixin):
                     self._workspace_root = os.path.realpath(os.path.abspath(workspace))
             if 'workspace_venv' in config:
                 self._workspace_venv = config['workspace_venv']
+            # ``.get`` rather than an ``if`` so this reads the knob without a
+            # new decision point (the complexity ratchet); absent leaves the
+            # current value, exactly as the guarded form would.
+            self._workspace_home = config.get('workspace_home', self._workspace_home)
 
         # Secrets-broker scrub (#10, default flipped in #863): absent means
         # the framework set; ``none`` is the announced opt-out; a malformed
@@ -498,6 +510,24 @@ class CLIToolPlugin(BackgroundCapableMixin, RunnerForwardingMixin):
                         "against the workspace root. Created if absent with "
                         "--system-site-packages; the model's pip installs "
                         "persist there. Recommended: .jaato/tool-venv"
+                    ),
+                },
+                "workspace_home": {
+                    "type": "string",
+                    "default": "",
+                    "description": (
+                        "Path to a workspace-scoped HOME for tool "
+                        "subprocesses (#1225; empty = off). Relative paths "
+                        "resolve against the workspace root, absolute "
+                        "allowed. HOME and the XDG base dirs are pointed at "
+                        "it for cli / interactive_shell / the notebook "
+                        "kernel, so ~/.gitconfig, ~/.config/gh, npm/pip "
+                        "caches and shell history stay per-workspace instead "
+                        "of shared across the daemon's HOME. Default on for "
+                        "workspaces the daemon manages under workspace_root "
+                        "(.home); the runner's own HOME is unchanged. Do NOT "
+                        "store secrets here -- it persists and file tools "
+                        "can read it."
                     ),
                 },
             },
@@ -1099,6 +1129,14 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
         venv_path = resolve_venv_path(self._workspace_venv, self._workspace_root)
         if venv_path:
             apply_venv_to_env(env, venv_path)
+
+        # Workspace HOME (#1225): point HOME + XDG at ``<ws>/<home>`` so the
+        # command's ~ writes land per-workspace, not in the daemon's HOME.
+        # The daemon created the directory before spawn (see
+        # ``ensure_workspace_home_dir``); this only redirects the env.
+        home_path = resolve_home_path(self._workspace_home, self._workspace_root)
+        if home_path:
+            apply_home_to_env(env, home_path)
 
         if self._scrub_secret_env:
             from jaato_server.shared.secret_scrub import scrub_env as _scrub_secret_env

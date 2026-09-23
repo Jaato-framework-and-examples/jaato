@@ -522,6 +522,7 @@ await client.create_session(profile="researcher")
 - `workspace.ignore <path>` — toggle one exact entry in the caller's workspace `.gitignore` (→ `WorkspaceIgnoreResultEvent`; protocol 1.12, see [A Key the Web Files Panel Did Not Have](#a-key-the-web-files-panel-did-not-have))
 - `scaffold.explain [topic] [name]` — render one `jaato-scaffold explain` topic **on the daemon**, so a CLI whose own virtualenv lacks the extension contributing it can still be told (→ `ScaffoldExplainEvent`; protocol 1.18, see [A Topic the CLI Could Not Answer and the Daemon Could](#a-topic-the-cli-could-not-answer-and-the-daemon-could))
 - `workspace.delete` (a `WorkspaceDeleteRequest`, WS only) — delete a workspace the caller may see: its directory, its sessions, its registry row (→ `WorkspaceDeletedEvent`; protocol 1.13, see [A Workspace Everyone Could See](#a-workspace-everyone-could-see))
+- `workspace.file.fetch` (a `WorkspaceFileFetchRequest`, WS only) — download one file from the caller's workspace (→ `WorkspaceFileContentEvent` + one binary frame; protocol 1.20, see [A File That Could Go In and Not Come Out](#a-file-that-could-go-in-and-not-come-out))
 
 **Flow:** Client sends `session.new --profile researcher` → server discovers profiles from `.jaato/profiles/` → resolves `SubagentProfile` → `JaatoServer` applies profile overrides (model, provider, plugins, plugin_configs, GC) during `initialize()`.
 
@@ -7155,6 +7156,70 @@ provider comes from its WORKSPACE `.env`, not the daemon's environment,
 so an auto-provisioned workspace needs the provisioner's own
 `templates/default/.env` seeded. A probe whose sessions do not start
 reports on the no-session path and says so nowhere.
+
+### A File That Could Go In and Not Come Out
+
+A remote client could put a file INTO a workspace (`StageFilesRequest`)
+and take none OUT, so an asset the agent produced in a server-provisioned
+workspace was reachable only by somebody with a shell on the host.
+`workspace.file.fetch` (protocol **1.20**, WS only) is the download, and
+it is the staging protocol in reverse: one TEXT
+`WorkspaceFileContentEvent` header and, on success, ONE raw binary frame
+of exactly `size` bytes. Wire details are in
+[SDK file staging](docs/sdk-file-staging.md).
+
+The web client uses it in two places:
+
+| Where | What |
+|---|---|
+| the Files panel | a file's name is a button that downloads it; a deleted file, or any file against an older daemon, stays plain text |
+| `offer_download`, a host tool the client registers | the model draws a download button in the chat when the user asks for a file, or when it produced one worth keeping |
+
+**The binary frame is the next frame after its header, and that is the
+whole protocol.** The header carries no id the frame could be matched by,
+so `_send_to_client_with_binary` writes both under `self._lock` (the lock
+every other send takes), and the TS transport holds a successful header
+until its frame arrives and delivers the two as one event. `request_id`
+correlates the ANSWER, so several fetches may be in flight.
+
+**What may leave is the daemon's decision, in one module**
+(`server/workspace_download.py`), because a link is something the MODEL
+can propose:
+
+| Rule | Why |
+|---|---|
+| the workspace is the one staging writes into (`_resolve_staging_workspace`, i.e. the router's `resolve_caller_workspace`) | one definition of "this client's workspace", as the staging fix established |
+| containment is judged on the RESOLVED path, checked before existence | a link the agent planted inside the workspace cannot carry out a file from outside it, and a refusal is not an oracle for what exists there |
+| `.env` (at any depth) and `.jaato/*_auth.json` are refused as `credential` | that is where `config.update` and `<provider>-auth key` put a provider key. `.env.example` and a `*_auth.json` outside `.jaato/` are the user's own files and download normally |
+| 50 MB cap (`too_large`), the staging total cap | the file is read whole and sent as one frame; the read runs off the event loop |
+
+**`offer_download` checks, it does not send.** The tool does a
+`metadata_only` fetch and answers the model with what it offered, or
+throws the refusal back as the tool's error, so the model is told "holds
+credentials" instead of offering a button that fails. The bytes move when
+the person clicks. The button sits under the tool's row and is always
+visible, because it IS the tool's output and cannot hide behind the
+expand toggle. It is auto-approved: it only offers, and every byte still
+passes the daemon's rules. Registration is per SESSION on the daemon,
+so the client re-registers on every `session.info` naming a new session,
+including the re-attach after a reconnect, and never against a daemon
+below 1.20.
+
+A missing verb (the 1.7 rule): an older daemon answers `ErrorEvent
+("Unknown message type")` and never the header, so the TS SDK refuses below
+`MIN_FILE_FETCH_PROTOCOL` rather than wait. `_handle_message` is baselined
+in the complexity ratchet, so the upload and download dispatch share one
+helper, `_dispatch_workspace_file_transfer`.
+
+Not done: directories (a zip would be a new verb and a new memory bound),
+the Python SDK (an IPC client is on the daemon's host and reads the
+filesystem itself), and files over the cap.
+
+Guards: `server/tests/test_a_file_the_user_could_not_download.py` (four
+reversions: climbing out, a symlink judged by its name, the `.env` rule,
+and the frame order), the TS SDK's `fetchWorkspaceFile` cases (three fail
+with the transport's pairing removed), and two e2e cases against a mock
+daemon that sends the header and frame in the daemon's shape.
 
 ### Markup That Reached the Transcript as Tags (#1191, #1193)
 

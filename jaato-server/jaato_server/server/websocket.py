@@ -971,6 +971,11 @@ class JaatoWSServer:
                     # _construct_and_initialize_server (see
                     # session_manager.py — same pattern as _agent_params).
                     cascade_driver_id=getattr(server, "_cascade_driver_id", None),
+                    # #1225: this hook only runs for WS-provisioned sessions
+                    # under the server's workspace_root (gated at the top), so
+                    # passing that root turns the workspace HOME default on
+                    # for exactly the sessions the daemon manages.
+                    managed_workspace_root=ws_workspace_root,
                 )
             except Exception as exc:  # noqa: BLE001 — spawn boundary
                 logger.warning(
@@ -995,6 +1000,10 @@ class JaatoWSServer:
                 session_id=session_id,
                 workspace_path=workspace_path,
                 profile_name=profile_name,
+                # #1225: fold the workspace-HOME default into the envelope's
+                # cli / interactive_shell / notebook configs for this managed
+                # workspace.
+                managed_workspace_root=ws_workspace_root,
             )
 
         def _apparmor_session_hook(server: JaatoServer, session_id: str) -> None:
@@ -2250,9 +2259,8 @@ class JaatoWSServer:
         # The handler reads the raw binary payload frames inline before
         # the per-connection receive loop can dispatch the next message,
         # so frame ordering is preserved without coordination state.
-        from jaato_sdk.events import StageFilesRequest
-        if isinstance(event, StageFilesRequest):
-            await self._handle_stage_files_request(client_id, event)
+        # A download (1.20) is the same pair of frames in the other direction.
+        if await self._dispatch_workspace_file_transfer(client_id, event):
             return
 
         # --- Daemon-mode delegation ---
@@ -2721,6 +2729,106 @@ class JaatoWSServer:
             return None
 
         return current_path
+
+    async def _dispatch_workspace_file_transfer(self, client_id: str, event) -> bool:
+        """Route the two binary-framed file verbs; ``True`` when one handled it.
+
+        Upload (``StageFilesRequest``) and download
+        (``WorkspaceFileFetchRequest``) both move raw binary frames beside a
+        TEXT event, so both must be handled HERE, on the receive loop, before
+        anything else reads a frame -- and never reach the command router,
+        which has no binary channel.
+        """
+        from jaato_sdk.events import StageFilesRequest, WorkspaceFileFetchRequest
+        if isinstance(event, StageFilesRequest):
+            await self._handle_stage_files_request(client_id, event)
+            return True
+        if isinstance(event, WorkspaceFileFetchRequest):
+            await self._handle_file_fetch_request(client_id, event)
+            return True
+        return False
+
+    async def _handle_file_fetch_request(self, client_id: str, event) -> None:
+        """Handle ``WorkspaceFileFetchRequest`` -- download one workspace file.
+
+        The reverse of :meth:`_handle_stage_files_request`.  The workspace is
+        the one staging would write into (:meth:`_resolve_staging_workspace`,
+        which delegates to the router's one definition of *which workspace a
+        verb acts in for this client*), and whether the path may leave it is
+        :func:`jaato_server.server.workspace_download.resolve_download`'s decision -- this
+        method only moves bytes.
+
+        On success, and unless ``metadata_only``, the header is followed by
+        ONE binary frame; both are written by
+        :meth:`_send_to_client_with_binary` under the send lock, so no other
+        event can land between them and a client may take "the next binary
+        frame" as this file.  The header's ``size`` is the length READ, not
+        the earlier ``stat``, so the two cannot disagree.  The read runs off
+        the event loop: a 50 MB file must not stall every other connection.
+        """
+        from jaato_sdk.events import WorkspaceFileContentEvent
+        from .workspace_download import read_download, resolve_download
+
+        def _answer(**fields: Any) -> WorkspaceFileContentEvent:
+            return WorkspaceFileContentEvent(
+                request_id=event.request_id,
+                metadata_only=event.metadata_only,
+                **fields,
+            )
+
+        workspace_path = self._resolve_staging_workspace(client_id, "")
+        if workspace_path is None:
+            await self._send_to_client(client_id, _answer(
+                ok=False, path=event.path, category="workspace_not_found",
+                error=f"No workspace selected for client {client_id}",
+            ))
+            return
+        target = resolve_download(workspace_path, event.path)
+        if not target.ok:
+            logger.info(
+                "file fetch refused for %s: path=%r category=%s",
+                client_id, event.path, target.category,
+            )
+            await self._send_to_client(client_id, _answer(
+                ok=False, path=event.path, category=target.category,
+                error=target.error,
+            ))
+            return
+        meta = dict(path=target.relpath, name=target.name, mime_type=target.mime_type)
+        if event.metadata_only:
+            await self._send_to_client(client_id, _answer(ok=True, size=target.size, **meta))
+            return
+        try:
+            data = await asyncio.to_thread(read_download, target)
+        except OSError as exc:
+            await self._send_to_client(client_id, _answer(
+                ok=False, category="io_error", error=str(exc), **meta,
+            ))
+            return
+        await self._send_to_client_with_binary(
+            client_id, _answer(ok=True, size=len(data), **meta), data,
+        )
+
+    async def _send_to_client_with_binary(
+        self, client_id: str, event: Event, data: bytes,
+    ) -> None:
+        """Send ``event`` then ``data`` as one binary frame, back to back.
+
+        Both writes happen under ``self._lock`` -- the lock every other send
+        to a client takes (:meth:`_send_to_client`, :meth:`_broadcast`) -- so
+        the binary frame is always the very next frame after its header.
+        That adjacency is the whole protocol: the header carries no id the
+        binary frame could be matched by.
+        """
+        async with self._lock:
+            client = self._clients.get(client_id)
+            if not client:
+                return
+            try:
+                await client.websocket.send(serialize_event(event))
+                await client.websocket.send(data)
+            except Exception as e:
+                logger.error(f"Send error to {client_id}: {e}")
 
     async def _drain_binary_frames(self, client_id: str, count: int) -> None:
         """Consume ``count`` binary frames without processing them.
