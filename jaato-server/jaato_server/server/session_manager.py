@@ -1412,6 +1412,14 @@ class SessionManager:
         # run (server 0.6.49+).
         self._pre_initialize_hooks: List[Callable] = []
 
+        # #1280: the WS server's provisioning root (``workspace_root``),
+        # handed over by ``JaatoWSServer.set_command_router`` via
+        # :meth:`set_managed_workspace_root`.  ``None`` on an IPC-only
+        # daemon.  Read through :meth:`_managed_workspace_root`, which
+        # threads it into the spawn path so the #1225 workspace HOME and
+        # #1274 workspace venv defaults apply to daemon-managed workspaces.
+        self._managed_workspace_root: Optional[str] = None
+
         logger.info(f"SessionManager initialized with storage template: {self._session_config.storage_path}")
 
     def buffer_client_tools(
@@ -1850,6 +1858,10 @@ class SessionManager:
             session_id=session_id,
             workspace_path=workspace_path,
             config_root=config_root,
+            # #1280: grant the #1225 / #1274 managed defaults (workspace venv
+            # ``bin`` and home ``.local/bin`` exec) on the path a WUI
+            # ``session.new`` takes, as the WS pre-init hook does.
+            managed_workspace_root=self._managed_workspace_root_for_spawn(),
         )
 
         # Spawn requires a workspace (cwd target).  Sessions without
@@ -2073,6 +2085,44 @@ class SessionManager:
             )
         except OSError:
             return False
+
+    def set_managed_workspace_root(self, root: Optional[str]) -> None:
+        """#1280: record the WS server's provisioning root.
+
+        Called by ``JaatoWSServer.set_command_router`` (the seam that also
+        registers the WS pre-init hook, so any deployment that has that hook
+        has this value).  It is what makes a workspace "daemon-managed" for
+        the #1225 workspace HOME and #1274 workspace venv defaults.
+
+        Not threaded through :meth:`set_apparmor_dependencies` because the
+        daemon calls that BEFORE it constructs the WS server, so the
+        ``ws_server`` it hands over is ``None`` on every WS daemon.
+
+        Args:
+            root: The WS server's ``workspace_root``.  ``None`` (standalone
+                or IPC-only) leaves both defaults off, as before.
+        """
+        self._managed_workspace_root = root or None
+
+    def _managed_workspace_root_for_spawn(self) -> Optional[str]:
+        """#1280: the provisioning root to thread into a runner spawn.
+
+        The value set by :meth:`set_managed_workspace_root`, else the
+        ``_workspace_root`` of the WS server reference from
+        :meth:`set_apparmor_dependencies` (same root, second route), else
+        ``None``.
+
+        Returned unconditionally when known: whether a given session's
+        workspace is under it is decided downstream by
+        ``workspace_home._is_daemon_managed``, so an IPC or user-CWD
+        workspace outside the root still resolves to "not managed" and its
+        envelope is unchanged.
+        """
+        explicit = getattr(self, "_managed_workspace_root", None)
+        if explicit:
+            return explicit
+        ws_server = getattr(self, "_ws_server_ref", None)
+        return getattr(ws_server, "_workspace_root", None) or None
 
     def _apparmor_available(self) -> bool:
         """#1253: does THIS host support kernel-enforced AppArmor?
@@ -2366,6 +2416,14 @@ class SessionManager:
                 the flag is the defence-in-depth backstop for any spawn path
                 that reaches the runner with the profile missing.
 
+        The WS provisioning root is not a parameter: it is read from
+        :meth:`_managed_workspace_root_for_spawn` and passed to BOTH
+        ``spawn_session_runner`` (which creates ``<ws>/.home``) and
+        ``dispatch_bootstrap_envelope`` (which folds the #1225 workspace HOME
+        and #1274 workspace venv defaults into the envelope).  Before #1280
+        neither got it, so on this path, the one a premium WUI
+        ``session.new`` takes, both defaults were silently off.
+
         Returns:
             True on successful spawn; False on failure.  Caller
             decides whether to downgrade ``sandbox_mode`` based on
@@ -2465,6 +2523,13 @@ class SessionManager:
                         request_id=getattr(_sess, "create_request_id", None))
                     return False
 
+            # #1280: the WS provisioning root, passed whenever it is known.
+            # ``spawn_session_runner`` creates ``<ws>/.home`` from it, and
+            # ``dispatch_bootstrap_envelope`` folds the #1225 workspace HOME
+            # and #1274 workspace venv defaults into the envelope.  Both
+            # decide per workspace (``_is_daemon_managed``), so an IPC or
+            # user-CWD workspace outside the root is unchanged.
+            managed_workspace_root = self._managed_workspace_root_for_spawn()
             spawn_session_runner(
                 server=server,
                 session_id=session_id,
@@ -2475,6 +2540,7 @@ class SessionManager:
                 cgroup_attach=cgroup_attach,
                 pool_manager=getattr(self, "_pool_manager_ref", None),
                 cascade_driver_id=cascade_driver_id,
+                managed_workspace_root=managed_workspace_root,
             )
             # #812: record WHICH PROCESS is running this session, now that
             # the spawn helper has left the ``SpawnedRunner`` on the server.
@@ -2522,6 +2588,9 @@ class SessionManager:
                     # #1253: carry the confinement invariant to the runner
                     # gate (defence in depth — see this method's docstring).
                     confinement_required=confinement_required,
+                    # #1280: the envelope's plugin configs get the managed
+                    # workspace HOME / venv defaults from this.
+                    managed_workspace_root=managed_workspace_root,
                 )
                 # Phase 3 cascade-sharing: if this session inherited a
                 # pool slot that previously served session
