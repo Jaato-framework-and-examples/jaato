@@ -852,6 +852,54 @@ test("the rail's drag handle resizes it, by pointer and by keyboard", async ({ p
   expect(Math.round((await page.getByRole("complementary", { name: "Session rail" }).boundingBox())!.width)).toBe(404);
 });
 
+test("dragging the boundary between two rail sections moves height between them, and survives a reload (#1244)", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await openSession(page);
+  await page.getByRole("button", { name: "Open Plan" }).click();
+  await page.getByRole("button", { name: "Open Sessions" }).click();
+
+  const plan = page.getByRole("region", { name: "Plan" });
+  const sessions = page.getByRole("region", { name: "Sessions" });
+  const rail = page.locator("[data-rail]");
+  const handle = page.getByRole("separator", { name: "Resize between Plan and Sessions" });
+
+  const planBefore = (await plan.boundingBox())!;
+  const sessionsBefore = (await sessions.boundingBox())!;
+
+  // Measured from the page, not from styles.  Drag the boundary UP, so Plan
+  // shrinks and Sessions grows by the same amount.
+  const hb = (await handle.boundingBox())!;
+  await page.mouse.move(hb.x + hb.width / 2, hb.y + hb.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(hb.x + hb.width / 2, hb.y + hb.height / 2 - 120, { steps: 6 });
+  await page.mouse.up();
+
+  const planAfter = (await plan.boundingBox())!;
+  const sessionsAfter = (await sessions.boundingBox())!;
+  expect(planAfter.height).toBeLessThan(planBefore.height - 40);
+  expect(sessionsAfter.height).toBeGreaterThan(sessionsBefore.height + 40);
+  // Split-pane: what one loses the other gains.
+  const shrank = planBefore.height - planAfter.height;
+  const grew = sessionsAfter.height - sessionsBefore.height;
+  expect(Math.abs(shrank - grew)).toBeLessThan(2);
+
+  // The rail as a whole does not scroll: the open sections divide its height.
+  expect(await rail.evaluate((el) => el.scrollHeight - el.clientHeight)).toBeLessThanOrEqual(1);
+
+  // Remembered per browser: reload, reopen the two sections, the proportion holds.
+  const ratio = planAfter.height / sessionsAfter.height;
+  await page.reload();
+  await page.getByPlaceholder("ws://host:8080").fill("ws://127.0.0.1:8097");
+  await page.getByRole("button", { name: "Connect" }).click();
+  await page.getByRole("button", { name: /default/ }).click();
+  await expect(page.getByText("Connected to the mock daemon")).toBeVisible();
+  await page.getByRole("button", { name: "Open Plan" }).click();
+  await page.getByRole("button", { name: "Open Sessions" }).click();
+  const planReload = (await page.getByRole("region", { name: "Plan" }).boundingBox())!;
+  const sessionsReload = (await page.getByRole("region", { name: "Sessions" }).boundingBox())!;
+  expect(planReload.height / sessionsReload.height).toBeCloseTo(ratio, 1);
+});
+
 test("files attached in the composer are staged into the workspace, listed in Files, and named by the next message", async ({ page }) => {
   await openSession(page);
   // A pick through the strip's hidden input (a drop or a paste reach the same call).

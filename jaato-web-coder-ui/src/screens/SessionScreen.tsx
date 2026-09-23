@@ -29,6 +29,8 @@ import { AgentTabs } from "@/components/panels/AgentTabs";
 import { StatusBar } from "@/components/layout/StatusBar";
 import { Plate } from "@/components/layout/Plate";
 import { RailResizer } from "@/components/layout/RailResizer";
+import { RailSectionResizer } from "@/components/layout/RailSectionResizer";
+import { sharesFor, RAIL_SECTION_MIN_PX, type RailSectionId } from "@/store/railSplits";
 import { answerClarification, attachSession, cancelClarification, createSession, ensureSessions, inputHistory, respondPermission, respondPostAuth, respondReference, submitInput } from "@/app/actions";
 import { openSessionWithQueued } from "@/app/staging";
 import { answerExit } from "@/app/exitChoice";
@@ -74,15 +76,31 @@ function SessionHeader() {
  * open, a labelled region with the panel.  The value on the header's
  * right is the one number the section is about, so a closed section
  * still says something.
+ *
+ * An OPEN section takes a share of the rail's height (``share``, a fraction
+ * of the open sections' total) via ``flex-grow`` rather than a fixed cap, and
+ * scrolls INSIDE its own ``min-h-0 overflow-auto`` box.  The rail no longer
+ * scrolls as a whole: the open sections divide its height between them, and
+ * the horizontal handles between them (``RailSectionResizer``) move that
+ * division.  ``data-rail-section`` is the marker those handles measure.
  */
-function RailSection({ title, value, open, onToggle, children }: { title: string; value?: string | null; open: boolean; onToggle: () => void; children: React.ReactNode }) {
+function RailSection({ id, title, value, open, share, onToggle, children }: { id: RailSectionId; title: string; value?: string | null; open: boolean; share: number; onToggle: () => void; children: React.ReactNode }) {
   return (
     <>
-      <button type="button" onClick={onToggle} className="flex items-baseline justify-between px-3.5 py-2 border-b hairline w-full text-left hover:bg-tint/60" aria-expanded={open} aria-label={`${open ? "Close" : "Open"} ${title}`}>
+      <button type="button" onClick={onToggle} className="flex items-baseline justify-between px-3.5 py-2 border-b hairline w-full text-left shrink-0 hover:bg-tint/60" aria-expanded={open} aria-label={`${open ? "Close" : "Open"} ${title}`}>
         <span className="kicker">{title}</span>
         <span className="font-mono text-[11px] text-text-muted">{value ? `${value} ` : ""}{open ? "▾" : "▸"}</span>
       </button>
-      {open && <section aria-label={title} className="border-b hairline overflow-auto min-h-0 shrink-0 max-h-[60%]">{children}</section>}
+      {open && (
+        <section
+          aria-label={title}
+          data-rail-section={id}
+          className="border-b hairline overflow-auto min-h-0"
+          style={{ flexGrow: share, flexShrink: 1, flexBasis: 0, minHeight: RAIL_SECTION_MIN_PX }}
+        >
+          {children}
+        </section>
+      )}
     </>
   );
 }
@@ -97,12 +115,37 @@ function Rail({ agentId }: { agentId: string }) {
   const sessions = useJaato((s) => s.sessions);
   const notes = useJaato((s) => s.notes);
   const budget = ctx?.usage.cost_usd != null ? `$${Number(ctx.usage.cost_usd).toFixed(4)}` : ctx?.percentUsed != null ? `${ctx.percentUsed.toFixed(0)}%` : null;
+
+  // Fixed order; each carries its ``ui.show*`` flag and its panel.  The open
+  // subset shares the rail's height, and a handle sits on each boundary
+  // between two OPEN sections — so a closed section (just its header) has
+  // nothing to resize.
+  const sections: { id: RailSectionId; title: string; value: string | null; open: boolean; toggle: () => void; panel: React.ReactNode }[] = [
+    { id: "plan", title: "Plan", value: planProgress(plan), open: ui.showPlan, toggle: () => toggle("showPlan"), panel: <PlanPanel agentId={agentId} /> },
+    { id: "budget", title: "Budget", value: budget, open: ui.showBudget, toggle: () => toggle("showBudget"), panel: <BudgetPanel agentId={agentId} /> },
+    { id: "files", title: "Files", value: changed ? `${changed} ${isReset ? "since reset" : "changed"}` : isReset ? "reset" : null, open: ui.showWorkspace, toggle: () => toggle("showWorkspace"), panel: <WorkspacePanel /> },
+    { id: "sessions", title: "Sessions", value: notedSummary(sessions, notes), open: ui.showSessions, toggle: () => toggle("showSessions"), panel: <SessionsPanel /> },
+  ];
+  const openIds = sections.filter((s) => s.open).map((s) => s.id);
+  const shares = sharesFor(ui.railSplits, openIds);
+
+  let prevOpen: { id: RailSectionId; title: string } | null = null;
+  const rows: React.ReactNode[] = [];
+  for (const s of sections) {
+    if (s.open && prevOpen) {
+      rows.push(<RailSectionResizer key={`${prevOpen.id}-${s.id}`} aboveId={prevOpen.id} belowId={s.id} aboveTitle={prevOpen.title} belowTitle={s.title} />);
+    }
+    rows.push(
+      <RailSection key={s.id} id={s.id} title={s.title} value={s.value} open={s.open} share={shares[s.id] ?? 1} onToggle={s.toggle}>
+        {s.panel}
+      </RailSection>,
+    );
+    if (s.open) prevOpen = { id: s.id, title: s.title };
+  }
+
   return (
-    <aside className="hidden md:flex shrink-0 border-l hairline bg-surface flex-col min-h-0 overflow-auto" style={{ width: ui.railWidth }} aria-label="Session rail">
-      <RailSection title="Plan" value={planProgress(plan)} open={ui.showPlan} onToggle={() => toggle("showPlan")}><PlanPanel agentId={agentId} /></RailSection>
-      <RailSection title="Budget" value={budget} open={ui.showBudget} onToggle={() => toggle("showBudget")}><BudgetPanel agentId={agentId} /></RailSection>
-      <RailSection title="Files" value={changed ? `${changed} ${isReset ? "since reset" : "changed"}` : isReset ? "reset" : null} open={ui.showWorkspace} onToggle={() => toggle("showWorkspace")}><WorkspacePanel /></RailSection>
-      <RailSection title="Sessions" value={notedSummary(sessions, notes)} open={ui.showSessions} onToggle={() => toggle("showSessions")}><SessionsPanel /></RailSection>
+    <aside data-rail className="hidden md:flex shrink-0 border-l hairline bg-surface flex-col min-h-0 overflow-hidden" style={{ width: ui.railWidth }} aria-label="Session rail">
+      {rows}
     </aside>
   );
 }
