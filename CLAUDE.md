@@ -8491,6 +8491,64 @@ a tautology on today's only caller — which is the point: the invariant holds a
 the seam that spawns, rather than being a property of one call site a later
 caller could drop.
 
+### What a Model Finds When It Reaches for a Tool (#1273, #1274)
+
+The `jaato-sdk` skill tells a model to run `jaato-doctor` and `jaato-scaffold`
+"from the same Python environment as the daemon". In a live web session
+`which jaato-doctor` found nothing. The daemon ran as
+`<venv>/bin/python -m jaato_server` without its venv activated, so its console
+scripts were on no `PATH` a subprocess inherits. The model could not name them
+by path either: #1202 allows a program by path only when its directory is on
+that same `PATH`.
+
+Four kinds of tool, four sources, and the daemon's own venv is never one of
+them:
+
+| The model runs | Resolves from |
+|---|---|
+| `jaato-doctor`, `jaato-scaffold` | an allow-listed symlink directory in the session tmpdir (`jaato_tools_path.py`), APPENDED to the `PATH` |
+| `python`, `pip`, `uv pip` | the workspace venv (`VIRTUAL_ENV` + its `bin` prepended), which daemon-managed workspaces now get by default |
+| what `uv tool` / `pipx` / `pip --user` install | `<home>/.local/bin`, APPENDED wherever the workspace HOME is applied |
+| `git`, `gh`, `node`, a host `uv` | the host `PATH`, i.e. provisioning; `extra_paths` for unusual locations |
+
+**Why not `<venv>/bin`.** It would fix `jaato-doctor` and also expose the
+daemon venv's `python` and `pip` wherever nothing earlier on the `PATH` shadows
+them, so a model's `pip install` would modify the daemon's own environment, as
+root on a root daemon. The allow-list is two names. `jaato-server` (which
+starts and stops the daemon) and `jaato` (the TUI) are excluded.
+
+**Why symlinks, and why in tmp.** AppArmor mediates exec on the RESOLVED
+path. The targets are `{venv_path}/bin/*`, which the runner profile already
+grants `ix`, while the tmpdir is `rw` without exec, so a wrapper script there
+would be refused. The directory is rebuilt if the session tmpdir is reaped.
+**Known limitation:** a symlink cannot reset the environment, so a tool started
+this way sees the workspace venv's site-packages on `PYTHONPATH`, and a
+conflicting package installed there could shadow one of jaato's dependencies.
+
+**The managed venv (#1274) is the #1225 rule applied to `workspace_venv`.**
+Every workspace the web client creates is profile-less (a bare `.env`), so no
+`plugin_configs` channel reached it. Without a venv, `pip install` ran the
+host's pip: as root against the system Python on a root daemon, or into PEP
+668's refusal and then `--break-system-packages`. Now a workspace under the WS
+server's `workspace_root` gets `.jaato/tool-venv` on `cli`, `interactive_shell`
+and `notebook`:
+
+| Property | Where |
+|---|---|
+| an explicit `plugin_configs.cli.workspace_venv` wins; `""` opts out | `effective_workspace_venv` |
+| an explicit per-surface value is kept; an explicit `cli` value is NOT mirrored (its pre-#1274 meaning) | `inject_workspace_venv` |
+| the envelope carries it | `build_session_envelope`, beside `inject_workspace_home` |
+| the AppArmor rules follow it (venv `bin/*` `ix`, home `.local/bin/*` and `.local/share/**/bin/*` `ix`) | `resolve_plugin_apparmor_rules(..., managed_workspace_root=)` folds both defaults |
+| kept out of the Files panel | `_WORKSPACE_HOME_IGNORE` in `workspace_monitor.py` |
+
+A user's own checkout (IPC, user-CWD) is unchanged: no implicit venv.
+`resolve_plugin_apparmor_rules` used to return `None` for any profile-less
+session. On a managed workspace it no longer does, so those sessions also get
+the rules of the plugins the runner loads either way.
+
+Not verified here: no AppArmor kernel. The exec grants and the resolved-path
+reasoning are exercised as rendered strings, not against an enforcing host.
+
 ### WebMCP Plugin (`jaato_server/shared/plugins/webmcp/`)
 
 Invokes the tools a **web page** declares for agents via

@@ -24,6 +24,7 @@ from typing import Callable, Optional, Dict, Any, Sequence
 from .ansi import strip_ansi
 from ..workspace_venv import apply_venv_to_env
 from ..workspace_home import apply_home_to_env
+from ..jaato_tools_path import apply_jaato_tools_to_env
 from jaato_server.shared.secret_scrub import scrub_env as _scrub_secret_env
 from jaato_server.shared.ai_tool_runner import get_current_cancel_token
 from jaato_sdk.plugins.model_provider.types import CancelledException
@@ -399,6 +400,8 @@ class ShellSession:
         # cannot leak the shared home into the child.
         if workspace_home:
             apply_home_to_env(spawn_env, workspace_home)
+        # jaato's own introspection tools (#1273), appended to PATH.
+        apply_jaato_tools_to_env(spawn_env)
 
         if _BACKEND == 'popen_spawn':
             # PopenSpawn: subprocess.Popen with piped stdin/stdout.

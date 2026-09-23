@@ -45,9 +45,19 @@ path.
 
 Contract
 --------
-- Empty / unset path = feature OFF.  There is no implicit default venv — the
-  path is the explicit agreement between the tool subprocess and the client's
-  in-process import path.
+- Empty / unset path = feature OFF.  Outside daemon-managed workspaces there
+  is no implicit default venv — the path is the explicit agreement between
+  the tool subprocess and the client's in-process import path.
+- **Managed default (#1274).**  A workspace the daemon manages under the WS
+  server's ``workspace_root`` gets :data:`DEFAULT_WORKSPACE_VENV`, the rule
+  #1225 applies to ``workspace_home``.  Those workspaces are profile-less
+  (a bare ``.env``), so no ``plugin_configs`` channel reaches them, and
+  without a venv the model's ``pip install`` runs the HOST's pip: as root
+  against the system Python on a root daemon, or into PEP 668's refusal.
+  An explicit ``plugin_configs.cli.workspace_venv`` (``""`` opts out) wins,
+  and an explicit per-surface value is never overwritten.  Folded daemon-side
+  by :func:`inject_workspace_venv`, both into the envelope and into the
+  AppArmor rule resolution, so the ``ix`` grant follows the venv.
 - Create-if-absent is idempotent, but the runner-import bridge is refreshed on
   every ``ensure`` (so a venv created elsewhere without it is fixed up).
 - Relative paths resolve against the session workspace root; a relative path
@@ -67,6 +77,17 @@ logger = logging.getLogger(__name__)
 
 
 _BRIDGE_PTH = "_jaato_runner_bridge.pth"
+
+# The venv daemon-managed workspaces get when nothing says otherwise (#1274).
+# Under ``.jaato/`` so the scaffolded ``.gitignore`` block (``.jaato/*`` plus
+# re-included authored dirs) already keeps it out of git; the workspace
+# monitor keeps it out of the Files panel.
+DEFAULT_WORKSPACE_VENV = ".jaato/tool-venv"
+
+# The surfaces that run model-driven Python and honour ``workspace_venv``.
+VENV_SURFACES = ("cli", "interactive_shell", "notebook")
+
+_VENV_CONFIG_KEY = "workspace_venv"
 
 
 # AppArmor rules that let a confined tool run ``pip`` at all: pip builds its
@@ -386,3 +407,51 @@ def apply_venv_to_env(env: MutableMapping[str, str], venv_path: str) -> None:
     if site:
         existing_pp = env.get("PYTHONPATH", "")
         env["PYTHONPATH"] = site + (sep + existing_pp if existing_pp else "")
+
+
+def effective_workspace_venv(
+    cli_config: Optional[dict],
+    workspace_path: Optional[str],
+    managed_workspace_root: Optional[str],
+) -> Optional[str]:
+    """The managed-default ``workspace_venv`` for this session, or ``None``.
+
+    ``None`` when a profile already decided (``plugin_configs.cli`` carries
+    the key, a blank value being the opt-out) or when the workspace is not
+    one the daemon manages -- a user's own checkout never grows a venv it
+    did not ask for.  Otherwise :data:`DEFAULT_WORKSPACE_VENV`.
+    """
+    from .workspace_home import is_daemon_managed
+
+    if cli_config is not None and _VENV_CONFIG_KEY in cli_config:
+        return None
+    if is_daemon_managed(workspace_path, managed_workspace_root):
+        return DEFAULT_WORKSPACE_VENV
+    return None
+
+
+def inject_workspace_venv(
+    plugin_configs: dict,
+    workspace_path: Optional[str],
+    managed_workspace_root: Optional[str],
+) -> Optional[str]:
+    """Fold the managed-default venv into every surface that honours it.
+
+    Mutates ``plugin_configs`` in place (``setdefault`` per surface, so an
+    explicit per-surface value is kept) and returns the value applied, or
+    ``None`` when no default applies.  An explicit ``cli`` value is NOT
+    mirrored to the other surfaces: that is the pre-#1274 meaning of the
+    key, and a profile that set it only for ``cli`` keeps that meaning.
+    """
+    if not isinstance(plugin_configs, dict):
+        return None
+    cli_cfg = plugin_configs.get("cli")
+    cli_cfg = cli_cfg if isinstance(cli_cfg, dict) else None
+    raw = effective_workspace_venv(cli_cfg, workspace_path, managed_workspace_root)
+    if not raw:
+        return None
+    for surface in VENV_SURFACES:
+        section = dict(plugin_configs.get(surface) or {})
+        section.setdefault(_VENV_CONFIG_KEY, raw)
+        plugin_configs[surface] = section
+    return raw

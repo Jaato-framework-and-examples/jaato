@@ -1049,6 +1049,7 @@ class JaatoWSServer:
                     session_id=session_id,
                     workspace_path=workspace_path,
                     config_root=None,
+                    managed_workspace_root=ws_workspace_root,
                 )
                 # #1033: the profile is named after the BOUNDARY, so a
                 # pre-warm slot that already wears it needs no
@@ -1314,6 +1315,7 @@ class JaatoWSServer:
                 session_id=session_id,
                 workspace_path=sess.workspace_path,
                 config_root=None,
+                managed_workspace_root=ws_workspace_root,
             )
             if not apparmor.provision_profile(
                 session_id, sess.workspace_path,
