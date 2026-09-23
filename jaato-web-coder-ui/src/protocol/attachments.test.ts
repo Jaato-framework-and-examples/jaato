@@ -44,6 +44,22 @@ describe("checkSizes", () => {
   });
 });
 
+describe("checkSizes against a daemon's limits", () => {
+  it("judges a file against the advertised per-file limit", () => {
+    const v = checkSizes([500, 1500], { stagePerFileLimit: 1000, stageTotalLimit: 10_000, advertised: true });
+    expect(v[0]!.reason).toBeNull();
+    expect(v[1]!.reason).toContain("per-file cap 1000");
+  });
+  // The reported PDF: 1.4 MB, allowed by the 10 MB default, but a daemon
+  // that advertises nothing closes the connection on anything over 1 MiB.
+  it("refuses a file over an older daemon's 1 MiB message limit, naming the remedy", () => {
+    const legacy = { stagePerFileLimit: 1024 * 1024, stageTotalLimit: STAGE_TOTAL_LIMIT, advertised: false };
+    const [pdf] = checkSizes([1_400_000], legacy);
+    expect(pdf!.reason).toMatch(/message limit; upgrade jaato-server/);
+    expect(checkSizes([1_400_000])[0]!.reason).toBeNull();
+  });
+});
+
 describe("attachmentFooter", () => {
   it("is empty with nothing staged, so the prompt goes as typed", () => {
     expect(attachmentFooter([])).toBe("");

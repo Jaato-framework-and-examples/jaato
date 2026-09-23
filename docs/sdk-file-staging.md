@@ -91,9 +91,40 @@ Fatal (aborts the remainder of the stream):
 |-------|---------|----------------|
 | Per-file size | 10 MB | `DEFAULT_STAGE_PER_FILE_LIMIT` in `jaato_server/server/websocket.py` |
 | Total payload size | 50 MB | `DEFAULT_STAGE_TOTAL_LIMIT` in `jaato_server/server/websocket.py` |
+| One WebSocket message | 16 MiB | `DEFAULT_WS_MAX_MESSAGE_SIZE`; `--ws-max-message-size` (floor 1M) |
 
-These will become per-deployment configurable when the next consumer
+The staging caps will become per-deployment configurable when the next consumer
 needs different values.
+
+### The message limit is a separate cap, and it is not polite
+
+Each file is sent as **one** binary message, so it is also bounded by the
+largest WebSocket message the daemon accepts. `websockets` enforces that
+by **closing the connection** with code 1009. It does not answer the
+request: its reader closes the socket as soon as the frame arrives, before
+any handler could reply. So the refusal has to happen on the client, before
+sending:
+
+- The daemon advertises its limits in `ConnectedEvent.server_info`:
+  `max_message_size`, `stage_per_file_limit` (never above
+  `max_message_size`) and `stage_total_limit`. The TS SDK exposes them as
+  `client.serverLimits`.
+- **A daemon that advertises none is an older one, and it enforces 1 MiB.**
+  Until the daemon passed an explicit `max_size`, `websockets` applied its
+  1 MiB default. So a 1.4 MB file closed the socket mid-upload, the client
+  reconnected as a new client, and `stageFiles` waited 120 s for an answer
+  that could not come. `serverLimitsFrom` returns those legacy values when
+  `max_message_size` is absent.
+- The TS SDK rejects a pending `stageFiles` / `fetchWorkspaceFile` **at once**
+  when its connection closes, with a `RequestInterruptedError` carrying the
+  close code, instead of waiting out the deadline.
+- The daemon logs a close with any code other than 1000 / 1001 / 1005 /
+  1006 at WARNING, naming the limit on a 1009.
+
+The 16 MiB default is derived rather than picked: a file at the 10 MB
+per-file cap sent **inline** as base64 (`staged_files` on `session.new`,
+`attachments` on `send_message`) is 4/3 of it, plus room for the JSON
+around it.
 
 ## Workspace targeting
 

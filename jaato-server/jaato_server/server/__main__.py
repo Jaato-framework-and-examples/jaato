@@ -316,6 +316,7 @@ class JaatoDaemon:
         ws_app_credentials: 'Optional[AppCredentialStore]' = None,
         ws_app_credentials_file: Optional[str] = None,
         umask: Optional[str] = None,
+        ws_max_message_size: Optional[str] = None,
     ):
         """Initialize the daemon.
 
@@ -351,6 +352,11 @@ class JaatoDaemon:
                 the daemon and not of a session. Stored raw rather than
                 parsed so ``_write_config`` can round-trip exactly what
                 the operator wrote, and so one resolver parses it.
+            ws_max_message_size: ``--ws-max-message-size``'s raw argument
+                (bytes, or a K/M/G suffix), or ``None`` for the default.
+                Kept raw for ``_write_config`` for the same reason as
+                ``umask``; parsed by
+                :func:`server.websocket.parse_ws_max_message_size`.
         """
         self.ipc_socket = ipc_socket
         self.web_socket = web_socket
@@ -368,6 +374,7 @@ class JaatoDaemon:
         self._ws_app_credentials = ws_app_credentials
         self._ws_app_credentials_file = ws_app_credentials_file
         self._umask = umask
+        self._ws_max_message_size = ws_max_message_size
 
         # Components
         self._session_manager: Optional[SessionManager] = None
@@ -584,6 +591,7 @@ class JaatoDaemon:
                 required_token=self._ws_token,
                 app_credentials=self._ws_app_credentials,
             )
+            ws_server_kwargs.update(_ws_message_size_kwargs(self._ws_max_message_size))
             _cgroups_root_env = os.environ.get("JAATO_CGROUPS_ROOT", "").strip()
             if _cgroups_root_env:
                 ws_server_kwargs["cgroups_root"] = _cgroups_root_env
@@ -917,6 +925,9 @@ class JaatoDaemon:
             # variable from its own environment, which is how every other
             # env knob in this process behaves.
             "umask": self._umask,
+            # Raw, like umask: a limit that decided which files a client
+            # can attach must not silently revert on --restart.
+            "ws_max_message_size": self._ws_max_message_size,
         }
         try:
             with open(self.config_file, 'w') as f:
@@ -1829,6 +1840,23 @@ def _resolve_ws_token(args) -> Optional[str]:
     return token
 
 
+def _ws_message_size_kwargs(raw: Optional[str]) -> Dict[str, int]:
+    """``JaatoWSServer`` kwargs for ``--ws-max-message-size`` (none when unset)."""
+    if not raw:
+        return {}
+    from jaato_server.server.websocket import parse_ws_max_message_size
+    return {"max_message_size": parse_ws_max_message_size(raw)}
+
+
+def _refuse_bad_ws_max_message_size(raw: Optional[str]) -> None:
+    """Exit 2 with the parser's message when ``--ws-max-message-size`` is invalid."""
+    try:
+        _ws_message_size_kwargs(raw)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(2)
+
+
 def _resolve_ws_app_credentials(args) -> 'Optional[AppCredentialStore]':
     """Load the application-credentials file, or return ``None`` (#1074).
 
@@ -1990,6 +2018,17 @@ Examples:
              "on a trusted host).",
     )
     parser.add_argument(
+        "--ws-max-message-size",
+        metavar="SIZE",
+        default=None,
+        help="Largest WebSocket message the daemon accepts, in bytes or "
+             "with a K/M/G suffix (default: 16M; floor: 1M). A staged file "
+             "travels as ONE message, so this also bounds the largest file "
+             "a WS client can attach; it is advertised to clients in the "
+             "connect handshake. A larger message closes the connection "
+             "with code 1009, logged at WARNING.",
+    )
+    parser.add_argument(
         "--umask",
         metavar="MODE",
         default=None,
@@ -2145,6 +2184,7 @@ Examples:
         # wrote, silently dropped by --restart, is the silent-posture-
         # change shape this tree announces rather than performs.
         args.umask = config.get("umask")
+        args.ws_max_message_size = config.get("ws_max_message_size")
 
         # Always restart as daemon
         args.daemon = True
@@ -2221,6 +2261,10 @@ Examples:
     # absent, which is the pre-#1074 posture exactly.
     ws_app_credentials = _resolve_ws_app_credentials(args)
 
+    # Refuse a malformed --ws-max-message-size here, before daemonising,
+    # so the operator sees the error instead of a daemon that never binds.
+    _refuse_bad_ws_max_message_size(getattr(args, "ws_max_message_size", None))
+
     # Create and run daemon
     socket_mode = int(args.socket_mode, 8)
     daemon = JaatoDaemon(
@@ -2237,6 +2281,7 @@ Examples:
         ws_app_credentials=ws_app_credentials,
         ws_app_credentials_file=args.ws_app_credentials,
         umask=args.umask,
+        ws_max_message_size=args.ws_max_message_size,
     )
 
     try:
