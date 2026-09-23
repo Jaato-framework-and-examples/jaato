@@ -37,3 +37,38 @@ plugin_configs:
     scrub_secret_env: [default, "!GH_TOKEN"]
   interactive_shell:
     scrub_secret_env: [default, "!GH_TOKEN"]
+
+  # 3. The outward-facing actions, ENFORCED where the design says enforce and
+  #    ADVISED where it says advise (docs/design/github-workspace-guidance.md
+  #    §7 Q4).  `defaultPolicy: allow` keeps the agent autonomous — the point of
+  #    a gh-worker — so the blacklist is what actually stops a dangerous verb,
+  #    and a blacklist is a HARD stop that works under a headless (ClientType.API)
+  #    driver too, where an interactive prompt has no channel to reach (#950/#951).
+  #
+  #    - Force-push (rule 11) is a hard stop: it rewrites history other people
+  #      pulled and is never the reversible default.  The patterns match the full
+  #      command signature (fnmatch glob), so they are `*`-wrapped to catch the
+  #      `git -C <worktree>` and `cd <worktree> && git push …` forms rule 2 uses.
+  #    - `gh pr merge` / `gh release delete` / `gh repo delete` (rules 10/12):
+  #      the design wanted these to *ask* (confirmable).  The permission policy
+  #      has no per-command ask-list — only a global `defaultPolicy` plus
+  #      allow/deny lists — so with an `allow` default they are shipped as a hard
+  #      deny, which also works headless and matches rule 10 ("draft PRs by
+  #      default; the user merges").  A deployment that wants inline confirmation
+  #      instead sets `defaultPolicy: ask` and drops these three lines.
+  #
+  #    Rules 12/13 beyond these verbs (commenting on someone else's PR, touching
+  #    only the repos the user named, the `gh api … /merge` bypass) are judgement
+  #    the command string does not carry, so they stay prose in the guidance file.
+  permission:
+    policy:
+      defaultPolicy: allow
+      blacklist:
+        patterns:
+          - "*push*--force*"              # git push --force / --force-with-lease
+          - "*push*--force-with-lease*"   # explicit, per §3 (redundant with above)
+          - "*push*-f"                    # git push … -f  (short flag at end)
+          - "*push*-f *"                  # git push -f …  (short flag mid-command)
+          - "*gh pr merge*"               # the user merges (rule 10)
+          - "*gh release delete*"         # irreversible (rule 12)
+          - "*gh repo delete*"            # irreversible (rule 12)
