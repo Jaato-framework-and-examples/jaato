@@ -26,6 +26,7 @@ import ctypes
 import ctypes.util
 import datetime
 import json
+import logging
 import os
 import select
 import signal
@@ -33,7 +34,8 @@ import subprocess
 import sys
 import threading
 import uuid
-from typing import Callable, Dict, List, Optional, Tuple
+from collections import deque
+from typing import Callable, Deque, Dict, List, Optional, Tuple
 
 from jaato_server.shared.session_context import get_workspace_root
 from ...workspace_venv import (
@@ -57,6 +59,19 @@ from ..types import (
 )
 
 _DEFAULT_TIMEOUT_S = 300
+
+logger = logging.getLogger(__name__)
+
+# Bounded capture of the kernel process's OWN stderr (fd 2) — NOT cell
+# stdout/stderr, which travels as ``stream`` frames.  Process stderr is where a
+# kernel death leaves its evidence: a C-level ``Fatal Python error`` /
+# ``Segmentation fault`` line, an uncaught harness traceback, an OOM message.
+# The reader thread drains it continuously (so a full pipe never blocks the
+# kernel) into a fixed-size ring, so the tail is available when the kernel dies
+# without ever buffering unbounded output (issue #1275).
+_STDERR_TAIL_CHUNKS = 16
+_STDERR_CHUNK_BYTES = 4096
+_STDERR_TAIL_CHARS = 2000
 
 
 _PR_SET_PDEATHSIG = 1
@@ -112,6 +127,82 @@ class _Kernel:
         self.rstream = rstream          # kernel → runner
         self.lock = threading.Lock()
         self.announce_boundary = False
+        # Ring of the kernel process's own stderr, for post-mortem diagnosis
+        # (#1275).  Bounded by ``maxlen``, drained by ``_stderr_thread`` so a
+        # full stderr pipe can never wedge the kernel.
+        self._stderr_chunks: Deque[bytes] = deque(maxlen=_STDERR_TAIL_CHUNKS)
+        self._stderr_lock = threading.Lock()
+        self._stderr_thread: Optional[threading.Thread] = None
+
+    def start_stderr_drain(self) -> None:
+        """Continuously copy the kernel's stderr into a bounded ring.
+
+        Started once, right after spawn.  The thread is a daemon and exits on
+        its own when the kernel dies (stderr hits EOF) or ``close`` kills the
+        process, so nothing has to stop it.  A drain that raises (fd already
+        closed under a racing teardown) simply ends — the tail captured so far
+        is what ``describe_death`` reports.
+        """
+        stream = self.proc.stderr
+        if stream is None:
+            return
+
+        def _drain() -> None:
+            try:
+                while True:
+                    chunk = stream.read(_STDERR_CHUNK_BYTES)
+                    if not chunk:
+                        break
+                    with self._stderr_lock:
+                        self._stderr_chunks.append(chunk)
+            except Exception:  # noqa: BLE001 - a drained-through-teardown read
+                pass
+
+        self._stderr_thread = threading.Thread(
+            target=_drain, name=f"nbkernel-stderr-{self.info.notebook_id}",
+            daemon=True)
+        self._stderr_thread.start()
+
+    def stderr_tail_text(self, limit: int = _STDERR_TAIL_CHARS) -> str:
+        """The last ``limit`` characters of captured kernel stderr, decoded.
+
+        Bounded twice over: the ring caps the bytes retained, and this caps the
+        rendered string, so a death reason cannot carry an unbounded payload
+        into a tool result the model reads.
+        """
+        with self._stderr_lock:
+            raw = b"".join(self._stderr_chunks)
+        text = raw.decode("utf-8", errors="replace").strip()
+        if len(text) > limit:
+            text = "…" + text[-limit:]
+        return text
+
+    def describe_death(self) -> str:
+        """A clean, bounded reason the kernel is no longer usable (#1275).
+
+        Names the exit signal (a negative ``returncode`` is ``-N`` for signal
+        ``N``) or exit code, plus the tail of the kernel's own stderr.  Joins
+        the stderr drain briefly first: a kernel that just died may have stderr
+        still buffered in the pipe, and the reason is only diagnosable if that
+        tail is read before it is reported.
+        """
+        rc = self.proc.poll()
+        if self._stderr_thread is not None:
+            self._stderr_thread.join(timeout=2)
+        tail = self.stderr_tail_text()
+        if rc is None:
+            head = "notebook kernel is unresponsive (exit status unknown)"
+        elif rc < 0:
+            try:
+                signame = signal.Signals(-rc).name
+            except (ValueError, KeyError):
+                signame = "unknown"
+            head = f"notebook kernel crashed (signal {-rc} {signame})"
+        elif rc == 0:
+            head = "notebook kernel exited (code 0, unexpected mid-session exit)"
+        else:
+            head = f"notebook kernel exited (code {rc})"
+        return f"{head}: {tail}" if tail else head
 
     def close(self) -> None:
         try:
@@ -354,8 +445,48 @@ class SubprocessKernelBackend(NotebookBackend):
 
     def execute(self, notebook_id: str, code: str,
                 timeout_seconds: Optional[int] = None) -> ExecutionResult:
-        kernel = self._get_or_create(notebook_id)
+        """Run one cell, recovering transparently from a kernel that has died.
+
+        A kernel outlives many cells and can die BETWEEN them (an OOM kill, a
+        native crash from a cell that had already returned, a delayed
+        ``atexit`` fault).  Left unhandled, the next write to its closed stdin
+        raised a raw ``BrokenPipeError`` on EVERY later cell, forever (#1275).
+
+        So a kernel found dead before the cell runs is reaped — capturing WHY
+        it died — and respawned ONCE, so this innocent cell runs on a live
+        kernel rather than hitting the dead pipe.  The re-run is bounded: it
+        goes through the normal read loop, which never respawns again, so a
+        cell that deterministically crashes its kernel fails cleanly rather
+        than looping.  Death discovered DURING the cell (a mid-execution
+        crash) is handled in :meth:`_drive_cell` — the cell that killed the
+        kernel reports its own failure and the notebook is left ready to
+        respawn on the next call.
+        """
         timeout = timeout_seconds or _DEFAULT_TIMEOUT_S
+        kernel = self._get_or_create(notebook_id)
+        if kernel.proc.poll() is not None:
+            reason = self._reap_dead_kernel(notebook_id, kernel)
+            logger.warning(
+                "notebook kernel %s died before a cell ran; respawning (%s)",
+                notebook_id, reason)
+            try:
+                kernel = self._get_or_create(notebook_id)
+            except Exception as exc:  # noqa: BLE001 - report, never re-raise raw
+                return self._kernel_died_result(
+                    f"{reason}; kernel respawn failed: {exc}", None)
+        return self._drive_cell(notebook_id, kernel, code, timeout)
+
+    def _drive_cell(self, notebook_id: str, kernel: "_Kernel", code: str,
+                    timeout: float) -> ExecutionResult:
+        """Send one cell to a (believed-live) kernel and collect its result.
+
+        The write is guarded: even after :meth:`execute`'s liveness check a
+        kernel can die in the race before the frame lands, so a
+        ``BrokenPipeError`` / ``OSError`` on the write is turned into a clean
+        typed failure (reaping the kernel) rather than escaping to
+        ``ai_tool_runner`` as a transport traceback (#1275).  A mid-execution
+        death surfaces the same way through the ``EOFError`` branch below.
+        """
         cell_id = uuid.uuid4().hex[:8]
         start = datetime.datetime.now()
         # Consumed once per kernel: whatever this cell does, the model has now
@@ -373,7 +504,15 @@ class SubprocessKernelBackend(NotebookBackend):
             allow_block = self._sandbox_allow_block()
             if allow_block is not None:
                 frame_out["allow"] = allow_block
-            proto.write_frame(kernel.wstream, frame_out)
+            try:
+                proto.write_frame(kernel.wstream, frame_out)
+            except (BrokenPipeError, OSError):
+                # The kernel died between cells and the write is what found it.
+                reason = self._reap_dead_kernel(notebook_id, kernel)
+                logger.warning(
+                    "notebook kernel %s dead at cell write (%s)",
+                    notebook_id, reason)
+                return self._kernel_died_result(reason, announce)
             outputs: List[CellOutput] = []
             while True:
                 if not self._wait_readable(kernel, timeout):
@@ -388,57 +527,113 @@ class SubprocessKernelBackend(NotebookBackend):
                 try:
                     frame = proto.read_frame(kernel.rstream)
                 except EOFError:
-                    # Kernel died mid-execution — reap it (avoid a zombie) and
-                    # drop it so the next execute spawns a fresh one.
-                    try:
-                        kernel.proc.wait(timeout=2)
-                    except Exception:
-                        kernel.proc.kill()
-                    with self._lock:
-                        self._kernels.pop(notebook_id, None)
-                    return ExecutionResult(
-                        status=ExecutionStatus.FAILED, outputs=outputs,
-                        error_name="KernelDied",
-                        error_message="notebook kernel closed mid-execution",
-                        boundary_kind=announce)
-                ft = frame.get("type")
-                if ft == proto.STREAM:
-                    otype = (OutputType.STDOUT if frame.get("name") == "stdout"
-                             else OutputType.STDERR)
-                    outputs.append(CellOutput(otype, frame.get("text", "")))
-                elif ft == proto.RESULT:
-                    if frame.get("value") is not None:
-                        outputs.append(CellOutput(OutputType.RESULT, frame["value"]))
-                    kernel.info.execution_count = frame.get(
-                        "execution_count", kernel.info.execution_count)
-                    kernel.info.last_executed_at = start.isoformat()
-                    dur = (datetime.datetime.now() - start).total_seconds()
-                    return ExecutionResult(
-                        status=ExecutionStatus.COMPLETED, outputs=outputs,
-                        execution_count=kernel.info.execution_count,
-                        duration_seconds=dur, boundary_kind=announce)
-                elif ft == proto.ERROR:
-                    outputs.append(CellOutput(
-                        OutputType.ERROR, frame.get("traceback", "")))
-                    dur = (datetime.datetime.now() - start).total_seconds()
-                    return ExecutionResult(
-                        status=ExecutionStatus.FAILED, outputs=outputs,
-                        error_name=frame.get("ename"),
-                        error_message=frame.get("evalue"),
-                        traceback=frame.get("traceback"),
-                        duration_seconds=dur, boundary_kind=announce)
-                elif ft == proto.TOOL_CALL:
-                    # The cell is blocked mid-exec waiting for this; run the tool
-                    # runner-side and reply.  The loop then continues reading the
-                    # cell's remaining output / further tool calls / result.
-                    ok, payload = self._run_tool(
-                        frame.get("name", ""), frame.get("args") or {})
-                    proto.write_frame(kernel.wstream, {
-                        "type": proto.TOOL_RESULT,
-                        "call_id": frame.get("call_id"),
-                        "ok": ok,
-                        ("result" if ok else "error"): payload,
-                    })
+                    # Kernel died mid-execution.  Reap it (capturing WHY) and
+                    # drop it so the next execute spawns a fresh one — the
+                    # crashing cell reports its failure, the notebook is not
+                    # bricked.
+                    reason = self._reap_dead_kernel(notebook_id, kernel)
+                    logger.warning(
+                        "notebook kernel %s died mid-execution (%s)",
+                        notebook_id, reason)
+                    return self._kernel_died_result(reason, announce, outputs)
+                result = self._process_frame(kernel, frame, outputs, start,
+                                             announce)
+                if result is not None:
+                    return result
+
+    def _process_frame(self, kernel: "_Kernel", frame: Dict, outputs:
+                       List[CellOutput], start: datetime.datetime,
+                       announce: Optional[str]) -> Optional[ExecutionResult]:
+        """Fold one kernel→runner frame into the running cell.
+
+        Returns an :class:`ExecutionResult` when the cell is done (a ``result``
+        or ``error`` frame), or ``None`` to keep reading (streamed output, or a
+        tool call answered in place).
+        """
+        ft = frame.get("type")
+        if ft == proto.STREAM:
+            otype = (OutputType.STDOUT if frame.get("name") == "stdout"
+                     else OutputType.STDERR)
+            outputs.append(CellOutput(otype, frame.get("text", "")))
+            return None
+        if ft == proto.RESULT:
+            if frame.get("value") is not None:
+                outputs.append(CellOutput(OutputType.RESULT, frame["value"]))
+            kernel.info.execution_count = frame.get(
+                "execution_count", kernel.info.execution_count)
+            kernel.info.last_executed_at = start.isoformat()
+            dur = (datetime.datetime.now() - start).total_seconds()
+            return ExecutionResult(
+                status=ExecutionStatus.COMPLETED, outputs=outputs,
+                execution_count=kernel.info.execution_count,
+                duration_seconds=dur, boundary_kind=announce)
+        if ft == proto.ERROR:
+            outputs.append(CellOutput(
+                OutputType.ERROR, frame.get("traceback", "")))
+            dur = (datetime.datetime.now() - start).total_seconds()
+            return ExecutionResult(
+                status=ExecutionStatus.FAILED, outputs=outputs,
+                error_name=frame.get("ename"),
+                error_message=frame.get("evalue"),
+                traceback=frame.get("traceback"),
+                duration_seconds=dur, boundary_kind=announce)
+        if ft == proto.TOOL_CALL:
+            # The cell is blocked mid-exec waiting for this; run the tool
+            # runner-side and reply.  The loop then continues reading the
+            # cell's remaining output / further tool calls / result.
+            ok, payload = self._run_tool(
+                frame.get("name", ""), frame.get("args") or {})
+            proto.write_frame(kernel.wstream, {
+                "type": proto.TOOL_RESULT,
+                "call_id": frame.get("call_id"),
+                "ok": ok,
+                ("result" if ok else "error"): payload,
+            })
+        return None
+
+    def _reap_dead_kernel(self, notebook_id: str, kernel: "_Kernel") -> str:
+        """Reap a dead kernel, capture its death reason, and drop it (#1275).
+
+        Waits (then kills, as a backstop) to avoid a zombie, reads the exit
+        signal and the tail of the kernel's stderr into a human reason, and
+        removes it from the live map so the next :meth:`execute` spawns a fresh
+        one.  Only drops the entry if it is still the mapped kernel, so a
+        concurrent respawn is not clobbered.  Never raises: a reap failing must
+        not turn a clean error into a traceback.
+        """
+        try:
+            kernel.proc.wait(timeout=2)
+        except Exception:  # noqa: BLE001 - still running / already reaped
+            try:
+                kernel.proc.kill()
+                kernel.proc.wait(timeout=2)
+            except Exception:  # noqa: BLE001
+                pass
+        reason = kernel.describe_death()
+        with self._lock:
+            if self._kernels.get(notebook_id) is kernel:
+                self._kernels.pop(notebook_id, None)
+        for stream in (kernel.wstream, kernel.rstream):
+            try:
+                stream.close()
+            except Exception:  # noqa: BLE001
+                pass
+        return reason
+
+    @staticmethod
+    def _kernel_died_result(
+            reason: str, announce: Optional[str],
+            outputs: Optional[List[CellOutput]] = None) -> ExecutionResult:
+        """A clean, typed 'the kernel crashed' result — never a raw exception.
+
+        Shaped like a normal failed cell (``status=failed``, ``error_name`` /
+        ``error_message``) so a model reads it the way it reads any cell error,
+        with the death signal and stderr tail in ``error_message`` (#1275).
+        """
+        return ExecutionResult(
+            status=ExecutionStatus.FAILED, outputs=outputs or [],
+            error_name="KernelDied", error_message=reason,
+            boundary_kind=announce)
 
     def get_execution_status(self, notebook_id: str,
                              execution_id: Optional[str] = None) -> ExecutionResult:
@@ -580,12 +775,19 @@ class SubprocessKernelBackend(NotebookBackend):
             cwd=workspace,
             env=kernel_env,
             preexec_fn=_set_pdeathsig,
+            # Capture the kernel's OWN stderr into a bounded ring so a death is
+            # diagnosable after the fact (#1275).  Cell stdout/stderr does NOT
+            # come this way — it is framed over the k2r pipe as ``stream``
+            # frames — so this carries only harness-level crash evidence
+            # (a native fault line, an uncaught traceback), never cell output.
+            stderr=subprocess.PIPE,
         )
         os.close(r2k_r)
         os.close(k2r_w)
         wstream = os.fdopen(r2k_w, "wb", buffering=0)
         rstream = os.fdopen(k2r_r, "rb", buffering=0)
         kernel = _Kernel(info, proc, wstream, rstream)
+        kernel.start_stderr_drain()
         # Handshake: the kernel sends READY after chdir + containment + namespace
         # init, and names the boundary it actually established.  Recorded on the
         # NotebookInfo so an operator reading `notebook_list` sees what bounds
