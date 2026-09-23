@@ -22,6 +22,8 @@
  *                 info: no prompt_lines, no warning -- the card falls back to
  *                 the tool arguments
  *   "ask"       → a batch_only clarification with two questions
+ *   "ask long"  → the same, but the first question's choices are ~300 chars
+ *                 each, so the card must wrap them inside the plate (#1245)
  *   "fail"      → a failing tool call
  *   "…notebook…" → a notebook_execute call whose output is one cell as the
  *                 daemon sends it: input / stdout / error <nb-row>s
@@ -339,6 +341,18 @@ async function turn(c: Client, text: string, agentId = "main"): Promise<void> {
     await stream(c, agentId, granted ? `Written (you answered \`${answer}\`).` : "Understood, not writing the file.");
   } else if (lower.includes("ask")) {
     const reqId = randomUUID();
+    // "ask long" gives the first question ~300-char choices, like the report
+    // (#1245): the card must wrap them inside the plate, not run one uppercase
+    // line off its right edge across the rail.  Plain "ask" keeps the short
+    // choices.
+    const longChoices = lower.includes("long");
+    const choices = longChoices
+      ? [
+          "Adopt React 19 with the App Router, server components everywhere, and a strict TypeScript config that treats every implicit any as a build error so the whole team is forced to annotate as they go",
+          "Reach for Svelte 5 runes and a thin adapter layer, keeping the existing REST endpoints untouched while the store is migrated one feature at a time behind a flag nobody outside the team can toggle yet",
+          "Stay on Solid for its fine-grained reactivity and the smaller bundle, accepting that the ecosystem is thinner and that a few of the component libraries the designers picked will have to be rebuilt by hand",
+        ]
+      : ["React 19", "Svelte 5", "Solid"];
     send(c, {
       type: "clarification.batch", agent_id: agentId, request_id: reqId, tool_name: "request_clarification", batch_only: true,
       context: "Before I start:",
@@ -348,13 +362,12 @@ async function turn(c: Client, text: string, agentId = "main"): Promise<void> {
       // the card's vocabulary, which is how a card that could not render the
       // daemon's passed every e2e test.
       questions: [
-        { index: 1, text: "Which framework should the client use?", question_type: "single_choice", required: true, choices: [{ text: "React 19" }, { text: "Svelte 5", default: true }, { text: "Solid" }] },
+        { index: 1, text: "Which framework should the client use?", question_type: "single_choice", required: true, choices: choices.map((text, i) => (i === 1 ? { text, default: true } : { text })) },
         { index: 2, text: "Anything else I should know?", question_type: "free_text", required: false },
       ],
     });
     const answers = (await waitFor(c, `clar:${reqId}`)) as string[];
     // Like the server's ClarificationChannel._parse_answer: a bare number picks that option.
-    const choices = ["React 19", "Svelte 5", "Solid"];
     const first = /^\d+$/.test(answers[0] ?? "") ? (choices[Number(answers[0]) - 1] ?? answers[0]) : answers[0];
     await stream(c, agentId, `Thanks — you chose **${first}** and said "${answers[1]}".`);
   } else if (lower.includes("live")) {

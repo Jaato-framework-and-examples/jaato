@@ -133,26 +133,36 @@ button, input, select, textarea { border-radius: 0; font-family: inherit; }
 .chrome-sm { font-size: 12px; }
 .display { font-family: var(--font-heading); font-weight: 600; line-height: 1.1; letter-spacing: -0.015em; }
 
-/* ── Buttons ──────────────────────────────────────────────────────── */
-.btn {
-  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
-  font-family: var(--font-heading); font-weight: 600; font-size: 14px; line-height: 1.2;
-  letter-spacing: 0.08em; text-transform: uppercase; white-space: nowrap;
-  color: var(--c-text); background: transparent;
-  border: 1px solid var(--c-divider); padding: 7px 14px; cursor: pointer;
+/* ── Buttons ──────────────────────────────────────────────────────────
+   In the components layer, not unlayered: in Tailwind v4 an unlayered rule
+   outranks every utility whatever its specificity, so a bare ``.btn`` here
+   silently cancelled ``normal-case`` / ``tracking-normal`` / ``font-sans`` /
+   ``text-left`` / ``whitespace-normal`` on a caller's button -- which left
+   long clarification and reference choices rendering as one uppercase
+   non-wrapping line that overflowed the plate (#1245).  A button keeps its
+   chrome look by default; a caller's utility may override it, as ``.plate``
+   already lets one override its ``position``. */
+@layer components {
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+    font-family: var(--font-heading); font-weight: 600; font-size: 14px; line-height: 1.2;
+    letter-spacing: 0.08em; text-transform: uppercase; white-space: nowrap;
+    color: var(--c-text); background: transparent;
+    border: 1px solid var(--c-divider); padding: 7px 14px; cursor: pointer;
+  }
+  .btn:hover { background: var(--c-tint); }
+  .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+  .btn-primary { background: var(--c-steel); color: var(--c-bg); border-color: var(--c-steel); }
+  .btn-primary:hover { filter: brightness(0.92); background: var(--c-steel); }
+  .btn-steel { color: var(--c-steel); border-color: var(--c-steel); }
+  .btn-quiet { color: var(--c-text-muted); }
+  .btn-quiet:hover { color: var(--c-text); }
+  .btn-danger { color: var(--c-error); }
+  .btn-sm { font-size: 12px; padding: 2px 8px; font-weight: 500; }
+  .btn-md { font-size: 13px; padding: 5px 12px; }
+  .btn kbd, .btn .key { font-family: var(--font-mono); font-size: 11px; letter-spacing: 0; text-transform: none; opacity: 0.7; border: 0; padding: 0; }
+  .btn-primary kbd, .btn-primary .key { color: inherit; }
 }
-.btn:hover { background: var(--c-tint); }
-.btn:disabled { opacity: 0.45; cursor: not-allowed; }
-.btn-primary { background: var(--c-steel); color: var(--c-bg); border-color: var(--c-steel); }
-.btn-primary:hover { filter: brightness(0.92); background: var(--c-steel); }
-.btn-steel { color: var(--c-steel); border-color: var(--c-steel); }
-.btn-quiet { color: var(--c-text-muted); }
-.btn-quiet:hover { color: var(--c-text); }
-.btn-danger { color: var(--c-error); }
-.btn-sm { font-size: 12px; padding: 2px 8px; font-weight: 500; }
-.btn-md { font-size: 13px; padding: 5px 12px; }
-.btn kbd, .btn .key { font-family: var(--font-mono); font-size: 11px; letter-spacing: 0; text-transform: none; opacity: 0.7; border: 0; padding: 0; }
-.btn-primary kbd, .btn-primary .key { color: inherit; }
 
 /* Text links in the chrome: the quiet way out of a screen. */
 .link { color: var(--c-text-muted); text-decoration: underline; text-underline-offset: 3px; }
