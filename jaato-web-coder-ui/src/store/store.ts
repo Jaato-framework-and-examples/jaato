@@ -1078,6 +1078,31 @@ export function reduce(s: JaatoState, raw: JaatoEvent): JaatoState {
       s.workspaceNotice = { text: `${path} ${ignored ? "added to" : "removed from"} .gitignore` };
       break;
     }
+    case EventTypeValue.SCAFFOLD_INTEGRATION_RESULT: {
+      // The daemon ran ``jaato-scaffold integration --refresh`` into this
+      // workspace (#1263).  A SKIPPED refresh — an ``edited`` / ``diverged``
+      // / ``unstamped`` copy the daemon declined to overwrite — is reported
+      // here rather than silently: the person edited the skill and should
+      // know it was left as-is.  A clean apply of a current copy says
+      // nothing (no notice), so a re-check on every session start is quiet.
+      const name = String(ev.integration ?? "jaato-sdk");
+      if (ev.ok === false) {
+        s.workspaceNotice = { text: String(ev.error || `Could not install the ${name} skill`), error: true };
+        break;
+      }
+      const state = String(ev.state_after ?? ev.state_before ?? "");
+      // Report only a skip that LEFT LOCAL CONTENT alone (the person edited
+      // the skill).  ``--refresh`` also declines an already-``current`` copy
+      // with a skipped_reason, but that is the steady state on every session
+      // start and is not worth a notice — reporting it would be constant noise.
+      if (ev.skipped_reason && (state === "edited" || state === "diverged" || state === "unstamped")) {
+        s.workspaceNotice = { text: `${name} skill left as-is (${state}): ${String(ev.skipped_reason)}` };
+      } else if (ev.changed) {
+        const ver = ev.server_version ? ` (jaato-server ${String(ev.server_version)})` : "";
+        s.workspaceNotice = { text: `${name} skill installed${ver}` };
+      }
+      break;
+    }
     default:
       break;
   }

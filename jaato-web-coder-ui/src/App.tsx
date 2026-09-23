@@ -5,6 +5,10 @@ import { applyTheme, loadThemePreference } from "@/theme/themes";
 import { ConnectScreen } from "@/screens/ConnectScreen";
 import { WorkspaceScreen } from "@/screens/WorkspaceScreen";
 import { SessionScreen } from "@/screens/SessionScreen";
+// Side-effect import: installs the store subscription that asks the daemon
+// to bootstrap the jaato-sdk skill into each workspace this client serves
+// (#1263), on workspace selection and on session start.
+import "@/app/bootstrapSkill";
 
 export default function App() {
   const screen = useJaato((s) => s.screen);

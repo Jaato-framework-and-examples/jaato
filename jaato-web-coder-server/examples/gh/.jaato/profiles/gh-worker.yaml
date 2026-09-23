@@ -14,6 +14,12 @@ default_agent: gh-worker
 plugins:
   - cli
   - interactive_shell
+  # The jaato web coder bootstraps the `jaato-sdk` skill into every workspace
+  # it serves (#1263), at `.claude/skills/jaato-sdk`.  `prompt_library` reads
+  # `.claude/skills/`, so the web-session agent can reach that skill — without
+  # it the skill is present on disk (for Claude Code) but invisible to the
+  # in-session agent.  A default profile that serves web sessions must list it.
+  - prompt_library
 
 # 1. Non-interactive defaults, so a missing credential is an error the model
 #    READS rather than a prompt nobody answers.  `GH_TOKEN=app://github` is the

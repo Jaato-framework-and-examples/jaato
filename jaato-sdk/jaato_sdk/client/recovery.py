@@ -886,6 +886,20 @@ class IPCRecoveryClient:
         if self._client:
             await self._client.explain_topic(topic, name)
 
+    async def run_integration(self, name: str) -> None:
+        """Run ``jaato-scaffold integration <name>`` on the daemon (1.21).
+
+        See :meth:`IPCClient.run_integration` for full docs.  The answer
+        arrives as a ``ScaffoldIntegrationEvent`` on the event stream, so this
+        forwards the request and nothing more.  The inner client raises
+        against a daemon below the protocol floor rather than waiting out a
+        reply it will never send — which for this verb would be reported as
+        *the skill was installed*, when it was not.
+        """
+        self._check_can_send()
+        if self._client:
+            await self._client.run_integration(name)
+
     async def respond_to_post_auth_setup(
         self,
         request_id: str,

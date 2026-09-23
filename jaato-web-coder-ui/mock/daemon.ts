@@ -87,6 +87,10 @@ interface Client {
   staging: { workspaceId: string; specs: { name: string; size: number }[]; frames: Buffer[]; refused: Record<string, string>[] | null } | null;
   /** Host tools this connection registered (``tools.register_client``). */
   clientTools: Set<string>;
+  /** Integrations already installed into this connection's workspace via
+   *  ``scaffold.integration`` (#1263), so a re-refresh reports ``current`` /
+   *  ``changed:false`` the way the daemon's ``--refresh`` does. */
+  installedIntegrations: Set<string>;
 }
 const STAGE_PER_FILE_LIMIT = 10 * 1024 * 1024;
 const STAGE_TOTAL_LIMIT = 50 * 1024 * 1024;
@@ -456,8 +460,9 @@ wss.on("connection", (ws, req) => {
     ws, id: `client_${++clientSeq}`, sessionId: null, pending: new Map(), ignored: new Set(),
     selected: null, provisioned: false, staging: null, clientTools: new Set(),
     policy: { effective_default: "ask", suspension_scope: null },
+    installedIntegrations: new Set(),
   };
-  send(c, { type: "connected", protocol_version: "1.20", server_info: { server_version: "mock-0.0.1", client_id: randomUUID() } });
+  send(c, { type: "connected", protocol_version: "1.21", server_info: { server_version: "mock-0.0.1", client_id: randomUUID() } });
 
   ws.on("message", async (raw, isBinary) => {
     if (c.staging) {
@@ -606,6 +611,38 @@ wss.on("connection", (ws, req) => {
             const ignored = !c.ignored.has(p);
             if (ignored) c.ignored.add(p); else c.ignored.delete(p);
             send(c, { type: "workspace.ignore.result", path: p, ok: true, ignored, gitignore_path: "/work/.gitignore" });
+          }
+        } else if (cmd === "scaffold.integration") {
+          // The daemon runs ``jaato-scaffold integration <name> --refresh``
+          // into the caller's workspace and answers with the four --refresh
+          // fields (protocol 1.21).  The mock models the ``--refresh``
+          // contract's two everyday outcomes: the first call installs an
+          // ``absent`` copy (``changed``), a later one finds it ``current``.
+          // It stamps the skill files into the workspace monitor too, so the
+          // Files panel lists ``.claude/skills/jaato-sdk/SKILL.md`` with the
+          // provenance stamp beside it — the e2e's assertion.
+          const name = args[0] ?? "";
+          const target = "/work/.claude/skills/jaato-sdk";
+          if (name !== "claude-code") {
+            send(c, { type: "scaffold.integration.result", integration: name, ok: false,
+              available: ["claude-code"], server_version: "mock-0.0.1",
+              error: `scaffold.integration: unknown integration '${name}'; this daemon ships: claude-code` });
+          } else if (c.installedIntegrations.has(name)) {
+            // --refresh declines an already-current copy; the daemon reports
+            // it as changed:false with a "current: <version>" skipped_reason,
+            // which the client shows no notice for (steady state).
+            send(c, { type: "scaffold.integration.result", integration: name, ok: true,
+              changed: false, state_before: "current", state_after: "current",
+              skipped_reason: "current: mock-0.0.1", target, available: ["claude-code"], server_version: "mock-0.0.1" });
+          } else {
+            c.installedIntegrations.add(name);
+            emitWorkspaceChanges(c, [
+              { path: ".claude/skills/jaato-sdk/SKILL.md", status: "created" },
+              { path: ".claude/skills/jaato-sdk/.jaato-integration", status: "created" },
+            ]);
+            send(c, { type: "scaffold.integration.result", integration: name, ok: true,
+              changed: true, state_before: "absent", state_after: "current",
+              skipped_reason: "", target, available: ["claude-code"], server_version: "mock-0.0.1" });
           }
         } else if (cmd === "session.stop") {
           send(c, { type: "system.message", message: "Stopped.", style: "warning" });

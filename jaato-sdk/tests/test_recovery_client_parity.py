@@ -86,6 +86,11 @@ INTENTIONALLY_ABSENT = {
         "wrapper forwards the METHOD and lets the inner client refuse a "
         "daemon too old to serve it -- same reasoning as "
         "MIN_SESSION_STOP_PROTOCOL above",
+    "MIN_SCAFFOLD_INTEGRATION_PROTOCOL":
+        "class constant on IPCClient gating run_integration; the recovery "
+        "wrapper forwards the METHOD and lets the inner client refuse a "
+        "daemon too old to serve it -- same reasoning as "
+        "MIN_SESSION_STOP_PROTOCOL above",
 }
 
 
