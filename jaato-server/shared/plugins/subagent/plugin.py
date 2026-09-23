@@ -21,6 +21,8 @@ from .config import (
     inject_scrub_secret_env,
     expand_variables, _find_workspace_root, gc_profile_to_plugin_config,
     validate_profile,
+    INHERIT_PROFILE_NAME, parse_plugin_entry,
+    profile_from_snapshot, profile_to_snapshot,
 )
 from shared.completion_nudge import resolve_max_completion_nudges
 from shared.instruction_suppression import suppression_to_wire
@@ -871,12 +873,19 @@ class SubagentPlugin(DaemonForwardingMixin):
             "Name of a runtime profile (model, plugins, permissions). "
             "Use list_subagent_profiles to see available profiles."
         )
+        inherit_note = (
+            " The reserved value 'inherit' spawns a subagent from a frozen "
+            "snapshot of YOUR OWN profile at this moment — your plugins (minus "
+            "spawn_subagent, so it cannot itself spawn) and your system "
+            "instructions — for a helper that behaves like you."
+        )
         if self._inline_allowed():
-            return base
+            return base + inherit_note
         return (
             "REQUIRED. " + base + " The profile decides which tools the "
             "subagent has; a profile may also bind its own persona via "
             "`default_agent`, so naming the profile alone is usually enough."
+            + inherit_note
         )
 
     def _spawn_profile_enum(self) -> Dict[str, Any]:
@@ -959,7 +968,12 @@ class SubagentPlugin(DaemonForwardingMixin):
         names = self._available_profile_names()
         if not names:
             return {}
-        return {"enum": sorted(names)}
+        # ``inherit`` (#1198) is always a valid value when a profile is
+        # required — it spawns a subagent from a frozen snapshot of THIS
+        # session's profile (parent plugins minus ``spawn_subagent``, plus the
+        # parent's framing).  It is offered whenever the enum is, and slots in
+        # alphabetically under ``sorted`` with no special-casing.
+        return {"enum": sorted([*names, INHERIT_PROFILE_NAME])}
 
     def _spawn_inline_config_property(self) -> Dict[str, Any]:
         """The ``inline_config`` schema property, or nothing.
@@ -3490,6 +3504,189 @@ class SubagentPlugin(DaemonForwardingMixin):
             )
         return None
 
+    def _build_inline_profile(
+        self,
+        inline_config: Optional[Dict[str, Any]],
+        custom_name: str,
+        parent_cwd: str,
+    ):
+        """Build the profile for a profile-less (inline) spawn.
+
+        Extracted from :meth:`_execute_spawn_subagent` so that method stays
+        under its complexity baseline once the ``inherit`` branch is added;
+        the behaviour is unchanged.  A profile-less spawn inherits the
+        parent's plugin set (``self._parent_plugins``, which upstream already
+        strips ``subagent``) with optional ``inline_config`` overrides.
+
+        Args:
+            inline_config: Optional overrides (``plugins`` / ``system_instructions``
+                / ``gc``); only honoured when inline spawning is enabled, which
+                the caller has already gated.
+            custom_name: The spawn's ``name`` argument (may be empty).
+            parent_cwd: The resolved workspace, for tech-stack detection.
+
+        Returns:
+            ``(profile, None)`` on success, or ``(None, (False, dict))`` where
+            the second element is the tuple the executor returns directly.
+        """
+        if not self._parent_plugins:
+            return None, (False, SubagentResult(
+                success=False,
+                response='',
+                error='No plugins available to inherit. Configure parent plugins first.'
+            ).to_dict())
+
+        # inline_config can override specific properties, defaults from parent
+        plugins = self._parent_plugins
+        system_instructions = None
+        gc_config = None
+
+        if inline_config:
+            if 'plugins' in inline_config:
+                plugins = inline_config['plugins']
+            if 'system_instructions' in inline_config:
+                system_instructions = inline_config['system_instructions']
+            if 'gc' in inline_config and inline_config['gc']:
+                gc_data = inline_config['gc']
+                gc_config = GCProfileConfig(
+                    type=gc_data.get('type', 'truncate'),
+                    threshold_percent=gc_data.get('threshold_percent', 80.0),
+                    preserve_recent_turns=gc_data.get('preserve_recent_turns', 5),
+                    notify_on_gc=gc_data.get('notify_on_gc', True),
+                    summarize_middle_turns=gc_data.get('summarize_middle_turns'),
+                    max_turns=gc_data.get('max_turns'),
+                    media_bytes_threshold=gc_data.get('media_bytes_threshold'),
+                    evict_consumed_media=gc_data.get('evict_consumed_media'),
+                    media_evict_mime_prefixes=gc_data.get(
+                        'media_evict_mime_prefixes'),
+                    plugin_config=gc_data.get('plugin_config', {}),
+                )
+
+        # ``inline_allowed_plugins`` binds BOTH inline paths (#944).
+        plugin_denial = self._disallowed_inline_plugins(plugins)
+        if plugin_denial:
+            return None, (False, SubagentResult(
+                success=False, response='', error=plugin_denial,
+            ).to_dict())
+
+        name = custom_name or ('_inline' if inline_config else '_inherited')
+
+        tech_stack = detect_workspace_tech_stack(parent_cwd)
+        if tech_stack:
+            tech_stack_preamble = (
+                f"WORKSPACE TECHNOLOGY CONTEXT:\n"
+                f"{tech_stack}\n\n"
+                f"You MUST constrain your output to the detected technology stack. "
+                f"Do NOT generate code in a different language or framework than what "
+                f"the workspace uses unless the task explicitly requires it."
+            )
+            if system_instructions:
+                system_instructions = f"{tech_stack_preamble}\n\n{system_instructions}"
+            else:
+                system_instructions = tech_stack_preamble
+
+        profile = SubagentProfile(
+            name=name,
+            description='Subagent with inherited plugins',
+            plugins=plugins,
+            system_instructions=system_instructions,
+            gc=gc_config,
+        )
+        return profile, None
+
+    def _build_inherit_profile(
+        self,
+        custom_name: str,
+        agent_params: Optional[Dict[str, Any]],
+    ):
+        """Build the ``profile="inherit"`` snapshot of the parent (#1198).
+
+        ``inherit`` spawns a subagent that behaves like THIS session — the
+        parent's plugin set and the parent's system instructions as they
+        stand at the moment of the call — without coupling the child to any
+        later mutation of the parent.
+
+        Two deliberate departures from "identical to the parent":
+
+        * **The ``subagent`` plugin is stripped.** An ``inherit`` snapshot
+          includes the persona that makes the parent delegate, so an
+          ``inherit`` child is primed to call ``spawn_subagent(profile=
+          "inherit")`` itself — and there is no spawn-depth bound (#680), so
+          leaving it in would make unbounded self-replication the path of
+          least resistance.  Stripping it (the triage's smaller, local
+          mitigation, chosen over a general depth bound) means an ``inherit``
+          child can neither spawn nor message siblings; a caller that needs a
+          spawning child names a real profile.  ``self._parent_plugins`` is
+          ALSO already ``subagent``-free upstream — so the guard is a property
+          of THIS code rather than an accident of how that list is populated.
+        * **No persona layer.** The parent's whole assembled system
+          instruction is carried as ``system_instruction_override`` (returned
+          separately), so the child runs the parent's exact framing rather
+          than re-assembling its own — ``default_agent`` / ``agent=`` are
+          therefore ignored for ``inherit``.
+
+        "Frozen" is a deep copy: the plugin list is rebuilt fresh and the
+        instruction is an immutable string captured now, and the synthesised
+        profile is round-tripped through :func:`profile_to_snapshot` /
+        :func:`profile_from_snapshot` (the #787 revive machinery) so a later
+        mutation of the parent's profile or instructions cannot reach the
+        already-spawned child.
+
+        Args:
+            custom_name: The spawn's ``name`` argument (may be empty).
+            agent_params: The spawn's ``agent_params`` — inspected only to
+                refuse the isolated-runner opt-in, which cannot carry the
+                override.
+
+        Returns:
+            ``(profile, override, None)`` on success, where ``override`` is
+            the parent's system instruction (or ``None`` if the parent has
+            none); or ``(None, None, error_message)`` when ``inherit`` cannot
+            be resolved.
+        """
+        # ``inherit`` needs a parent session to snapshot.  A non-session
+        # caller (or a session whose parent reference was never wired) cannot
+        # produce one — say so clearly rather than fail opaquely later.
+        if self._parent_session is None:
+            return None, None, (
+                "profile='inherit' requires a parent session to snapshot, and "
+                "there is none here (this is not a running session, or the "
+                "parent reference is unset). Name a discovered profile instead."
+            )
+
+        # The isolated-runner opt-in serialises the profile to a wire payload
+        # that has nowhere to carry the override, so the child would silently
+        # lose the parent's framing.  Refuse rather than substitute.
+        if _is_isolated_optin(agent_params):
+            return None, None, (
+                "profile='inherit' cannot be combined with the isolated-runner "
+                "opt-in (agent_params.isolated): the parent's system "
+                "instructions cannot cross that boundary. Use a discovered "
+                "profile for an isolated subagent."
+            )
+
+        # The parent's plugin set, minus the subagent plugin (see docstring).
+        stripped = [
+            entry for entry in (self._parent_plugins or [])
+            if parse_plugin_entry(entry)[0] != 'subagent'
+        ]
+
+        profile = SubagentProfile(
+            name=custom_name or INHERIT_PROFILE_NAME,
+            description="Frozen snapshot of the parent's profile at spawn time (#1198)",
+            plugins=stripped,
+            system_instructions=None,
+        )
+        # Deep-copy / freeze via the revive snapshot round-trip (#787), so a
+        # later mutation of any nested field cannot reach the child.
+        frozen = profile_from_snapshot(profile_to_snapshot(profile))
+
+        # Capture the parent's framing NOW (an immutable string), routed as an
+        # override so the child does not re-assemble and double its own base +
+        # plugin instructions on top of the parent's.
+        override = self._parent_session.get_system_instruction()
+        return frozen, override, None
+
     def _execute_spawn_subagent(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Spawn a subagent to handle a task.
 
@@ -3564,6 +3761,23 @@ class SubagentPlugin(DaemonForwardingMixin):
         if inline_denied:
             return False, SubagentResult(
                 success=False, response='', error=inline_denied,
+            ).to_dict()
+
+        # ``inherit`` (#1198) snapshots THIS session's profile, which is
+        # local — a peer resolves ``profile`` against its own config_root and
+        # has no access to our plugins or instructions.  Refuse before the
+        # remote branch forwards the name, rather than let the peer answer a
+        # confusing "profile 'inherit' not found".
+        if profile_name == INHERIT_PROFILE_NAME and server:
+            return False, SubagentResult(
+                success=False,
+                response='',
+                error=(
+                    "profile='inherit' cannot be combined with server=: it "
+                    "means a snapshot of THIS session's local profile, which "
+                    "a remote peer cannot see. Name a profile the peer has, "
+                    "or drop server= to run the inherited subagent locally."
+                ),
             ).to_dict()
 
         # ── Remote spawn path ──────────────────────────────────────────
@@ -3664,8 +3878,22 @@ class SubagentPlugin(DaemonForwardingMixin):
             workspace_path = get_workspace_root()
         parent_cwd = workspace_path or os.getcwd()
 
-        # Resolve the profile or create inline
-        if profile_name:
+        # Resolve the profile: a discovered profile, the reserved ``inherit``
+        # snapshot (#1198), or an inline-inherited set.  ``inherited_override``
+        # is the parent's framing captured for the ``inherit`` case — routed
+        # to ``create_session(system_instruction_override=...)`` so the child
+        # runs the parent's exact system instruction rather than re-assembling
+        # (and doubling) its own; ``None`` for every other profile.
+        inherited_override: Optional[str] = None
+        if profile_name == INHERIT_PROFILE_NAME:
+            profile, inherited_override, inherit_error = (
+                self._build_inherit_profile(custom_name, agent_params_arg)
+            )
+            if inherit_error:
+                return False, SubagentResult(
+                    success=False, response='', error=inherit_error,
+                ).to_dict()
+        elif profile_name:
             profile = self._config.get_profile(profile_name) if self._config else None
             if not profile:
                 available = list(self._config.profiles.keys()) if self._config else []
@@ -3675,89 +3903,20 @@ class SubagentPlugin(DaemonForwardingMixin):
                     error=f"Profile '{profile_name}' not found. Available: {available}"
                 ).to_dict()
         else:
-            # No profile specified - use inherited plugins with optional overrides
-            if not self._parent_plugins:
-                return False, SubagentResult(
-                    success=False,
-                    response='',
-                    error='No plugins available to inherit. Configure parent plugins first.'
-                ).to_dict()
-
-            # inline_config can override specific properties, defaults come from parent
-            plugins = self._parent_plugins
-            system_instructions = None
-            gc_config = None
-
-            if inline_config:
-                # Override plugins only if explicitly specified
-                if 'plugins' in inline_config:
-                    plugins = inline_config['plugins']
-                if 'system_instructions' in inline_config:
-                    system_instructions = inline_config['system_instructions']
-
-                # Parse gc config from inline_config
-                if 'gc' in inline_config and inline_config['gc']:
-                    gc_data = inline_config['gc']
-                    gc_config = GCProfileConfig(
-                        type=gc_data.get('type', 'truncate'),
-                        threshold_percent=gc_data.get('threshold_percent', 80.0),
-                        preserve_recent_turns=gc_data.get('preserve_recent_turns', 5),
-                        notify_on_gc=gc_data.get('notify_on_gc', True),
-                        summarize_middle_turns=gc_data.get('summarize_middle_turns'),
-                        max_turns=gc_data.get('max_turns'),
-                        media_bytes_threshold=gc_data.get('media_bytes_threshold'),
-                        evict_consumed_media=gc_data.get('evict_consumed_media'),
-                        media_evict_mime_prefixes=gc_data.get(
-                            'media_evict_mime_prefixes'),
-                        plugin_config=gc_data.get('plugin_config', {}),
-                    )
-
-            # ``inline_allowed_plugins`` binds BOTH inline paths (#944).
-            # Checking it here rather than inside ``if 'plugins' in
-            # inline_config`` is the fix: the inherited set — what a spawn
-            # that mentions no inline_config gets — used to reach the
-            # session unvalidated, so the restriction only ever bound an
-            # agent that opted into being restricted.
-            plugin_denial = self._disallowed_inline_plugins(plugins)
-            if plugin_denial:
-                return False, SubagentResult(
-                    success=False, response='', error=plugin_denial,
-                ).to_dict()
-
-            # Use provided name, or fall back to legacy behavior
-            if custom_name:
-                name = custom_name
-            else:
-                # Backwards compatibility: use old naming scheme
-                name = '_inline' if inline_config else '_inherited'
-
-            # Inject workspace tech stack context for inline subagents
-            tech_stack = detect_workspace_tech_stack(parent_cwd)
-            if tech_stack:
-                tech_stack_preamble = (
-                    f"WORKSPACE TECHNOLOGY CONTEXT:\n"
-                    f"{tech_stack}\n\n"
-                    f"You MUST constrain your output to the detected technology stack. "
-                    f"Do NOT generate code in a different language or framework than what "
-                    f"the workspace uses unless the task explicitly requires it."
-                )
-                if system_instructions:
-                    system_instructions = f"{tech_stack_preamble}\n\n{system_instructions}"
-                else:
-                    system_instructions = tech_stack_preamble
-
-            profile = SubagentProfile(
-                name=name,
-                description='Subagent with inherited plugins',
-                plugins=plugins,
-                system_instructions=system_instructions,
-                gc=gc_config,
-            )
+            profile, inline_error = self._build_inline_profile(
+                inline_config, custom_name, parent_cwd)
+            if inline_error is not None:
+                return inline_error
 
         # Resolve the persona: an explicit ``agent`` argument, else the
-        # profile's own ``default_agent`` (#944).
-        persona_error = self._apply_persona(
-            profile, agent_name_arg, agent_params_arg, parent_cwd)
+        # profile's own ``default_agent`` (#944).  Skipped for ``inherit``:
+        # the parent's whole system instruction is carried as an override,
+        # so a persona layer would be redundant with — or contradict — it.
+        persona_error = (
+            None if profile_name == INHERIT_PROFILE_NAME
+            else self._apply_persona(
+                profile, agent_name_arg, agent_params_arg, parent_cwd)
+        )
         if persona_error:
             return False, SubagentResult(
                 success=False, response='', error=persona_error,
@@ -3895,6 +4054,7 @@ class SubagentPlugin(DaemonForwardingMixin):
             owner_id,
             display_name,
             agent_params_arg,
+            inherited_override,
         )
 
         # Return immediately with subagent_id (matches parameter name for close/cancel/send tools)
@@ -3922,6 +4082,7 @@ class SubagentPlugin(DaemonForwardingMixin):
         owner_id: int = 0,
         display_name: Optional[str] = None,
         agent_params: Optional[Dict[str, Any]] = None,
+        system_instruction_override: Optional[str] = None,
     ) -> None:
         """Run a subagent asynchronously with output forwarding to parent.
 
@@ -3940,6 +4101,11 @@ class SubagentPlugin(DaemonForwardingMixin):
                 etc.) — passed through to ``runtime.create_session()`` so the
                 child session's dynamic-instructions render scripts can read
                 ``RenderContext.agent_params``.
+            system_instruction_override: The parent's assembled system
+                instruction, captured for a ``profile="inherit"`` spawn (#1198)
+                and forwarded to ``create_session`` so the child runs the
+                parent's exact framing instead of re-assembling its own.
+                ``None`` for every other profile, leaving assembly unchanged.
         """
         # Get workspace path from runtime registry as authoritative source
         # The parent_cwd parameter might be wrong if spawn_subagent couldn't resolve it correctly
@@ -4111,6 +4277,9 @@ class SubagentPlugin(DaemonForwardingMixin):
                 model=model,
                 plugins=profile.plugins,
                 system_instructions=profile.system_instructions,
+                # profile="inherit" (#1198): run the parent's exact assembled
+                # instruction rather than re-assembling (and doubling) our own.
+                system_instruction_override=system_instruction_override,
                 plugin_configs=effective_plugin_configs if effective_plugin_configs else None,
                 provider_name=provider,
                 preloaded_plugins=profile.preloaded_plugins or None,
