@@ -6,13 +6,20 @@ availability — when the kernel module was missing, no runner
 spawned and tool execution stayed in-process.
 
 Post-§7a: the hook spawns the runner unconditionally for any
-WS-provisioned session (workspace under WS-server's root).
-Apparmor confinement is layered atop iff the host has the
-kernel module + provisioning succeeds.
+WS-provisioned session (workspace under WS-server's root) when the
+host has no AppArmor — an unconfined session runs in-process on spawn
+failure, exactly as before.
+
+#1253 refines the confined case: when the daemon holds an available
+``AppArmorManager`` confinement is REQUIRED, and a provisioning failure
+or a spawn failure REFUSES the session (recorded for
+``initialize_or_refuse``) rather than serving model-driven work with no
+kernel boundary.  Confinement is no longer "layered atop, best-effort";
+it is confined or it does not run.
 
 This file exercises the WS hook's behavior under three apparmor
-states (unavailable / available+success / available+failure) and
-the gate paths (workspace not under WS root, no daemon loop).
+states (unavailable / available+success / available+provisioning-failure)
+and the gate paths (workspace not under WS root, no daemon loop).
 
 The shape mirrors the IPC test ``test_always_spawn_runner.py``
 but the surface is ``websocket.JaatoWSServer.set_command_router``
@@ -149,7 +156,20 @@ def _patch_spawn():
 
 
 def _server_stub() -> Any:
-    return type("_FakeJaatoServer", (), {})()
+    """A bare JaatoServer stand-in that RECORDS bootstrap-outcome notes.
+
+    #1253: the WS pre-init hook fails a confinement-required session closed
+    by calling ``server.note_runner_bootstrap_outcome(<reason>)`` and
+    returning without spawning; ``session_manager.initialize_or_refuse``
+    reads that back to refuse the session.  The stub records those calls
+    into ``bootstrap_outcomes`` so a test can assert the refusal (a real
+    ``JaatoServer`` stores it on ``_runner_bootstrap_error``)."""
+    srv = type("_FakeJaatoServer", (), {})()
+    srv.bootstrap_outcomes = []  # type: ignore[attr-defined]
+    srv.note_runner_bootstrap_outcome = (  # type: ignore[attr-defined]
+        lambda reason: srv.bootstrap_outcomes.append(reason)
+    )
+    return srv
 
 
 # ----------------------------------------------------------------------
@@ -237,12 +257,20 @@ def test_ws_hook_spawns_confined_when_apparmor_available(
     assert apparmor.provision_calls == [("s-aa", str(sess_dir))]
 
 
-def test_ws_hook_spawns_unconfined_when_provisioning_fails(
+def test_ws_hook_refuses_when_provisioning_fails(
     tmp_path, _patch_spawn,
 ) -> None:
-    """Apparmor available but profile provisioning fails — spawn
-    STILL fires unconfined.  §7a: dispatch surface comes first;
-    confinement is best-effort."""
+    """#1253: apparmor available (so confinement is REQUIRED) but profile
+    provisioning fails — the hook REFUSES the session rather than spawning
+    an unconfined runner.
+
+    Pre-#1253 this spawned unconfined (``disable_confine=True``, empty
+    ``profile_name``), leaving a session whose record claims
+    ``sandbox_mode: apparmor`` serving model-driven work with no kernel
+    boundary — the silent bypass #1100 deferred and #1253 measured live.
+    The fail-closed contract: no runner is spawned, no bootstrap is
+    dispatched, and ``note_runner_bootstrap_outcome`` records the reason so
+    ``initialize_or_refuse`` refuses the session by name."""
     ws_root = tmp_path / "ws_root"
     ws_root.mkdir()
     sess_dir = ws_root / "session_dir"
@@ -254,12 +282,18 @@ def test_ws_hook_spawns_unconfined_when_provisioning_fails(
     ws = _make_ws_server(str(ws_root), apparmor)
     hook = _register_and_get_hook(ws)
 
-    hook(_server_stub(), "s-prov-fail", str(sess_dir), client_id=None)
+    server = _server_stub()
+    hook(server, "s-prov-fail", str(sess_dir), client_id=None)
 
-    spawn_calls = _patch_spawn["spawn_calls"]
-    assert len(spawn_calls) == 1
-    assert spawn_calls[0]["disable_confine"] is True
-    assert spawn_calls[0]["profile_name"] == ""
+    # FAIL CLOSED: no unconfined runner, no bootstrap.
+    assert _patch_spawn["spawn_calls"] == []
+    assert _patch_spawn["bootstrap_calls"] == []
+    # The refusal was recorded so the session is refused (not run unconfined).
+    assert server.bootstrap_outcomes, (
+        "provisioning failure must record a bootstrap outcome so "
+        "initialize_or_refuse refuses the session"
+    )
+    assert "1253" in server.bootstrap_outcomes[-1]
 
 
 # ----------------------------------------------------------------------
@@ -314,12 +348,18 @@ def test_ws_hook_skips_when_no_daemon_loop(tmp_path, _patch_spawn) -> None:
 # ----------------------------------------------------------------------
 
 
-def test_ws_hook_spawn_failure_logs_and_returns(
+def test_ws_hook_spawn_failure_refuses_a_confined_session(
     tmp_path, _patch_spawn,
 ) -> None:
-    """Spawn failure: hook logs the warning and returns; doesn't
-    crash session creation.  The post-init hook downgrades to
-    soft mode based on the missing runner_rpc handle."""
+    """Spawn failure on a confinement-required session: hook logs, records
+    the refusal and returns without crashing session creation.
+
+    #1253: an in-process fallback would run the model's tools in the daemon
+    process with NO AppArmor boundary, which is the same silent bypass the
+    provisioning-failure path refuses — so a confined session's spawn
+    failure is recorded (``note_runner_bootstrap_outcome``) and the session
+    is refused rather than falling back to unconfined in-process execution.
+    ``_FakeAppArmor`` defaults available, so confinement is required here."""
     ws_root = tmp_path / "ws_root"
     ws_root.mkdir()
     sess_dir = ws_root / "session_dir"
@@ -330,13 +370,18 @@ def test_ws_hook_spawn_failure_logs_and_returns(
 
     _patch_spawn["spawn_outcome"]["raise"] = RuntimeError("spawn boom")
 
+    server = _server_stub()
     # Should not raise.
-    hook(_server_stub(), "s-spawn-fail", str(sess_dir), client_id=None)
+    hook(server, "s-spawn-fail", str(sess_dir), client_id=None)
     # Spawn was attempted.
     assert len(_patch_spawn["spawn_calls"]) == 1
     # Bootstrap was NOT attempted — the hook returns after the
     # spawn failure, so dispatch_bootstrap_envelope never fires.
     assert len(_patch_spawn["bootstrap_calls"]) == 0
+    # #1253: the confined session's spawn failure is recorded so
+    # initialize_or_refuse refuses it rather than running it unconfined.
+    assert server.bootstrap_outcomes
+    assert "1253" in server.bootstrap_outcomes[-1]
 
 
 # ----------------------------------------------------------------------
@@ -372,6 +417,8 @@ def test_ws_hook_dispatches_bootstrap_after_spawn(
     # profile_name passed through from apparmor provisioning.
     assert bootstrap["profile_name"].startswith("jaato-ws-")
     assert "s-bootstrap" not in bootstrap["profile_name"]
+    # #1253: a confined session carries the invariant to the runner gate.
+    assert bootstrap["confinement_required"] is True
 
 
 def test_ws_hook_dispatches_bootstrap_on_unconfined_path(
@@ -396,3 +443,6 @@ def test_ws_hook_dispatches_bootstrap_on_unconfined_path(
     assert len(_patch_spawn["bootstrap_calls"]) == 1
     # profile_name is empty on the unconfined path.
     assert _patch_spawn["bootstrap_calls"][0]["profile_name"] == ""
+    # #1253: a genuinely-unconfined session (no AppArmor manager available)
+    # carries confinement_required=False, so the runner gate stays inert.
+    assert _patch_spawn["bootstrap_calls"][0]["confinement_required"] is False

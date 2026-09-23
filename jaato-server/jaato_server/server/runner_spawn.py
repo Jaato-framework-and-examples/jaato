@@ -783,6 +783,7 @@ def build_session_envelope(
     workspace_path: Optional[str],
     profile_name: str,
     managed_workspace_root: Optional[str] = None,
+    confinement_required: bool = False,
 ) -> "SessionInitEnvelope":
     """Build a :class:`SessionInitEnvelope` from a pre-init JaatoServer.
 
@@ -814,6 +815,11 @@ def build_session_envelope(
         profile_name: AppArmor profile name (informational; the
             envelope's ``profile_name`` field carries it for
             audit attribution).
+        confinement_required: #1253 — whether this session was
+            configured for AppArmor confinement, stamped onto
+            ``SessionInitEnvelope.confinement_required`` so the runner
+            gate can tell an empty profile that SHOULD have been
+            confined from a legitimately-unconfined session.
 
     Returns:
         A :class:`SessionInitEnvelope` ready for
@@ -1225,6 +1231,10 @@ def build_session_envelope(
         client_tools=list(
             getattr(server, "client_tool_schemas", {}).values()
         ),
+        # #1253: carry the confinement invariant to the runner gate.  An
+        # empty ``profile_name`` with this True is the silent-bypass case
+        # ``_maybe_self_confine`` must refuse rather than run unconfined.
+        confinement_required=confinement_required,
     )
 
 
@@ -1236,6 +1246,7 @@ def dispatch_bootstrap_envelope(
     profile_name: str,
     timeout: float = 30.0,
     managed_workspace_root: Optional[str] = None,
+    confinement_required: bool = False,
 ) -> None:
     """Send the ``session.bootstrap`` RPC so the runner-side
     :class:`shared.jaato_session.JaatoSession` host is populated.
@@ -1267,6 +1278,12 @@ def dispatch_bootstrap_envelope(
             forwarded to :func:`build_session_envelope` so the
             workspace-HOME default is folded into the plugin configs
             for daemon-managed workspaces.  ``None`` for IPC / user-CWD.
+        confinement_required: #1253 — the session was configured for
+            AppArmor confinement.  Carried onto the envelope so the
+            runner-side ``_maybe_self_confine`` REFUSES to bootstrap
+            when it is ``True`` and ``profile_name`` is empty, rather
+            than serving work unconfined.  ``False`` (the default, and
+            every non-confined session) leaves that gate inert.
     """
     rpc = server.runner_rpc
     if rpc is None:
@@ -1313,6 +1330,7 @@ def dispatch_bootstrap_envelope(
             workspace_path=workspace_path,
             profile_name=profile_name,
             managed_workspace_root=managed_workspace_root,
+            confinement_required=confinement_required,
         )
         result = rpc.bootstrap_session_threadsafe(envelope, timeout=timeout)
         _note_bootstrap_outcome(server, None)
