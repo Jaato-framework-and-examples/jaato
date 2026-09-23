@@ -67,6 +67,14 @@ class _FakeJaatoServer:
     def _resolve_session_env(self) -> None:
         self.lifecycle_log.append("resolve_session_env")
 
+    # #1226: the bootstrap helper hands the session the app:// secret
+    # resolver BEFORE _resolve_session_env; the fake records it.
+    def set_app_secret_resolver(self, resolver: Any) -> None:
+        # Not recorded in lifecycle_log: the ordering tests pin the
+        # resolve_session_env / hooks / initialize sequence and this
+        # injection is not part of that contract.
+        self._app_secret_resolver = resolver
+
     def _with_session_env(self):
         from contextlib import contextmanager
         @contextmanager
@@ -103,6 +111,9 @@ class _FakeSessionManager:
     def __init__(self) -> None:
         self.pre_init_hook_calls: List[Tuple[Any, str, Optional[str], Optional[str]]] = []
         self.lifecycle_log: List[str] = []
+        # #1226: _bootstrap_session reads self._app_secret_resolver; None
+        # mirrors SessionManager.__init__.
+        self._app_secret_resolver: Any = None
         self.ipc_provision_return: Optional[str] = None
         self.ipc_provision_calls: List[Tuple[Any, str, Optional[str], Optional[str]]] = []
 

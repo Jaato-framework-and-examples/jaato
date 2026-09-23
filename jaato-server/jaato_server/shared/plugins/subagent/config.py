@@ -923,7 +923,22 @@ def _expand_string(
         pattern = r'\$\{([a-zA-Z_][a-zA-Z0-9_]*)\}'
         s = re.sub(pattern, replace_var, s)
 
-    # Phase 2: secret URI resolution (entire-string match only)
+    # Phase 2: secret URI resolution (entire-string match only).
+    #
+    # #1226: pass ``context`` ONLY when this call site actually has one
+    # (i.e. ``_resolve_session_env``'s dedicated pass).  Every other
+    # expand_variables path — the env_file overlay in
+    # ``SessionManager._resolve_profile``, plugin_configs expansion, the
+    # ``env:`` map — leaves ``resolve_context`` at ``None``, and there the
+    # arg is inert: ``_resolve_secret_uri``'s ``context`` defaults to
+    # ``None`` and ``_call_resolver`` only forwards a non-None context.
+    # Omitting it on the None path keeps the call byte-identical to
+    # pre-#1226, so a resolver-shaped callable with the old one-argument
+    # signature stays callable — the same backward-compat posture
+    # ``_call_resolver`` takes for premium resolvers that never added the
+    # ``context`` keyword.
+    if resolve_context is None:
+        return _resolve_secret_uri(s)
     return _resolve_secret_uri(s, resolve_context)
 
 
