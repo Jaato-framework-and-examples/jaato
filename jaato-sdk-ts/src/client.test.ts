@@ -10,7 +10,7 @@
 // and replaying server-shaped events back as desired.
 
 import { strict as assert } from "node:assert";
-import { afterEach, beforeEach, describe, test } from "node:test";
+import { afterEach, beforeEach, describe, mock, test } from "node:test";
 
 import {
   JaatoClient,
@@ -19,6 +19,7 @@ import {
   MIN_WORKSPACE_IGNORE_PROTOCOL,
   MIN_FILE_FETCH_PROTOCOL,
   MIN_PROTOCOL_VERSION,
+  STAGE_FILES_TIMEOUT_MS,
 } from "./client.js";
 import {
   ConnectionClosedError,
@@ -790,6 +791,68 @@ describe("JaatoClient.stageFiles", () => {
     const specs = requestFrame.files as Array<{ size: number }>;
     assert.equal(specs[0].size, 16);
     assert.equal(lastInstance!.sentBinary[0].byteLength, 16);
+  });
+
+  // #1248: the wait had no deadline, so a lost workspace.files.staged
+  // response left the promise unsettled forever and the caller's status
+  // stuck on "staging".  Drive the deadline with fake timers — no real
+  // clock sleep.
+  test("rejects and cleans up the subscription when no staged response arrives", async () => {
+    mock.timers.enable({ apis: ["setTimeout"] });
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const handlersBefore = (client as any)._catchallHandlers.length as number;
+      const promise = client.stageFiles(
+        "workspace_abc",
+        [{ name: "x.txt", data: new Uint8Array([1, 2, 3]) }],
+        { timeoutMs: 5_000 },
+      );
+      const settled = assert.rejects(promise, /no workspace\.files\.staged response after 5000 ms/);
+      // Before the deadline, the one-shot subscription is still installed.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      assert.equal((client as any)._catchallHandlers.length, handlersBefore + 1);
+      mock.timers.tick(5_000);
+      await settled;
+      // On timeout the subscription is removed — no leaked listener.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      assert.equal((client as any)._catchallHandlers.length, handlersBefore);
+    } finally {
+      mock.timers.reset();
+    }
+  });
+
+  test("uses STAGE_FILES_TIMEOUT_MS as the default deadline", () => {
+    assert.equal(typeof STAGE_FILES_TIMEOUT_MS, "number");
+    assert.ok(STAGE_FILES_TIMEOUT_MS > 0);
+  });
+
+  test("a normal staged response resolves and clears the timer (no late rejection)", async () => {
+    mock.timers.enable({ apis: ["setTimeout"] });
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const handlersBefore = (client as any)._catchallHandlers.length as number;
+      const promise = client.stageFiles(
+        "workspace_abc",
+        [{ name: "ok.txt", data: new Uint8Array([9]) }],
+        { timeoutMs: 5_000 },
+      );
+      lastInstance!.emit({
+        type: EventTypeValue.WORKSPACE_FILES_STAGED,
+        timestamp: new Date().toISOString(),
+        workspace_id: "workspace_abc",
+        staged: [{ name: "ok.txt" }],
+        failed: [],
+      });
+      const result = await promise;
+      assert.equal(result.type, EventTypeValue.WORKSPACE_FILES_STAGED);
+      // The subscription is gone and the timer, ticked past its deadline,
+      // fires no rejection at nothing.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      assert.equal((client as any)._catchallHandlers.length, handlersBefore);
+      mock.timers.tick(10_000);
+    } finally {
+      mock.timers.reset();
+    }
   });
 });
 
