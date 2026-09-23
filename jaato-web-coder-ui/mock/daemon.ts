@@ -94,6 +94,10 @@ interface Client {
 }
 const STAGE_PER_FILE_LIMIT = 10 * 1024 * 1024;
 const STAGE_TOTAL_LIMIT = 50 * 1024 * 1024;
+// The daemon's WebSocket message limit (``DEFAULT_WS_MAX_MESSAGE_SIZE``),
+// enforced by the socket and advertised in the handshake exactly as the
+// daemon does, so the client's pre-check runs against the real shape.
+const MAX_MESSAGE_SIZE = 16 * 1024 * 1024;
 
 /**
  * The session's workspace monitor, as the daemon keeps it (#1189): every
@@ -449,7 +453,7 @@ let clientSeq = 0;
 // Sessions the mock has created, by id.  A daemon keeps its sessions across
 // connections, so a client that reconnects can attach to the one it had.
 const LIVE_SESSIONS = new Set<string>();
-const wss = new WebSocketServer({ host: HOST, port: PORT });
+const wss = new WebSocketServer({ host: HOST, port: PORT, maxPayload: MAX_MESSAGE_SIZE });
 wss.on("connection", (ws, req) => {
   const url = new URL(req.url ?? "/", "http://x");
   const auth = req.headers.authorization ?? "";
@@ -462,7 +466,7 @@ wss.on("connection", (ws, req) => {
     policy: { effective_default: "ask", suspension_scope: null },
     installedIntegrations: new Set(),
   };
-  send(c, { type: "connected", protocol_version: "1.21", server_info: { server_version: "mock-0.0.1", client_id: randomUUID() } });
+  send(c, { type: "connected", protocol_version: "1.21", server_info: { server_version: "mock-0.0.1", client_id: randomUUID(), max_message_size: MAX_MESSAGE_SIZE, stage_per_file_limit: Math.min(STAGE_PER_FILE_LIMIT, MAX_MESSAGE_SIZE), stage_total_limit: STAGE_TOTAL_LIMIT } });
 
   ws.on("message", async (raw, isBinary) => {
     if (c.staging) {

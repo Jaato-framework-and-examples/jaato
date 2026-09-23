@@ -18,6 +18,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import ssl
 import uuid
 from dataclasses import dataclass
@@ -171,6 +172,90 @@ _SERVERS_JSON = Path.home() / ".jaato" / "servers.json"
 # become the fallback when the operator hasn't set values themselves.
 DEFAULT_STAGE_PER_FILE_LIMIT = 10 * 1024 * 1024   # 10 MB
 DEFAULT_STAGE_TOTAL_LIMIT    = 50 * 1024 * 1024   # 50 MB
+
+#: The largest single WebSocket message the daemon accepts, in bytes.
+#:
+#: ``websockets`` refuses any message over its ``max_size`` by closing the
+#: connection with code 1009, and its default is 1 MiB.  The daemon never
+#: set one, so every staged file over 1 MiB (one BINARY frame per file)
+#: closed the connection mid-upload while the staging cap above allows
+#: 10 MB: the client reconnected, no ``StageFilesEvent`` ever arrived, and
+#: the upload read as a two-minute hang.
+#:
+#: The default covers the two largest payloads the protocol carries in
+#: one message: a staged file at the per-file cap (a raw binary frame),
+#: and the same file sent inline as base64 (``staged_files`` on
+#: ``session.new``, ``attachments`` on ``send_message``), which is 4/3 of
+#: it -- plus :data:`WS_MESSAGE_ENVELOPE_HEADROOM` for the JSON around it.
+#: ``--ws-max-message-size`` overrides it; the effective value is
+#: advertised to clients in ``ConnectedEvent.server_info`` as
+#: ``max_message_size`` so a client can refuse a file BEFORE sending it.
+WS_MESSAGE_ENVELOPE_HEADROOM = 1024 * 1024
+DEFAULT_WS_MAX_MESSAGE_SIZE = 16 * 1024 * 1024
+
+#: The value ``websockets`` applies when none is passed, and so the limit
+#: every daemon before ``max_message_size`` was advertised enforced.  A
+#: client that finds no ``max_message_size`` in ``server_info`` is talking
+#: to such a daemon and should assume this.  Also the floor the
+#: ``--ws-max-message-size`` flag accepts: going below it would refuse
+#: messages every existing client already sends.
+LEGACY_WS_MAX_MESSAGE_SIZE = 1024 * 1024
+
+#: WebSocket close codes that are an ordinary end of a connection: a
+#: normal close (1000), a peer going away (1001, a browser tab closing),
+#: no status (1005) and an abnormal drop with no close frame (1006, a
+#: network blip or a killed process).  Anything else -- 1009 "message too
+#: big" above all -- means one side REFUSED something, and is logged at
+#: WARNING rather than silently discarded.
+_ORDINARY_CLOSE_CODES = frozenset({1000, 1001, 1005, 1006})
+
+
+def describe_connection_close(exc: BaseException) -> "tuple[Optional[int], str]":
+    """Return ``(code, text)`` for a ``ConnectionClosed``.
+
+    ``code`` is the close code this server SENT when it initiated the
+    close (the case that matters: a 1009 is the daemon refusing a
+    message), else the one it received, else ``None`` when neither side
+    sent a close frame.  ``text`` is a one-line rendering for a log line.
+    Tolerates objects without ``sent``/``rcvd`` so a future
+    ``websockets`` that reshapes the exception degrades to "unknown"
+    rather than raising inside the connection handler's ``except``.
+    """
+    sent = getattr(exc, "sent", None)
+    rcvd = getattr(exc, "rcvd", None)
+    frame = sent if sent is not None else rcvd
+    if frame is None:
+        return None, "no close frame (connection dropped)"
+    code = getattr(frame, "code", None)
+    reason = getattr(frame, "reason", "") or ""
+    side = "sent" if frame is sent else "received"
+    return code, f"{side} close {code}" + (f" ({reason})" if reason else "")
+
+
+def parse_ws_max_message_size(value: str) -> int:
+    """Parse ``--ws-max-message-size``: bytes, or a ``K``/``M``/``G`` suffix.
+
+    Suffixes are binary (``16M`` is 16 MiB).  Raises ``ValueError`` naming
+    the problem for a malformed value or one below
+    :data:`LEGACY_WS_MAX_MESSAGE_SIZE`, so the daemon refuses to start
+    rather than silently applying a limit nobody asked for.
+    """
+    text = (value or "").strip()
+    m = re.fullmatch(r"(?i)(\d+)\s*([kmg]?)(?:i?b)?", text)
+    if not m:
+        raise ValueError(
+            f"--ws-max-message-size {value!r}: expected a byte count, "
+            f"optionally with a K/M/G suffix (e.g. 16M)"
+        )
+    scale = {"": 1, "k": 1024, "m": 1024 ** 2, "g": 1024 ** 3}[m.group(2).lower()]
+    size = int(m.group(1)) * scale
+    if size < LEGACY_WS_MAX_MESSAGE_SIZE:
+        raise ValueError(
+            f"--ws-max-message-size {value!r} is {size} bytes, below the "
+            f"{LEGACY_WS_MAX_MESSAGE_SIZE}-byte floor every client already "
+            f"relies on"
+        )
+    return size
 
 
 def _safe_staged_filename(name: str) -> Optional[Path]:
@@ -623,6 +708,7 @@ class JaatoWSServer:
         ssl_context: Optional[ssl.SSLContext] = None,
         required_token: Optional[str] = None,
         app_credentials: Optional[AppCredentialStore] = None,
+        max_message_size: Optional[int] = None,
     ):
         """Initialize the WebSocket server.
 
@@ -676,6 +762,12 @@ class JaatoWSServer:
                 app-credential connection, no ticket can exist, and
                 :meth:`_resolve_connection_auth` collapses to the single
                 shared-digest comparison it has always been.
+            max_message_size: The largest single WebSocket message accepted,
+                in bytes (``None`` = :data:`DEFAULT_WS_MAX_MESSAGE_SIZE`).
+                A larger message closes the connection with 1009, which is
+                a ``websockets`` rule, not a jaato one; the value is
+                advertised in ``ConnectedEvent.server_info`` so clients
+                check against it before sending.
         """
         if not HAS_WEBSOCKETS:
             raise ImportError(
@@ -685,6 +777,12 @@ class JaatoWSServer:
         self.host = host
         self.port = port
         self._ssl_context = ssl_context
+        self._max_message_size: int = max_message_size or DEFAULT_WS_MAX_MESSAGE_SIZE
+        if self._max_message_size < LEGACY_WS_MAX_MESSAGE_SIZE:
+            raise ValueError(
+                f"max_message_size {self._max_message_size} is below the "
+                f"{LEGACY_WS_MAX_MESSAGE_SIZE}-byte floor"
+            )
         self._workspace_root = workspace_root
         # Stored as digest only — plaintext token never lives on the
         # instance after construction. ``None`` means auth is disabled
@@ -1524,6 +1622,9 @@ class JaatoWSServer:
             serve_kwargs: Dict[str, Any] = dict(
                 ping_interval=30,
                 ping_timeout=10,
+                # Without it ``websockets`` applies 1 MiB, and a staged
+                # file over that closed the connection mid-upload.
+                max_size=self._max_message_size,
             )
             if self._ssl_context:
                 serve_kwargs["ssl"] = self._ssl_context
@@ -1536,7 +1637,10 @@ class JaatoWSServer:
             ) as server:
                 self._server = server
                 scheme = "wss" if self._ssl_context else "ws"
-                logger.info(f"WebSocket server listening on {scheme}://{self.host}:{self.port}")
+                logger.info(
+                    f"WebSocket server listening on {scheme}://{self.host}:{self.port} "
+                    f"(max message {self._max_message_size} bytes)"
+                )
 
                 # Run event broadcaster and wait for shutdown
                 broadcast_task = asyncio.create_task(self._broadcast_loop())
@@ -1880,6 +1984,11 @@ class JaatoWSServer:
                 "client_id": client_id,
                 "workspace_mode": self._workspace_manager is not None,
                 "server_version": _get_server_version(),
+                # The size limits a client must respect, so it can refuse a
+                # file before sending it instead of having the connection
+                # closed under it.  Absent on older daemons, which enforce
+                # LEGACY_WS_MAX_MESSAGE_SIZE whatever the staging caps say.
+                **self.message_limits(),
             }
 
             if self._jaato_server:
@@ -1896,8 +2005,8 @@ class JaatoWSServer:
             async for message in websocket:
                 await self._dispatch_client_message(client_id, message)
 
-        except ConnectionClosed:
-            pass
+        except ConnectionClosed as exc:
+            self._log_connection_close(client_id, exc)
         except Exception as e:
             import traceback as _tb
             logger.error(f"Client error {client_id}: {e}\n{''.join(_tb.format_exception(e))}")
@@ -1922,6 +2031,27 @@ class JaatoWSServer:
     # =========================================================================
     # Identity at connect — the ticket bind channel (#1074)
     # =========================================================================
+
+    def _log_connection_close(self, client_id: str, exc: BaseException) -> None:
+        """Log how a client connection ended.
+
+        A close is normally uneventful and stays at DEBUG.  A close this
+        server was forced into -- 1009 "message too big" above all -- used
+        to vanish in a bare ``except ConnectionClosed: pass``, leaving a
+        client waiting for a reply to a message the daemon never accepted
+        and no trace on this side, so anything outside
+        :data:`_ORDINARY_CLOSE_CODES` is logged at WARNING.
+        """
+        code, text = describe_connection_close(exc)
+        if code is None or code in _ORDINARY_CLOSE_CODES:
+            logger.debug(f"Client {client_id} connection closed: {text}")
+            return
+        hint = (
+            f" -- a message exceeded max_message_size "
+            f"({self._max_message_size} bytes; --ws-max-message-size)"
+            if code == 1009 else ""
+        )
+        logger.warning(f"Client {client_id} connection closed abnormally: {text}{hint}")
 
     async def _dispatch_client_message(self, client_id: str, message: str) -> None:
         """Route one client frame, honouring the app-credential boundary.
@@ -3789,6 +3919,25 @@ class JaatoWSServer:
         """Check if server is running."""
         return self._server is not None and not self._shutdown_event.is_set()
 
+    def message_limits(self) -> Dict[str, int]:
+        """The size limits this server enforces, as advertised to clients.
+
+        Rides ``ConnectedEvent.server_info``.  ``max_message_size`` is the
+        largest single WebSocket message accepted; the two staging caps
+        are the per-file and per-request limits ``StageFilesRequest`` is
+        judged against.  ``stage_per_file_limit`` is the SMALLER of the
+        staging cap and the message size, because a staged file travels
+        as one binary message and a file larger than that cannot arrive
+        however generous the staging cap is.
+        """
+        return {
+            "max_message_size": self._max_message_size,
+            "stage_per_file_limit": min(
+                DEFAULT_STAGE_PER_FILE_LIMIT, self._max_message_size
+            ),
+            "stage_total_limit": DEFAULT_STAGE_TOTAL_LIMIT,
+        }
+
     def get_server_info(self) -> Dict[str, Any]:
         """Get server status information."""
         info = {
@@ -3880,8 +4029,24 @@ async def main():
         default=86400,
         help="Max age in seconds for provisioned workspaces (default: 86400)",
     )
+    parser.add_argument(
+        "--ws-max-message-size",
+        metavar="SIZE",
+        default=None,
+        help="Largest WebSocket message accepted, in bytes or with a K/M/G "
+             f"suffix (default: {DEFAULT_WS_MAX_MESSAGE_SIZE // (1024 * 1024)}M). "
+             "A staged file travels as one message, so this also bounds "
+             "the largest file a client can attach.",
+    )
     parser.add_argument("--verbose", "-v", action="store_true", help="Enable verbose logging")
     args = parser.parse_args()
+    try:
+        max_message_size = (
+            parse_ws_max_message_size(args.ws_max_message_size)
+            if args.ws_max_message_size else None
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
 
     # Configure logging
     logging.basicConfig(
@@ -3910,6 +4075,7 @@ async def main():
         cgroups_root=args.cgroups_root,
         default_template=args.workspace_template,
         workspace_max_age=args.workspace_max_age,
+        max_message_size=max_message_size,
     )
 
     try:

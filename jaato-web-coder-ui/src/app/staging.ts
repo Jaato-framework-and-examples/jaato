@@ -26,7 +26,7 @@
 import { EventTypeValue } from "@jaato/sdk";
 import { MAIN_AGENT, uploadScope, useJaato } from "@/store/store";
 import type { StagedUpload } from "@/store/types";
-import { checkSizes, stagedName } from "@/protocol/attachments";
+import { checkSizes, stagedName, type SizeLimits } from "@/protocol/attachments";
 import { getClient, isConnected, reassertAfterReconnect } from "@/sdk/connection";
 
 const bytesOf = new Map<string, File>();
@@ -67,7 +67,7 @@ export function attachFiles(files: File[], folder: string): void {
   // or "" on the picker before one opens (#1250).  The strip shows only
   // the active scope's uploads, so they do not follow into another session.
   const scope = uploadScope(st);
-  const verdicts = checkSizes(files.map((f) => f.size));
+  const verdicts = checkSizes(files.map((f) => f.size), currentLimits());
   const items: StagedUpload[] = files.map((f, i) => {
     const id = `up-${++seq}`;
     const rel = (f as File & { webkitRelativePath?: string }).webkitRelativePath ?? "";
@@ -87,6 +87,15 @@ export function discardUpload(id: string): void {
   useJaato.getState().removeUpload(id);
 }
 
+/**
+ * The connected daemon's size limits, or ``null`` before a connection
+ * (the defaults then apply, and the queued files are judged again against
+ * the real limits when they are sent).
+ */
+function currentLimits(): SizeLimits | null {
+  return isConnected() ? getClient().serverLimits : null;
+}
+
 /** Stage every ``queued`` entry, one request for the batch.  Resolves once the daemon has answered. */
 export function stageQueued(): Promise<void> {
   chain = chain.then(() => stageBatch()).catch(() => undefined);
@@ -97,6 +106,20 @@ async function stageBatch(retried = false): Promise<void> {
   const st = useJaato.getState();
   const queued = st.uploads.filter((u) => u.status === "queued" && bytesOf.has(u.id));
   if (!queued.length) return;
+  // Judge again against the limits of the daemon we are about to send to:
+  // a file queued on the picker before connecting was checked against the
+  // defaults, and one over the daemon's message limit would not be refused,
+  // it would close the connection.
+  const verdicts = checkSizes(queued.map((u) => bytesOf.get(u.id)!.size), currentLimits());
+  const fits = queued.filter((u, i) => {
+    const reason = verdicts[i]!.reason;
+    if (!reason) return true;
+    bytesOf.delete(u.id);
+    st.updateUpload(u.id, { status: "failed", error: reason });
+    return false;
+  });
+  if (!fits.length) return;
+  queued.splice(0, queued.length, ...fits);
   for (const u of queued) st.updateUpload(u.id, { status: "staging" });
   const agentId = st.selectedAgentId || MAIN_AGENT;
   // Read each file on its own: a directory dropped alongside real files

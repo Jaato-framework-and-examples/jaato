@@ -18,6 +18,7 @@
 
 import {
   ConnectionClosedError,
+  RequestInterruptedError,
   ConnectionError,
   IncompatibleServerError,
   ReconnectingError,
@@ -159,6 +160,48 @@ export const MIN_FILE_FETCH_PROTOCOL = "1.20";
  * is refused below this version rather than sent blind.
  */
 export const MIN_SCAFFOLD_INTEGRATION_PROTOCOL = "1.21";
+
+/**
+ * Size limits a daemon enforces, advertised in ``ConnectedEvent.server_info``.
+ *
+ * ``maxMessageSize`` is the largest single WebSocket message the daemon
+ * accepts; a larger one makes it close the connection with 1009.  A staged
+ * file travels as ONE binary message, so ``stagePerFileLimit`` is never
+ * above it.
+ */
+export interface ServerLimits {
+  maxMessageSize: number;
+  stagePerFileLimit: number;
+  stageTotalLimit: number;
+  /** ``false`` when the daemon advertised nothing and these are the legacy values. */
+  advertised: boolean;
+}
+
+/**
+ * What a daemon that advertises no limits enforces: the ``websockets``
+ * default of 1 MiB per message (the daemon never set one), which also caps
+ * a staged file whatever the 10 MB staging cap says.
+ */
+export const LEGACY_SERVER_LIMITS: ServerLimits = {
+  maxMessageSize: 1024 * 1024,
+  stagePerFileLimit: 1024 * 1024,
+  stageTotalLimit: 50 * 1024 * 1024,
+  advertised: false,
+};
+
+/** Read {@link ServerLimits} out of ``server_info``; legacy values when absent. */
+export function serverLimitsFrom(info: Record<string, unknown> | null | undefined): ServerLimits {
+  const num = (v: unknown): number | null =>
+    typeof v === "number" && Number.isFinite(v) && v > 0 ? v : null;
+  const max = num(info?.max_message_size);
+  if (max === null) return { ...LEGACY_SERVER_LIMITS };
+  return {
+    maxMessageSize: max,
+    stagePerFileLimit: Math.min(num(info?.stage_per_file_limit) ?? max, max),
+    stageTotalLimit: num(info?.stage_total_limit) ?? LEGACY_SERVER_LIMITS.stageTotalLimit,
+    advertised: true,
+  };
+}
 
 /**
  * How long {@link JaatoClient.stageFiles} waits for the daemon's
@@ -326,6 +369,13 @@ export class JaatoClient {
   private _serverProtocolVersion: string | null = null;
   /** Monotonic part of each ``fetchWorkspaceFile`` request id. */
   private _fileFetchSeq = 0;
+  /**
+   * Requests waiting for an answer on the CURRENT connection, told when it
+   * closes so they reject at once instead of waiting out their deadline.
+   * Cleared by each waiter as it settles.
+   */
+  private _closeWaiters: Set<(info: { code: number; reason: string }) => void> = new Set();
+  private _limits: ServerLimits | null = null;
   private _clientId: string | null = null;
   private _sessionId: string | null = null;
   private _statusHandlers: Array<(s: ConnectionStatus) => void> = [];
@@ -404,6 +454,17 @@ export class JaatoClient {
    */
   get serverProtocolVersion(): string | null {
     return this._serverProtocolVersion;
+  }
+
+  /**
+   * The size limits the connected daemon enforces, from
+   * ``ConnectedEvent.server_info``.  Against a daemon that advertises none
+   * (every release before it did) this is {@link LEGACY_SERVER_LIMITS}:
+   * those daemons closed the connection on any message over 1 MiB whatever
+   * their staging caps said.  ``null`` before the first handshake.
+   */
+  get serverLimits(): ServerLimits | null {
+    return this._limits;
   }
 
   /** Client ID assigned by the server in {@link ConnectedEvent}. */
@@ -1109,16 +1170,25 @@ export class JaatoClient {
     const requestId = `dl-${++this._fileFetchSeq}-${Date.now().toString(36)}`;
     const timeoutMs = options.timeoutMs ?? 120_000;
     const answer = new Promise<WorkspaceFileFetchResult>((resolve, reject) => {
-      const timer = setTimeout(() => {
+      const done = () => {
+        clearTimeout(timer);
         unsub();
+        this._closeWaiters.delete(onClose);
+      };
+      const timer = setTimeout(() => {
+        done();
         reject(new Error(`fetchWorkspaceFile: no answer for ${path} after ${timeoutMs} ms`));
       }, timeoutMs);
+      const onClose = (info: { code: number; reason: string }) => {
+        done();
+        reject(new RequestInterruptedError(`fetchWorkspaceFile ${path}`, info.code, info.reason));
+      };
+      this._closeWaiters.add(onClose);
       const unsub = this.subscribeAll((raw) => {
         const event = raw as WorkspaceFileContentEvent & { data?: Uint8Array };
         if (event.type !== EventTypeValue.WORKSPACE_FILE_CONTENT) return;
         if (event.request_id !== requestId) return;
-        clearTimeout(timer);
-        unsub();
+        done();
         resolve({ event, data: event.data ?? null });
       });
     });
@@ -1575,6 +1645,9 @@ export class JaatoClient {
       {
         timeoutMs: options.timeoutMs ?? STAGE_FILES_TIMEOUT_MS,
         label: "stageFiles: no workspace.files.staged response",
+        // The usual reason no response arrives: a file over the daemon's
+        // message limit makes it close the connection (1009) mid-upload.
+        closeLabel: "stageFiles",
       },
     );
 
@@ -1606,24 +1679,42 @@ export class JaatoClient {
    * whose response is lost surfaces as a settled promise the caller can
    * catch, not a hang (#1248).  Omit ``timeoutMs`` (or pass 0) to keep the
    * resolve-only behaviour.
+   *
+   * With ``options.closeLabel`` set, the wait also rejects -- at once, with
+   * a {@link RequestInterruptedError} carrying the close code -- when the
+   * connection closes first.  For a request the daemon answers on the same
+   * connection, a close means no answer is coming.
    */
   private _waitForNextEvent<T extends JaatoEvent = JaatoEvent>(
     predicate: (event: JaatoEvent) => boolean,
-    options: { timeoutMs?: number; label?: string } = {},
+    options: { timeoutMs?: number; label?: string; closeLabel?: string } = {},
   ): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       let timer: ReturnType<typeof setTimeout> | null = null;
+      let onClose: ((info: { code: number; reason: string }) => void) | null = null;
+      const done = () => {
+        if (timer) clearTimeout(timer);
+        unsub();
+        if (onClose) this._closeWaiters.delete(onClose);
+      };
       const unsub = this.subscribeAll((event) => {
         if (predicate(event)) {
-          if (timer) clearTimeout(timer);
-          unsub();
+          done();
           resolve(event as T);
         }
       });
+      if (options.closeLabel) {
+        const label = options.closeLabel;
+        onClose = (info) => {
+          done();
+          reject(new RequestInterruptedError(label, info.code, info.reason));
+        };
+        this._closeWaiters.add(onClose);
+      }
       const timeoutMs = options.timeoutMs ?? 0;
       if (timeoutMs > 0) {
         timer = setTimeout(() => {
-          unsub();
+          done();
           reject(new Error(`${options.label ?? "waitForNextEvent: no matching event"} after ${timeoutMs} ms`));
         }, timeoutMs);
       }
@@ -1696,6 +1787,7 @@ export class JaatoClient {
     this._serverVersion = (serverInfo.server_version as string) ?? null;
     this._clientId = (serverInfo.client_id as string) ?? null;
     this._serverProtocolVersion = connected.protocol_version ?? null;
+    this._limits = serverLimitsFrom(serverInfo);
 
     // Wire-protocol compat gate.  Compares against
     // ``protocol_version`` (not the daemon package version) — the
@@ -1821,6 +1913,17 @@ export class JaatoClient {
 
   private _handleClose(info: { code: number; reason: string }): void {
     this._transport = null;
+    // Requests in flight on this connection cannot be answered on the
+    // next one; reject them now, naming the close.
+    const waiters = [...this._closeWaiters];
+    this._closeWaiters.clear();
+    for (const w of waiters) {
+      try {
+        w(info);
+      } catch {
+        // A waiter only rejects its own promise.
+      }
+    }
     if (this._explicitClose || this._state === ConnectionState.CLOSED) {
       this._transition(ConnectionState.CLOSED, {
         reason: info.reason || `code ${info.code}`,

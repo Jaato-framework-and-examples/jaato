@@ -21,9 +21,12 @@ import {
   MIN_FILE_FETCH_PROTOCOL,
   MIN_PROTOCOL_VERSION,
   STAGE_FILES_TIMEOUT_MS,
+  LEGACY_SERVER_LIMITS,
+  serverLimitsFrom,
 } from "./client.js";
 import {
   ConnectionClosedError,
+  RequestInterruptedError,
   IncompatibleServerError,
   ReconnectingError,
 } from "./errors.js";
@@ -843,6 +846,50 @@ describe("JaatoClient.stageFiles", () => {
     }
   });
 
+  // A file over the daemon's message limit makes it close the connection
+  // (1009) mid-upload.  The next connection is a new client that cannot
+  // answer, so waiting out the 120 s deadline only hid the refusal.
+  test("rejects at once, naming the close, when the connection drops first", async () => {
+    mock.timers.enable({ apis: ["setTimeout"] });
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const handlersBefore = (client as any)._catchallHandlers.length as number;
+      const promise = client.stageFiles(
+        "workspace_abc",
+        [{ name: "big.pdf", data: new Uint8Array([1, 2, 3]) }],
+      );
+      lastInstance!.emitClose(1009, "message too big");
+      await assert.rejects(promise, (err: unknown) => {
+        assert.ok(err instanceof RequestInterruptedError);
+        assert.equal(err.code, 1009);
+        assert.match(err.message, /larger than its limit/);
+        return true;
+      });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      assert.equal((client as any)._catchallHandlers.length, handlersBefore);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      assert.equal((client as any)._closeWaiters.size, 0);
+      // No timer left to fire a second rejection later.
+      mock.timers.tick(STAGE_FILES_TIMEOUT_MS + 1);
+    } finally {
+      mock.timers.reset();
+    }
+  });
+
+  test("a settled request is not rejected by a later close", async () => {
+    const promise = client.stageFiles("ws", [{ name: "a.txt", data: new Uint8Array([1]) }]);
+    lastInstance!.emit({
+      type: EventTypeValue.WORKSPACE_FILES_STAGED,
+      timestamp: new Date().toISOString(),
+      workspace_id: "ws",
+      staged: [{ name: "a.txt" }],
+      failed: [],
+    });
+    await promise;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    assert.equal((client as any)._closeWaiters.size, 0);
+  });
+
   test("uses STAGE_FILES_TIMEOUT_MS as the default deadline", () => {
     assert.equal(typeof STAGE_FILES_TIMEOUT_MS, "number");
     assert.ok(STAGE_FILES_TIMEOUT_MS > 0);
@@ -1551,5 +1598,39 @@ describe("JaatoClient subscribe API", () => {
 
     assert.deepEqual(seen, ["a"]);
     await client.close();
+  });
+});
+
+describe("serverLimits", () => {
+  test("a daemon that advertises nothing gets the legacy 1 MiB limits", () => {
+    const limits = serverLimitsFrom({ client_id: "c", server_version: "1.1.0rc2" });
+    assert.deepEqual(limits, LEGACY_SERVER_LIMITS);
+    assert.equal(limits.stagePerFileLimit, 1024 * 1024);
+    assert.equal(limits.advertised, false);
+  });
+
+  test("advertised limits are read, and the per-file cap never exceeds a message", () => {
+    const limits = serverLimitsFrom({
+      max_message_size: 2 * 1024 * 1024,
+      stage_per_file_limit: 10 * 1024 * 1024,
+      stage_total_limit: 50 * 1024 * 1024,
+    });
+    assert.equal(limits.maxMessageSize, 2 * 1024 * 1024);
+    assert.equal(limits.stagePerFileLimit, 2 * 1024 * 1024);
+    assert.equal(limits.stageTotalLimit, 50 * 1024 * 1024);
+    assert.equal(limits.advertised, true);
+  });
+
+  test("the client exposes the handshake's limits", async () => {
+    installMockWebSocket();
+    try {
+      const client = new JaatoClient({ url: "ws://localhost:8080" });
+      assert.equal(client.serverLimits, null);
+      await connectAndAck(client);
+      assert.equal(client.serverLimits?.advertised, false);
+      await client.close();
+    } finally {
+      restoreWebSocket();
+    }
   });
 });

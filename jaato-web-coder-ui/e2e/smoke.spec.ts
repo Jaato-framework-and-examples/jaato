@@ -938,6 +938,18 @@ test("a file refused by the daemon shows the daemon's reason on its chip", async
   await expect(page.getByText(/Attached files, staged/)).toHaveCount(0);
 });
 
+// The reported PDF: 1.4 MB.  Before the daemon set a message limit,
+// ``websockets`` applied 1 MiB and closed the connection on this file's
+// binary frame, and the chip spun for two minutes.  The mock enforces and
+// advertises the daemon's limit, so this stages or fails loudly.
+test("a file over 1 MiB stages instead of hanging", async ({ page }) => {
+  await openSession(page);
+  await page.getByLabel("Attach files").setInputFiles([{ name: "report.pdf", mimeType: "application/pdf", buffer: Buffer.alloc(1_400_000, 7) }]);
+  const strip = page.getByRole("group", { name: "Attached files" });
+  await expect(strip.locator("li[data-status=staged]")).toHaveCount(1);
+  await expect(page.getByText("Staged into the workspace: report.pdf")).toBeVisible();
+});
+
 test("files attached on the session picker are in the workspace when the session opens", async ({ page }) => {
   await page.goto("/");
   await page.getByPlaceholder("ws://host:8080").fill(WS);
