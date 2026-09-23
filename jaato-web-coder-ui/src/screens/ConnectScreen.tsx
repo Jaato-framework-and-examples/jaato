@@ -131,6 +131,10 @@ export function ConnectScreen() {
       // Likewise for notes -- and ``null`` is not a failure here: it selects
       // the ``localStorage`` store instead, which the editor says out loud.
       useJaato.getState().setNotesUrl(cfg.notesUrl ?? null);
+      // And GitHub: present only when the backend has a ``github:`` block, so
+      // the two URLs together gate the "Connect GitHub" entry and the
+      // workspace account dropdown. Absent = neither appears.
+      useJaato.getState().setGithubUrls({ githubUrl: cfg.githubUrl ?? null, githubLoginUrl: cfg.githubLoginUrl ?? null });
       if (!cfg.daemon && !cfg.token && !cfg.ticketUrl) return;
       const nextUrl = cfg.daemon ?? url;
       setUrl(nextUrl);

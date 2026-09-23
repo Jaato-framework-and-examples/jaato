@@ -87,6 +87,18 @@ export interface JaatoState {
    */
   notesUrl: string | null;
   /**
+   * The sign-in backend's per-user GitHub connection API (``config.json``'s
+   * ``githubUrl``, see ``app/github.ts``), or ``null`` when the page was
+   * served without a ``github:`` block.  Its presence is the whole gate on
+   * the "Connect GitHub" settings entry and the workspace account dropdown.
+   */
+  githubUrl: string | null;
+  /**
+   * Where the server-side GitHub App connect starts (``config.json``'s
+   * ``githubLoginUrl``), or ``null``.  The settings entry navigates here.
+   */
+  githubLoginUrl: string | null;
+  /**
    * The notes THIS person has written, by session id.  Not part of
    * ``emptySessionState``: a note outlives the session being attached,
    * detached or swapped, and the listing it joins onto is cross-workspace.
@@ -245,6 +257,7 @@ export interface JaatoState {
   setScreen: (s: Screen) => void;
   setCredentialsUrl: (url: string | null) => void;
   setNotesUrl: (url: string | null) => void;
+  setGithubUrls: (urls: { githubUrl: string | null; githubLoginUrl: string | null }) => void;
   /** Replace the whole set, from one listing. */
   setNotes: (notes: SessionNote[]) => void;
   /** Upsert one, or drop it when ``null`` (an emptied note is a forgotten one). */
@@ -1046,6 +1059,8 @@ export const useJaato = create<JaatoState>()((set, get) => ({
   screen: "connect",
   credentialsUrl: null,
   notesUrl: null,
+  githubUrl: null,
+  githubLoginUrl: null,
   notes: {},
   noteStatus: {},
   backend: null,
@@ -1070,6 +1085,7 @@ export const useJaato = create<JaatoState>()((set, get) => ({
   setScreen: (screen) => set({ screen }),
   setCredentialsUrl: (credentialsUrl) => set({ credentialsUrl }),
   setNotesUrl: (notesUrl) => set({ notesUrl }),
+  setGithubUrls: ({ githubUrl, githubLoginUrl }) => set({ githubUrl, githubLoginUrl }),
   setNotes: (list) => set({ notes: Object.fromEntries(list.map((n) => [n.sessionId, n])) }),
   setNote: (sessionId, note) =>
     set((st) => {

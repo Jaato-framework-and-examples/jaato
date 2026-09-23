@@ -44,6 +44,20 @@ export interface LauncherConfig {
    * reason ``credentialsUrl`` is, so it is not derived from ``ticketUrl``.
    */
   notesUrl?: string;
+  /**
+   * Where the backend keeps this user's connected GitHub accounts and their
+   * per-workspace bindings (``app/github.ts``).  Named only by a backend that
+   * has the ``github:`` block; absent means the "Connect GitHub" settings
+   * entry and the workspace account dropdown do not appear.  Opt-in for the
+   * same reason ``credentialsUrl`` is, so it is not derived from ``ticketUrl``.
+   */
+  githubUrl?: string;
+  /**
+   * Where the server-side GitHub App connect starts (a full-page 302 to
+   * GitHub).  Sent beside ``githubUrl`` by the same backend; the settings
+   * entry navigates here to connect an account.
+   */
+  githubLoginUrl?: string;
   autoConnect?: boolean;
 }
 
@@ -59,6 +73,8 @@ export function parseLauncherConfig(raw: unknown): LauncherConfig {
   if (typeof o.logoutUrl === "string" && o.logoutUrl) out.logoutUrl = o.logoutUrl;
   if (typeof o.credentialsUrl === "string" && o.credentialsUrl) out.credentialsUrl = o.credentialsUrl;
   if (typeof o.notesUrl === "string" && o.notesUrl) out.notesUrl = o.notesUrl;
+  if (typeof o.githubUrl === "string" && o.githubUrl) out.githubUrl = o.githubUrl;
+  if (typeof o.githubLoginUrl === "string" && o.githubLoginUrl) out.githubLoginUrl = o.githubLoginUrl;
   if (typeof o.autoConnect === "boolean") out.autoConnect = o.autoConnect;
   return out;
 }
