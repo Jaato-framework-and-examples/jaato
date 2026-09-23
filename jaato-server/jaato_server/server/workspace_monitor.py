@@ -47,6 +47,7 @@ from watchdog.observers import Observer
 
 from jaato_server.shared.utils.gitignore import GitignoreParser
 from jaato_server.shared.plugins.workspace_home import DEFAULT_WORKSPACE_HOME
+from jaato_server.shared.plugins.workspace_venv import DEFAULT_WORKSPACE_VENV
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +60,13 @@ logger = logging.getLogger(__name__)
 # configured with a non-default relative home name still keeps the home out of
 # git (its nested ``*`` gitignore) but that custom name is not auto-hidden
 # from the panel.
-_WORKSPACE_HOME_IGNORE = (f"{DEFAULT_WORKSPACE_HOME}/",)
+# #1274: the managed-default tool venv holds thousands of files after one
+# ``pip install``; it is the interpreter's, not the user's project.  Same
+# treatment and same caveat as the home: a custom venv path is not hidden.
+_WORKSPACE_HOME_IGNORE = (
+    f"{DEFAULT_WORKSPACE_HOME}/",
+    f"{DEFAULT_WORKSPACE_VENV}/",
+)
 
 # How long (seconds) to wait after the last filesystem event before flushing
 # the accumulated changes as a single batched event.

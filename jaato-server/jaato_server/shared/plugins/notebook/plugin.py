@@ -32,6 +32,7 @@ from .tool_stubs import ToolBridge, ToolExecutionError, generate_tools_module, g
 from jaato_server.shared.ai_tool_runner import get_current_tool_output_callback
 from jaato_server.shared.plugins.runner_forwarding import RunnerForwardingMixin
 from ..workspace_venv import pip_apparmor_rules
+from ..workspace_home import home_exec_apparmor_rules
 from jaato_server.shared.trace import trace as _trace_write
 
 # Thread-local storage for per-session tool bindings state.
@@ -409,7 +410,9 @@ class NotebookPlugin(StreamingCapable, RunnerForwardingMixin):
         script runs.  Scoped to sessions that load ``notebook`` —
         least-privilege.  See ``pip_apparmor_rules``.
         """
-        return pip_apparmor_rules(plugin_config.get("workspace_venv"), workspace_path)
+        return pip_apparmor_rules(plugin_config.get("workspace_venv"), workspace_path) + (
+            home_exec_apparmor_rules(plugin_config.get("workspace_home"), workspace_path)
+        )
 
     def set_workspace_path(self, path: str) -> None:
         """Set workspace root path (auto-wired by PluginRegistry).

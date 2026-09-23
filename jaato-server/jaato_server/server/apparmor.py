@@ -3208,12 +3208,39 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
         return "\n".join(indent + line for line in lines)
 
 
+def _plugin_configs_with_managed_defaults(
+    profile: Optional[Any],
+    workspace_path: str,
+    managed_workspace_root: Optional[str],
+) -> Tuple[Dict[str, Any], bool]:
+    """The profile's ``plugin_configs`` with the managed defaults folded in.
+
+    A copy, per section, so folding a default never writes into the profile
+    object the rest of the session reads.  The folds are the envelope's own
+    (``inject_workspace_home`` #1225, ``inject_workspace_venv`` #1274), so
+    the rules are resolved against the values the runner will use.  Returns
+    ``(configs, whether any default applied)``.
+    """
+    from jaato_server.shared.plugins.workspace_home import inject_workspace_home
+    from jaato_server.shared.plugins.workspace_venv import inject_workspace_venv
+
+    raw = getattr(profile, "plugin_configs", None) or {}
+    configs: Dict[str, Any] = {
+        name: dict(cfg) if isinstance(cfg, dict) else cfg
+        for name, cfg in raw.items()
+    }
+    home = inject_workspace_home(configs, workspace_path, managed_workspace_root)
+    venv = inject_workspace_venv(configs, workspace_path, managed_workspace_root)
+    return configs, bool(home or venv)
+
+
 def resolve_plugin_apparmor_rules(
     server: Any,
     profile: Optional[Any],
     session_id: str,
     workspace_path: str,
     config_root: Optional[str],
+    managed_workspace_root: Optional[str] = None,
 ) -> Optional[List[str]]:
     """Union the AppArmor rules contributed by every plugin the runner loads.
 
@@ -3245,13 +3272,23 @@ def resolve_plugin_apparmor_rules(
     logged but do not abort — the framework baseline still renders.
     A confined runner missing one plugin's rules beats a session that
     fails to start.
+
+    ``managed_workspace_root`` (the WS server's provisioning root) folds in
+    the same managed defaults the envelope carries -- ``workspace_home``
+    (#1225) and ``workspace_venv`` (#1274) -- so the grants follow the
+    values the runner will actually use: the venv ``bin`` ``ix`` and the
+    home's ``.local/bin`` ``ix``.  A profile-less session used to get no
+    plugin rules at all; one on a managed workspace now gets them, because
+    the runner loads the same plugins either way.
     """
-    if profile is None:
+    plugin_configs, defaulted = _plugin_configs_with_managed_defaults(
+        profile, workspace_path, managed_workspace_root,
+    )
+    if profile is None and not defaulted:
         return None
     rules: List[str] = []
 
     registry = getattr(server, "registry", None)
-    plugin_configs = getattr(profile, "plugin_configs", None) or {}
     if registry is not None:
         # Grant for the plugins the RUNNER actually loads — NOT the declared
         # ``profile.plugins``.  ``expose_all`` (runner/session.py) initializes

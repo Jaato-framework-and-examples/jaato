@@ -40,6 +40,7 @@ from ...workspace_venv import (
     resolve_venv_path, ensure_workspace_venv, apply_venv_to_env, venv_python,
 )
 from ...workspace_home import resolve_home_path, apply_home_to_env
+from ...jaato_tools_path import append_path_entry, jaato_tools_dir
 from .base import NotebookBackend
 from .. import kernel_protocol as proto
 from ..kernel_sandbox import (
@@ -556,6 +557,15 @@ class SubprocessKernelBackend(NotebookBackend):
             if kernel_env is None:
                 kernel_env = os.environ.copy()
             apply_home_to_env(kernel_env, home_path)
+        # jaato's own introspection tools (#1273), appended to PATH, so a
+        # cell's ``!jaato-doctor`` resolves the way a cli command's does.
+        # Only materialises an env when there is a directory to add, so a
+        # kernel with nothing to change still inherits the environment as is.
+        tools_dir = jaato_tools_dir()
+        if tools_dir:
+            if kernel_env is None:
+                kernel_env = os.environ.copy()
+            append_path_entry(kernel_env, tools_dir)
 
         r2k_r, r2k_w = os.pipe()   # runner → kernel
         k2r_r, k2r_w = os.pipe()   # kernel → runner

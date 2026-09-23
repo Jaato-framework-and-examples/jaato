@@ -57,7 +57,7 @@ from jaato_server.shared.plugins.runner_forwarding import RunnerForwardingMixin
 from jaato_server.shared.secret_scrub import DEFAULT_SECRET_ENV_PATTERNS, resolve_scrub_patterns
 from jaato_server.shared.command_analysis import UnanalyzableCommand
 from ..command_containment import first_denied_path
-from ..workspace_home import resolve_home_path
+from ..workspace_home import resolve_home_path, home_exec_apparmor_rules
 from ..workspace_venv import (
     resolve_venv_path, ensure_workspace_venv, pip_apparmor_rules,
 )
@@ -432,7 +432,9 @@ class InteractiveShellPlugin(RunnerForwardingMixin):
         Scoped to sessions that load ``interactive_shell`` — least-privilege.
         See ``pip_apparmor_rules``.
         """
-        return pip_apparmor_rules(plugin_config.get("workspace_venv"), workspace_path)
+        return pip_apparmor_rules(plugin_config.get("workspace_venv"), workspace_path) + (
+            home_exec_apparmor_rules(plugin_config.get("workspace_home"), workspace_path)
+        )
 
     def set_workspace_path(self, path: Optional[str]) -> None:
         """Update the workspace root path.

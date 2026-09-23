@@ -23,7 +23,8 @@ from jaato_sdk.plugins.model_provider.types import (
     DISCOVERABILITY_DEFERRED,
 )
 from ..sandbox_utils import detect_jaato_symlink
-from ..workspace_home import resolve_home_path, apply_home_to_env
+from ..workspace_home import resolve_home_path, apply_home_to_env, home_exec_apparmor_rules
+from ..jaato_tools_path import apply_jaato_tools_to_env
 from ..workspace_venv import (
     resolve_venv_path, ensure_workspace_venv, apply_venv_to_env, pip_apparmor_rules,
 )
@@ -550,7 +551,9 @@ class CLIToolPlugin(BackgroundCapableMixin, RunnerForwardingMixin):
         the venv bin so a bare ``pip`` / console script runs.  Scoped to
         sessions that load ``cli`` — least-privilege.  See ``pip_apparmor_rules``.
         """
-        return pip_apparmor_rules(plugin_config.get("workspace_venv"), workspace_path)
+        return pip_apparmor_rules(plugin_config.get("workspace_venv"), workspace_path) + (
+            home_exec_apparmor_rules(plugin_config.get("workspace_home"), workspace_path)
+        )
 
     def get_tool_schemas(self) -> List[ToolSchema]:
         """Return the ToolSchema for the CLI tool."""
@@ -1099,9 +1102,15 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
           venv's ``python`` / ``pip`` win and ``pip install`` persists to it.
         - secret env vars scrubbed (feature #10 / #863).
 
-        Pure: it creates nothing.  The venv itself is created by the caller
-        (``ensure_workspace_venv``) only once the command passed
-        containment, so a refused command leaves no trace on disk.
+        - ``<home>/.local/bin`` and the jaato-tools directory APPENDED
+          (#1273), so a program a user-level installer put in the workspace
+          home, and ``jaato-doctor`` / ``jaato-scaffold``, resolve by name.
+
+        Creates nothing in the workspace.  The venv itself is created by the
+        caller (``ensure_workspace_venv``) only once the command passed
+        containment, so a refused command leaves no trace there; the only
+        write is the jaato-tools symlink directory, once per session tmpdir
+        (``jaato_tools_path.jaato_tools_dir``).
 
         The command string never contributes: a ``PATH=...`` it sets inline
         or via ``export`` / ``env`` is not read here and authorizes nothing.
@@ -1137,6 +1146,10 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
         home_path = resolve_home_path(self._workspace_home, self._workspace_root)
         if home_path:
             apply_home_to_env(env, home_path)
+
+        # jaato's own introspection tools (#1273), APPENDED: the skill tells
+        # the model to run them and the daemon's venv bin is not on PATH.
+        apply_jaato_tools_to_env(env)
 
         if self._scrub_secret_env:
             from jaato_server.shared.secret_scrub import scrub_env as _scrub_secret_env

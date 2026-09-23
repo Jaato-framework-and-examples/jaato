@@ -39,7 +39,9 @@ Where each piece runs
 
 import logging
 import os
-from typing import MutableMapping, Optional
+from typing import List, MutableMapping, Optional
+
+from .jaato_tools_path import append_path_entry
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +103,9 @@ def apply_home_to_env(
     ``XDG_CONFIG_HOME=/root/.config`` would otherwise have that value
     inherited by the subprocess and win over the redirected ``HOME``.
 
+    ``<home>/.local/bin`` is also APPENDED to ``PATH`` (#1273), so a program
+    a user-level installer put there resolves by name on the next command.
+
     Mutates ``env`` in place.  Nothing on disk is created here -- the tools
     make their own XDG subdirectories on demand, under the ``<home>`` the
     daemon created.
@@ -110,6 +115,50 @@ def apply_home_to_env(
     env["XDG_CACHE_HOME"] = os.path.join(home_path, ".cache")
     env["XDG_DATA_HOME"] = os.path.join(home_path, ".local", "share")
     env["XDG_STATE_HOME"] = os.path.join(home_path, ".local", "state")
+    # #1273: ``uv tool install``, ``pipx`` and ``pip install --user`` put the
+    # programs they install in ``~/.local/bin``.  With HOME redirected that is
+    # ``<home>/.local/bin``, which was on nobody's PATH, so a tool installed
+    # by one command was "not found" by the next.  Appended, so it can never
+    # shadow a host binary; per workspace, so it does not leak across them.
+    append_path_entry(env, local_bin_dir(home_path))
+
+
+def local_bin_dir(home_path: str) -> str:
+    """``<home>/.local/bin``: where user-level installers put programs."""
+    return os.path.join(home_path, ".local", "bin")
+
+
+def home_exec_apparmor_rules(
+    workspace_home_raw: Optional[str], workspace_path: Optional[str],
+) -> List[str]:
+    """AppArmor ``ix`` grants for programs installed under the workspace home.
+
+    The workspace is ``rwkl`` with no exec, so a program ``uv tool install``
+    or ``pipx`` put under the home could be written and not run.  Two
+    grants, because exec is mediated on the RESOLVED path: ``.local/bin/*``
+    for files installed there directly (``pip install --user`` scripts), and
+    ``.local/share/**/bin/*`` for the targets the ``uv tool`` and ``pipx``
+    symlinks in ``.local/bin`` resolve to.  The same trust class as the
+    workspace venv's ``bin/*`` grant: a location the model can already write
+    executables into.  Empty when the home is off or unresolvable.
+    """
+    try:
+        home_path = resolve_home_path(workspace_home_raw, workspace_path)
+    except ValueError:
+        return []
+    if not home_path:
+        return []
+    return [
+        f"{local_bin_dir(home_path)}/* ix,",
+        f"{os.path.join(home_path, '.local', 'share')}/**/bin/* ix,",
+    ]
+
+
+def is_daemon_managed(
+    workspace_path: Optional[str], managed_workspace_root: Optional[str],
+) -> bool:
+    """Public name for :func:`_is_daemon_managed` (shared with ``workspace_venv``)."""
+    return _is_daemon_managed(workspace_path, managed_workspace_root)
 
 
 def _is_daemon_managed(

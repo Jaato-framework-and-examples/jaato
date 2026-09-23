@@ -187,6 +187,8 @@ def test_notebook_kernel_without_home_does_not_force_an_env(tmp_path, monkeypatc
         raise _StopSpawn
 
     monkeypatch.setattr(sk_mod.subprocess, "Popen", _fake_popen)
+    # No jaato tools to expose either (#1273), so nothing forces an env.
+    monkeypatch.setattr(sk_mod, "jaato_tools_dir", lambda: None)
     backend = sk_mod.SubprocessKernelBackend()
     backend.initialize({"workspace_root": ws})
     with pytest.raises(_StopSpawn):

@@ -56,6 +56,7 @@ from jaato_server.server.confinement_id import (
 # profile's declared block (#735) rather than duck-typing it, and a lazy
 # import inside a per-session helper would pay the lookup on every spawn.
 from jaato_server.shared.runtime_limits import RuntimeLimits
+from jaato_server.shared.plugins.workspace_venv import inject_workspace_venv
 from jaato_server.shared.plugins.workspace_home import (
     ensure_workspace_home_dir, inject_workspace_home,
 )
@@ -1167,6 +1168,12 @@ def build_session_envelope(
     # web-created workspace has -- still gets the managed default.  The
     # daemon created the directory in ``spawn_session_runner``.
     inject_workspace_home(
+        plugin_configs_dict, workspace_path, managed_workspace_root,
+    )
+    # Workspace venv (#1274): the same managed-default rule, so a profile-less
+    # WS-provisioned session's pip / python / uv pip land in the workspace,
+    # never in the host (or daemon) interpreter.
+    inject_workspace_venv(
         plugin_configs_dict, workspace_path, managed_workspace_root,
     )
 

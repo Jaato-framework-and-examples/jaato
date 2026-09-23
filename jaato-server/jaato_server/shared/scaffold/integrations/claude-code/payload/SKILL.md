@@ -18,6 +18,10 @@ any document — this one included — they cannot drift:
 | `jaato-scaffold` | what does the framework offer, is my config valid, write me the known-good recipe |
 
 Run both from the **same Python environment as the daemon you target**.
+Inside a jaato session (a command the agent runs) that is already true: both
+are on the command `PATH`, linked to the daemon's own install, so run them by
+name. Do not go looking for the daemon's venv — its `bin/` is deliberately
+not on the `PATH`, and a program named by a path outside it is refused.
 
 ### When `explain` has no answer
 
