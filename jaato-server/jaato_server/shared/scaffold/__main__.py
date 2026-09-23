@@ -683,6 +683,34 @@ def _cmd_new(args) -> int:
 
 # ----------------------------------------------------- external verbs (plugins)
 
+def _run_refresh(_install, name, dest, *, json_out: bool, dry_run: bool) -> int:
+    """Apply ``integration <name> --refresh`` and report the transition.
+
+    A refresh reports what state the copy was in, what it is in now, whether
+    anything was written, and — when it declined — why, because "did nothing"
+    is a correct outcome here and a caller keeping a copy current needs to tell
+    it apart from a failure.  Always exits 0: a skipped refresh of an edited
+    copy is correct behaviour, not a failure (#1261).  Split out of
+    `_cmd_integration` so that function stays under the complexity ceiling.
+    """
+    state_before, detail_before = _install.compare(name, dest)
+    changed, lines = _install.install(name, dest, refresh=True, dry_run=dry_run)
+    state_after, _ = _install.compare(name, dest)
+    skipped_reason = None
+    if not changed and not dry_run \
+            and state_before not in _install.REFRESH_WRITE_STATES:
+        skipped_reason = f"{state_before}: {detail_before}"
+    if json_out:
+        print(json.dumps({"asset": name, "dest": str(dest),
+                          "state_before": state_before, "state_after": state_after,
+                          "changed": changed, "skipped_reason": skipped_reason,
+                          "version": _install.framework_version()}, indent=2))
+    else:
+        for line in lines:
+            print(line)
+    return 0
+
+
 def _cmd_integration(args) -> int:
     from . import integrations as _install
     names = _install.available()
@@ -706,6 +734,10 @@ def _cmd_integration(args) -> int:
         # made.  Say so instead of installing to a guessed path.
         print(f"{exc}", file=sys.stderr)
         return 1
+    if args.refresh:
+        return _run_refresh(_install, name, dest, json_out=args.json,
+                            dry_run=args.dry_run)
+
     changed, lines = _install.install(name, dest, force=args.force, dry_run=args.dry_run)
     if args.json:
         state, detail = _install.compare(name, dest)
@@ -1076,8 +1108,17 @@ def main(argv=None) -> int:
                             "say what it means)")
     scope.add_argument("--workspace", default=None,
                        help="apply under DIR instead of $HOME — this project only")
-    pi.add_argument("--force", action="store_true",
-                    help="overwrite an existing copy")
+    # --force and --refresh are opposite intents about local edits: --force
+    # overwrites every state, --refresh writes only the states that lose
+    # nothing local.  Asking for both is a contradiction, so argparse refuses
+    # it (exit 2) rather than the code having to pick a winner (#1261).
+    write_mode = pi.add_mutually_exclusive_group()
+    write_mode.add_argument("--force", action="store_true",
+                            help="overwrite an existing copy, local edits included")
+    write_mode.add_argument("--refresh", action="store_true",
+                            help="re-apply only when nothing local is lost "
+                                 "(absent / stale / outdated); leave edited, "
+                                 "diverged and unstamped copies untouched, exit 0")
     pi.add_argument("--dry-run", action="store_true",
                     help="print what would be written, write nothing")
     pi.add_argument("--json", action="store_true")

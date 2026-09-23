@@ -49,6 +49,22 @@ Read by ``jaato-doctor``.  Its presence is what makes a stale copy detectable
 instead of merely wrong.
 """
 
+REFRESH_WRITE_STATES = frozenset({"absent", "stale", "outdated"})
+"""States a ``--refresh`` (`install(..., refresh=True)`) may WRITE over.
+
+Each loses nothing local by being re-applied: ``absent`` has no copy,
+``stale`` is a pristine copy from another framework version, and ``outdated``
+is a pristine copy the payload has moved past at the same version.  The other
+states are all left untouched by a refresh: ``edited``, ``diverged`` and
+``unstamped`` carry local content a rewrite would discard, and ``current`` is
+already up to date so there is nothing to write.  A skip is exit-0 success,
+not a failure — the point of ``--refresh`` is that keeping a copy current
+never risks the edited ones.
+
+The single source of truth for the refresh decision, read by ``install`` and
+by the CLI so the two cannot disagree about which states are safe (#1261).
+"""
+
 
 def payload_digest(root: Path) -> str:
     """A content digest of every file under ``root``, excluding the stamp.
@@ -301,6 +317,18 @@ def compare(name: str, installed: Path) -> Tuple[str, str]:
     advice, and the reverse of the truth.  The digest recorded at apply time
     is what separates them: it says what the payload looked like when it was
     applied, so either side can be compared against that fixed point.
+
+    **The digest is checked BEFORE the version (#1261).**  The predecessor
+    returned `stale` the instant the version differed, without looking at
+    content — so a copy edited under an OLDER framework version read `stale`,
+    a state a `--refresh` is entitled to overwrite, and the upgrade would
+    silently discard the edit.  A recorded digest answers the question that
+    actually gates a re-apply — *did the LOCAL copy change since it was
+    applied?* — independently of the version, so that question is asked first
+    and a local edit reads as `edited`/`diverged` whatever the version says.
+    A pristine copy at a different version is still `stale`; a stamp with no
+    recorded digest cannot answer the question and falls back to the
+    version-only classification it always had.
     """
     src = payload_dir(name)
     if not installed.is_dir():
@@ -309,13 +337,32 @@ def compare(name: str, installed: Path) -> Tuple[str, str]:
     if not stamp:
         return "unstamped", "installed by hand — provenance unknown"
     got, want = stamp.get("version", "?"), framework_version()
-    if got != want:
+    version_matches = (got == want)
+    applied = stamp.get("digest")
+    here = payload_digest(installed)
+
+    # Local edit takes precedence over version drift: a recorded digest that
+    # no longer matches the installed tree means the copy was changed since it
+    # was applied, and that must not be mistaken for a plain version bump a
+    # refresh would overwrite.  `there` distinguishes edited (only the local
+    # side moved) from diverged (both moved) when the payload is visible.
+    if applied and here != applied:
+        there = payload_digest(src) if src.is_dir() else None
+        if there is not None and there != applied:
+            return "diverged", (f"both the installed copy and the payload "
+                                f"changed since {got}; re-applying discards "
+                                f"the local side")
+        return "edited", (f"the installed copy was changed since it was applied "
+                          f"from {got}; upstream it before re-applying")
+
+    if not version_matches:
+        # Pristine (here == applied), or no digest to judge by: the copy came
+        # from another build and nothing local is at stake in re-applying.
         return "stale", f"installed from {got}, framework is {want}"
     if not src.is_dir():
         return "current", got
 
-    applied = stamp.get("digest")
-    here, there = payload_digest(installed), payload_digest(src)
+    there = payload_digest(src)
     if not applied:
         # A stamp from before digests existed: the version matches and there is
         # no fixed point to compare against, so say exactly that rather than
@@ -325,25 +372,62 @@ def compare(name: str, installed: Path) -> Tuple[str, str]:
         return "diverged", (f"content differs from {got} and the stamp predates "
                             f"content tracking, so which side moved is unknown "
                             f"— re-apply to resync, losing any local change")
-    if here == applied and there == applied:
-        return "current", got
-    if here == applied:
-        return "outdated", (f"the payload changed upstream at {got}; "
-                            f"re-applying is safe, nothing local is lost")
+    # here == applied here on: the local copy is pristine as-applied.
     if there == applied:
-        return "edited", (f"the installed copy was changed since it was applied "
-                          f"from {got}; upstream it before re-applying")
-    return "diverged", (f"both the installed copy and the payload changed since "
-                        f"{got}; re-applying discards the local side")
+        return "current", got
+    return "outdated", (f"the payload changed upstream at {got}; "
+                        f"re-applying is safe, nothing local is lost")
+
+
+def _existing_copy_verdict(dest: Path, state: str, detail: str, *,
+                           force: bool, refresh: bool) -> Optional[List[str]]:
+    """Whether an existing copy blocks the write, and what to say if so.
+
+    Returns ``None`` when the write should PROCEED (nothing exists, ``force``,
+    or a ``refresh`` of a :data:`REFRESH_WRITE_STATES` copy), otherwise the
+    lines to report the refusal (default posture) or the skip (a refresh
+    declining a copy with local content).  Extracted from `install` so the
+    three postures toward an existing copy read as one decision and `install`
+    stays under the complexity ceiling.
+    """
+    if force or state == "absent":
+        return None
+    if refresh:
+        if state in REFRESH_WRITE_STATES:
+            return None
+        # A refresh declines a copy that carries local content (or is already
+        # current) rather than overwriting it — correct, not a failure, so the
+        # caller reads changed=False and the CLI exits 0.
+        return [f"{dest} left unchanged ({state}: {detail})",
+                f"--refresh writes only {'/'.join(sorted(REFRESH_WRITE_STATES))}; "
+                f"pass --force to overwrite regardless"]
+    return [f"{dest} already exists ({state}: {detail})",
+            "pass --force to overwrite, --refresh to update only when "
+            "nothing local is lost, or --dry-run to see what would change"]
 
 
 def install(name: str, dest: Path, *, force: bool = False,
-            dry_run: bool = False) -> Tuple[bool, List[str]]:
+            refresh: bool = False, dry_run: bool = False) -> Tuple[bool, List[str]]:
     """Copy ``name`` to ``dest``; return ``(changed, lines)``.
 
-    Refuses to overwrite an existing copy without ``--force``, and says which
-    state it found — a local edit and a stale version want different answers
-    from the operator, so the message names which one it is.
+    Three postures toward an existing copy:
+
+    - **default** (neither flag): refuses anything that is not ``absent`` and
+      says which state it found — a local edit and a stale version want
+      different answers from the operator, so the message names which one it
+      is;
+    - **``force``**: overwrites every state, local edits included;
+    - **``refresh``** (#1261): the safe middle — writes only the
+      :data:`REFRESH_WRITE_STATES` (``absent`` / ``stale`` / ``outdated``,
+      none of which loses anything local) and leaves ``edited`` / ``diverged``
+      / ``unstamped`` / ``current`` untouched.  A skip is ``changed=False``
+      with the same detail :func:`compare` produces, and is a success rather
+      than a refusal: keeping a copy current is meant never to risk an edited
+      one.
+
+    ``force`` and ``refresh`` are opposite intents about local edits and the
+    CLI refuses them together; if a direct caller passes both, ``force`` wins
+    (it is the stronger, edit-discarding posture).
     """
     src = payload_dir(name)
     if not src.is_dir():
@@ -351,9 +435,9 @@ def install(name: str, dest: Path, *, force: bool = False,
                        f"{', '.join(available()) or '(none)'}"]
 
     state, detail = compare(name, dest)
-    if state != "absent" and not force:
-        return False, [f"{dest} already exists ({state}: {detail})",
-                       "pass --force to overwrite, or --dry-run to see what would change"]
+    verdict = _existing_copy_verdict(dest, state, detail, force=force, refresh=refresh)
+    if verdict is not None:
+        return False, verdict
 
     files = sorted(p.relative_to(src).as_posix()
                    for p in src.rglob("*") if p.is_file() and p.name != STAMP)
