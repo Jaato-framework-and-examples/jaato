@@ -29,10 +29,16 @@ export function ClarificationPrompt({ c, onAnswer, onCancel }: { c: PendingClari
       <div className="px-3.5 py-2.5 text-[15px] whitespace-pre-wrap">{q?.question_text ?? (c.inputMode ? "Please answer in the box below." : "Waiting for the question…")}</div>
       {q && isMultipleChoice(q) && <div className="px-3.5 pb-1.5 text-[12px] text-text-muted">Pick one or more: click a choice, or type the numbers comma-separated (e.g. <kbd>1,3</kbd>).</div>}
       {q?.options && q.options.length > 0 && (
-        <div className="px-3.5 pb-3 flex flex-wrap gap-2">
+        // A long choice becomes a full-width, multi-line row rather than a
+        // wider button; a flex-wrap row of uneven widths reads worse, so any
+        // long choice tips the whole set into a vertical list (#1245).  The
+        // per-button ``whitespace-normal`` / ``items-start`` / ``max-w-full``
+        // are what actually wrap the label now that ``.btn`` no longer forces
+        // ``white-space: nowrap`` from an unlayered rule.
+        <div className={`px-3.5 pb-3 gap-2 ${q.options.some((o) => o.length > 40) ? "flex flex-col items-stretch" : "flex flex-wrap"}`}>
           {q.options.map((o, i) => (
-            <button key={i} type="button" onClick={() => onAnswer(String(i + 1))} className={`btn btn-md normal-case tracking-normal font-sans font-normal text-left ${q.default === i + 1 ? "btn-steel" : ""}`}>
-              <span className="font-mono text-[11px] text-steel">{i + 1}</span>{o}
+            <button key={i} type="button" onClick={() => onAnswer(String(i + 1))} className={`btn btn-md normal-case tracking-normal font-sans font-normal text-left whitespace-normal items-start max-w-full ${q.default === i + 1 ? "btn-steel" : ""}`}>
+              <span className="font-mono text-[11px] text-steel shrink-0 pt-0.5">{i + 1}</span>{o}
               {q.default === i + 1 && <span className="text-text-muted text-xs">(default)</span>}
               {q.expects_attachment?.[i] && <span className="text-text-muted" title="This choice expects you to attach a file">📎</span>}
             </button>

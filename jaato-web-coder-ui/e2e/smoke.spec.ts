@@ -304,6 +304,39 @@ test("batch clarification walks its questions and replies once", async ({ page }
   await expect(page.locator("p", { hasText: /you chose/ })).toContainText("Svelte 5");
 });
 
+test("long clarification choices wrap inside the plate, not off its edge (#1245)", async ({ page }) => {
+  // Reported with a screenshot: ~300-char choices rendered as one uppercase
+  // non-wrapping line running past the plate, across the transcript and over
+  // the rail.  An unlayered ``.btn { white-space: nowrap; text-transform:
+  // uppercase }`` outranked the button's ``normal-case`` / ``whitespace-normal``
+  // utilities.  Measured, not styled: each choice's box must lie inside the
+  // clarification plate AND inside the transcript column, and the text must
+  // not be uppercase-transformed.
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await openSession(page);
+  await composer(page).fill("ask long");
+  await composer(page).press("Enter");
+  await expect(page.getByText("Which framework should the client use?")).toBeVisible();
+  const plate = page.getByRole("group", { name: "Clarification" });
+  // The plate's footer "cancel" is also a <button>, so filter to the choices.
+  const buttons = plate.getByRole("button").filter({ hasNotText: /^cancel$/ });
+  const count = await buttons.count();
+  expect(count).toBe(3);
+  const plateBox = (await plate.boundingBox())!;
+  const main = (await page.locator("main").boundingBox())!;
+  for (let i = 0; i < count; i++) {
+    const b = buttons.nth(i);
+    const box = (await b.boundingBox())!;
+    // Inside the plate's box (a nowrap line overflows it to the right).
+    expect(box.x).toBeGreaterThanOrEqual(plateBox.x - 1);
+    expect(box.x + box.width).toBeLessThanOrEqual(plateBox.x + plateBox.width + 1);
+    // Inside the transcript column — so it cannot cross onto the rail.
+    expect(box.x + box.width).toBeLessThanOrEqual(main.x + main.width + 1);
+    // The label is body text, not chrome: no uppercase transform.
+    expect(await b.evaluate((el) => getComputedStyle(el).textTransform)).not.toBe("uppercase");
+  }
+});
+
 test("subagents get their own tab", async ({ page }) => {
   await openSession(page);
   await composer(page).fill("subagent");
