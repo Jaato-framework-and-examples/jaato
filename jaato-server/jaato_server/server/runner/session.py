@@ -783,7 +783,10 @@ def _maybe_self_confine(
                        the threads created under P_N could not follow
                        (#1023).  Kept because the transition itself is
                        still legal and a non-pool caller may use it.
-      - empty profile_name  (operator opted out; unconfined session)
+      - empty profile_name  (operator opted out; unconfined session) —
+        UNLESS ``envelope.confinement_required`` is set, in which case an
+        empty profile is the #1253 silent-bypass case and RAISES rather
+        than running unconfined (see the no-op cases below)
 
     Cold-spawn runners self-confined in ``__main__.py`` step 2 BEFORE
     ``bootstrap_session`` was called, so the kernel already reports
@@ -794,8 +797,13 @@ def _maybe_self_confine(
     hardening; only the glob rule covers cross-session targets).
 
     No-op cases:
-      - ``envelope.profile_name`` is empty (operator opted out of
-        confinement; runner runs unconfined).
+      - ``envelope.profile_name`` is empty AND
+        ``envelope.confinement_required`` is False (operator opted out of
+        confinement, or a host with no AppArmor; runner runs unconfined).
+        An empty profile with ``confinement_required`` True is NOT a no-op:
+        it RAISES ``BootstrapError`` (#1253), because running unconfined
+        would be a silent confinement bypass on a session whose record
+        claims ``sandbox_mode: apparmor``.
       - The kernel already reports the target profile (idempotency) —
         note this still recycles and verifies, see below.
 
@@ -841,6 +849,28 @@ def _maybe_self_confine(
     """
     target_profile = envelope.profile_name or ""
     if not target_profile:
+        if getattr(envelope, "confinement_required", False):
+            # #1253 FAIL CLOSED: the session was configured for AppArmor
+            # confinement but reached the runner with no profile to confine
+            # to.  Serving model-driven work unconfined here is the silent
+            # bypass this gate exists to prevent — the session record would
+            # still report ``sandbox_mode: apparmor`` while nothing was
+            # enforced.  Refuse the bootstrap instead: the daemon turns a
+            # ``BootstrapError`` into a ``RunnerBootstrapFailed`` refusal
+            # (#1033), so the session runs confined or not at all.  On the
+            # core WS path the daemon-side pre-init hook already refuses the
+            # provisioning-failure case before spawn, so a populated profile
+            # always accompanies the flag there; this is the defence-in-depth
+            # backstop for a pre-warm slot or a peer daemon that reaches the
+            # runner with the profile missing.
+            raise BootstrapError(
+                "confine",
+                "AppArmor confinement was required for this session "
+                "(envelope.confinement_required) but no profile_name was "
+                "carried to confine to; refusing to bootstrap an unconfined "
+                "runner rather than silently serving work with no kernel "
+                "boundary (#1253)",
+            )
         logger.info(
             "runner-session bootstrap: envelope.profile_name empty; "
             "skipping AppArmor self-confine (unconfined session)",

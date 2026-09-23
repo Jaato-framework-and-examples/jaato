@@ -409,6 +409,22 @@ class SessionInitEnvelope:
     # NOT consumed here: it is written to the cgroup daemon-side before
     # the runner is even forked, and the runner's children inherit it.
     runtime_limits: Optional[Dict[str, Any]] = None
+    # #1253: the session was CONFIGURED for AppArmor confinement.  Distinct
+    # from ``profile_name``, which is empty both when confinement was never
+    # asked for (a genuine unconfined session — the operator opt-out, or a
+    # host with no AppArmor) and when it was asked for but the profile failed
+    # to provision.  ``_maybe_self_confine`` needs to tell those apart: an
+    # empty profile with ``confinement_required=True`` is the silent-bypass
+    # case (#1100/#1253) and must RAISE rather than run unconfined, where an
+    # empty profile with it False is a legitimate unconfined session.  The
+    # daemon-side WS pre-init hook already refuses the provisioning-failure
+    # case before spawn, so on that path a populated profile always
+    # accompanies ``True``; the flag is the defence-in-depth backstop for a
+    # pre-warm slot or a peer daemon that reaches the runner with the profile
+    # missing.  ``False`` default keeps an older daemon's envelope — and every
+    # genuinely-unconfined session — behaving exactly as before; same-build
+    # daemon+runner so no schema_version bump.
+    confinement_required: bool = False
     schema_version: int = SESSION_ENVELOPE_VERSION
 
     def __post_init__(self) -> None:
@@ -486,6 +502,8 @@ class SessionInitEnvelope:
             "created_by": self.created_by,
             "max_parallel_tools": self.max_parallel_tools,
             "runtime_limits": self.runtime_limits,
+            # #1253: the confinement invariant, carried to the runner gate.
+            "confinement_required": self.confinement_required,
         }
 
     @classmethod
@@ -562,6 +580,10 @@ class SessionInitEnvelope:
                 d.get("max_parallel_tools")
             ),
             runtime_limits=_optional_limits_dict(d.get("runtime_limits")),
+            # #1253: default False so an older daemon's envelope — and every
+            # genuinely-unconfined session — reaches ``_maybe_self_confine``
+            # with the gate inert, exactly as before this field existed.
+            confinement_required=bool(d.get("confinement_required", False)),
         )
 
 
