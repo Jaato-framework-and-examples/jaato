@@ -196,6 +196,13 @@ export interface JaatoState {
   /** Show hidden entries (dimmed, with an ``H`` marker) so they can be unhidden. */
   workspaceShowHidden: boolean;
   /**
+   * Directories collapsed in the Files panel -- the TUI panel's Left/Right
+   * keys.  Entry ids, so each carries its trailing ``/``.  Every directory
+   * starts expanded; a reset expands them all again, as the TUI's clear
+   * does.  Client-side only.
+   */
+  workspaceCollapsed: string[];
+  /**
    * What the daemon last said about an entry's ``.gitignore`` line, from
    * ``workspace.ignore.result`` — learned, not derived: the client never
    * reads the file, so an entry absent here has unknown state.
@@ -286,6 +293,7 @@ export interface JaatoState {
   toggleBudgetSource: (source: string) => void;
   toggleWorkspaceHidden: (entryId: string) => void;
   toggleWorkspaceShowHidden: () => void;
+  toggleWorkspaceCollapsed: (entryId: string) => void;
   /** Reset the Files panel: from now on it shows only files that change after this moment. */
   resetWorkspaceView: () => void;
   /** Drop the reset point and show every file the session changed. */
@@ -335,6 +343,7 @@ const emptySessionState = () => ({
   workspaceReset: null as WorkspaceReset | null,
   workspaceHidden: [] as string[],
   workspaceShowHidden: false,
+  workspaceCollapsed: [] as string[],
   workspaceIgnored: {} as Record<string, boolean>,
   workspaceNotice: null as { text: string; error?: boolean } | null,
   permissionStatus: null,
@@ -1122,7 +1131,12 @@ export const useJaato = create<JaatoState>()((set, get) => ({
       : [...st.workspaceHidden, entryId],
   })),
   toggleWorkspaceShowHidden: () => set((st) => ({ workspaceShowHidden: !st.workspaceShowHidden })),
-  resetWorkspaceView: () => set((st) => ({ workspaceReset: markReset({ epoch: st.workspaceEpoch, seq: st.workspaceSeq }), workspaceNotice: null })),
+  toggleWorkspaceCollapsed: (entryId) => set((st) => ({
+    workspaceCollapsed: st.workspaceCollapsed.includes(entryId)
+      ? st.workspaceCollapsed.filter((c) => c !== entryId)
+      : [...st.workspaceCollapsed, entryId],
+  })),
+  resetWorkspaceView: () => set((st) => ({ workspaceReset: markReset({ epoch: st.workspaceEpoch, seq: st.workspaceSeq }), workspaceCollapsed: [], workspaceNotice: null })),
   showAllWorkspace: () => set(() => ({ workspaceReset: null, workspaceNotice: null })),
   setWorkspaceNotice: (n) => set(() => ({ workspaceNotice: n })),
   setWorkspaceListNotice: (n) => set((st) => ({ workspace: { ...st.workspace, notice: n } })),
