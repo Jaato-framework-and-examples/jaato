@@ -1878,6 +1878,20 @@ class SessionManager:
         # ----- Step 4: apparmor (opt-in) -----
         profile_name = ""
         sandbox_mode: Optional[str] = None
+        # #1253: was this session CONFIGURED for AppArmor confinement?  That
+        # is a SEPARATE fact from whether ``profile_name`` ends up populated.
+        # ``_provision_apparmor_for_session`` returns ``("", "soft")`` BOTH
+        # when the host has no AppArmor (genuinely unconfined — spawn as
+        # before) AND when the session opted in on a supporting host but
+        # provisioning FAILED (the silent-bypass case #1100 deferred and
+        # #1253 measured live: a runner spawns ``confined=False`` while the
+        # record still claims ``sandbox_mode: apparmor``).  So ``sandbox_mode``
+        # cannot be the discriminator — it collapses the two.  The invariant
+        # is the session's OPT-IN and the HOST's support, read from the manager
+        # ``_provision_apparmor_for_session`` just created.  This is the exact
+        # posture #1260 put in the WS pre-init hook, now on the SessionManager
+        # spawn path that a WS ``session.new`` actually takes.
+        confinement_required = False
         if opt_in_apparmor:
             profile_name, sandbox_mode = self._provision_apparmor_for_session(
                 session_id=session_id,
@@ -1888,12 +1902,7 @@ class SessionManager:
                 requested_fragments=requested_fragments,
                 plugin_rules=plugin_rules,
             )
-            if profile_name == "" and sandbox_mode == SANDBOX_MODE_SOFT:
-                # Apparmor unavailable / provisioning failed.
-                # Continue to the unconditional spawn but the
-                # runner is unconfined — that's the §7a intent
-                # (always have a runner; confinement is layered).
-                pass
+            confinement_required = self._apparmor_available()
 
         # Seed client-provided ("host") tool SCHEMAS the transport buffered for
         # this client BEFORE session.new, so spawn_session_runner's
@@ -1911,7 +1920,33 @@ class SessionManager:
                     "category": _ct.get("category", ""),
                 }
 
-        # ----- Step 5: spawn (unconditional) -----
+        # ----- Step 5: spawn (unconditional) — unless confinement is
+        # required and no profile reached this point -----
+        # #1253 FAIL CLOSED: the session opted into AppArmor on a host that
+        # supports it, but provisioning produced no profile.  Spawning here
+        # would serve model-driven work with NO kernel boundary while the
+        # session record still claims ``sandbox_mode: apparmor`` — the silent
+        # bypass this reconciles.  "Always have a runner" (§7a) must not mean
+        # "an unconfined runner for an apparmor session": record the refusal
+        # so ``initialize_or_refuse`` refuses the session by name
+        # (``RunnerBootstrapFailed``), and do NOT spawn.  A genuinely-unconfined
+        # session (no opt-in, or a host with no AppArmor) has
+        # ``confinement_required=False`` and reaches the spawn unchanged.
+        if confinement_required and not profile_name:
+            logger.warning(
+                "AppArmor confinement required for session %s (opted in, "
+                "host supports it) but no profile was provisioned — REFUSING "
+                "the session rather than spawning an unconfined runner "
+                "(#1253)",
+                session_id,
+            )
+            self._record_bootstrap_refusal(
+                server,
+                "AppArmor confinement required but profile provisioning "
+                "failed; refusing to spawn an unconfined runner (#1253)",
+            )
+            return SANDBOX_MODE_SOFT
+
         spawn_ok = self._spawn_session_runner_unconditional(
             server=server,
             session_id=session_id,
@@ -1919,6 +1954,13 @@ class SessionManager:
             client_id=client_id,
             profile_name=profile_name,
             cascade_driver_id=cascade_driver_id,
+            # #1253: carry the invariant to the runner-side gate as a
+            # defence-in-depth backstop.  On the success path ``profile_name``
+            # is populated so the gate is a no-op; on a spawn path that reaches
+            # the runner with confinement required and no profile (a pre-warm
+            # slot, a peer daemon), ``_maybe_self_confine`` RAISES rather than
+            # running the session unconfined (#1260).
+            confinement_required=confinement_required,
         )
         if not spawn_ok:
             # Spawn failed.  If apparmor was opted-in, downgrade
@@ -2031,6 +2073,39 @@ class SessionManager:
             )
         except OSError:
             return False
+
+    def _apparmor_available(self) -> bool:
+        """#1253: does THIS host support kernel-enforced AppArmor?
+
+        Read off the ``AppArmorManager`` that
+        :meth:`_provision_apparmor_for_session` lazily created, so the answer
+        is the same one provisioning used.  It is the discriminator the
+        ``("", "soft")`` return could not supply: it tells "opted in on a host
+        with no AppArmor" (genuinely unconfined — spawn as before) from "opted
+        in on a supporting host but provisioning FAILED" (confinement required,
+        must fail closed).  A missing manager reads as unavailable — positive
+        evidence only, the #1014 / #1023 posture about confinement facts.
+        """
+        mgr = getattr(self, "_apparmor_manager", None)
+        return bool(mgr is not None and mgr.is_available())
+
+    def _record_bootstrap_refusal(
+        self, server: 'JaatoServer', reason: str,
+    ) -> None:
+        """#1253 / #1260: record a bootstrap-outcome refusal on *server*.
+
+        The free function :func:`initialize_or_refuse` reads
+        ``server.runner_bootstrap_error`` after this spawn path runs and
+        refuses the session by name (``RunnerBootstrapFailed``) when it is
+        set — the same door the WS pre-init hook's ``_record_bootstrap_refusal``
+        uses (#1260).  Best-effort: a server object predating
+        ``note_runner_bootstrap_outcome`` (a test double) records nothing,
+        which reads downstream as "nothing known to be wrong" — the same
+        answer a session with no runner gives.
+        """
+        note = getattr(server, "note_runner_bootstrap_outcome", None)
+        if callable(note):
+            note(reason)
 
     def _provision_apparmor_for_session(
         self,
@@ -2263,6 +2338,7 @@ class SessionManager:
         client_id: str,
         profile_name: str,
         cascade_driver_id: Optional[str] = None,
+        confinement_required: bool = False,
     ) -> bool:
         """Spawn the per-session runner subprocess (Phase 3 §7a —
         always-called for IPC sessions with a workspace).
@@ -2277,6 +2353,18 @@ class SessionManager:
                 apparmor opt-in or provisioning failed) — the
                 spawn helper passes ``disable_confine=True`` to
                 ``RunnerSpawner``.
+            confinement_required: #1253 — the session opted into AppArmor on
+                a host that supports it.  Stamped onto
+                ``SessionInitEnvelope.confinement_required`` (via
+                ``dispatch_bootstrap_envelope``) so the runner-side
+                ``_maybe_self_confine`` gate can tell an empty ``profile_name``
+                that SHOULD have been confined from a legitimately-unconfined
+                session and RAISES rather than running unconfined (#1260).
+                The caller has already refused the ``confinement_required and
+                not profile_name`` combination before reaching here, so on this
+                path a ``True`` value always accompanies a populated profile;
+                the flag is the defence-in-depth backstop for any spawn path
+                that reaches the runner with the profile missing.
 
         Returns:
             True on successful spawn; False on failure.  Caller
@@ -2431,6 +2519,9 @@ class SessionManager:
                     session_id=session_id,
                     workspace_path=workspace_path,
                     profile_name=profile_name,
+                    # #1253: carry the confinement invariant to the runner
+                    # gate (defence in depth — see this method's docstring).
+                    confinement_required=confinement_required,
                 )
                 # Phase 3 cascade-sharing: if this session inherited a
                 # pool slot that previously served session

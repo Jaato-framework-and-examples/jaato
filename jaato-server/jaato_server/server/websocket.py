@@ -1223,6 +1223,26 @@ class JaatoWSServer:
                 confinement_id=apparmor.confinement_id_for_boundary(
                     sess.workspace_path, plugin_rules=plugin_rules),
             ):
+                # #1253: reaching here means confinement was REQUIRED for this
+                # WS-provisioned session — the host has an available
+                # AppArmorManager (the ``is_available`` gate above) and the
+                # workspace is under the WS root — yet the profile did not
+                # load.  The pre-init hook (#1260) fails this closed BEFORE
+                # spawn on the core path; this resilience re-run runs AFTER the
+                # runner already spawned, so it cannot un-spawn — but a silent
+                # downgrade to ``soft`` is exactly the invisible boundary loss
+                # #1253 is about.  Announce it at WARNING (the #1014 posture:
+                # never a silent downgrade of a boundary) and record the
+                # TRUTHFUL ``soft`` mode, so the record does not claim a
+                # boundary the kernel is not enforcing.
+                logger.warning(
+                    "AppArmor confinement required for session %s (WS-"
+                    "provisioned, host supports it) but profile provisioning "
+                    "failed in the post-init hook — the runner is NOT kernel-"
+                    "confined; recording sandbox_mode=soft rather than "
+                    "silently claiming enforcement (#1253/#1014)",
+                    session_id,
+                )
                 sess.sandbox_mode = SANDBOX_MODE_SOFT
                 return
 
