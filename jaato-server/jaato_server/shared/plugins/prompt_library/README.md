@@ -249,12 +249,32 @@ Both `PROMPT.md` (Jaato native) and `SKILL.md` (Claude format) are supported:
 - Claude's frontmatter fields (`disable-model-invocation`, `allowed-tools`, etc.) are preserved
 - Template syntax is compatible (`$ARGUMENTS` → `{{$0}}`)
 
+## Entry Kind: reference vs task
+
+Each entry is either **reference** material (a skill) or a **task** (a saved
+prompt), and this decides how the `prompt.<name>` tool result is framed to the
+model:
+
+- **reference** — content to *inform* the current task. The result tells the
+  model to read it as guidance and to follow any procedure it describes only
+  when the task calls for it; the "execute silently / final result only"
+  framing does NOT apply.
+- **task** — content to *execute*: the result tells the model to treat it as a
+  user request and carry out the instructions immediately.
+
+The kind is inferred from the entry filename — a `SKILL.md` entry is
+**reference**, a `PROMPT.md` entry or a single `.md` file is **task** — and a
+frontmatter `kind: reference | task` key overrides that default either way.
+
 ## System Instructions
 
 When prompts are available, the plugin injects system instructions that:
-1. List available prompts
-2. Guide the model to use `listPrompts`/`usePrompt` tools
-3. Encourage proactive prompt creation when patterns are detected
+1. List every skill (reference) with its description, and task prompts up to a
+   cap (`list_tools(category="prompt")` still enumerates them all) — each line
+   is `prompt.<name>: <description>`, sorted and byte-stable
+2. Point the model to `list_tools` / `get_tool_schemas` for discovery
+3. Explain that a result is framed by its kind (reference vs task)
+4. Encourage proactive prompt creation when patterns are detected
 
 ## Testing
 

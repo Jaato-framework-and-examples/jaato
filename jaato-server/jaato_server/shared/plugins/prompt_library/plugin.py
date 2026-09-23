@@ -110,6 +110,29 @@ PROMPT_ENTRY_FILE = "PROMPT.md"
 # Claude Code entry point
 SKILL_ENTRY_FILE = "SKILL.md"
 
+# Entry "kind" — decides how a prompt tool's result is framed to the model.
+#   reference: material to inform the current task (a Claude-Code-style skill).
+#              Do NOT execute it; follow any procedure it describes only when
+#              the task calls for it.
+#   task:      a saved instruction to carry out (today's default framing).
+# The kind is inferred from the entry filename (SKILL.md -> reference,
+# PROMPT.md / single file -> task) and overridden by a frontmatter ``kind:``
+# key.  See ``_resolve_kind``.
+KIND_REFERENCE = "reference"
+KIND_TASK = "task"
+
+# The system-prompt listing renders one ``prompt.<name>: <description>`` line
+# per entry.  Two bounds keep that block small and byte-stable (it sits in the
+# prompt-cache prefix):
+#   - every SKILL (reference) is always listed — a skill has no other way for
+#     the model to learn it exists and what it is for (the whole point of #1262);
+#   - task PROMPTS are capped by count, since they are typically numerous and
+#     self-describing by name, and the model can still enumerate them all with
+#     ``list_tools(category="prompt")``.
+# Each description is collapsed to one line and truncated to a character cap.
+LISTING_DESCRIPTION_CAP = 160
+LISTING_PROMPT_CAP = 10
+
 # Maximum file size to read (100KB)
 MAX_PROMPT_FILE_SIZE = 100_000
 
@@ -159,7 +182,15 @@ class PromptParam:
 
 @dataclass
 class PromptInfo:
-    """Information about a prompt in the library."""
+    """Information about a prompt in the library.
+
+    ``kind`` decides how the ``prompt.<name>`` tool result is framed to the
+    model — ``KIND_REFERENCE`` (a skill: content to *inform* the task) or
+    ``KIND_TASK`` (a saved prompt: content to *execute*).  It is resolved at
+    discovery time from the entry filename and any frontmatter ``kind:`` key
+    (see :meth:`PromptLibraryPlugin._resolve_kind`) and defaults to
+    ``KIND_TASK`` so a plain single-file prompt keeps today's behaviour.
+    """
     name: str
     description: str
     source: str  # "project", "global", "claude-skills", "claude-commands", "claude-global"
@@ -167,6 +198,7 @@ class PromptInfo:
     is_directory: bool = False
     tags: List[str] = field(default_factory=list)
     params: Dict[str, PromptParam] = field(default_factory=dict)
+    kind: str = KIND_TASK
 
 
 @dataclass
@@ -616,6 +648,30 @@ class PromptLibraryPlugin(RunnerForwardingMixin):
 
         return params
 
+    def _resolve_kind(self, frontmatter: Dict[str, Any], from_skill_file: bool) -> str:
+        """Decide whether an entry is reference material or a task to execute.
+
+        A frontmatter ``kind: reference | task`` key OVERRIDES the default.
+        Absent (or an unrecognised value, which is traced and ignored), the
+        default follows the entry FILENAME: an entry whose entry file is
+        ``SKILL.md`` is ``KIND_REFERENCE`` (a Claude-Code-style skill), and a
+        ``PROMPT.md`` entry or a single-file prompt is ``KIND_TASK``.
+
+        Args:
+            frontmatter: Parsed YAML frontmatter of the entry.
+            from_skill_file: True when the entry was loaded from a ``SKILL.md``.
+
+        Returns:
+            ``KIND_REFERENCE`` or ``KIND_TASK``.
+        """
+        declared = frontmatter.get('kind')
+        if isinstance(declared, str):
+            normalized = declared.strip().lower()
+            if normalized in (KIND_REFERENCE, KIND_TASK):
+                return normalized
+            self._trace(f"Unknown kind '{declared}', using filename default")
+        return KIND_REFERENCE if from_skill_file else KIND_TASK
+
     def _load_prompt_info(self, path: Path, source_name: str, entry_file: str) -> Optional[PromptInfo]:
         """Load prompt info from a file or directory."""
         try:
@@ -640,6 +696,10 @@ class PromptLibraryPlugin(RunnerForwardingMixin):
                     is_directory=True,
                     tags=frontmatter.get('tags', []),
                     params=self._extract_params(body, frontmatter),
+                    kind=self._resolve_kind(
+                        frontmatter,
+                        from_skill_file=entry_path.name == SKILL_ENTRY_FILE,
+                    ),
                 )
 
             elif path.is_file():
@@ -654,6 +714,8 @@ class PromptLibraryPlugin(RunnerForwardingMixin):
                 # Determine name (file stem, or from frontmatter)
                 name = frontmatter.get('name', path.stem)
 
+                # A single .md file is a saved prompt (task) by default; only a
+                # frontmatter ``kind:`` can make it reference material.
                 return PromptInfo(
                     name=name,
                     description=self._extract_description(body, frontmatter),
@@ -662,6 +724,7 @@ class PromptLibraryPlugin(RunnerForwardingMixin):
                     is_directory=False,
                     tags=frontmatter.get('tags', []),
                     params=self._extract_params(body, frontmatter),
+                    kind=self._resolve_kind(frontmatter, from_skill_file=False),
                 )
 
         except Exception as e:
@@ -1933,6 +1996,45 @@ class PromptLibraryPlugin(RunnerForwardingMixin):
             return self._execute_prompt_tool(prompt_name, args)
         return executor
 
+    def _instruction_for(self, kind: str, skill_root: str) -> str:
+        """Build the model-facing ``instruction`` field for a prompt result.
+
+        The framing depends on the entry's :class:`PromptInfo` ``kind``:
+
+        - ``KIND_REFERENCE`` (a skill): the content is guidance to *inform*
+          the current task.  The model is told NOT to execute it wholesale and
+          to follow any procedure it describes only when the task calls for it
+          — the "execute silently / final result only" wording deliberately
+          does not apply.
+        - ``KIND_TASK`` (a saved prompt): today's framing — treat the content
+          as a user request and carry out its instructions immediately.
+
+        ``skill_root`` is included in both so relative paths (references,
+        scripts) resolve for either kind.
+        """
+        if kind == KIND_REFERENCE:
+            return (
+                'This is reference material (a skill), not a task to run. '
+                'Use its content to inform the current task. '
+                f'Relative paths in it are relative to: {skill_root}\n\n'
+                'HOW TO USE:\n'
+                '- Read the content as guidance; do not execute it wholesale.\n'
+                '- Follow any procedure it describes only when the current task calls for it.\n'
+                '- Resolve any files, references, or scripts it mentions relative to the path above.\n'
+                '- Do not narrate that you loaded a skill; simply apply what is relevant.'
+            )
+        return (
+            'Execute the instructions in the content above. '
+            f'Relative paths are relative to: {skill_root}\n\n'
+            'EXECUTION BEHAVIOR:\n'
+            '- Execute silently. Do not narrate steps, explain what you are doing, or summarize the prompt.\n'
+            '- Only involve the user when necessary: missing information (use clarification tool), '
+            'or unrecoverable failures not addressed by the prompt.\n'
+            '- If a tool fails and the prompt provides fallback/recovery instructions, follow them silently.\n'
+            '- If a tool fails with no fallback in the prompt, report the error and stop.\n'
+            '- When complete, provide only the final result or outcome the user needs.'
+        )
+
     def _execute_prompt_tool(self, name: str, params: Dict[str, Any]) -> Dict[str, Any]:
         """Execute a prompt tool by name with given params.
 
@@ -1973,18 +2075,9 @@ class PromptLibraryPlugin(RunnerForwardingMixin):
                 'name': name,
                 'content': substituted,
                 'source': info.source,
+                'kind': info.kind,
                 'skill_path': skill_root,
-                'instruction': (
-                    'Execute the instructions in the content above. '
-                    f'Relative paths are relative to: {skill_root}\n\n'
-                    'EXECUTION BEHAVIOR:\n'
-                    '- Execute silently. Do not narrate steps, explain what you are doing, or summarize the prompt.\n'
-                    '- Only involve the user when necessary: missing information (use clarification tool), '
-                    'or unrecoverable failures not addressed by the prompt.\n'
-                    '- If a tool fails and the prompt provides fallback/recovery instructions, follow them silently.\n'
-                    '- If a tool fails with no fallback in the prompt, report the error and stop.\n'
-                    '- When complete, provide only the final result or outcome the user needs.'
-                ),
+                'instruction': self._instruction_for(info.kind, skill_root),
             }
 
             if missing:
@@ -2772,19 +2865,73 @@ Examples:
 
         return auto_approved
 
+    def _truncate_desc(self, text: str) -> str:
+        """Collapse a description to one line, capped for the listing.
+
+        Whitespace (including newlines) is collapsed to single spaces so each
+        entry renders on exactly one line and the block stays byte-stable.
+        Over ``LISTING_DESCRIPTION_CAP`` characters, it is truncated on a
+        character boundary with a trailing ellipsis.
+        """
+        collapsed = " ".join((text or "").split())
+        if len(collapsed) <= LISTING_DESCRIPTION_CAP:
+            return collapsed
+        return collapsed[: LISTING_DESCRIPTION_CAP - 1].rstrip() + "…"
+
+    def _render_prompt_listing(self, prompts: Dict[str, PromptInfo]) -> str:
+        """Render the ``prompt.<name>: <description>`` block for the prompt.
+
+        Deterministic and byte-stable (it sits in the prompt-cache prefix):
+        entries are partitioned by kind and each group is sorted by name.
+        EVERY skill (reference) is listed — a skill has no other way to make
+        the model aware it exists and what it is for. Task prompts are capped
+        at ``LISTING_PROMPT_CAP`` with a "... (N more)" line, since they are
+        numerous and self-describing, and the model can still enumerate them
+        all via ``list_tools(category="prompt")``.
+        """
+        skills = sorted(
+            (i for i in prompts.values() if i.kind == KIND_REFERENCE),
+            key=lambda i: i.name,
+        )
+        tasks = sorted(
+            (i for i in prompts.values() if i.kind != KIND_REFERENCE),
+            key=lambda i: i.name,
+        )
+
+        lines: List[str] = []
+        if skills:
+            lines.append("Skills (reference material — read to inform the task):")
+            for info in skills:
+                lines.append(f"- prompt.{info.name}: {self._truncate_desc(info.description)}")
+        if tasks:
+            shown = tasks[:LISTING_PROMPT_CAP]
+            if skills:
+                lines.append("")
+            lines.append("Prompts (saved tasks — run their instructions):")
+            for info in shown:
+                lines.append(f"- prompt.{info.name}: {self._truncate_desc(info.description)}")
+            remaining = len(tasks) - len(shown)
+            if remaining:
+                noun = "prompt" if remaining == 1 else "prompts"
+                lines.append(
+                    f"- ... ({remaining} more {noun}; list_tools(category=\"prompt\") for all)"
+                )
+        return "\n".join(lines)
+
     def get_system_instructions(self) -> Optional[str]:
         """Return system instructions for prompt library."""
         prompts = self._discover_prompts()
         if not prompts:
             return None  # No instructions if no prompts
 
-        prompt_tools = [f"prompt.{name}" for name in sorted(prompts.keys())[:10]]
-        more_indicator = f"... ({len(prompts)} total)" if len(prompts) > 10 else ""
+        listing = self._render_prompt_listing(prompts)
 
         return f"""## Prompt Tools (category: prompt)
 
-Reusable prompts are available as discoverable tools with 'prompt.' prefix.
-Available: {', '.join(prompt_tools)}{more_indicator}
+Reusable prompts and skills are available as discoverable tools with the
+'prompt.' prefix.
+
+{listing}
 
 ### Discovery
 - list_tools(category="prompt") - see all prompt tools
@@ -2794,7 +2941,9 @@ Available: {', '.join(prompt_tools)}{more_indicator}
 Call prompt tools directly with their parameters:
   prompt.code-review(file="main.py", focus="security")
 
-**IMPORTANT**: When a prompt tool returns content, treat it as a user request and execute the instructions immediately. Use your available tools (CLI, file operations, etc.) to carry out what the prompt describes.
+**IMPORTANT** — a prompt tool's result is framed by its kind, and the result's own `instruction` field states which applies:
+- A **skill** (reference material) returns content to *inform* the current task. Read it as guidance and follow any procedure it describes only when the task calls for it. Do not execute it wholesale.
+- A **prompt** (saved task) returns content to *execute*: treat it as a user request and carry out the instructions immediately, using your available tools (CLI, file operations, etc.).
 
 ### Creating and Updating Prompts
 Use savePrompt(name, content, description) to create new reusable prompts.
