@@ -1506,6 +1506,50 @@ def lifecycle() -> Rendered:
     return data, "\n".join(lines)
 
 
+def _plan_file_fields(pi) -> List[Dict[str, Any]]:
+    """The authored plan-FILE schema, when this plugin declares
+    ``initial_plan_name`` (#1222).
+
+    ``initial_plan_name`` names ``<config_root>/plans/<id>.yaml`` — a
+    separate authored file, not a nested config object — so ``explain plugin
+    <name>`` describes only the pointer and never the thing pointed at.  The
+    fields are read from ``initial_plan.PLAN_FILE_FIELDS``, co-located with
+    the ``parse_plan_document`` that enforces them, so this surface cannot
+    drift from what the loader accepts.  Empty for any plugin that does not
+    declare the knob.
+    """
+    from shared.plugins.todo.initial_plan import (
+        INITIAL_PLAN_KNOB, PLAN_FILE_FIELDS)
+    if not any(s.name == INITIAL_PLAN_KNOB for s in pi.config_settings):
+        return []
+    return [{"name": n, "required": req, "description": meaning}
+            for (n, req, meaning) in PLAN_FILE_FIELDS]
+
+
+def _plan_file_lines(pi) -> List[str]:
+    """Render :func:`_plan_file_fields` as its own labelled sub-block.
+
+    A block of its own rather than ``children`` of the knob: the knob is a
+    STRING that names a file, and rendering the file's fields as children
+    would read as if ``initial_plan_name`` itself took ``title`` / ``steps``.
+    Empty (no lines) when the plugin does not declare the knob.
+    """
+    fields = _plan_file_fields(pi)
+    if not fields:
+        return []
+    from shared.plugins.todo.initial_plan import PLANS_DIRNAME, PLAN_SUFFIX
+    out = ["",
+           "  initial_plan_name names an authored plan FILE at "
+           f"<config_root>/{PLANS_DIRNAME}/<id>{PLAN_SUFFIX}",
+           "  (mirrors TodoPlan.to_dict()) — its shape:"]
+    for f in fields:
+        tag = "required" if f["required"] else "optional"
+        out.append(f"    {f['name']:20} {tag:9} {f['description']}")
+    out.append("    (full field table — sequence / validation_required / "
+               "depends_on / …: the todo plugin README)")
+    return out
+
+
 def plugin(name: str) -> Rendered:
     PL = introspect.plugins()
     pi = PL.get(name)
@@ -1541,6 +1585,7 @@ def plugin(name: str) -> Rendered:
     if pi.config_settings:
         lines.append(f"  config (plugin_configs.{name}.*):")
         lines.extend(_config_block(pi.config_settings))
+        lines.extend(_plan_file_lines(pi))
     data = {"description": pi.description,
             "kind": pi.kind, "tier": pi.tier, "dynamic": pi.dynamic,
             "commands": _commands_json(pi.commands),
@@ -1553,7 +1598,12 @@ def plugin(name: str) -> Rendered:
             "tools": [{"name": t.name, "discoverability": t.discoverability,
                        "description": t.description,
                        "parameters": t.parameters} for t in pi.tools],
-            "config": _config_json(pi.config_settings)}
+            "config": _config_json(pi.config_settings),
+            # The authored plan-FILE schema (#1222).  Empty for every plugin
+            # but ``todo`` — a machine consumer reads ``[]`` as "not
+            # applicable", and it is NOT folded into ``config`` because the
+            # file is not a ``plugin_configs.<name>.*`` sub-object.
+            "initial_plan_file": _plan_file_fields(pi)}
     return data, "\n".join(lines)
 
 
