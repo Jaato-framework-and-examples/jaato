@@ -60,6 +60,9 @@ export type JaatoEvents =
   | GCEvent
   | SessionInfoEvent
   | MemoryListEvent
+  | MemoryGetResultEvent
+  | MemoryUpdateResultEvent
+  | MemoryDeleteResultEvent
   | SandboxPathsEvent
   | ServiceListEvent
   | SessionDescriptionUpdatedEvent
@@ -72,6 +75,10 @@ export type JaatoEvents =
   | EventsSubscribedEvent
   | CommandRequest
   | GetInstructionBudgetRequest
+  | MemoryListRequest
+  | MemoryGetRequest
+  | MemoryUpdateRequest
+  | MemoryDeleteRequest
   | CommandListRequest
   | CommandListEvent
   | CommandListRefreshEvent
@@ -199,6 +206,13 @@ export type EventType =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -337,6 +351,13 @@ export type EventType1 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -480,6 +501,13 @@ export type EventType2 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -621,6 +649,13 @@ export type EventType3 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -761,6 +796,13 @@ export type EventType4 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -909,6 +951,13 @@ export type EventType5 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -1054,6 +1103,13 @@ export type EventType6 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -1198,6 +1254,13 @@ export type EventType7 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -1336,6 +1399,13 @@ export type EventType8 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -1478,6 +1548,13 @@ export type EventType9 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -1618,6 +1695,13 @@ export type EventType10 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -1767,6 +1851,13 @@ export type EventType11 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -1915,6 +2006,13 @@ export type EventType12 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -2062,6 +2160,13 @@ export type EventType13 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -2212,6 +2317,13 @@ export type EventType14 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -2357,6 +2469,13 @@ export type EventType15 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -2496,6 +2615,13 @@ export type EventType16 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -2638,6 +2764,13 @@ export type EventType17 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -2780,6 +2913,13 @@ export type EventType18 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -2928,6 +3068,13 @@ export type EventType19 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -3069,6 +3216,13 @@ export type EventType20 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -3214,6 +3368,13 @@ export type EventType21 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -3354,6 +3515,13 @@ export type EventType22 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -3495,6 +3663,13 @@ export type EventType23 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -3636,6 +3811,13 @@ export type EventType24 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -3775,6 +3957,13 @@ export type EventType25 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -3919,6 +4108,13 @@ export type EventType26 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -4059,6 +4255,13 @@ export type EventType27 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -4198,6 +4401,13 @@ export type EventType28 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -4345,6 +4555,13 @@ export type EventType29 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -4486,6 +4703,13 @@ export type EventType30 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -4628,6 +4852,13 @@ export type EventType31 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -4785,6 +5016,13 @@ export type EventType32 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -4923,6 +5161,13 @@ export type EventType33 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -5078,6 +5323,13 @@ export type EventType34 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -5220,6 +5472,13 @@ export type EventType35 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -5358,6 +5617,13 @@ export type EventType36 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -5504,6 +5770,13 @@ export type EventType37 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -5646,6 +5919,13 @@ export type EventType38 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -5785,6 +6065,13 @@ export type EventType39 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -5923,6 +6210,13 @@ export type EventType40 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -6065,6 +6359,13 @@ export type EventType41 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -6209,6 +6510,13 @@ export type EventType42 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -6351,6 +6659,13 @@ export type EventType43 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -6491,6 +6806,13 @@ export type EventType44 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -6641,6 +6963,13 @@ export type EventType45 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -6801,6 +7130,13 @@ export type EventType46 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -6885,6 +7221,12 @@ export type SessionId46 = string;
 export type Memories1 = {
   [k: string]: unknown;
 }[];
+export type RequestId20 = string;
+export type Ok = boolean;
+export type Error5 = string;
+export type Category = string;
+export type Source1 = string;
+export type MayCurate = boolean | null;
 /**
  * All event types in the protocol.
  */
@@ -6941,6 +7283,13 @@ export type EventType47 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -7022,9 +7371,15 @@ export type EventType47 =
   | "gates.snapshot";
 export type Timestamp47 = string;
 export type SessionId47 = string;
-export type Paths = {
-  [k: string]: string;
-}[];
+export type RequestId21 = string;
+export type MemoryId = string;
+export type Ok1 = boolean;
+export type Error6 = string;
+export type Category1 = string;
+export type Source2 = string;
+export type Memory = {
+  [k: string]: unknown;
+} | null;
 /**
  * All event types in the protocol.
  */
@@ -7081,6 +7436,13 @@ export type EventType48 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -7162,9 +7524,15 @@ export type EventType48 =
   | "gates.snapshot";
 export type Timestamp48 = string;
 export type SessionId48 = string;
-export type Services1 = {
+export type RequestId22 = string;
+export type MemoryId1 = string;
+export type Ok2 = boolean;
+export type Error7 = string;
+export type Category2 = string;
+export type Source3 = string;
+export type Memory1 = {
   [k: string]: unknown;
-}[];
+} | null;
 /**
  * All event types in the protocol.
  */
@@ -7221,6 +7589,13 @@ export type EventType49 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -7302,7 +7677,12 @@ export type EventType49 =
   | "gates.snapshot";
 export type Timestamp49 = string;
 export type SessionId49 = string;
-export type Description = string;
+export type RequestId23 = string;
+export type MemoryId2 = string;
+export type Ok3 = boolean;
+export type Error8 = string;
+export type Category3 = string;
+export type Source4 = string;
 /**
  * All event types in the protocol.
  */
@@ -7359,6 +7739,13 @@ export type EventType50 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -7440,32 +7827,9 @@ export type EventType50 =
   | "gates.snapshot";
 export type Timestamp50 = string;
 export type SessionId50 = string;
-export type Name = string;
-export type Description1 = string;
-export type Plugins = string[];
-export type PreloadedPlugins = string[];
-export type Model = string | null;
-export type Provider = string | null;
-export type BudgetControl = {
-  [k: string]: unknown;
-} | null;
-export type Gc = {
-  [k: string]: unknown;
-} | null;
-export type RuntimeLimits = {
-  [k: string]: unknown;
-} | null;
-export type CompletionPayloadSchema =
-  | string
-  | {
-      [k: string]: unknown;
-    }
-  | null;
-export type EnvVarNames = string[];
-export type Profiles = ProfileSummary[];
-export type Name1 = string;
-export type Error5 = string;
-export type ParseErrors = ProfileParseError[];
+export type Paths = {
+  [k: string]: string;
+}[];
 /**
  * All event types in the protocol.
  */
@@ -7522,6 +7886,13 @@ export type EventType51 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -7603,11 +7974,9 @@ export type EventType51 =
   | "gates.snapshot";
 export type Timestamp51 = string;
 export type SessionId51 = string;
-export type Text1 = string;
-export type Attachments = {
+export type Services1 = {
   [k: string]: unknown;
 }[];
-export type ParallelTools = boolean | null;
 /**
  * All event types in the protocol.
  */
@@ -7664,6 +8033,13 @@ export type EventType52 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -7745,11 +8121,7 @@ export type EventType52 =
   | "gates.snapshot";
 export type Timestamp52 = string;
 export type SessionId52 = string;
-export type RequestId20 = string;
-export type Response2 = string;
-export type EditedArguments = {
-  [k: string]: unknown;
-} | null;
+export type Description = string;
 /**
  * All event types in the protocol.
  */
@@ -7806,6 +8178,13 @@ export type EventType53 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -7887,9 +8266,32 @@ export type EventType53 =
   | "gates.snapshot";
 export type Timestamp53 = string;
 export type SessionId53 = string;
-export type RequestId21 = string;
-export type QuestionIndex2 = number;
-export type Response3 = string;
+export type Name = string;
+export type Description1 = string;
+export type Plugins = string[];
+export type PreloadedPlugins = string[];
+export type Model = string | null;
+export type Provider = string | null;
+export type BudgetControl = {
+  [k: string]: unknown;
+} | null;
+export type Gc = {
+  [k: string]: unknown;
+} | null;
+export type RuntimeLimits = {
+  [k: string]: unknown;
+} | null;
+export type CompletionPayloadSchema =
+  | string
+  | {
+      [k: string]: unknown;
+    }
+  | null;
+export type EnvVarNames = string[];
+export type Profiles = ProfileSummary[];
+export type Name1 = string;
+export type Error9 = string;
+export type ParseErrors = ProfileParseError[];
 /**
  * All event types in the protocol.
  */
@@ -7946,6 +8348,13 @@ export type EventType54 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -8027,7 +8436,11 @@ export type EventType54 =
   | "gates.snapshot";
 export type Timestamp54 = string;
 export type SessionId54 = string;
-export type AgentId29 = string | null;
+export type Text1 = string;
+export type Attachments = {
+  [k: string]: unknown;
+}[];
+export type ParallelTools = boolean | null;
 /**
  * All event types in the protocol.
  */
@@ -8084,6 +8497,13 @@ export type EventType55 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -8165,7 +8585,11 @@ export type EventType55 =
   | "gates.snapshot";
 export type Timestamp55 = string;
 export type SessionId55 = string;
-export type Name2 = string;
+export type RequestId24 = string;
+export type Response2 = string;
+export type EditedArguments = {
+  [k: string]: unknown;
+} | null;
 /**
  * All event types in the protocol.
  */
@@ -8222,6 +8646,13 @@ export type EventType56 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -8303,8 +8734,9 @@ export type EventType56 =
   | "gates.snapshot";
 export type Timestamp56 = string;
 export type SessionId56 = string;
-export type AgentId30 = string;
-export type EventNames = string[];
+export type RequestId25 = string;
+export type QuestionIndex2 = number;
+export type Response3 = string;
 /**
  * All event types in the protocol.
  */
@@ -8361,6 +8793,13 @@ export type EventType57 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -8442,11 +8881,7 @@ export type EventType57 =
   | "gates.snapshot";
 export type Timestamp57 = string;
 export type SessionId57 = string;
-export type Command = string;
-export type Args = string[];
-export type Payload1 = {
-  [k: string]: unknown;
-} | null;
+export type AgentId29 = string | null;
 /**
  * All event types in the protocol.
  */
@@ -8503,6 +8938,13 @@ export type EventType58 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -8584,7 +9026,7 @@ export type EventType58 =
   | "gates.snapshot";
 export type Timestamp58 = string;
 export type SessionId58 = string;
-export type AgentId31 = string | null;
+export type Name2 = string;
 /**
  * All event types in the protocol.
  */
@@ -8641,6 +9083,13 @@ export type EventType59 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -8722,6 +9171,8 @@ export type EventType59 =
   | "gates.snapshot";
 export type Timestamp59 = string;
 export type SessionId59 = string;
+export type AgentId30 = string;
+export type EventNames = string[];
 /**
  * All event types in the protocol.
  */
@@ -8778,6 +9229,13 @@ export type EventType60 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -8859,9 +9317,11 @@ export type EventType60 =
   | "gates.snapshot";
 export type Timestamp60 = string;
 export type SessionId60 = string;
-export type Commands = {
-  [k: string]: string;
-}[];
+export type Command = string;
+export type Args = string[];
+export type Payload1 = {
+  [k: string]: unknown;
+} | null;
 /**
  * All event types in the protocol.
  */
@@ -8918,6 +9378,13 @@ export type EventType61 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -8999,6 +9466,7 @@ export type EventType61 =
   | "gates.snapshot";
 export type Timestamp61 = string;
 export type SessionId61 = string;
+export type AgentId31 = string | null;
 /**
  * All event types in the protocol.
  */
@@ -9055,6 +9523,13 @@ export type EventType62 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -9136,10 +9611,7 @@ export type EventType62 =
   | "gates.snapshot";
 export type Timestamp62 = string;
 export type SessionId62 = string;
-export type Tools1 = {
-  [k: string]: unknown;
-}[];
-export type Message3 = string;
+export type RequestId26 = string;
 /**
  * All event types in the protocol.
  */
@@ -9196,6 +9668,13 @@ export type EventType63 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -9277,6 +9756,8 @@ export type EventType63 =
   | "gates.snapshot";
 export type Timestamp63 = string;
 export type SessionId63 = string;
+export type RequestId27 = string;
+export type MemoryId3 = string;
 /**
  * All event types in the protocol.
  */
@@ -9333,6 +9814,13 @@ export type EventType64 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -9414,7 +9902,12 @@ export type EventType64 =
   | "gates.snapshot";
 export type Timestamp64 = string;
 export type SessionId64 = string;
-export type ToolName11 = string;
+export type RequestId28 = string;
+export type MemoryId4 = string;
+export type Description2 = string | null;
+export type Content1 = string | null;
+export type Tags = string[] | null;
+export type Maturity = string | null;
 /**
  * All event types in the protocol.
  */
@@ -9471,6 +9964,13 @@ export type EventType65 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -9552,9 +10052,8 @@ export type EventType65 =
   | "gates.snapshot";
 export type Timestamp65 = string;
 export type SessionId65 = string;
-export type Tools2 = {
-  [k: string]: unknown;
-}[];
+export type RequestId29 = string;
+export type MemoryId5 = string;
 /**
  * All event types in the protocol.
  */
@@ -9611,6 +10110,13 @@ export type EventType66 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -9692,9 +10198,6 @@ export type EventType66 =
   | "gates.snapshot";
 export type Timestamp66 = string;
 export type SessionId66 = string;
-export type CallId4 = string;
-export type AgentId32 = string;
-export type ToolName12 = string;
 /**
  * All event types in the protocol.
  */
@@ -9751,6 +10254,13 @@ export type EventType67 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -9832,9 +10342,9 @@ export type EventType67 =
   | "gates.snapshot";
 export type Timestamp67 = string;
 export type SessionId67 = string;
-export type CallId5 = string;
-export type Result1 = string;
-export type Error6 = string;
+export type Commands = {
+  [k: string]: string;
+}[];
 /**
  * All event types in the protocol.
  */
@@ -9891,6 +10401,13 @@ export type EventType68 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -9972,7 +10489,6 @@ export type EventType68 =
   | "gates.snapshot";
 export type Timestamp68 = string;
 export type SessionId68 = string;
-export type AgentId33 = string;
 /**
  * All event types in the protocol.
  */
@@ -10029,6 +10545,13 @@ export type EventType69 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -10110,13 +10633,10 @@ export type EventType69 =
   | "gates.snapshot";
 export type Timestamp69 = string;
 export type SessionId69 = string;
-export type AgentId34 = string;
-export type History = {
+export type Tools1 = {
   [k: string]: unknown;
 }[];
-export type TurnAccounting = {
-  [k: string]: unknown;
-}[];
+export type Message3 = string;
 /**
  * All event types in the protocol.
  */
@@ -10173,6 +10693,13 @@ export type EventType70 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -10254,16 +10781,6 @@ export type EventType70 =
   | "gates.snapshot";
 export type Timestamp70 = string;
 export type SessionId70 = string;
-export type TraceLogPath = string | null;
-export type ProviderTraceLog = string | null;
-export type WorkingDir = string | null;
-export type ConfigRoot = string | null;
-export type EnvFile = string | null;
-export type Presentation = {
-  [k: string]: unknown;
-} | null;
-export type PermissionTimeout = number | null;
-export type Apparmor = boolean;
 /**
  * All event types in the protocol.
  */
@@ -10320,6 +10837,13 @@ export type EventType71 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -10401,8 +10925,7 @@ export type EventType71 =
   | "gates.snapshot";
 export type Timestamp71 = string;
 export type SessionId71 = string;
-export type Text2 = string;
-export type PositionInQueue = number;
+export type ToolName11 = string;
 /**
  * All event types in the protocol.
  */
@@ -10459,6 +10982,13 @@ export type EventType72 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -10540,7 +11070,9 @@ export type EventType72 =
   | "gates.snapshot";
 export type Timestamp72 = string;
 export type SessionId72 = string;
-export type Text3 = string;
+export type Tools2 = {
+  [k: string]: unknown;
+}[];
 /**
  * All event types in the protocol.
  */
@@ -10597,6 +11129,13 @@ export type EventType73 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -10678,14 +11217,9 @@ export type EventType73 =
   | "gates.snapshot";
 export type Timestamp73 = string;
 export type SessionId73 = string;
-export type AtPercent = number;
-export type Action1 = string | null;
-export type Origin = string;
-export type Pressure = string;
-export type Usage = {
-  [k: string]: number;
-} | null;
-export type DrivingDimension = string | null;
+export type CallId4 = string;
+export type AgentId32 = string;
+export type ToolName12 = string;
 /**
  * All event types in the protocol.
  */
@@ -10742,6 +11276,13 @@ export type EventType74 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -10823,13 +11364,9 @@ export type EventType74 =
   | "gates.snapshot";
 export type Timestamp74 = string;
 export type SessionId74 = string;
-export type Kind = string;
-export type At = number;
-export type Cause = string;
-export type Site = string | null;
-export type Provider1 = string | null;
-export type Model1 = string | null;
-export type Tier = string | null;
+export type CallId5 = string;
+export type Result1 = string;
+export type Error10 = string;
 /**
  * All event types in the protocol.
  */
@@ -10886,6 +11423,13 @@ export type EventType75 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -10967,8 +11511,7 @@ export type EventType75 =
   | "gates.snapshot";
 export type Timestamp75 = string;
 export type SessionId75 = string;
-export type PartialResponseChars = number;
-export type UserPromptPreview = string;
+export type AgentId33 = string;
 /**
  * All event types in the protocol.
  */
@@ -11025,6 +11568,13 @@ export type EventType76 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -11106,9 +11656,13 @@ export type EventType76 =
   | "gates.snapshot";
 export type Timestamp76 = string;
 export type SessionId76 = string;
-export type AgentId35 = string;
-export type RecoveredCalls = number;
-export type ActionTaken = string;
+export type AgentId34 = string;
+export type History = {
+  [k: string]: unknown;
+}[];
+export type TurnAccounting = {
+  [k: string]: unknown;
+}[];
 /**
  * All event types in the protocol.
  */
@@ -11165,6 +11719,13 @@ export type EventType77 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -11246,6 +11807,16 @@ export type EventType77 =
   | "gates.snapshot";
 export type Timestamp77 = string;
 export type SessionId77 = string;
+export type TraceLogPath = string | null;
+export type ProviderTraceLog = string | null;
+export type WorkingDir = string | null;
+export type ConfigRoot = string | null;
+export type EnvFile = string | null;
+export type Presentation = {
+  [k: string]: unknown;
+} | null;
+export type PermissionTimeout = number | null;
+export type Apparmor = boolean;
 /**
  * All event types in the protocol.
  */
@@ -11302,6 +11873,13 @@ export type EventType78 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -11383,10 +11961,8 @@ export type EventType78 =
   | "gates.snapshot";
 export type Timestamp78 = string;
 export type SessionId78 = string;
-export type Root = string;
-export type Workspaces = {
-  [k: string]: unknown;
-}[];
+export type Text2 = string;
+export type PositionInQueue = number;
 /**
  * All event types in the protocol.
  */
@@ -11443,6 +12019,13 @@ export type EventType79 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -11524,7 +12107,7 @@ export type EventType79 =
   | "gates.snapshot";
 export type Timestamp79 = string;
 export type SessionId79 = string;
-export type Name3 = string;
+export type Text3 = string;
 /**
  * All event types in the protocol.
  */
@@ -11581,6 +12164,13 @@ export type EventType80 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -11662,8 +12252,14 @@ export type EventType80 =
   | "gates.snapshot";
 export type Timestamp80 = string;
 export type SessionId80 = string;
-export type Name4 = string;
-export type Path = string;
+export type AtPercent = number;
+export type Action1 = string | null;
+export type Origin = string;
+export type Pressure = string;
+export type Usage = {
+  [k: string]: number;
+} | null;
+export type DrivingDimension = string | null;
 /**
  * All event types in the protocol.
  */
@@ -11720,6 +12316,13 @@ export type EventType81 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -11801,7 +12404,13 @@ export type EventType81 =
   | "gates.snapshot";
 export type Timestamp81 = string;
 export type SessionId81 = string;
-export type Name5 = string;
+export type Kind = string;
+export type At = number;
+export type Cause = string;
+export type Site = string | null;
+export type Provider1 = string | null;
+export type Model1 = string | null;
+export type Tier = string | null;
 /**
  * All event types in the protocol.
  */
@@ -11858,6 +12467,13 @@ export type EventType82 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -11939,9 +12555,8 @@ export type EventType82 =
   | "gates.snapshot";
 export type Timestamp82 = string;
 export type SessionId82 = string;
-export type Name6 = string;
-export type Ok = boolean;
-export type Error7 = string;
+export type PartialResponseChars = number;
+export type UserPromptPreview = string;
 /**
  * All event types in the protocol.
  */
@@ -11998,6 +12613,13 @@ export type EventType83 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -12079,7 +12701,9 @@ export type EventType83 =
   | "gates.snapshot";
 export type Timestamp83 = string;
 export type SessionId83 = string;
-export type Name7 = string;
+export type AgentId35 = string;
+export type RecoveredCalls = number;
+export type ActionTaken = string;
 /**
  * All event types in the protocol.
  */
@@ -12136,6 +12760,13 @@ export type EventType84 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -12217,12 +12848,6 @@ export type EventType84 =
   | "gates.snapshot";
 export type Timestamp84 = string;
 export type SessionId84 = string;
-export type Workspace1 = string;
-export type Configured = boolean;
-export type Provider2 = string | null;
-export type Model2 = string | null;
-export type AvailableProviders = string[];
-export type MissingFields = string[];
 /**
  * All event types in the protocol.
  */
@@ -12279,6 +12904,13 @@ export type EventType85 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -12360,9 +12992,10 @@ export type EventType85 =
   | "gates.snapshot";
 export type Timestamp85 = string;
 export type SessionId85 = string;
-export type Provider3 = string;
-export type Model3 = string | null;
-export type ApiKey = string | null;
+export type Root = string;
+export type Workspaces = {
+  [k: string]: unknown;
+}[];
 /**
  * All event types in the protocol.
  */
@@ -12419,6 +13052,13 @@ export type EventType86 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -12500,11 +13140,7 @@ export type EventType86 =
   | "gates.snapshot";
 export type Timestamp86 = string;
 export type SessionId86 = string;
-export type Workspace2 = string;
-export type Provider4 = string;
-export type Model4 = string | null;
-export type Success3 = boolean;
-export type Error8 = string | null;
+export type Name3 = string;
 /**
  * All event types in the protocol.
  */
@@ -12561,6 +13197,13 @@ export type EventType87 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -12642,11 +13285,8 @@ export type EventType87 =
   | "gates.snapshot";
 export type Timestamp87 = string;
 export type SessionId87 = string;
-export type Changes = {
-  [k: string]: string;
-}[];
-export type Seq = number | null;
-export type Epoch = string | null;
+export type Name4 = string;
+export type Path = string;
 /**
  * All event types in the protocol.
  */
@@ -12703,6 +13343,13 @@ export type EventType88 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -12784,12 +13431,7 @@ export type EventType88 =
   | "gates.snapshot";
 export type Timestamp88 = string;
 export type SessionId88 = string;
-export type Files = {
-  [k: string]: string;
-}[];
-export type Total = number;
-export type Seq1 = number | null;
-export type Epoch1 = string | null;
+export type Name5 = string;
 /**
  * All event types in the protocol.
  */
@@ -12846,6 +13488,13 @@ export type EventType89 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -12927,11 +13576,9 @@ export type EventType89 =
   | "gates.snapshot";
 export type Timestamp89 = string;
 export type SessionId89 = string;
-export type Path1 = string;
-export type Ignored = boolean;
-export type Ok1 = boolean;
-export type Error9 = string;
-export type GitignorePath = string;
+export type Name6 = string;
+export type Ok4 = boolean;
+export type Error11 = string;
 /**
  * All event types in the protocol.
  */
@@ -12988,6 +13635,13 @@ export type EventType90 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -13069,14 +13723,7 @@ export type EventType90 =
   | "gates.snapshot";
 export type Timestamp90 = string;
 export type SessionId90 = string;
-export type Topic = string;
-export type Ok2 = boolean;
-export type Text4 = string;
-export type Topics = {
-  [k: string]: unknown;
-}[];
-export type Error10 = string;
-export type ServerVersion = string;
+export type Name7 = string;
 /**
  * All event types in the protocol.
  */
@@ -13133,6 +13780,13 @@ export type EventType91 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -13214,17 +13868,12 @@ export type EventType91 =
   | "gates.snapshot";
 export type Timestamp91 = string;
 export type SessionId91 = string;
-export type Integration = string;
-export type Ok3 = boolean;
-export type Changed = boolean;
-export type StateBefore = string;
-export type StateAfter = string;
-export type SkippedReason = string;
-export type Target = string;
-export type Text5 = string;
-export type Error11 = string;
-export type Available = string[];
-export type ServerVersion1 = string;
+export type Workspace1 = string;
+export type Configured = boolean;
+export type Provider2 = string | null;
+export type Model2 = string | null;
+export type AvailableProviders = string[];
+export type MissingFields = string[];
 /**
  * All event types in the protocol.
  */
@@ -13281,6 +13930,13 @@ export type EventType92 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -13362,12 +14018,9 @@ export type EventType92 =
   | "gates.snapshot";
 export type Timestamp92 = string;
 export type SessionId92 = string;
-export type WorkspaceId = string;
-export type Name8 = string;
-export type Size = number;
-export type ContentType = string | null;
-export type Mode1 = number | null;
-export type Files1 = StagedFileSpec[];
+export type Provider3 = string;
+export type Model3 = string | null;
+export type ApiKey = string | null;
 /**
  * All event types in the protocol.
  */
@@ -13424,6 +14077,13 @@ export type EventType93 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -13505,11 +14165,11 @@ export type EventType93 =
   | "gates.snapshot";
 export type Timestamp93 = string;
 export type SessionId93 = string;
-export type WorkspaceId1 = string;
-export type Staged = string[];
-export type Failed = {
-  [k: string]: string;
-}[];
+export type Workspace2 = string;
+export type Provider4 = string;
+export type Model4 = string | null;
+export type Success3 = boolean;
+export type Error12 = string | null;
 /**
  * All event types in the protocol.
  */
@@ -13566,6 +14226,13 @@ export type EventType94 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -13647,9 +14314,11 @@ export type EventType94 =
   | "gates.snapshot";
 export type Timestamp94 = string;
 export type SessionId94 = string;
-export type RequestId22 = string;
-export type Path2 = string;
-export type MetadataOnly = boolean;
+export type Changes = {
+  [k: string]: string;
+}[];
+export type Seq = number | null;
+export type Epoch = string | null;
 /**
  * All event types in the protocol.
  */
@@ -13706,6 +14375,13 @@ export type EventType95 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -13787,15 +14463,12 @@ export type EventType95 =
   | "gates.snapshot";
 export type Timestamp95 = string;
 export type SessionId95 = string;
-export type RequestId23 = string;
-export type Ok4 = boolean;
-export type Path3 = string;
-export type Name9 = string;
-export type Size1 = number;
-export type MimeType1 = string;
-export type MetadataOnly1 = boolean;
-export type Category = string;
-export type Error12 = string;
+export type Files = {
+  [k: string]: string;
+}[];
+export type Total = number;
+export type Seq1 = number | null;
+export type Epoch1 = string | null;
 /**
  * All event types in the protocol.
  */
@@ -13852,6 +14525,13 @@ export type EventType96 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -13933,20 +14613,11 @@ export type EventType96 =
   | "gates.snapshot";
 export type Timestamp96 = string;
 export type SessionId96 = string;
-export type ServerId = string;
-export type ServerName = string;
-export type ServerVersion2 = string;
-export type ActiveSessions = number;
-export type ActiveAgents = number;
-export type AvailableProviders1 = string[];
-export type AvailableModels1 = string[];
-export type Tags = string[];
-export type CpuPercent = number;
-export type MemoryPercent = number;
-export type UptimeSeconds = number;
-export type TrustState = string;
-export type SuccessRate1H = number;
-export type EscalatedTools = number;
+export type Path1 = string;
+export type Ignored = boolean;
+export type Ok5 = boolean;
+export type Error13 = string;
+export type GitignorePath = string;
 /**
  * All event types in the protocol.
  */
@@ -14003,6 +14674,13 @@ export type EventType97 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -14084,17 +14762,14 @@ export type EventType97 =
   | "gates.snapshot";
 export type Timestamp97 = string;
 export type SessionId97 = string;
-export type RequestId24 = string;
-export type OriginServer = string;
-export type AgentName1 = string;
-export type Task = string;
-export type Context1 = string;
-export type ProfileJson = string;
-export type InlineConfigJson = string;
-export type WorkspaceGitUrl = string;
-export type WorkspaceBranch = string;
-export type WorkspaceCommit = string;
-export type WorkspaceTempBranch = string;
+export type Topic = string;
+export type Ok6 = boolean;
+export type Text4 = string;
+export type Topics = {
+  [k: string]: unknown;
+}[];
+export type Error14 = string;
+export type ServerVersion = string;
 /**
  * All event types in the protocol.
  */
@@ -14151,6 +14826,13 @@ export type EventType98 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -14232,8 +14914,17 @@ export type EventType98 =
   | "gates.snapshot";
 export type Timestamp98 = string;
 export type SessionId98 = string;
-export type RequestId25 = string;
-export type RemoteAgentId = string;
+export type Integration = string;
+export type Ok7 = boolean;
+export type Changed = boolean;
+export type StateBefore = string;
+export type StateAfter = string;
+export type SkippedReason = string;
+export type Target = string;
+export type Text5 = string;
+export type Error15 = string;
+export type Available = string[];
+export type ServerVersion1 = string;
 /**
  * All event types in the protocol.
  */
@@ -14290,6 +14981,13 @@ export type EventType99 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -14371,8 +15069,12 @@ export type EventType99 =
   | "gates.snapshot";
 export type Timestamp99 = string;
 export type SessionId99 = string;
-export type RequestId26 = string;
-export type Reason1 = string;
+export type WorkspaceId = string;
+export type Name8 = string;
+export type Size = number;
+export type ContentType = string | null;
+export type Mode1 = number | null;
+export type Files1 = StagedFileSpec[];
 /**
  * All event types in the protocol.
  */
@@ -14429,6 +15131,13 @@ export type EventType100 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -14510,10 +15219,11 @@ export type EventType100 =
   | "gates.snapshot";
 export type Timestamp100 = string;
 export type SessionId100 = string;
-export type RequestId27 = string;
-export type RemoteAgentId1 = string;
-export type Text6 = string;
-export type Source1 = string;
+export type WorkspaceId1 = string;
+export type Staged = string[];
+export type Failed = {
+  [k: string]: string;
+}[];
 /**
  * All event types in the protocol.
  */
@@ -14570,6 +15280,13 @@ export type EventType101 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -14651,12 +15368,9 @@ export type EventType101 =
   | "gates.snapshot";
 export type Timestamp101 = string;
 export type SessionId101 = string;
-export type RequestId28 = string;
-export type RemoteAgentId2 = string;
-export type Success4 = boolean;
-export type Summary = string;
-export type Error13 = string;
-export type WorkspaceModified = boolean;
+export type RequestId30 = string;
+export type Path2 = string;
+export type MetadataOnly = boolean;
 /**
  * All event types in the protocol.
  */
@@ -14713,6 +15427,13 @@ export type EventType102 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -14794,8 +15515,15 @@ export type EventType102 =
   | "gates.snapshot";
 export type Timestamp102 = string;
 export type SessionId102 = string;
-export type RequestId29 = string;
-export type RemoteAgentId3 = string;
+export type RequestId31 = string;
+export type Ok8 = boolean;
+export type Path3 = string;
+export type Name9 = string;
+export type Size1 = number;
+export type MimeType1 = string;
+export type MetadataOnly1 = boolean;
+export type Category4 = string;
+export type Error16 = string;
 /**
  * All event types in the protocol.
  */
@@ -14852,6 +15580,13 @@ export type EventType103 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -14933,8 +15668,20 @@ export type EventType103 =
   | "gates.snapshot";
 export type Timestamp103 = string;
 export type SessionId103 = string;
-export type RequestId30 = string;
-export type RemoteAgentId4 = string;
+export type ServerId = string;
+export type ServerName = string;
+export type ServerVersion2 = string;
+export type ActiveSessions = number;
+export type ActiveAgents = number;
+export type AvailableProviders1 = string[];
+export type AvailableModels1 = string[];
+export type Tags1 = string[];
+export type CpuPercent = number;
+export type MemoryPercent = number;
+export type UptimeSeconds = number;
+export type TrustState = string;
+export type SuccessRate1H = number;
+export type EscalatedTools = number;
 /**
  * All event types in the protocol.
  */
@@ -14991,6 +15738,13 @@ export type EventType104 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -15072,10 +15826,17 @@ export type EventType104 =
   | "gates.snapshot";
 export type Timestamp104 = string;
 export type SessionId104 = string;
-export type GateName = string;
-export type TenantId = string;
-export type Owner = string;
-export type AnnouncedAt = string;
+export type RequestId32 = string;
+export type OriginServer = string;
+export type AgentName1 = string;
+export type Task = string;
+export type Context1 = string;
+export type ProfileJson = string;
+export type InlineConfigJson = string;
+export type WorkspaceGitUrl = string;
+export type WorkspaceBranch = string;
+export type WorkspaceCommit = string;
+export type WorkspaceTempBranch = string;
 /**
  * All event types in the protocol.
  */
@@ -15132,6 +15893,13 @@ export type EventType105 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -15213,14 +15981,8 @@ export type EventType105 =
   | "gates.snapshot";
 export type Timestamp105 = string;
 export type SessionId105 = string;
-export type GateName1 = string;
-export type TenantId1 = string;
-export type Owner1 = string;
-export type Outcome = {
-  [k: string]: unknown;
-} | null;
-export type ReleasedAt = string;
-export type WasAnnounced = boolean;
+export type RequestId33 = string;
+export type RemoteAgentId = string;
 /**
  * All event types in the protocol.
  */
@@ -15277,6 +16039,13 @@ export type EventType106 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -15358,17 +16127,8 @@ export type EventType106 =
   | "gates.snapshot";
 export type Timestamp106 = string;
 export type SessionId106 = string;
-export type GateName2 = string;
-export type TenantId2 = string;
-export type State = string;
-export type Owner2 = string | null;
-export type Intent1 = {
-  [k: string]: unknown;
-} | null;
-export type AcquiredAt = string | null;
-export type ExpiresAt = string | null;
-export type Gates = GateState[];
-export type SnapshotAt = string;
+export type RequestId34 = string;
+export type Reason1 = string;
 /**
  * All event types in the protocol.
  */
@@ -15425,6 +16185,13 @@ export type EventType107 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -15506,13 +16273,10 @@ export type EventType107 =
   | "gates.snapshot";
 export type Timestamp107 = string;
 export type SessionId107 = string;
-export type Text7 = string;
-export type SourceType = string;
-export type SourceId = string | null;
-export type Attachments1 = {
-  [k: string]: unknown;
-}[];
-export type RequestId31 = string | null;
+export type RequestId35 = string;
+export type RemoteAgentId1 = string;
+export type Text6 = string;
+export type Source5 = string;
 /**
  * All event types in the protocol.
  */
@@ -15569,6 +16333,13 @@ export type EventType108 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -15650,9 +16421,12 @@ export type EventType108 =
   | "gates.snapshot";
 export type Timestamp108 = string;
 export type SessionId108 = string;
-export type RequestId32 = string;
-export type Status3 = string;
-export type Detail = string | null;
+export type RequestId36 = string;
+export type RemoteAgentId2 = string;
+export type Success4 = boolean;
+export type Summary = string;
+export type Error17 = string;
+export type WorkspaceModified = boolean;
 /**
  * All event types in the protocol.
  */
@@ -15709,6 +16483,13 @@ export type EventType109 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -15790,13 +16571,8 @@ export type EventType109 =
   | "gates.snapshot";
 export type Timestamp109 = string;
 export type SessionId109 = string;
-export type RequestId33 = string;
-export type Messages =
-  | {
-      [k: string]: unknown;
-    }[]
-  | null;
-export type TimeoutSeconds = number;
+export type RequestId37 = string;
+export type RemoteAgentId3 = string;
 /**
  * All event types in the protocol.
  */
@@ -15853,6 +16629,13 @@ export type EventType110 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -15934,9 +16717,8 @@ export type EventType110 =
   | "gates.snapshot";
 export type Timestamp110 = string;
 export type SessionId110 = string;
-export type RequestId34 = string;
-export type ResponseText = string;
-export type Error14 = string;
+export type RequestId38 = string;
+export type RemoteAgentId4 = string;
 /**
  * All event types in the protocol.
  */
@@ -15993,6 +16775,13 @@ export type EventType111 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -16074,10 +16863,10 @@ export type EventType111 =
   | "gates.snapshot";
 export type Timestamp111 = string;
 export type SessionId111 = string;
-export type RequestId35 = string;
-export type AfterMessage = number | null;
-export type AfterToolCall = string | null;
-export type AfterTimestamp = string | null;
+export type GateName = string;
+export type TenantId = string;
+export type Owner = string;
+export type AnnouncedAt = string;
 /**
  * All event types in the protocol.
  */
@@ -16134,6 +16923,13 @@ export type EventType112 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -16215,9 +17011,14 @@ export type EventType112 =
   | "gates.snapshot";
 export type Timestamp112 = string;
 export type SessionId112 = string;
-export type RequestId36 = string;
-export type ForkIndex = number;
-export type Error15 = string;
+export type GateName1 = string;
+export type TenantId1 = string;
+export type Owner1 = string;
+export type Outcome = {
+  [k: string]: unknown;
+} | null;
+export type ReleasedAt = string;
+export type WasAnnounced = boolean;
 /**
  * All event types in the protocol.
  */
@@ -16274,6 +17075,13 @@ export type EventType113 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -16355,11 +17163,17 @@ export type EventType113 =
   | "gates.snapshot";
 export type Timestamp113 = string;
 export type SessionId113 = string;
-export type WakeRef = string;
-export type Outcome1 = string;
-export type Detail1 = string;
-export type ExpiresAt1 = number;
-export type Endpoint = string;
+export type GateName2 = string;
+export type TenantId2 = string;
+export type State = string;
+export type Owner2 = string | null;
+export type Intent1 = {
+  [k: string]: unknown;
+} | null;
+export type AcquiredAt = string | null;
+export type ExpiresAt = string | null;
+export type Gates = GateState[];
+export type SnapshotAt = string;
 /**
  * All event types in the protocol.
  */
@@ -16416,6 +17230,13 @@ export type EventType114 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -16497,8 +17318,13 @@ export type EventType114 =
   | "gates.snapshot";
 export type Timestamp114 = string;
 export type SessionId114 = string;
-export type WakeRef1 = string;
-export type Source2 = string;
+export type Text7 = string;
+export type SourceType = string;
+export type SourceId = string | null;
+export type Attachments1 = {
+  [k: string]: unknown;
+}[];
+export type RequestId39 = string | null;
 /**
  * All event types in the protocol.
  */
@@ -16555,6 +17381,13 @@ export type EventType115 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -16636,8 +17469,9 @@ export type EventType115 =
   | "gates.snapshot";
 export type Timestamp115 = string;
 export type SessionId115 = string;
-export type Tools3 = string[];
-export type Patterns = string[];
+export type RequestId40 = string;
+export type Status3 = string;
+export type Detail = string | null;
 /**
  * All event types in the protocol.
  */
@@ -16694,6 +17528,13 @@ export type EventType116 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -16775,8 +17616,13 @@ export type EventType116 =
   | "gates.snapshot";
 export type Timestamp116 = string;
 export type SessionId116 = string;
-export type Tools4 = string[];
-export type Patterns1 = string[];
+export type RequestId41 = string;
+export type Messages =
+  | {
+      [k: string]: unknown;
+    }[]
+  | null;
+export type TimeoutSeconds = number;
 /**
  * All event types in the protocol.
  */
@@ -16833,6 +17679,13 @@ export type EventType117 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -16914,9 +17767,9 @@ export type EventType117 =
   | "gates.snapshot";
 export type Timestamp117 = string;
 export type SessionId117 = string;
-export type Target1 = string;
-export type Tools5 = string[];
-export type Patterns2 = string[];
+export type RequestId42 = string;
+export type ResponseText = string;
+export type Error18 = string;
 /**
  * All event types in the protocol.
  */
@@ -16973,6 +17826,13 @@ export type EventType118 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -17054,7 +17914,10 @@ export type EventType118 =
   | "gates.snapshot";
 export type Timestamp118 = string;
 export type SessionId118 = string;
-export type Target2 = string;
+export type RequestId43 = string;
+export type AfterMessage = number | null;
+export type AfterToolCall = string | null;
+export type AfterTimestamp = string | null;
 /**
  * All event types in the protocol.
  */
@@ -17111,6 +17974,13 @@ export type EventType119 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -17192,7 +18062,9 @@ export type EventType119 =
   | "gates.snapshot";
 export type Timestamp119 = string;
 export type SessionId119 = string;
-export type Policy = string;
+export type RequestId44 = string;
+export type ForkIndex = number;
+export type Error19 = string;
 /**
  * All event types in the protocol.
  */
@@ -17249,6 +18121,13 @@ export type EventType120 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -17330,7 +18209,11 @@ export type EventType120 =
   | "gates.snapshot";
 export type Timestamp120 = string;
 export type SessionId120 = string;
-export type RequestId37 = string;
+export type WakeRef = string;
+export type Outcome1 = string;
+export type Detail1 = string;
+export type ExpiresAt1 = number;
+export type Endpoint = string;
 /**
  * All event types in the protocol.
  */
@@ -17387,6 +18270,13 @@ export type EventType121 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -17468,15 +18358,8 @@ export type EventType121 =
   | "gates.snapshot";
 export type Timestamp121 = string;
 export type SessionId121 = string;
-export type RequestId38 = string;
-export type DefaultPolicy = string;
-export type SessionDefaultPolicy = string | null;
-export type WhitelistTools = string[];
-export type WhitelistPatterns = string[];
-export type BlacklistTools = string[];
-export type BlacklistPatterns = string[];
-export type SessionWhitelist = string[];
-export type SessionBlacklist = string[];
+export type WakeRef1 = string;
+export type Source6 = string;
 /**
  * All event types in the protocol.
  */
@@ -17533,6 +18416,13 @@ export type EventType122 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -17614,10 +18504,8 @@ export type EventType122 =
   | "gates.snapshot";
 export type Timestamp122 = string;
 export type SessionId122 = string;
-export type RequestId39 = string;
-export type User = string;
-export type TtlSeconds = number;
-export type SingleUse = boolean;
+export type Tools3 = string[];
+export type Patterns = string[];
 /**
  * All event types in the protocol.
  */
@@ -17674,6 +18562,13 @@ export type EventType123 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -17755,13 +18650,8 @@ export type EventType123 =
   | "gates.snapshot";
 export type Timestamp123 = string;
 export type SessionId123 = string;
-export type RequestId40 = string;
-export type Status4 = string;
-export type Ticket = string;
-export type Qualified = string;
-export type AppId = string;
-export type ExpiresAt2 = string;
-export type Detail2 = string | null;
+export type Tools4 = string[];
+export type Patterns1 = string[];
 /**
  * All event types in the protocol.
  */
@@ -17818,6 +18708,13 @@ export type EventType124 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -17899,9 +18796,9 @@ export type EventType124 =
   | "gates.snapshot";
 export type Timestamp124 = string;
 export type SessionId124 = string;
-export type RequestId41 = string;
-export type Ticket1 = string;
-export type User1 = string;
+export type Target1 = string;
+export type Tools5 = string[];
+export type Patterns2 = string[];
 /**
  * All event types in the protocol.
  */
@@ -17958,6 +18855,13 @@ export type EventType125 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -18039,10 +18943,7 @@ export type EventType125 =
   | "gates.snapshot";
 export type Timestamp125 = string;
 export type SessionId125 = string;
-export type RequestId42 = string;
-export type Status5 = string;
-export type Revoked = number;
-export type Detail3 = string | null;
+export type Target2 = string;
 /**
  * All event types in the protocol.
  */
@@ -18099,6 +19000,13 @@ export type EventType126 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -18180,10 +19088,7 @@ export type EventType126 =
   | "gates.snapshot";
 export type Timestamp126 = string;
 export type SessionId126 = string;
-export type RequestId43 = string;
-export type User2 = string;
-export type Workspace3 = string;
-export type Name10 = string;
+export type Policy = string;
 /**
  * All event types in the protocol.
  */
@@ -18240,6 +19145,13 @@ export type EventType127 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -18321,11 +19233,7 @@ export type EventType127 =
   | "gates.snapshot";
 export type Timestamp127 = string;
 export type SessionId127 = string;
-export type RequestId44 = string;
-export type Status6 = string;
-export type Value = string | null;
-export type ExpiresAt3 = string | null;
-export type Detail4 = string | null;
+export type RequestId45 = string;
 /**
  * All event types in the protocol.
  */
@@ -18382,6 +19290,13 @@ export type EventType128 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -18463,8 +19378,15 @@ export type EventType128 =
   | "gates.snapshot";
 export type Timestamp128 = string;
 export type SessionId128 = string;
-export type RequestId45 = string;
-export type User3 = string;
+export type RequestId46 = string;
+export type DefaultPolicy = string;
+export type SessionDefaultPolicy = string | null;
+export type WhitelistTools = string[];
+export type WhitelistPatterns = string[];
+export type BlacklistTools = string[];
+export type BlacklistPatterns = string[];
+export type SessionWhitelist = string[];
+export type SessionBlacklist = string[];
 /**
  * All event types in the protocol.
  */
@@ -18521,6 +19443,13 @@ export type EventType129 =
   | "session.info"
   | "session.description_updated"
   | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
   | "sandbox.paths"
   | "service.list"
   | "message.send"
@@ -18602,7 +19531,1044 @@ export type EventType129 =
   | "gates.snapshot";
 export type Timestamp129 = string;
 export type SessionId129 = string;
-export type RequestId46 = string;
+export type RequestId47 = string;
+export type User = string;
+export type TtlSeconds = number;
+export type SingleUse = boolean;
+/**
+ * All event types in the protocol.
+ */
+export type EventType130 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "scaffold.explain.result"
+  | "scaffold.integration.result"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp130 = string;
+export type SessionId130 = string;
+export type RequestId48 = string;
+export type Status4 = string;
+export type Ticket = string;
+export type Qualified = string;
+export type AppId = string;
+export type ExpiresAt2 = string;
+export type Detail2 = string | null;
+/**
+ * All event types in the protocol.
+ */
+export type EventType131 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "scaffold.explain.result"
+  | "scaffold.integration.result"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp131 = string;
+export type SessionId131 = string;
+export type RequestId49 = string;
+export type Ticket1 = string;
+export type User1 = string;
+/**
+ * All event types in the protocol.
+ */
+export type EventType132 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "scaffold.explain.result"
+  | "scaffold.integration.result"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp132 = string;
+export type SessionId132 = string;
+export type RequestId50 = string;
+export type Status5 = string;
+export type Revoked = number;
+export type Detail3 = string | null;
+/**
+ * All event types in the protocol.
+ */
+export type EventType133 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "scaffold.explain.result"
+  | "scaffold.integration.result"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp133 = string;
+export type SessionId133 = string;
+export type RequestId51 = string;
+export type User2 = string;
+export type Workspace3 = string;
+export type Name10 = string;
+/**
+ * All event types in the protocol.
+ */
+export type EventType134 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "scaffold.explain.result"
+  | "scaffold.integration.result"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp134 = string;
+export type SessionId134 = string;
+export type RequestId52 = string;
+export type Status6 = string;
+export type Value = string | null;
+export type ExpiresAt3 = string | null;
+export type Detail4 = string | null;
+/**
+ * All event types in the protocol.
+ */
+export type EventType135 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "scaffold.explain.result"
+  | "scaffold.integration.result"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp135 = string;
+export type SessionId135 = string;
+export type RequestId53 = string;
+export type User3 = string;
+/**
+ * All event types in the protocol.
+ */
+export type EventType136 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "scaffold.explain.result"
+  | "scaffold.integration.result"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp136 = string;
+export type SessionId136 = string;
+export type RequestId54 = string;
 export type Status7 = string;
 export type Reloaded = number;
 export type Detail5 = string | null;
@@ -19660,13 +21626,125 @@ export interface ToolIdMappings {
   [k: string]: string;
 }
 /**
- * List of available memories - for completion cache and pager display.
+ * The memory store, as the plugin that HOLDS it reports it.
+ *
+ * Two emitters, one shape: the answer to :class:`MemoryListRequest`
+ * (protocol 1.22, ``request_id`` echoed) and the push after a ``memory``
+ * user command (the TUI's completion cache).  ``SessionInfoEvent.memories``
+ * carries the same rows, read the same way.  ``memory`` is
+ * ``PLUGIN_TIER = "runner"``, so on a runner-served session -- the default
+ * -- the rows are read from the RUNNER's plugin over the control lane.
+ * Before 1.22 the command push read the DAEMON's copy while the command
+ * itself ran on the runner (#1232), which on a split host, or wherever the
+ * daemon copy had no storage, answered ``[]``.
+ *
+ * Each row (a dict, so an older client ignores the keys it does not know):
+ *
+ * ``id`` / ``description`` / ``tags`` / ``maturity`` (``raw`` |
+ * ``validated`` | ``escalated`` | ``dismissed``) / ``confidence`` /
+ * ``scope`` (``project`` | ``universal`` -- how broadly it applies)
+ *     What every emitter has always sent.
+ * ``tier`` (1.22)
+ *     ``workspace`` or ``global`` (``~/.jaato/memories``): the rail merges
+ *     both stores, and a row says which one it came from.  Deliberately
+ *     NOT ``scope``, which already means something else on a memory.
+ * ``timestamp`` / ``last_accessed`` / ``usage_count`` / ``generated_by``
+ * / ``curated_by`` / ``source_agent`` / ``source_session`` (1.22)
+ *     Fields that already exist on the stored record, passed through.
+ *     ``curated_by`` is ``None`` on every ``raw`` memory by definition;
+ *     ``generated_by`` is ``None`` on a record written before #1123 --
+ *     *provenance unknown*, never human-authored.  ``content`` is NOT
+ *     listed: :class:`MemoryGetRequest` fetches it per row, so a large
+ *     store does not arrive in one frame.
+ * ``written_this_session`` / ``retrieved_this_session`` (1.22)
+ *     Whether the session the request was served for wrote this memory,
+ *     or retrieved it with ``retrieve_memories``.  Answer-only: the
+ *     command push carries neither.
+ *
+ * Fields (1.22, all additive):
+ *     request_id: The :class:`MemoryListRequest` this answers; ``""`` on
+ *         the command push.
+ *     ok: ``False`` when the store could not be read -- the runner did
+ *         not answer, the session does not enable the memory plugin.
+ *         ``memories`` is then EMPTY AND MEANINGLESS: an empty list is
+ *         never how a failure is spelled, because it reads as "nothing
+ *         remembered".
+ *     error / category: Why not.  ``category`` is one of
+ *         ``no_session``, ``no_plugin``, ``runner_unreachable``,
+ *         ``not_found``, ``invalid``, ``not_owner``, ``unknown_op``,
+ *         ``store_error``.
+ *     source: ``runner`` or ``daemon`` -- which plugin copy answered.
+ *         ``daemon`` only where there is no runner at all (embedded,
+ *         standalone), where the daemon's copy IS the store.
+ *     may_curate: Whether THIS caller may update / delete (the workspace
+ *         owner, or anyone on an unowned workspace), decided daemon-side
+ *         by the same predicate that refuses the verbs.  ``None`` on the
+ *         command push.
  */
 export interface MemoryListEvent {
   type?: EventType46;
   timestamp?: Timestamp46;
   session_id?: SessionId46;
   memories?: Memories1;
+  request_id?: RequestId20;
+  ok?: Ok;
+  error?: Error5;
+  category?: Category;
+  source?: Source1;
+  may_curate?: MayCurate;
+}
+/**
+ * Answer to :class:`MemoryGetRequest` (1.22): one memory, with content.
+ *
+ * ``memory`` is the list row plus ``content`` and ``evidence``, or
+ * ``None`` when ``ok`` is ``False`` (``category="not_found"`` for an id
+ * neither tier holds).
+ */
+export interface MemoryGetResultEvent {
+  type?: EventType47;
+  timestamp?: Timestamp47;
+  session_id?: SessionId47;
+  request_id?: RequestId21;
+  memory_id?: MemoryId;
+  ok?: Ok1;
+  error?: Error6;
+  category?: Category1;
+  source?: Source2;
+  memory?: Memory;
+}
+/**
+ * Answer to :class:`MemoryUpdateRequest` (1.22).
+ *
+ * ``memory`` is the row AFTER the update, so a client can replace its
+ * copy without a second list.  ``category="not_owner"`` is the owner gate
+ * refusing; ``invalid`` is the plugin's schema validator refusing (an empty
+ * description, a one-letter tag, a maturity outside the vocabulary).
+ */
+export interface MemoryUpdateResultEvent {
+  type?: EventType48;
+  timestamp?: Timestamp48;
+  session_id?: SessionId48;
+  request_id?: RequestId22;
+  memory_id?: MemoryId1;
+  ok?: Ok2;
+  error?: Error7;
+  category?: Category2;
+  source?: Source3;
+  memory?: Memory1;
+}
+/**
+ * Answer to :class:`MemoryDeleteRequest` (1.22).
+ */
+export interface MemoryDeleteResultEvent {
+  type?: EventType49;
+  timestamp?: Timestamp49;
+  session_id?: SessionId49;
+  request_id?: RequestId23;
+  memory_id?: MemoryId2;
+  ok?: Ok3;
+  error?: Error8;
+  category?: Category3;
+  source?: Source4;
 }
 /**
  * List of sandbox-allowed paths - for @@ completion cache.
@@ -19675,9 +21753,9 @@ export interface MemoryListEvent {
  * completion list for @@ (sandbox path) references.
  */
 export interface SandboxPathsEvent {
-  type?: EventType47;
-  timestamp?: Timestamp47;
-  session_id?: SessionId47;
+  type?: EventType50;
+  timestamp?: Timestamp50;
+  session_id?: SessionId50;
   paths?: Paths;
 }
 /**
@@ -19687,18 +21765,18 @@ export interface SandboxPathsEvent {
  * completion list for service names and HTTP methods.
  */
 export interface ServiceListEvent {
-  type?: EventType48;
-  timestamp?: Timestamp48;
-  session_id?: SessionId48;
+  type?: EventType51;
+  timestamp?: Timestamp51;
+  session_id?: SessionId51;
   services?: Services1;
 }
 /**
  * Session description was updated (by model calling session_describe).
  */
 export interface SessionDescriptionUpdatedEvent {
-  type?: EventType49;
-  timestamp?: Timestamp49;
-  session_id?: SessionId49;
+  type?: EventType52;
+  timestamp?: Timestamp52;
+  session_id?: SessionId52;
   description?: Description;
 }
 /**
@@ -19719,9 +21797,9 @@ export interface SessionDescriptionUpdatedEvent {
  * removed from this event.
  */
 export interface SessionProfilesEvent {
-  type?: EventType50;
-  timestamp?: Timestamp50;
-  session_id?: SessionId50;
+  type?: EventType53;
+  timestamp?: Timestamp53;
+  session_id?: SessionId53;
   profiles?: Profiles;
   parse_errors?: ParseErrors;
 }
@@ -19776,15 +21854,15 @@ export interface ModelTiers {
  */
 export interface ProfileParseError {
   name: Name1;
-  error: Error5;
+  error: Error9;
 }
 /**
  * Send a message to the model.
  */
 export interface SendMessageRequest {
-  type?: EventType51;
-  timestamp?: Timestamp51;
-  session_id?: SessionId51;
+  type?: EventType54;
+  timestamp?: Timestamp54;
+  session_id?: SessionId54;
   text?: Text1;
   attachments?: Attachments;
   parallel_tools?: ParallelTools;
@@ -19793,10 +21871,10 @@ export interface SendMessageRequest {
  * Respond to a permission request.
  */
 export interface PermissionResponseRequest {
-  type?: EventType52;
-  timestamp?: Timestamp52;
-  session_id?: SessionId52;
-  request_id?: RequestId20;
+  type?: EventType55;
+  timestamp?: Timestamp55;
+  session_id?: SessionId55;
+  request_id?: RequestId24;
   response?: Response2;
   edited_arguments?: EditedArguments;
 }
@@ -19804,10 +21882,10 @@ export interface PermissionResponseRequest {
  * Respond to a clarification question.
  */
 export interface ClarificationResponseRequest {
-  type?: EventType53;
-  timestamp?: Timestamp53;
-  session_id?: SessionId53;
-  request_id?: RequestId21;
+  type?: EventType56;
+  timestamp?: Timestamp56;
+  session_id?: SessionId56;
+  request_id?: RequestId25;
   question_index?: QuestionIndex2;
   response?: Response3;
 }
@@ -19815,9 +21893,9 @@ export interface ClarificationResponseRequest {
  * Stop current operation (cancel generation).
  */
 export interface StopRequest {
-  type?: EventType54;
-  timestamp?: Timestamp54;
-  session_id?: SessionId54;
+  type?: EventType57;
+  timestamp?: Timestamp57;
+  session_id?: SessionId57;
   agent_id?: AgentId29;
 }
 /**
@@ -19827,9 +21905,9 @@ export interface StopRequest {
  * so that agents subscribed via ``subscribeToEvents`` are notified.
  */
 export interface ExternalEventRequest {
-  type?: EventType55;
-  timestamp?: Timestamp55;
-  session_id?: SessionId55;
+  type?: EventType58;
+  timestamp?: Timestamp58;
+  session_id?: SessionId58;
   name?: Name2;
   data?: Data;
 }
@@ -19844,9 +21922,9 @@ export interface Data {
  * events.
  */
 export interface EventsSubscribedEvent {
-  type?: EventType56;
-  timestamp?: Timestamp56;
-  session_id?: SessionId56;
+  type?: EventType59;
+  timestamp?: Timestamp59;
+  session_id?: SessionId59;
   agent_id?: AgentId30;
   event_names?: EventNames;
 }
@@ -19867,9 +21945,9 @@ export interface EventsSubscribedEvent {
  * construction.
  */
 export interface CommandRequest {
-  type?: EventType57;
-  timestamp?: Timestamp57;
-  session_id?: SessionId57;
+  type?: EventType60;
+  timestamp?: Timestamp60;
+  session_id?: SessionId60;
   command?: Command;
   args?: Args;
   payload?: Payload1;
@@ -19881,26 +21959,89 @@ export interface CommandRequest {
  * If agent_id is None or empty, returns budget for main agent.
  */
 export interface GetInstructionBudgetRequest {
-  type?: EventType58;
-  timestamp?: Timestamp58;
-  session_id?: SessionId58;
+  type?: EventType61;
+  timestamp?: Timestamp61;
+  session_id?: SessionId61;
   agent_id?: AgentId31;
+}
+/**
+ * List the attached session's memory store, quietly (#1232, 1.22).
+ *
+ * Answered by :class:`MemoryListEvent` carrying this ``request_id``.
+ * Unlike the ``memory list`` user command it prints nothing to the
+ * transcript, so a client may ask as often as it needs.  Session-scoped:
+ * the store is read through the session's own runner.
+ */
+export interface MemoryListRequest {
+  type?: EventType62;
+  timestamp?: Timestamp62;
+  session_id?: SessionId62;
+  request_id?: RequestId26;
+}
+/**
+ * Fetch one memory WITH its content (1.22).
+ *
+ * Answered by :class:`MemoryGetResultEvent`.  Viewing follows the
+ * session's visibility, like the list.
+ */
+export interface MemoryGetRequest {
+  type?: EventType63;
+  timestamp?: Timestamp63;
+  session_id?: SessionId63;
+  request_id?: RequestId27;
+  memory_id?: MemoryId3;
+}
+/**
+ * Edit a memory, or approve / dismiss it (1.22).
+ *
+ * The structured replacement for ``memory edit``, which spawns ``$EDITOR``
+ * on the runner's host and so cannot be driven from a browser.  Every
+ * field is optional; ``None`` leaves it as it is.  ``maturity`` moves the
+ * lifecycle -- ``validated`` approves, ``dismissed`` dismisses -- through
+ * the plugin's one ``curated_by``-stamping helper, which records the
+ * caller as the curator.  Limited to the workspace owner (anyone, on an
+ * unowned workspace); answered by :class:`MemoryUpdateResultEvent`.
+ */
+export interface MemoryUpdateRequest {
+  type?: EventType64;
+  timestamp?: Timestamp64;
+  session_id?: SessionId64;
+  request_id?: RequestId28;
+  memory_id?: MemoryId4;
+  description?: Description2;
+  content?: Content1;
+  tags?: Tags;
+  maturity?: Maturity;
+}
+/**
+ * Remove a memory from whichever tier holds it (1.22).
+ *
+ * Through the plugin's existing delete path (``delete_memory``), not a
+ * second one.  Limited to the workspace owner; answered by
+ * :class:`MemoryDeleteResultEvent`.
+ */
+export interface MemoryDeleteRequest {
+  type?: EventType65;
+  timestamp?: Timestamp65;
+  session_id?: SessionId65;
+  request_id?: RequestId29;
+  memory_id?: MemoryId5;
 }
 /**
  * Request list of available commands from server.
  */
 export interface CommandListRequest {
-  type?: EventType59;
-  timestamp?: Timestamp59;
-  session_id?: SessionId59;
+  type?: EventType66;
+  timestamp?: Timestamp66;
+  session_id?: SessionId66;
 }
 /**
  * List of available commands from server/plugins.
  */
 export interface CommandListEvent {
-  type?: EventType60;
-  timestamp?: Timestamp60;
-  session_id?: SessionId60;
+  type?: EventType67;
+  timestamp?: Timestamp67;
+  session_id?: SessionId67;
   commands?: Commands;
 }
 /**
@@ -19911,17 +22052,17 @@ export interface CommandListEvent {
  * by re-requesting the full command list from the daemon.
  */
 export interface CommandListRefreshEvent {
-  type?: EventType61;
-  timestamp?: Timestamp61;
-  session_id?: SessionId61;
+  type?: EventType68;
+  timestamp?: Timestamp68;
+  session_id?: SessionId68;
 }
 /**
  * Tool status information for client display.
  */
 export interface ToolStatusEvent {
-  type?: EventType62;
-  timestamp?: Timestamp62;
-  session_id?: SessionId62;
+  type?: EventType69;
+  timestamp?: Timestamp69;
+  session_id?: SessionId69;
   tools?: Tools1;
   message?: Message3;
 }
@@ -19936,9 +22077,9 @@ export interface ToolStatusEvent {
  * not a delta. Clients should replace their local lookup on each receive.
  */
 export interface ToolIdRegistryEvent {
-  type?: EventType63;
-  timestamp?: Timestamp63;
-  session_id?: SessionId63;
+  type?: EventType70;
+  timestamp?: Timestamp70;
+  session_id?: SessionId70;
   mappings?: Mappings;
 }
 export interface Mappings {
@@ -19951,9 +22092,9 @@ export interface Mappings {
  * Used by headless mode to disable tools before starting event handling.
  */
 export interface ToolDisableRequest {
-  type?: EventType64;
-  timestamp?: Timestamp64;
-  session_id?: SessionId64;
+  type?: EventType71;
+  timestamp?: Timestamp71;
+  session_id?: SessionId71;
   tool_name?: ToolName11;
 }
 /**
@@ -19964,9 +22105,9 @@ export interface ToolDisableRequest {
  * ``tool.execute_request`` and waits for ``tool.execute_result``.
  */
 export interface ToolsRegisterClientRequest {
-  type?: EventType65;
-  timestamp?: Timestamp65;
-  session_id?: SessionId65;
+  type?: EventType72;
+  timestamp?: Timestamp72;
+  session_id?: SessionId72;
   tools?: Tools2;
   categories?: Categories;
 }
@@ -19977,9 +22118,9 @@ export interface Categories {
  * Server requests the WS client to execute a client-registered tool.
  */
 export interface ToolExecuteRequestEvent {
-  type?: EventType66;
-  timestamp?: Timestamp66;
-  session_id?: SessionId66;
+  type?: EventType73;
+  timestamp?: Timestamp73;
+  session_id?: SessionId73;
   call_id?: CallId4;
   agent_id?: AgentId32;
   tool_name?: ToolName12;
@@ -19992,29 +22133,29 @@ export interface ToolArgs3 {
  * Client returns the result of a client-side tool execution.
  */
 export interface ToolExecuteResultEvent {
-  type?: EventType67;
-  timestamp?: Timestamp67;
-  session_id?: SessionId67;
+  type?: EventType74;
+  timestamp?: Timestamp74;
+  session_id?: SessionId74;
   call_id?: CallId5;
   result?: Result1;
-  error?: Error6;
+  error?: Error10;
 }
 /**
  * Client request for conversation history.
  */
 export interface HistoryRequest {
-  type?: EventType68;
-  timestamp?: Timestamp68;
-  session_id?: SessionId68;
+  type?: EventType75;
+  timestamp?: Timestamp75;
+  session_id?: SessionId75;
   agent_id?: AgentId33;
 }
 /**
  * Conversation history from server.
  */
 export interface HistoryEvent {
-  type?: EventType69;
-  timestamp?: Timestamp69;
-  session_id?: SessionId69;
+  type?: EventType76;
+  timestamp?: Timestamp76;
+  session_id?: SessionId76;
   agent_id?: AgentId34;
   history?: History;
   turn_accounting?: TurnAccounting;
@@ -20027,9 +22168,9 @@ export interface HistoryEvent {
  * a ``PresentationContext`` on the server side.
  */
 export interface ClientConfigRequest {
-  type?: EventType70;
-  timestamp?: Timestamp70;
-  session_id?: SessionId70;
+  type?: EventType77;
+  timestamp?: Timestamp77;
+  session_id?: SessionId77;
   trace_log_path?: TraceLogPath;
   provider_trace_log?: ProviderTraceLog;
   working_dir?: WorkingDir;
@@ -20047,9 +22188,9 @@ export interface ClientConfigRequest {
  * pause point (between tool executions, after subagent completion, etc.).
  */
 export interface MidTurnPromptQueuedEvent {
-  type?: EventType71;
-  timestamp?: Timestamp71;
-  session_id?: SessionId71;
+  type?: EventType78;
+  timestamp?: Timestamp78;
+  session_id?: SessionId78;
   text?: Text2;
   position_in_queue?: PositionInQueue;
 }
@@ -20060,9 +22201,9 @@ export interface MidTurnPromptQueuedEvent {
  * by the model.
  */
 export interface MidTurnPromptInjectedEvent {
-  type?: EventType72;
-  timestamp?: Timestamp72;
-  session_id?: SessionId72;
+  type?: EventType79;
+  timestamp?: Timestamp79;
+  session_id?: SessionId79;
   text?: Text3;
 }
 /**
@@ -20113,9 +22254,9 @@ export interface MidTurnPromptInjectedEvent {
  *         ``notify`` checkpoint and every action-only rung.
  */
 export interface BudgetRungFiredEvent {
-  type?: EventType73;
-  timestamp?: Timestamp73;
-  session_id?: SessionId73;
+  type?: EventType80;
+  timestamp?: Timestamp80;
+  session_id?: SessionId80;
   at_percent?: AtPercent;
   action?: Action1;
   origin?: Origin;
@@ -20158,9 +22299,9 @@ export interface TierChanges {
  *         there was one.  Absent rather than ``null`` when unknown.
  */
 export interface IncidentEvent {
-  type?: EventType74;
-  timestamp?: Timestamp74;
-  session_id?: SessionId74;
+  type?: EventType81;
+  timestamp?: Timestamp81;
+  session_id?: SessionId81;
   kind?: Kind;
   at?: At;
   cause?: Cause;
@@ -20177,9 +22318,9 @@ export interface IncidentEvent {
  * The partial response is preserved and the user's prompt is being processed.
  */
 export interface MidTurnInterruptEvent {
-  type?: EventType75;
-  timestamp?: Timestamp75;
-  session_id?: SessionId75;
+  type?: EventType82;
+  timestamp?: Timestamp82;
+  session_id?: SessionId82;
   partial_response_chars?: PartialResponseChars;
   user_prompt_preview?: UserPromptPreview;
 }
@@ -20191,9 +22332,9 @@ export interface MidTurnInterruptEvent {
  * for any pending tool calls.
  */
 export interface InterruptedTurnRecoveredEvent {
-  type?: EventType76;
-  timestamp?: Timestamp76;
-  session_id?: SessionId76;
+  type?: EventType83;
+  timestamp?: Timestamp83;
+  session_id?: SessionId83;
   agent_id?: AgentId35;
   recovered_calls?: RecoveredCalls;
   action_taken?: ActionTaken;
@@ -20202,17 +22343,17 @@ export interface InterruptedTurnRecoveredEvent {
  * Client requests list of available workspaces.
  */
 export interface WorkspaceListRequest {
-  type?: EventType77;
-  timestamp?: Timestamp77;
-  session_id?: SessionId77;
+  type?: EventType84;
+  timestamp?: Timestamp84;
+  session_id?: SessionId84;
 }
 /**
  * Response to workspace.list - list of available workspaces.
  */
 export interface WorkspaceListEvent {
-  type?: EventType78;
-  timestamp?: Timestamp78;
-  session_id?: SessionId78;
+  type?: EventType85;
+  timestamp?: Timestamp85;
+  session_id?: SessionId85;
   root?: Root;
   workspaces?: Workspaces;
 }
@@ -20220,9 +22361,9 @@ export interface WorkspaceListEvent {
  * Client requests creation of a new workspace.
  */
 export interface WorkspaceCreateRequest {
-  type?: EventType79;
-  timestamp?: Timestamp79;
-  session_id?: SessionId79;
+  type?: EventType86;
+  timestamp?: Timestamp86;
+  session_id?: SessionId86;
   name?: Name3;
 }
 /**
@@ -20237,9 +22378,9 @@ export interface WorkspaceCreateRequest {
  * learned of a created workspace as one with no name.
  */
 export interface WorkspaceCreatedEvent {
-  type?: EventType80;
-  timestamp?: Timestamp80;
-  session_id?: SessionId80;
+  type?: EventType87;
+  timestamp?: Timestamp87;
+  session_id?: SessionId87;
   name?: Name4;
   path?: Path;
   workspace?: Workspace;
@@ -20254,9 +22395,9 @@ export interface Workspace {
  * ``WorkspaceDeletedEvent``.
  */
 export interface WorkspaceDeleteRequest {
-  type?: EventType81;
-  timestamp?: Timestamp81;
-  session_id?: SessionId81;
+  type?: EventType88;
+  timestamp?: Timestamp88;
+  session_id?: SessionId88;
   name?: Name5;
 }
 /**
@@ -20271,29 +22412,29 @@ export interface WorkspaceDeleteRequest {
  * gone and the deleting client's selection of it is cleared.
  */
 export interface WorkspaceDeletedEvent {
-  type?: EventType82;
-  timestamp?: Timestamp82;
-  session_id?: SessionId82;
+  type?: EventType89;
+  timestamp?: Timestamp89;
+  session_id?: SessionId89;
   name?: Name6;
-  ok?: Ok;
-  error?: Error7;
+  ok?: Ok4;
+  error?: Error11;
 }
 /**
  * Client selects a workspace to use for the session.
  */
 export interface WorkspaceSelectRequest {
-  type?: EventType83;
-  timestamp?: Timestamp83;
-  session_id?: SessionId83;
+  type?: EventType90;
+  timestamp?: Timestamp90;
+  session_id?: SessionId90;
   name?: Name7;
 }
 /**
  * Response to workspace.select - configuration status of selected workspace.
  */
 export interface ConfigStatusEvent {
-  type?: EventType84;
-  timestamp?: Timestamp84;
-  session_id?: SessionId84;
+  type?: EventType91;
+  timestamp?: Timestamp91;
+  session_id?: SessionId91;
   workspace?: Workspace1;
   configured?: Configured;
   provider?: Provider2;
@@ -20305,9 +22446,9 @@ export interface ConfigStatusEvent {
  * Client updates workspace configuration (provider, model, API key).
  */
 export interface ConfigUpdateRequest {
-  type?: EventType85;
-  timestamp?: Timestamp85;
-  session_id?: SessionId85;
+  type?: EventType92;
+  timestamp?: Timestamp92;
+  session_id?: SessionId92;
   provider?: Provider3;
   model?: Model3;
   api_key?: ApiKey;
@@ -20316,14 +22457,14 @@ export interface ConfigUpdateRequest {
  * Response to config.update - configuration was updated.
  */
 export interface ConfigUpdatedEvent {
-  type?: EventType86;
-  timestamp?: Timestamp86;
-  session_id?: SessionId86;
+  type?: EventType93;
+  timestamp?: Timestamp93;
+  session_id?: SessionId93;
   workspace?: Workspace2;
   provider?: Provider4;
   model?: Model4;
   success?: Success3;
-  error?: Error8;
+  error?: Error12;
 }
 /**
  * Incremental workspace file change notification.
@@ -20339,9 +22480,9 @@ export interface ConfigUpdatedEvent {
  *     ``"deleted"``  – file was previously tracked and is now gone.
  */
 export interface WorkspaceFilesChangedEvent {
-  type?: EventType87;
-  timestamp?: Timestamp87;
-  session_id?: SessionId87;
+  type?: EventType94;
+  timestamp?: Timestamp94;
+  session_id?: SessionId94;
   changes?: Changes;
   seq?: Seq;
   epoch?: Epoch;
@@ -20354,9 +22495,9 @@ export interface WorkspaceFilesChangedEvent {
  * replaying individual deltas.
  */
 export interface WorkspaceFilesSnapshotEvent {
-  type?: EventType88;
-  timestamp?: Timestamp88;
-  session_id?: SessionId88;
+  type?: EventType95;
+  timestamp?: Timestamp95;
+  session_id?: SessionId95;
   files?: Files;
   total?: Total;
   seq?: Seq1;
@@ -20395,13 +22536,13 @@ export interface Seqs {
  *     gitignore_path: The file that was edited, so a client can name it.
  */
 export interface WorkspaceIgnoreResultEvent {
-  type?: EventType89;
-  timestamp?: Timestamp89;
-  session_id?: SessionId89;
+  type?: EventType96;
+  timestamp?: Timestamp96;
+  session_id?: SessionId96;
   path?: Path1;
   ignored?: Ignored;
-  ok?: Ok1;
-  error?: Error9;
+  ok?: Ok5;
+  error?: Error13;
   gitignore_path?: GitignorePath;
 }
 /**
@@ -20447,15 +22588,15 @@ export interface WorkspaceIgnoreResultEvent {
  *         report WHOSE install answered rather than implying its own.
  */
 export interface ScaffoldExplainEvent {
-  type?: EventType90;
-  timestamp?: Timestamp90;
-  session_id?: SessionId90;
+  type?: EventType97;
+  timestamp?: Timestamp97;
+  session_id?: SessionId97;
   topic?: Topic;
-  ok?: Ok2;
+  ok?: Ok6;
   text?: Text4;
   data?: Data1;
   topics?: Topics;
-  error?: Error10;
+  error?: Error14;
   server_version?: ServerVersion;
 }
 export interface Data1 {
@@ -20508,18 +22649,18 @@ export interface Data1 {
  *         skill.
  */
 export interface ScaffoldIntegrationEvent {
-  type?: EventType91;
-  timestamp?: Timestamp91;
-  session_id?: SessionId91;
+  type?: EventType98;
+  timestamp?: Timestamp98;
+  session_id?: SessionId98;
   integration?: Integration;
-  ok?: Ok3;
+  ok?: Ok7;
   changed?: Changed;
   state_before?: StateBefore;
   state_after?: StateAfter;
   skipped_reason?: SkippedReason;
   target?: Target;
   text?: Text5;
-  error?: Error11;
+  error?: Error15;
   available?: Available;
   server_version?: ServerVersion1;
 }
@@ -20563,9 +22704,9 @@ export interface ScaffoldIntegrationEvent {
  * already-existing workspace mid-session.
  */
 export interface StageFilesRequest {
-  type?: EventType92;
-  timestamp?: Timestamp92;
-  session_id?: SessionId92;
+  type?: EventType99;
+  timestamp?: Timestamp99;
+  session_id?: SessionId99;
   workspace_id?: WorkspaceId;
   files?: Files1;
 }
@@ -20613,9 +22754,9 @@ export interface StagedFileSpec {
  *   AppArmor refusal, ...).  ``error`` carries the OS message.
  */
 export interface StageFilesEvent {
-  type?: EventType93;
-  timestamp?: Timestamp93;
-  session_id?: SessionId93;
+  type?: EventType100;
+  timestamp?: Timestamp100;
+  session_id?: SessionId100;
   workspace_id?: WorkspaceId1;
   staged?: Staged;
   failed?: Failed;
@@ -20641,10 +22782,10 @@ export interface StageFilesEvent {
  * the model is told "no such file" instead of offering a link that fails.
  */
 export interface WorkspaceFileFetchRequest {
-  type?: EventType94;
-  timestamp?: Timestamp94;
-  session_id?: SessionId94;
-  request_id?: RequestId22;
+  type?: EventType101;
+  timestamp?: Timestamp101;
+  session_id?: SessionId101;
+  request_id?: RequestId30;
   path?: Path2;
   metadata_only?: MetadataOnly;
 }
@@ -20670,18 +22811,18 @@ export interface WorkspaceFileFetchRequest {
  * - ``"io_error"`` -- the read failed; ``error`` carries the OS message.
  */
 export interface WorkspaceFileContentEvent {
-  type?: EventType95;
-  timestamp?: Timestamp95;
-  session_id?: SessionId95;
-  request_id?: RequestId23;
-  ok?: Ok4;
+  type?: EventType102;
+  timestamp?: Timestamp102;
+  session_id?: SessionId102;
+  request_id?: RequestId31;
+  ok?: Ok8;
   path?: Path3;
   name?: Name9;
   size?: Size1;
   mime_type?: MimeType1;
   metadata_only?: MetadataOnly1;
-  category?: Category;
-  error?: Error12;
+  category?: Category4;
+  error?: Error16;
 }
 /**
  * Heartbeat sent between peer servers at a configurable interval.
@@ -20691,9 +22832,9 @@ export interface WorkspaceFileContentEvent {
  * to expose cluster state to the model.
  */
 export interface PeerHeartbeatEvent {
-  type?: EventType96;
-  timestamp?: Timestamp96;
-  session_id?: SessionId96;
+  type?: EventType103;
+  timestamp?: Timestamp103;
+  session_id?: SessionId103;
   server_id?: ServerId;
   server_name?: ServerName;
   server_version?: ServerVersion2;
@@ -20701,7 +22842,7 @@ export interface PeerHeartbeatEvent {
   active_agents?: ActiveAgents;
   available_providers?: AvailableProviders1;
   available_models?: AvailableModels1;
-  tags?: Tags;
+  tags?: Tags1;
   cpu_percent?: CpuPercent;
   memory_percent?: MemoryPercent;
   uptime_seconds?: UptimeSeconds;
@@ -20718,10 +22859,10 @@ export interface PeerHeartbeatEvent {
  * this spawn lifecycle.
  */
 export interface PeerSpawnRequestEvent {
-  type?: EventType97;
-  timestamp?: Timestamp97;
-  session_id?: SessionId97;
-  request_id?: RequestId24;
+  type?: EventType104;
+  timestamp?: Timestamp104;
+  session_id?: SessionId104;
+  request_id?: RequestId32;
   origin_server?: OriginServer;
   agent_name?: AgentName1;
   task?: Task;
@@ -20740,10 +22881,10 @@ export interface PeerSpawnRequestEvent {
  * ephemeral session and is about to start processing.
  */
 export interface PeerSpawnAcceptedEvent {
-  type?: EventType98;
-  timestamp?: Timestamp98;
-  session_id?: SessionId98;
-  request_id?: RequestId25;
+  type?: EventType105;
+  timestamp?: Timestamp105;
+  session_id?: SessionId105;
+  request_id?: RequestId33;
   remote_agent_id?: RemoteAgentId;
 }
 /**
@@ -20753,10 +22894,10 @@ export interface PeerSpawnAcceptedEvent {
  * capacity limits, missing provider, unknown profile).
  */
 export interface PeerSpawnRejectedEvent {
-  type?: EventType99;
-  timestamp?: Timestamp99;
-  session_id?: SessionId99;
-  request_id?: RequestId26;
+  type?: EventType106;
+  timestamp?: Timestamp106;
+  session_id?: SessionId106;
+  request_id?: RequestId34;
   reason?: Reason1;
 }
 /**
@@ -20767,13 +22908,13 @@ export interface PeerSpawnRejectedEvent {
  * to the parent session via ``inject_prompt``.
  */
 export interface PeerAgentOutputEvent {
-  type?: EventType100;
-  timestamp?: Timestamp100;
-  session_id?: SessionId100;
-  request_id?: RequestId27;
+  type?: EventType107;
+  timestamp?: Timestamp107;
+  session_id?: SessionId107;
+  request_id?: RequestId35;
   remote_agent_id?: RemoteAgentId1;
   text?: Text6;
-  source?: Source1;
+  source?: Source5;
 }
 /**
  * Signal that a remote subagent has finished execution.
@@ -20783,14 +22924,14 @@ export interface PeerAgentOutputEvent {
  * populated only when ``success`` is False.
  */
 export interface PeerAgentCompletedEvent {
-  type?: EventType101;
-  timestamp?: Timestamp101;
-  session_id?: SessionId101;
-  request_id?: RequestId28;
+  type?: EventType108;
+  timestamp?: Timestamp108;
+  session_id?: SessionId108;
+  request_id?: RequestId36;
   remote_agent_id?: RemoteAgentId2;
   success?: Success4;
   summary?: Summary;
-  error?: Error13;
+  error?: Error17;
   workspace_modified?: WorkspaceModified;
 }
 /**
@@ -20800,20 +22941,20 @@ export interface PeerAgentCompletedEvent {
  * a previously spawned remote subagent.
  */
 export interface PeerStopRequestEvent {
-  type?: EventType102;
-  timestamp?: Timestamp102;
-  session_id?: SessionId102;
-  request_id?: RequestId29;
+  type?: EventType109;
+  timestamp?: Timestamp109;
+  session_id?: SessionId109;
+  request_id?: RequestId37;
   remote_agent_id?: RemoteAgentId3;
 }
 /**
  * Confirmation that a remote peer received and processed the stop request.
  */
 export interface PeerStopAcknowledgedEvent {
-  type?: EventType103;
-  timestamp?: Timestamp103;
-  session_id?: SessionId103;
-  request_id?: RequestId30;
+  type?: EventType110;
+  timestamp?: Timestamp110;
+  session_id?: SessionId110;
+  request_id?: RequestId38;
   remote_agent_id?: RemoteAgentId4;
 }
 /**
@@ -20825,9 +22966,9 @@ export interface PeerStopAcknowledgedEvent {
  * observe the spawned session's events.
  */
 export interface GateAnnouncedEvent {
-  type?: EventType104;
-  timestamp?: Timestamp104;
-  session_id?: SessionId104;
+  type?: EventType111;
+  timestamp?: Timestamp111;
+  session_id?: SessionId111;
   gate_name?: GateName;
   tenant_id?: TenantId;
   owner?: Owner;
@@ -20847,9 +22988,9 @@ export interface Intent {
  * on TTL expiry.
  */
 export interface GateReleasedEvent {
-  type?: EventType105;
-  timestamp?: Timestamp105;
-  session_id?: SessionId105;
+  type?: EventType112;
+  timestamp?: Timestamp112;
+  session_id?: SessionId112;
   gate_name?: GateName1;
   tenant_id?: TenantId1;
   owner?: Owner1;
@@ -20865,9 +23006,9 @@ export interface GateReleasedEvent {
  * the registry replays the live state once at subscription time.
  */
 export interface GatesSnapshotEvent {
-  type?: EventType106;
-  timestamp?: Timestamp106;
-  session_id?: SessionId106;
+  type?: EventType113;
+  timestamp?: Timestamp113;
+  session_id?: SessionId113;
   gates?: Gates;
   snapshot_at?: SnapshotAt;
 }
@@ -20918,14 +23059,14 @@ export interface GateState {
  * patterns via the priority dimension.
  */
 export interface InjectPromptRequest {
-  type?: EventType107;
-  timestamp?: Timestamp107;
-  session_id?: SessionId107;
+  type?: EventType114;
+  timestamp?: Timestamp114;
+  session_id?: SessionId114;
   text?: Text7;
   source_type?: SourceType;
   source_id?: SourceId;
   attachments?: Attachments1;
-  request_id?: RequestId31;
+  request_id?: RequestId39;
 }
 /**
  * Server's response to :class:`InjectPromptRequest`.
@@ -20977,10 +23118,10 @@ export interface InjectPromptRequest {
  * absence is left checkable instead of forgeable.
  */
 export interface InjectPromptResultEvent {
-  type?: EventType108;
-  timestamp?: Timestamp108;
-  session_id?: SessionId108;
-  request_id?: RequestId32;
+  type?: EventType115;
+  timestamp?: Timestamp115;
+  session_id?: SessionId115;
+  request_id?: RequestId40;
   status?: Status3;
   detail?: Detail;
 }
@@ -20999,10 +23140,10 @@ export interface InjectPromptResultEvent {
  * flows compose this with ``resolve_fork_point``.
  */
 export interface ReplayMessagesRequest {
-  type?: EventType109;
-  timestamp?: Timestamp109;
-  session_id?: SessionId109;
-  request_id?: RequestId33;
+  type?: EventType116;
+  timestamp?: Timestamp116;
+  session_id?: SessionId116;
+  request_id?: RequestId41;
   messages?: Messages;
   timeout_seconds?: TimeoutSeconds;
 }
@@ -21010,12 +23151,12 @@ export interface ReplayMessagesRequest {
  * Server's response to :class:`ReplayMessagesRequest`.
  */
 export interface ReplayMessagesResultEvent {
-  type?: EventType110;
-  timestamp?: Timestamp110;
-  session_id?: SessionId110;
-  request_id?: RequestId34;
+  type?: EventType117;
+  timestamp?: Timestamp117;
+  session_id?: SessionId117;
+  request_id?: RequestId42;
   response_text?: ResponseText;
-  error?: Error14;
+  error?: Error18;
 }
 /**
  * Resolve a fork point in the session's history to a message index.
@@ -21033,10 +23174,10 @@ export interface ReplayMessagesResultEvent {
  * tool uses internally.
  */
 export interface ResolveForkPointRequest {
-  type?: EventType111;
-  timestamp?: Timestamp111;
-  session_id?: SessionId111;
-  request_id?: RequestId35;
+  type?: EventType118;
+  timestamp?: Timestamp118;
+  session_id?: SessionId118;
+  request_id?: RequestId43;
   after_message?: AfterMessage;
   after_tool_call?: AfterToolCall;
   after_timestamp?: AfterTimestamp;
@@ -21045,12 +23186,12 @@ export interface ResolveForkPointRequest {
  * Server's response to :class:`ResolveForkPointRequest`.
  */
 export interface ResolveForkPointResultEvent {
-  type?: EventType112;
-  timestamp?: Timestamp112;
-  session_id?: SessionId112;
-  request_id?: RequestId36;
+  type?: EventType119;
+  timestamp?: Timestamp119;
+  session_id?: SessionId119;
+  request_id?: RequestId44;
   fork_index?: ForkIndex;
-  error?: Error15;
+  error?: Error19;
 }
 /**
  * Server returns the result of ``session.bind_wake`` / ``session.unbind_wake``.
@@ -21062,9 +23203,9 @@ export interface ResolveForkPointResultEvent {
  * binding's Unix expiry — the values the caller's waker keys on.
  */
 export interface WakeBindResultEvent {
-  type?: EventType113;
-  timestamp?: Timestamp113;
-  session_id?: SessionId113;
+  type?: EventType120;
+  timestamp?: Timestamp120;
+  session_id?: SessionId120;
   wake_ref?: WakeRef;
   outcome?: Outcome1;
   detail?: Detail1;
@@ -21091,11 +23232,11 @@ export interface WakeBindResultEvent {
  * notification is a signal to attach, not the untrusted payload).
  */
 export interface SessionWokenEvent {
-  type?: EventType114;
-  timestamp?: Timestamp114;
-  session_id?: SessionId114;
+  type?: EventType121;
+  timestamp?: Timestamp121;
+  session_id?: SessionId121;
   wake_ref?: WakeRef1;
-  source?: Source2;
+  source?: Source6;
 }
 /**
  * Add tools / patterns to the session's permission whitelist.
@@ -21106,9 +23247,9 @@ export interface SessionWokenEvent {
  * additive.
  */
 export interface PermissionAddWhitelistRequest {
-  type?: EventType115;
-  timestamp?: Timestamp115;
-  session_id?: SessionId115;
+  type?: EventType122;
+  timestamp?: Timestamp122;
+  session_id?: SessionId122;
   tools?: Tools3;
   patterns?: Patterns;
 }
@@ -21120,9 +23261,9 @@ export interface PermissionAddWhitelistRequest {
  * both lists are additive.
  */
 export interface PermissionAddBlacklistRequest {
-  type?: EventType116;
-  timestamp?: Timestamp116;
-  session_id?: SessionId116;
+  type?: EventType123;
+  timestamp?: Timestamp123;
+  session_id?: SessionId123;
   tools?: Tools4;
   patterns?: Patterns1;
 }
@@ -21133,9 +23274,9 @@ export interface PermissionAddBlacklistRequest {
  * ``"blacklist"``.  Empty lists are no-ops.
  */
 export interface PermissionRemoveRequest {
-  type?: EventType117;
-  timestamp?: Timestamp117;
-  session_id?: SessionId117;
+  type?: EventType124;
+  timestamp?: Timestamp124;
+  session_id?: SessionId124;
   target?: Target1;
   tools?: Tools5;
   patterns?: Patterns2;
@@ -21149,9 +23290,9 @@ export interface PermissionRemoveRequest {
  * session-level overrides.
  */
 export interface PermissionClearRequest {
-  type?: EventType118;
-  timestamp?: Timestamp118;
-  session_id?: SessionId118;
+  type?: EventType125;
+  timestamp?: Timestamp125;
+  session_id?: SessionId125;
   target?: Target2;
 }
 /**
@@ -21162,19 +23303,19 @@ export interface PermissionClearRequest {
  * the base default for this session only.
  */
 export interface PermissionSetDefaultRequest {
-  type?: EventType119;
-  timestamp?: Timestamp119;
-  session_id?: SessionId119;
+  type?: EventType126;
+  timestamp?: Timestamp126;
+  session_id?: SessionId126;
   policy?: Policy;
 }
 /**
  * Request a structured snapshot of the current permission policy.
  */
 export interface PermissionPolicySnapshotRequest {
-  type?: EventType120;
-  timestamp?: Timestamp120;
-  session_id?: SessionId120;
-  request_id?: RequestId37;
+  type?: EventType127;
+  timestamp?: Timestamp127;
+  session_id?: SessionId127;
+  request_id?: RequestId45;
 }
 /**
  * Structured permission policy snapshot.
@@ -21185,10 +23326,10 @@ export interface PermissionPolicySnapshotRequest {
  * the stringly-typed ``permissions check`` command.
  */
 export interface PermissionPolicySnapshotEvent {
-  type?: EventType121;
-  timestamp?: Timestamp121;
-  session_id?: SessionId121;
-  request_id?: RequestId38;
+  type?: EventType128;
+  timestamp?: Timestamp128;
+  session_id?: SessionId128;
+  request_id?: RequestId46;
   default_policy?: DefaultPolicy;
   session_default_policy?: SessionDefaultPolicy;
   whitelist_tools?: WhitelistTools;
@@ -21237,10 +23378,10 @@ export interface PermissionPolicySnapshotEvent {
  *         socket for a side channel, and a weaker posture either way.
  */
 export interface TicketBindRequest {
-  type?: EventType122;
-  timestamp?: Timestamp122;
-  session_id?: SessionId122;
-  request_id?: RequestId39;
+  type?: EventType129;
+  timestamp?: Timestamp129;
+  session_id?: SessionId129;
+  request_id?: RequestId47;
   user?: User;
   ttl_seconds?: TtlSeconds;
   single_use?: SingleUse;
@@ -21288,10 +23429,10 @@ export interface TicketBindRequest {
  *         say — a reader of ``"unknown"`` is back where they started.
  */
 export interface TicketBindResultEvent {
-  type?: EventType123;
-  timestamp?: Timestamp123;
-  session_id?: SessionId123;
-  request_id?: RequestId40;
+  type?: EventType130;
+  timestamp?: Timestamp130;
+  session_id?: SessionId130;
+  request_id?: RequestId48;
   status?: Status4;
   ticket?: Ticket;
   qualified?: Qualified;
@@ -21328,10 +23469,10 @@ export interface TicketBindResultEvent {
  *         application instead.
  */
 export interface TicketRevokeRequest {
-  type?: EventType124;
-  timestamp?: Timestamp124;
-  session_id?: SessionId124;
-  request_id?: RequestId41;
+  type?: EventType131;
+  timestamp?: Timestamp131;
+  session_id?: SessionId131;
+  request_id?: RequestId49;
   ticket?: Ticket1;
   user?: User1;
 }
@@ -21357,10 +23498,10 @@ export interface TicketRevokeRequest {
  *         say.
  */
 export interface TicketRevokeResultEvent {
-  type?: EventType125;
-  timestamp?: Timestamp125;
-  session_id?: SessionId125;
-  request_id?: RequestId42;
+  type?: EventType132;
+  timestamp?: Timestamp132;
+  session_id?: SessionId132;
+  request_id?: RequestId50;
   status?: Status5;
   revoked?: Revoked;
   detail?: Detail3;
@@ -21402,10 +23543,10 @@ export interface TicketRevokeResultEvent {
  *         which of that user's secrets to mint.
  */
 export interface SecretResolveRequest {
-  type?: EventType126;
-  timestamp?: Timestamp126;
-  session_id?: SessionId126;
-  request_id?: RequestId43;
+  type?: EventType133;
+  timestamp?: Timestamp133;
+  session_id?: SessionId133;
+  request_id?: RequestId51;
   user?: User2;
   workspace?: Workspace3;
   name?: Name10;
@@ -21444,10 +23585,10 @@ export interface SecretResolveRequest {
  *         say.  Never the secret.
  */
 export interface SecretResolveResultEvent {
-  type?: EventType127;
-  timestamp?: Timestamp127;
-  session_id?: SessionId127;
-  request_id?: RequestId44;
+  type?: EventType134;
+  timestamp?: Timestamp134;
+  session_id?: SessionId134;
+  request_id?: RequestId52;
   status?: Status6;
   value?: Value;
   expires_at?: ExpiresAt3;
@@ -21472,10 +23613,10 @@ export interface SecretResolveResultEvent {
  *         ``ticket.bind`` does, so the app id is never a request field.
  */
 export interface SecretReloadRequest {
-  type?: EventType128;
-  timestamp?: Timestamp128;
-  session_id?: SessionId128;
-  request_id?: RequestId45;
+  type?: EventType135;
+  timestamp?: Timestamp135;
+  session_id?: SessionId135;
+  request_id?: RequestId53;
   user?: User3;
 }
 /**
@@ -21496,10 +23637,10 @@ export interface SecretReloadRequest {
  *     detail: Human-readable elaboration, omitted when there is nothing to say.
  */
 export interface SecretReloadResultEvent {
-  type?: EventType129;
-  timestamp?: Timestamp129;
-  session_id?: SessionId129;
-  request_id?: RequestId46;
+  type?: EventType136;
+  timestamp?: Timestamp136;
+  session_id?: SessionId136;
+  request_id?: RequestId54;
   status?: Status7;
   reloaded?: Reloaded;
   detail?: Detail5;
@@ -21577,6 +23718,13 @@ export const EventTypeValue = {
   SESSION_INFO: "session.info",
   SESSION_DESCRIPTION_UPDATED: "session.description_updated",
   MEMORY_LIST: "memory.list",
+  MEMORY_LIST_REQUEST: "memory.list.request",
+  MEMORY_GET_REQUEST: "memory.get.request",
+  MEMORY_GET_RESULT: "memory.get.result",
+  MEMORY_UPDATE_REQUEST: "memory.update.request",
+  MEMORY_UPDATE_RESULT: "memory.update.result",
+  MEMORY_DELETE_REQUEST: "memory.delete.request",
+  MEMORY_DELETE_RESULT: "memory.delete.result",
   SANDBOX_PATHS: "sandbox.paths",
   SERVICE_LIST: "service.list",
   SEND_MESSAGE: "message.send",

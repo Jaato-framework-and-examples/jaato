@@ -7035,6 +7035,74 @@ a test that stubbed enough of a server to run it would be asserting the
 stubs — and what the defect was is a missing call site, which is exactly
 what a walk of the call sites can answer.
 
+### A Memory Store Nobody Could See From the Browser (#1232)
+
+The web client had no view of the session's memories. The only route was
+the `memory` command, which prints a listing into the transcript, and
+`memory edit`, which opens `$EDITOR` on the daemon's host — a browser
+cannot drive that. The rail now has a **Memories** section, and the daemon
+has four quiet verbs behind it (protocol **1.22**):
+
+| Request | Answer | What it does |
+|---|---|---|
+| `MemoryListRequest` | `MemoryListEvent` (+ `request_id`, `ok`, `category`, `source`, `may_curate`) | both tiers, raw and curated; rows carry `tier`, timestamps, `usage_count`, `generated_by`, `curated_by`, source agent/session and two this-session flags, and no content |
+| `MemoryGetRequest` | `MemoryGetResultEvent` | one memory with its content and evidence |
+| `MemoryUpdateRequest` | `MemoryUpdateResultEvent` | a structured edit (description, content, tags) or a maturity change: approve is `validated`, dismiss is `dismissed` |
+| `MemoryDeleteRequest` | `MemoryDeleteResultEvent` | the plugin's own `delete_memory` path |
+
+Each answer echoes the caller's `request_id`. Both SDKs refuse the verbs
+below 1.22 (`list_memories` and friends / `listMemories` and friends): an
+older daemon answers "Unknown request type" and never the result.
+
+**The answer comes from the runner's copy.** `memory` is
+`PLUGIN_TIER = "runner"`, and the `memory` command used to run on the
+runner and then fill its `MemoryListEvent` from the DAEMON's copy of the
+plugin — a store no runner-served session writes to (the #1179 class).
+`JaatoServer.memory_op` asks the runner (`session.memory`, a named
+control-lane handler, so a refresh answers during a turn). A failed ask
+answers `ok=False, category="runner_unreachable"`, never an empty list and
+never the daemon's copy. The daemon's plugin answers only when there is no
+runner at all (embedded, standalone WS), where it is the store. The
+`memory` command's push and the `SessionInfoEvent.memories` snapshot now go
+through the same method, and are withheld when the read failed.
+`jaato_server/shared/plugins/memory/verbs.py` holds the one definition of what each
+verb does, so the runner and the no-runner path cannot disagree.
+
+**Only the workspace owner may change memories.** `memory_verbs.may_curate`
+is the one predicate: the owner may, anyone may on an unowned workspace,
+and an identity-less connection on an owned workspace may look but not
+change. The identity comes from the transport, never from the request. A
+refused mutation answers `not_owner` without reaching the runner, and the
+list carries `may_curate` so the rail hides buttons the daemon would refuse.
+Stated cost: an IPC client on a workspace the WS server records as owned is
+refused, because an IPC identity is an OS account and never equals an
+`app:user` owner; it still has the `memory` command.
+
+**An approval records who approved it.** Approve and dismiss go through
+`_stamp_curation`, the one writer of `curated_by`. A rail action has no
+model in context, so the daemon passes the person the transport
+authenticated (`{"kind": "human", "via": "memory.update", "user": …}`).
+Moving back out of a curated maturity clears the stamp. Dismissing a raw
+memory unlinks it from the queue, so it is gone from the next list.
+Deleting from a tier now rebuilds that tier's index too.
+
+The rail section (`app/memories.ts`, `components/panels/MemoriesPanel.tsx`)
+lists the whole store by default, with a "this session only" toggle. Rows
+written or retrieved in this session are highlighted, and a raw memory
+says **unvetted** in words. The header reads `12 memories · 3 unvetted`.
+Expanding a row fetches its content. The list is refreshed on attach and
+on every `session.info`, on a successful `store_memory` / `update_memory` /
+`delete_memory` in any agent, on the `memory` command's push, on window
+focus, and after each rail action. A failed read is shown and keeps the
+rows it had.
+
+Guard: `jaato_server/shared/tests/test_memory_rail_1232.py`, six reversions (the daemon
+answering from its own copy, the owner predicate, the gate not applied, an
+approval with no stamp, the human curator dropped, and the
+`handle_request` arm removed). `handle_request` stayed on its ratchet by
+lifting the instruction-budget arm into `_handle_instruction_budget_request`
+(93 → 80).
+
 ### A File the Browser Could Not Put in the Workspace
 
 The premium `<jaato-task>` component (and the knowledge-manager client

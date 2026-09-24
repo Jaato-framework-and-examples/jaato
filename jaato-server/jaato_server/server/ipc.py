@@ -104,6 +104,15 @@ from jaato_sdk.events import (
     ToolExecuteResultEvent,
     ToolOutputEvent,
 )
+from .memory_verbs import MEMORY_REQUEST_TYPES
+
+#: Requests routed even when the client is attached to no session: the
+#: daemon-level verbs, and the memory verbs (#1232), whose answer to a
+#: session-less caller is a correlated ``no_session`` result rather than
+#: silence the SDK would wait out.
+_SESSIONLESS_REQUEST_TYPES = (
+    CommandRequest, ClientConfigRequest, PostAuthSetupResponse,
+) + MEMORY_REQUEST_TYPES
 
 
 logger = logging.getLogger(__name__)
@@ -880,10 +889,11 @@ class JaatoIPCServer:
                     client.session_id = session_id
 
         # Route to session handler
-        # CommandRequest, ClientConfigRequest, and PostAuthSetupResponse are
-        # allowed without session_id — they are handled at daemon level.
+        # CommandRequest, ClientConfigRequest, PostAuthSetupResponse and the
+        # memory verbs are allowed without session_id — they are handled at
+        # daemon level (see _SESSIONLESS_REQUEST_TYPES).
         if self._on_session_request:
-            if session_id or isinstance(event, (CommandRequest, ClientConfigRequest, PostAuthSetupResponse)):
+            if session_id or isinstance(event, _SESSIONLESS_REQUEST_TYPES):
                 # ClientConfigRequest must be processed synchronously to ensure
                 # client's env_file is registered before session creation
                 if isinstance(event, ClientConfigRequest):

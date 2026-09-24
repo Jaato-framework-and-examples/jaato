@@ -19,6 +19,7 @@ import {
   MIN_WORKSPACE_IGNORE_PROTOCOL,
   MIN_SCAFFOLD_INTEGRATION_PROTOCOL,
   MIN_FILE_FETCH_PROTOCOL,
+  MIN_MEMORY_VERBS_PROTOCOL,
   MIN_PROTOCOL_VERSION,
   STAGE_FILES_TIMEOUT_MS,
   LEGACY_SERVER_LIMITS,
@@ -1632,5 +1633,117 @@ describe("serverLimits", () => {
     } finally {
       restoreWebSocket();
     }
+  });
+});
+
+describe("JaatoClient memory verbs (protocol 1.22, #1232)", () => {
+  let client: JaatoClient;
+
+  beforeEach(async () => {
+    installMockWebSocket();
+    client = new JaatoClient({ url: "ws://localhost:8080" });
+    await connectAndAck(client, MIN_MEMORY_VERBS_PROTOCOL);
+    if (lastInstance) lastInstance.sent = [];
+  });
+
+  afterEach(async () => {
+    await client.close();
+    restoreWebSocket();
+  });
+
+  const tick = (): Promise<void> => new Promise<void>((resolve) => setTimeout(resolve, 0));
+  const lastRequest = (): Record<string, unknown> =>
+    JSON.parse(lastInstance!.sent[lastInstance!.sent.length - 1]!) as Record<string, unknown>;
+
+  test("the floor is 1.22", () => {
+    assert.equal(MIN_MEMORY_VERBS_PROTOCOL, "1.22");
+  });
+
+  test("listMemories resolves with the answer carrying ITS request_id", async () => {
+    const promise = client.listMemories();
+    await tick();
+    const req = lastRequest();
+    assert.equal(req.type, EventTypeValue.MEMORY_LIST_REQUEST);
+    assert.ok(req.request_id);
+    // A decoy answer for somebody else, then an echo of the request, then ours.
+    lastInstance!.emit({ type: EventTypeValue.MEMORY_LIST, request_id: "other", memories: [{ id: "x" }] });
+    lastInstance!.emit({ ...req });
+    lastInstance!.emit({
+      type: EventTypeValue.MEMORY_LIST, request_id: req.request_id,
+      memories: [{ id: "mine" }], ok: true, may_curate: false,
+    });
+    const got = await promise;
+    assert.deepEqual(got.memories, [{ id: "mine" }]);
+    assert.equal(got.may_curate, false);
+  });
+
+  test("updateMemory sends only the fields given", async () => {
+    const promise = client.updateMemory("m1", { description: "d", tags: ["aa", "bb"] });
+    await tick();
+    const req = lastRequest();
+    assert.equal(req.type, EventTypeValue.MEMORY_UPDATE_REQUEST);
+    assert.equal(req.memory_id, "m1");
+    assert.equal(req.description, "d");
+    assert.deepEqual(req.tags, ["aa", "bb"]);
+    assert.ok(!("content" in req));
+    assert.ok(!("maturity" in req));
+    lastInstance!.emit({ type: EventTypeValue.MEMORY_UPDATE_RESULT, request_id: req.request_id, memory_id: "m1", ok: true });
+    assert.equal((await promise).ok, true);
+  });
+
+  test("approve and dismiss are maturity updates", async () => {
+    for (const [call, maturity] of [
+      [() => client.approveMemory("m1"), "validated"],
+      [() => client.dismissMemory("m1"), "dismissed"],
+    ] as const) {
+      const promise = call();
+      await tick();
+      const req = lastRequest();
+      assert.equal(req.maturity, maturity);
+      lastInstance!.emit({ type: EventTypeValue.MEMORY_UPDATE_RESULT, request_id: req.request_id, memory_id: "m1", ok: true });
+      await promise;
+    }
+  });
+
+  test("getMemory and deleteMemory send their typed requests", async () => {
+    const got = client.getMemory("m1");
+    await tick();
+    const r1 = lastRequest();
+    assert.equal(r1.type, EventTypeValue.MEMORY_GET_REQUEST);
+    lastInstance!.emit({ type: EventTypeValue.MEMORY_GET_RESULT, request_id: r1.request_id, memory_id: "m1", ok: true, memory: { id: "m1", content: "c" } });
+    assert.equal(((await got).memory as { content?: string }).content, "c");
+
+    const del = client.deleteMemory("m1");
+    await tick();
+    const r2 = lastRequest();
+    assert.equal(r2.type, EventTypeValue.MEMORY_DELETE_REQUEST);
+    lastInstance!.emit({ type: EventTypeValue.MEMORY_DELETE_RESULT, request_id: r2.request_id, memory_id: "m1", ok: false, category: "not_owner" });
+    assert.equal((await del).category, "not_owner");
+  });
+
+  test("a closed connection rejects rather than resolving empty", async () => {
+    const promise = client.listMemories();
+    await tick();
+    lastInstance!.close(1006, "gone");
+    await assert.rejects(promise, RequestInterruptedError);
+  });
+
+  test("every verb is refused below 1.22 with nothing sent", async () => {
+    await client.close();
+    installMockWebSocket();
+    client = new JaatoClient({ url: "ws://localhost:8080" });
+    await connectAndAck(client, "1.21");
+    if (lastInstance) lastInstance.sent = [];
+    for (const call of [
+      () => client.listMemories(),
+      () => client.getMemory("m1"),
+      () => client.updateMemory("m1", { description: "d" }),
+      () => client.approveMemory("m1"),
+      () => client.dismissMemory("m1"),
+      () => client.deleteMemory("m1"),
+    ]) {
+      await assert.rejects(call, /memory verbs/);
+    }
+    assert.equal(lastInstance!.sent.length, 0);
   });
 });

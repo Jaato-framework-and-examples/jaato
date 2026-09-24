@@ -42,6 +42,9 @@
  *                 ``tool.execute_request``, waits for the client's
  *                 ``tool.execute_result``, and the call lands as a tool row
  *   "subagent"  → spawns a subagent that streams in its own tab
+ *   "…remember <text>" → a ``store_memory`` call that succeeds and adds a
+ *                 RAW memory written in this session to the store the
+ *                 memory verbs (protocol 1.22) answer from
  *   "model this is broken" (verbatim test) → echoes the text back
  *   anything else → a short streamed markdown reply
  *
@@ -123,6 +126,86 @@ function monitorFor(c: Client): MockMonitor {
  */
 const MOCK_GC_POLICY = { strategy: "budget", threshold: 80, target_percent: 60, continuous_mode: false };
 const LAST_GC = new Map<string, Record<string, unknown>>();
+
+/**
+ * The memory store the memory verbs answer from (#1232, protocol 1.22), in
+ * the daemon's row shape (``MemoryPlugin.memory_row``): every field but the
+ * content, plus ``tier``, and the two this-session flags computed for the
+ * asking session.  Keyed by session so parallel tests do not curate each
+ * other's memories; seeded with one of each kind the panel draws.
+ */
+interface MockMemory {
+  id: string; description: string; content: string; tags: string[]; maturity: string; tier: string;
+  scope: string; timestamp: string; usage_count: number; source_session: string | null;
+  curated_by: Record<string, unknown> | null; retrieved: boolean;
+}
+const MEMORIES = new Map<string, MockMemory[]>();
+function memoriesFor(c: Client): MockMemory[] {
+  const key = c.sessionId ?? `_client:${c.id}`;
+  let list = MEMORIES.get(key);
+  if (!list) {
+    list = [
+      { id: "mem_raw_1", description: "The build uses pnpm, not npm", content: "Run pnpm install; npm install breaks the lockfile.", tags: ["build", "pnpm"], maturity: "raw", tier: "workspace", scope: "project", timestamp: ts(), usage_count: 0, source_session: null, curated_by: null, retrieved: false },
+      { id: "mem_ok_1", description: "Tests live beside their modules", content: "Every foo.ts has foo.test.ts next to it.", tags: ["tests", "layout"], maturity: "validated", tier: "workspace", scope: "project", timestamp: ts(), usage_count: 3, source_session: null, curated_by: { kind: "human", user: "mock:tester", at: ts() }, retrieved: true },
+      { id: "mem_global_1", description: "Prefer small commits", content: "One change per commit, with the reason in the body.", tags: ["git", "style"], maturity: "validated", tier: "global", scope: "universal", timestamp: ts(), usage_count: 1, source_session: null, curated_by: { kind: "human", user: "mock:tester", at: ts() }, retrieved: false },
+    ];
+    MEMORIES.set(key, list);
+  }
+  return list;
+}
+function memoryRow(c: Client, m: MockMemory): Record<string, unknown> {
+  return {
+    id: m.id, description: m.description, tags: m.tags, maturity: m.maturity, confidence: 0.8, scope: m.scope,
+    tier: m.tier, timestamp: m.timestamp, last_accessed: null, usage_count: m.usage_count,
+    generated_by: { provider: "mock", model: "mock-1" }, curated_by: m.curated_by,
+    source_agent: "main", source_session: m.source_session,
+    written_this_session: !!c.sessionId && m.source_session === c.sessionId,
+    retrieved_this_session: m.retrieved,
+  };
+}
+/** Answer one ``memory.*.request`` the way ``memory_verbs.answer_memory_request`` does. */
+function answerMemoryRequest(c: Client, ev: Record<string, unknown>): void {
+  const type = String(ev.type);
+  const requestId = String(ev.request_id ?? "");
+  const common = { request_id: requestId, source: "runner", error: "", category: "" };
+  if (!c.sessionId) {
+    const refusal = { ...common, ok: false, category: "no_session", error: "no session is attached to this connection" };
+    if (type === "memory.list.request") send(c, { type: "memory.list", memories: [], may_curate: true, ...refusal });
+    else send(c, { type: type.replace(".request", ".result"), memory_id: String(ev.memory_id ?? ""), ...refusal });
+    return;
+  }
+  const list = memoriesFor(c);
+  if (type === "memory.list.request") {
+    send(c, { type: "memory.list", memories: list.map((m) => memoryRow(c, m)), may_curate: true, ok: true, ...common });
+    return;
+  }
+  const id = String(ev.memory_id ?? "");
+  const index = list.findIndex((m) => m.id === id);
+  const result = type.replace(".request", ".result");
+  if (index < 0) {
+    send(c, { type: result, memory_id: id, ...common, ok: false, category: "not_found", error: `Memory not found: ${id}` });
+    return;
+  }
+  const m = list[index]!;
+  if (type === "memory.get.request") {
+    send(c, { type: result, memory_id: id, ...common, ok: true, memory: { ...memoryRow(c, m), content: m.content, evidence: null } });
+  } else if (type === "memory.delete.request") {
+    list.splice(index, 1);
+    send(c, { type: result, memory_id: id, ...common, ok: true });
+  } else if (type === "memory.update.request") {
+    if (typeof ev.description === "string") m.description = ev.description;
+    if (typeof ev.content === "string") m.content = ev.content;
+    if (Array.isArray(ev.tags)) m.tags = (ev.tags as unknown[]).map(String);
+    if (typeof ev.maturity === "string" && ev.maturity !== m.maturity) {
+      m.maturity = ev.maturity;
+      m.curated_by = ev.maturity === "validated" || ev.maturity === "escalated" ? { kind: "human", via: "memory.update", user: "mock:tester", at: ts() } : null;
+    }
+    const row = memoryRow(c, m);
+    // The storage layer keeps no dismissed trace: gone from the next list.
+    if (m.maturity === "dismissed") list.splice(index, 1);
+    send(c, { type: result, memory_id: id, ...common, ok: true, memory: row });
+  }
+}
 function sendGcState(c: Client): void {
   send(c, { type: "gc.config", agent_id: "main", ...MOCK_GC_POLICY });
   const last = c.sessionId ? LAST_GC.get(c.sessionId) : undefined;
@@ -273,7 +356,17 @@ async function turn(c: Client, text: string, agentId = "main"): Promise<void> {
   await sleep(50);
 
   const touch = /\btouch\s+(.+)$/i.exec(text);
-  if (touch) {
+  const remember = /\bremember\s+(.+)$/i.exec(text);
+  if (remember) {
+    // The model stores a memory; the daemon runs ``store_memory`` and the
+    // client re-lists on the successful ``tool.call_end``.
+    const body = remember[1] ?? "";
+    const callId = randomUUID();
+    send(c, { type: "tool.call_start", agent_id: agentId, tool_name: "store_memory", tool_args: { description: body, content: body, tags: ["mock", "note"] }, call_id: callId });
+    memoriesFor(c).push({ id: `mem_${callId.slice(0, 8)}`, description: body, content: body, tags: ["mock", "note"], maturity: "raw", tier: "workspace", scope: "project", timestamp: ts(), usage_count: 0, source_session: c.sessionId, curated_by: null, retrieved: false });
+    send(c, { type: "tool.call_end", agent_id: agentId, tool_name: "store_memory", call_id: callId, success: true, duration_seconds: 0.01, error_message: null });
+    await stream(c, agentId, "Noted.");
+  } else if (touch) {
     const paths = (touch[1] ?? "").split(/\s+/).filter(Boolean);
     emitWorkspaceChanges(c, paths.map((path) => ({ path, status: "modified" })));
     await stream(c, agentId, `Touched ${paths.join(", ")}.`);
@@ -466,7 +559,7 @@ wss.on("connection", (ws, req) => {
     policy: { effective_default: "ask", suspension_scope: null },
     installedIntegrations: new Set(),
   };
-  send(c, { type: "connected", protocol_version: "1.21", server_info: { server_version: "mock-0.0.1", client_id: randomUUID(), max_message_size: MAX_MESSAGE_SIZE, stage_per_file_limit: Math.min(STAGE_PER_FILE_LIMIT, MAX_MESSAGE_SIZE), stage_total_limit: STAGE_TOTAL_LIMIT } });
+  send(c, { type: "connected", protocol_version: "1.22", server_info: { server_version: "mock-0.0.1", client_id: randomUUID(), max_message_size: MAX_MESSAGE_SIZE, stage_per_file_limit: Math.min(STAGE_PER_FILE_LIMIT, MAX_MESSAGE_SIZE), stage_total_limit: STAGE_TOTAL_LIMIT } });
 
   ws.on("message", async (raw, isBinary) => {
     if (c.staging) {
@@ -495,6 +588,12 @@ wss.on("connection", (ws, req) => {
       }
       case "workspace.file.fetch":
         answerFileFetch(c, ev);
+        break;
+      case "memory.list.request":
+      case "memory.get.request":
+      case "memory.update.request":
+      case "memory.delete.request":
+        answerMemoryRequest(c, ev);
         break;
       case "tools.register_client":
         for (const t of (ev.tools as { name?: string }[] | undefined) ?? []) if (t.name) c.clientTools.add(t.name);

@@ -1,0 +1,7 @@
+{
+  "type": "memory.get.request",
+  "timestamp": "<TIMESTAMP>",
+  "session_id": "",
+  "request_id": "",
+  "memory_id": ""
+}

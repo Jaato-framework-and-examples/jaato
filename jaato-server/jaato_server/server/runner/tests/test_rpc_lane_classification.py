@@ -128,6 +128,7 @@ _CONTROL_PLANE = frozenset({
     "session.get_user_commands",
     "session.health_check",
     "session.inject_prompt",
+    "session.memory",
     "session.is_running",
     "session.offer_message",
     "session.register_client_tools",

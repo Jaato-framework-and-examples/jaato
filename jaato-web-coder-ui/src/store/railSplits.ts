@@ -1,5 +1,5 @@
 /**
- * How the rail's open sections (Plan, Budget, Files, Sessions) share its
+ * How the rail's open sections (Plan, Budget, Files, Sessions, Memories) share its
  * height, and the per-browser memory of it.
  *
  * A section's size is a **weight**, not a pixel count: the open sections'
@@ -17,7 +17,7 @@
  * others don't move), ``resetPair`` levels a pair, and ``sharesFor`` is the one
  * place open/close redistribution happens.
  */
-export const RAIL_SECTION_IDS = ["plan", "budget", "files", "sessions"] as const;
+export const RAIL_SECTION_IDS = ["plan", "budget", "files", "sessions", "memories"] as const;
 export type RailSectionId = (typeof RAIL_SECTION_IDS)[number];
 
 /** Weight per section id.  Absent = the default weight; a section not open is

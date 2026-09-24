@@ -407,7 +407,40 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 # than wait out a reply nobody will send.  The result event degrades the 1.8
 # way: an older client that somehow receives one it does not know logs and
 # continues.
-PROTOCOL_VERSION = "1.21"
+#
+# 1.22 -- the memory verbs (#1232): ``memory.list.request`` /
+# ``memory.get.request`` / ``memory.update.request`` /
+# ``memory.delete.request``, answered by ``MemoryListEvent`` (widened) and
+# ``memory.get.result`` / ``memory.update.result`` / ``memory.delete.result``,
+# each echoing the caller's ``request_id``.  A QUIET list: unlike the
+# ``memory list`` user command it prints nothing to the transcript, so a
+# client's side rail may ask as often as it needs.
+#
+# The rows come from the plugin copy that HOLDS the store.  ``memory`` is
+# ``PLUGIN_TIER = "runner"``, and the command path used to fill
+# ``MemoryListEvent`` from the DAEMON's copy of the plugin while the command
+# itself ran on the runner -- the #1179 defect class.  The answer is now read
+# from the runner over the control lane, carries ``source`` (``runner`` /
+# ``daemon``, the latter only where there is no runner at all), and a failed
+# ask answers ``ok=False`` with ``error`` / ``category`` -- never an empty
+# list, which reads as "nothing remembered".
+#
+# The rows widen with fields that already exist on ``Memory``
+# (``timestamp``, ``last_accessed``, ``usage_count``, ``generated_by``,
+# ``curated_by``, ``source_agent``, ``source_session``) plus ``tier``
+# (``workspace`` / ``global`` -- the two stores are merged) and two
+# per-session flags.  Content is NOT listed; ``memory.get.request`` fetches
+# it per row.  ``memory.update.request`` edits description / tags / content
+# and moves maturity (approve = ``validated``, dismiss = ``dismissed``)
+# through the one helper that stamps ``curated_by``; update and delete are
+# limited to the workspace OWNER, decided daemon-side.
+#
+# New VERBS (the 1.7 rule): an older daemon answers ``ErrorEvent("Unknown
+# request type")`` with no ``request_id`` and never the result a caller
+# waits on, so both SDKs refuse below ``MIN_MEMORY_VERBS_PROTOCOL``.  The
+# widened ``MemoryListEvent`` is additive -- an older client ignores the new
+# keys -- and the result events degrade the 1.8 way.
+PROTOCOL_VERSION = "1.22"
 
 
 # =============================================================================
@@ -526,7 +559,15 @@ class EventType(str, Enum):
     SESSION_DESCRIPTION_UPDATED = "session.description_updated"  # Description changed
 
     # Memory management (Server -> Client)
-    MEMORY_LIST = "memory.list"  # Memory list for completion cache and pager display
+    MEMORY_LIST = "memory.list"  # Memory list for completion cache, pager display and the rail (1.22)
+    # Memory verbs (#1232, 1.22): request/result pairs correlated by request_id
+    MEMORY_LIST_REQUEST = "memory.list.request"  # Client -> Server
+    MEMORY_GET_REQUEST = "memory.get.request"  # Client -> Server
+    MEMORY_GET_RESULT = "memory.get.result"  # Server -> Client
+    MEMORY_UPDATE_REQUEST = "memory.update.request"  # Client -> Server
+    MEMORY_UPDATE_RESULT = "memory.update.result"  # Server -> Client
+    MEMORY_DELETE_REQUEST = "memory.delete.request"  # Client -> Server
+    MEMORY_DELETE_RESULT = "memory.delete.result"  # Server -> Client
 
     # Sandbox management (Server -> Client)
     SANDBOX_PATHS = "sandbox.paths"  # Sandbox allowed paths for @@ completion cache
@@ -1915,10 +1956,115 @@ class SessionListEvent(Event):
 
 
 class MemoryListEvent(Event):
-    """List of available memories - for completion cache and pager display."""
+    """The memory store, as the plugin that HOLDS it reports it.
+
+    Two emitters, one shape: the answer to :class:`MemoryListRequest`
+    (protocol 1.22, ``request_id`` echoed) and the push after a ``memory``
+    user command (the TUI's completion cache).  ``SessionInfoEvent.memories``
+    carries the same rows, read the same way.  ``memory`` is
+    ``PLUGIN_TIER = "runner"``, so on a runner-served session -- the default
+    -- the rows are read from the RUNNER's plugin over the control lane.
+    Before 1.22 the command push read the DAEMON's copy while the command
+    itself ran on the runner (#1232), which on a split host, or wherever the
+    daemon copy had no storage, answered ``[]``.
+
+    Each row (a dict, so an older client ignores the keys it does not know):
+
+    ``id`` / ``description`` / ``tags`` / ``maturity`` (``raw`` |
+    ``validated`` | ``escalated`` | ``dismissed``) / ``confidence`` /
+    ``scope`` (``project`` | ``universal`` -- how broadly it applies)
+        What every emitter has always sent.
+    ``tier`` (1.22)
+        ``workspace`` or ``global`` (``~/.jaato/memories``): the rail merges
+        both stores, and a row says which one it came from.  Deliberately
+        NOT ``scope``, which already means something else on a memory.
+    ``timestamp`` / ``last_accessed`` / ``usage_count`` / ``generated_by``
+    / ``curated_by`` / ``source_agent`` / ``source_session`` (1.22)
+        Fields that already exist on the stored record, passed through.
+        ``curated_by`` is ``None`` on every ``raw`` memory by definition;
+        ``generated_by`` is ``None`` on a record written before #1123 --
+        *provenance unknown*, never human-authored.  ``content`` is NOT
+        listed: :class:`MemoryGetRequest` fetches it per row, so a large
+        store does not arrive in one frame.
+    ``written_this_session`` / ``retrieved_this_session`` (1.22)
+        Whether the session the request was served for wrote this memory,
+        or retrieved it with ``retrieve_memories``.  Answer-only: the
+        command push carries neither.
+
+    Fields (1.22, all additive):
+        request_id: The :class:`MemoryListRequest` this answers; ``""`` on
+            the command push.
+        ok: ``False`` when the store could not be read -- the runner did
+            not answer, the session does not enable the memory plugin.
+            ``memories`` is then EMPTY AND MEANINGLESS: an empty list is
+            never how a failure is spelled, because it reads as "nothing
+            remembered".
+        error / category: Why not.  ``category`` is one of
+            ``no_session``, ``no_plugin``, ``runner_unreachable``,
+            ``not_found``, ``invalid``, ``not_owner``, ``unknown_op``,
+            ``store_error``.
+        source: ``runner`` or ``daemon`` -- which plugin copy answered.
+            ``daemon`` only where there is no runner at all (embedded,
+            standalone), where the daemon's copy IS the store.
+        may_curate: Whether THIS caller may update / delete (the workspace
+            owner, or anyone on an unowned workspace), decided daemon-side
+            by the same predicate that refuses the verbs.  ``None`` on the
+            command push.
+    """
     type: EventType = Field(default=EventType.MEMORY_LIST)
     memories: List[Dict[str, Any]] = Field(default_factory=list)
-    # ^ List of {id: str, description: str, tags: List[str]}
+    request_id: str = ""
+    ok: bool = True
+    error: str = ""
+    category: str = ""
+    source: str = ""
+    may_curate: Optional[bool] = None
+
+
+class MemoryGetResultEvent(Event):
+    """Answer to :class:`MemoryGetRequest` (1.22): one memory, with content.
+
+    ``memory`` is the list row plus ``content`` and ``evidence``, or
+    ``None`` when ``ok`` is ``False`` (``category="not_found"`` for an id
+    neither tier holds).
+    """
+    type: EventType = Field(default=EventType.MEMORY_GET_RESULT)
+    request_id: str = ""
+    memory_id: str = ""
+    ok: bool = True
+    error: str = ""
+    category: str = ""
+    source: str = ""
+    memory: Optional[Dict[str, Any]] = None
+
+
+class MemoryUpdateResultEvent(Event):
+    """Answer to :class:`MemoryUpdateRequest` (1.22).
+
+    ``memory`` is the row AFTER the update, so a client can replace its
+    copy without a second list.  ``category="not_owner"`` is the owner gate
+    refusing; ``invalid`` is the plugin's schema validator refusing (an empty
+    description, a one-letter tag, a maturity outside the vocabulary).
+    """
+    type: EventType = Field(default=EventType.MEMORY_UPDATE_RESULT)
+    request_id: str = ""
+    memory_id: str = ""
+    ok: bool = True
+    error: str = ""
+    category: str = ""
+    source: str = ""
+    memory: Optional[Dict[str, Any]] = None
+
+
+class MemoryDeleteResultEvent(Event):
+    """Answer to :class:`MemoryDeleteRequest` (1.22)."""
+    type: EventType = Field(default=EventType.MEMORY_DELETE_RESULT)
+    request_id: str = ""
+    memory_id: str = ""
+    ok: bool = True
+    error: str = ""
+    category: str = ""
+    source: str = ""
 
 
 class SandboxPathsEvent(Event):
@@ -2484,6 +2630,61 @@ class GetInstructionBudgetRequest(Event):
     """
     type: EventType = Field(default=EventType.INSTRUCTION_BUDGET_REQUEST)
     agent_id: Optional[str] = None  # None = main agent
+
+
+class MemoryListRequest(Event):
+    """List the attached session's memory store, quietly (#1232, 1.22).
+
+    Answered by :class:`MemoryListEvent` carrying this ``request_id``.
+    Unlike the ``memory list`` user command it prints nothing to the
+    transcript, so a client may ask as often as it needs.  Session-scoped:
+    the store is read through the session's own runner.
+    """
+    type: EventType = Field(default=EventType.MEMORY_LIST_REQUEST)
+    request_id: str = ""
+
+
+class MemoryGetRequest(Event):
+    """Fetch one memory WITH its content (1.22).
+
+    Answered by :class:`MemoryGetResultEvent`.  Viewing follows the
+    session's visibility, like the list.
+    """
+    type: EventType = Field(default=EventType.MEMORY_GET_REQUEST)
+    request_id: str = ""
+    memory_id: str = ""
+
+
+class MemoryUpdateRequest(Event):
+    """Edit a memory, or approve / dismiss it (1.22).
+
+    The structured replacement for ``memory edit``, which spawns ``$EDITOR``
+    on the runner's host and so cannot be driven from a browser.  Every
+    field is optional; ``None`` leaves it as it is.  ``maturity`` moves the
+    lifecycle -- ``validated`` approves, ``dismissed`` dismisses -- through
+    the plugin's one ``curated_by``-stamping helper, which records the
+    caller as the curator.  Limited to the workspace owner (anyone, on an
+    unowned workspace); answered by :class:`MemoryUpdateResultEvent`.
+    """
+    type: EventType = Field(default=EventType.MEMORY_UPDATE_REQUEST)
+    request_id: str = ""
+    memory_id: str = ""
+    description: Optional[str] = None
+    content: Optional[str] = None
+    tags: Optional[List[str]] = None
+    maturity: Optional[str] = None
+
+
+class MemoryDeleteRequest(Event):
+    """Remove a memory from whichever tier holds it (1.22).
+
+    Through the plugin's existing delete path (``delete_memory``), not a
+    second one.  Limited to the workspace owner; answered by
+    :class:`MemoryDeleteResultEvent`.
+    """
+    type: EventType = Field(default=EventType.MEMORY_DELETE_REQUEST)
+    request_id: str = ""
+    memory_id: str = ""
 
 
 class CommandListRequest(Event):
@@ -4191,6 +4392,9 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.GC.value: GCEvent,
     EventType.SESSION_INFO.value: SessionInfoEvent,
     EventType.MEMORY_LIST.value: MemoryListEvent,
+    EventType.MEMORY_GET_RESULT.value: MemoryGetResultEvent,
+    EventType.MEMORY_UPDATE_RESULT.value: MemoryUpdateResultEvent,
+    EventType.MEMORY_DELETE_RESULT.value: MemoryDeleteResultEvent,
     EventType.SANDBOX_PATHS.value: SandboxPathsEvent,
     EventType.SERVICE_LIST.value: ServiceListEvent,
     EventType.SESSION_DESCRIPTION_UPDATED.value: SessionDescriptionUpdatedEvent,
@@ -4203,6 +4407,10 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.EVENTS_SUBSCRIBED.value: EventsSubscribedEvent,
     EventType.COMMAND.value: CommandRequest,
     EventType.INSTRUCTION_BUDGET_REQUEST.value: GetInstructionBudgetRequest,
+    EventType.MEMORY_LIST_REQUEST.value: MemoryListRequest,
+    EventType.MEMORY_GET_REQUEST.value: MemoryGetRequest,
+    EventType.MEMORY_UPDATE_REQUEST.value: MemoryUpdateRequest,
+    EventType.MEMORY_DELETE_REQUEST.value: MemoryDeleteRequest,
     EventType.COMMAND_LIST_REQUEST.value: CommandListRequest,
     EventType.COMMAND_LIST.value: CommandListEvent,
     EventType.COMMAND_LIST_REFRESH.value: CommandListRefreshEvent,

@@ -265,6 +265,13 @@ NAMED_METHOD_HANDLERS: Dict[str, str] = {
     # its key in ``initialize()``.  The daemon re-resolves and pushes the
     # whole dict; the runner re-applies it and rebuilds the provider.
     "session.reload_env": "_handle_session_reload_env",
+    # The memory rail's verbs (#1232), answered from THIS process's copy of
+    # the memory plugin -- the copy that holds the store.  ``memory`` is
+    # runner-tier, and the daemon keeps a copy of its own that no
+    # runner-served session writes through; reading that one is how the
+    # ``memory`` command's list came back from the wrong store.  Control
+    # lane: a rail refresh must not queue behind the turn in flight.
+    "session.memory": "_handle_session_memory",
 }
 
 #: How many recently-registered request ids the reader thread remembers,
@@ -1762,6 +1769,40 @@ class RunnerRPC:
             "tool_count": tool_count,
             **transport,
         }
+
+    def _handle_session_memory(self, args: Dict[str, Any]) -> "tuple[bool, Any]":
+        """``session.memory`` -- one memory-rail verb, on the store's own copy (#1232).
+
+        ``args = {"op": "list"|"get"|"update"|"delete", "args": {...}}``;
+        the body is :func:`jaato_server.shared.plugins.memory.verbs.serve_memory_op`,
+        the one definition the daemon also calls where there is no runner,
+        so the two paths cannot disagree about what a verb answers.
+
+        Returns:
+            ``(True, <answer>)`` -- the answer carries its own ``ok`` /
+            ``category``, because "no such memory" and "the session does
+            not enable the plugin" are answers, not transport failures.
+            ``(False, {"error", "stage"})`` only for ``no_host`` /
+            ``no_session`` / ``call``, which the daemon reports as
+            ``runner_unreachable`` -- never as an empty store.
+        """
+        from jaato_server.shared.plugins.memory.verbs import serve_memory_op
+
+        ready, err, session = self._require_ready_session()
+        if not ready:
+            return err
+        runtime = getattr(session, "_runtime", None)
+        registry = getattr(runtime, "registry", None) if runtime else None
+        try:
+            answer = serve_memory_op(
+                registry, str(args.get("op") or ""), args.get("args") or {},
+            )
+        except Exception as exc:  # noqa: BLE001 -- boundary
+            return False, {
+                "error": f"session.memory: {type(exc).__name__}: {exc}",
+                "stage": "call",
+            }
+        return True, answer
 
     def _handle_session_reload_env(self, args: Dict[str, Any]) -> "tuple[bool, Any]":
         """``session.reload_env`` -- re-apply the session env and rebuild the provider.
