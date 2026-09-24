@@ -383,7 +383,7 @@ speaks, and it is checked.
 
 | Phase | Delivers | New code, roughly |
 |---|---|---|
-| 1 | `session_groups.py`; index carries owner + name; `deliver_group_message` over the existing drive/queue/wake primitives (text + inline attachments, wake on cold, no spool); `send_to_session` + `list_group_sessions`; `session.message` + result event; `GROUP_DELIVERY` trace | one module, one method on `SessionManager`, two executors in the subagent plugin, one router handler, one SDK method per SDK |
+| 1 | `session_groups.py`; index carries owner + name; `deliver_group_message` over the existing drive/queue/wake primitives (text + inline attachments, wake on cold, no spool); the `coordination` plugin (§11) holding `send_to_session`, `list_group_sessions` and the two sibling tools moved out of `subagent`; `session.message` + result event; `GROUP_DELIVERY` trace | one module, one method on `SessionManager`, one new plugin (four executors, two of them relocated), one router handler, one SDK method per SDK |
 | 2 | the inbox: spool on busy/failed-revive, drain on load and turn end, watchdog retry; `_pending_wakes` folded into it; `inbox_pending` on the listing | inbox module + three drain hooks |
 | 3 | `file_refs` and `text_attachments`; cross-workspace copy through the staging write path; receipt file dispositions | envelope validation + copy helper |
 
@@ -425,6 +425,8 @@ rather than a receipt. Phase 3 is the payload width.
 
 - `send_to_sibling`, `session.send`, `session.wake`, `inject_prompt` keep
   their contracts, including "cold peers are not woken" on the first two.
+  `send_to_sibling` and `list_siblings` change **home** (§11), not
+  behaviour.
 - The queue-or-drive decision stays in `shared.message_delivery` and
   `offer_message`; the new method calls it, it does not copy it.
 - Untrusted-content marking, the sibling grammar refusal, daemon-stamped
@@ -682,13 +684,19 @@ no plugin exposed on the target.
 | `telepathy` | in-process, runner-tier, parent-implicit — the wrong axis (§10) |
 | session built-ins | the shape telepathy was extracted from: tools belong in plugins |
 
-**The sibling tools, and a stated cost.** The clean end state has
-`coordination` holding every peer tool and `subagent` holding the
-parent-child ones. Moving `send_to_sibling` / `list_siblings` in the same
-change would break every cascade profile that lists `subagent` for those
-two, so Phase 1 leaves them where they are (the §7 promise) and the move is
-a follow-up: `subagent` stops declaring them, `validate` reports a profile
-that lists `subagent` without `coordination` and whose persona mentions a
-sibling tool, and the daemon-side executors become one set. For one
-release two plugins carry peer-messaging tools. That is the price of not
-breaking existing profiles, and it is stated rather than hidden.
+**The sibling tools move too.** `send_to_sibling` and `list_siblings`
+leave the `subagent` plugin in the same change, so `coordination` holds
+every peer tool and `subagent` holds the parent-child ones from the first
+release. `subagent` stops declaring the two schemas and executors, its
+`set_session_manager` hook and `DaemonForwardingMixin` go with them (the
+plugin returns to a plain runner-tier shape, which is what the tier gate
+wanted all along), and the daemon-side wiring is unchanged because the
+sweep hands the `SessionManager` to whichever exposed plugin declares the
+hook. Their contracts are unchanged: cid-scoped addressing, cold refusal,
+the §8 caps. A profile that listed `subagent` for the sibling tools adds
+`coordination`; `validate` reports `sibling_tools_moved` (**error**) on a
+profile whose persona names `send_to_sibling` or `list_siblings` and whose
+`plugins:` carries no `coordination`, so the move fails loudly at
+authoring time rather than as a model hunting for a tool through
+`list_tools`. Breaking existing profiles is accepted here; a plugin that
+carries half a feature for a release is the worse outcome.
