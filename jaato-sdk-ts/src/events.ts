@@ -21825,6 +21825,15 @@ export interface RetryEvent {
  *     "waiting 4 min" instead of "waiting".  A separate key rather than
  *     a widening of ``awaiting``, which stays a scalar an older client
  *     can ignore.  Absent means NOT MEASURED, never "just now".
+ *
+ * ``inbox_pending`` (session group messaging, phase 2)
+ *     How many messages wait in that session's durable inbox -- spooled
+ *     by ``send_to_session`` / ``session.message`` because the target was
+ *     mid-turn with a payload it could not queue, or cold and not yet
+ *     revived.  Counted for cold rows too: a cold session with a pending
+ *     message is the one the daemon's watchdog is about to revive.  A
+ *     diagnostic a human reads (the #812 shape), additive and unbumped;
+ *     absent on a daemon that predates it.
  */
 export interface SessionListEvent {
   type?: EventType43;
