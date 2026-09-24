@@ -418,6 +418,15 @@ rather than a receipt. Phase 3 is the payload width.
    only through their parent. Out of scope here: a group is a set of
    daemon sessions. An isolated sub-runner *does* have a record and joins
    its parent's groups by inheriting `created_by` (already true) and cid.
+6. **The plugin's name.** `coordination` is also a tool category that
+   already spans `todo`, `waypoint`, `subagent` and the event-bus
+   built-ins (§11), so a plugin of that name owns a small part of the
+   category it is named after. Proposed: keep `coordination` for the
+   plugin, since peer messaging is squarely inside the category's own
+   description and the profile key reads naturally. Alternative:
+   `peer_messaging`, which names exactly what the plugin holds and leaves
+   the category as the wider taxonomy it already is. Either way the four
+   tools stay stamped `category="coordination"`.
 
 ---
 
@@ -621,6 +630,31 @@ exposure is decided by the plugin name in `plugins:`, narrowed by
 `plugin(tools:[…])`, and refused per tool name by the permission policy.
 So "where does it land" is a question about a plugin, and the answer is
 to make the category one.
+
+**What the category already holds.** `coordination` is one of the eleven
+entries in `TOOL_CATEGORIES` (`jaato_sdk/plugins/model_provider/types.py`),
+described there as *task planning, delegation, subagents, parallel
+execution*; the waypoint plugin re-registers the same name with its own
+description at `initialize()`. It is a `list_tools` grouping, and four
+sources stamp tools into it today:
+
+| Source | Tools in the category |
+|---|---|
+| `subagent` plugin | `spawn_subagent`, `send_to_subagent`, `close_subagent`, `cancel_subagent`, `list_active_subagents`, `list_subagent_profiles`, `validateProfile` |
+| `todo` plugin | `startPlan`, `addStep`, `addDependentStep`, `setStepStatus`, `completeStepWithOutput`, `getPlanStatus`, `getBlockedSteps`, `completePlan` |
+| `waypoint` plugin | `list_waypoints`, `waypoint_info`, `create_waypoint`, `restore_waypoint`, `delete_waypoint` |
+| session built-ins (`shared/event_bus_tools.py`, not a plugin) | `subscribeToEvents`, `getEvents`, `listSubscriptions`, `unsubscribe` |
+
+Two things follow. The two sibling tools carry **no category at all** —
+their schemas set `traits` and nothing else — so the tools most obviously
+about coordination are the ones `list_tools` files under none; the new
+plugin stamps all four of its tools. And a plugin named `coordination`
+would own four of some twenty-eight tools in a category of that name,
+spread over four sources. Nothing in the tree keys on a plugin name and a
+category name together, so the collision costs nothing mechanically; what
+it costs is a reader of `explain plugins coordination` or of a `validate`
+message expecting the plugin to be the category. That is open decision 6
+in §6.
 
 **Where the peer tools live today.** `send_to_sibling` and
 `list_siblings` are declared by the `subagent` plugin (`PLUGIN_TIER =
