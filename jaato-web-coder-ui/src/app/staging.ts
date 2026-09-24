@@ -24,10 +24,10 @@
  * renders, this holds what the wire needs.
  */
 import { EventTypeValue } from "@jaato/sdk";
-import { MAIN_AGENT, useJaato } from "@/store/store";
+import { MAIN_AGENT, uploadScope, useJaato } from "@/store/store";
 import type { StagedUpload } from "@/store/types";
-import { checkSizes, stagedName } from "@/protocol/attachments";
-import { getClient, isConnected } from "@/sdk/connection";
+import { checkSizes, stagedName, type SizeLimits } from "@/protocol/attachments";
+import { getClient, isConnected, reassertAfterReconnect } from "@/sdk/connection";
 
 const bytesOf = new Map<string, File>();
 let chain: Promise<void> = Promise.resolve();
@@ -63,15 +63,19 @@ useJaato.subscribe((st, prev) => {
 export function attachFiles(files: File[], folder: string): void {
   if (!files.length) return;
   const st = useJaato.getState();
-  const verdicts = checkSizes(files.map((f) => f.size));
+  // The context these files belong to, captured now: the active session,
+  // or "" on the picker before one opens (#1250).  The strip shows only
+  // the active scope's uploads, so they do not follow into another session.
+  const scope = uploadScope(st);
+  const verdicts = checkSizes(files.map((f) => f.size), currentLimits());
   const items: StagedUpload[] = files.map((f, i) => {
     const id = `up-${++seq}`;
     const rel = (f as File & { webkitRelativePath?: string }).webkitRelativePath ?? "";
     const path = stagedName(f.name, rel, folder);
     const reason = path === null ? "name must be a non-empty workspace-relative path with no '..' components" : verdicts[i]!.reason;
-    if (reason) return { id, path: path ?? f.name, size: f.size, status: "failed", error: reason };
+    if (reason) return { id, path: path ?? f.name, size: f.size, status: "failed", scope, error: reason };
     bytesOf.set(id, f);
-    return { id, path: path!, size: f.size, status: "queued" };
+    return { id, path: path!, size: f.size, status: "queued", scope };
   });
   st.addUploads(items);
   if (canStageNow()) stageQueued().catch(() => undefined);
@@ -83,16 +87,39 @@ export function discardUpload(id: string): void {
   useJaato.getState().removeUpload(id);
 }
 
+/**
+ * The connected daemon's size limits, or ``null`` before a connection
+ * (the defaults then apply, and the queued files are judged again against
+ * the real limits when they are sent).
+ */
+function currentLimits(): SizeLimits | null {
+  return isConnected() ? getClient().serverLimits : null;
+}
+
 /** Stage every ``queued`` entry, one request for the batch.  Resolves once the daemon has answered. */
 export function stageQueued(): Promise<void> {
   chain = chain.then(() => stageBatch()).catch(() => undefined);
   return chain;
 }
 
-async function stageBatch(): Promise<void> {
+async function stageBatch(retried = false): Promise<void> {
   const st = useJaato.getState();
   const queued = st.uploads.filter((u) => u.status === "queued" && bytesOf.has(u.id));
   if (!queued.length) return;
+  // Judge again against the limits of the daemon we are about to send to:
+  // a file queued on the picker before connecting was checked against the
+  // defaults, and one over the daemon's message limit would not be refused,
+  // it would close the connection.
+  const verdicts = checkSizes(queued.map((u) => bytesOf.get(u.id)!.size), currentLimits());
+  const fits = queued.filter((u, i) => {
+    const reason = verdicts[i]!.reason;
+    if (!reason) return true;
+    bytesOf.delete(u.id);
+    st.updateUpload(u.id, { status: "failed", error: reason });
+    return false;
+  });
+  if (!fits.length) return;
+  queued.splice(0, queued.length, ...fits);
   for (const u of queued) st.updateUpload(u.id, { status: "staging" });
   const agentId = st.selectedAgentId || MAIN_AGENT;
   // Read each file on its own: a directory dropped alongside real files
@@ -112,6 +139,18 @@ async function stageBatch(): Promise<void> {
   if (!sending.length) return;
   try {
     const result = await getClient().stageFiles("", payloads);
+    // A batch already on the wire when the socket dropped is answered by
+    // the NEW connection, which has no workspace: ``sdk/connection``
+    // re-asserts on every reconnect, but these bytes left before it could.
+    // Re-assert and send them once more rather than failing a file the
+    // person can see a workspace for.  Once, so a daemon that genuinely
+    // has no workspace still reports it.
+    if (!retried && st.workspace.selected
+        && (result.failed ?? []).some((f) => f.category === "workspace_not_found")) {
+      for (const u of sending) st.updateUpload(u.id, { status: "queued" });
+      await reassertAfterReconnect();
+      return stageBatch(true);
+    }
     const staged = new Set(result.staged ?? []);
     const failed = new Map((result.failed ?? []).map((f) => [f.name, f.error || f.category || "failed"]));
     const ok: string[] = [];

@@ -8,13 +8,20 @@
  * output underneath, in a ground plate indented under the name.  Failed
  * calls open by default; successful ones honour the server's
  * ``show_output`` hint.
+ *
+ * A successful ``offer_download`` call (the host tool the model uses to
+ * hand the user a file, ``app/downloads.ts``) also draws a download
+ * button under its row, always visible: the button IS the tool's output,
+ * so it cannot sit behind the expand toggle.
  */
-import { memo } from "react";
+import { memo, useState } from "react";
 import type { ToolBlock } from "@/store/types";
 import { useJaato } from "@/store/store";
 import { Plate } from "@/components/layout/Plate";
 import { MediaView } from "./MediaView";
-import { JMarkup } from "./JMarkup";
+import { hasServerMarkup, JMarkup } from "./JMarkup";
+import { resolveToolArgs } from "@/protocol/toolIds";
+import { downloadWorkspaceFile, OFFER_DOWNLOAD_TOOL } from "@/app/downloads";
 
 export function summarizeArgs(args: Record<string, unknown>, max = 110): string {
   const parts: string[] = [];
@@ -36,10 +43,36 @@ function StatusGlyph({ status }: { status: ToolBlock["status"] }) {
   return <span className="text-error" aria-label="failed">✗</span>;
 }
 
+/**
+ * The button an ``offer_download`` call leaves in the chat.  The bytes are
+ * fetched when it is clicked, not when it is drawn, so a file that changed
+ * or vanished since the offer is reported here, on the button.
+ */
+export function DownloadChip({ path, label }: { path: string; label?: string }) {
+  const [state, setState] = useState<{ busy: boolean; error: string | null }>({ busy: false, error: null });
+  const name = path.split("/").pop() || path;
+  const onClick = async () => {
+    setState({ busy: true, error: null });
+    const error = await downloadWorkspaceFile(path);
+    setState({ busy: false, error });
+  };
+  return (
+    <div className="ml-6 mt-1 mb-2 flex items-center gap-3 flex-wrap">
+      <button type="button" className="btn btn-steel" onClick={() => { void onClick(); }} disabled={state.busy} aria-label={`Download ${path}`} title={path}>
+        {state.busy ? "Downloading…" : `⤓ ${label || name}`}
+      </button>
+      {state.error && <span role="status" className="text-xs text-error">{name}: {state.error}</span>}
+    </div>
+  );
+}
+
 export const ToolBlockView = memo(function ToolBlockView({ block }: { block: ToolBlock }) {
   const toggle = useJaato((s) => s.toggleTool);
+  // Hashed tool / category ids in the arguments, shown by name (protocol/toolIds.ts).
+  const toolIdNames = useJaato((s) => s.toolIdNames);
   const setPopup = useJaato((s) => s.setPopup);
   const hasBody = block.output.length > 0 || block.media.length > 0 || !!block.errorMessage;
+  const offered = (toolIdNames[block.toolName] ?? block.toolName) === OFFER_DOWNLOAD_TOOL && block.status === "success" && typeof block.args.path === "string" ? block.args.path : null;
   const running = block.status === "running";
   return (
     <div data-testid="tool-block" className="border-t hairline">
@@ -53,7 +86,7 @@ export const ToolBlockView = memo(function ToolBlockView({ block }: { block: Too
           <StatusGlyph status={block.status} />
         </span>
         <span className={`chrome w-[120px] shrink-0 truncate ${block.status === "error" ? "text-error" : ""}`}>{block.toolName}</span>
-        <span className="font-mono text-xs text-text-muted truncate flex-1">{summarizeArgs(block.args)}</span>
+        <span className="font-mono text-xs text-text-muted truncate flex-1">{summarizeArgs(resolveToolArgs(block.args, toolIdNames))}</span>
         {block.backgrounded && <span className="kicker kicker-muted text-[10px]">bg</span>}
         {running && block.output ? (
           <span
@@ -72,11 +105,12 @@ export const ToolBlockView = memo(function ToolBlockView({ block }: { block: Too
           <span className="w-[52px]" />
         )}
       </button>
+      {offered && <DownloadChip path={offered} label={typeof block.args.label === "string" ? block.args.label : undefined} />}
       {block.expanded && hasBody && (
         <Plate ground corners="two" edge={block.status === "error" ? "error" : "hairline"} className="ml-6 mt-0.5 mb-2.5">
           {block.errorMessage && <div className="px-3 py-1.5 text-error text-xs whitespace-pre-wrap">{block.errorMessage}</div>}
           {block.output && (
-            block.output.includes("<j-") ? (
+            hasServerMarkup(block.output) ? (
               <div className="px-3 py-1.5 text-[13px]"><JMarkup text={block.output} /></div>
             ) : (
               <pre className="code-block whitespace-pre-wrap break-words px-3 py-2 max-h-[60vh] overflow-auto">{block.output}</pre>

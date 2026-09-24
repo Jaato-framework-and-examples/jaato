@@ -128,7 +128,7 @@ The server uses this trait to find all auth plugins, then matches
 
 Usage::
 
-    from shared.plugins.base import TRAIT_AUTH_PROVIDER
+    from jaato_server.shared.plugins.base import TRAIT_AUTH_PROVIDER
 
     class MyAuthPlugin:
         plugin_traits = frozenset({TRAIT_AUTH_PROVIDER})
@@ -136,6 +136,62 @@ Usage::
         @property
         def provider_name(self) -> str:
             return "my_provider"
+"""
+
+
+TRAIT_OUTPUT_MARKER = "output_marker"
+"""Plugin-level trait identifying MARKERS of AI-generated output.
+
+Regulation (EU) 2024/1689 Art. 50(2) asks that the output of a
+generative AI system be "marked in a machine-readable format and
+detectable as artificially generated or manipulated", in a way that is
+"effective, interoperable, robust and reliable as far as this is
+technically feasible".  ``ToolOutputEvent.generated_by`` (protocol 1.14)
+is the framework's own half of that, and it stops at the wire: the field
+travels with the delivery event and is gone the moment a client saves
+the bytes.  A marker is what puts the fact IN or BESIDE the payload, so
+it survives leaving jaato.
+
+A plugin declaring this trait implements::
+
+    def mark_output(self, payload: OutputPayload) -> MarkResult: ...
+
+where ``payload`` is
+:class:`jaato_sdk.output_marking.OutputPayload` and the result is a
+:class:`jaato_sdk.output_marking.MarkResult`.
+
+Why a trait rather than a fixed implementation: the Article says "state
+of the art", and the state of the art in audio watermarking moves faster
+than a release of this framework and has no dependency-free
+implementation.  The trait is the CONTRACT -- what gets invoked, on
+what, and when; which algorithm satisfies the Article is the marker's
+choice and the provider's responsibility to defend.
+
+The one in-tree marker is ``output_marker``
+(``shared/plugins/output_marker/``): a provenance sidecar beside a file,
+stdlib only.  It declines any payload with no filesystem destination,
+which is the honest answer for a marker that writes a second file.
+
+Two rules every marker inherits, enforced by the framework rather than
+by the marker:
+
+* **A relayed payload is never marked.**  Only a payload carrying a
+  ``generated_by`` stamp is eligible -- a fetched image is not
+  AI-generated because an agent fetched it.
+* **A marker that fails must not lose the payload.**  The framework
+  catches, delivers unmarked, and records that marking failed.  Refusing
+  to deliver would be a stronger posture than the Article asks for and
+  would break every voice session on a transient error.
+
+Usage::
+
+    from jaato_sdk.plugins.base import TRAIT_OUTPUT_MARKER
+
+    class MyWatermarkPlugin:
+        plugin_traits = frozenset({TRAIT_OUTPUT_MARKER})
+
+        def mark_output(self, payload):
+            ...
 """
 
 
@@ -922,7 +978,7 @@ class ToolPlugin(Protocol):
     #         shared.plugins.reliability.types.
     #
     #     Example:
-    #         from shared.plugins.reliability.types import (
+    #         from jaato_server.shared.plugins.reliability.types import (
     #             PrerequisitePolicy, PatternSeverity, NudgeType
     #         )
     #         return [PrerequisitePolicy(

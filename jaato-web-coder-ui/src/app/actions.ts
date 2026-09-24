@@ -13,7 +13,6 @@
  * The composer's ``verbatim`` flag (Escape on the proposal) is threaded
  * through to ``parseUserInput`` so a dismissed command word ships as text.
  */
-import { EventTypeValue } from "@jaato/sdk";
 import { attachmentFooter } from "@/protocol/attachments";
 import { parseUserInput } from "@/protocol/commands";
 import { MAIN_AGENT, useJaato } from "@/store/store";
@@ -23,6 +22,7 @@ import { disconnect, getClient, isConnected } from "@/sdk/connection";
 import { noteAuthKeyCommand } from "./authKeyCapture";
 import { markExited } from "./exitIntent";
 import { answerExit, requestExit } from "./exitChoice";
+import { deleteSession, isGone } from "./sessionDelete";
 
 export const inputHistory: string[] = [];
 
@@ -145,6 +145,28 @@ export async function ensureSessions(): Promise<void> {
 }
 
 /**
+ * Open a NEW session — the TUI's ``session new``.
+ *
+ * The pane is the transcript of ONE session, so it starts empty.  Without
+ * the reset, a failed attempt's errors stayed in the buffer and the new
+ * session's lines were appended UNDER them: a screen whose last three
+ * lines said the provider resolved and the session was created opened
+ * with somebody else's ``RunnerBootstrapFailed`` at the top, which reads
+ * top-down as "this session is broken".  ``attachSession`` has always
+ * reset for exactly this reason; creating was the one verb that bound the
+ * screen to a different session and cleared nothing.
+ *
+ * Queued attachments survive by construction — ``uploads`` lives outside
+ * ``emptySessionState`` (``store/store.ts``), which is what lets the
+ * picker stage files into the session it is about to open.
+ */
+export async function createSession(profile: string | null): Promise<void> {
+  const st = useJaato.getState();
+  st.resetSessionState();
+  await getClient().createSession(profile ? { profile } : {});
+}
+
+/**
  * Switch this client to another session — the TUI's ``session attach``.
  * The output of the session being left is dropped, the daemon attaches
  * and answers with its ``session.info``, and the conversation is rebuilt
@@ -248,6 +270,23 @@ export async function submitInput(text: string, verbatim: boolean): Promise<void
         } else st.addSystemBlock(agentId, `Themes: ${THEME_NAMES.join(", ")}`, "info");
         return;
       }
+      if (parsed.command === "session.delete" && parsed.args?.[0]) {
+        // Deleting is a client-side transition too, and this is the route
+        // that had none: the note you wrote about that session is stored
+        // where the daemon cannot see it, so nothing forgot it and the
+        // rail went on offering an instruction about a session that no
+        // longer exists.  ``deleteSession`` waits for the daemon's word
+        // and forgets it only if that word says the session is gone.
+        st.addUserBlock(agentId, text);
+        const answer = await deleteSession(parsed.args[0]);
+        if (answer.text) st.addSystemBlock(agentId, answer.text, answer.kind === "deleted" ? "info" : "warning");
+        // The set of sessions just changed and this screen is still showing
+        // the old one, so the rail would go on offering a row for a session
+        // the daemon no longer has.  ``endSession`` needs no refresh: it
+        // leaves.  Silent, as every listing nobody typed is.
+        if (isGone(answer)) await ensureSessions();
+        return;
+      }
       if (parsed.command === "session.attach" && parsed.args?.[0]) {
         // Switching sessions is a client-side transition as well as a
         // daemon command: the pane is reset and the conversation replayed.
@@ -267,8 +306,17 @@ export async function submitInput(text: string, verbatim: boolean): Promise<void
       // the same text the daemon will echo.
       const body = (parsed.text ?? text) + attachmentFooter(st.takeUploads());
       st.addUserBlock(agentId, body);
-      st.dispatch([{ type: EventTypeValue.AGENT_STATUS_CHANGED, agent_id: agentId, status: "processing" } as never]);
-      await client.sendMessage(body);
+      // Optimistic only until the daemon speaks.  This used to dispatch a
+      // fabricated ``agent.status_changed`` carrying a status the daemon
+      // never emits -- which the daemon's real ``active`` then read as "not
+      // busy" and switched back off, one round trip later.
+      st.markSending(agentId);
+      try {
+        await client.sendMessage(body);
+      } catch (err) {
+        st.clearSending(agentId);
+        throw err;
+      }
       return;
     }
   }

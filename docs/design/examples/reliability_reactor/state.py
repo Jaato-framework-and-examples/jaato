@@ -17,12 +17,12 @@ from dataclasses import dataclass, field
 from typing import Dict, Set
 
 # Public reliability primitives (jaato-server) — reused, not reimplemented.
-from shared.plugins.reliability.types import (
+from jaato_server.shared.plugins.reliability.types import (
     EscalationRule,
     FailureKey,
     TrustState,
 )
-from shared.plugins.reliability.patterns import PatternDetector
+from jaato_server.shared.plugins.reliability.patterns import PatternDetector
 
 
 @dataclass

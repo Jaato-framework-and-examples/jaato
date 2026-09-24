@@ -80,7 +80,7 @@ wire-format change needed — only the writer path.
    ``agent_params`` into the new `BootstrapEnvelope.agent_params`
    field.
 2. `SessionManager._construct_and_initialize_server`: stash a copy
-   on the per-session JaatoServer via ``server._agent_params =
+   on the per-session JaatoServer via ``jaato_server.server._agent_params =
    dict(envelope.agent_params or {})``.  The JaatoServer is per-
    session (one instance per session, GC'd at session end) — not
    centralized daemon state, just the per-session daemon-side handle
@@ -108,7 +108,7 @@ Four regression pins in `test_agent_params_passdown_phase4d.py`:
 1. ``test_envelope_agent_params_empty_when_server_has_no_stash`` —
    pre-§D behaviour preserved when no agent_params is supplied.
 2. ``test_envelope_agent_params_forwarded_from_server_stash`` — when
-   `server._agent_params` is populated, the wire envelope carries
+   `jaato_server.server._agent_params` is populated, the wire envelope carries
    the same dict verbatim.
 3. ``test_envelope_agent_params_dict_is_independent_copy`` —
    defensive deep-copy so mutations to the envelope's view don't

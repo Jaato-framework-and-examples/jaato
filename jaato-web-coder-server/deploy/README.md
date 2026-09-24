@@ -45,7 +45,7 @@ sudo jaato-web-coder-server init --dir /etc/jaato-web-coder
 ```
 
 writes `app.credential`, `session.secret`, `credentials.key` (the key the
-per-user API-key store is encrypted with) and a `server.yaml` template
+per-user API-key store is encrypted with) and a `jaato_server.server.yaml` template
 (all 0600) and prints the daemon-side entry. Put that entry in
 `/etc/jaato/ws-apps.json` (mode 0600, owned by the daemon's user):
 
@@ -53,7 +53,7 @@ per-user API-key store is encrypted with) and a `server.yaml` template
 {"jaato-web-coder": "<the printed credential>"}
 ```
 
-Edit `server.yaml`: `public_url`, `daemon.url`, `auth.oidc.issuer`, and
+Edit `jaato_server.server.yaml`: `public_url`, `daemon.url`, `auth.oidc.issuer`, and
 `backchannel_url: http://127.0.0.1:8180` if Keycloak is reached over
 loopback.
 

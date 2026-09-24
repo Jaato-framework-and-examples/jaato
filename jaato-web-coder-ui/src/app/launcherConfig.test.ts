@@ -15,6 +15,8 @@ describe("parseLauncherConfig", () => {
     expect(parseLauncherConfig({ daemon: "wss://d", ticketUrl: "./api/ticket", loginUrl: "./auth/login" })).toEqual({ daemon: "wss://d", ticketUrl: "./api/ticket", loginUrl: "./auth/login" });
     expect(parseLauncherConfig({ ticketUrl: "./api/ticket", sessionUrl: "./who", logoutUrl: "./bye" })).toEqual({ ticketUrl: "./api/ticket", sessionUrl: "./who", logoutUrl: "./bye" });
     expect(parseLauncherConfig({ ticketUrl: "./api/ticket", credentialsUrl: "./api/credentials" })).toEqual({ ticketUrl: "./api/ticket", credentialsUrl: "./api/credentials" });
+    expect(parseLauncherConfig({ githubUrl: "./api/github", githubLoginUrl: "./auth/github/login" })).toEqual({ githubUrl: "./api/github", githubLoginUrl: "./auth/github/login" });
+    expect(parseLauncherConfig({ githubUrl: "", githubLoginUrl: 5 })).toEqual({});
     expect(parseLauncherConfig({ credentialsUrl: "" })).toEqual({});
     expect(parseLauncherConfig({ daemon: 5, token: "", autoConnect: "yes" })).toEqual({});
     expect(parseLauncherConfig(null)).toEqual({});

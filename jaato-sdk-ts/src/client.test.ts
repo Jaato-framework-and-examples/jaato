@@ -10,17 +10,26 @@
 // and replaying server-shaped events back as desired.
 
 import { strict as assert } from "node:assert";
-import { afterEach, beforeEach, describe, test } from "node:test";
+import { afterEach, beforeEach, describe, mock, test } from "node:test";
 
 import {
   JaatoClient,
   MIN_ATTACHMENT_RESUME_PROTOCOL,
   MIN_SESSION_RELOAD_ENV_PROTOCOL,
   MIN_WORKSPACE_IGNORE_PROTOCOL,
+  MIN_SCAFFOLD_INTEGRATION_PROTOCOL,
+  MIN_FILE_FETCH_PROTOCOL,
+  MIN_MEMORY_VERBS_PROTOCOL,
+  MIN_SESSION_MESSAGE_PROTOCOL,
+  MIN_SESSION_MESSAGE_FILES_PROTOCOL,
   MIN_PROTOCOL_VERSION,
+  STAGE_FILES_TIMEOUT_MS,
+  LEGACY_SERVER_LIMITS,
+  serverLimitsFrom,
 } from "./client.js";
 import {
   ConnectionClosedError,
+  RequestInterruptedError,
   IncompatibleServerError,
   ReconnectingError,
 } from "./errors.js";
@@ -652,12 +661,109 @@ describe("JaatoClient session management", () => {
     assert.equal(getSent().length, 0);
   });
 
+  test("runScaffoldIntegration sends scaffold.integration with the name as its one arg", async () => {
+    await client.close();
+    installMockWebSocket();
+    client = new JaatoClient({ url: "ws://localhost:8080" });
+    await connectAndAck(client, MIN_SCAFFOLD_INTEGRATION_PROTOCOL);
+    if (lastInstance) lastInstance.sent = [];
+    await client.runScaffoldIntegration("claude-code");
+    const [ev] = getSent();
+    assert.equal(ev.type, EventTypeValue.COMMAND);
+    assert.equal((ev as { command?: string }).command, "scaffold.integration");
+    assert.deepEqual((ev as { args?: string[] }).args, ["claude-code"]);
+  });
+
+  test("runScaffoldIntegration is refused below protocol 1.21 with nothing sent", async () => {
+    await assert.rejects(
+      () => client.runScaffoldIntegration("claude-code"),
+      /scaffold\.integration/,
+    );
+    assert.equal(getSent().length, 0);
+  });
+
+  test("sendSessionMessage carries fileRefs and textAttachments at 1.24", async () => {
+    await client.close();
+    installMockWebSocket();
+    client = new JaatoClient({ url: "ws://localhost:8080" });
+    await connectAndAck(client, MIN_SESSION_MESSAGE_FILES_PROTOCOL);
+    if (lastInstance) lastInstance.sent = [];
+    await client.sendSessionMessage("s-b", "", {
+      fileRefs: ["reports/q3.md", { path: "a", workspace: "/w" }],
+      textAttachments: [{ name: "fix.patch", text: "--- a" }],
+      requestId: "r1",
+    });
+    const [ev] = getSent();
+    assert.equal((ev as { command?: string }).command, "session.message");
+    const payload = (ev as { payload?: Record<string, unknown> }).payload ?? {};
+    assert.deepEqual(payload.file_refs, ["reports/q3.md", { path: "a", workspace: "/w" }]);
+    assert.deepEqual(payload.text_attachments, [{ name: "fix.patch", text: "--- a" }]);
+    assert.equal(payload.text, "");
+    assert.equal(payload.request_id, "r1");
+    assert.equal("attachments" in payload, false);
+  });
+
+  test("sendSessionMessage refuses files below 1.24 and still sends text alone at 1.23", async () => {
+    // A 1.23 daemon reads neither key: it would deliver the text WITHOUT
+    // the files and answer accepted -- a degraded call that reads as success.
+    await client.close();
+    installMockWebSocket();
+    client = new JaatoClient({ url: "ws://localhost:8080" });
+    await connectAndAck(client, MIN_SESSION_MESSAGE_PROTOCOL);
+    if (lastInstance) lastInstance.sent = [];
+    await assert.rejects(
+      () => client.sendSessionMessage("s-b", "see", { fileRefs: ["a.md"] }),
+      /fileRefs \/ textAttachments/,
+    );
+    await assert.rejects(
+      () => client.sendSessionMessage("s-b", "see", { textAttachments: [{ text: "x" }] }),
+      /fileRefs \/ textAttachments/,
+    );
+    assert.equal(getSent().length, 0);
+    await client.sendSessionMessage("s-b", "see");
+    assert.equal(getSent().length, 1);
+    await assert.rejects(() => client.sendSessionMessage("s-b"), /requires text/);
+  });
+
   test("deleteSession carries the session id as the first arg", async () => {
     await client.deleteSession("sess_xyz");
     const [ev] = getSent();
     assert.equal(ev.type, EventTypeValue.COMMAND);
     assert.equal((ev as { command?: string }).command, "session.delete");
     assert.deepEqual((ev as { args?: string[] }).args, ["sess_xyz"]);
+  });
+
+  // #1167 -- the type existed in both SDKs and the method in neither, so the
+  // only producer was a web component hand-rolling the frame.  These pin the
+  // three things a hand-rolled frame kept getting wrong.
+  test("sendExternalEvent sends a typed event.external frame", async () => {
+    await client.sendExternalEvent("order.placed", { id: 7 });
+    const [ev] = getSent();
+    assert.equal(ev.type, EventTypeValue.EVENT_EXTERNAL);
+    assert.equal((ev as { name?: string }).name, "order.placed");
+    assert.deepEqual((ev as { data?: unknown }).data, { id: 7 });
+  });
+
+  test("sendExternalEvent sends {} rather than undefined for an absent payload", async () => {
+    await client.sendExternalEvent("build.finished");
+    const [ev] = getSent();
+    assert.deepEqual((ev as { data?: unknown }).data, {});
+  });
+
+  test("sendExternalEvent carries timestamp and sessionId when given", async () => {
+    await client.sendExternalEvent(
+      "ticket.assigned",
+      {},
+      { timestamp: "2026-09-20T12:00:00Z", sessionId: "sess_abc" },
+    );
+    const [ev] = getSent();
+    assert.equal((ev as { timestamp?: string }).timestamp, "2026-09-20T12:00:00Z");
+    assert.equal((ev as { session_id?: string }).session_id, "sess_abc");
+  });
+
+  test("sendExternalEvent refuses an empty name and sends nothing", async () => {
+    await assert.rejects(() => client.sendExternalEvent(""), /requires a name/);
+    assert.equal(getSent().length, 0);
   });
 });
 
@@ -756,6 +862,216 @@ describe("JaatoClient.stageFiles", () => {
     const specs = requestFrame.files as Array<{ size: number }>;
     assert.equal(specs[0].size, 16);
     assert.equal(lastInstance!.sentBinary[0].byteLength, 16);
+  });
+
+  // #1248: the wait had no deadline, so a lost workspace.files.staged
+  // response left the promise unsettled forever and the caller's status
+  // stuck on "staging".  Drive the deadline with fake timers — no real
+  // clock sleep.
+  test("rejects and cleans up the subscription when no staged response arrives", async () => {
+    mock.timers.enable({ apis: ["setTimeout"] });
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const handlersBefore = (client as any)._catchallHandlers.length as number;
+      const promise = client.stageFiles(
+        "workspace_abc",
+        [{ name: "x.txt", data: new Uint8Array([1, 2, 3]) }],
+        { timeoutMs: 5_000 },
+      );
+      const settled = assert.rejects(promise, /no workspace\.files\.staged response after 5000 ms/);
+      // Before the deadline, the one-shot subscription is still installed.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      assert.equal((client as any)._catchallHandlers.length, handlersBefore + 1);
+      mock.timers.tick(5_000);
+      await settled;
+      // On timeout the subscription is removed — no leaked listener.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      assert.equal((client as any)._catchallHandlers.length, handlersBefore);
+    } finally {
+      mock.timers.reset();
+    }
+  });
+
+  // A file over the daemon's message limit makes it close the connection
+  // (1009) mid-upload.  The next connection is a new client that cannot
+  // answer, so waiting out the 120 s deadline only hid the refusal.
+  test("rejects at once, naming the close, when the connection drops first", async () => {
+    mock.timers.enable({ apis: ["setTimeout"] });
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const handlersBefore = (client as any)._catchallHandlers.length as number;
+      const promise = client.stageFiles(
+        "workspace_abc",
+        [{ name: "big.pdf", data: new Uint8Array([1, 2, 3]) }],
+      );
+      lastInstance!.emitClose(1009, "message too big");
+      await assert.rejects(promise, (err: unknown) => {
+        assert.ok(err instanceof RequestInterruptedError);
+        assert.equal(err.code, 1009);
+        assert.match(err.message, /larger than its limit/);
+        return true;
+      });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      assert.equal((client as any)._catchallHandlers.length, handlersBefore);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      assert.equal((client as any)._closeWaiters.size, 0);
+      // No timer left to fire a second rejection later.
+      mock.timers.tick(STAGE_FILES_TIMEOUT_MS + 1);
+    } finally {
+      mock.timers.reset();
+    }
+  });
+
+  test("a settled request is not rejected by a later close", async () => {
+    const promise = client.stageFiles("ws", [{ name: "a.txt", data: new Uint8Array([1]) }]);
+    lastInstance!.emit({
+      type: EventTypeValue.WORKSPACE_FILES_STAGED,
+      timestamp: new Date().toISOString(),
+      workspace_id: "ws",
+      staged: [{ name: "a.txt" }],
+      failed: [],
+    });
+    await promise;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    assert.equal((client as any)._closeWaiters.size, 0);
+  });
+
+  test("uses STAGE_FILES_TIMEOUT_MS as the default deadline", () => {
+    assert.equal(typeof STAGE_FILES_TIMEOUT_MS, "number");
+    assert.ok(STAGE_FILES_TIMEOUT_MS > 0);
+  });
+
+  test("a normal staged response resolves and clears the timer (no late rejection)", async () => {
+    mock.timers.enable({ apis: ["setTimeout"] });
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const handlersBefore = (client as any)._catchallHandlers.length as number;
+      const promise = client.stageFiles(
+        "workspace_abc",
+        [{ name: "ok.txt", data: new Uint8Array([9]) }],
+        { timeoutMs: 5_000 },
+      );
+      lastInstance!.emit({
+        type: EventTypeValue.WORKSPACE_FILES_STAGED,
+        timestamp: new Date().toISOString(),
+        workspace_id: "workspace_abc",
+        staged: [{ name: "ok.txt" }],
+        failed: [],
+      });
+      const result = await promise;
+      assert.equal(result.type, EventTypeValue.WORKSPACE_FILES_STAGED);
+      // The subscription is gone and the timer, ticked past its deadline,
+      // fires no rejection at nothing.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      assert.equal((client as any)._catchallHandlers.length, handlersBefore);
+      mock.timers.tick(10_000);
+    } finally {
+      mock.timers.reset();
+    }
+  });
+});
+
+describe("JaatoClient.fetchWorkspaceFile (protocol 1.20)", () => {
+  let client: JaatoClient;
+
+  beforeEach(async () => {
+    installMockWebSocket();
+    client = new JaatoClient({ url: "ws://localhost:8080" });
+    await connectAndAck(client, MIN_FILE_FETCH_PROTOCOL);
+    if (lastInstance) lastInstance.sent = [];
+  });
+
+  afterEach(async () => {
+    await client.close();
+    restoreWebSocket();
+  });
+
+  const tick = (): Promise<void> => new Promise<void>((resolve) => setTimeout(resolve, 0));
+  const lastRequest = (): Record<string, unknown> =>
+    JSON.parse(lastInstance!.sent[lastInstance!.sent.length - 1]!) as Record<string, unknown>;
+  const header = (requestId: unknown, fields: Record<string, unknown>): object => ({
+    type: EventTypeValue.WORKSPACE_FILE_CONTENT,
+    timestamp: new Date().toISOString(),
+    request_id: requestId,
+    ...fields,
+  });
+  const binary = (bytes: Uint8Array): void => {
+    const buf = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    lastInstance!.onmessage!({ data: buf } as any);
+  };
+
+  test("the binary frame after a header is that file's bytes", async () => {
+    const promise = client.fetchWorkspaceFile("out/report.pdf");
+    await tick();
+    const req = lastRequest();
+    assert.equal(req.type, EventTypeValue.WORKSPACE_FILE_FETCH_REQUEST);
+    assert.equal(req.path, "out/report.pdf");
+    assert.equal(req.metadata_only, false);
+    const bytes = new TextEncoder().encode("%PDF-1.7");
+    lastInstance!.emit(header(req.request_id, { ok: true, path: "out/report.pdf", name: "report.pdf", size: bytes.byteLength }));
+    binary(bytes);
+    const result = await promise;
+    assert.equal(result.event.ok, true);
+    assert.deepEqual(result.data, bytes);
+  });
+
+  test("a text frame after the binary is parsed as an event again", async () => {
+    const promise = client.fetchWorkspaceFile("a.txt");
+    await tick();
+    const req = lastRequest();
+    lastInstance!.emit(header(req.request_id, { ok: true, path: "a.txt", size: 1 }));
+    binary(new Uint8Array([65]));
+    await promise;
+    const seen: string[] = [];
+    client.subscribeAll((e) => { seen.push(String(e.type)); });
+    lastInstance!.emit({ type: EventTypeValue.SYSTEM_MESSAGE, timestamp: new Date().toISOString(), message: "hi" });
+    await tick();
+    assert.ok(seen.includes(EventTypeValue.SYSTEM_MESSAGE));
+  });
+
+  test("a metadata-only answer and a refusal carry no bytes and wait for none", async () => {
+    const meta = client.fetchWorkspaceFile("a.txt", { metadataOnly: true });
+    await tick();
+    const r1 = lastRequest();
+    assert.equal(r1.metadata_only, true);
+    lastInstance!.emit(header(r1.request_id, { ok: true, metadata_only: true, size: 3 }));
+    const m = await meta;
+    assert.equal(m.data, null);
+    assert.equal(m.event.size, 3);
+
+    const refused = client.fetchWorkspaceFile(".env");
+    await tick();
+    lastInstance!.emit(header(lastRequest().request_id, { ok: false, category: "credential" }));
+    const r = await refused;
+    assert.equal(r.data, null);
+    assert.equal(r.event.category, "credential");
+  });
+
+  test("concurrent fetches are matched by request_id, not by arrival order", async () => {
+    const first = client.fetchWorkspaceFile("one.txt");
+    await tick();
+    const id1 = lastRequest().request_id;
+    const second = client.fetchWorkspaceFile("two.txt");
+    await tick();
+    const id2 = lastRequest().request_id;
+    assert.notEqual(id1, id2);
+    lastInstance!.emit(header(id2, { ok: true, path: "two.txt", size: 1 }));
+    binary(new Uint8Array([2]));
+    lastInstance!.emit(header(id1, { ok: true, path: "one.txt", size: 1 }));
+    binary(new Uint8Array([1]));
+    assert.deepEqual((await first).data, new Uint8Array([1]));
+    assert.deepEqual((await second).data, new Uint8Array([2]));
+  });
+
+  test("is refused below protocol 1.20 and sends nothing", async () => {
+    await client.close();
+    installMockWebSocket();
+    client = new JaatoClient({ url: "ws://localhost:8080" });
+    await connectAndAck(client, "1.19");
+    if (lastInstance) lastInstance.sent = [];
+    await assert.rejects(() => client.fetchWorkspaceFile("a.txt"), /workspace\.file\.fetch/);
+    assert.equal(getSent().length, 0);
   });
 });
 
@@ -1328,5 +1644,151 @@ describe("JaatoClient subscribe API", () => {
 
     assert.deepEqual(seen, ["a"]);
     await client.close();
+  });
+});
+
+describe("serverLimits", () => {
+  test("a daemon that advertises nothing gets the legacy 1 MiB limits", () => {
+    const limits = serverLimitsFrom({ client_id: "c", server_version: "1.1.0rc2" });
+    assert.deepEqual(limits, LEGACY_SERVER_LIMITS);
+    assert.equal(limits.stagePerFileLimit, 1024 * 1024);
+    assert.equal(limits.advertised, false);
+  });
+
+  test("advertised limits are read, and the per-file cap never exceeds a message", () => {
+    const limits = serverLimitsFrom({
+      max_message_size: 2 * 1024 * 1024,
+      stage_per_file_limit: 10 * 1024 * 1024,
+      stage_total_limit: 50 * 1024 * 1024,
+    });
+    assert.equal(limits.maxMessageSize, 2 * 1024 * 1024);
+    assert.equal(limits.stagePerFileLimit, 2 * 1024 * 1024);
+    assert.equal(limits.stageTotalLimit, 50 * 1024 * 1024);
+    assert.equal(limits.advertised, true);
+  });
+
+  test("the client exposes the handshake's limits", async () => {
+    installMockWebSocket();
+    try {
+      const client = new JaatoClient({ url: "ws://localhost:8080" });
+      assert.equal(client.serverLimits, null);
+      await connectAndAck(client);
+      assert.equal(client.serverLimits?.advertised, false);
+      await client.close();
+    } finally {
+      restoreWebSocket();
+    }
+  });
+});
+
+describe("JaatoClient memory verbs (protocol 1.22, #1232)", () => {
+  let client: JaatoClient;
+
+  beforeEach(async () => {
+    installMockWebSocket();
+    client = new JaatoClient({ url: "ws://localhost:8080" });
+    await connectAndAck(client, MIN_MEMORY_VERBS_PROTOCOL);
+    if (lastInstance) lastInstance.sent = [];
+  });
+
+  afterEach(async () => {
+    await client.close();
+    restoreWebSocket();
+  });
+
+  const tick = (): Promise<void> => new Promise<void>((resolve) => setTimeout(resolve, 0));
+  const lastRequest = (): Record<string, unknown> =>
+    JSON.parse(lastInstance!.sent[lastInstance!.sent.length - 1]!) as Record<string, unknown>;
+
+  test("the floor is 1.22", () => {
+    assert.equal(MIN_MEMORY_VERBS_PROTOCOL, "1.22");
+  });
+
+  test("listMemories resolves with the answer carrying ITS request_id", async () => {
+    const promise = client.listMemories();
+    await tick();
+    const req = lastRequest();
+    assert.equal(req.type, EventTypeValue.MEMORY_LIST_REQUEST);
+    assert.ok(req.request_id);
+    // A decoy answer for somebody else, then an echo of the request, then ours.
+    lastInstance!.emit({ type: EventTypeValue.MEMORY_LIST, request_id: "other", memories: [{ id: "x" }] });
+    lastInstance!.emit({ ...req });
+    lastInstance!.emit({
+      type: EventTypeValue.MEMORY_LIST, request_id: req.request_id,
+      memories: [{ id: "mine" }], ok: true, may_curate: false,
+    });
+    const got = await promise;
+    assert.deepEqual(got.memories, [{ id: "mine" }]);
+    assert.equal(got.may_curate, false);
+  });
+
+  test("updateMemory sends only the fields given", async () => {
+    const promise = client.updateMemory("m1", { description: "d", tags: ["aa", "bb"] });
+    await tick();
+    const req = lastRequest();
+    assert.equal(req.type, EventTypeValue.MEMORY_UPDATE_REQUEST);
+    assert.equal(req.memory_id, "m1");
+    assert.equal(req.description, "d");
+    assert.deepEqual(req.tags, ["aa", "bb"]);
+    assert.ok(!("content" in req));
+    assert.ok(!("maturity" in req));
+    lastInstance!.emit({ type: EventTypeValue.MEMORY_UPDATE_RESULT, request_id: req.request_id, memory_id: "m1", ok: true });
+    assert.equal((await promise).ok, true);
+  });
+
+  test("approve and dismiss are maturity updates", async () => {
+    for (const [call, maturity] of [
+      [() => client.approveMemory("m1"), "validated"],
+      [() => client.dismissMemory("m1"), "dismissed"],
+    ] as const) {
+      const promise = call();
+      await tick();
+      const req = lastRequest();
+      assert.equal(req.maturity, maturity);
+      lastInstance!.emit({ type: EventTypeValue.MEMORY_UPDATE_RESULT, request_id: req.request_id, memory_id: "m1", ok: true });
+      await promise;
+    }
+  });
+
+  test("getMemory and deleteMemory send their typed requests", async () => {
+    const got = client.getMemory("m1");
+    await tick();
+    const r1 = lastRequest();
+    assert.equal(r1.type, EventTypeValue.MEMORY_GET_REQUEST);
+    lastInstance!.emit({ type: EventTypeValue.MEMORY_GET_RESULT, request_id: r1.request_id, memory_id: "m1", ok: true, memory: { id: "m1", content: "c" } });
+    assert.equal(((await got).memory as { content?: string }).content, "c");
+
+    const del = client.deleteMemory("m1");
+    await tick();
+    const r2 = lastRequest();
+    assert.equal(r2.type, EventTypeValue.MEMORY_DELETE_REQUEST);
+    lastInstance!.emit({ type: EventTypeValue.MEMORY_DELETE_RESULT, request_id: r2.request_id, memory_id: "m1", ok: false, category: "not_owner" });
+    assert.equal((await del).category, "not_owner");
+  });
+
+  test("a closed connection rejects rather than resolving empty", async () => {
+    const promise = client.listMemories();
+    await tick();
+    lastInstance!.close(1006, "gone");
+    await assert.rejects(promise, RequestInterruptedError);
+  });
+
+  test("every verb is refused below 1.22 with nothing sent", async () => {
+    await client.close();
+    installMockWebSocket();
+    client = new JaatoClient({ url: "ws://localhost:8080" });
+    await connectAndAck(client, "1.21");
+    if (lastInstance) lastInstance.sent = [];
+    for (const call of [
+      () => client.listMemories(),
+      () => client.getMemory("m1"),
+      () => client.updateMemory("m1", { description: "d" }),
+      () => client.approveMemory("m1"),
+      () => client.dismissMemory("m1"),
+      () => client.deleteMemory("m1"),
+    ]) {
+      await assert.rejects(call, /memory verbs/);
+    }
+    assert.equal(lastInstance!.sent.length, 0);
   });
 });

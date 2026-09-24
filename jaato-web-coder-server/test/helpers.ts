@@ -19,9 +19,15 @@ export interface MockDaemon {
   port: number;
   binds: Array<{ user: string; ttl_seconds: number; single_use: boolean; auth: string | undefined }>;
   revokes: Array<{ user?: string; ticket?: string }>;
+  /** Users the daemon was asked to reload (``secret.reload``, #1226 §6.4). */
+  reloads: string[];
+  /** How many loaded sessions to report reloaded; default 0. */
+  nextReloadCount: number;
   /** Answer the next bind with this status instead of "bound". */
   nextBindStatus: string | null;
   authHeaders: Array<string | undefined>;
+  /** Send a ``secret.resolve`` down the app-credential connection and await its ``secret.resolve.result``. */
+  askSecretResolve(req: { request_id: string; user: string; workspace: string; name: string }): Promise<Record<string, unknown>>;
   close(): Promise<void>;
 }
 
@@ -31,11 +37,25 @@ export async function startMockDaemon(): Promise<MockDaemon> {
   await new Promise<void>((r) => wss.on("listening", r));
   const port = (wss.address() as { port: number }).port;
   let minted = 0;
-  const d: MockDaemon = { url: `ws://127.0.0.1:${port}`, port, binds: [], revokes: [], nextBindStatus: null, authHeaders: [], close: () => new Promise((r) => wss.close(() => r())) };
+  let appSock: WebSocket | null = null;
+  const resolvePending = new Map<string, (ev: Record<string, unknown>) => void>();
+  const d: MockDaemon = {
+    url: `ws://127.0.0.1:${port}`, port, binds: [], revokes: [], reloads: [], nextReloadCount: 0,
+    nextBindStatus: null, authHeaders: [],
+    askSecretResolve(reqEv) {
+      if (!appSock) return Promise.reject(new Error("no app-credential connection to ask"));
+      return new Promise((resolve) => {
+        resolvePending.set(reqEv.request_id, resolve);
+        appSock!.send(JSON.stringify({ type: "secret.resolve", ...reqEv }));
+      });
+    },
+    close: () => new Promise((r) => wss.close(() => r())),
+  };
   wss.on("connection", (sock: WebSocket, req) => {
     const auth = req.headers.authorization;
     d.authHeaders.push(auth);
     const isApp = auth === `Bearer ${APP_CREDENTIAL}`;
+    if (isApp) appSock = sock;
     sock.send(JSON.stringify({ type: "connected", timestamp: new Date().toISOString(), protocol_version: "1.10", server_info: { client_id: "client_1", server_version: "0.9.0" } }));
     sock.on("message", (raw) => {
       const ev = JSON.parse(String(raw));
@@ -50,6 +70,18 @@ export async function startMockDaemon(): Promise<MockDaemon> {
       if (ev.type === "ticket.revoke") {
         d.revokes.push({ user: ev.user, ticket: ev.ticket });
         return sock.send(JSON.stringify({ type: "ticket.revoke.result", request_id: ev.request_id, status: "not_found", revoked: 0 }));
+      }
+      if (ev.type === "secret.reload") {
+        if (!isApp) return sock.send(JSON.stringify({ type: "secret.reload.result", request_id: ev.request_id, status: "denied", reloaded: 0 }));
+        d.reloads.push(ev.user);
+        const reloaded = d.nextReloadCount; d.nextReloadCount = 0;
+        return sock.send(JSON.stringify({ type: "secret.reload.result", request_id: ev.request_id, status: "ok", reloaded }));
+      }
+      // The application's answer to a daemon-initiated secret.resolve.
+      if (ev.type === "secret.resolve.result") {
+        const cb = resolvePending.get(ev.request_id);
+        if (cb) { resolvePending.delete(ev.request_id); cb(ev); }
+        return;
       }
       if (isApp) return sock.send(JSON.stringify({ type: "error", error: `'${ev.type}' is not available on an application-credential connection`, error_type: "UsageError", recoverable: true }));
     });
@@ -89,6 +121,8 @@ export function writeSecrets(dir = mkdtempSync(join(tmpdir(), "jwcs-"))): { dir:
   writeFileSync(join(dir, "oidc.secret"), "client-secret\n", { mode: 0o600 });
   writeFileSync(join(dir, "session.secret"), "s".repeat(48) + "\n", { mode: 0o600 });
   writeFileSync(join(dir, "credentials.key"), "c".repeat(48) + "\n", { mode: 0o600 });
+  writeFileSync(join(dir, "github.key"), "g".repeat(48) + "\n", { mode: 0o600 });
+  writeFileSync(join(dir, "github-app.secret"), "gh-client-secret\n", { mode: 0o600 });
   return { dir };
 }
 

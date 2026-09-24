@@ -1,0 +1,2 @@
+$ grep 'INCIDENT:' .jaato/logs/session_trace.jsonl
+[12:37:17.060] [INCIDENT] INCIDENT: kind=budget_exhausted at=1789907837.0600615 session_id=20260920_123713 site=server/core.py::_emit_budget_refusal_if_exhausted cause='budget_exhausted (self-enforced: turns 100%)'

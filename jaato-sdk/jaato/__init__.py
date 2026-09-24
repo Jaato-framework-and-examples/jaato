@@ -65,8 +65,8 @@ from jaato_sdk.plugins.base import UserCommand, CommandParameter
 # the eager import list (and out of __all__) so ``import jaato`` never pulls the
 # server runtime — the whole point of the sdk-only facade.
 _LAZY = {
-    "JaatoClient": ("shared", "JaatoClient"),
-    "PluginRegistry": ("shared", "PluginRegistry"),
+    "JaatoClient": ("jaato_server.shared", "JaatoClient"),
+    "PluginRegistry": ("jaato_server.shared", "PluginRegistry"),
     "InProcessClient": ("jaato_embedded", "InProcessClient"),
 }
 
@@ -103,7 +103,7 @@ def __dir__() -> list:
 
 
 if TYPE_CHECKING:  # static analyzers / IDEs — no runtime import
-    from shared import JaatoClient, PluginRegistry
+    from jaato_server.shared import JaatoClient, PluginRegistry
     from jaato_embedded import InProcessClient
 
 

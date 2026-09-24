@@ -26,7 +26,7 @@ The framework's name is not the application's name. They were the same string.
 
 ## The shape of the fix
 
-[`shared/app_identity.py`](../../jaato-server/shared/app_identity.py)
+[`jaato_server/shared/app_identity.py`](../../jaato-server/jaato_server/shared/app_identity.py)
 introduces `AppIdentity` — *the application*, as distinct from the framework
 it is built with. Both reach the upstream:
 
@@ -109,8 +109,8 @@ export JAATO_APP_CATEGORIES="chat-bot,productivity"   # optional; no listing wit
 
 ```python
 # tier 3 — the embedding surface
-from shared.app_identity import AppIdentity
-from shared.jaato_runtime import JaatoRuntime
+from jaato_server.shared.app_identity import AppIdentity
+from jaato_server.shared.jaato_runtime import JaatoRuntime
 
 runtime = JaatoRuntime(
     app_identity=AppIdentity(
@@ -161,7 +161,7 @@ serialized.
 
 ## Why the env vars are `host`-scoped
 
-`shared/env_scope.py` tags the four `JAATO_APP_*` vars **`host`**, which means
+`jaato_server/shared/env_scope.py` tags the four `JAATO_APP_*` vars **`host`**, which means
 they carry no typed profile key. That is a claim, so here is the argument:
 *which application this is* is a property of the deployment, not of a
 conversation, and two sessions in one process disagreeing about who is

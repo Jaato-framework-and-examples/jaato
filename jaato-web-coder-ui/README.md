@@ -1,7 +1,7 @@
 # jaato-web-coder-ui
 
 Browser client for a jaato daemon — the web counterpart of `jaato-tui`.
-It connects to `python -m server --web-socket …` over the daemon's
+It connects to `python -m jaato_server --web-socket …` over the daemon's
 WebSocket transport through the TypeScript SDK (`@jaato/sdk`, in
 `../jaato-sdk-ts`), and renders the same session a TUI can be attached to.
 
@@ -83,7 +83,7 @@ The client is published on npm as `@jaato/web-coder-ui`; the package is the buil
 bundle plus a dependency-free launcher, so `npx` fetches it in one go:
 
 ```bash
-.venv/bin/python -m server --web-socket :8080 --daemon   # the daemon, on this machine
+.venv/bin/python -m jaato_server --web-socket :8080 --daemon   # the daemon, on this machine
 npx @jaato/web-coder-ui                                            # serves the client, opens the browser
 ```
 
@@ -158,6 +158,15 @@ does a permission prompt. A page served with `autoConnect` does not
 connect straight back after an exit; the next click does
 (`src/app/exitIntent.ts`).
 
+Leaving drops this client's session state, because that is what it
+describes, so coming back opens the picker rather than a detached session's
+transcript. A new session starts on an empty pane, as attaching to one
+always has. And a reconnect re-asserts what the client believes before
+anything else goes out: the daemon keeps the workspace selection and the
+session attachment per connection, so without it the next staged file is
+refused and the next session resolves no `.env` (`reassertAfterReconnect`
+in `src/sdk/connection.ts`).
+
 ### Hosting the bundle yourself
 
 `dist/` is static (assets are referenced relatively, so it can sit under any
@@ -201,7 +210,7 @@ npm run dev              # http://localhost:5173, proxies /ws → ws://127.0.0.1
 Against a real daemon:
 
 ```bash
-.venv/bin/python -m server --web-socket :8080 --workspace-root /srv/workspaces   # or without --workspace-root
+.venv/bin/python -m jaato_server --web-socket :8080 --workspace-root /srv/workspaces   # or without --workspace-root
 cat ~/.jaato/ws.token                                                            # paste into the connect form
 ```
 

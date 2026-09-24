@@ -115,6 +115,7 @@ class Renderer(ABC):
         mime_type: Optional[str] = None,
         data_b64: Optional[str] = None,
         final: bool = False,
+        generated_by: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Handle live tool output chunk (text and/or binary media).
 

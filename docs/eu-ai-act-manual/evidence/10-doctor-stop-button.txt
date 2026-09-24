@@ -1,0 +1,8 @@
+$ jaato-doctor --no-release-check
+jaato SDK doctor
+────────────────────────────────────────────────────────────
+✔ PASS  socket                     /run/jaato/jaato.sock — daemon listening
+✔ PASS  daemon identity            PID 31383  HOME=/root  USER=?
+✔ PASS  stop button                PID 31383: `jaato-server --stop --pid-file /run/jaato/jaato.pid --ipc-socket /run/jaato/jaato.sock` saves every loaded session, then cancels each and reaps the runners.  one session: `session stop <id>` from an attached client (SDK stop_session, daemon protocol >= 1.7); `session orphans` lists what is loaded with nobody watching.
+────────────────────────────────────────────────────────────
+WARN: 0 fail, 4 warn, 22 checks

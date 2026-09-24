@@ -16,6 +16,26 @@ import { summarizeToolCalls } from "@/protocol/turnStats";
 import { formatSessionList, normalizeSessionList, type SessionSummary } from "@/protocol/sessions";
 import { formatHistoryListing, historyBlocks } from "@/protocol/history";
 import { clampRailWidth, loadRailWidth, saveRailWidth } from "@/store/railWidth";
+import { loadRailSplits, sanitizeSplits, saveRailSplits, type RailSplits } from "@/store/railSplits";
+import { applyChanged, applySnapshot, markReset, type WorkspaceReset } from "@/store/workspaceView";
+import { toolIdMappings } from "@/protocol/toolIds";
+import type { SessionNote } from "@/app/notes";
+
+/**
+ * What the note editor says about the last save, rendered in the section's
+ * ``value`` slot so a failure is visible without a toast.
+ *
+ * ``signed-out`` is deliberately not folded into ``error``: BFF-side storage
+ * means the cookie can expire mid-session, and "signed out" is a different
+ * thing to tell somebody than "could not save".
+ */
+export type NoteStatus =
+  | { state: "idle" }
+  | { state: "saving" }
+  | { state: "saved"; at: number }
+  | { state: "error"; message: string }
+  | { state: "signed-out"; loginUrl: string };
+import { BUSY_STATUS } from "@/store/phase";
 import type {
   StagedUpload,
   ExitChoice,
@@ -24,7 +44,10 @@ import type {
   Agent,
   ConfigStatus,
   ConnectionPhase,
+  BudgetState,
+  GcState,
   ContextState,
+  MemoriesState,
   InitProgress,
   OutputBlock,
   PendingClarification,
@@ -58,6 +81,33 @@ export interface JaatoState {
    * offer previously used keys instead of asking for the key again.
    */
   credentialsUrl: string | null;
+  /**
+   * The sign-in backend's per-user session-note store (``config.json``'s
+   * ``notesUrl``, see ``app/notes.ts``), or ``null`` when the page was
+   * served without one -- in which case notes are kept in this browser
+   * instead, which the UI says rather than pretending otherwise.
+   */
+  notesUrl: string | null;
+  /**
+   * The sign-in backend's per-user GitHub connection API (``config.json``'s
+   * ``githubUrl``, see ``app/github.ts``), or ``null`` when the page was
+   * served without a ``github:`` block.  Its presence is the whole gate on
+   * the "Connect GitHub" settings entry and the workspace account dropdown.
+   */
+  githubUrl: string | null;
+  /**
+   * Where the server-side GitHub App connect starts (``config.json``'s
+   * ``githubLoginUrl``), or ``null``.  The settings entry navigates here.
+   */
+  githubLoginUrl: string | null;
+  /**
+   * The notes THIS person has written, by session id.  Not part of
+   * ``emptySessionState``: a note outlives the session being attached,
+   * detached or swapped, and the listing it joins onto is cross-workspace.
+   */
+  notes: Record<string, SessionNote>;
+  /** Per session: what the editor should say about the last save. */
+  noteStatus: Record<string, NoteStatus>;
   /**
    * The sign-in backend behind this page, when ``config.json`` named a
    * ticket URL: where "Sign out" goes and who the backend says is signed
@@ -121,8 +171,35 @@ export interface JaatoState {
 
   plan: Record<string, PlanState>;
   context: Record<string, ContextState>;
+  /** What the window is spent ON, by instruction source (see BudgetState). */
+  budget: Record<string, BudgetState>;
+  /** GC policy and last pass, per agent (see GcState). */
+  gc: Record<string, GcState>;
+  /** Budget source layers whose children are showing — the TUI panel's drill-down. */
+  budgetExpanded: string[];
   commands: CommandSpec[];
+  /** Every file the session changed, path -> status: the FULL list, whatever the panel's reset point. */
   workspaceFiles: Record<string, string>;
+  /**
+   * Hashed tool / category id -> the name a person knows, from
+   * ``tools.id_registry`` and ``session.info.tool_id_mappings``
+   * (``protocol/toolIds.ts``).  Replaced wholesale on each receive -- the
+   * daemon always sends the full current set.
+   */
+  toolIdNames: Record<string, string>;
+  /** Path -> the daemon's number for its latest change (#1189, ``store/workspaceView.ts``). */
+  workspaceSeqs: Record<string, number>;
+  /** The workspace monitor those numbers belong to; ``null`` from a daemon that numbers nothing. */
+  workspaceEpoch: string | null;
+  /** The highest change number seen -- what a reset records. */
+  workspaceSeq: number;
+  /**
+   * The Files panel's reset point (the TUI's ``workspace_clear``): when set,
+   * the panel shows only files changed after it.  Per viewer and in memory,
+   * like ``workspaceHidden``; voided -- with a notice -- when the daemon's
+   * numbering says it can no longer be honoured.
+   */
+  workspaceReset: WorkspaceReset | null;
   /**
    * Entries hidden from the Files panel this session — the TUI panel's
    * ``h`` key.  A directory is stored with its trailing ``/`` and hides
@@ -132,6 +209,13 @@ export interface JaatoState {
   workspaceHidden: string[];
   /** Show hidden entries (dimmed, with an ``H`` marker) so they can be unhidden. */
   workspaceShowHidden: boolean;
+  /**
+   * Directories collapsed in the Files panel -- the TUI panel's Left/Right
+   * keys.  Entry ids, so each carries its trailing ``/``.  Every directory
+   * starts expanded; a reset expands them all again, as the TUI's clear
+   * does.  Client-side only.
+   */
+  workspaceCollapsed: string[];
   /**
    * What the daemon last said about an entry's ``.gitignore`` line, from
    * ``workspace.ignore.result`` — learned, not derived: the client never
@@ -144,20 +228,39 @@ export interface JaatoState {
   uploads: StagedUpload[];
   /** ``PermissionStatusEvent``: the effective default policy and, when suspended, the scope. */
   permissionStatus?: { effectiveDefault: string; suspensionScope: string | null } | null;
-  processing: Record<string, boolean>;
+  /**
+   * When each agent became busy, for the phase indicator's elapsed clock.
+   * Set the moment the daemon reports ``active`` (or the composer sends,
+   * whichever is first) and dropped when the turn ends.  Absent = not busy;
+   * ``store/phase.ts`` is what reads it.
+   */
+  busySince: Record<string, number>;
   /** The open exit confirmation, or ``null`` (``app/exitChoice.ts``). */
   exitChoice: ExitChoice | null;
+  /** The rail's Memories section (#1232, ``app/memories.ts``). */
+  memories: MemoriesState;
 
   ui: {
     showPlan: boolean;
     showBudget: boolean;
     showWorkspace: boolean;
     showTools: boolean;
+    /** The Sessions rail section: survey every session and note it without leaving this one. */
+    showSessions: boolean;
+    /** The Memories rail section (#1232): the session's memory store, and the owner's curation of it. */
+    showMemories: boolean;
     theme: string;
     /** Tool call currently pinned in the live-output popup. */
     popupCallId?: string | null;
     /** Width of the session rail in px, dragged via the handle on its left edge; remembered per browser. */
     railWidth: number;
+    /**
+     * How the rail's open sections share its height, as a weight per section
+     * id, dragged via the horizontal handle between two open sections;
+     * remembered per browser.  Normalised to fractions over the open set at
+     * render time — see ``@/store/railSplits``.
+     */
+    railSplits: RailSplits;
   };
 
   // ── actions ──
@@ -166,11 +269,33 @@ export interface JaatoState {
   setUrl: (url: string) => void;
   setScreen: (s: Screen) => void;
   setCredentialsUrl: (url: string | null) => void;
+  setNotesUrl: (url: string | null) => void;
+  setGithubUrls: (urls: { githubUrl: string | null; githubLoginUrl: string | null }) => void;
+  /** Replace the whole set, from one listing. */
+  setNotes: (notes: SessionNote[]) => void;
+  /** Upsert one, or drop it when ``null`` (an emptied note is a forgotten one). */
+  setNote: (sessionId: string, note: SessionNote | null) => void;
+  setNoteStatus: (sessionId: string, status: NoteStatus) => void;
   setBackend: (b: { logoutUrl: string; user: string | null } | null) => void;
   setWorkspaceMode: (m: JaatoState["workspace"]["mode"]) => void;
   selectWorkspace: (name: string | undefined) => void;
   selectAgent: (id: string) => void;
   addUserBlock: (agentId: string, text: string) => void;
+  /**
+   * The composer sent; the agent counts as busy until the daemon's first
+   * word about it arrives, so the indicator does not go dark over the
+   * round trip.  This is the ONLY optimistic piece of the phase --
+   * everything else is the daemon's own account.  ``clearSending`` gives
+   * it back when the send failed, so a refused send does not leave the
+   * indicator claiming work is under way.
+   *
+   * It replaces a fabricated ``AgentStatusChangedEvent`` the client used
+   * to dispatch at itself carrying ``status: "processing"`` -- a word no
+   * daemon emits, which the real ``active`` then read as "not busy" and
+   * switched the indicator back OFF one round trip later.
+   */
+  markSending: (agentId: string) => void;
+  clearSending: (agentId: string) => void;
   addSystemBlock: (agentId: string, text: string, style?: string) => void;
   clearOutput: (agentId: string) => void;
   toggleTool: (agentId: string, blockId: string) => void;
@@ -184,14 +309,23 @@ export interface JaatoState {
   dismissClarification: (requestId: string) => void;
   dismissReferenceSelection: (requestId: string) => void;
   dismissPostAuth: () => void;
-  toggleUi: (key: "showPlan" | "showBudget" | "showWorkspace" | "showTools") => void;
+  toggleUi: (key: "showPlan" | "showBudget" | "showWorkspace" | "showTools" | "showSessions" | "showMemories") => void;
+  /** Merge into the Memories section's state (``app/memories.ts`` is its one writer). */
+  patchMemories: (patch: Partial<MemoriesState> | ((m: MemoriesState) => Partial<MemoriesState>)) => void;
   /** The TUI's Ctrl+T: expand or collapse every tool block, and new ones follow. */
   setToolsExpanded: (expanded: boolean) => void;
   /** Add (``+1``, before a silent request) or give back (``-1``, when it failed to send) one silent reply. */
   setSessionListSilent: (delta: 1 | -1) => void;
   setHistoryMode: (mode: JaatoState["historyMode"]) => void;
+  /** Show or hide one budget source's children. */
+  toggleBudgetSource: (source: string) => void;
   toggleWorkspaceHidden: (entryId: string) => void;
   toggleWorkspaceShowHidden: () => void;
+  toggleWorkspaceCollapsed: (entryId: string) => void;
+  /** Reset the Files panel: from now on it shows only files that change after this moment. */
+  resetWorkspaceView: () => void;
+  /** Drop the reset point and show every file the session changed. */
+  showAllWorkspace: () => void;
   setWorkspaceNotice: (n: JaatoState["workspaceNotice"]) => void;
   /** The workspace SCREEN's status line (``workspace.notice``), as opposed to the Files panel's above. */
   setWorkspaceListNotice: (n: JaatoState["workspace"]["notice"]) => void;
@@ -199,6 +333,8 @@ export interface JaatoState {
   setPopup: (callId: string | null) => void;
   /** Clamped to the rail's bounds and persisted. */
   setRailWidth: (w: number) => void;
+  /** Replace the rail section split weights (from a drag or a reset) and persist. */
+  setRailSplits: (splits: RailSplits) => void;
   addUploads: (items: StagedUpload[]) => void;
   updateUpload: (id: string, patch: Partial<StagedUpload>) => void;
   removeUpload: (id: string) => void;
@@ -226,15 +362,56 @@ const emptySessionState = () => ({
   postAuth: null as PendingPostAuthSetup | null,
   plan: {} as Record<string, PlanState>,
   context: {} as Record<string, ContextState>,
+  budget: {} as Record<string, BudgetState>,
+  gc: {} as Record<string, GcState>,
+  budgetExpanded: [] as string[],
+  toolIdNames: {} as Record<string, string>,
   workspaceFiles: {} as Record<string, string>,
+  workspaceSeqs: {} as Record<string, number>,
+  workspaceEpoch: null as string | null,
+  workspaceSeq: 0,
+  workspaceReset: null as WorkspaceReset | null,
   workspaceHidden: [] as string[],
   workspaceShowHidden: false,
+  workspaceCollapsed: [] as string[],
   workspaceIgnored: {} as Record<string, boolean>,
   workspaceNotice: null as { text: string; error?: boolean } | null,
   permissionStatus: null,
-  processing: {} as Record<string, boolean>,
+  busySince: {} as Record<string, number>,
   exitChoice: null as ExitChoice | null,
+  memories: emptyMemories(),
 });
+
+/** The Memories section before anything was asked (and after a session change). */
+export function emptyMemories(): MemoriesState {
+  return {
+    rows: [], status: "idle", error: null, mayCurate: null, thisSessionOnly: false,
+    expanded: null, details: {}, busy: {}, editing: {}, notice: null,
+  };
+}
+
+/** Drop one key, returning a new record (React identity) — or the same one. */
+function without<T>(rec: Record<string, T>, key: string): Record<string, T> {
+  if (!(key in rec)) return rec;
+  const next = { ...rec };
+  delete next[key];
+  return next;
+}
+
+/** Stamp ``key`` with now, unless it is already stamped (the clock must not restart). */
+function startedAt(rec: Record<string, number>, key: string): Record<string, number> {
+  return key in rec ? rec : { ...rec, [key]: Date.now() };
+}
+
+/**
+ * The context an upload belongs to (#1250): the active session once one
+ * exists, else ``""`` (the picker, before a session opens).  Stamped onto
+ * each upload at attach time and re-read to filter the attach strip, so a
+ * file attached in one session is not shown in another.
+ */
+export function uploadScope(st: { sessionId?: string | null }): string {
+  return st.sessionId ? `session:${st.sessionId}` : "";
+}
 
 function agentOf(ev: AnyEvent): string {
   const a = ev.agent_id;
@@ -299,8 +476,9 @@ function upsertPermission(s: JaatoState, ev: AnyEvent, inputMode: boolean): void
   s.permissions = existing
     ? s.permissions.map((p) => (p.requestId === requestId ? merged : p))
     : [...s.permissions, merged];
-  const a = s.agents[merged.agentId];
-  if (a) s.agents = { ...s.agents, [merged.agentId]: { ...a, status: "awaiting_permission" } };
+  // A prompt is the one thing that cannot wait behind an unknown agent: it
+  // blocks that agent's turn until somebody answers, so give it a tab.
+  ensureAgent(s, merged.agentId);
 }
 
 /**
@@ -374,9 +552,14 @@ export function reduce(s: JaatoState, raw: JaatoEvent): JaatoState {
       const id = agentOf(ev);
       ensureAgent(s, id);
       const a = s.agents[id]!;
+      // The daemon's word, verbatim: active | idle | done | error | cancelled.
+      // The client invents no status of its own -- ``store/phase.ts`` derives
+      // what to show from this plus the pending prompts and the open tools.
       const status = String(ev.status ?? a.status);
       s.agents = { ...s.agents, [id]: { ...a, status, error: (ev.error as string | null | undefined) ?? null } };
-      s.processing = { ...s.processing, [id]: status === "processing" || status === "running" };
+      // The daemon has spoken: its word replaces the composer's optimism,
+      // whichever way the status went.
+      s.busySince = status === BUSY_STATUS ? startedAt(s.busySince, id) : without(s.busySince, id);
       break;
     }
     case EventTypeValue.AGENT_COMPLETED:
@@ -385,8 +568,10 @@ export function reduce(s: JaatoState, raw: JaatoEvent): JaatoState {
       ensureAgent(s, id);
       const a = s.agents[id]!;
       const isErr = ev.type === EventTypeValue.AGENT_ERROR;
-      s.agents = { ...s.agents, [id]: { ...a, status: isErr ? "error" : "finished", error: isErr ? String(ev.error ?? "") : null } };
-      s.processing = { ...s.processing, [id]: false };
+      // ``done``, not a locally-invented ``finished``: the daemon emits a
+      // ``done`` status beside this event and the two must not disagree.
+      s.agents = { ...s.agents, [id]: { ...a, status: isErr ? "error" : "done", error: isErr ? String(ev.error ?? "") : null } };
+      s.busySince = without(s.busySince, id);
       if (isErr) {
         const list = [...(s.blocks[id] ?? [])];
         list.push({ id: nextId(), kind: "system", agentId: id, text: String(ev.error ?? "agent error"), style: "error" });
@@ -497,11 +682,11 @@ export function reduce(s: JaatoState, raw: JaatoEvent): JaatoState {
       upsertPermission(s, ev, true);
       break;
     case EventTypeValue.PERMISSION_RESOLVED: {
+      // Dropping the pending record is the whole of it: the agent's status
+      // is still the ``active`` the daemon set before it asked, so the phase
+      // goes straight back to whatever the turn is doing.
       const rid = String(ev.request_id ?? "");
       s.permissions = s.permissions.filter((p) => p.requestId !== rid);
-      const id = agentOf(ev);
-      const a = s.agents[id];
-      if (a && a.status === "awaiting_permission") s.agents = { ...s.agents, [id]: { ...a, status: "processing" } };
       break;
     }
     case EventTypeValue.PERMISSION_STATUS:
@@ -517,7 +702,7 @@ export function reduce(s: JaatoState, raw: JaatoEvent): JaatoState {
       s.sessions = list;
       if (s.sessionListSilent > 0) { s.sessionListSilent -= 1; break; }
       const id = s.selectedAgentId;
-      setBlocks(s, id, [...(s.blocks[id] ?? []), { id: nextId(), kind: "system", agentId: id, text: formatSessionList(list), style: "help" }]);
+      setBlocks(s, id, [...(s.blocks[id] ?? []), { id: nextId(), kind: "system", agentId: id, text: formatSessionList(list, s.notes), style: "help" }]);
       break;
     }
     case EventTypeValue.HISTORY: {
@@ -656,6 +841,33 @@ export function reduce(s: JaatoState, raw: JaatoEvent): JaatoState {
       };
       break;
     }
+    /**
+     * ``InstructionBudgetEvent`` -- what the context window is spent ON.
+     *
+     * Read by the rail's Budget section.  The daemon's snapshot is taken
+     * verbatim rather than reshaped: it is one dict, several clients read
+     * it, and a client-side flattening is how two readers start disagreeing
+     * about what a source layer costs.  A snapshot that carries no entries
+     * is ignored, because replacing a populated breakdown with an empty one
+     * would blank the panel mid-turn.
+     */
+    case EventTypeValue.INSTRUCTION_BUDGET_UPDATED: {
+      const snap = ev.budget_snapshot as Record<string, unknown> | undefined;
+      const entries = snap?.entries as BudgetState["entries"] | undefined;
+      if (!snap || !entries || Object.keys(entries).length === 0) break;
+      s.budget = {
+        ...s.budget,
+        [agentOf(ev)]: {
+          contextLimit: (snap.context_limit as number | null | undefined) ?? null,
+          totalTokens: (snap.total_tokens as number | null | undefined) ?? null,
+          utilizationPercent: (snap.utilization_percent as number | null | undefined) ?? null,
+          lockedTokens: (snap.locked_tokens as number | null | undefined) ?? null,
+          gcEligibleTokens: (snap.gc_eligible_tokens as number | null | undefined) ?? null,
+          entries,
+        },
+      };
+      break;
+    }
     case EventTypeValue.TURN_COMPLETED: {
       const id = agentOf(ev);
       const prev = s.context[id] ?? { usage: {} };
@@ -673,9 +885,7 @@ export function reduce(s: JaatoState, raw: JaatoEvent): JaatoState {
           },
         },
       };
-      s.processing = { ...s.processing, [id]: false };
-      const a = s.agents[id];
-      if (a && a.status === "processing") s.agents = { ...s.agents, [id]: { ...a, status: "idle" } };
+      s.busySince = without(s.busySince, id);
       break;
     }
     case EventTypeValue.SYSTEM_MESSAGE: {
@@ -716,6 +926,17 @@ export function reduce(s: JaatoState, raw: JaatoEvent): JaatoState {
       break;
     case EventTypeValue.SESSION_INFO: {
       const sid = ev.session_id as string | undefined;
+      // A session opening adopts the picker's uploads: files attached
+      // before any session existed carry scope ``""``, and the one session
+      // they were staged for is the one that now opens (#1250).  Re-stamp
+      // only unscoped uploads, so another session's files are never
+      // reassigned.  Only on the null -> session transition.
+      if (sid && !s.sessionId) {
+        const adopted = `session:${sid}`;
+        if (s.uploads.some((u) => u.scope === "")) {
+          s.uploads = s.uploads.map((u) => (u.scope === "" ? { ...u, scope: adopted } : u));
+        }
+      }
       if (sid) s.sessionId = sid;
       if (Array.isArray(ev.sessions)) s.sessions = normalizeSessionList(ev.sessions);
       s.session = {
@@ -726,6 +947,42 @@ export function reduce(s: JaatoState, raw: JaatoEvent): JaatoState {
         profile: (ev.profile_name as string | null | undefined) ?? s.session.profile ?? null,
         models: (ev.models as string[] | undefined) ?? s.session.models,
       };
+      {
+        const names = toolIdMappings(ev.tool_id_mappings);
+        if (names && Object.keys(names).length) s.toolIdNames = names;
+      }
+      break;
+    }
+    case EventTypeValue.GC_CONFIG: {
+      const id = (ev.agent_id as string) || "main";
+      const num = (v: unknown) => (typeof v === "number" ? v : null);
+      s.gc = { ...s.gc, [id]: { ...s.gc[id], config: {
+        strategy: typeof ev.strategy === "string" && ev.strategy ? ev.strategy : null,
+        threshold: num(ev.threshold), targetPercent: num(ev.target_percent), continuous: ev.continuous_mode === true,
+      } } };
+      break;
+    }
+    case EventTypeValue.GC: {
+      const id = (ev.agent_id as string) || "main";
+      const cur = s.gc[id] ?? {};
+      const num = (v: unknown) => (typeof v === "number" ? v : null);
+      if (ev.phase === "started") s.gc = { ...s.gc, [id]: { ...cur, running: true } };
+      else if (ev.phase === "completed") {
+        const at = Date.parse(String(ev.timestamp ?? ""));
+        s.gc = { ...s.gc, [id]: { ...cur, running: false, lastPass: {
+          at: Number.isFinite(at) ? at : Date.now(),
+          success: ev.success !== false,
+          tokensFreed: num(ev.tokens_freed), tokensBefore: num(ev.tokens_before), tokensAfter: num(ev.tokens_after),
+          trigger: typeof ev.trigger_reason === "string" ? ev.trigger_reason : null,
+          strategy: typeof ev.strategy === "string" ? ev.strategy : null,
+          error: typeof ev.error === "string" ? ev.error : null,
+        } } };
+      }
+      break;
+    }
+    case EventTypeValue.TOOL_ID_REGISTRY: {
+      const names = toolIdMappings(ev.mappings);
+      if (names) s.toolIdNames = names;
       break;
     }
     case EventTypeValue.SESSION_PROFILES:
@@ -812,32 +1069,18 @@ export function reduce(s: JaatoState, raw: JaatoEvent): JaatoState {
       s.workspace = { ...s.workspace, config: cfg, selected: cfg.workspace || s.workspace.selected };
       break;
     }
-    case EventTypeValue.WORKSPACE_FILES_CHANGED: {
-      const next = { ...s.workspaceFiles };
-      // WorkspaceFilesChangedEvent.changes is [{path, status}] — ``status`` is
-      // the daemon's key; ``change`` / ``type`` are tolerated for older feeds.
-      for (const ch of (ev.changes as Record<string, string>[] | undefined) ?? []) {
-        const p = ch.path ?? ch.file;
-        if (!p) continue;
-        const status = ch.status ?? ch.change ?? ch.type ?? "modified";
-        if (status === "deleted") delete next[p];
-        else next[p] = status;
-      }
-      s.workspaceFiles = next;
-      break;
-    }
+    case EventTypeValue.WORKSPACE_FILES_CHANGED:
     case EventTypeValue.WORKSPACE_FILES_SNAPSHOT: {
-      const next: Record<string, string> = {};
-      for (const f of (ev.files as unknown[] | undefined) ?? []) {
-        if (typeof f === "string") next[f] = "modified";
-        else if (f && typeof f === "object") {
-          const o = f as Record<string, string>;
-          const p = o.path ?? o.file;
-          const status = o.status ?? o.change ?? o.type ?? "modified";
-          if (p && status !== "deleted") next[p] = status;
-        }
-      }
-      s.workspaceFiles = next;
+      // #1189: both go through workspaceView.ts, which keeps the change
+      // numbers the panel's reset point is measured against.
+      const cur = { files: s.workspaceFiles, seqs: s.workspaceSeqs, epoch: s.workspaceEpoch, seq: s.workspaceSeq, reset: s.workspaceReset };
+      const out = ev.type === EventTypeValue.WORKSPACE_FILES_SNAPSHOT ? applySnapshot(cur, ev) : applyChanged(cur, ev);
+      s.workspaceFiles = out.files;
+      s.workspaceSeqs = out.seqs;
+      s.workspaceEpoch = out.epoch;
+      s.workspaceSeq = out.seq;
+      s.workspaceReset = out.reset;
+      if (out.voided) s.workspaceNotice = { text: out.voided };
       break;
     }
     case EventTypeValue.WORKSPACE_IGNORE_RESULT: {
@@ -851,6 +1094,31 @@ export function reduce(s: JaatoState, raw: JaatoEvent): JaatoState {
       s.workspaceNotice = { text: `${path} ${ignored ? "added to" : "removed from"} .gitignore` };
       break;
     }
+    case EventTypeValue.SCAFFOLD_INTEGRATION_RESULT: {
+      // The daemon ran ``jaato-scaffold integration --refresh`` into this
+      // workspace (#1263).  A SKIPPED refresh — an ``edited`` / ``diverged``
+      // / ``unstamped`` copy the daemon declined to overwrite — is reported
+      // here rather than silently: the person edited the skill and should
+      // know it was left as-is.  A clean apply of a current copy says
+      // nothing (no notice), so a re-check on every session start is quiet.
+      const name = String(ev.integration ?? "jaato-sdk");
+      if (ev.ok === false) {
+        s.workspaceNotice = { text: String(ev.error || `Could not install the ${name} skill`), error: true };
+        break;
+      }
+      const state = String(ev.state_after ?? ev.state_before ?? "");
+      // Report only a skip that LEFT LOCAL CONTENT alone (the person edited
+      // the skill).  ``--refresh`` also declines an already-``current`` copy
+      // with a skipped_reason, but that is the steady state on every session
+      // start and is not worth a notice — reporting it would be constant noise.
+      if (ev.skipped_reason && (state === "edited" || state === "diverged" || state === "unstamped")) {
+        s.workspaceNotice = { text: `${name} skill left as-is (${state}): ${String(ev.skipped_reason)}` };
+      } else if (ev.changed) {
+        const ver = ev.server_version ? ` (jaato-server ${String(ev.server_version)})` : "";
+        s.workspaceNotice = { text: `${name} skill installed${ver}` };
+      }
+      break;
+    }
     default:
       break;
   }
@@ -862,6 +1130,11 @@ export const useJaato = create<JaatoState>()((set, get) => ({
   url: "",
   screen: "connect",
   credentialsUrl: null,
+  notesUrl: null,
+  githubUrl: null,
+  githubLoginUrl: null,
+  notes: {},
+  noteStatus: {},
   backend: null,
   workspace: { mode: "unknown", list: [] },
   profiles: [],
@@ -871,7 +1144,7 @@ export const useJaato = create<JaatoState>()((set, get) => ({
   commands: mergeCommandSpecs([]),
   uploads: [],
   ...emptySessionState(),
-  ui: { showPlan: false, showBudget: false, showWorkspace: false, showTools: false, theme: "light", popupCallId: null, railWidth: loadRailWidth() },
+  ui: { showPlan: false, showBudget: false, showWorkspace: false, showTools: false, showSessions: false, showMemories: false, theme: "light", popupCallId: null, railWidth: loadRailWidth(), railSplits: loadRailSplits() },
 
   dispatch: (events) =>
     set((state) => {
@@ -883,10 +1156,25 @@ export const useJaato = create<JaatoState>()((set, get) => ({
   setUrl: (url) => set({ url }),
   setScreen: (screen) => set({ screen }),
   setCredentialsUrl: (credentialsUrl) => set({ credentialsUrl }),
+  setNotesUrl: (notesUrl) => set({ notesUrl }),
+  setGithubUrls: ({ githubUrl, githubLoginUrl }) => set({ githubUrl, githubLoginUrl }),
+  setNotes: (list) => set({ notes: Object.fromEntries(list.map((n) => [n.sessionId, n])) }),
+  setNote: (sessionId, note) =>
+    set((st) => {
+      const notes = { ...st.notes };
+      if (note) notes[sessionId] = note; else delete notes[sessionId];
+      return { notes };
+    }),
+  setNoteStatus: (sessionId, status) => set((st) => ({ noteStatus: { ...st.noteStatus, [sessionId]: status } })),
   setBackend: (backend) => set({ backend }),
   setWorkspaceMode: (mode) => set((st) => ({ workspace: { ...st.workspace, mode } })),
   selectWorkspace: (name) => set((st) => ({ workspace: { ...st.workspace, selected: name } })),
   selectAgent: (id) => set({ selectedAgentId: id }),
+  markSending: (agentId) => set((st) => ({ busySince: startedAt(st.busySince, agentId) })),
+  clearSending: (agentId) =>
+    // Only what the send itself claimed: a turn the daemon has since
+    // confirmed is ``active`` is not this send's to cancel.
+    set((st) => (st.agents[agentId]?.status === BUSY_STATUS ? {} : { busySince: without(st.busySince, agentId) })),
   addUserBlock: (agentId, text) =>
     set((st) => ({ blocks: { ...st.blocks, [agentId]: [...(st.blocks[agentId] ?? []), { id: nextId(), kind: "user", agentId, text }] } })),
   addSystemBlock: (agentId, text, style = "info") =>
@@ -920,23 +1208,44 @@ export const useJaato = create<JaatoState>()((set, get) => ({
   })),
   setSessionListSilent: (delta) => set((st) => ({ sessionListSilent: Math.max(0, st.sessionListSilent + delta) })),
   setHistoryMode: (mode) => set({ historyMode: mode }),
+  toggleBudgetSource: (source) => set((st) => ({
+    budgetExpanded: st.budgetExpanded.includes(source)
+      ? st.budgetExpanded.filter((k) => k !== source)
+      : [...st.budgetExpanded, source],
+  })),
   toggleWorkspaceHidden: (entryId) => set((st) => ({
     workspaceHidden: st.workspaceHidden.includes(entryId)
       ? st.workspaceHidden.filter((h) => h !== entryId)
       : [...st.workspaceHidden, entryId],
   })),
   toggleWorkspaceShowHidden: () => set((st) => ({ workspaceShowHidden: !st.workspaceShowHidden })),
+  toggleWorkspaceCollapsed: (entryId) => set((st) => ({
+    workspaceCollapsed: st.workspaceCollapsed.includes(entryId)
+      ? st.workspaceCollapsed.filter((c) => c !== entryId)
+      : [...st.workspaceCollapsed, entryId],
+  })),
+  resetWorkspaceView: () => set((st) => ({ workspaceReset: markReset({ epoch: st.workspaceEpoch, seq: st.workspaceSeq }), workspaceCollapsed: [], workspaceNotice: null })),
+  showAllWorkspace: () => set(() => ({ workspaceReset: null, workspaceNotice: null })),
   setWorkspaceNotice: (n) => set(() => ({ workspaceNotice: n })),
   setWorkspaceListNotice: (n) => set((st) => ({ workspace: { ...st.workspace, notice: n } })),
   setTheme: (theme) => set((st) => ({ ui: { ...st.ui, theme } })),
   setPopup: (callId) => set((st) => ({ ui: { ...st.ui, popupCallId: callId } })),
+  patchMemories: (patch) => set((st) => ({
+    memories: { ...st.memories, ...(typeof patch === "function" ? patch(st.memories) : patch) },
+  })),
   setRailWidth: (w) => set((st) => { const railWidth = clampRailWidth(w); saveRailWidth(railWidth); return { ui: { ...st.ui, railWidth } }; }),
+  setRailSplits: (splits) => set((st) => { const railSplits = sanitizeSplits(splits); saveRailSplits(railSplits); return { ui: { ...st.ui, railSplits } }; }),
   addUploads: (items) => set((st) => ({ uploads: [...st.uploads, ...items] })),
   updateUpload: (id, patch) => set((st) => ({ uploads: st.uploads.map((u) => (u.id === id ? { ...u, ...patch } : u)) })),
   removeUpload: (id) => set((st) => ({ uploads: st.uploads.filter((u) => u.id !== id) })),
   takeUploads: () => {
-    const staged = get().uploads.filter((u) => u.status === "staged").map((u) => u.path);
-    set((st) => ({ uploads: st.uploads.filter((u) => u.status === "queued" || u.status === "staging") }));
+    // Only the ACTIVE context's staged files are named in the message and
+    // its settled chips (staged + failed) cleared; another session's uploads
+    // (a different scope) are left untouched (#1250).  A file still
+    // queued/staging in this context is kept for the next send, as before.
+    const active = uploadScope(get());
+    const staged = get().uploads.filter((u) => u.scope === active && u.status === "staged").map((u) => u.path);
+    set((st) => ({ uploads: st.uploads.filter((u) => u.scope !== active || u.status === "queued" || u.status === "staging") }));
     return staged;
   },
   resetSessionState: () => set(() => ({ ...emptySessionState() })),

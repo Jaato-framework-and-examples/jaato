@@ -1,10 +1,16 @@
 /**
  * The attachment strip: an "Attach files" control, the folder the next
  * files go into, and one chip per attached file with its state — queued
- * (○, waiting for a workspace), staging (● pulsing), staged (✓) or failed
- * (✗, the reason in the title).  Rendered above the composer during a
- * session and on the session picker before one exists; both feed
- * ``app/staging.ts`` and read the store's ``uploads``.
+ * (○, waiting for a workspace), staging (● pulsing, with an indeterminate
+ * progress bar), staged (✓) or failed (✗, the reason in the title).
+ * Rendered above the composer during a session and on the session picker
+ * before one exists; both feed ``app/staging.ts`` and read the store's
+ * ``uploads``.
+ *
+ * The strip shows only the ACTIVE context's uploads (#1250): an upload
+ * carries the session (or picker) it was staged into, and the strip filters
+ * to ``uploadScope(state)``, so a file attached in session A does not follow
+ * you into an unrelated session B.
  *
  * ``×`` drops a chip from the strip only — a file already staged stays in
  * the workspace (the Files panel still lists it), one still queued is
@@ -13,7 +19,7 @@
 import { useRef, useState } from "react";
 import { attachFiles, discardUpload } from "@/app/staging";
 import { formatSize } from "@/protocol/attachments";
-import { useJaato } from "@/store/store";
+import { uploadScope, useJaato } from "@/store/store";
 import type { StagedUpload } from "@/store/types";
 
 const GLYPH: Record<StagedUpload["status"], { text: string; cls: string }> = {
@@ -31,7 +37,12 @@ export interface AttachStripProps {
 }
 
 export function AttachStrip({ hint, always }: AttachStripProps) {
-  const uploads = useJaato((s) => s.uploads);
+  // Only the active context's uploads (#1250): a file attached in session A
+  // must not show above session B's composer.  Both selectors return stable
+  // references, so the filter runs on state change, not every render.
+  const allUploads = useJaato((s) => s.uploads);
+  const sessionId = useJaato((s) => s.sessionId);
+  const uploads = allUploads.filter((u) => u.scope === uploadScope({ sessionId }));
   const [folder, setFolder] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
   if (!always && uploads.length === 0) {
@@ -53,12 +64,22 @@ export function AttachStrip({ hint, always }: AttachStripProps) {
       {uploads.length > 0 && (
         <ul className="flex flex-wrap gap-1.5 px-3 py-2" aria-label="Attachments">
           {uploads.map((u) => (
-            <li key={u.id} data-status={u.status} title={u.error ?? u.path} className={`flex items-center gap-1.5 border hairline px-2 py-0.5 font-mono text-[12px] ${u.status === "failed" ? "border-error" : ""}`}>
-              <span className={GLYPH[u.status].cls} aria-label={u.status}>{GLYPH[u.status].text}</span>
-              <span className="max-w-[18rem] truncate">{u.path}</span>
-              <span className="text-text-muted">{formatSize(u.size)}</span>
-              {u.status === "failed" && <span className="text-error truncate max-w-[16rem]">{u.error}</span>}
-              <button type="button" onClick={() => discardUpload(u.id)} aria-label={`Remove ${u.path}`} className="text-text-muted hover:text-error px-0.5">×</button>
+            <li key={u.id} data-status={u.status} title={u.error ?? u.path} className={`flex flex-col gap-0.5 border hairline px-2 py-0.5 font-mono text-[12px] ${u.status === "failed" ? "border-error" : ""}`}>
+              <div className="flex items-center gap-1.5">
+                <span className={GLYPH[u.status].cls} aria-label={u.status}>{GLYPH[u.status].text}</span>
+                <span className="max-w-[18rem] truncate">{u.path}</span>
+                <span className="text-text-muted">{formatSize(u.size)}</span>
+                {u.status === "failed" && <span className="text-error truncate max-w-[16rem]">{u.error}</span>}
+                <button type="button" onClick={() => discardUpload(u.id)} aria-label={`Remove ${u.path}`} className="text-text-muted hover:text-error px-0.5">×</button>
+              </div>
+              {u.status === "staging" && (
+                // No byte-level progress from the transport (the batch's
+                // frames are handed over in one go), so an indeterminate
+                // sweep rather than a faked percentage.  It ends when the
+                // status leaves "staging" -- ✓ staged, ✗ failed, or the
+                // #1248 staging timeout, which resolves to failed.
+                <div className="bar bar-indeterminate w-full" role="progressbar" aria-label="Staging" aria-valuetext="staging" data-testid="staging-bar"><span /></div>
+              )}
             </li>
           ))}
         </ul>

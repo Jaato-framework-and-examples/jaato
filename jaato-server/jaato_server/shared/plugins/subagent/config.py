@@ -1,0 +1,5869 @@
+"""Configuration models for subagent plugin."""
+
+import importlib.metadata
+import json
+import logging
+import os
+import re
+import sys
+import threading
+from dataclasses import asdict, dataclass, field, replace
+from pathlib import Path
+from typing import Any, Callable, Dict, FrozenSet, List, NamedTuple, Optional, Protocol, Tuple, Union
+from typing import runtime_checkable
+
+from jaato_sdk.trace import (
+    TRACE_PATH_PLACEHOLDERS,
+    unknown_trace_placeholders,
+)
+from jaato_server.shared.runtime_limits import RuntimeLimits
+from jaato_server.shared.budget_control import BudgetControlConfig, merge_limits
+from jaato_server.shared.instruction_suppression import normalize_suppression
+from jaato_server.shared.secret_scrub import SCRUB_SURFACES, normalize_scrub_patterns
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Secret resolver protocol and registry
+#
+# Allows premium (or third-party) packages to register secret backends
+# (HashiCorp Vault, AWS Secrets Manager, SOPS, OS keyring, etc.) via the
+# ``jaato.premium`` → ``secret_resolvers`` entry point.
+#
+# Config values like ``vault://secret/myapp#db_password`` are resolved
+# transparently during variable expansion.
+# ---------------------------------------------------------------------------
+
+# Regex for ``scheme://path`` or ``scheme://path#key``.
+_SECRET_URI_RE = re.compile(
+    r'^(?P<scheme>[a-z][a-z0-9_+-]*)://'  # scheme (lowercase, RFC-ish)
+    r'(?P<path>[^#]+)'                     # path (everything up to optional #)
+    r'(?:#(?P<key>.+))?$'                  # optional #key fragment
+)
+
+
+# Standard network protocol schemes that are NEVER secret-resolver
+# indirections — they're literal URLs awaiting plain HTTP/WS/FTP
+# resolution.  Pre-server-0.6.57 ``_resolve_secret_uri`` matched these
+# against the URI regex, fired a "no resolver registered" warning, and
+# returned the literal URI unchanged.  Cosmetically noisy AND, when the
+# URI contained an unresolved ``${VAR}`` substitution (e.g. handoff_test's
+# ``http://127.0.0.1:${ANTIFRAUDE_PORT}``), prevented the env-file env-var
+# expansion from running at the right point in the chain because the
+# secret-URI machinery short-circuited to "literal URL".  Network-scheme
+# values now bypass secret-URI resolution entirely; standard env-var
+# expansion downstream handles ``${VAR}``.
+_NETWORK_SCHEMES = frozenset({"http", "https", "ws", "wss", "ftp", "ftps"})
+
+
+class SecretResolveContext(NamedTuple):
+    """Who a secret is being resolved FOR (#1226).
+
+    ``SecretResolver.resolve`` historically had no notion of who is asking:
+    every existing scheme (``pass``, ``vault``, ``awssm``, …) resolves the
+    same value for every session, so a scheme-and-path is a complete question.
+    The ``app://`` scheme is the first that needs to know the *workspace* (to
+    find the owner) and the *owner* (to pick the application to ask), so an
+    optional context is threaded through :func:`_resolve_secret_uri` by the
+    one caller that has it — ``JaatoServer._resolve_session_env``.
+
+    Existing resolvers ignore it (their ``resolve`` signature does not accept
+    it, and the dispatch below only passes it to a resolver that does).  The
+    in-tree ``app://`` resolver REFUSES when the context is absent rather than
+    guessing — an ``app://`` reference anywhere but the session-env resolution
+    path has no owner and cannot be answered.
+
+    Attributes:
+        workspace_path: Absolute path of the workspace the session runs in.
+        workspace_owner: The QUALIFIED owner ``"app:user"`` of that workspace
+            (``WorkspaceInfo.owner``, stamped from a #1074 ticket identity), or
+            ``None`` for an unowned workspace — which resolves nothing.
+        session_id: The session being spawned, for diagnostics.
+    """
+
+    workspace_path: str
+    workspace_owner: Optional[str]
+    session_id: Optional[str] = None
+
+
+#: The ``app://`` scheme (#1226): a per-user secret reference resolved at spawn
+#: by the application that owns the workspace, over the #1074 bind channel.
+#: Deferred by :func:`_resolve_secret_uri` (never warned about, never resolved
+#: through the entry-point registry) because its resolution needs the workspace
+#: owner, which only ``JaatoServer._resolve_session_env`` holds.
+APP_SECRET_SCHEME = "app"
+
+
+class AppSecretReference(NamedTuple):
+    """A parsed ``app://<name>[?required]`` reference (#1226).
+
+    Attributes:
+        name: The reference name — ``github`` in ``app://github``.
+        required: ``True`` when the strict form ``app://github?required`` was
+            used, which turns an unresolved reference into a bootstrap refusal
+            rather than a dropped variable.
+    """
+
+    name: str
+    required: bool
+
+
+def parse_app_secret_reference(value: Any) -> Optional[AppSecretReference]:
+    """Parse an ``app://<name>[?required]`` reference, or return ``None``.
+
+    Returns ``None`` for anything that is not a well-formed ``app://`` URI —
+    a non-string, a ``${VAR}``-bearing value (still pending expansion), any
+    other scheme, or an ``app://`` with an empty or malformed name.  The one
+    query token understood is ``required``; any other query makes the whole
+    thing not an app reference (returned ``None``) so a typo is not silently
+    treated as the lenient form.
+    """
+    if not isinstance(value, str) or "${" in value:
+        return None
+    m = _SECRET_URI_RE.match(value)
+    if not m or m.group("scheme") != APP_SECRET_SCHEME:
+        return None
+    if m.group("key") is not None:
+        # A `#fragment` has no meaning for app:// and is refused rather than
+        # ignored, so `app://github#x` is not silently read as `app://github`.
+        return None
+    path = m.group("path")
+    required = False
+    if "?" in path:
+        name, _, query = path.partition("?")
+        if query != "required":
+            return None
+        required = True
+    else:
+        name = path
+    name = name.strip("/")
+    if not name or "/" in name:
+        return None
+    return AppSecretReference(name=name, required=required)
+
+
+@runtime_checkable
+class SecretResolver(Protocol):
+    """Protocol for secret backend resolvers.
+
+    Each resolver handles one or more URI schemes (e.g. ``vault``, ``awssm``,
+    ``sops``, ``keyring``).  The framework discovers resolvers via the
+    ``jaato.premium`` → ``secret_resolvers`` entry point and dispatches
+    ``scheme://path#key`` references to the matching resolver.
+
+    Implementations live in the premium package (or any third-party package
+    that registers the entry point).  The core framework only defines this
+    protocol and the dispatch logic.
+    """
+
+    @property
+    def schemes(self) -> FrozenSet[str]:
+        """URI schemes this resolver handles (e.g. ``frozenset({"vault"})``).
+
+        Must be lowercase.  A resolver may handle multiple schemes — for
+        example a "cloud" resolver might handle both ``awssm`` and ``gcpsm``.
+        """
+        ...
+
+    def resolve(
+        self,
+        scheme: str,
+        path: str,
+        key: Optional[str] = None,
+        context: Optional[SecretResolveContext] = None,
+    ) -> str:
+        """Resolve a secret reference to its plaintext value.
+
+        Args:
+            scheme: The URI scheme (e.g. ``"vault"``).
+            path: The path portion of the URI (e.g. ``"secret/myapp"``).
+            key: Optional key/field within the secret (from the ``#fragment``).
+            context: Who the secret is being resolved for (#1226).  Optional
+                and ignored by every existing resolver — the dispatch only
+                passes it to a resolver whose signature accepts it.  The
+                in-tree ``app://`` resolver refuses without it.
+
+        Returns:
+            The resolved secret value as a string.
+
+        Raises:
+            SecretResolutionError: If the secret cannot be resolved (not found,
+                auth failure, backend unreachable, etc.).
+        """
+        ...
+
+
+class SecretResolutionError(Exception):
+    """Raised when a secret URI cannot be resolved.
+
+    Attributes:
+        uri: The original ``scheme://path#key`` string that failed.
+        reason: Human-readable explanation of the failure.
+    """
+
+    def __init__(self, uri: str, reason: str) -> None:
+        self.uri = uri
+        self.reason = reason
+        super().__init__(f"Failed to resolve secret '{uri}': {reason}")
+
+
+# ---------------------------------------------------------------------------
+# Resolver registry — populated lazily from entry points.
+# ---------------------------------------------------------------------------
+
+#: Discovered resolvers, or ``None`` until discovery has COMPLETED.
+#:
+#: ``None`` means "not discovered yet"; an empty dict means "discovered, and
+#: there are none".  Those are different answers and the fast path below
+#: distinguishes them with ``is not None`` -- which only works if the dict is
+#: published when it is FINISHED.
+_resolvers: Optional[Dict[str, 'SecretResolver']] = None
+
+#: Serialises discovery.  Two threads may both find ``_resolvers is None``;
+#: only one should pay for the entry-point scan, and neither may observe a
+#: half-built registry.
+_resolvers_lock = threading.Lock()
+
+
+def _discover_secret_resolvers() -> Dict[str, 'SecretResolver']:
+    """Discover secret resolvers from ``jaato.premium`` entry points.
+
+    Looks for the ``secret_resolvers`` entry point which must return
+    an iterable of :class:`SecretResolver` instances.
+
+    Results are cached for the process lifetime, and the cache is
+    **published only once it is complete** -- a concurrent caller either
+    waits for discovery or sees the finished registry, never a partial one.
+    Discovery runs at most once; losers of the race pay only the lock.
+
+    Returns:
+        Dict mapping URI scheme → resolver instance.  Empty means
+        "discovered, and there are none" -- never "not discovered yet".
+    """
+    global _resolvers
+    if _resolvers is not None:
+        return _resolvers
+
+    with _resolvers_lock:
+        # Re-check: another thread may have completed discovery while this
+        # one waited.
+        if _resolvers is not None:
+            return _resolvers
+        discovered = _discover_secret_resolvers_uncached()
+        # PUBLISHED ONLY WHEN COMPLETE.  This used to assign ``_resolvers =
+        # {}`` and then fill it, so a second thread arriving during the
+        # (slow) entry-point scan and premium import saw ``is not None``,
+        # took the fast path, and got an EMPTY registry -- reporting
+        # "(available: none)" and passing a literal ``pass://`` URI through
+        # to a provider as its api_key.
+        #
+        # Observed on a cold daemon's first two CONCURRENT sessions, 2 for 2;
+        # never on a warm one, because once populated the registry is never
+        # empty again.  The condition is first-use concurrency, not elapsed
+        # time.
+        _resolvers = discovered
+        return _resolvers
+
+
+def _discover_secret_resolvers_uncached() -> Dict[str, 'SecretResolver']:
+    """Do the discovery, into a LOCAL dict nothing else can observe.
+
+    Split out so the caller can publish the result atomically.  Everything
+    here is slow enough to matter: ``entry_points()`` scans installed
+    distributions and ``ep.load()`` imports jaato-premium.
+    """
+    resolvers: Dict[str, 'SecretResolver'] = {}
+
+    eps = importlib.metadata.entry_points()
+    if sys.version_info >= (3, 12):
+        matches = eps.select(group="jaato.premium", name="secret_resolvers")
+    elif sys.version_info >= (3, 10):
+        matches = [ep for ep in eps.select(group="jaato.premium")
+                   if ep.name == "secret_resolvers"]
+    else:
+        matches = [ep for ep in eps.get("jaato.premium", [])
+                   if ep.name == "secret_resolvers"]
+
+    for ep in matches:
+        try:
+            provider_fn = ep.load()
+            provider_fn_result = provider_fn()
+            for resolver in provider_fn_result:
+                for scheme in resolver.schemes:
+                    if scheme in resolvers:
+                        logger.warning(
+                            "Duplicate secret resolver for scheme '%s' — "
+                            "keeping first registered",
+                            scheme,
+                        )
+                        continue
+                    resolvers[scheme] = resolver
+                    logger.debug("Registered secret resolver: %s://", scheme)
+        except Exception:
+            # #1188: name the entry point that was skipped, not just
+            # "failed to load".  A minimal-PATH daemon makes
+            # PassResolver.__init__ raise ImportError (no `pass` /
+            # `gpg-connect-agent` on PATH), and the operator needs to know
+            # WHICH resolver they just lost and why.  WARNING (not debug),
+            # and once per process because discovery is cached: a missing
+            # resolver must not be a silent skip.
+            logger.warning(
+                "secret_resolvers entry point %r (from %s) failed to load; "
+                "its secret-URI scheme(s) are UNAVAILABLE for this process "
+                "(e.g. a pass:// resolver needs `pass` / `gpg-connect-agent` "
+                "on PATH). Secret URIs for those schemes will be used "
+                "literally, which is almost certainly wrong, until the cause "
+                "is fixed and the resolver cache is reset "
+                "(reset_secret_resolvers) or the daemon restarts.",
+                ep.name, getattr(ep, "value", "<unknown>"),
+                exc_info=True,
+            )
+
+    if resolvers:
+        logger.info(
+            "Secret resolvers available for schemes: %s",
+            ", ".join(sorted(resolvers.keys())),
+        )
+    else:
+        # #1188: an empty registry is cached for the process lifetime, so
+        # every pass:// / vault:// URI thereafter reports "no resolver
+        # registered" with no other signal.  Say so ONCE, here, where the
+        # cause (nothing was discovered) is known — rather than leaving an
+        # operator to infer it from a run of downstream "no resolver" errors.
+        # Fires only when discovery actually runs (lazily, on first secret-URI
+        # use), and once per process because the result is cached.
+        logger.warning(
+            "No secret resolvers were discovered from the jaato.premium "
+            "'secret_resolvers' entry point. pass:// / vault:// (and any "
+            "other scheme://) secret URIs cannot be resolved and will be "
+            "used literally, which is almost certainly wrong. Install the "
+            "package that provides the resolver (jaato-premium for pass://). "
+            "If it was installed AFTER this process started, call "
+            "reset_secret_resolvers() (or restart the daemon) to force "
+            "re-discovery — the empty result is cached for the process."
+        )
+
+    return resolvers
+
+
+def _resolve_secret_uri(
+    value: str,
+    context: Optional[SecretResolveContext] = None,
+) -> str:
+    """If *value* is a ``scheme://path[#key]`` URI with a registered resolver, resolve it.
+
+    Returns the original string unchanged if:
+    - It doesn't match the URI pattern.
+    - The scheme is a standard network protocol (http/https/ws/wss/ftp/ftps) —
+      these are literal URLs, not secret-resolver indirections (server
+      0.6.57+).
+    - The value contains ``${VAR}`` substitution markers — they're
+      pending env-var expansion, not secret URIs (server 0.6.57+).
+    - The scheme is ``app`` (#1226) — resolved by
+      ``JaatoServer._resolve_session_env``'s dedicated pass, which is the only
+      place holding the workspace owner.  Passed through here literally and
+      WITHOUT a warning, because the generic path has no owner to resolve it
+      for; the dedicated pass then resolves it or DROPS it (never forwards the
+      literal).
+    - No resolver is registered for the scheme.
+
+    Args:
+        value: The candidate ``scheme://path[#key]`` string.
+        context: Who the secret is being resolved for (#1226).  Forwarded to a
+            resolver whose ``resolve`` signature accepts a ``context`` keyword;
+            every existing (premium) resolver has a three-arg signature and is
+            called exactly as before.
+
+    Raises:
+        SecretResolutionError: Propagated from the resolver on failure.
+    """
+    # Server 0.6.57+: skip values with unresolved ``${VAR}`` substitutions.
+    # The env-file expansion runs downstream (``expand_variables`` in
+    # http_client + general os.environ), so a literal-with-pending-var
+    # passes through here unchanged and gets resolved at the right
+    # point.  Pre-0.6.57 the secret-URI machinery returned the literal
+    # ``http://127.0.0.1:${ANTIFRAUDE_PORT}`` as-is, blocking downstream
+    # expansion and breaking handoff_test cascade post daemon-restart.
+    if "${" in value:
+        return value
+
+    m = _SECRET_URI_RE.match(value)
+    if not m:
+        return value
+
+    scheme = m.group('scheme')
+
+    # Server 0.6.57+: standard network schemes are literal URLs.
+    # ``https://search.maven.org`` matched the URI regex pre-0.6.57,
+    # fired a "no resolver registered" warning that was just noise,
+    # and the literal URL was returned unchanged anyway.  Skip the
+    # whole code path now — these schemes never have a resolver
+    # because they aren't secret-resolver indirections.
+    if scheme in _NETWORK_SCHEMES:
+        return value
+
+    # #1226: the ``app`` scheme is resolved by the dedicated pass in
+    # ``JaatoServer._resolve_session_env`` (the only site holding the
+    # workspace owner), NOT through the entry-point registry.  Deferring it
+    # here — pass through literally, no "no resolver registered" warning —
+    # keeps a stray ``app://`` value inert on every OTHER expand_variables
+    # path rather than raising or warning; the session-env pass then either
+    # resolves it against the owning application or drops it (§6.1: an
+    # unresolved app:// is never forwarded as a literal).
+    if scheme == APP_SECRET_SCHEME:
+        return value
+
+    resolvers = _discover_secret_resolvers()
+    resolver = resolvers.get(scheme)
+    if resolver is None:
+        logger.warning(
+            "Secret URI '%s' uses scheme '%s' but no resolver is registered "
+            "for it (available: %s). The literal URI will be used as the value, "
+            "which is almost certainly wrong.",
+            value, scheme, list(resolvers.keys()) or "none",
+        )
+        return value
+
+    path = m.group('path')
+    key = m.group('key')  # May be None
+
+    try:
+        return _call_resolver(resolver, scheme, path, key, context)
+    except SecretResolutionError:
+        raise
+    except Exception as exc:
+        raise SecretResolutionError(value, str(exc)) from exc
+
+
+def _call_resolver(
+    resolver: 'SecretResolver',
+    scheme: str,
+    path: str,
+    key: Optional[str],
+    context: Optional[SecretResolveContext],
+) -> str:
+    """Call ``resolver.resolve``, passing ``context`` only if it accepts it.
+
+    Every pre-#1226 resolver has a three-argument ``resolve(scheme, path,
+    key)`` signature and must be called unchanged — passing an unexpected
+    ``context=`` would raise ``TypeError``.  A resolver that opts into the
+    new argument (its signature names ``context``, or accepts ``**kwargs``)
+    receives it.  The check is by signature introspection rather than a
+    try/except on ``TypeError`` because a genuine ``TypeError`` from inside a
+    resolver must not be misread as "does not accept context".
+    """
+    if context is not None and _resolver_accepts_context(resolver):
+        return resolver.resolve(scheme, path, key, context=context)
+    return resolver.resolve(scheme, path, key)
+
+
+def _resolver_accepts_context(resolver: 'SecretResolver') -> bool:
+    """Whether ``resolver.resolve`` accepts a ``context`` keyword argument."""
+    import inspect
+    try:
+        params = inspect.signature(resolver.resolve).parameters
+    except (TypeError, ValueError):
+        return False
+    if "context" in params:
+        return True
+    return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
+
+
+def looks_like_unresolved_secret_uri(value: Any) -> bool:
+    """Return True if *value* is a non-network ``scheme://`` secret-URI that
+    was NOT resolved (it passed through literally because no resolver is
+    registered for its scheme).
+
+    Used to FAIL LOUD at the provider credential boundary: a *resolved* secret
+    is a plain string, so a credential field still shaped like ``pass://...`` /
+    ``vault://...`` means the providing resolver plugin (e.g. jaato-premium's
+    ``secret_resolvers`` entry point) isn't installed.  ``_resolve_secret_uri``
+    intentionally passes such values through (so non-provider consumers like
+    ``service_connector`` can report "credential missing" with provenance), but
+    a provider must NOT send a literal secret URI as an API key — that produces
+    a confusing upstream 401.  Network schemes (http/ws/...), ``${VAR}``
+    placeholders, and non-URI strings return False.
+    """
+    if not isinstance(value, str) or "${" in value:
+        return False
+    m = _SECRET_URI_RE.match(value)
+    if not m:
+        return False
+    return m.group("scheme") not in _NETWORK_SCHEMES
+
+
+# Regex for a MALFORMED single-colon secret reference: ``scheme:path`` with
+# the ``//`` dropped (``pass:x`` instead of ``pass://x`` — the #1 secret-URI
+# typo).  The ``(?!//)`` lookahead excludes the well-formed ``scheme://`` form
+# (that's :data:`_SECRET_URI_RE`), so this matches ONLY the ``//``-less shape.
+_MALFORMED_SECRET_URI_RE = re.compile(
+    r'^(?P<scheme>[a-z][a-z0-9_+-]*):(?!//)(?P<rest>\S+)$'
+)
+
+
+def looks_like_malformed_secret_uri(value: Any) -> Optional[str]:
+    """Return the scheme name if *value* is a MALFORMED single-colon secret
+    reference for a REGISTERED resolver — e.g. ``pass:jaato/x`` when the user
+    meant ``pass://jaato/x`` — else ``None``.
+
+    The well-formed ``scheme://`` form is handled by
+    :func:`looks_like_unresolved_secret_uri`.  This catches the common
+    ``//``-dropped typo, which is invisible to the resolver machinery: a single
+    colon fails :data:`_SECRET_URI_RE`, so the value is passed through
+    literally and reaches the provider as a bearer token — producing exactly
+    the confusing upstream 401 the ``//`` guard exists to prevent.
+
+    Only a scheme that is an ACTIVELY REGISTERED resolver
+    (:func:`_discover_secret_resolvers`) is flagged, so on a host without that
+    resolver a literal ``word:word`` value is left untouched and there is no
+    hardcoded scheme list.  Network schemes (http/ws/...) and ``${VAR}``
+    placeholders return ``None``.
+    """
+    if not isinstance(value, str) or "${" in value:
+        return None
+    m = _MALFORMED_SECRET_URI_RE.match(value)
+    if not m:
+        return None
+    scheme = m.group("scheme")
+    if scheme in _NETWORK_SCHEMES:
+        return None
+    if scheme in _discover_secret_resolvers():
+        return scheme
+    return None
+
+
+def reset_secret_resolvers() -> None:
+    """Drop the cached secret-resolver registry so the next lookup re-discovers.
+
+    Discovery (:func:`_discover_secret_resolvers`) runs once and caches its
+    result — including an EMPTY result — for the whole process lifetime.  That
+    is right for a settled deployment but wrong for one where a resolver
+    package (e.g. jaato-premium's ``pass://`` resolver) is installed *after*
+    the daemon started: every ``pass://`` URI keeps reporting "no resolver
+    registered" until the cache is cleared.  This is the supported,
+    **documented** way to force re-discovery without restarting the daemon;
+    it is deliberately the ONLY such mechanism (#1188 explicitly does not add
+    filesystem watching or automatic re-discovery).  It is also what the
+    resolver tests call between cases.
+
+    Takes the discovery lock so that *every* write to ``_resolvers`` happens
+    under it -- a reader can then rely on seeing either ``None`` or a
+    finished registry, with no third state.
+    """
+    global _resolvers
+    with _resolvers_lock:
+        _resolvers = None
+
+
+# Valid values for the ``mode`` modifier knob.  ``discover`` (the
+# default) leaves the plugin's discoverable tools deferred — the model
+# finds them via ``list_tools`` / ``get_tool_schemas`` introspection.
+# ``preload`` forces all of the plugin's tools (including discoverable
+# ones) into the initial wire context.  The vocabulary mirrors
+# ``ToolSchema.discoverability`` (``core`` | ``discoverable``): a
+# deferred tool is precisely one the model *discovers*.
+_PLUGIN_MODES = ("preload", "discover")
+
+
+def _split_top_level_commas(s: str) -> List[str]:
+    """Split ``s`` on commas that are NOT inside ``[...]`` brackets.
+
+    Needed so ``"mode:preload, tools:[readFile,writeFile]"`` splits into
+    two tokens (``mode:preload`` and ``tools:[readFile,writeFile]``)
+    rather than four — the commas inside the bracketed list belong to
+    the list, not the modifier separator.
+    """
+    parts: List[str] = []
+    depth = 0
+    cur: List[str] = []
+    for ch in s:
+        if ch == '[':
+            depth += 1
+            cur.append(ch)
+        elif ch == ']':
+            depth = max(0, depth - 1)
+            cur.append(ch)
+        elif ch == ',' and depth == 0:
+            parts.append(''.join(cur))
+            cur = []
+        else:
+            cur.append(ch)
+    if cur:
+        parts.append(''.join(cur))
+    return parts
+
+
+def _parse_tool_allowlist(val: str) -> List[str]:
+    """Parse a ``tools`` value into a list of tool names.
+
+    Accepts the bracketed form ``[readFile, writeFile]`` and the bare
+    single-value form ``readFile``.  Whitespace around names is
+    stripped; empty entries are dropped.
+    """
+    val = val.strip()
+    if val.startswith('[') and val.endswith(']'):
+        val = val[1:-1]
+    return [t.strip() for t in val.split(',') if t.strip()]
+
+
+def parse_plugin_entry(entry: str) -> Tuple[str, bool, Optional[List[str]]]:
+    """Parse a plugin entry that may carry a ``(...)`` modifier.
+
+    Plugin names in profile ``plugins`` lists can carry an optional
+    parenthesised modifier expressing two orthogonal knobs:
+
+    - **mode** (``preload`` | ``discover``, default ``discover``) —
+      whether to eagerly load all of the plugin's tools into the
+      initial wire context (``preload``) or leave discoverable tools
+      deferred (``discover``).
+    - **tools** (an allow-list) — restrict the plugin to exactly the
+      named tools; every other tool the plugin ships is dropped from
+      this session's wire body AND its xgrammar grammar surface.  When
+      absent, all of the plugin's tools are exposed (current default).
+
+    Both knobs accept an **implicit** (positional, by token shape) form
+    and an **explicit** (tagged ``key:value``) form, freely mixed:
+
+    - a bare word (``preload`` / ``discover``) → the **mode**
+    - a ``[...]`` token → the **tools** allow-list
+    - a ``key:value`` token → an explicit tag (``mode:`` / ``tools:``)
+
+    Token order is irrelevant.  An optional space before the
+    parenthesis is accepted (``"file_edit (preload)"``).
+
+    The bare legacy flag ``(preload)`` still parses — it is just the
+    implicit-mode form.
+
+    Args:
+        entry: Plugin entry string, e.g. ``"cli"``, ``"file_edit(preload)"``,
+            ``"file_edit([readFile])"``,
+            ``"file_edit(mode:preload, tools:[readFile,writeFile])"``.
+
+    Returns:
+        Tuple of ``(plugin_name, is_preloaded, tool_allowlist)`` where
+        ``tool_allowlist`` is ``None`` (all tools) or a list of allowed
+        tool names.
+
+    Raises:
+        ValueError: when a modifier token is unrecognised (not a valid
+            mode, not a ``[...]`` list, not a known ``key:value`` tag).
+
+    Examples:
+        >>> parse_plugin_entry("cli")
+        ('cli', False, None)
+        >>> parse_plugin_entry("file_edit(preload)")
+        ('file_edit', True, None)
+        >>> parse_plugin_entry("file_edit([readFile])")
+        ('file_edit', False, ['readFile'])
+        >>> parse_plugin_entry("file_edit(mode:preload, tools:[readFile,writeFile])")
+        ('file_edit', True, ['readFile', 'writeFile'])
+        >>> parse_plugin_entry("file_edit([readFile], preload)")
+        ('file_edit', True, ['readFile'])
+    """
+    match = re.match(r'^(\w+)\s*(?:\((.*)\))?$', entry.strip())
+    if not match:
+        # Not a recognisable ``name`` or ``name(...)`` shape — treat the
+        # whole string as a bare plugin name (lenient; downstream
+        # expose_tool will surface an unknown-plugin error if invalid).
+        return entry.strip(), False, None
+
+    name = match.group(1)
+    inner = match.group(2)
+    if inner is None:
+        return name, False, None
+
+    preload = False
+    tools: Optional[List[str]] = None
+    for raw_token in _split_top_level_commas(inner):
+        token = raw_token.strip()
+        if not token:
+            continue
+        if ':' in token:
+            key, _, val = token.partition(':')
+            key = key.strip()
+            val = val.strip()
+            if key == 'mode':
+                if val not in _PLUGIN_MODES:
+                    raise ValueError(
+                        f"invalid mode {val!r} in plugin entry {entry!r}; "
+                        f"expected one of {_PLUGIN_MODES}"
+                    )
+                preload = (val == 'preload')
+            elif key == 'tools':
+                tools = _parse_tool_allowlist(val)
+            else:
+                raise ValueError(
+                    f"unknown modifier key {key!r} in plugin entry "
+                    f"{entry!r}; expected 'mode' or 'tools'"
+                )
+        elif token.startswith('['):
+            tools = _parse_tool_allowlist(token)
+        elif token in _PLUGIN_MODES:
+            preload = (token == 'preload')
+        else:
+            raise ValueError(
+                f"unrecognised modifier token {token!r} in plugin entry "
+                f"{entry!r}; expected a mode ({_PLUGIN_MODES}), a "
+                f"'[tool,...]' allow-list, or a 'mode:'/'tools:' tag"
+            )
+    return name, preload, tools
+
+
+def parse_plugin_list(
+    entries: List[str],
+) -> Tuple[List[str], set, Dict[str, List[str]]]:
+    """Parse a list of plugin entries into names, preload set, and scopes.
+
+    Args:
+        entries: List of plugin entry strings, possibly carrying ``(...)``
+            modifiers (see :func:`parse_plugin_entry`).
+
+    Returns:
+        Tuple of ``(clean_plugin_names, preloaded_plugin_names_set,
+        tool_scopes)`` where ``tool_scopes`` maps a plugin name to its
+        allow-list of tool names.  Plugins without a ``tools`` modifier
+        do not appear in ``tool_scopes`` (meaning: all tools exposed).
+    """
+    clean_names: List[str] = []
+    preloaded: set = set()
+    tool_scopes: Dict[str, List[str]] = {}
+    for entry in entries:
+        name, is_preloaded, tools = parse_plugin_entry(entry)
+        clean_names.append(name)
+        if is_preloaded:
+            preloaded.add(name)
+        if tools is not None:
+            tool_scopes[name] = tools
+    return clean_names, preloaded, tool_scopes
+
+
+#: The context variables :func:`expand_variables` supplies on top of the
+#: process environment -- name -> what it resolves to, for humans.
+#:
+#: Hoisted out of the function so ``jaato-scaffold explain`` can RENDER the
+#: vocabulary instead of restating it.  Before this, the only complete list of
+#: what ``${...}`` accepts lived inside a function body, which is why the
+#: reference doc's table has been missing ``jdtlsStateRoot`` since it was
+#: added.  ``test_expansion_context_vars_are_declared`` asserts that the keys
+#: here are exactly the keys the function builds, so the next one cannot be
+#: added without appearing in the docs.
+#:
+#: NOT a superset of what a profile may write: every process env var is also
+#: expandable, and undefined names are left literal.
+EXPANSION_CONTEXT_VARS: Dict[str, str] = {
+    'cwd': "the session's workspace root, else the resolving process's cwd",
+    'workspaceRoot': "the workspace root detected from .git / .jaato",
+    'jdtlsStateRoot': ("the framework-managed jdtls state directory, a sibling "
+                       "of the workspace (Eclipse forbids it inside the "
+                       "project)"),
+    'HOME': "the resolving process's $HOME",
+    'USER': "the resolving process's $USER",
+}
+
+#: Env vars whose value is a PATH, keyed to the typed profile key that
+#: supersedes them (``None`` where none exists yet).
+#:
+#: The set a profile's untyped ``env:`` map is checked against: these are the
+#: vars where a boolean-shaped value is not merely odd but destructive, because
+#: something downstream will happily create a file or directory named ``1``
+#: (#775).  ``JAATO_SESSION_LOG_DIR`` has no typed sibling and is included
+#: anyway -- the check is about the VALUE being a switch, and a log directory
+#: named ``1`` is the same defect wearing a different variable.
+PATH_TYPED_ENV_VARS: Dict[str, Optional[str]] = {
+    "JAATO_TRACE_LOG": "trace.session_log",
+    "JAATO_PROVIDER_TRACE": "trace.provider_log",
+    "JAATO_SESSION_LOG_DIR": None,
+}
+
+
+def expand_variables(
+    value: Any,
+    context: Optional[Dict[str, str]] = None,
+    workspace_root_override: Optional[str] = None,
+    resolve_context: Optional[SecretResolveContext] = None,
+) -> Any:
+    """Expand ${variable} references in a value.
+
+    Supports:
+    - Environment variables: ${HOME}, ${USER}, ${PATH}
+    - Context variables: ${projectPath}, ${workspaceRoot}, ${cwd}
+    - Nested expansion in dicts and lists
+
+    Args:
+        value: Value to expand (string, dict, list, or other)
+        context: Optional dict of context variables to expand
+        workspace_root_override: Explicit workspace root to use instead of auto-detection.
+            This is useful when the calling code knows the correct workspace root
+            (e.g., from parent agent's config or environment).
+        resolve_context: Who a secret is being resolved for (#1226), forwarded
+            to the secret-URI resolver.  Only ``_resolve_session_env`` passes
+            it; every other caller leaves it ``None`` and existing resolvers
+            are unaffected.  The ``app://`` scheme is resolved by that method's
+            dedicated pass rather than here regardless, so this only reaches
+            premium resolvers that opt into a ``context`` argument.
+
+    Returns:
+        Value with variables expanded
+
+    Examples:
+        >>> expand_variables("${HOME}/projects", {})
+        '/home/user/projects'
+
+        >>> expand_variables({"path": "${projectPath}/.lsp.json"}, {"projectPath": "/app"})
+        {'path': '/app/.lsp.json'}
+    """
+    if context is None:
+        context = {}
+
+    # Add default context variables
+    # Use workspace_root_override if provided, otherwise auto-detect
+    # via the per-task ContextVar (race-free) → os.environ fallback.
+    from jaato_server.shared.session_context import get_workspace_root
+    effective_cwd = workspace_root_override or get_workspace_root() or os.getcwd()
+    workspace_root = _find_workspace_root(workspace_root_override)
+    # Keys here MUST match EXPANSION_CONTEXT_VARS -- that declaration is what
+    # `jaato-scaffold explain` renders, and a var added here alone would be
+    # undocumented by construction (guarded by
+    # test_expansion_context_vars_are_declared).
+    default_context = {
+        'cwd': effective_cwd,
+        'workspaceRoot': workspace_root,
+        # Family IV (PR-217): sibling-of-workspace path that holds
+        # framework-managed per-session state which cannot live inside
+        # the project boundary (e.g. Eclipse / jdtls workspace metadata
+        # — Eclipse Platform Core forbids workspace_location ⊆
+        # project_location).  Naming convention:
+        # ``<workspace.parent>/.<workspace.basename>-jdtls-state``
+        # (dotfile-prefix lowest-collision pattern, suffix scopes the
+        # data class so future framework-managed siblings can coexist).
+        # Sibling stays under the same per-session AppArmor profile
+        # → no data-leak (indexed source copies stay inside tenant
+        # confinement boundary, just not inside project-root subtree).
+        # Operator-facing template var symmetric with workspaceRoot.
+        'jdtlsStateRoot': _compute_jdtls_state_root(workspace_root),
+        'HOME': os.environ.get('HOME', ''),  # env: ambient — expanded as a template variable in profile/persona files
+        'USER': os.environ.get('USER', ''),  # env: ambient — expanded as a template variable in profile/persona files
+    }
+    # Merge with provided context (provided takes precedence)
+    effective_context = {**default_context, **context}
+
+    if isinstance(value, str):
+        return _expand_string(value, effective_context, resolve_context)
+    elif isinstance(value, dict):
+        return {k: expand_variables(v, context, workspace_root_override, resolve_context)
+                for k, v in value.items()}
+    elif isinstance(value, list):
+        return [expand_variables(item, context, workspace_root_override, resolve_context)
+                for item in value]
+    else:
+        return value
+
+
+def _expand_string(
+    s: str,
+    context: Dict[str, str],
+    resolve_context: Optional[SecretResolveContext] = None,
+) -> str:
+    """Expand ``${variable}`` references and secret URIs in a string.
+
+    Two-phase expansion:
+
+    1. **Variable substitution** — ``${VAR}`` patterns are replaced in
+       this order: *context* (caller-provided), then the session-scoped
+       env (``get_session_env``, populated from the session's
+       ``env_file``), then the daemon's ``os.environ``.  Undefined
+       variables are kept as-is (``${UNKNOWN}`` stays literal).
+
+       The session-env tier exists so that plugins reading expanded
+       config values (e.g. service_connector resolving
+       ``base_url: http://127.0.0.1:${SERVICE_PORT}``) see the variables
+       defined in the session's ``.env`` file even when the daemon was
+       started without those vars in its process env.
+
+    2. **Secret URI resolution** — if the *fully expanded* string matches
+       ``scheme://path[#key]`` and a :class:`SecretResolver` is registered
+       for that scheme, the value is resolved to its plaintext secret.
+       This phase is a no-op when no premium resolvers are installed.
+
+    Secret resolution only applies when the **entire** string is a URI
+    (e.g. a config value ``vault://secret/myapp#db_password``).  URIs
+    embedded in a larger string are not resolved — use ``${VAR}``
+    indirection for those cases.
+
+    Args:
+        s: String containing ``${variable}`` references or a secret URI.
+        context: Dict of variable names to values.
+
+    Returns:
+        String with variables expanded and secrets resolved.
+
+    Raises:
+        SecretResolutionError: If a secret URI is recognised but the
+            resolver fails (auth error, not found, backend unreachable).
+    """
+    # Imported lazily to avoid a circular import — session_context lives
+    # at the package root and importing it at module load time would
+    # pull in the JaatoSession TYPE_CHECKING ladder.
+    from jaato_server.shared.session_context import get_session_env
+
+    # Phase 1: ${VAR} expansion
+    if '${' in s:
+        def replace_var(match: re.Match) -> str:
+            var_name = match.group(1)
+            # First check context, then session env, then process env.
+            if var_name in context:
+                return context[var_name]
+            session_val = get_session_env(var_name)
+            if session_val is not None:
+                return session_val
+            return os.environ.get(var_name, match.group(0))  # Keep original if not found
+
+        # Match ${VAR_NAME} pattern
+        pattern = r'\$\{([a-zA-Z_][a-zA-Z0-9_]*)\}'
+        s = re.sub(pattern, replace_var, s)
+
+    # Phase 2: secret URI resolution (entire-string match only).
+    #
+    # #1226: pass ``context`` ONLY when this call site actually has one
+    # (i.e. ``_resolve_session_env``'s dedicated pass).  Every other
+    # expand_variables path — the env_file overlay in
+    # ``SessionManager._resolve_profile``, plugin_configs expansion, the
+    # ``env:`` map — leaves ``resolve_context`` at ``None``, and there the
+    # arg is inert: ``_resolve_secret_uri``'s ``context`` defaults to
+    # ``None`` and ``_call_resolver`` only forwards a non-None context.
+    # Omitting it on the None path keeps the call byte-identical to
+    # pre-#1226, so a resolver-shaped callable with the old one-argument
+    # signature stays callable — the same backward-compat posture
+    # ``_call_resolver`` takes for premium resolvers that never added the
+    # ``context`` keyword.
+    if resolve_context is None:
+        return _resolve_secret_uri(s)
+    return _resolve_secret_uri(s, resolve_context)
+
+
+def _resolve_workspace_path(path: str) -> str:
+    """Resolve a workspace path, handling relative paths.
+
+    Relative paths (like ".") are resolved relative to the current
+    working directory.
+
+    Args:
+        path: The workspace path (absolute or relative like ".").
+
+    Returns:
+        Absolute path to the workspace.
+    """
+    p = Path(path)
+    if not p.is_absolute():
+        from jaato_server.shared.session_context import get_workspace_root
+        workspace = get_workspace_root() or os.getcwd()
+        p = Path(workspace) / p
+    return str(p.resolve())
+
+
+def _compute_jdtls_state_root(workspace_root: str) -> str:
+    """Compute the sibling jdtls state directory for *workspace_root*.
+
+    Family IV (PR-217) naming convention.  Given a workspace at
+    ``/foo/bar/cascade_smoke``, returns
+    ``/foo/bar/.cascade_smoke-jdtls-state``.
+
+    Why a sibling and not an in-workspace location: Eclipse Platform
+    Core forbids the workspace metadata directory (jdtls's ``-data``
+    arg) from being nested inside any imported project's root.  jdtls
+    imports the workspace as a Maven project (pom.xml at root), so
+    placing ``-data`` at ``<workspaceRoot>/.jaato/jdtls-data`` fires
+    ``Invalid project description ... overlaps the workspace location``
+    at ``ProjectsManager.importProjects``; no diagnostics flow.
+
+    Why a sibling and not ``~/.cache`` / ``/var/lib/jaato/jdtls/...``:
+    jdtls metadata is a transformed copy of source code (indexed
+    classpath data, syntax trees, etc.).  Keeping it inside the
+    tenant confinement boundary (per-session AppArmor profile) avoids
+    a data-leak class where the indexed copy survives in shared
+    system territory.  Sibling is under the same parent dir as the
+    workspace; the per-session AppArmor profile grants r/w to both.
+
+    Why dotfile-prefix + suffix: ``.<basename>-jdtls-state`` is:
+    - hidden in ``ls`` by default (operators don't see framework state)
+    - lowest-collision with operator-created directories (dotfile +
+      framework-specific suffix is unlikely to be picked accidentally)
+    - explicit about ownership (``-jdtls-state`` reads as
+      framework-managed, distinct from any operator-named
+      ``-jdtls`` / ``-state`` etc.)
+
+    Args:
+        workspace_root: Absolute workspace path.  Empty string returns
+            empty string (callers that compute on a missing workspace
+            get a no-op; the apparmor composer + LSP plugin both
+            tolerate the empty case).
+
+    Returns:
+        Absolute path to the sibling jdtls state directory, or empty
+        string when ``workspace_root`` is falsy.
+    """
+    if not workspace_root:
+        return ""
+    p = Path(workspace_root).resolve()
+    return str(p.parent / f".{p.name}-jdtls-state")
+
+
+def _find_workspace_root(override: Optional[str] = None) -> str:
+    """Find the workspace root by looking for .git directory.
+
+    Priority order:
+    1. Explicit override parameter
+    2. JAATO_WORKSPACE_ROOT environment variable
+    3. workspaceRoot environment variable (from .env file)
+    4. Search for .git or .jaato directory from cwd
+
+    Note: Relative paths (like ".") are resolved relative to cwd.
+
+    Args:
+        override: Explicit workspace root path to use (takes precedence).
+
+    Returns:
+        Path to workspace root, or cwd if not found
+    """
+    # Priority 1: Explicit override
+    if override:
+        return _resolve_workspace_path(override)
+
+    # Priority 2: per-task workspace root (ContextVar, race-free) →
+    # JAATO_WORKSPACE_ROOT env var fallback for daemon-startup callers.
+    from jaato_server.shared.session_context import get_workspace_root
+    env_root = get_workspace_root()
+    if env_root:
+        return _resolve_workspace_path(env_root)
+
+    # Priority 3: workspaceRoot environment variable (common in .env files)
+    env_workspace_root = os.environ.get('workspaceRoot')
+    if env_workspace_root:
+        return _resolve_workspace_path(env_workspace_root)
+
+    # Priority 4: Search for .git or .jaato directory
+    current = Path.cwd()
+    for parent in [current] + list(current.parents):
+        if (parent / '.git').exists():
+            return str(parent)
+        if (parent / '.jaato').exists():
+            return str(parent)
+    return str(current)
+
+
+def detect_workspace_tech_stack(workspace_path: str) -> str:
+    """Detect the primary technology stack of a workspace by scanning for marker files.
+
+    Checks for common build/config files at the workspace root to determine
+    the project's language and build system.
+
+    Args:
+        workspace_path: Absolute path to the workspace root.
+
+    Returns:
+        Concise summary string (e.g., "Java project (Maven - pom.xml detected)")
+        or empty string if nothing detected.
+    """
+    root = Path(workspace_path)
+    detections = []
+
+    # Check marker files in priority order
+    markers = [
+        ("pom.xml", "Java project (Maven - pom.xml detected)"),
+        ("build.gradle", "Java/Kotlin project (Gradle - build.gradle detected)"),
+        ("build.gradle.kts", "Kotlin project (Gradle KTS - build.gradle.kts detected)"),
+        ("Cargo.toml", "Rust project (Cargo - Cargo.toml detected)"),
+        ("go.mod", "Go project (go.mod detected)"),
+        ("package.json", "JavaScript/TypeScript project (Node.js - package.json detected)"),
+        ("pyproject.toml", "Python project (pyproject.toml detected)"),
+        ("setup.py", "Python project (setup.py detected)"),
+        ("requirements.txt", "Python project (requirements.txt detected)"),
+        ("Gemfile", "Ruby project (Gemfile detected)"),
+        ("composer.json", "PHP project (Composer - composer.json detected)"),
+    ]
+
+    for filename, description in markers:
+        if (root / filename).exists():
+            detections.append(description)
+
+    # Check glob patterns for .NET
+    if any(root.glob("*.sln")) or any(root.glob("*.csproj")):
+        detections.append("C#/.NET project (.sln/.csproj detected)")
+
+    if not detections:
+        return ""
+
+    return "; ".join(detections)
+
+
+def expand_plugin_configs(
+    plugin_configs: Dict[str, Dict[str, Any]],
+    context: Optional[Dict[str, str]] = None,
+    workspace_root_override: Optional[str] = None
+) -> Dict[str, Dict[str, Any]]:
+    """Expand variables in all plugin configurations.
+
+    Args:
+        plugin_configs: Dict of plugin name -> config dict
+        context: Optional context variables (e.g., projectPath)
+        workspace_root_override: Explicit workspace root to use instead of auto-detection.
+            If provided, ${workspaceRoot} will expand to this value.
+
+    Returns:
+        Plugin configs with all variables expanded.  Always a dict: a
+        ``None`` input (a profile whose ``plugin_configs:`` is null) expands
+        to ``{}`` rather than propagating, so callers that fold profile
+        fields into the result (``inject_scrub_secret_env``) never need
+        their own guard.
+
+    Example:
+        >>> configs = {
+        ...     "lsp": {"config_path": "${projectPath}/.lsp.json"},
+        ...     "mcp": {"config_path": "${projectPath}/.mcp.json"}
+        ... }
+        >>> expand_plugin_configs(configs, {"projectPath": "/app"})
+        {'lsp': {'config_path': '/app/.lsp.json'}, 'mcp': {'config_path': '/app/.mcp.json'}}
+    """
+    return expand_variables(plugin_configs or {}, context, workspace_root_override)
+
+
+@dataclass
+class CacheProfileConfig:
+    """Prompt-cache configuration for a profile — the common `cache:` field.
+
+    The cross-provider default. Caching is delivered three different ways
+    (Anthropic breakpoints, Google ``CachedContent``, OpenRouter's gateway
+    annotation) with three different knob spellings, layers and defaults,
+    so before this field a profile author had to know which mechanism
+    their provider used in order to turn caching on at all. See
+    ``docs/design/model-tier-prompt-cache.md`` §7.
+
+    This sets the default; ``plugin_configs.<provider>`` overrides it for
+    mechanism-specific tuning. More specific wins, which is the same
+    child-wins rule ``resolve_provider_extra`` already applies to
+    provider extras — the common field is a layer BENEATH an existing
+    one, not a new precedence concept.
+
+    Attributes:
+        enabled: ``"auto"`` (default), ``True`` or ``False``. ``auto``
+            means "leave the provider's own default alone", and on a
+            provider that cannot cache at all it is a no-op rather than
+            an error — ``ProviderCapabilities.prompt_caching`` is what
+            makes that well-defined.
+        ttl: Cache lifetime in the ``5m`` / ``1h`` vocabulary. Translated
+            per provider (Google wants a duration in seconds).
+        history: Cache the conversation prefix, not only system+tools.
+            Honoured by providers whose mechanism can place a history
+            breakpoint; ignored by the others.
+    """
+    enabled: Any = "auto"
+    ttl: str = "5m"
+    history: bool = True
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'CacheProfileConfig':
+        """Build from a profile's ``cache:`` block.
+
+        Raises:
+            ValueError: on an unusable value, rather than silently
+                falling back to a default. A cache knob that is quietly
+                ignored is the exact failure §4 documents.
+        """
+        enabled = data.get('enabled', "auto")
+        if isinstance(enabled, str):
+            lowered = enabled.strip().lower()
+            if lowered == "auto":
+                enabled = "auto"
+            elif lowered in ("true", "yes", "on"):
+                enabled = True
+            elif lowered in ("false", "no", "off"):
+                enabled = False
+            else:
+                raise ValueError(
+                    f"cache.enabled must be auto/true/false, got {enabled!r}")
+        elif not isinstance(enabled, bool):
+            raise ValueError(
+                f"cache.enabled must be auto/true/false, got {enabled!r}")
+
+        ttl = str(data.get('ttl', "5m")).strip().lower()
+        if ttl not in VALID_CACHE_TTLS:
+            raise ValueError(
+                f"cache.ttl must be one of {sorted(VALID_CACHE_TTLS)}, "
+                f"got {ttl!r}")
+
+        history = data.get('history', True)
+        if not isinstance(history, bool):
+            raise ValueError(
+                f"cache.history must be a boolean, got {history!r}")
+
+        return cls(enabled=enabled, ttl=ttl, history=history)
+
+
+#: Profile ``trace:`` key -> the env var it seeds.  ONE mapping, read by
+#: :meth:`TraceProfileConfig.from_dict` (key validation), by
+#: :meth:`TraceProfileConfig.as_env` (the export) and by the env-scope
+#: catalog's ``typed_key`` entries, so a rename cannot desynchronise them.
+TRACE_ENV_VARS: Dict[str, str] = {
+    "session_log": "JAATO_TRACE_LOG",
+    "provider_log": "JAATO_PROVIDER_TRACE",
+    "ledger": "LEDGER_PATH",
+}
+
+#: Values that mean "on" to a human and nothing at all to a path reader.
+#: An author who writes one of these into ``trace:`` is reaching for a
+#: switch; there is no file they could plausibly have meant, so the value
+#: is refused rather than turned into a file with that name.
+_TRACE_BOOLEAN_TOKENS = frozenset({
+    "0", "1", "true", "false", "yes", "no", "on", "off", "y", "n",
+    "enable", "enabled", "disable", "disabled", "none", "null",
+})
+
+
+@dataclass
+class TraceProfileConfig:
+    """Diagnostic trace-log paths for a profile -- the ``trace:`` block.
+
+    THE KNOB THAT MADE THE CASE FOR TYPED KEYS (issue #775).  Both values
+    are *paths*, and before this block the only per-session route to them
+    was the profile's ``env:`` map::
+
+        env:
+          JAATO_PROVIDER_TRACE: "1"      # accepted, and catastrophic
+
+    ``env`` is ``Dict[str, str]`` and ``"1"`` is a valid string, so
+    nothing rejected it -- and nothing was in a position to.  Every
+    session then wrote its provider trace to a file literally named ``1``,
+    including eval-arm workspaces, contaminating the very trees a
+    comparative judge was diffing.  The failure is silent on both sides:
+    the trace is written, the run completes, and the contamination is
+    visible only by listing the arm directories afterwards.
+
+    WHAT THIS BLOCK REJECTS, AND WHAT IT DELIBERATELY DOES NOT.  The
+    defect in ``"1"`` is not that it is relative -- a *relative* trace
+    path is the supported per-session idiom, resolved against
+    ``JAATO_WORKSPACE_ROOT`` by ``jaato_sdk.trace._resolve_trace_file`` so
+    each session gets its own file in its own workspace.  Rejecting
+    relative paths here would break that.  The defect is that ``"1"`` is a
+    *boolean written into a path field*: the author reached for a switch,
+    and a string-typed map had no way to say so.  So this block refuses
+    the boolean vocabulary (:data:`_TRACE_BOOLEAN_TOKENS`), a value that
+    names a directory rather than a file, and anything that is not a
+    non-empty string -- and passes every real path through untouched.
+
+    The env vars remain the lower-precedence default -- a workspace
+    ``.env`` or an ``env:`` entry still works -- and this block simply
+    outranks them (see ``JaatoServer._resolve_session_env``).  Nothing
+    downstream reads the block: it is a validated *producer* of the two
+    env vars the framework already reads, which is why promoting a knob
+    costs no reader changes.
+
+    Attributes:
+        session_log: Path for the framework's own session event trace
+            (``JAATO_TRACE_LOG``).  Absolute, or relative to the session
+            workspace.
+        provider_log: Path for the provider request/response trace
+            (``JAATO_PROVIDER_TRACE``).  Same resolution.
+        ledger: Path for the token ledger (``LEDGER_PATH``) -- every model
+            round trip and permission verdict, appended per record by
+            ``shared.token_accounting.TokenLedger``.  Same resolution.
+            The typed home of a var that was ``AWAITING_TYPED_KEY`` and,
+            until the ledger appended per record, seeded a file nothing
+            wrote to on the daemon path.
+    """
+
+    session_log: Optional[str] = None
+    provider_log: Optional[str] = None
+    ledger: Optional[str] = None
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'TraceProfileConfig':
+        """Build from a profile's ``trace:`` block.
+
+        Raises:
+            ValueError: on a non-mapping block, an unknown key, a
+                non-string or empty value, a boolean-shaped token, or a
+                value that names a directory.  Failing loud is the whole
+                point -- a trace path that is quietly wrong produces a
+                file nobody looks for and a diagnosis nobody can make.
+        """
+        if not isinstance(data, dict):
+            raise ValueError(
+                f"trace: must be a mapping, got {type(data).__name__}")
+
+        unknown = set(data) - set(TRACE_ENV_VARS)
+        if unknown:
+            raise ValueError(
+                f"trace: unknown key(s) {sorted(unknown)}. "
+                f"Allowed: {sorted(TRACE_ENV_VARS)}")
+
+        values: Dict[str, Optional[str]] = {}
+        for key in TRACE_ENV_VARS:
+            value = data.get(key)
+            values[key] = (None if value is None
+                           else _validate_trace_path(key, value))
+        return cls(**values)
+
+    def as_env(self, workspace_root_override: Optional[str] = None) -> Dict[str, str]:
+        """The env vars this block seeds, expanded, omitting keys left unset.
+
+        EXPANDS, because the sibling route does.  A profile's ``env:`` map is
+        run through :func:`expand_variables`, so ``${HOME}/t.log`` there
+        becomes a real path; this block was applied verbatim, so the same
+        string became a *relative* path and ``jaato_sdk.trace`` created a
+        directory literally named ``${HOME}`` inside the workspace.  Two typed
+        routes to one variable disagreeing about their own value syntax is the
+        #775 shape a second time, and the block that outranks the map must not
+        be the one that understands less.
+
+        The per-agent ``{agent}`` / ``{agent_suffix}`` placeholders are a
+        different vocabulary with a different resolution TIME and pass through
+        untouched -- ``expand_variables`` only ever reads ``${...}``.  See
+        :data:`jaato_sdk.trace.TRACE_PATH_PLACEHOLDERS`.
+
+        Args:
+            workspace_root_override: Explicit workspace root for
+                ``${workspaceRoot}`` / ``${cwd}``, for callers that know the
+                session's own (the subagent spawn path does; the daemon's
+                main-session path does not, which is why
+                ``jaato-scaffold validate`` warns about those two vars in a
+                trace path).
+
+        Returns:
+            ``{env var: expanded value}`` for the keys that are set.
+        """
+        return {
+            TRACE_ENV_VARS[key]: expand_variables(
+                value, workspace_root_override=workspace_root_override)
+            for key, value in (("session_log", self.session_log),
+                               ("provider_log", self.provider_log),
+                               ("ledger", self.ledger))
+            if value
+        }
+
+
+def _validate_trace_path(key: str, value: Any) -> str:
+    """Return *value* as a usable trace path, or raise ``ValueError``.
+
+    Split out of :meth:`TraceProfileConfig.from_dict` so the rule has one
+    home and one set of tests; the two keys are validated identically.
+    """
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(
+            f"trace.{key} must be a non-empty string path, got {value!r}")
+    text = value.strip()
+
+    if text.lower() in _TRACE_BOOLEAN_TOKENS:
+        raise ValueError(
+            f"trace.{key}={value!r} is a switch, not a path. This knob is "
+            f"the FILE the trace is written to -- setting it to {value!r} "
+            f"through the untyped `env:` map is what produced a file "
+            f"literally named {value!r} in every session's workspace "
+            f"(issue #775). Give a path: an absolute one is shared by "
+            f"every session using this profile, a relative one resolves "
+            f"against each session's own workspace "
+            f"(e.g. .jaato/logs/{key}.jsonl).")
+
+    if text.endswith(("/", "\\")) or os.path.isdir(text):
+        raise ValueError(
+            f"trace.{key}={value!r} names a directory; this knob is the "
+            f"trace FILE. Append a filename "
+            f"(e.g. {text.rstrip('/')}/{key}.jsonl).")
+
+    unknown = unknown_trace_placeholders(text)
+    if unknown:
+        raise ValueError(
+            f"trace.{key}={value!r} names {', '.join(unknown)}, which nothing "
+            f"substitutes. Known placeholders: "
+            f"{', '.join(sorted(TRACE_PATH_PLACEHOLDERS))} (resolved per agent "
+            f"when the line is written). A token nobody resolves survives into "
+            f"the path and is CREATED as a literal directory -- the #775 shape "
+            f"this block exists to stop. For an env var use ${{VAR}}, which is "
+            f"expanded when the profile resolves.")
+
+    return text
+
+
+def validate_profile_env_paths(env: Dict[str, str]) -> None:
+    """Refuse a switch written into a path-valued var in a profile ``env:`` map.
+
+    THE OTHER HALF OF #775.  ``TraceProfileConfig`` refuses
+    ``trace: {provider_log: '1'}``, and the untyped map right beside it
+    accepted the identical mistake -- which is the spelling that actually
+    caused the incident, since ``env:`` was the only route that existed at the
+    time.  Closing one and leaving the other open makes the typed block a
+    suggestion rather than a rule: an author who hits the refusal can satisfy
+    it by moving the same value one key over.
+
+    Scoped to the PROFILE, deliberately.  The workspace ``.env`` is the
+    operator's own file, is lower precedence, and is not part of the validated
+    surface; a profile is jaato's own schema and is where a contract can be
+    enforced without taking a file's ownership away from the person who wrote
+    it.
+
+    Args:
+        env: The profile's resolved ``env:`` map (raw values -- run this
+            BEFORE expansion, so the literal the author typed is what gets
+            judged).
+
+    Raises:
+        ValueError: naming the variable, the value, and the typed key that
+            supersedes it where one exists.
+    """
+    for var, typed_key in PATH_TYPED_ENV_VARS.items():
+        value = env.get(var)
+        if not isinstance(value, str) or value.strip().lower() not in _TRACE_BOOLEAN_TOKENS:
+            continue
+        better = (f"Use the typed `{typed_key}` key, which validates the value"
+                  if typed_key else
+                  "Give a path")
+        raise ValueError(
+            f"env.{var}={value!r} is a switch, not a path. {var} is the FILE "
+            f"(or directory) the log is written to, so {value!r} produces one "
+            f"literally named {value!r} in every session using this profile "
+            f"(issue #775). {better}: an absolute path is shared by every such "
+            f"session, a relative one resolves against each session's own "
+            f"workspace.")
+
+
+def _scrub_secret_env_errors(data: Dict[str, Any]) -> List[str]:
+    """Shape errors for a profile's ``scrub_secret_env`` (#863).
+
+    Split out of :func:`validate_profile` to keep it under the complexity
+    ratchet.  Checks the profile-level key AND each subprocess surface's
+    ``plugin_configs.<surface>.scrub_secret_env`` against the one grammar
+    in :func:`shared.secret_scrub.normalize_scrub_patterns`, because a
+    malformed value at either position fails CLOSED at the plugin (the
+    default set is applied) and an author should learn that from the
+    validator rather than from a tool that cannot see its token.
+    """
+    errors: List[str] = []
+    candidates = [("'scrub_secret_env'", data.get("scrub_secret_env"))]
+    plugin_configs = data.get("plugin_configs")
+    if isinstance(plugin_configs, dict):
+        for surface in SCRUB_SURFACES:
+            cfg = plugin_configs.get(surface)
+            if isinstance(cfg, dict) and "scrub_secret_env" in cfg:
+                candidates.append((
+                    f"plugin_configs['{surface}'].scrub_secret_env",
+                    cfg["scrub_secret_env"],
+                ))
+    for label, value in candidates:
+        try:
+            normalize_scrub_patterns(value)
+        except ValueError as exc:
+            errors.append(f"{label}: {exc}")
+    return errors
+
+
+def inject_scrub_secret_env(
+    profile: Any,
+    plugin_configs_dict: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Fold a profile's ``scrub_secret_env`` into its subprocess surfaces.
+
+    For each of :data:`shared.secret_scrub.SCRUB_SURFACES` the profile
+    enables, the profile-level value is laid BENEATH the surface's own
+    ``plugin_configs.<surface>.scrub_secret_env`` (``setdefault`` — an
+    explicit per-surface knob always wins, the same rule the ``cache:``
+    field follows for ``plugin_configs.<provider>``).  A surface the
+    profile does not enable is left alone: the key would reach a plugin
+    that is not part of the session, and the validator flags the
+    inert declaration instead.
+
+    Called at every site where a profile becomes a session — the runner
+    envelope, the in-process root session, and both subagent spawn paths —
+    so the shorthand reaches the plugin whichever way the session was
+    built.  A profile that never set the key changes nothing: the plugins
+    then apply the framework default on their own, which is what makes
+    the scrub ON by default rather than dependent on this call.
+
+    Mutates ``plugin_configs_dict`` in place and returns it.
+    """
+    value = getattr(profile, "scrub_secret_env", None)
+    if value is None:
+        return plugin_configs_dict
+    enabled = set(getattr(profile, "plugins", None) or ())
+    for surface in SCRUB_SURFACES:
+        if surface not in enabled:
+            continue
+        cfg = dict(plugin_configs_dict.get(surface) or {})
+        cfg.setdefault("scrub_secret_env", value)
+        plugin_configs_dict[surface] = cfg
+    return plugin_configs_dict
+
+
+def _gc_media_errors(gc_data: Dict[str, Any]) -> List[str]:
+    """Validate the three media keys of a profile's ``gc:`` block.
+
+    A separate function rather than three more branches inline because the
+    validator it feeds is already one of the largest in the file; the
+    checks themselves are the ordinary shape ones (a byte ceiling is a
+    non-negative int, an eviction switch is a bool, a mime-prefix set is a
+    list of strings).
+    """
+    errors: List[str] = []
+    threshold = gc_data.get("media_bytes_threshold")
+    if threshold is not None:
+        if not isinstance(threshold, int) or isinstance(threshold, bool):
+            errors.append("gc.media_bytes_threshold must be an integer "
+                          "(bytes; 0 disables)")
+        elif threshold < 0:
+            errors.append("gc.media_bytes_threshold must be non-negative")
+
+    evict = gc_data.get("evict_consumed_media")
+    if evict is not None and not isinstance(evict, bool):
+        errors.append("gc.evict_consumed_media must be a boolean")
+
+    prefixes = gc_data.get("media_evict_mime_prefixes")
+    if prefixes is not None:
+        if not isinstance(prefixes, list) or not all(
+            isinstance(p, str) for p in prefixes
+        ):
+            errors.append("gc.media_evict_mime_prefixes must be a list of "
+                          "mime prefixes, e.g. [\"audio/\"]")
+    return errors
+
+
+@dataclass
+class GCProfileConfig:
+    """Garbage collection configuration for a profile.
+
+    Defines the GC strategy and its configuration for a subagent or main agent.
+
+    Attributes:
+        type: GC strategy type ('truncate', 'summarize', 'hybrid', 'budget').
+        threshold_percent: Trigger GC when context usage exceeds this percentage.
+        target_percent: Target usage after GC (default: 60.0).
+        pressure_percent: When PRESERVABLE can be touched (0 = continuous mode).
+        preserve_recent_turns: Number of recent turns to always preserve.
+        notify_on_gc: Whether to inject a notification into history after GC.
+        summarize_middle_turns: For hybrid strategy, number of middle turns to summarize.
+        max_turns: Trigger GC when turn count exceeds this limit.
+        media_bytes_threshold: Trigger GC when history carries more than
+            this many BYTES of binary payload (audio, images, PDFs); 0
+            disables the check.  The second denominator, and the only one
+            not expressed as a percentage of a token budget — media was
+            invisible to GC precisely because the payload dominating a
+            voice request is not a token quantity (#850).  ``None`` leaves
+            the framework default (``JAATO_GC_MEDIA_BYTES``, else 8 MiB).
+        evict_consumed_media: Whether binary parts are purged from history
+            once the turn that consumed them has completed, leaving a
+            marker naming the attachment's id.  ``None`` = framework
+            default (on).
+        media_evict_mime_prefixes: Which mimes eviction applies to.
+            ``None`` = framework default (``["audio/"]``).
+        plugin_config: Additional plugin-specific configuration.
+    """
+    type: str = "truncate"
+    threshold_percent: float = 80.0
+    target_percent: float = 60.0
+    pressure_percent: Optional[float] = 90.0  # 0 or None = continuous mode
+    preserve_recent_turns: int = 5
+    notify_on_gc: bool = True
+    summarize_middle_turns: Optional[int] = None  # For hybrid strategy
+    max_turns: Optional[int] = None
+    media_bytes_threshold: Optional[int] = None
+    evict_consumed_media: Optional[bool] = None
+    media_evict_mime_prefixes: Optional[List[str]] = None
+    plugin_config: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def continuous_mode(self) -> bool:
+        """True if continuous GC is enabled (pressure_percent is 0 or None)."""
+        return not self.pressure_percent
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize to a JSON-safe dict — the half ``from_dict`` lacked.
+
+        Derived from the dataclass fields, deliberately, rather than
+        written out key by key.  Three hand-written write-sides existed
+        before this and **each had drifted differently** (#1133):
+
+        * the runner envelope producer read ``.config`` — an attribute
+          this class does not have — so it emitted ``{"type": ...}``
+          and dropped every declared knob;
+        * the session-snapshot serializer listed ten of the twelve
+          fields, omitting ``target_percent`` and ``pressure_percent``,
+          so a revived session lost the two numbers that decide how far
+          a collection goes and when PRESERVABLE may be touched;
+        * ``from_dict`` — the only complete one — reads all twelve.
+
+        A list that has to be edited whenever a field is added is the
+        defect, not the individual omissions, so this one cannot be
+        edited out of date.
+
+        Returns:
+            Every field, with ``media_evict_mime_prefixes`` normalised
+            from a tuple to a list so the result survives ``json.dumps``
+            and compares equal after a round trip.
+        """
+        data = asdict(self)
+        prefixes = data.get('media_evict_mime_prefixes')
+        if isinstance(prefixes, tuple):
+            data['media_evict_mime_prefixes'] = list(prefixes)
+        return data
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'GCProfileConfig':
+        """Create GCProfileConfig from a dictionary.
+
+        The symmetric half of :meth:`to_dict`: every key it writes is
+        read here, and an absent key falls back to this class's own
+        default rather than to a literal typed at the call site.
+        """
+        return cls(
+            type=data.get('type', 'truncate'),
+            threshold_percent=data.get('threshold_percent', 80.0),
+            target_percent=data.get('target_percent', 60.0),
+            pressure_percent=data.get('pressure_percent', 90.0),
+            preserve_recent_turns=data.get('preserve_recent_turns', 5),
+            notify_on_gc=data.get('notify_on_gc', True),
+            summarize_middle_turns=data.get('summarize_middle_turns'),
+            max_turns=data.get('max_turns'),
+            media_bytes_threshold=data.get('media_bytes_threshold'),
+            evict_consumed_media=data.get('evict_consumed_media'),
+            media_evict_mime_prefixes=data.get('media_evict_mime_prefixes'),
+            plugin_config=data.get('plugin_config', {}),
+        )
+
+
+@dataclass
+class CompletionProcessor:
+    """A profile-declared completion processor.
+
+    Replaces the prior split between ``completion_artifacts``
+    (renderers that produce files) and ``completion_validators`` (kb
+    Python that returns error lists) — both surfaces collapsed into
+    one ``completion_processors`` config field as of server 0.6.125+.
+    The two had the same plumbing (kb Python under
+    ``.jaato/scripts/``, loaded via ``script_loader``, run after
+    ``jsonschema.validate`` passes, block completion on failure); the
+    split was an artifact of incremental shipping (PR-138 added
+    validators while artifacts already existed and supported a
+    "validator-as-renderer" mode).
+
+    Each kb processor module exposes one or both of these top-level
+    callables — the framework probes for which symbols are present
+    and dispatches accordingly:
+
+    - ``render(payload: dict, context: RenderContext) -> str | bytes``
+      Produces output content.  When the processor entry declares an
+      ``output:`` path template, the returned bytes are written to
+      disk (atomic ``.tmp`` + ``rename``).  When ``output:`` is
+      omitted, the return is logged for audit but not persisted —
+      "validator-as-renderer" use case.
+
+    - ``validate(payload: dict, context: RenderContext) -> list[str]``
+      Returns a list of error strings.  Empty list → pass.  Non-empty
+      → completion blocked per the entry's ``on_error`` policy.  Has
+      access to ``context.tool_calls`` — the pre-computed ledger of
+      every function_call + function_response in the session, paired
+      by call_id.  Use to cross-check payload claims against actual
+      tool outcomes (e.g. agent claimed file X rendered, but the
+      corresponding ``renderTemplateToFile`` call returned an error).
+
+    Both functions can be present in one module — useful when a
+    single processor both writes an audit record AND checks payload
+    consistency.
+
+    Attributes:
+        script: kb Python file path resolved through the standard
+            ``script_loader`` tier (absolute → ``<config_root>/<path>``
+            → ``~/.jaato/<path>``).
+        name: Optional stable identifier for this processor, used by an
+            inheriting profile's ``suppress_inherited_processors`` to
+            decline it by name.  When ``None`` the ``script`` path is the
+            identity (a suppression entry matches either).  Declare one on
+            a base profile's processors when you want the identity to
+            survive moving the script file.  Ignored at runtime.
+        output: Optional output file path with simple ``{field}``
+            templating.  When set, the ``render`` symbol's return is
+            written to this path.  Substitutes from the payload first,
+            then ``agent_params``, then session-derived values
+            (``case_id``, ``agent_id``, ``workspace_path``).  Relative
+            paths resolve under ``workspace_path``.  ``None`` means the
+            processor runs for side-effect / validation only — useful
+            for ``validate``-only processors or ``render`` calls that
+            consult state without producing files.
+        on_error: How a failure (script raised, file write failed,
+            ``validate`` returned non-empty list) is surfaced.
+            ``"fail_completion"`` returns a validation_failed shape to
+            the model so it retries; ``"warn"`` logs and lets the
+            completion proceed (the operator can clean up after).
+            Default ``"fail_completion"``.
+        description: Optional human-readable note on what this
+            processor does and why it's wired in.  Ignored at runtime;
+            consumed by docs / introspection tooling.
+        phase: WHEN this processor runs (server 0.6.199+).
+            ``"finalization"`` (default) — runs at ``signal_completion``
+            only, exactly as every processor did before this field
+            existed: ``render`` writes output, ``validate`` blocks
+            completion on errors.  ``"completeness"`` — runs DURING
+            ``prepare_completion`` (gated: only once the schema-required
+            floor is met, so it fires ~once near the end, not per
+            field) and its ``validate`` return participates in the
+            COMPOSITE ``is_complete`` verdict via the ``incomplete[]``
+            channel of :class:`jaato_sdk.cascade_authoring.ProcessorResult`.
+            A completeness processor's job is SEMANTIC done-ness:
+            "does the accumulated payload have every field the
+            downstream cascade stages actually consume for THIS run?"
+            — distinct from the schema's STRUCTURAL floor (required[]).
+            It must be cheap (pure payload/context inspection, no
+            subprocess / Maven / LSP) because it runs mid-accumulation.
+            Its ``incomplete[]`` entries gate ``is_complete`` to False
+            and surface to the model as neutral "still needed" guidance
+            (no retry penalty); its ``errors[]`` still reject as usual.
+        max_refusals: How many times this processor may BLOCK completion
+            before the framework stops letting it (issue #768).  ``None`` (the default) is unbounded, which is
+            what every processor did before this field existed — and
+            which does not terminate on its own: the processor refuses,
+            the agent re-claims completion, forever.  An observed run
+            spent seven refusals in 156 seconds on the same two errors
+            and ended BLOCKED with its whole budget gone.  Set an
+            integer and the framework counts the refusals per session
+            and applies ``on_exhausted`` at the ceiling.
+
+            **What counts as one refusal:** ONE invocation of this
+            processor in which its ``validate`` returned at least one
+            ``errors[]`` entry, however many entries that was.  What
+            does NOT count: ``warnings[]``, ``incomplete[]``, the
+            budget-exempt ``faults[]`` channel (see
+            :class:`jaato_sdk.cascade_authoring.ProcessorResult`), and
+            every broken-gate condition — a load failure, a raise, a
+            malformed return, a failed write.  Those are not the agent
+            getting the answer wrong, so spending its retries on them
+            would burn the budget without ever producing a verdict.
+            The counter lives on the framework's per-session
+            ``LoadedProcessor`` (see
+            :mod:`shared.completion_processors`), which is what makes
+            it a declared home rather than a module-level global
+            resting on an undocumented caching guarantee (#765).
+
+            **Per processor, per session** — not one budget shared
+            across the profile (#770's open question).  Two gates on
+            one profile hold independent ceilings and the longer one
+            governs while the shorter goes advisory.  It is the only
+            answer that composes: processors are merged along a
+            profile's inheritance chain (#791), so a shared budget
+            would let a base profile's gate spend a child's, and
+            adding an unrelated gate would silently tighten every
+            existing one.
+
+            The value has to REACH the runner to do anything, and for
+            a while it did not — three hand-written serialisers
+            between the daemon and the runner named five of this
+            dataclass's fields and dropped the rest, so a declared
+            ceiling was ``None`` by the time it was enforced (a live
+            daemon refused 494 times under ``max_refusals: 2``).  Both
+            directions now go through
+            ``completion_processors_to_wire`` /
+            ``completion_processors_from_wire``, neither of which
+            names a field.  Guard:
+            ``shared/tests/test_processor_wiring_survives_the_runner_boundary.py``.
+        on_exhausted: What happens on the invocation AFTER
+            ``max_refusals`` is spent.  ``"allow"`` (default) downgrades
+            this processor's errors to warnings and lets the completion
+            stand unfinished — the checks still failed and whatever
+            grades the run afterwards will say so, on the reasoning that
+            **a FAIL verdict carries information and a BLOCKED arm
+            carries none**.  ``"fail"`` keeps blocking forever, which is
+            right when an unfinished completion is worse than no
+            completion (a run that writes to a shared store, say).  Both
+            are real choices; the default is the one that keeps a
+            harness producing verdicts.  Ignored when ``max_refusals``
+            is ``None``.
+    """
+    script: str
+    output: Optional[str] = None
+    on_error: str = "fail_completion"
+    description: Optional[str] = None
+    phase: str = "finalization"
+    name: Optional[str] = None
+    max_refusals: Optional[int] = None
+    on_exhausted: str = "allow"
+
+    @property
+    def identity(self) -> str:
+        """What ``suppress_inherited_processors`` matches this entry by.
+
+        The declared ``name`` when there is one, else the ``script``
+        path.  Used for the "no inherited processor matched" diagnostic;
+        the match itself accepts EITHER form so a child can suppress by
+        script path even when the parent named the processor.
+        """
+        return self.name or self.script
+
+
+@dataclass
+class SubagentProfile:
+    """Configuration profile for a subagent.
+
+    Defines what tools and capabilities a subagent has access to,
+    allowing the parent model to delegate specialized tasks.
+
+    Attributes:
+        name: Unique identifier for this subagent profile.
+        description: Human-readable description of what this subagent does.
+        plugins: List of plugin names to enable for this subagent (clean names,
+            ``(preload)`` suffixes stripped during parsing).
+        preloaded_plugins: Set of plugin names that should bypass deferred tool
+            loading — all their tools (including discoverable) are loaded into
+            the initial context. Derived from ``(preload)`` annotations in the
+            raw ``plugins`` list during profile parsing.
+        plugin_configs: Per-plugin configuration overrides.
+        system_instructions: **Deprecated.** Use agents (``.jaato/agents/``) instead.
+            When an agent is specified via ``--agent``, its rendered markdown
+            replaces this field.  Profiles should contain runtime config only.
+        default_agent: Name of the agent definition (``.jaato/agents/<name>.md``)
+            whose persona this profile spawns with when the caller names no
+            ``agent``.  A profile supplies plugins; an agent supplies
+            instructions — this binds the two, so ``spawn_subagent(profile=...)``
+            alone yields a subagent that has both (#944).  An explicit
+            ``agent=`` argument always wins.  Inheritance: scalar-override.
+        model: Optional model override (uses parent's model if not specified).
+        provider: Optional provider override (e.g., 'anthropic', 'google_genai').
+                  Allows subagents to use a different provider than the parent.
+
+        max_completion_nudges: How many times the framework re-prompts a
+            session that settled without calling ``signal_completion``
+            before giving up and emitting ``NudgeExhausted`` (#919).
+            Per TURN — a conversation's later turns each get the same
+            allowance rather than inheriting what an earlier one spent
+            (#934).  ``None`` means the framework default of 2
+            (:data:`shared.completion_nudge.DEFAULT_MAX_COMPLETION_NUDGES`).
+            Inheritance: child-override, else the minimum across
+            parents that declared one.
+        gc: Optional garbage collection configuration for this subagent.
+        trace: Optional diagnostic trace-log paths (``session_log`` /
+            ``provider_log``).  The typed, validated sibling of
+            ``JAATO_TRACE_LOG`` / ``JAATO_PROVIDER_TRACE``, which remain
+            the lower-precedence default.  Seeded into the session env by
+            ``JaatoServer._resolve_session_env`` -- see
+            :class:`TraceProfileConfig` for the failure that motivated it
+            (issue #775).
+        env: Session-scoped environment variables for this profile.
+            Values support ``${VAR}`` expansion and secret URI resolution
+            (e.g. ``vault://secret/myapp#db_password``).  For main sessions
+            these are merged into ``JaatoServer._session_env``; for subagents
+            they are applied to ``os.environ`` for the duration of the
+            subagent thread and restored on exit.  Never leaks to other
+            sessions or agents.
+        inherits: Optional list of parent profile names. When set, this
+            profile inherits fields from its parents. Resolved during
+            ``discover_profiles()`` — after resolution, ``inherits`` is
+            cleared and the profile is fully flattened.
+        completion_payload_schema: Optional JSON Schema constraining the
+            ``payload`` argument of ``signal_completion``. Either an inline
+            dict or a string path resolved via the
+            ``.jaato/completion_schemas/`` tier (absolute → workspace →
+            home). When set, ``signal_completion``'s parameters carry the
+            schema so providers enforce it at sampling time and
+            ``LifecycleTools`` validates the payload server-side before
+            emitting ``AgentCompletedEvent``. When ``None``, the legacy
+            ``summary: str`` parameter is used. Inheritance follows the
+            scalar-override rule (parents must agree or child overrides).
+        runtime_limits: Optional per-session resource consumption caps —
+            memory, PIDs, CPU weight, tool wall-clock timeout, stdout cap
+            and tool concurrency.  Orthogonal to sandboxing (AppArmor):
+            answers "how much can this session consume?" rather than
+            "what can it touch?".  The kernel-enforceable subset (memory,
+            PIDs, CPU weight) is applied via cgroup v2 by
+            ``server.cgroups.CgroupsManager``; the timeout and stdout cap
+            are read by the CLI/interactive_shell plugins at tool-call
+            time; ``max_parallel_tools`` is read by ``JaatoSession``,
+            which owns the thread pool.  ``None`` means "no limits"
+            (host defaults).  Inheritance: the ceilings are
+            scalar-override, ``max_parallel_tools`` is min-wins (#862) —
+            see :func:`_merge_runtime_limits`.
+        budget_control: Optional multi-dimensional budget ceilings
+            (``limits``: usd / tokens / seconds / tool_calls / turns) plus
+            a ``degrade`` ladder applied as those ceilings are
+            approached.  Where ``runtime_limits`` caps HOST resources,
+            this caps agent ECONOMICS.  A degrade rung rebinds
+            ``model_tiers`` bindings (a brownout) rather than moving the
+            agent between tiers, so the model's cognitive role is
+            untouched.  Inheritance: ``limits`` min-wins (a child may only
+            tighten), ``degrade`` is scalar-override.  ``None`` means
+            "unbudgeted".
+    """
+    name: str = field(metadata={
+        "description": "Unique profile identifier (the <agent>.yaml stem)."})
+    description: str = field(metadata={
+        "description": "Human-readable summary of what this (sub)agent does."})
+    plugins: List[str] = field(default_factory=list, metadata={
+        "description": "Plugin names to enable. `name(preload)` bypasses "
+        "deferred tool-loading (all its tools, incl. discoverable, enter the "
+        "initial context); `name(tools:[a,b])` scopes which tools are exposed "
+        "(see tool_scopes)."})
+    preloaded_plugins: set = field(default_factory=set, metadata={
+        "description": "DERIVED from `(preload)` annotations in `plugins` during "
+        "parsing — not set directly."})
+    # Per-plugin tool allow-lists derived from ``tools:[...]`` modifiers
+    # in the raw ``plugins`` list (see :func:`parse_plugin_entry`).  Maps
+    # plugin name → list of tool names to expose; every other tool the
+    # plugin ships is dropped from this session's wire body AND its
+    # xgrammar grammar surface.  A plugin absent from this dict exposes
+    # all its tools (the default).  The filter is applied **per session**
+    # in ``JaatoSession`` (mirroring the ``_tool_plugins`` plugin-level
+    # filter) — it never mutates the shared registry, so sibling
+    # subagents on the same runtime are unaffected.
+    #
+    # CAVEAT for profile authors: a tool dropped here is invisible to the
+    # model — its schema never reaches the wire.  If an agent persona (or
+    # cross-persona instruction) names a tool that the allow-list omits,
+    # the model will be told to use a tool it cannot see.  Keep the
+    # allow-list and the persona's referenced tools in sync.
+    tool_scopes: Dict[str, List[str]] = field(default_factory=dict, metadata={
+        "description": "Per-plugin tool allow-lists (plugin -> [tool names to "
+        "expose]); every other tool that plugin ships is dropped from this "
+        "session's wire + grammar. Absent plugin = all its tools. Keep in sync "
+        "with the persona's referenced tools."})
+    plugin_configs: Dict[str, Dict[str, Any]] = field(default_factory=dict, metadata={
+        "description": "Per-plugin config overrides (plugin name -> config "
+        "dict), e.g. plugin_configs.<provider>.api_params / .extra_body, "
+        "plugin_configs.permission.policy."})
+    system_instructions: Optional[str] = field(default=None, metadata={
+        "description": "DEPRECATED — use agents (.jaato/agents/<name>.md) "
+        "instead; an `--agent`'s rendered markdown replaces this. Profiles "
+        "should carry runtime config only."})
+    # The persona this profile belongs to (#944).
+    #
+    # A profile supplies PLUGINS; an agent definition supplies the
+    # PERSONA.  ``spawn_subagent(profile="documentalista")`` used to yield
+    # a correctly-tooled subagent with no instructions at all, because the
+    # binding between the two lived nowhere but in the caller's memory —
+    # every spawn site had to repeat the pair, and omitting ``agent`` was
+    # silent.  Naming the persona HERE puts the binding in the profile
+    # that already knows which one belongs to it.
+    #
+    # Resolved by ``spawn_subagent`` exactly like an explicit ``agent``
+    # argument (same ``SessionManager._resolve_agent`` call, same
+    # ``.jaato/agents/`` lookup), and only when the caller named none —
+    # an explicit ``agent=`` always wins, so a profile can carry a default
+    # persona without forbidding a specialised one.
+    #
+    # Inheritance is scalar-override, like ``model`` / ``provider``.
+    default_agent: Optional[str] = field(default=None, metadata={
+        "description": "Agent definition (.jaato/agents/<name>.md) whose "
+        "persona this profile spawns with when the caller names no `agent`. "
+        "A profile supplies plugins, an agent supplies instructions — this "
+        "binds the two so `spawn_subagent(profile=...)` alone yields a "
+        "subagent that has both. An explicit `agent=` wins."})
+    # When True, drop the framework's BASE instructions layer (the
+    # "Principle 1: Transparency Mandate" and other always-on framework
+    # instructions) from this profile's system prompt.  Plugin-contributed
+    # instructions and the agent's own ``system_instructions`` are still
+    # included.  Useful for simple goal-focused agents (body-wired echo
+    # specialists, narrow-scope narrators) that don't benefit from the
+    # framework's general-purpose guidance and would rather have those
+    # tokens back for their actual work — typical savings 3-5k tokens
+    # per turn, which can be the difference between fitting in a small
+    # model's context window and triggering aggressive GC.  Defaults to
+    # ``False`` (full framework instructions).
+    suppress_base_instructions: Any = field(default=False, metadata={
+        "description": "Drop framework-injected instruction layers from the system "
+        "prompt (plugin + agent instructions always kept).  `true` drops the disk "
+        "BASE layer (.jaato/instructions/*.md) AND the framework constants "
+        "(task-completion, parallel guidance, turn-summary); the security "
+        "untrusted-content boundary and the AI disclosure (EU AI Act Art. 50(1)) "
+        "are kept.  A dict gives granular control over the four pieces, e.g. "
+        "`{disk: true, constants: true, security: false}` (absent key = keep); "
+        "dropping `security` or `disclosure` is a posture change and is "
+        "announced at WARNING.  "
+        "Saves ~3-5k tokens/turn for narrow goal-focused agents.  Default False.  "
+        "Normalized to a canonical frozenset of piece names in __post_init__."})
+    model: Optional[str] = field(default=None, metadata={
+        "description": "Model override (uses the parent's model if unset). "
+        "Silently ignored when model_tiers is non-empty."})
+    provider: Optional[str] = field(default=None, metadata={
+        "description": "Provider override (e.g. anthropic, nebius, vllm). A "
+        "profile binds exactly one provider + model."})
+
+    # The completion-nudge budget (#919).  How many times the framework
+    # re-prompts a session that settled without calling
+    # ``signal_completion`` before giving up and producing the
+    # ``NudgeExhausted`` terminal.
+    #
+    # ``None`` (absent) means the framework default
+    # (``shared.completion_nudge.DEFAULT_MAX_COMPLETION_NUDGES`` = 2),
+    # which is deliberately unchanged: 2 is right for a strong
+    # tool-caller, and raising it globally would make weak models loop
+    # longer for everyone.  What this field adds is the ability for a
+    # deployment that KNOWS its model needs more attempts to say so --
+    # the sibling of a processor's ``max_refusals``,
+    # and previously the one bound in the completion path that was a
+    # function-local constant in three files rather than a profile knob.
+    #
+    # Read by :func:`shared.completion_nudge.resolve_max_completion_nudges`
+    # at every nudge site (the daemon's top-level guard, the embedded
+    # lead, the subagent loop) rather than by the sites themselves, so a
+    # profile object predating the field resolves to the default.
+    #
+    # The budget is spent PER TURN.  It used to be per session, which was
+    # invisible while a completion-gated session was one-shot and became a
+    # ceiling on the whole conversation once #913 let such a session be
+    # driven again -- raising this field then only moved the wall (2 dies
+    # at turn 3, 40 at turn 41).  See ``JaatoSession._begin_turn_
+    # completion_state`` for how a nudge's own re-prompt is kept from
+    # refunding itself (#934).
+    #
+    # Inheritance is child-override / min-across-parents -- see
+    # :func:`_merge_profiles`.
+    max_completion_nudges: Optional[int] = field(default=None, metadata={
+        "description": "How many times the framework re-prompts a session "
+        "that ended without calling signal_completion before giving up "
+        "(NudgeExhausted). Per turn. None = the framework default, 2. "
+        "Raise it for a "
+        "model that reliably does the work and unreliably reports it done "
+        "(audio models routinely burn a nudge on a redundant enter_tier). "
+        "Positive integer; the sibling of a processor's max_refusals."})
+    cache: Optional['CacheProfileConfig'] = field(default=None, metadata={
+        "description": "Prompt-cache defaults, cross-provider. "
+        "{enabled: auto|true|false, ttl: 5m|1h, history: bool}. "
+        "'auto' leaves the provider's own default alone and is a no-op on "
+        "a provider that cannot cache. plugin_configs.<provider> overrides "
+        "this for mechanism-specific tuning (more specific wins)."})
+    trace: Optional['TraceProfileConfig'] = field(default=None, metadata={
+        "description": "Diagnostic trace-log paths: {session_log, provider_log, "
+        "ledger}. Typed sibling of the JAATO_TRACE_LOG / JAATO_PROVIDER_TRACE / "
+        "LEDGER_PATH env vars, "
+        "which stay the lower-precedence default (this block outranks them). "
+        "Absolute = one shared file; relative = one file per session, resolved "
+        "against the workspace. Refuses a switch written into a path field -- "
+        "`env: {JAATO_PROVIDER_TRACE: \'1\'}` is a valid str and wrote every "
+        "session\'s trace to a file named `1` (#775)."})
+    regulatory: Optional['RegulatoryProfileConfig'] = field(default=None, metadata={
+        "description": "What this application declares about itself under "
+        "the EU AI Act (Regulation (EU) 2024/1689): {intended_purpose, "
+        "risk_class: minimal|limited|high, annex_iii, provider: {name, "
+        "contact}, interacts_with_persons, disclosure_text}.  Declared, never "
+        "inferred -- whether a use is high-risk is the provider's own "
+        "determination (Art. 6(4)).  `validate` escalates its warnings to "
+        "errors under risk_class: high; the disclosure piece reads "
+        "provider.name and interacts_with_persons (Art. 50(1)).  risk_class "
+        "inherits most-restrictive-wins, the other fields child-replaces.  "
+        "Absent = undeclared (validated as minimal, documented as unknown)."})
+    record_keeping: Optional['RecordKeepingConfig'] = field(
+        default=None, metadata={
+        "description": "How long this session's records are kept and whether "
+        "they carry tamper evidence (EU AI Act Arts. 12, 19, 26(6)): "
+        "{retention_days, conversation_retention_days, integrity: "
+        "none|sha256-chain}.  Two clocks because two different things are "
+        "kept -- the audit record says what the system DID, the conversation "
+        "is personal data somebody may ask to have erased, and keeping the "
+        "first while dropping the second is what satisfies Art. 19(1) and "
+        "GDPR at once.  0 days = keep until deleted.  All three inherit "
+        "most-restrictive-wins (LONGER for the two minimums), and 0 cannot "
+        "win it.  Absent = delete removes everything, exactly as before -- "
+        "this block changes what DELETE MEANS, so it has no default."})
+    gc: Optional[GCProfileConfig] = field(default=None, metadata={
+        "description": "Garbage-collection strategy + thresholds for this "
+        "session (type + threshold_percent / target / preserve_recent_turns). "
+        "None = framework default."})
+    env: Dict[str, str] = field(default_factory=dict, metadata={
+        "description": "Session-scoped env vars (support ${VAR} expansion + "
+        "secret URIs, e.g. vault://secret/app#key). Applied for the session's "
+        "duration, never leak to other sessions."})
+    inherits: Optional[List[str]] = field(default=None, metadata={
+        "description": "Parent profile names to inherit from (tier-1 _base_* / "
+        "profile-set composition). Resolved + flattened at discover_profiles(); "
+        "cleared after."})
+    completion_payload_schema: Optional[Union[str, Dict[str, Any]]] = field(
+        default=None, metadata={
+        "description": "JSON Schema constraining signal_completion's `payload` "
+        "(inline dict or a path under .jaato/completion_schemas/). Carried on "
+        "the tool so providers enforce it at sampling time + LifecycleTools "
+        "validates server-side. None = legacy `summary: str`."})
+    spawn_payload_schema: Optional[Union[str, Dict[str, Any]]] = field(
+        default=None, metadata={
+        "description": "JSON Schema constraining the spawn-time payload "
+        "(input boundary), mirror of completion_payload_schema in everything "
+        "but the type system. Inline dict or a .jaato/spawn_schemas/ "
+        "path (spawn_schema_loader resolves it; the field previously named "
+        "completion_schemas/ here, which is the OTHER schema's root). "
+        "TYPE EVERY PROPERTY `string`: agent_params cross the IPC wire "
+        "as `key=value` argv tokens, so the daemon validates strings and a "
+        "property typed integer/number/boolean/object/array is refused on "
+        "EVERY spawn (add a `pattern` for shape and parse in the prefetch). "
+        "#883 ratified that as the contract, so BOTH boundaries — this one "
+        "and the model-driven spawn_subagent call, where a model emitting "
+        "`{\"n\": 1}` used to hand the validator a real int — validate the "
+        "wire's string view, and a refusal caused by the schema says so. "
+        "`jaato-scaffold validate` reports it before a spawn as "
+        "spawn_schema_type_unreachable."})
+    # Unified completion-processor surface (server 0.6.125+).  Replaces
+    # the prior split between ``completion_artifacts`` (renderers that
+    # produce files) and ``completion_validators`` (kb Python that
+    # returns error lists) — same plumbing under the hood (kb Python
+    # under ``.jaato/scripts/processors/``, loaded via
+    # ``script_loader``, run after ``jsonschema.validate`` passes,
+    # block completion on failure).  See :class:`CompletionProcessor`
+    # docstring for the full kb author contract (probe-by-symbol:
+    # ``render`` and/or ``validate``).  Inheritance concatenates
+    # parent + child — each processor is independent and all fire.
+    completion_processors: List[CompletionProcessor] = field(
+        default_factory=list, metadata={
+        "description": "kb Python hooks (.jaato/scripts/processors/, probed for "
+        "`render` and/or `validate`) run after jsonschema.validate passes; a "
+        "validator's error list blocks completion, a renderer produces files. "
+        "Inheritance concatenates parent + child; all fire. To drop ONE "
+        "inherited processor, name it in `suppress_inherited_processors` — "
+        "an empty list here adds nothing, it does not clear the parents'."})
+    # The one opt-out of ``completion_processors``' concatenation
+    # (#791).  Every other inherited key can be scoped down by the
+    # child somehow — a scalar by replacing it, a dict per key — but
+    # concatenation only ever grows, so a child whose stage genuinely
+    # completes differently had no move except to stop inheriting, and
+    # silently lose ``budget_control`` /
+    # ``runtime_limits`` / ``env`` / ``plugin_configs`` with it.
+    #
+    # Scoped deliberately narrow:
+    #   - BY NAME, never "drop them all", so a base that later adds a
+    #     second processor does not silently re-enable the one this
+    #     child declined;
+    #   - applies only to what the PARENTS contributed — the child's own
+    #     ``completion_processors`` are its to edit directly;
+    #   - an entry matching no inherited processor is a profile-load
+    #     ERROR, not a silent no-op, because a stale suppression means
+    #     the base moved or renamed the processor and this child is
+    #     once again running one it declared it did not want;
+    #   - NOT itself inherited: it is consumed at the merge that
+    #     resolves this profile, so a grandchild never re-applies (and
+    #     never trips over) an ancestor's suppression.
+    suppress_inherited_processors: List[str] = field(
+        default_factory=list, metadata={
+        "description": "Names (or script paths) of INHERITED "
+        "completion_processors this profile declines — the only way to scope "
+        "down a key that otherwise only concatenates. Matches a parent "
+        "entry's `name` or its `script`. An entry matching nothing is a load "
+        "error. Not inherited further; only meaningful alongside `inherits`."})
+    runtime_limits: Optional[RuntimeLimits] = field(default=None, metadata={
+        "description": "Per-session resource caps (memory, PIDs, CPU weight, "
+        "tool wall-clock timeout, stdout, max_parallel_tools). 'How much can "
+        "it consume' — orthogonal to AppArmor's 'what can it touch'. "
+        "None = host defaults."})
+    # Per-turn model-tier config.  Empty dict means "single-model
+    # mode" — the framework falls back to env vars (JAATO_TIER_*) at
+    # session-init time, and from there to single-model behavior using
+    # ``model``.  When non-empty, ``model`` is silently ignored (with a
+    # warning at load time) because the active model is selected per
+    # turn from ``model_tiers[<active_tier>]``.
+    #
+    # Single-level dict mixing tier→model entries with the reserved
+    # control keys (``initial`` / ``fallback``).  A tier key is either one
+    # of the four canonical names (``CANONICAL_TIER_NAMES``) or a name the
+    # deployment chooses — ``coder``, ``reviewer`` — in which case
+    # ``description`` becomes REQUIRED, since the framework has no prose
+    # for a name it does not know (#831).  Each tier entry is either a model-name string or a
+    # dict with ``model`` (required) plus optional ``provider`` (tiers may
+    # name different ones), ``description`` (prose the MODEL reads as that
+    # tier's bullet in the ``enter_tier`` tool) and ``modalities`` (the
+    # non-text roles the tier fills, per direction — ``{image: inbound}``,
+    # list form is inbound sugar; ``vision`` implies image inbound).  See
+    # ``shared/model_tiers.py`` for the resolver and validation, and
+    # ``project_backlog_per_turn_model`` for the full design.
+    model_tiers: Dict[str, Any] = field(default_factory=dict, metadata={
+        "description": "Per-turn model-tier selection. Single-level dict "
+        "mapping a tier key to a model (a model-name string, or "
+        "{model (required), provider (optional; tiers may span providers), "
+        "description (optional; prose the model reads as that tier's bullet "
+        "in the enter_tier tool — default is the framework's own wording for "
+        "the tier name), modalities (optional; non-text roles this tier fills "
+        "per direction, e.g. {\"image\": \"inbound\"} or the inbound-sugar list "
+        "[\"image\"]; directions are inbound / outbound / bidirectional — the "
+        "content gate and the startup capability check resolve a tier BY ROLE, "
+        "a tier named vision implies image inbound, and outbound roles parse "
+        "but are inert until media delivery lands)}), plus the reserved "
+        "control keys initial / fallback. "
+        "Tier keys are the four canonical names (planner / dispatcher / "
+        "executor / vision) or any name the deployment picks matching "
+        "^[a-z][a-z0-9_]{1,31}$ — a deployment-named tier REQUIRES a "
+        "description, and there is no JAATO_TIER_* env spelling for one. "
+        "At most 8 tiers per session (each costs a bullet and an enum "
+        "entry in the prompt-cache prefix, on every request). "
+        "The enter_tier tool advertises ONLY the declared tiers. "
+        "Non-empty silently ignores `model` (warns at load) — the active model "
+        "is picked per turn from model_tiers[<active_tier>]. Empty = "
+        "single-model mode (falls back to the JAATO_TIER_* env vars, then "
+        "`model`)."})
+    # Budget ceilings + the degradation ladder applied as they're
+    # approached.  Distinct from ``runtime_limits`` (host resources:
+    # memory / pids / cpu) — this caps agent ECONOMICS.  A ``degrade``
+    # rung REBINDS ``model_tiers`` entries rather than moving the agent
+    # between tiers, because tier labels are a cognitive/role axis with
+    # no inherent cost ordering (see shared/model_tiers.py).  Parsed +
+    # validated by ``shared/budget_control.py``; full design in
+    # ``docs/design/budget-control-degradation.md``.
+    budget_control: Optional[BudgetControlConfig] = field(
+        default=None, metadata={
+        "description": "Multi-dimensional budget ceilings + graceful degradation. "
+        "`limits`: usd / tokens / seconds / tool_calls / turns (omit a dimension to "
+        "leave it unbounded). `degrade`: an ordered ladder of rungs; a rung fires "
+        "when ANY dimension crosses its `at` percentage and overlays new model_tiers "
+        "bindings (a brownout — the tier vocabulary and the model's role are "
+        "untouched, only the model each tier points at changes) and/or takes a "
+        "terminal action (finalize / abort / escalate). Inheritance: limits "
+        "MIN-WINS (a child may only tighten), degrade is scalar-override. "
+        "None = unbudgeted."})
+    # AppArmor confinement intent for the session (PR-A, 2026-05-14).
+    #
+    # ``False`` (default, back-compat) — the session bootstraps
+    # unconfined regardless of host AppArmor capability.  Same posture
+    # as every pre-PR-A caller of ``SessionManager.create_headless_session``.
+    #
+    # ``True`` — the session opts into per-session AppArmor confinement
+    # (same mechanism as the IPC client's ``apparmor=True`` toggle):
+    # the daemon provisions a per-session profile, the runner self-
+    # confines to it in ``bootstrap_session`` step 1c, and any //child
+    # subprocesses transition to ``//child``.  On hosts without
+    # AppArmor (macOS, BSD, containerised Linux without policy load
+    # support) the ``_maybe_self_confine`` helper no-ops just like
+    # ``IPCClient(apparmor=True)`` already does today — the field is a
+    # statement of intent; the actual enforcement is best-effort.
+    #
+    # **Default-flip planned (PR-B):**  Once cascade workloads
+    # (kb-enablement-2.0) have validated the field on non-trivial
+    # graphs, PR-B will flip the default to ``True`` so the security
+    # gradient closes.  Legacy callers that haven't opted out by then
+    # will need to set ``apparmor: false`` explicitly.  See
+    # ``project_backlog_apparmor_kwarg_for_headless_sessions`` for the
+    # full migration plan.
+    #
+    # Resolution precedence at session-creation time:
+    #   1. Explicit ``apparmor=`` kwarg on
+    #      ``SessionManager.create_headless_session`` (kwarg wins).
+    #   2. This profile field.
+    #   3. Legacy unconfined default (``False`` until PR-B).
+    apparmor: bool = field(default=False, metadata={
+        "description": "Opt into per-session kernel-enforced AppArmor "
+        "confinement (best-effort; no-ops on hosts without AppArmor). "
+        "False = unconfined. Resolution: create_headless_session kwarg > this "
+        "field > legacy unconfined default."})
+
+    # Provider/model quirks declarations (server 0.6.194+).
+    #
+    # Top-level profile field that opts the active provider into known
+    # wire-format / model-behavior workarounds.  A profile binds to
+    # exactly one ``provider`` + ``model``; the provider plugin reads
+    # the quirks dict at session init and acts on the keys it knows.
+    # Unknown keys log a warning and are ignored.
+    #
+    # Currently shipped quirks (see provider plugin docstrings for the
+    # canonical list):
+    #
+    # - ``coerce_typed_tool_args`` (vllm, others may follow): when the
+    #   model emits a JSON string where the tool schema expects an
+    #   array / object / integer / number / boolean, attempt
+    #   ``ast.literal_eval`` (handles Python repr with single quotes
+    #   that ``json.loads`` cannot parse) then ``json.loads`` as a
+    #   fallback, then re-validate.  Workaround for Llama 3.1 on vLLM
+    #   0.22.1 with the ``llama3_json`` parser, which passes the
+    #   model's stringified args through verbatim because vLLM has not
+    #   registered a structural-tag enforcement for that parser.
+    #   See ``feedback_llama31_vllm_auto_mode_stringifies_args`` for
+    #   the full diagnosis.
+    #
+    # Defaults to an empty dict (no quirks active).  Inheritance follows
+    # the collection-union rule: child + parent keys are merged; on
+    # key collision the child wins.
+    quirks: Dict[str, Any] = field(default_factory=dict, metadata={
+        "description": "Opt the active provider into known wire-format / "
+        "model-behavior workarounds (the provider reads the keys it knows; "
+        "unknown keys warn). e.g. coerce_typed_tool_args (vllm)."})
+
+    # Secret env scrubbing for model-driven subprocesses (#863).
+    #
+    # The profile-level shorthand for the per-surface
+    # ``plugin_configs.<cli|interactive_shell|mcp>.scrub_secret_env`` knob.
+    # Folded into each of those surfaces the profile enables by
+    # :func:`inject_scrub_secret_env` (called wherever a profile becomes a
+    # session), BENEATH an explicit per-surface knob — more specific wins.
+    #
+    # ``None`` (absent) does NOT mean "off": the plugins scrub with the
+    # framework set when nothing is declared, so absence is the safe
+    # posture and ``none`` is the explicit, WARNING-announced opt-out.
+    # Grammar (one shape for every ingress, see ``shared/secret_scrub.py``):
+    # ``default`` | ``none`` | a glob | a list of globs where ``default``
+    # expands in place and ``!NAME`` exempts a variable a developer CLI
+    # legitimately needs (``[default, '!GH_TOKEN']`` keeps ``gh`` working
+    # while the provider key stays out of the shell).
+    #
+    # Kept as the raw value rather than a normalised tuple so the snapshot
+    # and ``explain`` show what the author wrote; normalisation happens at
+    # the plugin.  Inheritance: scalar-override (the child's value replaces
+    # the parents' outright; parents must agree when the child is silent).
+    scrub_secret_env: Optional[Any] = field(default=None, metadata={
+        "description": "Secret env-var globs stripped from every model-driven "
+        "subprocess (cli / interactive_shell / mcp). Absent = the framework "
+        "set (*_API_KEY, *_TOKEN, *_SECRET, ...) — scrubbing is ON by default. "
+        "`default` names that set; `none` opts out (announced at WARNING); a "
+        "list of globs may carry `default` and `!NAME` exemption entries, e.g. "
+        "[default, '!GH_TOKEN']. plugin_configs.<surface>.scrub_secret_env "
+        "overrides this for one surface."})
+
+    # Per-profile AppArmor fragment scoping (Piece 1, 2026-05-14).
+    #
+    # When set, the per-session AppArmor policy composes only the
+    # fragments whose basename (without ``.rules``) matches an entry
+    # in this list, looked up in the fragment search path (user-tier
+    # ``~/.jaato/apparmor-fragments/``, workspace-tier
+    # ``<workspace>/.jaato/apparmor-fragments/``, and the
+    # walker-generated cache layer
+    # ``<workspace>/.jaato/.cache/apparmor-fragments/`` with cache
+    # taking precedence on basename collision).
+    #
+    # ``None`` (default, absent) — back-compat: the profile composes
+    # ALL fragments from the search path, just like pre-Piece-1
+    # behaviour.  This is the right default for workspaces with no
+    # cascade intent.
+    #
+    # ``[]`` (explicit empty list) — distinct from ``None``: the
+    # profile composes NO fragments.  Maximally locked-down stage in
+    # a cascade.
+    #
+    # Non-empty list — compose ONLY the listed fragments.  Unknown
+    # fragment names log WARNING but don't abort (operator may have
+    # removed the fragment after authoring the profile).
+    #
+    # **Inheritance semantics — child REPLACES parent.**  When the
+    # field is declared (not None) on the child, the child's value
+    # wins.  When the child doesn't declare it, the resolved value
+    # comes from the nearest parent in the ``inherits:`` chain.
+    # Replace (not union) lets cascade authors SCOPE DOWN from a
+    # parent's broader set — necessary for least-privilege, since
+    # union would only let children ADD permissions, never remove.
+    # Matches the ``model`` field's child-wins rationale (vs
+    # ``plugins`` which is union).
+    #
+    # See ``project_backlog_per_profile_apparmor_fragments`` for the
+    # design ask + the cascade footgun this closes (workspace-tier
+    # fragments bleeding binary-exec across all cascade stages when
+    # only one stage should have it).
+    apparmor_fragments: Optional[List[str]] = field(default=None, metadata={
+        "description": "Scope WHICH AppArmor .rules fragments compose this "
+        "session's policy, by basename, from the fragment search path "
+        "(~/.jaato/apparmor-fragments/, <workspace>/.jaato/apparmor-fragments/, "
+        "+ the .cache/ layer). None = compose ALL fragments; [] = none "
+        "(maximally locked-down)."})
+
+    def __post_init__(self) -> None:
+        """Normalize ``suppress_base_instructions`` to its canonical form.
+
+        Accepts the authored bool / dict / list (or an already-normalized
+        frozenset, idempotently) and stores a ``frozenset`` of piece names.
+        Centralizing here means every construction path — ``from_dict``,
+        ``build_inline_profile``, inheritance merge, direct kwargs — ends up
+        with one representation, and an unknown piece name fails loud at
+        profile-load time rather than silently keeping a layer.
+        """
+        self.suppress_base_instructions = normalize_suppression(
+            self.suppress_base_instructions
+        )
+
+
+def _normalize_inherits(value: Any) -> Optional[List[str]]:
+    """Normalize the ``inherits`` field to a list of strings or None.
+
+    Accepts a single string (``"readonly"``), a list of strings
+    (``["readonly", "web_capable"]``), or None/absent.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return [str(v) for v in value if v]
+    return None
+
+
+def _normalize_apparmor_fragments(value: Any) -> Optional[List[str]]:
+    """Coerce ``apparmor_fragments`` field value into the canonical shape.
+
+    Distinguishes three input states (Piece 1, 2026-05-14):
+
+    - **Absent** (``value is None`` — key not in the dict) → returns
+      ``None``.  The profile inherits the workspace-default
+      "compose all fragments" behaviour.  Back-compat for every
+      pre-Piece-1 profile.
+    - **Explicit empty list** (``value == []``) → returns ``[]``.
+      The profile composes NO fragments — maximally locked-down
+      stage in a cascade.  Distinct from absent (the field IS
+      declared, just empty).
+    - **Non-empty list of strings** → returns the same list with
+      entries coerced to ``str``.  These fragment basenames will
+      be looked up at policy-render time.
+
+    Anything else (non-list value, list of non-strings) is rejected
+    by raising :class:`ValueError`.  Quiet coercion would mask
+    operator typos in the YAML/JSON.
+
+    Args:
+        value: Raw value pulled from ``data.get('apparmor_fragments')``.
+
+    Returns:
+        ``None``, ``[]``, or ``List[str]`` per the rules above.
+
+    Raises:
+        ValueError: If ``value`` is non-None but isn't a list of
+            strings.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise ValueError(
+            f"apparmor_fragments must be a list of strings, "
+            f"got {type(value).__name__}: {value!r}"
+        )
+    normalised: List[str] = []
+    for i, entry in enumerate(value):
+        if not isinstance(entry, str) or not entry.strip():
+            raise ValueError(
+                f"apparmor_fragments[{i}] must be a non-empty string, "
+                f"got {type(entry).__name__}: {entry!r}"
+            )
+        normalised.append(entry.strip())
+    return normalised
+
+
+def _normalize_suppress_inherited_processors(value: Any) -> List[str]:
+    """Normalize ``suppress_inherited_processors`` to a list of strings.
+
+    Accepts a single string (``"acceptance"``), a list, or None/absent.
+    Entries are coerced with ``str()`` rather than dropped: a non-string
+    entry becomes a string that matches no inherited processor, and
+    :func:`_merge_completion_processors` then fails the profile load with
+    the same "matched nothing" diagnostic a typo gets.  Dropping it
+    quietly would leave the author with a processor they declared they
+    did not want, which is precisely the silent loss #791 is about.
+
+    A value that is neither a string nor a list (a dict, an int) is not
+    coercible to a *set* of identities at all, so it warns and yields
+    ``[]``.
+
+    Args:
+        value: Raw value pulled from ``data.get('suppress_inherited_processors')``.
+
+    Returns:
+        A list of identity strings; empty when nothing was declared.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return [str(v) for v in value if v is not None and v != ""]
+    logger.warning(
+        "suppress_inherited_processors must be a string or a list of "
+        "strings, got %s: %r; ignoring",
+        type(value).__name__, value,
+    )
+    return []
+
+
+def _processor_opt_str(
+    entry: Dict[str, Any], key: str, script: str,
+) -> Optional[str]:
+    """Read an optional free-text key off one ``completion_processors`` entry.
+
+    Shared by ``description`` and ``name``: both are optional strings that
+    are stripped, both collapse to ``None`` when blank, and both warn
+    (naming the offending ``script``) rather than raise when the author
+    wrote a non-string — a typo'd annotation must not take the whole
+    profile down with it.
+
+    Args:
+        entry: One raw ``completion_processors`` list item.
+        key: The key to read (``"description"`` / ``"name"``).
+        script: The entry's script path, for the warning message.
+
+    Returns:
+        The stripped string, or ``None`` when absent, blank, or invalid.
+    """
+    value = entry.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        logger.warning(
+            "completion_processors: %r must be a string for script=%r "
+            "(got %s); ignoring",
+            key, script, type(value).__name__,
+        )
+        return None
+    return value.strip() or None
+
+
+def _processor_enum(
+    entry: Dict[str, Any],
+    key: str,
+    allowed: Tuple[str, ...],
+    default: str,
+    script: str,
+) -> str:
+    """Read a closed-vocabulary key off one ``completion_processors`` entry.
+
+    Shared by ``on_error`` and ``phase``.  An unrecognised value warns and
+    falls back to *default* rather than rejecting the entry: the safe
+    default (``fail_completion`` / ``finalization``) is the conservative
+    one in both cases, so a typo degrades to strictness, never past it.
+
+    Args:
+        entry: One raw ``completion_processors`` list item.
+        key: The key to read.
+        allowed: The permitted values.
+        default: Value used when the key is absent or unrecognised.
+        script: The entry's script path, for the warning message.
+
+    Returns:
+        One of *allowed*.
+    """
+    value = entry.get(key, default)
+    if value not in allowed:
+        logger.warning(
+            "completion_processors: invalid %s=%r for script=%r "
+            "(expected one of %r); defaulting to %r",
+            key, value, script, list(allowed), default,
+        )
+        return default
+    return value
+
+
+#: The closed vocabularies of a ``completion_processors`` entry.  Named
+#: constants rather than literals at the call site because they are read
+#: back by ``jaato-scaffold explain completion`` (via
+#: ``shared.scaffold.introspect.processor_schema``): a doc that quotes the
+#: framework's own vocabulary cannot drift from it, and a doc that spells
+#: it out silently can — which is the whole of jaato #769.
+PROCESSOR_ON_ERROR: Tuple[str, ...] = ("fail_completion", "warn")
+PROCESSOR_PHASES: Tuple[str, ...] = ("finalization", "completeness")
+PROCESSOR_ON_EXHAUSTED: Tuple[str, ...] = ("allow", "fail")
+
+
+def _processor_opt_int(
+    entry: Dict[str, Any], key: str, script: str,
+) -> Optional[int]:
+    """Read an optional non-negative integer key off one processor entry.
+
+    Used for ``max_refusals``.  Rejects non-integers (including ``bool``,
+    which ``isinstance(True, int)`` would otherwise wave through as 1) and
+    negatives, warning and returning ``None`` — i.e. degrading to the
+    unbounded pre-#768 behaviour rather than inventing a ceiling the author
+    did not write.  Consistent with every other key here: a typo'd
+    annotation must not take the whole profile down with it.
+
+    Args:
+        entry: One raw ``completion_processors`` list item.
+        key: The key to read (``"max_refusals"``).
+        script: The entry's script path, for the warning message.
+
+    Returns:
+        The integer, or ``None`` when absent or invalid.
+    """
+    value = entry.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        logger.warning(
+            "completion_processors: %r must be a non-negative integer for "
+            "script=%r (got %r); ignoring — this processor stays unbounded",
+            key, script, value,
+        )
+        return None
+    return value
+
+
+def _parse_completion_processors(value: Any) -> List[CompletionProcessor]:
+    """Parse a profile's ``completion_processors`` list from raw JSON/YAML.
+
+    Replaces the prior ``_parse_completion_artifacts`` +
+    ``_parse_completion_validators`` (server 0.6.125+).  Each entry is
+    a dict shaped like::
+
+        {"script": "scripts/processors/foo.py",
+         "output": "out/{case_id}/foo",      # optional
+         "on_error": "fail_completion",      # default
+         "phase": "finalization",            # default
+         "name": "acceptance",               # optional
+         "max_refusals": 3,                  # optional; None = unbounded
+         "on_exhausted": "allow",            # default; "allow" | "fail"
+         "description": "..."}               # optional
+
+    ``output`` is optional — when omitted, the processor runs for
+    side-effect (validator-only) and ``render``'s return is logged
+    but not written.  ``description`` travels with the wiring for
+    documentation; ignored at runtime.  ``name`` is the stable
+    identity an inheriting profile's ``suppress_inherited_processors``
+    can decline the processor by (#791); when absent the ``script``
+    path is that identity.
+
+    Skips malformed entries with a warning rather than raising —
+    partial profiles still load and the missing/typo'd processor
+    surfaces at completion time as a load error the agent sees.
+
+    Returns an empty list when ``value`` is ``None``, missing, or
+    not a list.
+    """
+    if not isinstance(value, list):
+        return []
+    out: List[CompletionProcessor] = []
+    for entry in value:
+        if not isinstance(entry, dict):
+            logger.warning(
+                "completion_processors: skipping non-dict entry: %r", entry,
+            )
+            continue
+        script = entry.get("script")
+        output = entry.get("output")
+        if not isinstance(script, str) or not script.strip():
+            logger.warning(
+                "completion_processors: skipping entry without 'script': %r",
+                entry,
+            )
+            continue
+        normalized_output: Optional[str]
+        if output is None or output == "":
+            normalized_output = None
+        elif isinstance(output, str) and output.strip():
+            normalized_output = output.strip()
+        else:
+            logger.warning(
+                "completion_processors: invalid 'output' value (must be a "
+                "non-empty string or omitted) for script=%r: %r",
+                script, output,
+            )
+            continue
+        out.append(CompletionProcessor(
+            script=script.strip(),
+            output=normalized_output,
+            on_error=_processor_enum(
+                entry, "on_error", PROCESSOR_ON_ERROR,
+                "fail_completion", script,
+            ),
+            description=_processor_opt_str(entry, "description", script),
+            phase=_processor_enum(
+                entry, "phase", PROCESSOR_PHASES,
+                "finalization", script,
+            ),
+            name=_processor_opt_str(entry, "name", script),
+            max_refusals=_processor_opt_int(entry, "max_refusals", script),
+            on_exhausted=_processor_enum(
+                entry, "on_exhausted", PROCESSOR_ON_EXHAUSTED,
+                "allow", script,
+            ),
+        ))
+    return out
+
+
+def completion_processors_to_wire(
+    processors: Any,
+) -> List[Dict[str, Any]]:
+    """Serialise ``completion_processors`` for the daemon -> runner envelope.
+
+    Uses ``dataclasses.asdict`` rather than naming the fields, which is the
+    whole point of it existing.  Three separate call sites used to build this
+    dict by hand — two daemon-side envelope builders and the runner-side
+    reconstruction — and every one of them listed ``script`` / ``output`` /
+    ``on_error`` / ``description`` / ``phase`` and stopped there.  So
+    ``name``, ``max_refusals`` and ``on_exhausted`` were dropped in transit:
+    the profile parsed them, ``profile_to_snapshot`` persisted them, and the
+    session that actually ran never saw them.
+
+    What that cost: a declared refusal ceiling had NO EFFECT on a real
+    session.  Measured against a live daemon, a gate with ``max_refusals: 2``
+    refused 494 times without exhausting — the unbounded loop of jaato #768,
+    reintroduced by a serialiser, with the profile still saying the ceiling
+    was there.  ``suppress_inherited_processors`` (#791) lost the same way,
+    since it matches on ``name``.
+
+    Entries that are already plain dicts pass through unchanged: subagent
+    spawn specs may carry raw wire dicts that never became dataclasses.  An
+    object that merely LOOKS like a processor (anything exposing ``script``)
+    is accepted too, because the hand-written path this replaces duck-typed
+    on exactly that and callers rely on it; its fields are read through
+    ``CompletionProcessor`` so the dataclass stays the single source of both
+    the field set and the defaults.
+
+    Anything else is dropped WITH A WARNING rather than silently, since a
+    processor that vanishes on the way to the runner is a gate that stops
+    gating and says nothing — the failure this function exists to end.
+
+    Args:
+        processors: ``CompletionProcessor`` instances, raw dicts, duck-typed
+            stand-ins, or a mix.
+
+    Returns:
+        One JSON-safe dict per entry, carrying EVERY field of the dataclass.
+    """
+    import dataclasses as _dc
+
+    out: List[Dict[str, Any]] = []
+    for entry in processors or []:
+        if isinstance(entry, dict):
+            out.append(dict(entry))
+        elif _dc.is_dataclass(entry) and not isinstance(entry, type):
+            out.append(_dc.asdict(entry))
+        elif hasattr(entry, "script"):
+            out.append(_dc.asdict(CompletionProcessor(**{
+                f.name: getattr(entry, f.name)
+                for f in _dc.fields(CompletionProcessor)
+                if hasattr(entry, f.name)
+            })))
+        else:
+            logger.warning(
+                "completion_processors: dropping unusable entry on the way "
+                "to the runner (no 'script'): %r", entry,
+            )
+    return out
+
+
+def completion_processors_from_wire(
+    entries: Any,
+) -> List[CompletionProcessor]:
+    """Rebuild ``completion_processors`` runner-side from the envelope.
+
+    A thin alias of :func:`_parse_completion_processors`, deliberately: the
+    wire dict and a profile file's ``completion_processors:`` block are the
+    same shape, so parsing them with the same function is what stops the two
+    from disagreeing about what an entry means.  The hand-rolled
+    reconstruction it replaces had already drifted — it silently defaulted
+    every field it did not know about, so a ceiling that crossed the wire
+    would still have been discarded on arrival.
+
+    Malformed entries are skipped with a warning rather than raising, exactly
+    as they are when a profile declares them.
+    """
+    return _parse_completion_processors(entries)
+
+
+#: The ``cache.ttl`` vocabulary.  Deliberately the Anthropic/OpenRouter
+#: spelling rather than a duration string: those are the two mechanisms
+#: that expose a TTL choice at all, and Google's seconds format is
+#: derived from these rather than the other way round.
+VALID_CACHE_TTLS = frozenset({"5m", "1h"})
+
+
+def parse_cache_block(data: Dict[str, Any]) -> Optional['CacheProfileConfig']:
+    """Parse a profile dict's optional ``cache:`` block.
+
+    Sibling of :func:`parse_gc_block`, and the reason that one exists:
+    both are called from all four profile ingresses, and a block field
+    wired into three of them is silently inert in the fourth.
+    """
+    block = data.get('cache')
+    if not block:
+        return None
+    return CacheProfileConfig.from_dict(block)
+
+
+def parse_gc_block(data: Dict[str, Any]) -> Optional['GCProfileConfig']:
+    """Parse a profile dict's optional ``gc:`` block.
+
+    ONE definition, because there are FOUR ingresses that build a
+    ``SubagentProfile`` from a dict — ``build_inline_profile``,
+    ``_scan_profiles_dir``, ``_discover_premium_profiles`` and
+    ``SubagentConfig.from_dict`` — and each carried its own copy of the
+    same three lines, in two spellings of the identical guard
+    (``data.get('gc')`` and ``'gc' in data and data['gc']``).
+
+    Four copies is four places to forget when a sibling block field is
+    added, and a field wired into three ingresses and missed in the
+    fourth is silently inert in exactly one code path — which is the
+    failure this branch opened by fixing (§4: a cache knob that reached
+    no ingress at all). Collapsing them now means the next block field
+    is added once.
+
+    Returns ``None`` when the block is absent or empty; an empty ``gc:``
+    is deliberately not a default-constructed config, matching what all
+    four sites already did.
+    """
+    block = data.get('gc')
+    if not block:
+        return None
+    return GCProfileConfig.from_dict(block)
+
+
+def parse_trace_block(data: Dict[str, Any]) -> Optional['TraceProfileConfig']:
+    """Parse a profile dict's optional ``trace:`` block.
+
+    Third sibling of :func:`parse_cache_block` / :func:`parse_gc_block`,
+    for the reason both of those exist: FOUR ingresses build a
+    ``SubagentProfile`` from a dict, and a block field wired into three
+    of them is silently inert in the fourth.
+
+    Returns ``None`` when the block is absent or empty; raises
+    ``ValueError`` (from ``TraceProfileConfig.from_dict``) on an
+    unusable one, which is the whole reason the block exists.
+    """
+    block = data.get('trace')
+    if not block:
+        return None
+    return TraceProfileConfig.from_dict(block)
+
+
+def parse_profile_env(data: Dict[str, Any], key: str = 'env') -> Dict[str, str]:
+    """Parse and check a profile dict's ``env:`` map.
+
+    Fourth sibling of :func:`parse_trace_block` / :func:`parse_cache_block` /
+    :func:`parse_gc_block`, and for the reason all of those exist: FOUR
+    ingresses build a ``SubagentProfile`` from a dict, each of them previously
+    inlining the same two-line dict comprehension, so a rule added to one of
+    them would be silently absent from the other three.  The stringify is
+    unchanged; what it now carries with it is
+    :func:`validate_profile_env_paths`.
+
+    Args:
+        data: The raw profile dict.
+        key: The mapping key to read (``env`` everywhere today; named so a
+            caller reading a differently-nested block cannot be forced to
+            reimplement the check).
+
+    Returns:
+        The map with keys and values stringified.  A non-mapping value yields
+        ``{}``, as it always has.
+
+    Raises:
+        ValueError: from :func:`validate_profile_env_paths`, when a
+            path-valued variable was given a switch.
+    """
+    raw = data.get(key, {})
+    env = ({str(k): str(v) for k, v in raw.items()}
+           if isinstance(raw, dict) else {})
+    validate_profile_env_paths(env)
+    return env
+
+
+# ---------------------------------------------------------------------------
+# regulatory: -- the one fact only the author knows (EU AI Act, Art. 6(4))
+# ---------------------------------------------------------------------------
+
+#: The risk classes a profile may declare, least to most demanding.  The
+#: vocabulary is the Act's own (Regulation (EU) 2024/1689): ``high`` is an
+#: Annex III use, ``limited`` is one bound only by the Article 50
+#: transparency duties, ``minimal`` is everything else.  Ordered, because
+#: inheritance is most-restrictive-wins on this one field.
+RISK_CLASSES: Tuple[str, ...] = ("minimal", "limited", "high")
+_RISK_RANK: Dict[str, int] = {name: i for i, name in enumerate(RISK_CLASSES)}
+
+#: What a ``regulatory:`` block may say.  ``provider`` is a nested mapping of
+#: ``name`` / ``contact``; everything else is a scalar.
+REGULATORY_KEYS: FrozenSet[str] = frozenset({
+    "intended_purpose", "risk_class", "annex_iii", "provider",
+    "interacts_with_persons", "disclosure_text",
+})
+_REGULATORY_PROVIDER_KEYS: FrozenSet[str] = frozenset({"name", "contact"})
+
+
+@dataclass(frozen=True)
+class RegulatoryProfileConfig:
+    """What a profile declares about itself under the EU AI Act -- ``regulatory:``.
+
+    The one profile block whose content the framework CANNOT derive: whether
+    an application is high-risk is a legal determination the provider must
+    make and document (Art. 6(4)), and a framework that inferred it would be
+    making that determination silently on the author's behalf.  So every
+    field here is declared, never guessed, and an absent block means
+    exactly that -- ``jaato-scaffold validate`` treats it as ``minimal`` and
+    a generated dossier reports it as *undeclared*.
+
+    Three consumers read it:
+
+    * ``jaato-scaffold validate`` escalates its warnings to errors under
+      ``risk_class: high`` and adds the high-risk-only findings (no
+      permission policy, no record keeping, disclosure suppressed, an
+      unconfined shell) -- see ``shared/scaffold/validate.py``;
+    * the ``disclosure`` instruction piece and the first-interaction
+      announcement read ``provider_name`` / ``interacts_with_persons``
+      (Art. 50(1));
+    * ``explain profile`` renders it and the dossier is built from it.
+
+    Attributes:
+        intended_purpose: The use the provider intends the system for
+            (Art. 3(12)) -- the sentence every Annex IV section starts from.
+        risk_class: ``minimal`` / ``limited`` / ``high``; ``None`` = not
+            declared.
+        annex_iii: The Annex III point when ``high`` (``"4a"``); free text.
+        provider_name: The provider under the Act -- the organisation that
+            puts the application into service, which is never the
+            framework.
+        provider_contact: Where that provider can be reached.
+        interacts_with_persons: Whether natural persons talk to it directly
+            (Art. 50(1)).  ``None`` = not declared, which ``validate``
+            reports as ``disclosure_absent`` for a profile that binds a
+            persona.
+        disclosure_text: The announcement a client renders on first
+            interaction; ``None`` = rendered from ``provider_name``.
+    """
+
+    intended_purpose: Optional[str] = None
+    risk_class: Optional[str] = None
+    annex_iii: Optional[str] = None
+    provider_name: Optional[str] = None
+    provider_contact: Optional[str] = None
+    interacts_with_persons: Optional[bool] = None
+    disclosure_text: Optional[str] = None
+
+    @property
+    def is_high_risk(self) -> bool:
+        """``True`` only for an EXPLICIT ``risk_class: high``."""
+        return self.risk_class == "high"
+
+    @property
+    def effective_risk_class(self) -> str:
+        """The class validation applies: the declared one, else ``minimal``.
+
+        Documentation must not use this -- an undeclared class is
+        *undeclared*, and a dossier that printed ``minimal`` for it would
+        be asserting a determination nobody made.
+        """
+        return self.risk_class or RISK_CLASSES[0]
+
+    @classmethod
+    def from_dict(cls, data: Any) -> 'RegulatoryProfileConfig':
+        """Build from a profile's ``regulatory:`` block.
+
+        Raises:
+            ValueError: on a non-mapping block, an unknown key, a risk class
+                outside :data:`RISK_CLASSES`, a non-string scalar, a
+                non-boolean ``interacts_with_persons``, or a ``provider``
+                that is not a ``{name, contact}`` mapping.  Loud, for the
+                reason every block parser here is: a regulatory declaration
+                that is quietly wrong is a compliance record that is wrong.
+        """
+        if not isinstance(data, dict):
+            raise ValueError(
+                f"regulatory: must be a mapping, got {type(data).__name__}")
+        unknown = set(data) - REGULATORY_KEYS
+        if unknown:
+            raise ValueError(
+                f"regulatory: unknown key(s) {sorted(unknown)}. "
+                f"Allowed: {sorted(REGULATORY_KEYS)}")
+
+        def _opt_str(key: str, value: Any) -> Optional[str]:
+            if value is None:
+                return None
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(
+                    f"regulatory.{key} must be a non-empty string, "
+                    f"got {value!r}")
+            return value.strip()
+
+        risk = data.get("risk_class")
+        if risk is not None:
+            if not isinstance(risk, str) or risk not in _RISK_RANK:
+                raise ValueError(
+                    f"regulatory.risk_class must be one of "
+                    f"{list(RISK_CLASSES)}, got {risk!r}")
+        interacts = data.get("interacts_with_persons")
+        if interacts is not None and not isinstance(interacts, bool):
+            raise ValueError(
+                "regulatory.interacts_with_persons must be a boolean, "
+                f"got {interacts!r}")
+        provider = data.get("provider")
+        pname = pcontact = None
+        if provider is not None:
+            if not isinstance(provider, dict):
+                raise ValueError(
+                    "regulatory.provider must be a mapping of "
+                    f"{sorted(_REGULATORY_PROVIDER_KEYS)}, got "
+                    f"{type(provider).__name__}")
+            extra = set(provider) - _REGULATORY_PROVIDER_KEYS
+            if extra:
+                raise ValueError(
+                    f"regulatory.provider: unknown key(s) {sorted(extra)}. "
+                    f"Allowed: {sorted(_REGULATORY_PROVIDER_KEYS)}")
+            pname = _opt_str("provider.name", provider.get("name"))
+            pcontact = _opt_str("provider.contact", provider.get("contact"))
+        return cls(
+            intended_purpose=_opt_str(
+                "intended_purpose", data.get("intended_purpose")),
+            risk_class=risk,
+            annex_iii=_opt_str("annex_iii", data.get("annex_iii")),
+            provider_name=pname,
+            provider_contact=pcontact,
+            interacts_with_persons=interacts,
+            disclosure_text=_opt_str(
+                "disclosure_text", data.get("disclosure_text")),
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        """The block in its FILE shape (``provider`` nested), unset keys omitted.
+
+        What :func:`profile_to_snapshot` persists and
+        :meth:`from_dict` reads back, so a snapshot round-trips through
+        the same parser a profile file does.
+        """
+        out: Dict[str, Any] = {}
+        for key in ("intended_purpose", "risk_class", "annex_iii",
+                    "interacts_with_persons", "disclosure_text"):
+            value = getattr(self, key)
+            if value is not None:
+                out[key] = value
+        provider = {k: v for k, v in (("name", self.provider_name),
+                                      ("contact", self.provider_contact))
+                    if v is not None}
+        if provider:
+            out["provider"] = provider
+        return out
+
+
+# ---------------------------------------------------------------------------
+# record_keeping: -- how long the audit record is kept (EU AI Act, Arts. 12, 19)
+# ---------------------------------------------------------------------------
+
+#: The integrity postures a profile may declare, least to most demanding.
+#: Ordered, because inheritance is most-restrictive-wins on this field for
+#: the same reason ``risk_class`` is: a base that asked for tamper evidence
+#: has made a determination a child cannot un-make.
+INTEGRITY_MODES: Tuple[str, ...] = ("none", "sha256-chain")
+_INTEGRITY_RANK: Dict[str, int] = {n: i for i, n in enumerate(INTEGRITY_MODES)}
+
+#: What a ``record_keeping:`` block may say.
+RECORD_KEEPING_KEYS: FrozenSet[str] = frozenset({
+    "retention_days", "conversation_retention_days", "integrity",
+})
+
+
+@dataclass(frozen=True)
+class RecordKeepingConfig:
+    """How long this session's records are kept -- the ``record_keeping:`` block.
+
+    Regulation (EU) 2024/1689 Art. 19(1) asks a provider of a high-risk
+    system to keep the logs its system automatically generates for at
+    least six months; 26(6) asks the same of the deployer.  Nothing in a
+    profile could say so: ``session.delete`` and ``workspace.delete``
+    removed everything including the ledger, and the #812 lifetime sweep
+    had no retention pass.
+
+    **Two clocks, because two different things are being kept.**  The
+    audit record answers "what did this system do"; the conversation is
+    personal data somebody may ask to have erased.  Keeping the first and
+    dropping the second is the shape that satisfies Art. 19(1) and GDPR
+    erasure at once, and it is not expressible with one number.
+
+    **Declared, never defaulted.**  Unlike ``max_orphan_seconds`` -- which
+    has a framework default precisely because the session that needs it is
+    the one whose profile declared nothing -- this block changes what
+    DELETE MEANS, and a default would change that for every existing
+    deployment on upgrade.  A profile with no block deletes exactly as it
+    always has.
+
+    Attributes:
+        retention_days: The MINIMUM days an audit record is kept after
+            the session it belongs to is deleted.  ``0`` means "keep
+            until something deletes it" -- the 0-disables spelling
+            ``max_session_seconds`` uses -- and, like
+            ``max_orphan_seconds``, 0 cannot win the inheritance
+            comparison: a child may keep longer than an ancestor, never
+            shorter, and may not disable a retention an ancestor set.
+        conversation_retention_days: The same for the session record --
+            the history, which may legitimately go sooner than the log
+            about it.  ``None`` = governed by nothing here, which is
+            today's behaviour.
+        integrity: ``none`` (default) or ``sha256-chain``.  See
+            :mod:`jaato_sdk.audit` and ``docs/audit-log.md``.
+    """
+
+    retention_days: Optional[int] = None
+    conversation_retention_days: Optional[int] = None
+    integrity: str = "none"
+
+    @property
+    def chains(self) -> bool:
+        """Whether records carry a tamper-evidence chain."""
+        return self.integrity == "sha256-chain"
+
+    @property
+    def declared(self) -> bool:
+        """Whether this block says anything at all.
+
+        An empty block is not a retention policy, and must not make
+        ``session.delete`` start keeping records: the knob that changes
+        what delete means has to be one somebody wrote.
+        """
+        return (self.retention_days is not None
+                or self.conversation_retention_days is not None
+                or self.integrity != "none")
+
+    @classmethod
+    def from_dict(cls, data: Any) -> 'RecordKeepingConfig':
+        """Build from a profile's ``record_keeping:`` block.
+
+        Raises:
+            ValueError: on a non-mapping block, an unknown key, a
+                negative or non-integer day count, or an integrity mode
+                outside :data:`INTEGRITY_MODES`.  Loud, for the reason
+                every block parser here is: a retention policy that is
+                quietly wrong is a record that is quietly gone.
+        """
+        if not isinstance(data, dict):
+            raise ValueError(
+                f"record_keeping: must be a mapping, got {type(data).__name__}")
+        unknown = set(data) - RECORD_KEEPING_KEYS
+        if unknown:
+            raise ValueError(
+                f"record_keeping: unknown key(s) {sorted(unknown)}. "
+                f"Allowed: {sorted(RECORD_KEEPING_KEYS)}")
+
+        def _days(key: str) -> Optional[int]:
+            value = data.get(key)
+            if value is None:
+                return None
+            # bool is an int subclass; `retention_days: true` is an author
+            # reaching for a switch, the #925 shape, and must not read as 1.
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError(
+                    f"record_keeping.{key} must be an integer number of "
+                    f"days, got {value!r}")
+            if value < 0:
+                raise ValueError(
+                    f"record_keeping.{key} must be >= 0 (0 = keep until "
+                    f"deleted), got {value}")
+            return value
+
+        integrity = data.get("integrity", "none")
+        if integrity is None:
+            integrity = "none"
+        if not isinstance(integrity, str) or integrity not in _INTEGRITY_RANK:
+            raise ValueError(
+                f"record_keeping.integrity must be one of "
+                f"{list(INTEGRITY_MODES)}, got {integrity!r}")
+
+        return cls(
+            retention_days=_days("retention_days"),
+            conversation_retention_days=_days("conversation_retention_days"),
+            integrity=integrity,
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        """The block in its FILE shape, unset keys omitted.
+
+        What :func:`profile_to_snapshot` persists and :meth:`from_dict`
+        reads back, so a snapshot round-trips through the same parser a
+        profile file does.
+        """
+        out: Dict[str, Any] = {}
+        if self.retention_days is not None:
+            out["retention_days"] = self.retention_days
+        if self.conversation_retention_days is not None:
+            out["conversation_retention_days"] = self.conversation_retention_days
+        if self.integrity != "none":
+            out["integrity"] = self.integrity
+        return out
+
+
+def parse_record_keeping_block(
+    data: Dict[str, Any],
+) -> Optional['RecordKeepingConfig']:
+    """Parse a profile dict's optional ``record_keeping:`` block.
+
+    Sixth sibling of the block parsers above, for the reason all of them
+    exist: every ingress that builds a ``SubagentProfile`` from a dict
+    calls this, so the block cannot be wired into five of the six and be
+    silently inert in the sixth.
+
+    Returns ``None`` when the block is absent or empty; raises
+    ``ValueError`` on an unusable one.
+    """
+    block = data.get('record_keeping')
+    if not block:
+        return None
+    return RecordKeepingConfig.from_dict(block)
+
+
+def merge_record_keeping(
+    child: 'SubagentProfile', parents: List['SubagentProfile'],
+) -> Optional['RecordKeepingConfig']:
+    """Merge ``record_keeping:`` across an ``inherits`` chain.
+
+    **Most-restrictive-wins on every field**, and the three fields spell
+    "most restrictive" two different ways:
+
+    * the two day counts are MINIMUMS, so restrictive means LONGER -- the
+      maximum across declaring layers.  And ``0`` ("keep until deleted")
+      cannot win it, the ``max_orphan_seconds`` rule inverted: a child may
+      keep longer than its base, never shorter, and may not disable a
+      retention an ancestor set;
+    * ``integrity`` is ranked, so restrictive means further along
+      :data:`INTEGRITY_MODES` -- the ``risk_class`` rule.
+
+    Returns ``None`` when no layer declares the block at all.
+    """
+    layers = [getattr(child, "record_keeping", None)] + [
+        getattr(p, "record_keeping", None) for p in parents]
+    declared = [layer for layer in layers if layer is not None]
+    if not declared:
+        return None
+
+    def _longest(name: str) -> Optional[int]:
+        values = [getattr(layer, name) for layer in declared
+                  if getattr(layer, name) is not None]
+        if not values:
+            return None
+        # 0 means "keep until deleted", which is the LEAST restrictive
+        # thing a layer can say here, so it loses to any real minimum --
+        # and wins only when every declaring layer said it.
+        bounded = [v for v in values if v > 0]
+        return max(bounded) if bounded else 0
+
+    modes = [layer.integrity for layer in declared]
+    return RecordKeepingConfig(
+        retention_days=_longest("retention_days"),
+        conversation_retention_days=_longest("conversation_retention_days"),
+        integrity=max(modes, key=_INTEGRITY_RANK.__getitem__),
+    )
+
+
+def _record_keeping_errors(data: Dict[str, Any]) -> List[str]:
+    """``validate_profile``'s view of the block: the parser's refusal, as text."""
+    if data.get("record_keeping") is None:
+        return []
+    try:
+        RecordKeepingConfig.from_dict(data["record_keeping"])
+    except ValueError as exc:
+        return [str(exc)]
+    return []
+
+
+def parse_regulatory_block(data: Dict[str, Any]) -> Optional['RegulatoryProfileConfig']:
+    """Parse a profile dict's optional ``regulatory:`` block.
+
+    Fifth sibling of the block parsers above, for the reason all of them
+    exist: every ingress that builds a ``SubagentProfile`` from a dict
+    calls this, so the block cannot be wired into five of the six and be
+    silently inert in the sixth.
+
+    Returns ``None`` when the block is absent or empty; raises
+    ``ValueError`` (from :meth:`RegulatoryProfileConfig.from_dict`) on an
+    unusable one.
+    """
+    block = data.get('regulatory')
+    if not block:
+        return None
+    return RegulatoryProfileConfig.from_dict(block)
+
+
+def merge_regulatory(
+    child: 'SubagentProfile', parents: List['SubagentProfile'],
+) -> Optional['RegulatoryProfileConfig']:
+    """Merge ``regulatory:`` across an ``inherits`` chain.
+
+    Scalars are child-replaces, then the first parent (in declaration
+    order) that declares the field -- so a base profile can carry the
+    organisation's ``provider`` block once and every child inherits it.
+    ``risk_class`` is MOST-RESTRICTIVE-WINS, the ``max_parallel_tools``
+    shape: a child may not declare itself ``minimal`` under a base that
+    says ``high``, because the base's author has made a determination the
+    child cannot un-make by omission or by contradiction.
+
+    Returns ``None`` when no layer declares the block at all.
+    """
+    layers = [getattr(child, "regulatory", None)] + [
+        getattr(p, "regulatory", None) for p in parents]
+    declared = [layer for layer in layers if layer is not None]
+    if not declared:
+        return None
+
+    def _first(name: str) -> Any:
+        for layer in declared:
+            value = getattr(layer, name)
+            if value is not None:
+                return value
+        return None
+
+    ranked = [layer.risk_class for layer in declared
+              if layer.risk_class is not None]
+    risk = max(ranked, key=_RISK_RANK.__getitem__) if ranked else None
+    return RegulatoryProfileConfig(
+        intended_purpose=_first("intended_purpose"),
+        risk_class=risk,
+        annex_iii=_first("annex_iii"),
+        provider_name=_first("provider_name"),
+        provider_contact=_first("provider_contact"),
+        interacts_with_persons=_first("interacts_with_persons"),
+        disclosure_text=_first("disclosure_text"),
+    )
+
+
+def _regulatory_errors(data: Dict[str, Any]) -> List[str]:
+    """``validate_profile``'s view of the block: the parser's refusal, as text."""
+    if data.get("regulatory") is None:
+        return []
+    try:
+        RegulatoryProfileConfig.from_dict(data["regulatory"])
+    except ValueError as exc:
+        return [str(exc)]
+    return []
+
+
+def build_inline_profile(
+    data: Dict[str, Any],
+    name: str = "<inline>",
+    description: str = "Inline session spec",
+) -> 'SubagentProfile':
+    """Construct a ``SubagentProfile`` from a dict supplied by an SDK client.
+
+    Mirrors the field set understood by ``_load_profiles_from_directory``
+    so an inline spec on ``session.new`` accepts the same JSON shape as a
+    profile file on disk. ``inherits`` is intentionally ignored — inline
+    specs are atomic, not chained. ``name`` is taken from ``data['name']``
+    when the client supplied one (like disk profiles), else the ``name``
+    param (default ``<inline>``); ``description`` defaults to a placeholder.
+
+    Args:
+        data: The dict carried in ``CommandRequest.payload['spec']``.
+            Recognized keys: ``model``, ``provider``, ``plugins``,
+            ``plugin_configs``, ``system_instructions``,
+            ``gc``, ``env``, ``completion_payload_schema``,
+            ``completion_processors``,
+            ``runtime_limits``, ``budget_control``, ``model_tiers``.
+        name: Display name for logs and traces. Default ``<inline>``.
+        description: Human-readable description for the profile.
+
+    Returns:
+        A fully-formed ``SubagentProfile`` ready to hand to
+        ``JaatoServer(profile=...)``.
+
+    Raises:
+        ValueError: If a structured sub-field (``gc``, ``runtime_limits``)
+            fails to parse. Surfaced so the caller can emit a clear
+            ``ErrorEvent`` rather than swallowing the failure.
+    """
+    cache_config = parse_cache_block(data)
+    gc_config = parse_gc_block(data)
+    trace_config = parse_trace_block(data)
+    regulatory = parse_regulatory_block(data)
+    record_keeping = parse_record_keeping_block(data)
+
+    runtime_limits = None
+    if data.get('runtime_limits'):
+        if not isinstance(data['runtime_limits'], dict):
+            raise ValueError(
+                "Invalid runtime_limits in inline spec: expected dict, "
+                f"got {type(data['runtime_limits']).__name__}"
+            )
+        try:
+            runtime_limits = RuntimeLimits.from_dict(data['runtime_limits'])
+        except (ValueError, TypeError) as exc:
+            raise ValueError(f"Invalid runtime_limits in inline spec: {exc}")
+
+    budget_control = None
+    if data.get('budget_control'):
+        try:
+            budget_control = BudgetControlConfig.from_dict(data['budget_control'])
+        except (ValueError, TypeError) as exc:
+            raise ValueError(f"Invalid budget_control in inline spec: {exc}")
+
+    # ``plugins`` is REQUIRED on every profile / inline spec — absent
+    # vs. explicitly-empty have meaningfully different downstream
+    # semantics (see the workspace-tier scanner for the full
+    # rationale).  Inline specs raise immediately because the caller
+    # has the surface area to fix it.
+    if 'plugins' not in data:
+        raise ValueError(
+            "Inline session spec is missing the required 'plugins' "
+            "key.  Use 'plugins': [] for the minimal framework set "
+            "(permission, reliability, lifecycle only), or list "
+            "plugin names to expose."
+        )
+    raw_plugins = data['plugins']
+    clean_plugins, preloaded, tool_scopes = parse_plugin_list(raw_plugins)
+
+    env = parse_profile_env(data)
+
+    raw_model_tiers = data.get('model_tiers') or {}
+    model_tiers = (
+        {str(k): v for k, v in raw_model_tiers.items()}
+        if isinstance(raw_model_tiers, dict) else {}
+    )
+
+    raw_quirks = data.get('quirks') or {}
+    quirks = (
+        {str(k): v for k, v in raw_quirks.items()}
+        if isinstance(raw_quirks, dict) else {}
+    )
+
+    return SubagentProfile(
+        # Honor the spec's own ``name`` (e.g. "nano-chat") when the SDK
+        # client supplied one; fall back to the ``name`` param (default
+        # "<inline>") otherwise.  Mirrors disk profiles, which take
+        # ``data.get('name')`` — previously an inline spec's name was
+        # silently dropped, so ``profile_name`` / the agent display always
+        # read "<inline>".  Inline restore no longer depends on the name
+        # being an unresolvable sentinel (it reconstructs from
+        # ``profile_spec`` directly — see SessionManager._load_session_impl).
+        name=data.get('name') or name,
+        description=description,
+        plugins=clean_plugins,
+        preloaded_plugins=preloaded,
+        tool_scopes=tool_scopes,
+        plugin_configs=data.get('plugin_configs', {}),
+        system_instructions=data.get('system_instructions'),
+        default_agent=data.get('default_agent'),
+        suppress_base_instructions=data.get('suppress_base_instructions', False),
+        model=data.get('model'),
+        provider=data.get('provider'),
+
+        max_completion_nudges=data.get('max_completion_nudges'),
+        gc=gc_config,
+            cache=cache_config,
+            trace=trace_config,
+        env=env,
+        inherits=None,
+        completion_payload_schema=data.get('completion_payload_schema'),
+        spawn_payload_schema=data.get('spawn_payload_schema'),
+        completion_processors=_parse_completion_processors(data.get('completion_processors')),
+        runtime_limits=runtime_limits,
+        budget_control=budget_control,
+        model_tiers=model_tiers,
+        apparmor=bool(data.get('apparmor', False)),
+        # Use ``data.get('apparmor_fragments')`` (returns None when
+        # absent) rather than ``data.get(..., default)`` — None
+        # signals "absent / inherit workspace default", which is
+        # semantically distinct from explicit ``[]`` (compose no
+        # fragments).  See :func:`_normalize_apparmor_fragments`.
+        apparmor_fragments=_normalize_apparmor_fragments(data.get('apparmor_fragments')),
+        quirks=quirks,
+        scrub_secret_env=data.get('scrub_secret_env'),
+        regulatory=regulatory,
+        record_keeping=record_keeping,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Resolved-profile snapshots (issue #787)
+#
+# ``build_inline_profile`` reconstructs a profile from an AUTHORED spec —
+# the JSON/YAML shape a human writes.  A snapshot is the other direction:
+# the RESOLVED ``SubagentProfile`` a session actually ran under, frozen so
+# a revive can rebuild it without re-reading (and re-resolving, and
+# re-merging) the profile files on disk.
+#
+# Why not reuse ``build_inline_profile``: it accepts the authored key set
+# only.  A resolved profile carries fields inheritance produced
+# (``suppress_inherited_processors``, merged ``completion_processors``) and
+# fields derived at parse time (``preloaded_plugins``, ``tool_scopes``,
+# normalized ``suppress_base_instructions``).  Round-tripping through the
+# authored shape would silently drop them, which is the opposite of what a
+# snapshot is for.
+#
+# Secrets: the snapshot stores what the resolved profile holds, and a
+# resolved profile holds ``pass://`` / ``vault://`` URIs UNRESOLVED —
+# expansion happens later, at ``expand_plugin_configs`` / ``env`` overlay
+# time on the daemon (see ``runner_spawn.build_session_envelope``).  So a
+# snapshot lands the same unresolved URIs on disk that ``profile_spec``
+# already does, and no plaintext credential is introduced by persisting it.
+# ---------------------------------------------------------------------------
+
+#: Snapshot format version.  Bumped when the field set changes in a way a
+#: reader must notice; readers tolerate an unknown-but-newer minor by
+#: ignoring keys they do not recognise (``SubagentProfile`` construction is
+#: keyword-explicit, so an unknown key is simply never read).
+PROFILE_SNAPSHOT_VERSION = 1
+
+
+def _emit_plugin_entry(
+    name: str,
+    preloaded: bool,
+    tools: Optional[List[str]],
+) -> str:
+    """Render one ``plugins:`` entry back to its authored string form.
+
+    Inverse of :func:`parse_plugin_entry`.  Emits the explicit tagged form
+    (``name(mode:preload, tools:[a,b])``) rather than the positional one so
+    the result is unambiguous regardless of which knobs are present.
+
+    Args:
+        name: Plugin name.
+        preloaded: Whether the plugin is in the profile's preload set.
+        tools: Per-plugin tool allow-list, or ``None`` for "all tools".
+
+    Returns:
+        A string :func:`parse_plugin_entry` parses back to the same triple.
+    """
+    parts: List[str] = []
+    if preloaded:
+        parts.append("mode:preload")
+    if tools is not None:
+        parts.append("tools:[" + ",".join(str(t) for t in tools) + "]")
+    if not parts:
+        return name
+    return f"{name}({', '.join(parts)})"
+
+
+def _runtime_limits_to_dict(
+    limits: Optional['RuntimeLimits'],
+) -> Optional[Dict[str, Any]]:
+    """Render :class:`RuntimeLimits` back to its authored mapping.
+
+    Inverse of :meth:`RuntimeLimits.from_dict`, which splits a profile's
+    ``runtime_limits:`` block into known fields plus an ``extra`` bag for
+    keys it does not recognise.  ``dataclasses.asdict`` would emit that bag
+    as a nested ``extra`` key, which ``from_dict`` then parks in ANOTHER
+    ``extra`` -- one level deeper per save/restore cycle.  Flattening here
+    keeps the round trip a fixed point.
+
+    Args:
+        limits: The resolved limits, or ``None``.
+
+    Returns:
+        A mapping ``RuntimeLimits.from_dict`` reconstructs identically, or
+        ``None`` when there were no limits.
+    """
+    if limits is None:
+        return None
+    import dataclasses as _dc
+    data = _dc.asdict(limits)
+    extra = data.pop("extra", None) or {}
+    data.update(extra)
+    return data
+
+
+def profile_to_snapshot(profile: 'SubagentProfile') -> Dict[str, Any]:
+    """Freeze a RESOLVED profile into a JSON-serializable snapshot.
+
+    The inverse of :func:`profile_from_snapshot`.  Every field of
+    :class:`SubagentProfile` is carried, with the derived plugin knobs
+    (``preloaded_plugins`` / ``tool_scopes``) folded back into the
+    ``plugins`` entry strings so there is one source of truth for them on
+    the way back in.
+
+    Args:
+        profile: The resolved profile a session was created with.
+
+    Returns:
+        A JSON-serializable dict.  ``pass://`` / ``vault://`` URIs inside
+        ``env`` / ``plugin_configs`` are carried UNRESOLVED (see the module
+        note above) — the snapshot never lands a plaintext credential that
+        the profile file did not already contain.
+    """
+    import dataclasses as _dc
+
+    preloaded = set(getattr(profile, "preloaded_plugins", None) or ())
+    scopes = dict(getattr(profile, "tool_scopes", None) or {})
+    plugins = [
+        _emit_plugin_entry(name, name in preloaded, scopes.get(name))
+        for name in (profile.plugins or [])
+    ]
+
+    def _block(value: Any) -> Optional[Dict[str, Any]]:
+        return _dc.asdict(value) if value is not None else None
+
+    budget = getattr(profile, "budget_control", None)
+
+    return {
+        "snapshot_version": PROFILE_SNAPSHOT_VERSION,
+        "name": profile.name,
+        "description": profile.description,
+        "plugins": plugins,
+        "plugin_configs": dict(profile.plugin_configs or {}),
+        "system_instructions": profile.system_instructions,
+        "default_agent": getattr(profile, "default_agent", None),
+        "suppress_base_instructions": sorted(
+            profile.suppress_base_instructions or ()
+        ),
+        "model": profile.model,
+        "provider": profile.provider,
+
+        "max_completion_nudges": getattr(
+            profile, "max_completion_nudges", None),
+        "cache": _block(getattr(profile, "cache", None)),
+        "trace": _block(getattr(profile, "trace", None)),
+        "regulatory": _regulatory_to_dict(profile),
+        "record_keeping": _record_keeping_to_dict(profile),
+        "gc": _block(getattr(profile, "gc", None)),
+        "env": dict(profile.env or {}),
+        # ``inherits`` is deliberately dropped: a snapshot is POST-merge, so
+        # re-declaring the parents would re-apply them on top of a profile
+        # that already carries their fields.
+        "completion_payload_schema": profile.completion_payload_schema,
+        "spawn_payload_schema": profile.spawn_payload_schema,
+        "completion_processors": [
+            _dc.asdict(p) for p in (profile.completion_processors or [])
+        ],
+        "suppress_inherited_processors": list(
+            getattr(profile, "suppress_inherited_processors", None) or []
+        ),
+        # ``RuntimeLimits`` parks unknown keys in an ``extra`` dict and
+        # ``from_dict`` re-parks anything it does not recognise -- so a
+        # plain ``asdict`` would nest ``extra`` one level deeper on every
+        # round trip.  Flatten it back into the mapping ``from_dict``
+        # expects, which is the shape the profile file had.
+        "runtime_limits": _runtime_limits_to_dict(
+            getattr(profile, "runtime_limits", None)
+        ),
+        "model_tiers": dict(getattr(profile, "model_tiers", None) or {}),
+        "budget_control": budget.to_dict() if budget is not None else None,
+        "apparmor": bool(getattr(profile, "apparmor", False)),
+        "apparmor_fragments": (
+            list(profile.apparmor_fragments)
+            if getattr(profile, "apparmor_fragments", None) is not None
+            else None
+        ),
+        "quirks": dict(getattr(profile, "quirks", None) or {}),
+        # Raw, as authored (str or list) -- the plugin normalises it.
+        "scrub_secret_env": getattr(profile, "scrub_secret_env", None),
+    }
+
+
+def _regulatory_to_dict(profile: 'SubagentProfile') -> Optional[Dict[str, Any]]:
+    """The ``regulatory`` block in its file shape, or ``None`` when undeclared.
+
+    Its own function so :func:`profile_to_snapshot` stays at its complexity
+    baseline; the shape is :meth:`RegulatoryProfileConfig.to_dict`'s.
+    """
+    reg = getattr(profile, "regulatory", None)
+    return reg.to_dict() if reg is not None else None
+
+
+def _record_keeping_to_dict(profile: 'SubagentProfile') -> Optional[Dict[str, Any]]:
+    """The ``record_keeping`` block in its file shape, or ``None``.
+
+    Sibling of :func:`_regulatory_to_dict`, and for the same reason:
+    :func:`profile_to_snapshot` is at its complexity baseline.
+    """
+    keeping = getattr(profile, "record_keeping", None)
+    return keeping.to_dict() if keeping is not None else None
+
+
+def _snapshot_blocks(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Re-parse a snapshot's five structured sub-blocks.
+
+    Split out of :func:`profile_from_snapshot` so that function stays under
+    the cyclomatic-complexity ceiling: each block is an
+    absent-or-parse pair, and five of them in one body is most of its
+    branching.
+
+    Args:
+        data: The snapshot dict.
+
+    Returns:
+        ``{"gc", "cache", "trace", "runtime_limits", "budget_control", "regulatory"}``,
+        each either the parsed config or ``None``.
+
+    Raises:
+        ValueError: When a block is present but unparseable.  Loud, because
+            a session silently revived with (say) no GC strategy is worse
+            than one that refuses to revive: the first is discovered when
+            the context window overflows.
+    """
+    limits_raw = data.get("runtime_limits")
+    budget_raw = data.get("budget_control")
+    try:
+        return {
+            # The SHARED block parsers, deliberately -- a snapshot is one
+            # more profile ingress, and the whole point of
+            # ``parse_gc_block`` / ``parse_cache_block`` /
+            # ``parse_trace_block`` is that a new block field is wired in
+            # once rather than once per ingress.  They read their own key
+            # out of the dict, so the whole snapshot is what they take.
+            "gc": parse_gc_block(data),
+            "cache": parse_cache_block(data),
+            "trace": parse_trace_block(data),
+            "regulatory": parse_regulatory_block(data),
+            "record_keeping": parse_record_keeping_block(data),
+            "runtime_limits": (
+                RuntimeLimits.from_dict(limits_raw) if limits_raw else None
+            ),
+            "budget_control": (
+                BudgetControlConfig.from_dict(budget_raw)
+                if budget_raw else None
+            ),
+        }
+    except (ValueError, TypeError) as exc:
+        raise ValueError(f"invalid block in profile snapshot: {exc}") from exc
+
+
+def profile_from_snapshot(data: Dict[str, Any]) -> 'SubagentProfile':
+    """Rebuild a resolved profile from a :func:`profile_to_snapshot` dict.
+
+    Args:
+        data: A snapshot dict.
+
+    Returns:
+        The reconstructed :class:`SubagentProfile`.
+
+    Raises:
+        ValueError: When ``data`` is not a dict, or a structured sub-block
+            fails to parse.  Callers surface this rather than silently
+            reviving a session under a half-built recipe.
+    """
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"profile snapshot must be a dict, got {type(data).__name__}"
+        )
+
+    clean_plugins, preloaded, tool_scopes = parse_plugin_list(
+        list(data.get("plugins") or [])
+    )
+    blocks = _snapshot_blocks(data)
+
+    return SubagentProfile(
+        name=data.get("name") or "<snapshot>",
+        description=data.get("description") or "",
+        plugins=clean_plugins,
+        preloaded_plugins=preloaded,
+        tool_scopes=tool_scopes,
+        plugin_configs=data.get("plugin_configs") or {},
+        system_instructions=data.get("system_instructions"),
+        default_agent=data.get("default_agent"),
+        suppress_base_instructions=data.get(
+            "suppress_base_instructions", False
+        ),
+        model=data.get("model"),
+        provider=data.get("provider"),
+
+        max_completion_nudges=data.get("max_completion_nudges"),
+        cache=blocks["cache"],
+        trace=blocks["trace"],
+        regulatory=blocks["regulatory"],
+        record_keeping=blocks["record_keeping"],
+        gc=blocks["gc"],
+        env=dict(data.get("env") or {}),
+        inherits=None,
+        completion_payload_schema=data.get("completion_payload_schema"),
+        spawn_payload_schema=data.get("spawn_payload_schema"),
+        completion_processors=_parse_completion_processors(
+            data.get("completion_processors")
+        ),
+        suppress_inherited_processors=list(
+            data.get("suppress_inherited_processors") or []
+        ),
+        runtime_limits=blocks["runtime_limits"],
+        model_tiers=dict(data.get("model_tiers") or {}),
+        budget_control=blocks["budget_control"],
+        apparmor=bool(data.get("apparmor", False)),
+        apparmor_fragments=_normalize_apparmor_fragments(
+            data.get("apparmor_fragments")
+        ),
+        quirks=dict(data.get("quirks") or {}),
+        scrub_secret_env=data.get("scrub_secret_env"),
+    )
+
+
+def resolve_profiles(
+    profiles: Dict[str, 'SubagentProfile'],
+) -> Tuple[Dict[str, 'SubagentProfile'], Dict[str, str]]:
+    """Resolve profile inheritance by merging parent fields into children.
+
+    Performs a topological traversal of the inheritance graph. Each profile
+    with an ``inherits`` field has its parents' fields merged in, following
+    the merge semantics from ``docs/design/profile-inheritance.md``:
+
+    - **Collection fields** (union): ``plugins``, ``preloaded_plugins``,
+      ``env``, ``plugin_configs``
+    - **Scalar fields** (agreement-or-override): ``model``, ``provider``,
+      ``gc``
+    - **Concatenation**: ``system_instructions`` (grandparent → parent → child)
+    - **Never inherited**: ``name``, ``description``
+
+    Conflicts between parents on scalar fields are hard errors unless the
+    child explicitly overrides.  Cycles are detected and reported.
+
+    After resolution, ``inherits`` is cleared on each profile (fully
+    flattened).
+
+    Args:
+        profiles: Dict of profile name → SubagentProfile (unresolved).
+
+    Returns:
+        Tuple of (resolved_profiles, errors). ``errors`` maps profile
+        names to error messages.  Profiles with errors are excluded from
+        the resolved dict.
+    """
+    resolved: Dict[str, SubagentProfile] = {}
+    errors: Dict[str, str] = {}
+    resolving: set = set()  # cycle detection
+
+    def _resolve(name: str) -> Optional[SubagentProfile]:
+        """Recursively resolve a single profile."""
+        if name in resolved:
+            return resolved[name]
+        if name in errors:
+            return None
+        if name in resolving:
+            errors[name] = f"Inheritance cycle detected involving '{name}'"
+            return None
+        if name not in profiles:
+            errors[name] = f"Profile '{name}' not found"
+            return None
+
+        profile = profiles[name]
+
+        # No inheritance — resolve immediately.  Nothing to suppress
+        # here, so say so rather than letting the key look effective:
+        # ``suppress_inherited_processors`` only ever removes what a
+        # PARENT contributed (#791).
+        if not profile.inherits:
+            if profile.suppress_inherited_processors:
+                logger.warning(
+                    "Profile '%s' declares suppress_inherited_processors %r "
+                    "but does not inherit from anything; it has no effect. "
+                    "Remove the entries, or the processors themselves from "
+                    "completion_processors.",
+                    name, list(profile.suppress_inherited_processors),
+                )
+            resolved[name] = profile
+            return profile
+
+        # Resolve parents first
+        resolving.add(name)
+        parent_profiles: List[SubagentProfile] = []
+        for parent_name in profile.inherits:
+            parent = _resolve(parent_name)
+            if parent is None:
+                errors[name] = (
+                    f"Profile '{name}' inherits from '{parent_name}' "
+                    f"which failed to resolve"
+                )
+                resolving.discard(name)
+                return None
+            parent_profiles.append(parent)
+        resolving.discard(name)
+
+        # Merge parents then apply child overrides
+        merged = _merge_profiles(name, parent_profiles, profile, errors)
+        if merged is None:
+            return None
+
+        resolved[name] = merged
+        return merged
+
+    # Resolve all profiles
+    for name in list(profiles.keys()):
+        _resolve(name)
+
+    return resolved, errors
+
+
+#: ``runtime_limits`` fields resolved MOST-RESTRICTIVE-WINS across an
+#: ``inherits:`` chain, rather than by the block-level child-REPLACES rule.
+#:
+#: ``max_parallel_tools`` (#862) and the two wall-clock bounds (#812) are all
+#: statements about how much of a shared environment one session may take,
+#: which is the same safety direction ``budget_control.limits``
+#: already resolves in: a child may TIGHTEN what an
+#: ancestor declared and may never widen it.  Every other field in the block
+#: is a cgroup controller value, where interleaving layers would produce a
+#: confinement nobody wrote — hence child-REPLACES for those.
+_MIN_WINS_RUNTIME_LIMIT_FIELDS = (
+    "max_parallel_tools",
+    "max_session_seconds",
+    "max_orphan_seconds",
+)
+
+#: The min-wins fields for which ``0`` is the TIGHTEST value rather than
+#: "explicitly unbounded" (#1106).
+#:
+#: The distinction is not cosmetic and it is not shared with the tuple above.
+#: For a wall-clock BOUND, 0 means "never stop this session", which is the
+#: least restrictive thing a layer can say -- so :func:`_merged_min_wins_limit`
+#: reads it as infinity, and a child cannot disable a ceiling an ancestor set.
+#: For ``unload_grace_seconds``, 0 means "unload immediately", which is the
+#: MOST restrictive thing a layer can say: it releases the runner and the pool
+#: slot soonest.  A plain ``min()`` is therefore already correct, and routing
+#: it through the 0-as-infinity branch would invert the safety direction --
+#: a child asking for no grace at all would be overruled by a parent's 60s.
+_MIN_WINS_ZERO_TIGHTEST_FIELDS = (
+    "unload_grace_seconds",
+)
+
+#: Every runtime-limits field resolved by ``min()`` rather than by the
+#: block-level child-REPLACES rule, whichever reading of ``0`` it takes.
+#: This is the set :func:`_resolve_runtime_limit_ceilings` must normalise out
+#: of its agreement test, so two parents differing only in a min-wins field
+#: are resolved rather than reported as conflicting.
+_ALL_MIN_WINS_RUNTIME_LIMIT_FIELDS = (
+    _MIN_WINS_RUNTIME_LIMIT_FIELDS + _MIN_WINS_ZERO_TIGHTEST_FIELDS
+)
+
+
+def _merged_min_wins_limit(
+    parents: List['SubagentProfile'],
+    child: 'SubagentProfile',
+    field_name: str,
+    *,
+    zero_is_unbounded: bool = True,
+) -> Optional[float]:
+    """MIN of one :data:`_ALL_MIN_WINS_RUNTIME_LIMIT_FIELDS` field across layers.
+
+    Divergent parent values are not a conflict — the minimum is well-defined
+    and is the safe resolution, so two parents differing only here are
+    resolved rather than reported.
+
+    ``0`` means "explicitly unbounded" for the two wall-clock BOUNDS and must
+    not win a ``min()`` against a real ceiling (it is the LEAST restrictive value,
+    not the most).  It is therefore read as infinity while comparing, and
+    returned as ``0`` only when EVERY declaring layer said ``0`` — so a child
+    can disable a bound no ancestor set, and cannot disable one an ancestor
+    did.  ``max_parallel_tools`` never sees this branch: it is validated
+    positive, so no layer can declare 0.
+
+    Args:
+        parents: The resolved parent profiles.
+        child: The profile declaring ``inherits:``.
+        field_name: Which field to resolve.
+        zero_is_unbounded: Whether ``0`` means "least restrictive" for this
+            field (the two wall-clock bounds) or is just the smallest value
+            like any other (:data:`_MIN_WINS_ZERO_TIGHTEST_FIELDS`).
+
+    Returns:
+        The most restrictive declared value, or ``None`` when no layer
+        declares one (the caller then applies whatever default the field has).
+    """
+    declared = [
+        getattr(limits, field_name)
+        for limits in (p.runtime_limits for p in (*parents, child))
+        if limits is not None and getattr(limits, field_name) is not None
+    ]
+    if not declared:
+        return None
+    if not zero_is_unbounded:
+        return min(declared)
+    bounded = [v for v in declared if v != 0]
+    return min(bounded) if bounded else 0
+
+
+def _resolve_runtime_limit_ceilings(
+    parents: List['SubagentProfile'],
+    child: 'SubagentProfile',
+) -> Tuple[Optional[RuntimeLimits], List[str]]:
+    """Scalar-override for the ceilings half of ``runtime_limits``.
+
+    The child's whole block wins when it declares one; otherwise the
+    parents must agree.  A cgroup controller file takes exactly ONE
+    value, so interleaving a memory ceiling from one layer with a pids
+    ceiling from another would produce a confinement neither author
+    wrote — which is why this half is not merged per-field.
+
+    The agreement test normalises every
+    :data:`_ALL_MIN_WINS_RUNTIME_LIMIT_FIELDS` field out, because
+    :func:`_merged_min_wins_limit` resolves those by ``min()``: two parents
+    that agree on every ceiling and differ only in the tool-pool width or a
+    wall-clock bound must not be reported as conflicting.
+
+    Args:
+        parents: The resolved parent profiles.
+        child: The profile declaring ``inherits:``.
+
+    Returns:
+        ``(block, conflicts)`` — ``block`` is ``None`` when nothing was
+        declared or the parents conflicted; ``conflicts`` holds at most
+        one ready-to-render line for the caller's conflict list.
+    """
+    if child.runtime_limits is not None:
+        return child.runtime_limits, []
+
+    declaring = [p for p in parents if p.runtime_limits is not None]
+    if not declaring:
+        return None, []
+    normalise = {f: None for f in _ALL_MIN_WINS_RUNTIME_LIMIT_FIELDS}
+    comparable = {
+        p.name: replace(p.runtime_limits, **normalise)
+        for p in declaring
+    }
+    if len(set(str(v) for v in comparable.values())) == 1:
+        return declaring[0].runtime_limits, []
+    details = ", ".join(
+        f"'{name}': {val!r}" for name, val in comparable.items()
+    )
+    return None, [f"  runtime_limits: {details}"]
+
+
+def _merge_runtime_limits(
+    parents: List['SubagentProfile'],
+    child: 'SubagentProfile',
+) -> Tuple[Optional[RuntimeLimits], List[str]]:
+    """Merge ``runtime_limits`` across parents + child.
+
+    Two different rules, one per half of the block — the same shape
+    :func:`_merge_budget_control` uses:
+
+    * every field outside :data:`_MIN_WINS_RUNTIME_LIMIT_FIELDS` —
+      **scalar-override** (:func:`_resolve_runtime_limit_ceilings`);
+    * ``max_parallel_tools``, ``max_session_seconds``,
+      ``max_orphan_seconds`` and ``unload_grace_seconds`` — **min-wins**
+      across every layer that declares them
+      (:func:`_merged_min_wins_limit`).  The last one reads ``0`` as the
+      tightest value rather than as "unbounded"; see
+      :data:`_MIN_WINS_ZERO_TIGHTEST_FIELDS`.
+
+    Args:
+        parents: The resolved parent profiles, in declaration order.
+        child: The profile declaring ``inherits:``.
+
+    Returns:
+        ``(merged, conflicts)``.  ``merged`` is ``None`` when no layer
+        declares anything; ``conflicts`` is a possibly-empty list of
+        lines for the caller's ``scalar_conflicts``.
+    """
+    min_wins = {
+        name: _merged_min_wins_limit(parents, child, name)
+        for name in _MIN_WINS_RUNTIME_LIMIT_FIELDS
+    }
+    min_wins.update({
+        name: _merged_min_wins_limit(
+            parents, child, name, zero_is_unbounded=False)
+        for name in _MIN_WINS_ZERO_TIGHTEST_FIELDS
+    })
+    base, conflicts = _resolve_runtime_limit_ceilings(parents, child)
+    if base is None and all(v is None for v in min_wins.values()):
+        return None, conflicts
+    return replace(base or RuntimeLimits(), **min_wins), conflicts
+
+
+def _merge_budget_control(
+    parents: List['SubagentProfile'],
+    child: 'SubagentProfile',
+) -> Optional[BudgetControlConfig]:
+    """Merge ``budget_control`` across parents + child.
+
+    Two different rules, one per half of the block:
+
+    * ``limits`` — **min-wins** across every layer that declares a
+      dimension (:func:`shared.budget_control.merge_limits`).  A child
+      may only ever TIGHTEN a ceiling; it must never grant itself a
+      bigger budget than the profile that spawned it.  This is the same
+      safety direction ``max_parallel_tools`` already takes (most restrictive
+      value across parents), and it deliberately differs from the
+      child-replaces-parent rule used by most scalar fields — for a
+      resource ceiling, "child wins" would be an escape hatch.
+      Divergent parent values do NOT conflict: the minimum is
+      well-defined and is the safe resolution.
+    * ``degrade`` — **scalar-override**: the child's whole ladder wins
+      when it declares one, else the first parent that declares one is
+      inherited whole.  Matches ``model_tiers`` (a ladder is a coherent
+      unit; interleaving rungs from two layers would produce a ladder
+      neither author wrote).
+
+    Returns ``None`` when no layer declares anything, so an unbudgeted
+    profile stays unbudgeted.
+    """
+    parent_configs = [
+        p.budget_control for p in parents if p.budget_control is not None
+    ]
+    child_config = child.budget_control
+    if not parent_configs and child_config is None:
+        return None
+
+    limits: Dict[str, float] = {}
+    for cfg in parent_configs:
+        limits = merge_limits(limits, cfg.limits)
+    if child_config is not None:
+        limits = merge_limits(limits, child_config.limits)
+
+    degrade: Tuple[Any, ...] = ()
+    if child_config is not None and child_config.degrade:
+        degrade = child_config.degrade
+    else:
+        for cfg in parent_configs:
+            if cfg.degrade:
+                degrade = cfg.degrade
+                break
+
+    if not limits and not degrade:
+        return None
+    return BudgetControlConfig(limits=limits, degrade=degrade)
+
+
+def _processor_identities(
+    processors: List[CompletionProcessor],
+) -> FrozenSet[str]:
+    """Every string a ``suppress_inherited_processors`` entry may match.
+
+    A processor answers to its declared ``name`` AND to its ``script``
+    path, so a child can decline one without knowing which of the two the
+    base chose to write.  See :attr:`CompletionProcessor.identity` for the
+    single canonical form used in diagnostics.
+
+    Args:
+        processors: The inherited processors to index.
+
+    Returns:
+        The union of every entry's script path and (when set) name.
+    """
+    ids: set = set()
+    for proc in processors:
+        ids.add(proc.script)
+        if proc.name:
+            ids.add(proc.name)
+    return frozenset(ids)
+
+
+def _unmatched_suppression_error(
+    child_name: str,
+    unmatched: List[str],
+    parents: List['SubagentProfile'],
+    inherited: List[CompletionProcessor],
+) -> str:
+    """Explain a ``suppress_inherited_processors`` entry that matched nothing.
+
+    Names what was asked for AND what was actually on offer, because the
+    two ways to get here — a typo, or a base that renamed/moved the
+    processor — are told apart by reading the available list.
+
+    Args:
+        child_name: Profile that declared the suppression.
+        unmatched: The entries that matched no inherited processor.
+        parents: The resolved parents, named in the message.
+        inherited: Everything the parents contributed.
+
+    Returns:
+        The error message recorded against *child_name*.
+    """
+    listing = sorted(proc.identity for proc in inherited) or ["(none)"]
+    return (
+        f"Profile '{child_name}' declares suppress_inherited_processors "
+        f"{unmatched!r}, which match no inherited completion_processor.  "
+        f"Inherited from {[p.name for p in parents]!r}: {listing!r}.  A "
+        f"suppression that matches nothing means the processor was renamed "
+        f"or moved and this profile is running it again — fix the entry or "
+        f"drop it."
+    )
+
+
+def _merge_completion_processors(
+    parents: List['SubagentProfile'],
+    child: 'SubagentProfile',
+) -> Tuple[List[CompletionProcessor], Optional[str]]:
+    """Merge ``completion_processors`` across parents + child (#791).
+
+    The default is **concatenation**, parent → child: each processor is
+    independent (writes a different artefact or checks a different
+    invariant) and all of them fire.  A child's ``completion_processors``
+    only ever ADDS — an empty list there clears nothing.
+
+    ``suppress_inherited_processors`` is the single, deliberately narrow
+    opt-out.  It names inherited processors to drop, matching either a
+    parent entry's ``name`` or its ``script`` path.  Three properties are
+    load-bearing:
+
+    * **By name, never wholesale.**  A base that later adds a second
+      processor must not silently re-enable the one this child declined,
+      and "drop everything the parent completes with" is not a thing a
+      cascade stage should be able to say in passing.
+    * **Parents only.**  The child's own processors are its to edit
+      directly, so suppression never has to disambiguate between "the one
+      I inherited" and "the one I declared".
+    * **A stale entry is an error.**  If nothing matches, the base moved
+      or renamed the processor and this child is running one it declared
+      it did not want.  Failing the profile load says so; a silent no-op
+      is how #791's "an interrogation ran with no cost ceiling" happens.
+
+    One entry drops EVERY inherited processor it matches — with multiple
+    parents contributing the same script, declining it declines all of
+    them, which is what "I do not complete that way" means.
+
+    Args:
+        parents: Resolved parent profiles, in declaration order.
+        child: The child profile with its own overrides.
+
+    Returns:
+        ``(processors, error)``.  ``error`` is ``None`` on success, else a
+        message naming the unmatched entries and what WAS available; the
+        caller records it and drops the profile.
+    """
+    inherited: List[CompletionProcessor] = []
+    for parent in parents:
+        inherited.extend(parent.completion_processors)
+
+    suppress = list(child.suppress_inherited_processors or [])
+    if not suppress:
+        return inherited + list(child.completion_processors), None
+
+    available = _processor_identities(inherited)
+    unmatched = [entry for entry in suppress if entry not in available]
+    if unmatched:
+        return [], _unmatched_suppression_error(
+            child.name, unmatched, parents, inherited,
+        )
+
+    # Keep a processor when NEITHER of its identities is suppressed.
+    suppress_set = set(suppress)
+    kept = [
+        proc for proc in inherited
+        if suppress_set.isdisjoint((proc.script, proc.identity))
+    ]
+    return kept + list(child.completion_processors), None
+
+
+def _merge_max_completion_nudges(child, parents) -> Optional[int]:
+    """Resolve ``max_completion_nudges`` across an inheritance chain (#919).
+
+    Spelled against ``None`` rather than a sentinel value: the child
+    overrides outright, else the minimum across the parents that declared one, else
+    ``None`` — left unresolved deliberately, so
+    :func:`shared.completion_nudge.resolve_max_completion_nudges` and not
+    this merge owns what the framework default IS.
+
+    Min-across-parents rather than max because two bases disagreeing about
+    a retry budget is not a conflict worth refusing a profile over, and the
+    safer reading of that disagreement is the one that loops less — the
+    direction ``budget_control.limits`` already takes.  A
+    child that wants the looser budget says so, which is the whole point of
+    the knob.
+
+    Args:
+        child: The inheriting profile.
+        parents: Its resolved parents, in declaration order.
+
+    Returns:
+        The effective budget, or ``None`` when no layer declared one.
+    """
+    if getattr(child, 'max_completion_nudges', None) is not None:
+        return child.max_completion_nudges
+    declared = [
+        p.max_completion_nudges for p in parents
+        if getattr(p, 'max_completion_nudges', None) is not None
+    ]
+    return min(declared) if declared else None
+
+
+def _merge_profiles(
+    child_name: str,
+    parents: List['SubagentProfile'],
+    child: 'SubagentProfile',
+    errors: Dict[str, str],
+) -> Optional['SubagentProfile']:
+    """Merge parent profiles with a child profile.
+
+    Args:
+        child_name: Name of the child profile (for error messages).
+        parents: Resolved parent profiles in declaration order.
+        child: The child profile with its own overrides.
+        errors: Error dict to populate on conflict.
+
+    Returns:
+        Merged SubagentProfile, or None if conflicts detected.
+    """
+    # --- Collection fields: union ---
+
+    # plugins: parents first (in order), then child, deduplicated
+    seen_plugins: set = set()
+    merged_plugins: List[str] = []
+    for parent in parents:
+        for p in parent.plugins:
+            if p not in seen_plugins:
+                seen_plugins.add(p)
+                merged_plugins.append(p)
+    for p in child.plugins:
+        if p not in seen_plugins:
+            seen_plugins.add(p)
+            merged_plugins.append(p)
+
+    # preloaded_plugins: union
+    merged_preloaded: set = set()
+    for parent in parents:
+        merged_preloaded |= parent.preloaded_plugins
+    merged_preloaded |= child.preloaded_plugins
+
+    # tool_scopes: per-plugin override (dict update — child wins on a
+    # plugin key it specifies; a parent's scope for a plugin the child
+    # doesn't re-scope survives).  Note this means a child that re-lists
+    # a plugin WITHOUT a ``tools:`` modifier inherits the parent's
+    # allow-list — consistent with preloaded_plugins' additive
+    # semantics.  To widen back to all tools, a child must list the
+    # plugin with an explicit ``tools:[...]`` enumerating the wider set.
+    merged_tool_scopes: Dict[str, List[str]] = {}
+    for parent in parents:
+        merged_tool_scopes.update(getattr(parent, 'tool_scopes', {}) or {})
+    merged_tool_scopes.update(child.tool_scopes or {})
+
+    # env: merge with conflict detection
+    merged_env: Dict[str, str] = {}
+    env_sources: Dict[str, str] = {}  # key → source profile name
+    conflict_details: List[str] = []
+
+    for parent in parents:
+        for key, val in parent.env.items():
+            if key in merged_env and merged_env[key] != val:
+                # Conflict between parents
+                if key not in child.env:
+                    conflict_details.append(
+                        f"  env['{key}']: '{env_sources[key]}' sets "
+                        f"'{merged_env[key]}', '{parent.name}' sets '{val}'"
+                    )
+            else:
+                merged_env[key] = val
+                env_sources[key] = parent.name
+    # Child overrides last
+    merged_env.update(child.env)
+
+    # plugin_configs: deep merge by plugin name
+    merged_configs: Dict[str, Dict[str, Any]] = {}
+    config_sources: Dict[str, Dict[str, str]] = {}  # plugin → key → source
+
+    for parent in parents:
+        for plugin_name, config in parent.plugin_configs.items():
+            if plugin_name not in merged_configs:
+                merged_configs[plugin_name] = {}
+                config_sources[plugin_name] = {}
+            for key, val in config.items():
+                existing = merged_configs[plugin_name].get(key)
+                if existing is not None and existing != val:
+                    src = config_sources[plugin_name].get(key, "?")
+                    # Only conflict if child doesn't override this specific key
+                    child_plugin_config = child.plugin_configs.get(plugin_name, {})
+                    if key not in child_plugin_config:
+                        conflict_details.append(
+                            f"  plugin_configs['{plugin_name}']['{key}']: "
+                            f"'{src}' sets {existing!r}, '{parent.name}' sets {val!r}"
+                        )
+                else:
+                    merged_configs[plugin_name][key] = val
+                    config_sources[plugin_name][key] = parent.name
+    # Child overrides last (per-plugin, per-key)
+    for plugin_name, config in child.plugin_configs.items():
+        if plugin_name not in merged_configs:
+            merged_configs[plugin_name] = {}
+        merged_configs[plugin_name].update(config)
+
+    # --- Scalar fields: agreement-or-override ---
+
+    # Collect parent values for scalar fields
+    scalar_conflicts: List[str] = []
+
+    def _resolve_scalar(field_name: str, child_val, default=None):
+        """Resolve a scalar field across parents + child."""
+        parent_vals = {}
+        for parent in parents:
+            val = getattr(parent, field_name)
+            if val is not None and val != default:
+                parent_vals[parent.name] = val
+
+        # Child explicitly overrides
+        if child_val is not None and child_val != default:
+            return child_val
+
+        # No parents set it
+        if not parent_vals:
+            return child_val  # keep child default
+
+        # All parents agree
+        unique_vals = set(str(v) for v in parent_vals.values())
+        if len(unique_vals) == 1:
+            return next(iter(parent_vals.values()))
+
+        # Conflict
+        details = ", ".join(
+            f"'{name}': {val!r}" for name, val in parent_vals.items()
+        )
+        scalar_conflicts.append(
+            f"  {field_name}: {details}"
+        )
+        return child_val
+
+    merged_model = _resolve_scalar('model', child.model)
+    merged_provider = _resolve_scalar('provider', child.provider)
+
+
+    merged_max_completion_nudges = _merge_max_completion_nudges(child, parents)
+
+    # gc: agreement-or-override (compare as dicts for equality)
+    merged_cache = _resolve_scalar('cache', child.cache)
+    merged_gc = _resolve_scalar('gc', child.gc)
+    # trace: scalar-override.  A stage that redirects its trace redirects
+    # the whole of it -- merging session_log from one layer with
+    # provider_log from another produces a split diagnosis nobody asked
+    # for, which is the class of failure the block exists to prevent.
+    merged_trace = _resolve_scalar('trace', child.trace)
+    # regulatory: child-replaces per field, most-restrictive-wins on
+    # risk_class -- see :func:`merge_regulatory`.
+    merged_regulatory = merge_regulatory(child, parents)
+    # record_keeping: most-restrictive-wins on every field, and "most
+    # restrictive" is LONGER for the two minimums -- see
+    # :func:`merge_record_keeping`.
+    merged_record_keeping = merge_record_keeping(child, parents)
+
+    # runtime_limits: scalar-override for the ceilings (parents must
+    # agree or child overrides; frozen dataclasses with the same field
+    # values produce identical reprs, so two parents declaring the same
+    # limits don't conflict) — but MIN-wins for ``max_parallel_tools``,
+    # which a child may only tighten.  See :func:`_merge_runtime_limits`.
+    merged_runtime_limits, runtime_limits_conflicts = _merge_runtime_limits(
+        parents, child,
+    )
+    scalar_conflicts.extend(runtime_limits_conflicts)
+
+    # scrub_secret_env: scalar-override.  A child that says ``none`` (or
+    # narrows the set) replaces the parent's value outright — the same
+    # child-wins rule as ``trace`` / ``runtime_limits``; two parents that
+    # disagree without a child override is a conflict.
+    merged_scrub_secret_env = _resolve_scalar(
+        'scrub_secret_env', child.scrub_secret_env)
+
+    # model_tiers: scalar-override (the child's whole tier-config wins; inherit
+    # the parent's when the child declares none).  default={} so an unset child
+    # ({}) is treated as "not set" and inherits.  WAS DROPPED entirely pre-fix:
+    # the construction below omitted model_tiers, so inherits/set-based tiered
+    # profiles silently lost their tiers and fell back to single-model.
+    merged_model_tiers = _resolve_scalar(
+        'model_tiers', child.model_tiers, default={})
+
+    # budget_control: NOT a plain scalar-override.  ``limits`` merge
+    # MIN-WINS across parents + child (a child may only TIGHTEN a
+    # ceiling — it must never grant itself a bigger budget than the
+    # profile that spawned it, the same safety direction as max_parallel_tools
+    # above), while ``degrade`` is scalar-override (the child's whole
+    # ladder wins, matching model_tiers).
+    merged_budget_control = _merge_budget_control(parents, child)
+
+    # completion_payload_schema: scalar-override (parents must agree or
+    # child overrides). Inline dicts and string paths both compared as-is
+    # via str() in _resolve_scalar.
+    merged_completion_schema = _resolve_scalar(
+        'completion_payload_schema', child.completion_payload_schema
+    )
+
+    # spawn_payload_schema: same scalar-override semantics — symmetric
+    # to completion_payload_schema but constrains the agent_params dict
+    # passed to spawn_subagent at the spawn boundary.
+    merged_spawn_schema = _resolve_scalar(
+        'spawn_payload_schema', child.spawn_payload_schema
+    )
+
+    # default_agent: scalar-override, like ``model`` / ``provider``.  A
+    # child that names its own persona wins; otherwise the parents' — and
+    # two parents naming different personas is a conflict, not a coin toss.
+    merged_default_agent = _resolve_scalar('default_agent', child.default_agent)
+
+    # completion_processors: concatenation across parent → child, minus
+    # whatever the child declines by name in
+    # ``suppress_inherited_processors``.  Each processor is independent
+    # (writes a different artefact or checks a different invariant);
+    # concatenating fires all of them.  Child entries appear last; the
+    # framework invokes them sequentially and aggregates ALL errors so
+    # the agent sees the full set on the retry prompt rather than
+    # playing whack-a-mole turn by turn.  See
+    # :func:`_merge_completion_processors` for the opt-out's rules.
+    merged_completion_processors, processor_error = (
+        _merge_completion_processors(parents, child)
+    )
+
+    # --- Concatenation: system_instructions ---
+    instruction_parts = []
+    for parent in parents:
+        if parent.system_instructions:
+            instruction_parts.append(parent.system_instructions)
+    if child.system_instructions:
+        instruction_parts.append(child.system_instructions)
+    merged_instructions = "\n\n".join(instruction_parts) if instruction_parts else None
+
+    # --- Check for conflicts ---
+    if processor_error:
+        errors[child_name] = processor_error
+        return None
+
+    all_conflicts = conflict_details + scalar_conflicts
+    if all_conflicts:
+        conflict_msg = (
+            f"Profile '{child_name}' inherits from "
+            f"{[p.name for p in parents]}.\n"
+            f"Conflicts (override in '{child_name}' to resolve):\n"
+            + "\n".join(all_conflicts)
+        )
+        errors[child_name] = conflict_msg
+        return None
+
+    # ``suppress_base_instructions`` follows UNION semantics: a piece is
+    # suppressed if ANY layer in the chain (parents or child) suppresses
+    # it.  Rationale: a base saying "drop the framework constants, I'm
+    # minimal" shouldn't be silently overridable by an inheritor; an
+    # inheritor that genuinely wants a layer back should not inherit from
+    # a parent that drops it.  Each profile's field is already the
+    # canonical frozenset (normalized in __post_init__), so the merge is
+    # a plain set union.
+    merged_suppress_base = frozenset().union(
+        *(getattr(p, 'suppress_base_instructions', frozenset()) for p in parents),
+        getattr(child, 'suppress_base_instructions', frozenset()),
+    )
+
+    # ``apparmor`` follows OR semantics: True if any layer in the chain
+    # (parents or child) sets it True.  Same rationale as
+    # ``suppress_base_instructions`` — a security primitive shouldn't be
+    # silently downgradeable by an inheritor.  An inheritor that
+    # genuinely wants unconfined operation should not inherit from a
+    # confined parent.
+    merged_apparmor = any(
+        getattr(p, 'apparmor', False) for p in parents
+    ) or getattr(child, 'apparmor', False)
+
+    # ``apparmor_fragments`` follows CHILD-REPLACES-PARENT semantics
+    # (Piece 1, 2026-05-14).  Distinct from ``apparmor`` above:
+    #
+    # - ``apparmor`` is a bool, OR-merged so children can't silently
+    #   downgrade a confined parent.
+    # - ``apparmor_fragments`` is a list expressing WHICH fragments
+    #   the profile wants.  Replace lets cascade authors SCOPE DOWN
+    #   from a broader parent set — necessary for least-privilege,
+    #   since union would only let children ADD permissions, never
+    #   remove.  Matches ``model`` field's child-wins rationale.
+    #
+    # Resolution: walk the inheritance chain in order child → parents.
+    # The first profile that declares the field (i.e. has a non-None
+    # value) wins.  ``None`` everywhere → resolved value is ``None``
+    # (workspace-default "compose all fragments" applies at render
+    # time).  See ``project_backlog_per_profile_apparmor_fragments``
+    # for the cascade footgun this design closes.
+    merged_apparmor_fragments: Optional[List[str]] = None
+    child_fragments = getattr(child, 'apparmor_fragments', None)
+    if child_fragments is not None:
+        merged_apparmor_fragments = list(child_fragments)
+    else:
+        for p in parents:
+            parent_fragments = getattr(p, 'apparmor_fragments', None)
+            if parent_fragments is not None:
+                merged_apparmor_fragments = list(parent_fragments)
+                break
+
+    # quirks: dict-union with child-wins-on-key-collision.  Same shape
+    # as plugin_configs / env merging — parent keys flow through, child
+    # keys override.  Rationale: quirks are additive declarations of
+    # which provider workarounds the profile opts into; a child that
+    # disables a parent's quirk does so explicitly with ``key: false``,
+    # not by omitting the key.
+    merged_quirks: Dict[str, Any] = {}
+    for parent in parents:
+        merged_quirks.update(getattr(parent, 'quirks', {}) or {})
+    merged_quirks.update(child.quirks or {})
+
+    return SubagentProfile(
+        name=child.name,
+        description=child.description,
+        plugins=merged_plugins,
+        preloaded_plugins=merged_preloaded,
+        tool_scopes=merged_tool_scopes,
+        plugin_configs=merged_configs,
+        system_instructions=merged_instructions,
+        default_agent=merged_default_agent,
+        suppress_base_instructions=merged_suppress_base,
+        model=merged_model,
+        provider=merged_provider,
+
+        max_completion_nudges=merged_max_completion_nudges,
+        gc=merged_gc,
+        cache=merged_cache,
+        trace=merged_trace,
+        env=merged_env,
+        inherits=None,  # Fully resolved
+        completion_payload_schema=merged_completion_schema,
+        spawn_payload_schema=merged_spawn_schema,
+        completion_processors=merged_completion_processors,
+        # Consumed by the merge above — the resolved profile carries no
+        # residual suppression, so a grandchild inheriting THIS profile
+        # neither re-applies it nor trips the "matched nothing" error on
+        # a processor that is already gone.
+        suppress_inherited_processors=[],
+        runtime_limits=merged_runtime_limits,
+        budget_control=merged_budget_control,
+        model_tiers=merged_model_tiers,
+        apparmor=merged_apparmor,
+        apparmor_fragments=merged_apparmor_fragments,
+        quirks=merged_quirks,
+        scrub_secret_env=merged_scrub_secret_env,
+        regulatory=merged_regulatory,
+        record_keeping=merged_record_keeping,
+    )
+
+
+#: The reserved ``spawn_subagent(profile="inherit")`` value (#1198).  It is
+#: resolved at SPAWN time from a frozen snapshot of the parent's profile —
+#: the parent's plugin set (minus the ``subagent`` plugin, so the child
+#: cannot itself spawn) and the parent's system instructions as they stand
+#: at the moment of the call — not a profile discovered on disk.  A discovered
+#: profile of this name would shadow the reserved value and a spawn naming it
+#: would silently get the file instead of the parent snapshot, so a file that
+#: would load under it is REFUSED at discovery (see :func:`_parse_profile_file`).
+INHERIT_PROFILE_NAME = "inherit"
+
+#: Profile names a discovered file may not claim.  Currently just
+#: ``inherit``; a set so a second reserved value costs one entry rather than
+#: a new branch.
+RESERVED_PROFILE_NAMES = frozenset({INHERIT_PROFILE_NAME})
+
+
+def _parse_profile_file(
+    file_path: Path,
+) -> Tuple[Optional[str], Optional[Dict[str, Any]], Optional[str]]:
+    """Parse a single profile file (JSON or YAML).
+
+    Args:
+        file_path: Path to the profile file.
+
+    Returns:
+        Tuple of ``(profile_name, profile_data, None)`` on success, or
+        ``(None, None, error_message)`` on parse/read failure.
+    """
+    try:
+        content = file_path.read_text(encoding='utf-8')
+
+        if file_path.suffix in ('.yaml', '.yml'):
+            try:
+                import yaml
+                data = yaml.safe_load(content)
+            except ImportError:
+                msg = f"PyYAML not installed, cannot parse YAML profile: {file_path.name}"
+                logger.warning(msg)
+                return None, None, msg
+        elif file_path.suffix == '.json':
+            data = json.loads(content)
+        else:
+            logger.debug("Skipping non-profile file: %s", file_path)
+            return None, None, None
+
+        if not isinstance(data, dict):
+            msg = f"Profile file must contain a JSON object: {file_path.name}"
+            logger.warning(msg)
+            return None, None, msg
+
+        # Profile name is either explicit 'name' field or derived from filename
+        name = data.get('name') or file_path.stem
+
+        # Reserved names are resolved at spawn time, not loaded from disk
+        # (#1198).  Refuse rather than register: were a discovered profile
+        # allowed to claim ``inherit``, ``spawn_subagent(profile="inherit")``
+        # would silently get the file instead of the parent snapshot.
+        if name in RESERVED_PROFILE_NAMES:
+            msg = (
+                f"Profile name '{name}' is reserved and cannot be loaded from "
+                f"a file ({file_path.name}): spawn_subagent(profile='{name}') "
+                f"means a frozen snapshot of the parent's profile at spawn "
+                f"time (#1198). Rename the profile."
+            )
+            logger.warning(msg)
+            return None, None, msg
+
+        return name, data, None
+
+    except json.JSONDecodeError as e:
+        msg = f"Invalid JSON in {file_path.name}: {e}"
+        logger.warning(msg)
+        return None, None, msg
+    except Exception as e:
+        msg = f"Error reading {file_path.name}: {e}"
+        logger.warning(msg)
+        return None, None, msg
+
+
+@dataclass
+class ProfileDiscoveryResult:
+    """Result of profile discovery, carrying both valid profiles and parse errors.
+
+    Callers that only need the profiles dict can use ``result.profiles``.
+    Callers that want to surface actionable diagnostics (e.g. when a
+    requested profile is missing) should also inspect ``result.errors``
+    — a mapping from the profile file stem (e.g. ``"github-resolver"``)
+    to the human-readable error message.
+    """
+
+    profiles: Dict[str, 'SubagentProfile'] = field(default_factory=dict)
+    errors: Dict[str, str] = field(default_factory=dict)
+
+
+#: Every key :func:`_scan_profiles_dir` reads out of a profile FILE.
+#:
+#: Not the same set as ``dataclasses.fields(SubagentProfile)``, and the two
+#: differ in both directions — which is the whole reason this is written down
+#: rather than derived from the dataclass:
+#:
+#: * ``preloaded_plugins`` and ``tool_scopes`` are dataclass fields and NOT
+#:   file keys.  They are DERIVED by :func:`parse_plugin_list` from the
+#:   ``plugins:`` list's own modifiers (``todo(preload)``,
+#:   ``memory(tools:[...])``), so a file spelling either of them out is read
+#:   by nobody.
+#: * ``cache`` / ``gc`` / ``trace`` / ``env`` reach the dataclass through the
+#:   four block parsers rather than a ``data.get`` in the builder, so a scan
+#:   of the builder alone would miss them.
+#:
+#: Construction is keyword-explicit, so anything outside this set is simply
+#: never read — silently, which is what ``jaato-scaffold validate`` reports as
+#: ``unknown_profile_key``.  ``test_profile_file_keys.py`` fails the build if
+#: the loader gains a key that is not listed here.
+PROFILE_FILE_KEYS = frozenset({
+    'name',
+    'description',
+    'plugins',
+    'plugin_configs',
+    'system_instructions',      # deprecated; still read
+    'default_agent',
+    'suppress_base_instructions',
+    'model',
+    'provider',
+
+    'max_completion_nudges',
+    'gc',
+    'cache',
+    'trace',
+    'regulatory',
+    'record_keeping',
+    'env',
+    'inherits',
+    'completion_payload_schema',
+    'spawn_payload_schema',
+    'completion_processors',
+    'suppress_inherited_processors',
+    'runtime_limits',
+    'budget_control',
+    'model_tiers',
+    'apparmor',
+    'apparmor_fragments',
+    'quirks',
+    'scrub_secret_env',
+})
+
+#: Dataclass fields that are NOT profile-file keys, and what supplies them.
+#: ``explain profile`` renders the dataclass, so without this it advertises
+#: two keys a file may not set.
+PROFILE_DERIVED_FIELDS = {
+    'preloaded_plugins': "derived from plugins: — write `todo(preload)`",
+    'tool_scopes': "derived from plugins: — write `memory(tools:[a,b])`",
+}
+
+#: Keys a profile file may still CARRY and that the loader no longer reads,
+#: mapped to what replaces them.  Distinct from an unknown key: the author
+#: did not mistype anything, the field was withdrawn under them, so the
+#: message names the successor rather than guessing at a near-miss.  The
+#: posture ``deprecated_system_instructions`` already takes.
+PROFILE_REMOVED_FIELDS = {
+    'max_turns': (
+        "removed in #1068 — it was declared, validated, inherited and "
+        "advertised to the model, and compared against a turn counter in "
+        "no path of the tree.  Bound a session with `budget_control` "
+        "instead: `limits.turns` plus a `degrade` rung whose `action` is "
+        "`abort` (limits alone are observed, never enforced)"
+    ),
+}
+
+
+def _scan_profiles_dir(
+    directory: Path,
+    profiles: Dict[str, 'SubagentProfile'],
+    errors: Dict[str, str],
+) -> None:
+    """Scan a directory for profile files and populate profiles/errors dicts.
+
+    Existing entries in ``profiles`` are never overwritten, so earlier
+    directories (higher precedence) win over later ones.
+
+    Args:
+        directory: Directory to scan for .json/.yaml/.yml profile files.
+        profiles: Accumulator dict — discovered profiles are added here.
+        errors: Accumulator dict — parse errors are added here.
+    """
+    try:
+        if not directory.is_dir():
+            return
+        entries = list(directory.iterdir())
+    except OSError as exc:
+        # The directory is inaccessible: missing, or a confined session
+        # correctly denied this tier (e.g. ~/.jaato/profiles under AppArmor —
+        # is_dir()/iterdir() raise PermissionError, not return False).  This is
+        # an OPTIONAL tier: skip it so the other tiers (workspace, premium)
+        # still discover.  A denied tier must NEVER abort the whole discovery.
+        logger.debug("Profiles tier %s not scannable (%s); skipping", directory, exc)
+        return
+
+    # Track names actually registered IN THIS PASS so the summary
+    # log line below reports the correct provenance.  Pre-fix the
+    # log printed ``profiles.items()`` which is the cumulative dict
+    # across all preceding passes — names from earlier directories
+    # appeared in the line claiming they came from ``directory``,
+    # which is misleading to operators ("why does my home dir have
+    # 'codegen' in it?  it doesn't.").  See 2026-05-15 finding.
+    found_names: List[str] = []
+    found = 0
+    for file_path in entries:
+        if not file_path.is_file():
+            continue
+        if file_path.suffix not in ('.json', '.yaml', '.yml'):
+            continue
+
+        name, data, error = _parse_profile_file(file_path)
+        if error:
+            if file_path.stem not in errors:
+                errors[file_path.stem] = error
+            continue
+        if name is None or data is None:
+            continue
+        if name in profiles:
+            continue  # higher-precedence source already registered this name
+
+        # The validating block parsers, guarded TOGETHER: each raises
+        # ValueError on an unusable value, and an escaping raise takes the
+        # whole SCAN down -- so one profile with a bad `trace:` path would
+        # leave a workspace with no profiles at all, at daemon startup, with
+        # the other files blamed by their absence.  Recorded per file like
+        # every other parse failure, which is also what lets
+        # `jaato-scaffold validate` report it against the profile that owns
+        # it rather than dying.
+        try:
+            cache_config = parse_cache_block(data)
+            gc_config = parse_gc_block(data)
+            trace_config = parse_trace_block(data)
+            regulatory = parse_regulatory_block(data)
+            record_keeping = parse_record_keeping_block(data)
+            env = parse_profile_env(data)
+        except ValueError as exc:
+            err = f"Invalid profile '{name}': {exc}"
+            logger.warning(err)
+            if name not in errors:
+                errors[name] = err
+            continue
+
+        runtime_limits = None
+        if 'runtime_limits' in data and data['runtime_limits']:
+            try:
+                runtime_limits = RuntimeLimits.from_dict(data['runtime_limits'])
+            except (ValueError, TypeError) as exc:
+                err = f"Invalid runtime_limits in profile '{name}': {exc}"
+                logger.warning(err)
+                if name not in errors:
+                    errors[name] = err
+                continue
+
+        budget_control = None
+        if 'budget_control' in data and data['budget_control']:
+            try:
+                budget_control = BudgetControlConfig.from_dict(
+                    data['budget_control'])
+            except (ValueError, TypeError) as exc:
+                err = f"Invalid budget_control in profile '{name}': {exc}"
+                logger.warning(err)
+                if name not in errors:
+                    errors[name] = err
+                continue
+
+        # ``plugins:`` is a REQUIRED profile key as of server 0.6.x
+        # (this PR).  Absent vs. explicitly-empty have meaningfully
+        # different semantics:
+        #   - Absent  → was conflated with "load all exposed plugins"
+        #               by server/core.py:_apply_profile_overrides via
+        #               a falsy check (``if self._profile.plugins``)
+        #               that swallowed both ``None`` and ``[]``.  The
+        #               2026-06-07 vLLM smoke investigation surfaced
+        #               this: ``plugins: []`` in the profile YAML
+        #               produced ~30 tools on the wire instead of 0.
+        #   - Empty   → explicit "no non-framework plugins" — the
+        #               framework still wires permission, reliability,
+        #               and lifecycle (signal_completion) regardless.
+        # Requiring the key forces profile authors to pick one
+        # intentionally and eliminates the ambiguous middle case.
+        if 'plugins' not in data:
+            err = (
+                f"Profile '{name}' is missing the required 'plugins' "
+                f"key.  Use 'plugins: []' for the minimal framework "
+                f"set (permission, reliability, lifecycle only), or "
+                f"list plugin names to expose (e.g. 'plugins: "
+                f"[cli, todo]')."
+            )
+            logger.warning(err)
+            if name not in errors:
+                errors[name] = err
+            continue
+        raw_plugins = data['plugins']
+        clean_plugins, preloaded, tool_scopes = parse_plugin_list(raw_plugins)
+
+        # `env` was parsed (and checked) with the other blocks above.
+
+        raw_model_tiers = data.get('model_tiers') or {}
+        model_tiers = (
+            {str(k): v for k, v in raw_model_tiers.items()}
+            if isinstance(raw_model_tiers, dict) else {}
+        )
+        if model_tiers and data.get('model'):
+            logger.warning(
+                "Profile '%s' declares both 'model' and 'model_tiers'; "
+                "'model' will be ignored — the active model is selected "
+                "per turn from 'model_tiers[<active_tier>]', starting at "
+                "the initial tier. Keeping 'model' is harmless; removing it "
+                "is also fine (the session bootstraps from the initial "
+                "tier).", name,
+            )
+
+        raw_quirks = data.get('quirks') or {}
+        quirks = (
+            {str(k): v for k, v in raw_quirks.items()}
+            if isinstance(raw_quirks, dict) else {}
+        )
+
+        profiles[name] = SubagentProfile(
+            name=name,
+            description=data.get('description', ''),
+            plugins=clean_plugins,
+            preloaded_plugins=preloaded,
+            tool_scopes=tool_scopes,
+            plugin_configs=data.get('plugin_configs', {}),
+            system_instructions=data.get('system_instructions'),
+            default_agent=data.get('default_agent'),
+            suppress_base_instructions=data.get('suppress_base_instructions', False),
+            model=data.get('model'),
+            provider=data.get('provider'),
+
+            max_completion_nudges=data.get('max_completion_nudges'),
+            gc=gc_config,
+            cache=cache_config,
+            trace=trace_config,
+            env=env,
+            inherits=_normalize_inherits(data.get('inherits')),
+            completion_payload_schema=data.get('completion_payload_schema'),
+            spawn_payload_schema=data.get('spawn_payload_schema'),
+            completion_processors=_parse_completion_processors(data.get('completion_processors')),
+            suppress_inherited_processors=_normalize_suppress_inherited_processors(
+                data.get('suppress_inherited_processors')),
+            runtime_limits=runtime_limits,
+            budget_control=budget_control,
+            model_tiers=model_tiers,
+            apparmor=bool(data.get('apparmor', False)),
+            apparmor_fragments=_normalize_apparmor_fragments(data.get('apparmor_fragments')),
+            quirks=quirks,
+            scrub_secret_env=data.get('scrub_secret_env'),
+            regulatory=regulatory,
+            record_keeping=record_keeping,
+        )
+        if data.get('system_instructions'):
+            import warnings
+            warnings.warn(
+                f"Profile '{name}' has 'system_instructions' which is deprecated. "
+                f"Move the prompt to .jaato/agents/{name}.md and remove "
+                f"system_instructions from the profile.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            logger.warning(
+                "Profile '%s' has deprecated 'system_instructions'. "
+                "Move to .jaato/agents/%s.md instead.",
+                name, name,
+            )
+        found += 1
+        found_names.append(name)
+        logger.debug("Discovered profile '%s' from %s", name, file_path)
+
+    if found:
+        logger.info(
+            "Discovered %d profile(s) from %s: %s",
+            found, directory,
+            ", ".join(found_names),
+        )
+
+
+#: The filenames a persona may take inside one search directory, in the order
+#: :func:`find_agent_file` tries them.  ``<name>.md`` is the normal form; the
+#: directory forms let a persona ship alongside its own assets.
+AGENT_FILE_FORMS = ("<name>.md", "<name>/PROMPT.md", "<name>/SKILL.md")
+
+
+def agent_search_dirs(
+    workspace_path: Optional[str],
+    config_root: Optional[str] = None,
+) -> List[Path]:
+    """Directories searched for a persona, highest precedence first.
+
+    Split out of :func:`find_agent_file` so a DOCUMENTATION surface can report
+    the order without resolving a name — ``jaato-scaffold explain agents``
+    prints exactly this list.  Restating it in prose is how a documented
+    search order comes to disagree with the one the runtime walks.
+
+    ``config_root``, when given, REPLACES the workspace tier rather than
+    adding to it: it is the workspace tier, relocated.
+
+    Args:
+        workspace_path: The session's workspace, or ``None``.
+        config_root: Override for the workspace tier (``<config_root>/``).
+
+    Returns:
+        Existing or not, every directory that would be consulted, in order.
+    """
+    dirs: List[Path] = []
+    if config_root:
+        cr = Path(config_root).expanduser().resolve()
+        dirs += [cr / "agents", cr / "prompts"]
+    elif workspace_path:
+        ws = Path(workspace_path) / ".jaato"
+        dirs += [ws / "agents", ws / "prompts"]
+    home = Path.home() / ".jaato"
+    dirs += [home / "agents", home / "prompts"]
+    return dirs
+
+
+def find_agent_file(
+    agent_name: str,
+    workspace_path: Optional[str],
+    config_root: Optional[str] = None,
+) -> Optional[Path]:
+    """Locate an agent definition's markdown file, without reading it.
+
+    The lookup half of :func:`resolve_agent`, split out so a caller that
+    only needs to know whether a persona EXISTS — ``jaato-scaffold
+    validate`` checking a profile's ``default_agent`` (#944) — can ask
+    without rendering the markdown, which would execute the persona's
+    ``{{!py:...}}`` prefetch scripts.  ``validate`` must stay side-effect
+    free.
+
+    Search order: the workspace tier (``<config_root>/`` when given, else
+    ``<workspace_path>/.jaato/``) then the user tier (``~/.jaato/``), each
+    checked for ``agents/<name>.md``, ``prompts/<name>.md``, and the
+    directory forms ``<name>/PROMPT.md`` / ``<name>/SKILL.md``.
+
+    Args:
+        agent_name: Agent name (filename stem).
+        workspace_path: Workspace directory for agent resolution.
+        config_root: Optional override for the workspace tier.
+
+    Returns:
+        The resolved path, or ``None`` when no tier carries the agent.
+    """
+    for search_dir in agent_search_dirs(workspace_path, config_root):
+        if not search_dir.is_dir():
+            continue
+        # Single file: agents/gen-references.md
+        candidate = search_dir / f"{agent_name}.md"
+        if candidate.is_file():
+            return candidate
+        # Directory: agents/gen-references/PROMPT.md
+        candidate_dir = search_dir / agent_name
+        if candidate_dir.is_dir():
+            for entry_name in ("PROMPT.md", "SKILL.md"):
+                entry = candidate_dir / entry_name
+                if entry.is_file():
+                    return entry
+    return None
+
+
+def resolve_agent(
+    agent_name: str,
+    params: Optional[Dict[str, str]],
+    workspace_path: Optional[str],
+    config_root: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Resolve an agent by name from .jaato/agents/ and .jaato/prompts/.
+
+    Scans agent directories (workspace then user-level), reads the markdown
+    file, parses frontmatter, substitutes params, and returns the rendered
+    system instructions.
+
+    The single source of truth for agent-persona resolution: the daemon's
+    ``SessionManager._resolve_agent`` delegates here, and the embedded
+    in-process client (``jaato_embedded.client``) imports it directly — so a
+    daemon-free embedded session resolves ``agent=<name>`` the same way the
+    daemon does, without depending on ``server`` (mirrors how
+    ``shared.config_resolver.resolve_secret_uri`` was lifted out of the daemon).
+
+    Args:
+        agent_name: Agent name (filename stem).
+        params: Parameter values for ``{{param}}`` placeholders.
+        workspace_path: Workspace directory for agent resolution.
+        config_root: Optional override for the workspace tier.  When set, scans
+            ``<config_root>/agents/`` and ``<config_root>/prompts/`` instead of
+            the workspace-anchored paths.  See
+            :func:`shared.config_resolver.resolve_config_search_path`.
+
+    Returns:
+        Dict with ``system_instructions``, ``description``, ``default_profile``,
+        ``missing_params``, ``source_path``, or ``None`` if not found.
+    """
+    agent_path = find_agent_file(agent_name, workspace_path, config_root)
+    if not agent_path:
+        return None
+
+    raw = agent_path.read_text(encoding="utf-8")
+
+    # Parse YAML frontmatter
+    frontmatter: Dict[str, Any] = {}
+    body = raw
+    if raw.startswith("---"):
+        match = re.match(r"^---\s*\n(.*?)\n---\s*\n", raw, re.DOTALL)
+        if match:
+            try:
+                import yaml
+                frontmatter = yaml.safe_load(match.group(1)) or {}
+            except Exception:
+                pass
+            body = raw[match.end():]
+
+    # Substitute params
+    effective_params = dict(params or {})
+    param_defs = frontmatter.get("params", {})
+
+    # Apply frontmatter defaults for params not provided
+    if isinstance(param_defs, dict):
+        for pname, pdef in param_defs.items():
+            if pname not in effective_params:
+                if isinstance(pdef, dict) and "default" in pdef:
+                    default = pdef["default"]
+                    if default is not None:
+                        effective_params[pname] = str(default)
+
+    # Pre-scan: collect inline ``{{name:default}}`` defaults declared anywhere
+    # in the body so a later bare ``{{name}}`` can fall back to the same
+    # default.  Without this, an agent that uses a parameter both with and
+    # without an inline default would mark it missing on the bare occurrences
+    # and leave literal ``{{name}}`` placeholders in the rendered system
+    # instructions — which then bloat every turn's prompt.
+    inline_defaults: Dict[str, str] = {}
+    inline_pattern = re.compile(r"\{\{(\w+)(?::([^}]*))?\}\}")
+    for m in inline_pattern.finditer(body):
+        name = m.group(1)
+        default = m.group(2)
+        if default is not None and name not in inline_defaults:
+            inline_defaults[name] = default
+
+    # Use a set for O(1) dedup; the public missing list is built once at the
+    # end so the same name never appears twice.
+    missing_set: set = set()
+
+    def replace_param(m: "re.Match") -> str:
+        name = m.group(1)
+        inline_default = m.group(2)
+
+        if name in effective_params:
+            return effective_params[name]
+        if inline_default is not None:
+            return inline_default
+        if name in inline_defaults:
+            return inline_defaults[name]
+        missing_set.add(name)
+        return m.group(0)  # Keep unresolved (debugging signal)
+
+    rendered = inline_pattern.sub(replace_param, body)
+
+    return {
+        "system_instructions": rendered,
+        "description": frontmatter.get("description", ""),
+        "default_profile": frontmatter.get("default_profile"),
+        "missing_params": sorted(missing_set),
+        "source_path": str(agent_path),
+    }
+
+
+def discover_profiles(
+    profiles_dir: str,
+    base_path: Optional[str] = None,
+    config_root: Optional[str] = None,
+    force_profile_set: Optional[str] = None,
+) -> ProfileDiscoveryResult:
+    """Discover subagent profiles from multiple sources.
+
+    Scans up to three locations for ``.json`` / ``.yaml`` / ``.yml``
+    profile files, in decreasing order of precedence:
+
+    1. **Workspace** —
+       * if ``config_root`` is set: ``<config_root>/profiles/``;
+       * else: ``{base_path}/{profiles_dir}`` (today's behavior).
+    2. **User**      — ``~/.jaato/profiles/``
+    3. **Premium**   — profiles registered via ``jaato.premium`` entry points
+
+    When the same profile name appears in multiple sources, the
+    higher-precedence source wins.
+
+    Args:
+        profiles_dir: Directory path to scan (relative or absolute).
+            Ignored when ``config_root`` is set.
+        base_path: Base path for resolving relative profiles_dir.
+                   Defaults to current working directory.
+        config_root: Optional override for the workspace tier.  When set,
+            scans ``<config_root>/profiles/`` instead of
+            ``{base_path}/{profiles_dir}``.  See
+            :func:`shared.config_resolver.resolve_config_search_path`.
+        force_profile_set: Optional override for the profile-set name.
+            When set, takes precedence over the ``JAATO_PROFILE_SET``
+            env-var lookup at step 1.a — the named set is scanned even
+            if the env var is empty or names a different set.  Used by
+            callers that resolve a qualified ``set/name`` profile path
+            and need the matching set's subdirectory to be scanned
+            regardless of the per-session env state.  When ``None`` /
+            empty, falls back to the env-var read (pre-existing
+            behavior).
+
+    Returns:
+        ProfileDiscoveryResult with discovered profiles and any parse errors.
+    """
+    # Server 0.6.68+: read workspace_root / config_root via the per-task
+    # ``ContextVar`` first (race-free across concurrent sessions); fall
+    # back to ``os.environ`` for daemon-startup callers.  Pre-0.6.68
+    # this read directly from ``os.environ``, which clobbered across
+    # concurrent overlapping sessions and made the daemon's profile
+    # discovery for client A read client B's workspace.
+    from jaato_server.shared.session_context import get_config_root, get_workspace_root
+    if base_path is None:
+        base_path = get_workspace_root() or os.getcwd()
+
+    # When no explicit ``config_root`` is provided, fall back to the
+    # session-scoped value set by ``JaatoServer._in_workspace`` —
+    # plugins whose ``initialize()`` runs inside that context (including
+    # the subagent plugin's first call here) pick up the per-session
+    # override even though the registry's ``set_config_root`` broadcast
+    # hasn't fired yet (broadcasts run AFTER plugin init).
+    effective_config_root = config_root or get_config_root()
+
+    profiles: Dict[str, SubagentProfile] = {}
+    errors: Dict[str, str] = {}
+
+    # 1.a Workspace profile-set overlay (optional).
+    #
+    # When ``JAATO_PROFILE_SET`` is set and ``<config_root>/profiles/<set>/``
+    # exists, scan it FIRST so its entries land in the profiles dict before
+    # the regular profiles/ scan — ``_scan_profiles_dir`` skips already-present
+    # names, so first-scanned wins.  Used by the model-set switcher (e.g.
+    # ``--model-set dumb``) to override per-agent ``model`` / ``provider`` /
+    # ``plugin_configs`` while inheriting everything else from the regular
+    # ``profiles/`` tier (typically via ``inherits: [_base_<agent>]``).
+    #
+    # The set lives as a subdirectory under ``profiles/`` (e.g.
+    # ``profiles/dumb/``, ``profiles/tailored/``) — the regular scan is
+    # non-recursive so subdirectories aren't accidentally pulled into the
+    # default set.
+    #
+    # When the env var isn't set, this is a no-op and behaviour matches
+    # the pre-existing single-dir scan.
+    #
+    # Resolution rule (per the workspace-tied env-var contract): the
+    # value is read via ``get_session_env``, which checks the per-
+    # session contextvar (populated from the session's ``env_file``)
+    # before falling back to the daemon's ``os.environ``.  This keeps
+    # profile-set selection workspace-scoped — different sessions on
+    # the same daemon can run different sets concurrently, and switching
+    # sets does NOT require restarting the daemon.
+    from jaato_server.shared.session_context import get_session_env
+    # ``force_profile_set`` (explicit kwarg) wins over the env-var read
+    # so callers resolving a qualified ``set/name`` path can pin the
+    # set without mutating the per-session env contextvar.
+    profile_set = force_profile_set or get_session_env('JAATO_PROFILE_SET')
+    if profile_set and effective_config_root:
+        set_path = (
+            Path(effective_config_root).expanduser().resolve()
+            / "profiles" / profile_set
+        )
+        _scan_profiles_dir(set_path, profiles, errors)
+    elif profile_set and not effective_config_root:
+        # No ``config_root`` override — fall back to scanning
+        # ``<base_path>/<profiles_dir>/<set>/`` so qualified resolution
+        # still works in test harnesses and ad-hoc layouts that don't
+        # set a config_root.
+        fallback_set_path = Path(profiles_dir)
+        if not fallback_set_path.is_absolute():
+            fallback_set_path = Path(base_path) / fallback_set_path
+        _scan_profiles_dir(fallback_set_path / profile_set, profiles, errors)
+
+    # 1.b Workspace tier — config_root override takes precedence; fall
+    #    back to <base_path>/<profiles_dir> when no override is in effect.
+    if effective_config_root:
+        profiles_path = Path(effective_config_root).expanduser().resolve() / "profiles"
+    else:
+        profiles_path = Path(profiles_dir)
+        if not profiles_path.is_absolute():
+            profiles_path = Path(base_path) / profiles_path
+    _scan_profiles_dir(profiles_path, profiles, errors)
+
+    # 2. User-level profiles from ~/.jaato/profiles/
+    #    Workspace profiles take precedence.
+    user_profiles_path = Path.home() / ".jaato" / "profiles"
+    _scan_profiles_dir(user_profiles_path, profiles, errors)
+
+    # 3. Premium entry-point profiles (if installed).
+    #    Workspace and user profiles take precedence over premium ones.
+    premium_profiles = _discover_premium_profiles()
+    for name, profile in premium_profiles.items():
+        if name not in profiles:
+            profiles[name] = profile
+
+    # Resolve inheritance after all sources are scanned
+    resolved, inheritance_errors = resolve_profiles(profiles)
+    errors.update(inheritance_errors)
+
+    return ProfileDiscoveryResult(profiles=resolved, errors=errors)
+
+
+def _discover_premium_profiles() -> Dict[str, 'SubagentProfile']:
+    """Discover profiles provided by the ``jaato.premium`` → ``profiles`` entry point.
+
+    Returns an empty dict if no premium package is installed.
+    """
+    try:
+        from jaato_server.shared.jaato_runtime import _get_premium_content_path
+    except ImportError:
+        return {}
+
+    premium_dir = _get_premium_content_path("profiles")
+    if not premium_dir or not Path(premium_dir).is_dir():
+        return {}
+
+    # Re-use discover_profiles logic on the premium path, but pass
+    # an absolute path to avoid workspace-relative resolution.
+    profiles: Dict[str, SubagentProfile] = {}
+    for file_path in Path(premium_dir).iterdir():
+        if not file_path.is_file():
+            continue
+        if file_path.suffix not in ('.json', '.yaml', '.yml'):
+            continue
+
+        name, data, _error = _parse_profile_file(file_path)
+        if name is None or data is None:
+            continue
+
+        # Guarded together — see _scan_profiles_dir for why an escaping
+        # ValueError here is worse than skipping one profile.
+        try:
+            cache_config = parse_cache_block(data)
+            gc_config = parse_gc_block(data)
+            trace_config = parse_trace_block(data)
+            regulatory = parse_regulatory_block(data)
+            record_keeping = parse_record_keeping_block(data)
+        except ValueError as exc:
+            logger.warning("Skipping premium profile '%s': %s", name, exc)
+            continue
+
+        runtime_limits = None
+        if 'runtime_limits' in data and data['runtime_limits']:
+            try:
+                runtime_limits = RuntimeLimits.from_dict(data['runtime_limits'])
+            except (ValueError, TypeError) as exc:
+                logger.warning(
+                    "Skipping premium profile '%s': invalid runtime_limits: %s",
+                    name, exc,
+                )
+                continue
+
+        budget_control = None
+        if 'budget_control' in data and data['budget_control']:
+            try:
+                budget_control = BudgetControlConfig.from_dict(
+                    data['budget_control'])
+            except (ValueError, TypeError) as exc:
+                logger.warning(
+                    "Skipping premium profile '%s': invalid budget_control: %s",
+                    name, exc,
+                )
+                continue
+
+        # ``plugins:`` is REQUIRED on premium profiles too — see the
+        # workspace scanner for the full rationale.
+        if 'plugins' not in data:
+            logger.warning(
+                "Skipping premium profile '%s': missing required "
+                "'plugins' key.  Use 'plugins: []' for the minimal "
+                "framework set, or list plugin names to expose.",
+                name,
+            )
+            continue
+        raw_plugins = data['plugins']
+        clean_plugins, preloaded, tool_scopes = parse_plugin_list(raw_plugins)
+
+        env = parse_profile_env(data)
+
+        raw_model_tiers = data.get('model_tiers') or {}
+        model_tiers = (
+            {str(k): v for k, v in raw_model_tiers.items()}
+            if isinstance(raw_model_tiers, dict) else {}
+        )
+        if model_tiers and data.get('model'):
+            logger.warning(
+                "Premium profile '%s' declares both 'model' and 'model_tiers'; "
+                "'model' will be ignored.", name,
+            )
+
+        raw_quirks = data.get('quirks') or {}
+        quirks = (
+            {str(k): v for k, v in raw_quirks.items()}
+            if isinstance(raw_quirks, dict) else {}
+        )
+
+        profile = SubagentProfile(
+            name=name,
+            description=data.get('description', ''),
+            plugins=clean_plugins,
+            preloaded_plugins=preloaded,
+            tool_scopes=tool_scopes,
+            plugin_configs=data.get('plugin_configs', {}),
+            system_instructions=data.get('system_instructions'),
+            default_agent=data.get('default_agent'),
+            suppress_base_instructions=data.get('suppress_base_instructions', False),
+            model=data.get('model'),
+            provider=data.get('provider'),
+
+            max_completion_nudges=data.get('max_completion_nudges'),
+            gc=gc_config,
+            cache=cache_config,
+            trace=trace_config,
+            env=env,
+            inherits=_normalize_inherits(data.get('inherits')),
+            completion_payload_schema=data.get('completion_payload_schema'),
+            spawn_payload_schema=data.get('spawn_payload_schema'),
+            completion_processors=_parse_completion_processors(data.get('completion_processors')),
+            suppress_inherited_processors=_normalize_suppress_inherited_processors(
+                data.get('suppress_inherited_processors')),
+            runtime_limits=runtime_limits,
+            budget_control=budget_control,
+            model_tiers=model_tiers,
+            apparmor=bool(data.get('apparmor', False)),
+            apparmor_fragments=_normalize_apparmor_fragments(data.get('apparmor_fragments')),
+            quirks=quirks,
+            scrub_secret_env=data.get('scrub_secret_env'),
+            regulatory=regulatory,
+            record_keeping=record_keeping,
+        )
+        profiles[name] = profile
+        logger.debug("Discovered premium profile '%s' from %s", name, file_path)
+
+    if profiles:
+        logger.info(
+            "Discovered %d premium profile(s): %s",
+            len(profiles), ", ".join(profiles.keys())
+        )
+    return profiles
+
+
+def _max_completion_nudges_errors(data: Dict[str, Any]) -> List[str]:
+    """Validate a profile's ``max_completion_nudges`` (#919).
+
+    A positive integer, or absent.  Zero is REFUSED rather than read as
+    "never nudge": the give-up predicate at every nudge site is
+    ``nudges_fired >= max``, so a budget of 0 would report
+    ``NudgeExhausted`` on sessions that completed cleanly.  A deployment
+    that wants no nudging at all keeps ``signal_completion`` out of the
+    session's tool surface, which the framework already honours.
+
+    Args:
+        data: The raw profile mapping.
+
+    Returns:
+        Zero or one error string.
+    """
+    declared = data.get("max_completion_nudges")
+    if declared is None:
+        return []
+    if not isinstance(declared, int) or isinstance(declared, bool):
+        return ["'max_completion_nudges' must be an integer"]
+    if declared <= 0:
+        return [
+            "'max_completion_nudges' must be a positive integer "
+            "(omit the key for the framework default of 2)"
+        ]
+    return []
+
+
+def validate_profile(data: Any) -> Tuple[bool, List[str], List[str]]:
+    """Validate a subagent profile JSON structure.
+
+    Checks required fields, type constraints, and GC sub-configuration
+    for a single profile definition (the format stored in .jaato/profiles/*.json).
+
+    Args:
+        data: Parsed JSON data from a profile file.
+
+    Returns:
+        Tuple of (is_valid, errors, warnings).
+    """
+    errors: List[str] = []
+    warnings: List[str] = []
+
+    if not isinstance(data, dict):
+        return False, ["File must contain a JSON object"], []
+
+    # Required fields
+    if not data.get("name"):
+        errors.append("'name' is required")
+    if not data.get("description"):
+        errors.append("'description' is required")
+
+    # plugins: list of strings
+    plugins = data.get("plugins")
+    if plugins is not None:
+        if not isinstance(plugins, list):
+            errors.append("'plugins' must be an array")
+        elif not all(isinstance(p, str) for p in plugins):
+            errors.append("'plugins' must contain only strings")
+
+    # plugin_configs: dict of dicts
+    plugin_configs = data.get("plugin_configs")
+    if plugin_configs is not None:
+        if not isinstance(plugin_configs, dict):
+            errors.append("'plugin_configs' must be an object")
+        else:
+            for key, val in plugin_configs.items():
+                if not isinstance(val, dict):
+                    errors.append(f"plugin_configs['{key}'] must be an object")
+
+    # scrub_secret_env (#863): profile-level + per-surface shape
+    errors.extend(_scrub_secret_env_errors(data))
+
+
+    errors.extend(_max_completion_nudges_errors(data))
+
+    # regulatory (EU AI Act): delegate to the block parser, one rule.
+    errors.extend(_regulatory_errors(data))
+
+    # record_keeping (EU AI Act Arts. 12/19): same rule, same delegation.
+    errors.extend(_record_keeping_errors(data))
+
+    # model: string or null
+    model = data.get("model")
+    if model is not None and not isinstance(model, str):
+        errors.append("'model' must be a string or null")
+
+    # provider: string or null
+    provider = data.get("provider")
+    if provider is not None and not isinstance(provider, str):
+        errors.append("'provider' must be a string or null")
+
+    # env: dict of string keys to string values, or null
+    env_data = data.get("env")
+    if env_data is not None:
+        if not isinstance(env_data, dict):
+            errors.append("'env' must be an object or null")
+        else:
+            for key, val in env_data.items():
+                if not isinstance(key, str):
+                    errors.append(f"env key {key!r} must be a string")
+                if not isinstance(val, str):
+                    errors.append(f"env['{key}'] must be a string")
+
+    # inherits: string, list of strings, or null
+    inherits = data.get("inherits")
+    if inherits is not None:
+        if isinstance(inherits, str):
+            pass  # Single string is valid (normalized to list during parsing)
+        elif isinstance(inherits, list):
+            for item in inherits:
+                if not isinstance(item, str):
+                    errors.append("'inherits' must be a string or list of strings")
+                    break
+        else:
+            errors.append("'inherits' must be a string or list of strings")
+
+    # GC sub-validation
+    gc_data = data.get("gc")
+    if gc_data is not None:
+        if not isinstance(gc_data, dict):
+            errors.append("'gc' must be an object or null")
+        else:
+            valid_gc_types = ("truncate", "summarize", "hybrid", "budget")
+            gc_type = gc_data.get("type", "truncate")
+            if gc_type not in valid_gc_types:
+                errors.append(
+                    f"gc.type '{gc_type}' is invalid. "
+                    f"Must be one of: {', '.join(valid_gc_types)}"
+                )
+
+            # Numeric range checks
+            for field_name in ("threshold_percent", "target_percent", "pressure_percent"):
+                val = gc_data.get(field_name)
+                if val is not None:
+                    if not isinstance(val, (int, float)) or isinstance(val, bool):
+                        errors.append(f"gc.{field_name} must be a number")
+                    elif val < 0 or val > 100:
+                        errors.append(f"gc.{field_name} must be between 0 and 100")
+
+            gc_preserve = gc_data.get("preserve_recent_turns")
+            if gc_preserve is not None:
+                if not isinstance(gc_preserve, int) or isinstance(gc_preserve, bool):
+                    errors.append("gc.preserve_recent_turns must be an integer")
+                elif gc_preserve < 0:
+                    errors.append("gc.preserve_recent_turns must be non-negative")
+
+            errors.extend(_gc_media_errors(gc_data))
+
+            gc_max_turns = gc_data.get("max_turns")
+            if gc_max_turns is not None:
+                if not isinstance(gc_max_turns, int) or isinstance(gc_max_turns, bool):
+                    errors.append("gc.max_turns must be an integer")
+                elif gc_max_turns <= 0:
+                    errors.append("gc.max_turns must be a positive integer")
+
+    # runtime_limits sub-validation: delegate to RuntimeLimits.from_dict
+    # which raises ValueError for any out-of-range value (kept in one
+    # place rather than duplicating the rules here).
+    runtime_data = data.get("runtime_limits")
+    if runtime_data is not None:
+        if not isinstance(runtime_data, dict):
+            errors.append("'runtime_limits' must be an object or null")
+        else:
+            try:
+                RuntimeLimits.from_dict(runtime_data)
+            except (ValueError, TypeError) as exc:
+                errors.append(f"runtime_limits: {exc}")
+
+    # budget_control sub-validation: delegate to BudgetControlConfig
+    # .from_dict, which raises for unknown dimensions / bad thresholds /
+    # bad overlay tier names — kept in one place rather than duplicated.
+    budget_data = data.get("budget_control")
+    if budget_data is not None:
+        if not isinstance(budget_data, dict):
+            errors.append("'budget_control' must be an object or null")
+        else:
+            try:
+                BudgetControlConfig.from_dict(budget_data)
+            except (ValueError, TypeError) as exc:
+                errors.append(f"budget_control: {exc}")
+
+    return len(errors) == 0, errors, warnings
+
+
+@dataclass
+class SubagentConfig:
+    """Top-level configuration for the subagent plugin.
+
+    Attributes:
+        project: GCP project ID for Vertex AI.
+        location: Vertex AI region (e.g., 'us-central1').
+        default_model: Default model for subagents. None = inherit from parent.
+        default_provider: Default provider for subagents. None = inherit from parent.
+                         If set, MUST match default_model's provider.
+        profiles: Dict of named subagent profiles.
+        allow_inline: Whether ``spawn_subagent`` may be called WITHOUT a
+            ``profile`` — the "inline" path, where the subagent inherits the
+            parent's entire plugin set and gets no system instructions.
+            Defaults to ``False`` (#944): the omitted-profile spawn used to
+            succeed silently with the wrong tools and no persona, which is
+            indistinguishable from a correct delegation at the call site.
+            Set ``true`` to opt back in; the plugin announces that at
+            WARNING, and ``spawn_subagent``'s schema stops requiring
+            ``profile``.
+        inline_allowed_plugins: Plugins an inline subagent may hold. Enforced
+            on BOTH inline paths — an explicit ``inline_config.plugins`` and
+            the inherit-the-parent's-set default (#944).
+        auto_discover_profiles: Whether to auto-discover profiles from profiles_dir.
+        profiles_dir: Directory to scan for profile files (default: .jaato/profiles).
+    """
+    project: str
+    location: str
+    default_model: Optional[str] = None  # None = inherit from parent
+    default_provider: Optional[str] = None  # None = inherit from parent
+    profiles: Dict[str, SubagentProfile] = field(default_factory=dict)
+    allow_inline: bool = False
+    inline_allowed_plugins: List[str] = field(default_factory=list)
+    auto_discover_profiles: bool = True
+    profiles_dir: str = ".jaato/profiles"
+
+    def add_profile(self, profile: SubagentProfile) -> None:
+        """Add a subagent profile."""
+        self.profiles[profile.name] = profile
+
+    def get_profile(self, name: str) -> Optional[SubagentProfile]:
+        """Get a subagent profile by name."""
+        return self.profiles.get(name)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'SubagentConfig':
+        """Create SubagentConfig from a dictionary.
+
+        Args:
+            data: Configuration dictionary with structure:
+                {
+                    "project": "...",
+                    "location": "...",
+                    "default_model": "...",
+                    "profiles": {
+                        "profile_name": {
+                            "description": "...",
+                            "plugins": [...],
+                            ...
+                        }
+                    },
+                    "allow_inline": true,
+                    "inline_allowed_plugins": [...],
+                    "auto_discover_profiles": true,
+                    "profiles_dir": ".jaato/profiles"
+                }
+
+        Returns:
+            SubagentConfig instance.
+        """
+        profiles = {}
+        for name, profile_data in data.get('profiles', {}).items():
+            # Parse GC configuration if present
+            cache_config = parse_cache_block(profile_data)
+            gc_config = parse_gc_block(profile_data)
+            trace_config = parse_trace_block(profile_data)
+            regulatory = parse_regulatory_block(profile_data)
+            record_keeping = parse_record_keeping_block(profile_data)
+
+            # Parse runtime_limits (cgroup-enforced + app-enforced caps).
+            # Validation runs in __post_init__ — bad values raise here so
+            # the inline config rejects them at load time, same as gc.
+            runtime_limits = None
+            if 'runtime_limits' in profile_data and profile_data['runtime_limits']:
+                runtime_limits = RuntimeLimits.from_dict(profile_data['runtime_limits'])
+
+            # Same fail-at-load-time contract as runtime_limits above.
+            budget_control = None
+            if 'budget_control' in profile_data and profile_data['budget_control']:
+                budget_control = BudgetControlConfig.from_dict(
+                    profile_data['budget_control'])
+
+            # Parse plugin entries, separating (preload) annotations
+            # and per-plugin tool allow-lists.
+            raw_plugins = profile_data.get('plugins', [])
+            clean_plugins, preloaded, tool_scopes = parse_plugin_list(raw_plugins)
+
+            env = parse_profile_env(profile_data)
+
+            raw_model_tiers = profile_data.get('model_tiers') or {}
+            model_tiers = (
+                {str(k): v for k, v in raw_model_tiers.items()}
+                if isinstance(raw_model_tiers, dict) else {}
+            )
+            if model_tiers and profile_data.get('model'):
+                logger.warning(
+                    "Inline profile '%s' declares both 'model' and "
+                    "'model_tiers'; 'model' will be ignored.", name,
+                )
+
+            profiles[name] = SubagentProfile(
+                name=name,
+                description=profile_data.get('description', ''),
+                plugins=clean_plugins,
+                preloaded_plugins=preloaded,
+                tool_scopes=tool_scopes,
+                plugin_configs=profile_data.get('plugin_configs', {}),
+                system_instructions=profile_data.get('system_instructions'),
+                suppress_base_instructions=profile_data.get('suppress_base_instructions', False),
+                model=profile_data.get('model'),
+                provider=profile_data.get('provider'),
+
+                max_completion_nudges=profile_data.get('max_completion_nudges'),
+                gc=gc_config,
+            cache=cache_config,
+            trace=trace_config,
+                env=env,
+                inherits=_normalize_inherits(profile_data.get('inherits')),
+                completion_payload_schema=profile_data.get('completion_payload_schema'),
+                completion_processors=_parse_completion_processors(profile_data.get('completion_processors')),
+                suppress_inherited_processors=_normalize_suppress_inherited_processors(
+                    profile_data.get('suppress_inherited_processors')),
+                runtime_limits=runtime_limits,
+                budget_control=budget_control,
+                model_tiers=model_tiers,
+                apparmor=bool(profile_data.get('apparmor', False)),
+                apparmor_fragments=_normalize_apparmor_fragments(profile_data.get('apparmor_fragments')),
+                scrub_secret_env=profile_data.get('scrub_secret_env'),
+                regulatory=regulatory,
+                record_keeping=record_keeping,
+            )
+
+        return cls(
+            project=data.get('project', ''),
+            location=data.get('location', ''),
+            default_model=data.get('default_model'),  # None = inherit from parent
+            default_provider=data.get('default_provider'),  # None = inherit from parent
+            profiles=profiles,
+            allow_inline=data.get('allow_inline', False),
+            inline_allowed_plugins=data.get('inline_allowed_plugins', []),
+            auto_discover_profiles=data.get('auto_discover_profiles', True),
+            profiles_dir=data.get('profiles_dir', '.jaato/profiles'),
+        )
+
+
+def gc_profile_to_plugin_config(
+    gc_profile: GCProfileConfig,
+    agent_name: Optional[str] = None
+) -> tuple:
+    """Convert a GCProfileConfig to a (GCPlugin, GCConfig) tuple.
+
+    This helper function takes a profile's GC configuration and creates
+    the actual GC plugin and config objects needed by JaatoSession.
+
+    Args:
+        gc_profile: GCProfileConfig from a subagent profile.
+        agent_name: Optional agent name for trace logging identification.
+
+    Returns:
+        Tuple of (GCPlugin, GCConfig) ready to pass to session.set_gc_plugin().
+
+    Raises:
+        ValueError: If the GC plugin type is not found.
+
+    Example:
+        if profile.gc:
+            gc_plugin, gc_config = gc_profile_to_plugin_config(profile.gc, agent_id)
+            session.set_gc_plugin(gc_plugin, gc_config)
+    """
+    from ..gc import load_gc_plugin, GCConfig
+
+    gc_type = gc_profile.type
+    gc_plugin_name = gc_type if gc_type.startswith('gc_') else f'gc_{gc_type}'
+
+    # Build plugin init config
+    gc_init_config = {
+        'preserve_recent_turns': gc_profile.preserve_recent_turns,
+        'notify_on_gc': gc_profile.notify_on_gc,
+    }
+    if agent_name:
+        gc_init_config['agent_name'] = agent_name
+    if gc_profile.summarize_middle_turns is not None:
+        gc_init_config['summarize_middle_turns'] = gc_profile.summarize_middle_turns
+    # Merge plugin-specific config
+    gc_init_config.update(gc_profile.plugin_config)
+
+    gc_plugin = load_gc_plugin(gc_plugin_name, gc_init_config)
+
+    # Create GCConfig for the session
+    # The three media keys are passed only when the profile SET them:
+    # their defaults live on GCConfig (one behind JAATO_GC_MEDIA_BYTES), and
+    # spelling them here would make every profile with a `gc:` block
+    # silently override the env var.
+    media_kwargs: Dict[str, Any] = {}
+    if gc_profile.media_bytes_threshold is not None:
+        media_kwargs['media_bytes_threshold'] = gc_profile.media_bytes_threshold
+    if gc_profile.evict_consumed_media is not None:
+        media_kwargs['evict_consumed_media'] = gc_profile.evict_consumed_media
+    if gc_profile.media_evict_mime_prefixes is not None:
+        media_kwargs['media_evict_mime_prefixes'] = tuple(
+            gc_profile.media_evict_mime_prefixes
+        )
+
+    gc_config = GCConfig(
+        threshold_percent=gc_profile.threshold_percent,
+        target_percent=gc_profile.target_percent,
+        pressure_percent=gc_profile.pressure_percent,
+        max_turns=gc_profile.max_turns,
+        preserve_recent_turns=gc_profile.preserve_recent_turns,
+        plugin_config=gc_profile.plugin_config,
+        **media_kwargs,
+    )
+
+    return gc_plugin, gc_config
+
+
+@dataclass
+class SubagentResult:
+    """Result from a subagent execution.
+
+    Attributes:
+        success: Whether the subagent completed successfully.
+        response: The subagent's final response text.
+        turns_used: Number of conversation turns used.
+        error: Error message if success is False.
+        token_usage: Token usage statistics if available.
+        agent_id: ID of the subagent session (for multi-turn conversations).
+        output_streamed: Whether output was streamed via UI hooks (prevents double-display).
+    """
+    success: bool
+    response: str
+    turns_used: int = 0
+    error: Optional[str] = None
+    token_usage: Optional[Dict[str, int]] = None
+    agent_id: Optional[str] = None
+    output_streamed: bool = False
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for tool response.
+
+        When output_streamed is True, the response text is omitted from the
+        result since it was already displayed to the user via UI hooks.
+        This prevents the model from echoing the response in its output.
+        """
+        result: Dict[str, Any] = {
+            'success': self.success,
+            'turns_used': self.turns_used,
+        }
+        # Only include response text if it wasn't already streamed to UI
+        if self.output_streamed:
+            result['response_note'] = 'Response was streamed to the user interface. Do not repeat it.'
+        else:
+            result['response'] = self.response
+        if self.error:
+            result['error'] = self.error
+        if self.token_usage:
+            result['token_usage'] = self.token_usage
+        if self.agent_id:
+            result['agent_id'] = self.agent_id
+        return result

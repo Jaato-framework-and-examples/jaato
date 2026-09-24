@@ -3,19 +3,19 @@
 > **Status**: Pre-existing gap surfaced by §7c Step 7 disposition audit
 > (commit `285449d0`) + confirmed by Step 7.4 investigation
 > (`a292999`-era).  Not in scope for the §7c+§7d Phase 3 critical path.
-> Mirrors the permission plugin's [`runner_rpc_channel.py`](../jaato-server/shared/plugins/permission/runner_rpc_channel.py)
+> Mirrors the permission plugin's [`runner_rpc_channel.py`](../jaato-server/jaato_server/shared/plugins/permission/runner_rpc_channel.py)
 > pattern which ships today.
 
 ## Problem
 
-Both `shared/plugins/clarification/` and `shared/plugins/references/`
+Both `jaato_server/shared/plugins/clarification/` and `jaato_server/shared/plugins/references/`
 declare `PLUGIN_TIER = "runner"` and run runner-side post-§7c
 seat-flip.  Their `_get_channel()` methods return the in-process
 `self._channel` directly — no detection of runner-side execution
 context, no relay through the daemon's RPC.
 
 The permission plugin already ships the right pattern
-([`runner_rpc_channel.py`](../jaato-server/shared/plugins/permission/runner_rpc_channel.py)):
+([`runner_rpc_channel.py`](../jaato-server/jaato_server/shared/plugins/permission/runner_rpc_channel.py)):
 when the plugin runs runner-side (`registry.runner_rpc_client` is
 set, which §7c Step 7.2 wires at commit `cb656034`), the plugin
 routes ASKs through `client.prompt_operator` — a daemon-side RPC
@@ -74,16 +74,16 @@ each of clarification + references:
 
 ### Per-plugin files (new)
 
-1. `shared/plugins/clarification/types.py` — `PromptClarificationPayload` +
+1. `jaato_server/shared/plugins/clarification/types.py` — `PromptClarificationPayload` +
    `PromptClarificationResponse` dataclasses (analogues of
    `permission/types.py:PromptPayload` / `PromptResponse`).
-2. `shared/plugins/clarification/runner_rpc_channel.py` — implements
+2. `jaato_server/shared/plugins/clarification/runner_rpc_channel.py` — implements
    `ClarificationChannel` protocol; routes through
    `rpc_client.prompt_clarification(payload)`.
-3. `shared/plugins/clarification/plugin.py` `_get_channel()` extended
+3. `jaato_server/shared/plugins/clarification/plugin.py` `_get_channel()` extended
    to detect `registry.runner_rpc_client` (mirror of permission's
    `_get_runner_rpc_channel`).
-4. `server/runner_rpc_handlers/clarification.py` — daemon-side handler
+4. `jaato_server/server/runner_rpc_handlers/clarification.py` — daemon-side handler
    class (mirror of `prompt_operator.py`); emits
    `ClarificationRequestedEvent`; awaits matching response via
    `resolve_response(request_id, response)`.
@@ -108,7 +108,7 @@ them (Path 1 / Path 2 pattern from Step 7.3).
 
 ### Wiring (runner-side wrapper)
 
-Extend `server/runner/rpc_client.py:RunnerRPCClient` with
+Extend `jaato_server/server/runner/rpc_client.py:RunnerRPCClient` with
 `prompt_clarification()` and `prompt_references()` methods — thin
 wrappers over `RunnerRPC.outgoing_call("client.prompt_clarification", ...)`
 etc.  Same shape as the existing `prompt_operator()` method
@@ -145,15 +145,15 @@ daemon-side ``respond_to_*`` rerouting.
 
 ## Files to touch (when scheduled)
 
-- `shared/plugins/clarification/types.py` (new)
-- `shared/plugins/clarification/runner_rpc_channel.py` (new)
-- `shared/plugins/clarification/plugin.py` (extend `_get_channel`)
-- `shared/plugins/references/types.py` (new)
-- `shared/plugins/references/runner_rpc_channel.py` (new)
-- `shared/plugins/references/plugin.py` (extend `_get_channel`)
-- `server/runner_rpc_handlers/clarification.py` (new)
-- `server/runner_rpc_handlers/references.py` (new)
-- `server/runner/rpc_client.py` (add `prompt_clarification` + `prompt_references` methods)
-- `server/core.py` (extend `set_runner_rpc` registration + rewire
+- `jaato_server/shared/plugins/clarification/types.py` (new)
+- `jaato_server/shared/plugins/clarification/runner_rpc_channel.py` (new)
+- `jaato_server/shared/plugins/clarification/plugin.py` (extend `_get_channel`)
+- `jaato_server/shared/plugins/references/types.py` (new)
+- `jaato_server/shared/plugins/references/runner_rpc_channel.py` (new)
+- `jaato_server/shared/plugins/references/plugin.py` (extend `_get_channel`)
+- `jaato_server/server/runner_rpc_handlers/clarification.py` (new)
+- `jaato_server/server/runner_rpc_handlers/references.py` (new)
+- `jaato_server/server/runner/rpc_client.py` (add `prompt_clarification` + `prompt_references` methods)
+- `jaato_server/server/core.py` (extend `set_runner_rpc` registration + rewire
   `respond_to_clarification` and `respond_to_reference_selection`)
 - Test files: 4-6 new test files mirroring Steps 7.1-7.3

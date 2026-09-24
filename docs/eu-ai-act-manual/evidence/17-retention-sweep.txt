@@ -1,0 +1,6 @@
+$ python -c 'from server.record_retention import ...'   # a sweep over backdated files
+# two profiles, two clocks; both files are 45 days old
+profile a: retention_days=30  files=['a-ledger.jsonl']
+  EXPIRED  a-ledger.jsonl  age=45d > 30d  (45.0d old, past the 30d minimum)
+profile b: retention_days=0  files=['b-ledger.jsonl']
+  -> 0 = keep until deleted: the sweep never expires these

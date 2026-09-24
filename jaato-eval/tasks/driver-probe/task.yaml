@@ -1,0 +1,66 @@
+# The smallest DRIVER arm (jaato #1110): a process, not a session, is the
+# unit of work.  The engine starts `run` in the arm's workspace, hands it
+# the contract as environment, observes the cascade id it was given, and
+# reads its exit code.  fixture/driver.py is a complete consumer of that
+# contract — two stages in a fixed order, both stamped with the arm's cid —
+# and the place to start when writing one.
+#
+# Like example-echo this is a smoke test for the harness, not a benchmark:
+# a task every model passes carries no information.  It runs against a
+# live daemon; nothing here is exercised without one.
+#
+# CREDENTIALS: the arm's `.env` carries only JAATO_PROFILE_SET, so the
+# profiles this driver's sessions bind must resolve their key through a
+# `pass://` / `vault://` URI or from the daemon's own environment — never
+# from the fixture. See README, "The contract".
+id: example/driver-probe
+description: >
+  A two-stage driver: stage 1 writes answer.txt, stage 2 copies it to
+  echo.txt.  Exercises: the driver contract, the cascade observer, the
+  per-stage session records, the exit-code vocabulary.
+
+environment:
+  fixture: fixture
+  config_root: .jaato
+
+# `input.params` is the driver's input, exported as JAATO_EVAL_PARAM_WORD
+# (and the whole mapping as JAATO_EVAL_PARAMS).  The script grader below
+# receives the SAME variable, so the check follows the input.
+input:
+  params: {WORD: READY}
+
+# `$JAATO_EVAL_PYTHON` rather than `python`: `run` inherits the engine's
+# PATH and nothing else, and the interpreter jaato-eval runs under is the
+# one that has `jaato_sdk` — which a driver needs and `python` on this
+# host may not be.  Written as `python driver.py`, this probe recorded
+# `exit 127, /bin/sh: 1: python: not found` on a venv install.
+harness:
+  kind: driver
+  run: '"$JAATO_EVAL_PYTHON" driver.py'
+
+# A pool, so the driver's sessions draw on it: the daemon applies a cid's
+# pool to every session stamped with it, and the contract's cascade id IS
+# this pool's cid.  Two arms of this task running concurrently share it,
+# which is why the engine attributes sessions by the record in each arm's
+# own workspace rather than by the event stream (see jaato_eval/driver.py).
+budget:
+  usd: 0.10
+  seconds: 600
+  degrade:
+    - at: 100%
+      action: abort
+
+# Two graders, because a driver arm's scorer is the other half of the
+# contract (#1127).  The first is a shell one-liner over the tree; the
+# second is `fixture/score.py`, invoked through `$JAATO_EVAL_PYTHON` for
+# the same reason `run` above is — a grader that has to import the package
+# it graded needs the interpreter that has it, and until #1127 that
+# variable was empty here, so the shell ran `""` and the arm BLOCKED at
+# exit 127 with its driver already exited 0.
+graders:
+  - kind: script
+    run: 'test -f answer.txt && grep -qx "$JAATO_EVAL_PARAM_WORD" answer.txt && cmp -s answer.txt echo.txt'
+  - kind: script
+    run: '"$JAATO_EVAL_PYTHON" score.py'
+
+repeats: 2

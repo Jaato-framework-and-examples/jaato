@@ -1,0 +1,25 @@
+$ jaato-scaffold explain oversight   # MARKING GENERATED OUTPUT
+MARKING GENERATED OUTPUT  (Art. 50(2), 50(4))
+  media
+        the model's own audio and images carry `generated_by` on the wire
+        (protocol 1.17): kind, provider, model, session_id, agent_id.  That
+        field travels with the DELIVERY EVENT and stops there -- a client that
+        saves the bytes keeps no record of it
+  files
+        a plugin declaring TRAIT_OUTPUT_MARKER puts the marking in or beside
+        the payload, so it survives leaving jaato.  Installed here:
+        output_marker
+  text
+        NOT marked.  AgentOutputEvent.source attributes it at the event layer
+        (agent / system / permission / user) and that is all; no text
+        watermark ships until the Art. 50(7) code of practice or a harmonised
+        standard names one, because a prefix a client strips is a marking that
+        certifies what it did not find
+  publishing
+        Art. 50(4) -- disclosing that text published to inform the public on
+        matters of public interest was AI-generated -- is a PUBLISHING
+        decision.  The framework cannot see that a transcript was published,
+        and does not attempt to
+
+  `explain oversight <profile> --workspace DIR` shows which of these a
+  named profile has ARMED; `jaato-doctor` prints the exact --stop

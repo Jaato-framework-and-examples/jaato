@@ -119,9 +119,59 @@ test("tool calls stream into a collapsible block and update the plan panel", asy
   await expect(toolBlock).toHaveAttribute("aria-expanded", "false");
 });
 
+test("a notebook cell renders as a cell, not as its <nb-row> tags (#1193)", async ({ page }) => {
+  await openSession(page);
+  await composer(page).fill("run a notebook cell");
+  await composer(page).press("Enter");
+  await expect(page.getByText("The cell raised a ZeroDivisionError.")).toBeVisible();
+  const cell = page.locator("[data-testid=tool-block] .nb-cells");
+  await expect(cell).toBeVisible();
+  await expect(cell.locator(".nb-label")).toHaveText(["In [1]:", "Out [1]:", "Err [1]:"]);
+  await expect(cell.locator('.nb-row[data-nb-type="input"] pre.code-block')).toContainText("1/0");
+  await expect(cell.locator('.nb-row[data-nb-type="error"] pre.nb-out')).toContainText('File "<cell>", line 2');
+  // The reported leak: no wrapper tag reaches the page as text.
+  await expect(page.getByText("<nb-row")).toHaveCount(0);
+  await expect(page.getByText("</nb-row>")).toHaveCount(0);
+});
+
+test("an early-exit notebook error renders as a cell too", async ({ page }) => {
+  await openSession(page);
+  await composer(page).fill("show an early notebook exit");
+  await composer(page).press("Enter");
+  const label = page.locator("[data-testid=tool-block] .nb-label");
+  await expect(label).toHaveText("Err:");
+  await expect(page.locator("[data-testid=tool-block] pre.nb-out")).toHaveText("No code provided");
+  await expect(page.getByText("<nb-row")).toHaveCount(0);
+});
+
 test("the status bar shows the permission default policy the daemon reports", async ({ page }) => {
   await openSession(page);
   await expect(page.getByTestId("permission-status")).toHaveText(/permissions\s+ask/);
+});
+
+test("the permissions plate changes the policy and the readout follows it", async ({ page }) => {
+  // The segment is a CONTROL, so the loop is the thing worth asserting:
+  // click a default, the daemon applies it and re-emits its status, the
+  // bar reads the new one back.  It was broken in the daemon for as long
+  // as the segment existed -- it read a copy of the policy that nothing
+  // updated, so `permissions default deny` left the bar saying `ask` --
+  // and no test here could see it, because the mock was answering in the
+  // shape the daemon was SUPPOSED to and the daemon was not.
+  await openSession(page);
+  await expect(page.getByTestId("permission-status")).toHaveText(/permissions\s+ask/);
+
+  await page.getByTestId("permission-status").click();
+  const plate = page.getByRole("dialog", { name: /permission/i });
+  await expect(plate).toBeVisible();
+  await plate.getByRole("button", { name: /^deny$/i }).click();
+  await expect(page.getByTestId("permission-status")).toHaveText(/permissions\s+deny/);
+
+  // Suspension outranks the default in the rendering because it does in
+  // the daemon: while prompting is suspended no policy is consulted.
+  await page.getByTestId("permission-status").click();
+  await page.getByRole("dialog", { name: /permission/i })
+    .getByRole("button", { name: /until idle/i }).click();
+  await expect(page.getByTestId("permission-status")).toHaveText(/allow\s+\(idle\)/);
 });
 
 test("`session list` prints the daemon's listing; `session attach` completes ids and replays the conversation", async ({ page }) => {
@@ -129,7 +179,10 @@ test("`session list` prints the daemon's listing; `session attach` completes ids
   await composer(page).fill("session list");
   await composer(page).press("Enter");
   await expect(page.getByText("▶ current  ● loaded  ○ on disk")).toBeVisible();
-  await expect(page.getByText(/● 20260916_090000 - fix the budget panel \[anthropic\/claude-sonnet-4\]/)).toBeVisible();
+  // The waiting marker sits between the description and the model, because
+  // #1138 added `awaiting` to the listing precisely so this command answers
+  // "which of these wants me" and not only "which of these exist".
+  await expect(page.getByText(/● 20260916_090000 - fix the budget panel \[waiting: permission\] \[anthropic\/claude-sonnet-4\]/)).toBeVisible();
 
   // Third-level completion: the ids the daemon listed, filtered as you type.
   await composer(page).fill("session attach 2026091");
@@ -194,6 +247,15 @@ test("files panel: hide drops an entry from the view, show-hidden brings it back
   await panel.getByRole("button", { name: "hide hidden" }).click();
   await expect(panel.getByText("~ app.py")).toBeVisible();
 
+  // collapse (the TUI's Left/Right): the arrow folds a directory to one
+  // line that says how many files it holds, and unfolds it again.
+  await panel.getByRole("button", { name: "Collapse src/", exact: true }).click();
+  await expect(panel.getByText("~ app.py")).toHaveCount(0);
+  await expect(panel.getByRole("button", { name: "Expand src/", exact: true })).toHaveAttribute("aria-expanded", "false");
+  await expect(panel.getByRole("button", { name: "Expand src/", exact: true })).toContainText("(1)");
+  await panel.getByRole("button", { name: "Expand src/", exact: true }).click();
+  await expect(panel.getByText("~ app.py")).toBeVisible();
+
   // ignore (the TUI's ``i``): through the daemon, whose answer is the notice.
   await panel.getByRole("button", { name: "Add src/app.py to .gitignore" }).click();
   await expect(panel.getByRole("status")).toHaveText("src/app.py added to .gitignore");
@@ -214,6 +276,22 @@ test("a permission ASK with no prompt content falls back to the tool arguments",
   await expect(page.getByText("Written (you answered")).toBeVisible();
 });
 
+test("the agent tab says what that agent is doing, including a prompt waiting on you", async ({ page }) => {
+  // The glyph is the whole point of a tab you are NOT looking at, and it
+  // is keyed on the daemon's own status vocabulary (active | idle | done |
+  // error | cancelled).  It used to key on four words no daemon emits, so
+  // every tab read "idle" whatever the agent was doing -- and the mock
+  // emitted one of those invented words, which is why this suite was green.
+  await openSession(page);
+  const main = page.getByRole("tab", { name: "main" });
+  await expect(main).toHaveAttribute("title", /idle/);
+  await composer(page).fill("permit");
+  await composer(page).press("Enter");
+  await expect(main).toHaveAttribute("title", /Waiting for you/);
+  await page.getByRole("button", { name: /^yes y$/ }).click();
+  await expect(main).toHaveAttribute("title", /idle/);
+});
+
 test("batch clarification walks its questions and replies once", async ({ page }) => {
   await openSession(page);
   await composer(page).fill("ask");
@@ -224,6 +302,39 @@ test("batch clarification walks its questions and replies once", async ({ page }
   await composer(page).fill("nothing");
   await composer(page).press("Enter");
   await expect(page.locator("p", { hasText: /you chose/ })).toContainText("Svelte 5");
+});
+
+test("long clarification choices wrap inside the plate, not off its edge (#1245)", async ({ page }) => {
+  // Reported with a screenshot: ~300-char choices rendered as one uppercase
+  // non-wrapping line running past the plate, across the transcript and over
+  // the rail.  An unlayered ``.btn { white-space: nowrap; text-transform:
+  // uppercase }`` outranked the button's ``normal-case`` / ``whitespace-normal``
+  // utilities.  Measured, not styled: each choice's box must lie inside the
+  // clarification plate AND inside the transcript column, and the text must
+  // not be uppercase-transformed.
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await openSession(page);
+  await composer(page).fill("ask long");
+  await composer(page).press("Enter");
+  await expect(page.getByText("Which framework should the client use?")).toBeVisible();
+  const plate = page.getByRole("group", { name: "Clarification" });
+  // The plate's footer "cancel" is also a <button>, so filter to the choices.
+  const buttons = plate.getByRole("button").filter({ hasNotText: /^cancel$/ });
+  const count = await buttons.count();
+  expect(count).toBe(3);
+  const plateBox = (await plate.boundingBox())!;
+  const main = (await page.locator("main").boundingBox())!;
+  for (let i = 0; i < count; i++) {
+    const b = buttons.nth(i);
+    const box = (await b.boundingBox())!;
+    // Inside the plate's box (a nowrap line overflows it to the right).
+    expect(box.x).toBeGreaterThanOrEqual(plateBox.x - 1);
+    expect(box.x + box.width).toBeLessThanOrEqual(plateBox.x + plateBox.width + 1);
+    // Inside the transcript column — so it cannot cross onto the rail.
+    expect(box.x + box.width).toBeLessThanOrEqual(main.x + main.width + 1);
+    // The label is body text, not chrome: no uppercase transform.
+    expect(await b.evaluate((el) => getComputedStyle(el).textTransform)).not.toBe("uppercase");
+  }
 });
 
 test("subagents get their own tab", async ({ page }) => {
@@ -346,8 +457,29 @@ test("workspace mode: a configured workspace reopens with its sessions and no pr
   // No sign-in row, no .env talk: the workspace already binds a provider.
   await expect(page.getByText("No provider configured yet?")).toHaveCount(0);
   // Its previous session is offered for resuming, and resuming replays it.
-  await page.getByRole("button", { name: "Resume session 20260916_090000" }).click();
+  // Targeted by ROLE: the chip carried `btn btn-steel` styling as a plain
+  // span for two releases, so it looked like this control and was not one.
+  await page.getByRole("button", { name: "Attach session 20260916_090000" }).click();
   await expect(page.getByText("The panel reads function_calls as a number; it is a list of records.")).toBeVisible();
+});
+
+test("workspace mode: the session picker goes back to the workspace list", async ({ page }) => {
+  // Reported from a deployed client: a workspace opened by mistake could
+  // only be left by ending a session or leaving the daemon, because
+  // WorkspaceScreen routes forward and nothing routed back.
+  await page.goto("/");
+  await page.getByPlaceholder("ws://host:8080").fill("ws://127.0.0.1:8098");
+  await page.getByRole("button", { name: "Connect" }).click();
+  await page.getByRole("button", { name: "Open workspace project-a" }).click();
+  await expect(page.getByTestId("session-picker")).toBeVisible();
+
+  await page.getByRole("button", { name: "Workspaces" }).click();
+
+  // The list, with both workspaces still there — going back selects nothing
+  // and destroys nothing, so the other one is one click away.
+  await expect(page.getByRole("button", { name: "Open workspace project-a" })).toBeVisible();
+  await page.getByRole("button", { name: "Open workspace project-b" }).click();
+  await expect(page.getByTestId("session-picker")).toBeVisible();
 });
 
 test("workspace mode: a workspace is deleted after confirmation, and a refusal is shown", async ({ page }) => {
@@ -526,7 +658,7 @@ test("with a turn in flight the question offers Cancel task and exit first, and 
   await openSession(page);
   await composer(page).fill("hang");
   await composer(page).press("Enter");
-  await expect(page.getByText("Agent working")).toBeVisible();
+  await expect(page.getByRole("status")).toContainText("Thinking");
   await page.getByRole("button", { name: EXIT }).click();
   const plate = page.getByRole("group", { name: "Exit options" });
   await expect(plate.getByText("Task in progress")).toBeVisible();
@@ -559,6 +691,121 @@ test("End session on a single-workspace daemon disconnects like Detach", async (
   await composer(page).fill("e");
   await composer(page).press("Enter");
   await expect(page.getByRole("button", { name: "Connect" })).toBeVisible();
+});
+
+test("a new session starts on an empty pane", async ({ page }) => {
+  await openSession(page);
+  await composer(page).fill("fail");
+  await composer(page).press("Enter");
+  await expect(page.getByText("The command failed; see the tool block.")).toBeVisible();
+  // Leave and open another one.  What the session just left said must not
+  // become the top of the next one's transcript: the errors of a failed
+  // attempt above a "Session created" line read as the new session's own.
+  await page.getByRole("button", { name: EXIT }).click();
+  await page.getByRole("group", { name: "Exit options" }).getByRole("button", { name: /Detach/ }).click();
+  await page.getByRole("button", { name: "Connect" }).click();
+  // The picker, not the transcript of the session just detached from: the
+  // connection that held it is gone, so this client holds no session.
+  await expect(page.getByTestId("session-picker")).toBeVisible();
+  await expect(page.getByText("The command failed; see the tool block.")).toHaveCount(0);
+  await page.getByRole("button", { name: /default/ }).click();
+  await expect(page.getByText("Connected to the mock daemon")).toBeVisible();
+  await expect(page.getByRole("button", { name: /run_command/ })).toHaveCount(0);
+});
+
+test("a reconnect re-selects the workspace, so a file attached after it still lands", async ({ page }) => {
+  await page.goto("/");
+  await page.getByPlaceholder("ws://host:8080").fill(WS_WORKSPACES);
+  await page.getByRole("button", { name: "Connect" }).click();
+  await page.getByRole("button", { name: "Open workspace project-a" }).click();
+  await page.getByRole("button", { name: /default/ }).click();
+  await expect(page.getByText("Connected to the mock daemon")).toBeVisible();
+  // The socket drops.  The daemon forgets this connection's workspace and
+  // detaches its session; the SDK reconnects as a new client, and the store
+  // still names both -- which is what used to refuse the next staged file
+  // with ``No workspace selected for client …``.
+  await composer(page).fill("mock-drop");
+  await composer(page).press("Enter");
+  await expect(page.getByText("Dropping the connection.")).toBeVisible();
+  await expect(page.getByText(/^reconnecting/)).toBeVisible();
+  await expect(page.getByText("connected", { exact: true })).toBeVisible();
+  await page.getByLabel("Attach files").setInputFiles([{ name: "after.txt", mimeType: "text/plain", buffer: Buffer.from("x") }]);
+  await expect(page.getByText("Staged into the workspace: after.txt")).toBeVisible();
+});
+
+test("the Files panel's reset shows only later changes, and survives a reconnect (#1189)", async ({ page }) => {
+  await openSession(page);
+  await composer(page).fill("please touch old.py kept.py");
+  await composer(page).press("Enter");
+  await expect(page.getByText("Touched old.py, kept.py.")).toBeVisible();
+  await page.getByRole("button", { name: "Toggle workspace changes (Alt+W)" }).click();
+  const panel = page.getByRole("region", { name: "Files" });
+  await expect(panel.getByText("~ old.py")).toBeVisible();
+
+  await panel.getByRole("button", { name: "reset", exact: true }).click();
+  await expect(panel.getByText("No files changed since the reset.")).toBeVisible();
+
+  // kept.py was already listed: touching it again is what the reset is for.
+  await composer(page).fill("please touch kept.py new.py");
+  await composer(page).press("Enter");
+  await expect(page.getByText("Touched kept.py, new.py.")).toBeVisible();
+  await expect(panel.getByText("~ kept.py")).toBeVisible();
+  await expect(panel.getByText("~ new.py")).toBeVisible();
+  await expect(panel.getByText("~ old.py")).toHaveCount(0);
+
+  // The reconnect's snapshot replaces the list wholesale; the numbering on
+  // it is what lets the reset survive.
+  await composer(page).fill("mock-drop");
+  await composer(page).press("Enter");
+  await expect(page.getByText(/^reconnecting/)).toBeVisible();
+  await expect(page.getByText("connected", { exact: true })).toBeVisible();
+  await expect(panel.getByText("~ new.py")).toBeVisible();
+  await expect(panel.getByText("~ old.py")).toHaveCount(0);
+
+  await panel.getByRole("button", { name: "show everything" }).click();
+  await expect(panel.getByText("~ old.py")).toBeVisible();
+});
+
+test("a hashed category id in a tool call is shown by its name", async ({ page }) => {
+  await openSession(page);
+  await composer(page).fill("please discover tools");
+  await composer(page).press("Enter");
+  await expect(page.getByText("I have a system category.")).toBeVisible();
+  const row = page.getByRole("button", { name: /list_tools/ });
+  // The mapping arrived after the call: the row resolves when it does.
+  await expect(row).toContainText("category_id=system");
+  await expect(row).not.toContainText("c_bbc5e661");
+});
+
+test("the Instructions panel says when GC last ran, what it freed, and the policy -- to a tab that attached later too (#1190)", async ({ page }) => {
+  await openSession(page);
+  await composer(page).fill("please collect garbage");
+  await composer(page).press("Enter");
+  await expect(page.getByText("Collected.")).toBeVisible();
+  const budgetToggle = page.getByRole("button", { name: /Open Budget/ });
+  if (await budgetToggle.count()) await budgetToggle.click();
+  const gc = page.getByTestId("gc-summary");
+  // The mock stamps the pass 12 minutes in the past: the panel must show
+  // the pass's own time, not the moment the event arrived.
+  await expect(gc).toContainText("last GC 12 min ago · freed 14.2k tokens");
+  await expect(gc).toContainText("GC: budget · runs at 80% · down to 60%");
+
+  // A second tab attaching to the same session never saw the pass.  Only
+  // the daemon's replay can tell it -- a reconnect of THIS tab would not
+  // prove that, since it keeps what the tab already knew.
+  const sessionId = await page.locator("span[title]").filter({ hasText: /^session / }).first().getAttribute("title");
+  expect(sessionId).toBeTruthy();
+  const other = await page.context().newPage();
+  await other.goto("/");
+  await other.getByPlaceholder("ws://host:8080").fill(WS);
+  await other.getByRole("button", { name: "Connect" }).click();
+  await other.getByRole("button", { name: "Go to the prompt without a session" }).click();
+  await composer(other).fill(`session attach ${sessionId}`);
+  await composer(other).press("Enter");
+  const otherToggle = other.getByRole("button", { name: /Open Budget/ });
+  if (await otherToggle.count()) await otherToggle.click();
+  await expect(other.getByTestId("gc-summary")).toContainText("last GC 12 min ago · freed 14.2k tokens");
+  await expect(other.getByTestId("gc-summary")).toContainText("GC: budget");
 });
 
 test("the workspace list says who is signed in and offers the backend's Sign out", async ({ page }) => {
@@ -605,6 +852,54 @@ test("the rail's drag handle resizes it, by pointer and by keyboard", async ({ p
   expect(Math.round((await page.getByRole("complementary", { name: "Session rail" }).boundingBox())!.width)).toBe(404);
 });
 
+test("dragging the boundary between two rail sections moves height between them, and survives a reload (#1244)", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await openSession(page);
+  await page.getByRole("button", { name: "Open Plan" }).click();
+  await page.getByRole("button", { name: "Open Sessions" }).click();
+
+  const plan = page.getByRole("region", { name: "Plan" });
+  const sessions = page.getByRole("region", { name: "Sessions" });
+  const rail = page.locator("[data-rail]");
+  const handle = page.getByRole("separator", { name: "Resize between Plan and Sessions" });
+
+  const planBefore = (await plan.boundingBox())!;
+  const sessionsBefore = (await sessions.boundingBox())!;
+
+  // Measured from the page, not from styles.  Drag the boundary UP, so Plan
+  // shrinks and Sessions grows by the same amount.
+  const hb = (await handle.boundingBox())!;
+  await page.mouse.move(hb.x + hb.width / 2, hb.y + hb.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(hb.x + hb.width / 2, hb.y + hb.height / 2 - 120, { steps: 6 });
+  await page.mouse.up();
+
+  const planAfter = (await plan.boundingBox())!;
+  const sessionsAfter = (await sessions.boundingBox())!;
+  expect(planAfter.height).toBeLessThan(planBefore.height - 40);
+  expect(sessionsAfter.height).toBeGreaterThan(sessionsBefore.height + 40);
+  // Split-pane: what one loses the other gains.
+  const shrank = planBefore.height - planAfter.height;
+  const grew = sessionsAfter.height - sessionsBefore.height;
+  expect(Math.abs(shrank - grew)).toBeLessThan(2);
+
+  // The rail as a whole does not scroll: the open sections divide its height.
+  expect(await rail.evaluate((el) => el.scrollHeight - el.clientHeight)).toBeLessThanOrEqual(1);
+
+  // Remembered per browser: reload, reopen the two sections, the proportion holds.
+  const ratio = planAfter.height / sessionsAfter.height;
+  await page.reload();
+  await page.getByPlaceholder("ws://host:8080").fill("ws://127.0.0.1:8097");
+  await page.getByRole("button", { name: "Connect" }).click();
+  await page.getByRole("button", { name: /default/ }).click();
+  await expect(page.getByText("Connected to the mock daemon")).toBeVisible();
+  await page.getByRole("button", { name: "Open Plan" }).click();
+  await page.getByRole("button", { name: "Open Sessions" }).click();
+  const planReload = (await page.getByRole("region", { name: "Plan" }).boundingBox())!;
+  const sessionsReload = (await page.getByRole("region", { name: "Sessions" }).boundingBox())!;
+  expect(planReload.height / sessionsReload.height).toBeCloseTo(ratio, 1);
+});
+
 test("files attached in the composer are staged into the workspace, listed in Files, and named by the next message", async ({ page }) => {
   await openSession(page);
   // A pick through the strip's hidden input (a drop or a paste reach the same call).
@@ -643,6 +938,18 @@ test("a file refused by the daemon shows the daemon's reason on its chip", async
   await expect(page.getByText(/Attached files, staged/)).toHaveCount(0);
 });
 
+// The reported PDF: 1.4 MB.  Before the daemon set a message limit,
+// ``websockets`` applied 1 MiB and closed the connection on this file's
+// binary frame, and the chip spun for two minutes.  The mock enforces and
+// advertises the daemon's limit, so this stages or fails loudly.
+test("a file over 1 MiB stages instead of hanging", async ({ page }) => {
+  await openSession(page);
+  await page.getByLabel("Attach files").setInputFiles([{ name: "report.pdf", mimeType: "application/pdf", buffer: Buffer.alloc(1_400_000, 7) }]);
+  const strip = page.getByRole("group", { name: "Attached files" });
+  await expect(strip.locator("li[data-status=staged]")).toHaveCount(1);
+  await expect(page.getByText("Staged into the workspace: report.pdf")).toBeVisible();
+});
+
 test("files attached on the session picker are in the workspace when the session opens", async ({ page }) => {
   await page.goto("/");
   await page.getByPlaceholder("ws://host:8080").fill(WS);
@@ -657,4 +964,222 @@ test("files attached on the session picker are in the workspace when the session
   await expect(page.getByText("Staged into the workspace: brief.txt")).toBeVisible();
   await page.getByRole("button", { name: "Toggle workspace changes (Alt+W)" }).click();
   await expect(page.getByRole("region", { name: "Files" }).getByText("+ brief.txt")).toBeVisible();
+});
+
+test("an attached file does not follow you into another session (#1250)", async ({ page }) => {
+  // The reported bug: uploads were one flat global list, so a file attached
+  // in session A sat above session B's composer too.  They are scoped to the
+  // session now, so switching away hides them.
+  await openSession(page);
+  await page.getByLabel("Attach files").setInputFiles([
+    { name: "switchme.txt", mimeType: "text/plain", buffer: Buffer.from("mine only") },
+  ]);
+  const strip = page.getByRole("group", { name: "Attached files" });
+  await expect(strip.getByText("switchme.txt")).toBeVisible();
+  await expect(strip.locator("li[data-status=staged]")).toHaveCount(1);
+
+  // Switch to an unrelated session: the file belongs to the one it was
+  // attached in, so the strip in this one does not show it.
+  await composer(page).fill("session attach 20260916_090000");
+  await composer(page).press("Enter");
+  await expect(page.getByText("switchme.txt")).toHaveCount(0);
+});
+
+test("a note written on the exit plate survives Escape, is kept, and is the rail's copy too", async ({ page }) => {
+  // The whole loop in a real browser, with no BFF -- which is the shape a
+  // local `npx @jaato/web-coder-ui` has, so the store behind it is this
+  // browser's and the UI has to SAY so rather than imply a shared one.
+  await openSession(page);
+  await page.getByRole("button", { name: EXIT }).click();
+  const plate = page.getByRole("group", { name: "Exit options" });
+  const field = plate.getByLabel("Note to self");
+  await field.fill("waiting on the grace period answer, then re-run e2e");
+  // Escape inside the field leaves the field, never the session: it used to
+  // answer `r` unconditionally and take the half-typed note with it.
+  await field.press("Escape");
+  await expect(plate).toBeVisible();
+  await expect(field).toHaveValue(/grace period/);
+  await plate.getByRole("button", { name: /Return/ }).click();
+  await expect(plate).toHaveCount(0);
+
+  // Same note, read from the rail -- one store, four mount points.
+  await page.getByRole("button", { name: "Toggle your sessions and their notes" }).click();
+  const rail = page.getByRole("region", { name: "Sessions" });
+  await expect(rail.getByLabel("This session")).toHaveValue(/grace period/);
+  await expect(rail.getByText("Notes are kept in this browser only", { exact: false })).toBeVisible();
+});
+
+test("a session blocked on a person says so in the rail, from another session", async ({ page }) => {
+  // The one fact the rail exists for that a note cannot supply: prompt
+  // events reach only that session's attached clients, so working in one
+  // session is exactly when you cannot otherwise learn another wants you.
+  await openSession(page);
+  await page.getByRole("button", { name: "Toggle your sessions and their notes" }).click();
+  const rail = page.getByRole("region", { name: "Sessions" });
+  await expect(rail.getByText(/waiting 4 min: permission/)).toBeVisible();
+  // And the header counts what needs a person ahead of what carries a note.
+  await expect(page.getByText("1 waiting on you")).toBeVisible();
+});
+
+test("deleting a session forgets the note written about it", async ({ page }) => {
+  // The reported state: the rail offered `✎ …` under a session its owner
+  // had deleted.  A note is keyed by session id and stored where the daemon
+  // cannot see it, so nothing removed one when its session went away.
+  await openSession(page);
+  await page.getByRole("button", { name: "Toggle your sessions and their notes" }).click();
+  const rail = page.getByRole("region", { name: "Sessions" });
+
+  const row = rail.getByRole("button", { name: "Edit your note about session 20260915_170000" });
+  await row.click();
+  await rail.getByRole("textbox", { name: "Note about session 20260915_170000" }).fill("ask about the grace period");
+  await expect(rail.getByText("✎ ask about the grace period")).toBeVisible();
+
+  // The OTHER delete route -- the one that had no forget at all.
+  await composer(page).fill("session delete 20260915_170000");
+  await composer(page).press("Enter");
+
+  // The row goes because the daemon really removed the record, and the
+  // listing is re-asked; that is the refresh, not the forget.
+  await expect(rail.getByText("20260915_170000")).toHaveCount(0);
+
+  // The forget is asserted in the STORE, because the row disappearing takes
+  // the note's line with it whether or not anything forgot anything -- a
+  // first draft of this case passed with the forget deleted.  Without a BFF
+  // the store is this browser's ``localStorage``, which outlives the row.
+  await expect
+    .poll(() => page.evaluate(() => localStorage.getItem("jaato.web-coder.notes.v1") ?? ""))
+    .not.toContain("grace period");
+});
+
+test("the live tool-output popup floats inside the transcript, not off its edge", async ({ page }) => {
+  // Reported with a screenshot of the CLI's popup cut off on the left.  An
+  // unlayered ``.plate { position: relative }`` outranked Tailwind's
+  // ``absolute``, so the popup sat in normal flow and ``right-5`` pushed it
+  // off the left edge.  Measured, not styled: the box must lie inside the
+  // transcript column and above the composer.
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await openSession(page);
+  await composer(page).fill("live");
+  await composer(page).press("Enter");
+  const popup = page.getByRole("dialog", { name: "Live tool output" });
+  await expect(popup).toContainText("src/slow.test.ts");
+  const box = (await popup.boundingBox())!;
+  const main = (await page.locator("main").boundingBox())!;
+  const input = (await composer(page).boundingBox())!;
+  expect(box.x).toBeGreaterThanOrEqual(main.x);
+  expect(box.x + box.width).toBeLessThanOrEqual(main.x + main.width);
+  expect(box.y).toBeGreaterThanOrEqual(main.y);
+  expect(box.y + box.height).toBeLessThanOrEqual(input.y);
+  // Anchored to the right, as the design draws it -- in flow it hugs the left.
+  expect(main.x + main.width - (box.x + box.width)).toBeLessThan(40);
+});
+
+test("the command proposals float above the composer instead of pushing the layout", async ({ page }) => {
+  // The same unlayered rule cancelled this list's ``absolute bottom-full``:
+  // it was laid out in flow, so the composer's strip grew upward and the
+  // transcript shrank by the list's height every time a proposal appeared.
+  // The input itself does not move (it is pinned to the bottom), which is
+  // why the strip's TOP is what is measured.
+  await openSession(page);
+  const strip = page.locator("main > div.border-t");
+  const before = (await strip.boundingBox())!;
+  await composer(page).fill("mo");
+  const listbox = page.getByRole("listbox", { name: "Command proposals" });
+  await expect(listbox).toBeVisible();
+  const list = (await listbox.boundingBox())!;
+  const after = (await strip.boundingBox())!;
+  expect(after.y).toBe(before.y);
+  expect(list.y + list.height).toBeLessThanOrEqual((await composer(page).boundingBox())!.y);
+});
+
+test("a file in the Files panel downloads when its name is clicked (protocol 1.20)", async ({ page }) => {
+  await openSession(page);
+  await composer(page).fill("please touch out/report.txt");
+  await composer(page).press("Enter");
+  await expect(page.getByText("Touched out/report.txt.")).toBeVisible();
+  await page.getByRole("button", { name: "Toggle workspace changes (Alt+W)" }).click();
+  const panel = page.getByRole("region", { name: "Files" });
+  const downloading = page.waitForEvent("download");
+  await panel.getByRole("button", { name: "Download out/report.txt", exact: true }).click();
+  const download = await downloading;
+  expect(download.suggestedFilename()).toBe("report.txt");
+  const body = await (await download.createReadStream()).toArray();
+  expect(Buffer.concat(body).toString()).toBe("mock content of out/report.txt\n");
+});
+
+test("the model offers a file with offer_download and the chat draws a button that downloads it", async ({ page }) => {
+  await openSession(page);
+  await composer(page).fill("please offer out/report.txt");
+  await composer(page).press("Enter");
+  await expect(page.getByText("Here it is -- use the button above.")).toBeVisible();
+  const chip = page.getByTestId("tool-block").getByRole("button", { name: "Download out/report.txt", exact: true });
+  const downloading = page.waitForEvent("download");
+  await chip.click();
+  const download = await downloading;
+  expect(download.suggestedFilename()).toBe("report.txt");
+
+  // A file that must not leave is refused to the MODEL, and no button is drawn.
+  await composer(page).fill("please offer .env");
+  await composer(page).press("Enter");
+  await expect(page.getByText("I could not offer it: .env: holds credentials")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Download .env", exact: true })).toHaveCount(0);
+});
+
+test("the jaato-sdk skill is bootstrapped into the workspace on session start (#1263)", async ({ page }) => {
+  // On session start the client asks the daemon to run
+  // ``jaato-scaffold integration claude-code --refresh`` into its
+  // workspace; the daemon writes the skill and its monitor reports the
+  // files, so the Files panel lists ``.claude/skills/jaato-sdk/SKILL.md``
+  // and the notice names the version the copy was stamped with.
+  await openSession(page);
+  await page.getByRole("button", { name: "Toggle workspace changes (Alt+W)" }).click();
+  const panel = page.getByRole("region", { name: "Files" });
+  await expect(
+    panel.getByRole("button", { name: "Download .claude/skills/jaato-sdk/SKILL.md", exact: true }),
+  ).toBeVisible();
+  await expect(page.getByText(/claude-code skill installed \(jaato-server mock-0\.0\.1\)/)).toBeVisible();
+});
+
+test("memories rail lists the store, re-lists on a store_memory, and approves and removes (#1232)", async ({ page }) => {
+  await openSession(page);
+  await page.getByRole("button", { name: "Toggle the session's memories" }).click();
+  const panel = page.getByRole("region", { name: "Memories" });
+
+  // The seeded store: one raw (unvetted), two approved, one of them global.
+  await expect(panel.getByTestId("memory-row")).toHaveCount(3);
+  await expect(page.getByRole("button", { name: "Close Memories" })).toContainText("3 memories · 1 unvetted");
+  const raw = panel.locator('[data-memory-id="mem_raw_1"]');
+  await expect(raw).toContainText("unvetted");
+  await expect(panel.locator('[data-memory-id="mem_global_1"]')).toContainText("global");
+
+  // Nothing is printed into the transcript: the verbs are quiet.
+  await expect(page.getByText("mock: executed memory")).toHaveCount(0);
+
+  // Expanding fetches the content the list does not carry.
+  await raw.getByRole("button", { name: /^Show memory/ }).click();
+  await expect(raw.getByTestId("memory-content")).toHaveText("Run pnpm install; npm install breaks the lockfile.");
+
+  // A successful store_memory in the conversation re-lists, and the new
+  // memory says it was written here.
+  await composer(page).fill("please remember the api is versioned");
+  await composer(page).press("Enter");
+  await expect(panel.getByTestId("memory-row")).toHaveCount(4);
+  await expect(panel.getByText("written in this session")).toBeVisible();
+  await expect(panel.getByText("used in this session")).toBeVisible();
+  // The filter keeps what was written OR retrieved here: the new memory,
+  // and the seeded one this session's retrieval surfaced.
+  await panel.getByRole("checkbox", { name: /This session only/ }).check();
+  await expect(panel.getByTestId("memory-row")).toHaveCount(2);
+  await panel.getByRole("checkbox", { name: /This session only/ }).uncheck();
+
+  // Approve: the unvetted marker goes, and the daemon's store is re-read.
+  await raw.getByRole("button", { name: /^Approve memory/ }).click();
+  await expect(panel.getByRole("status")).toHaveText("Approved.");
+  await expect(raw).not.toContainText("unvetted");
+
+  // Remove is two steps.
+  await raw.getByRole("button", { name: /^Remove memory/ }).click();
+  await raw.getByRole("button", { name: /^Confirm remove memory/ }).click();
+  await expect(panel.getByRole("status")).toHaveText("Removed.");
+  await expect(panel.locator('[data-memory-id="mem_raw_1"]')).toHaveCount(0);
 });

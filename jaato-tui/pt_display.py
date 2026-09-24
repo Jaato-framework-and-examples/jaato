@@ -3476,7 +3476,12 @@ class PTDisplay:
             self._plan_panel.update_plan(plan_data)
         self.refresh()
 
-    def update_workspace_files(self, changes: List[Dict[str, str]]) -> None:
+    def update_workspace_files(
+        self,
+        changes: List[Dict[str, str]],
+        seq: Optional[int] = None,
+        epoch: Optional[str] = None,
+    ) -> None:
         """Apply incremental workspace file changes.
 
         Called by the event handler when a ``WorkspaceFilesChangedEvent``
@@ -3484,11 +3489,19 @@ class PTDisplay:
 
         Args:
             changes: List of ``{"path": str, "status": str}`` dicts.
+            seq: The batch's number (protocol 1.19+, #1189).
+            epoch: The monitor instance that numbered it.
         """
-        self._workspace_panel.apply_changes(changes)
+        self._workspace_panel.apply_changes(changes, seq=seq, epoch=epoch)
         self.refresh()
 
-    def set_workspace_snapshot(self, files: List[Dict[str, str]]) -> None:
+    def set_workspace_snapshot(
+        self,
+        files: List[Dict[str, str]],
+        seq: Optional[int] = None,
+        epoch: Optional[str] = None,
+        seqs: Optional[Dict[str, int]] = None,
+    ) -> None:
         """Replace workspace file state from a snapshot event.
 
         Called by the event handler when a ``WorkspaceFilesSnapshotEvent``
@@ -3496,8 +3509,10 @@ class PTDisplay:
 
         Args:
             files: List of ``{"path": str, "status": str}`` dicts.
+            seq, epoch, seqs: The daemon's change numbering (protocol 1.19+,
+                #1189), which lets a cleared panel stay cleared.
         """
-        self._workspace_panel.apply_snapshot(files)
+        self._workspace_panel.apply_snapshot(files, seq=seq, epoch=epoch, seqs=seqs)
         self.refresh()
 
     def clear_plan(self, agent_id: Optional[str] = None) -> None:

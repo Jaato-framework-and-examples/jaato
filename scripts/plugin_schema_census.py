@@ -90,7 +90,7 @@ def framework_injected_keys() -> List[str]:
     over-report — so :func:`render` states the count rather than assuming it,
     and a zero here against a non-empty tree is visible in the output.
     """
-    src = _ROOT / "jaato-server" / "shared" / "plugins" / "registry.py"
+    src = _ROOT / "jaato-server" / "jaato_server" / "shared" / "plugins" / "registry.py"
     try:
         tree = ast.parse(src.read_text(encoding="utf-8"))
     except (OSError, SyntaxError):
@@ -120,7 +120,7 @@ def _declared_names(settings) -> set:
 
 def census() -> Dict[str, Any]:
     """``{framework_keys, plugins: [...], totals}`` over every in-tree plugin."""
-    from shared.scaffold import introspect
+    from jaato_server.shared.scaffold import introspect
 
     injected = framework_injected_keys()
     plugins = introspect.plugins()

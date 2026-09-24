@@ -7,8 +7,10 @@
  * and the permission default -- with a count of prompts waiting, since a
  * waiting prompt is the one thing worth reading off the foot of the page.
  */
+import { useRef, useState } from "react";
 import { requestExit } from "@/app/exitChoice";
 import { BUILD, buildLine } from "@/app/buildInfo";
+import { PermissionsPlate } from "@/components/prompts/PermissionsPlate";
 import { useJaato } from "@/store/store";
 
 export function StatusBar() {
@@ -19,15 +21,29 @@ export function StatusBar() {
   const toggle = useJaato((s) => s.toggleUi);
   const setToolsExpanded = useJaato((s) => s.setToolsExpanded);
   const ui = useJaato((s) => s.ui);
+  const [perms, setPerms] = useState(false);
+  const permsBtn = useRef<HTMLButtonElement>(null);
   const dotCls = conn.phase === "connected" ? "bg-success" : conn.phase === "reconnecting" || conn.phase === "connecting" ? "bg-warning pulse" : "bg-error";
   const tab = (on: boolean) => `chrome-sm font-heading font-medium uppercase tracking-[0.12em] ${on ? "text-steel" : "text-text-muted hover:text-steel"}`;
   return (
-    <div className="flex items-center gap-4 px-4 h-[26px] text-[11px] bg-surface border-t hairline font-mono text-text-muted select-none shrink-0">
+    <div className="relative flex items-center gap-4 px-4 h-[26px] text-[11px] bg-surface border-t hairline font-mono text-text-muted select-none shrink-0">
       <span className="flex items-center gap-1.5 text-text"><span className={`inline-block w-1.5 h-1.5 ${dotCls}`} />{conn.phase}{conn.attempt ? ` #${conn.attempt}` : ""}</span>
       <span title={buildLine()}>{conn.serverVersion ? `server ${conn.serverVersion} · ` : ""}ui {BUILD.ui}</span>
       {sessionId && <span title={sessionId}>session {sessionId.slice(0, 8)}</span>}
+      {/* Reporting the policy and being able to change it used to be in
+          different places, and only the reading was on screen.  The
+          segment keeps its wording and becomes the control. */}
       {permStatus && (
-        <span title="Permission default policy (permissions default allow|deny|ask)" data-testid="permission-status" className={waiting ? "text-warning" : ""}>
+        <button
+          ref={permsBtn}
+          type="button"
+          onClick={() => setPerms((o) => !o)}
+          aria-expanded={perms}
+          aria-haspopup="dialog"
+          title="Session permissions — click to change the default, suspend prompting, or show the policy"
+          data-testid="permission-status"
+          className={`font-mono hover:text-steel ${waiting ? "text-warning" : ""}`}
+        >
           <span>permissions </span>
           {permStatus.suspensionScope ? (
             <span className="text-success">allow <span className="text-text-muted">({permStatus.suspensionScope})</span></span>
@@ -35,12 +51,17 @@ export function StatusBar() {
             <span className={waiting ? "" : permStatus.effectiveDefault === "deny" ? "text-warning" : permStatus.effectiveDefault === "allow" ? "text-success" : "text-text"}>{permStatus.effectiveDefault}</span>
           )}
           {waiting > 0 && <span> · {waiting} waiting</span>}
-        </span>
+        </button>
       )}
+      {perms && <PermissionsPlate onClose={() => setPerms(false)} anchor={permsBtn} />}
       <span className="flex-1" />
       <button type="button" onClick={() => toggle("showPlan")} className={tab(ui.showPlan)} title="Toggle plan (Ctrl+P)" aria-label="Toggle plan (Ctrl+P)">Plan</button>
       <button type="button" onClick={() => toggle("showBudget")} className={tab(ui.showBudget)} title="Toggle budget (Ctrl+B)" aria-label="Toggle budget (Ctrl+B)">Budget</button>
       <button type="button" onClick={() => toggle("showWorkspace")} className={tab(ui.showWorkspace)} title="Toggle workspace changes (Alt+W)" aria-label="Toggle workspace changes (Alt+W)">Files</button>
+      {/* No shortcut letter: Ctrl+P/T/R/F/G/W are spoken for, and the free
+          set should be checked rather than guessed. */}
+      <button type="button" onClick={() => toggle("showSessions")} className={tab(ui.showSessions)} title="Toggle your sessions and their notes" aria-label="Toggle your sessions and their notes">Sessions</button>
+      <button type="button" onClick={() => toggle("showMemories")} className={tab(ui.showMemories)} title="Toggle the session's memories" aria-label="Toggle the session's memories">Memories</button>
       <button type="button" onClick={() => setToolsExpanded(!ui.showTools)} className={tab(ui.showTools)} title={ui.showTools ? "Tool call boxes expanded — click to collapse them (Ctrl+T)" : "Tool call boxes collapsed — click to expand them (Ctrl+T)"} aria-label="Toggle tool call boxes (Ctrl+T)">Tools</button>
       {/* The ``exit`` command as a button: asks what becomes of the session -- detach, end, or cancel the task -- before leaving. */}
       <button type="button" onClick={() => { requestExit().catch(() => undefined); }} className={`${tab(false)} hover:text-error`} title="Leave: detach from the session, or end it (the exit command)" aria-label="Exit (detach from or end the session)">Exit</button>

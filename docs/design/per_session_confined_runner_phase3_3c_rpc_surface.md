@@ -22,7 +22,7 @@ first migration touches `self._jaato`.
 
 ## 2. Runner-side handlers
 
-All handlers live in `jaato-server/server/runner/rpc.py`,
+All handlers live in `jaato-server/jaato_server/server/runner/rpc.py`,
 dispatched from `RunnerRPC._dispatch_method`.  Each follows the
 same shape:
 
@@ -61,7 +61,7 @@ template).
 ## 3. Daemon-side wrapper contract
 
 All wrappers live in
-`jaato-server/server/runner_rpc_client.py:RunnerRPCClient`.
+`jaato-server/jaato_server/server/runner_rpc_client.py:RunnerRPCClient`.
 
 - Async + threadsafe variants per method.
 - Uses `_call_named(method, args, timeout)` internal helper
@@ -169,12 +169,12 @@ original "~95"):
 
 | File | `self._jaato.X` access count | Notes |
 |---|---|---|
-| `server/core.py` | 50 | Bulk of `_jaato.send_message`, `respond_to_*`, state setters / getters; the seat-flip's main migration target. |
-| `server/websocket.py` | 18 (named `_jaato_server.X`) | WS-standalone direct API.  Same patterns as core but without the daemon-event-emit glue. |
-| `server/command_router.py` | 1 | `session.server._jaato.get_runtime` — single fork-ask call site. |
+| `jaato_server/server/core.py` | 50 | Bulk of `_jaato.send_message`, `respond_to_*`, state setters / getters; the seat-flip's main migration target. |
+| `jaato_server/server/websocket.py` | 18 (named `_jaato_server.X`) | WS-standalone direct API.  Same patterns as core but without the daemon-event-emit glue. |
+| `jaato_server/server/command_router.py` | 1 | `session.server._jaato.get_runtime` — single fork-ask call site. |
 
 Total: **~69 daemon-side dispatch sites**.  Reading wider call
-sites (`server/__main__.py`, plugin-extension hooks) adds ~5 more.
+sites (`jaato_server/server/__main__.py`, plugin-extension hooks) adds ~5 more.
 
 ### 7a. Always-spawn the runner
 
@@ -221,25 +221,25 @@ Open design questions (peer-review M1):
      the seat-flip; those tests stay green.
 
 Files touched:
-- `server/session_manager.py` — split
+- `jaato_server/server/session_manager.py` — split
   `_provision_ipc_apparmor_and_spawn_runner` into
   `_spawn_session_runner_unconditional` (always called) +
   `_provision_apparmor_for_session` (opt-in only).  The IPC
   bootstrap path always invokes the spawn helper; apparmor is
   layered atop iff the client opted in.
-- `server/runner_spawn.py` — already independent; no changes
+- `jaato_server/server/runner_spawn.py` — already independent; no changes
   needed but verify the helper handles the no-apparmor path
   cleanly (the runner's `aa_change_profile` becomes a no-op
   when no profile is attached — should fall through to the
   `JAATO_RUNNER_DISABLE_CONFINE=1` mode, which Phase 2's
   `runner/__main__.py` already supports).
-- `server/websocket.py` — apply the same split for the WS-
+- `jaato_server/server/websocket.py` — apply the same split for the WS-
   standalone bootstrap.
 
 Tests:
 - New `tests/integration/test_runner_always_spawned.py` —
   exercises an IPC `session.new` without apparmor opt-in;
-  asserts `server.runner_rpc is not None` post-init.
+  asserts `jaato_server.server.runner_rpc is not None` post-init.
 - Existing apparmor-opt-in path tests still pass (apparmor is
   layered, not gated).
 - A performance-baseline test recording session-create p95
@@ -321,14 +321,14 @@ The biggest single handler.  Open design questions:
    `JaatoSession.send_message` return).
 
 Files touched:
-- `server/runner/rpc.py` — add `session.send_message` handler;
+- `jaato_server/server/runner/rpc.py` — add `session.send_message` handler;
   reuses the streaming + cancel infrastructure already proven
   for `tool.execute`.
-- `server/runner_rpc_client.py` — async wrapper +
+- `jaato_server/server/runner_rpc_client.py` — async wrapper +
   `session_send_message_threadsafe` (note: long-running, so
   `timeout=None` default with explicit caller-side cancellation
   via the cancel frame).
-- `server/core.py` — migrate `JaatoServer.send_message` to call
+- `jaato_server/server/core.py` — migrate `JaatoServer.send_message` to call
   the wrapper.  This is the LAST big migration before the
   seat-flip's final flag-removal commit.
 
@@ -369,7 +369,7 @@ not internal `_jaato.X` consumers.  They flow client responses
 INTO the daemon's response-queue infrastructure.
 
 The runner-side ASK round-trip already has a working primitive:
-`server/runner_rpc_handlers/prompt_operator.py:PromptOperatorHandler`
+`jaato_server/server/runner_rpc_handlers/prompt_operator.py:PromptOperatorHandler`
 (class at line 58) — the runner emits ASK via `client.prompt_operator`
 RPC, awaits the response as the RPC return value, and the daemon's
 transport layer calls `PromptOperatorHandler.resolve_response()`
@@ -431,9 +431,9 @@ Two threads roll forward into §7c:
 ##### Files touched (this withdrawal)
 
 - This doc — §7b.3 marked WITHDRAWN with the audit-of-record above.
-- `server/runner/rpc.py` — no new handlers added for §7b.3.
-- `server/runner_rpc_client.py` — no new wrappers added for §7b.3.
-- `server/core.py` — no new migrations for §7b.3; affected sites
+- `jaato_server/server/runner/rpc.py` — no new handlers added for §7b.3.
+- `jaato_server/server/runner_rpc_client.py` — no new wrappers added for §7b.3.
+- `jaato_server/server/core.py` — no new migrations for §7b.3; affected sites
   collapse during §7c.
 
 ##### Commit budget
@@ -455,17 +455,17 @@ migrations + the actual field removal) was enumerated:
 
 | Step | Focus | Status |
 |---|---|---|
-| **§7c step 1** | Always-bootstrap the runner-side session (remove `JAATO_RUNNER_HOSTS_SESSION` flag from the IPC spawn path; bootstrap dispatches unconditionally; failure-tolerant). | **Shipped.**  Files: `server/__main__.py`, `server/runner_spawn.py`, `server/runner/__main__.py`, `server/runner/session.py` (doc-comments).  New regression test: `server/tests/test_spawn_session_runner_always_bootstraps.py` (8 tests pinning the unconditional dispatch + failure tolerance + flag-value irrelevance). |
-| **§7c step 2** | WS-side bootstrap parity (WS spawn lacked the bootstrap dispatch; refactored the IPC envelope-build + dispatch into a shared `dispatch_bootstrap_envelope` helper in `server/runner_spawn.py` and wired both IPC + WS callers through it). | **Shipped.**  Files: `server/runner_spawn.py` (new `build_session_envelope` + `dispatch_bootstrap_envelope` helpers — relocated from `__main__.py`), `server/__main__.py` (call-site rewritten through the helper; legacy `_build_session_envelope` re-exported under the old private name for back-compat), `server/websocket.py` (WS hook calls `dispatch_bootstrap_envelope` after `spawn_session_runner`).  New tests: `server/tests/test_dispatch_bootstrap_envelope.py` (4 unit tests pinning happy-path + None-rpc no-op + failure-swallow + timeout-threading), plus 2 new tests in `test_ws_always_spawn_runner.py` covering the WS bootstrap dispatch on confined + unconfined paths. |
+| **§7c step 1** | Always-bootstrap the runner-side session (remove `JAATO_RUNNER_HOSTS_SESSION` flag from the IPC spawn path; bootstrap dispatches unconditionally; failure-tolerant). | **Shipped.**  Files: `jaato_server/server/__main__.py`, `jaato_server/server/runner_spawn.py`, `jaato_server/server/runner/__main__.py`, `jaato_server/server/runner/session.py` (doc-comments).  New regression test: `jaato_server/server/tests/test_spawn_session_runner_always_bootstraps.py` (8 tests pinning the unconditional dispatch + failure tolerance + flag-value irrelevance). |
+| **§7c step 2** | WS-side bootstrap parity (WS spawn lacked the bootstrap dispatch; refactored the IPC envelope-build + dispatch into a shared `dispatch_bootstrap_envelope` helper in `jaato_server/server/runner_spawn.py` and wired both IPC + WS callers through it). | **Shipped.**  Files: `jaato_server/server/runner_spawn.py` (new `build_session_envelope` + `dispatch_bootstrap_envelope` helpers — relocated from `__main__.py`), `jaato_server/server/__main__.py` (call-site rewritten through the helper; legacy `_build_session_envelope` re-exported under the old private name for back-compat), `jaato_server/server/websocket.py` (WS hook calls `dispatch_bootstrap_envelope` after `spawn_session_runner`).  New tests: `jaato_server/server/tests/test_dispatch_bootstrap_envelope.py` (4 unit tests pinning happy-path + None-rpc no-op + failure-swallow + timeout-threading), plus 2 new tests in `test_ws_always_spawn_runner.py` covering the WS bootstrap dispatch on confined + unconfined paths. |
 | **§7c step 3** | INTERNAL + WIRING bucket refactors — replace `_jaato.get_session()._executor` / `set_session_plugin` / `set_gc_plugin` with daemon-side direct accessors or runner-RPC equivalents.  Shrinks `_jaato.X` site count to the DAEMON-only residual.  Decomposed into sub-steps below. | In progress. |
-|     **§7c step 3a** | Encapsulation cleanup — replace daemon-side reaches into private `_jaato._agent_id` / `_jaato._agent_name` attributes with the new public `JaatoClient.set_agent_identity(agent_id, agent_name)` setter. | **Shipped.**  Files: `shared/jaato_client.py` (new `set_agent_identity` method), `server/core.py` (call-site `_setup_agent_hooks` updated).  New tests: 4 in `shared/tests/test_jaato_client.py` (`TestJaatoClientSetAgentIdentity`). |
-|     **§7c step 3b** | Remaining INTERNAL bucket — refactor `_build_tool_id_mappings` (1290) to use the new public `JaatoSession.get_tool_schemas` / `JaatoClient.get_tool_schemas` accessors instead of reading the private `session._tools`.  Other INTERNAL sites (`set_apparmor_confinement`, `set_runtime_limits` — `session._executor` reaches; `set_reference_authorizer` — already public; `send_message`/`_start_model_thread` `get_session()` reads — daemon-tier executor accesses) defer to step 6 when `_jaato` removal forces the rework. | **Shipped.**  Files: `shared/jaato_session.py` (new public `get_tool_schemas`), `shared/jaato_client.py` (forwarding `get_tool_schemas`), `server/core.py` (`_build_tool_id_mappings` updated).  New tests: 3 in `shared/tests/test_jaato_session.py` (`TestGetToolSchemas`) + 2 in `shared/tests/test_jaato_client.py` (`TestJaatoClientGetToolSchemas`). |
+|     **§7c step 3a** | Encapsulation cleanup — replace daemon-side reaches into private `_jaato._agent_id` / `_jaato._agent_name` attributes with the new public `JaatoClient.set_agent_identity(agent_id, agent_name)` setter. | **Shipped.**  Files: `jaato_server/shared/jaato_client.py` (new `set_agent_identity` method), `jaato_server/server/core.py` (call-site `_setup_agent_hooks` updated).  New tests: 4 in `jaato_server/shared/tests/test_jaato_client.py` (`TestJaatoClientSetAgentIdentity`). |
+|     **§7c step 3b** | Remaining INTERNAL bucket — refactor `_build_tool_id_mappings` (1290) to use the new public `JaatoSession.get_tool_schemas` / `JaatoClient.get_tool_schemas` accessors instead of reading the private `session._tools`.  Other INTERNAL sites (`set_apparmor_confinement`, `set_runtime_limits` — `session._executor` reaches; `set_reference_authorizer` — already public; `send_message`/`_start_model_thread` `get_session()` reads — daemon-tier executor accesses) defer to step 6 when `_jaato` removal forces the rework. | **Shipped.**  Files: `jaato_server/shared/jaato_session.py` (new public `get_tool_schemas`), `jaato_server/shared/jaato_client.py` (forwarding `get_tool_schemas`), `jaato_server/server/core.py` (`_build_tool_id_mappings` updated).  New tests: 3 in `jaato_server/shared/tests/test_jaato_session.py` (`TestGetToolSchemas`) + 2 in `jaato_server/shared/tests/test_jaato_client.py` (`TestJaatoClientGetToolSchemas`). |
 |     **§7c step 3c** | WIRING bucket — `set_session_plugin` (2251), `configure_plugins_only` (1765), `configure_tools` (1784, 4113), `set_gc_plugin` (1854, 4122).  **Doc-only clarification:** these sites pass rich Python plugin INSTANCES (GCPlugin, SessionPlugin, registry, permission_plugin) that cannot cross an RPC boundary as-is.  But the runner-side session ALREADY receives the equivalent configuration via the `SessionInitEnvelope` (the `plugins` + `gc` fields), and `bootstrap_session()` → `runtime.create_session()` → `session.configure()` does the runner-side wiring during boot.  So daemon-side WIRING calls today configure the *daemon-side* JaatoClient/JaatoSession; post-step-6 (when the daemon-side session is removed) they collapse into either no-ops or daemon-side runtime configuration that does NOT need a runner-RPC forward.  No active migration in step 3c — the WIRING bucket sunsets alongside step 6's `_jaato`-removal. | **Shipped (clarification).**  No code changes; this row records the architectural decision. |
 | **§7c step 4** | DAEMON bucket migration — split `JaatoClient` so `JaatoRuntime` lives daemon-side under a new `self._runtime` field; convert `_jaato.provider_name` / `_jaato.model_name` / `_jaato.is_connected` / `_jaato.auth_info` / `get_runtime` to direct `self._runtime.X` reads.  Introspection collapse from §7b.3 lands here.  **Step 4 first pass shipped:** added the `self._runtime` field + aliased to `self._jaato.get_runtime()` at connect; migrated all 5 active `get_runtime()` read sites (`set_pre_init_confine_context`, `_get_event_bus`, formatter-pipeline init wiring, `_find_plugin_for_command`, `_get_sandbox_paths`) to read through the new field.  `model_name` / `provider_name` / `auth_info` reads (4 sites at lines 1665-1666, 1990, 4225) batch with step 5 since they need a similar but distinct migration shape (JaatoRuntime exposes `provider_name` natively but `model_name` lives on JaatoClient and `auth_info` reads through the session-tier provider). | First pass shipped (5 sites). |
 | **§7c step 5** | DEFER-§7c read migrations — switch `get_context_usage` / `get_context_limit` reads at `initialize()` + `_check_auth_completion()` to runner-RPC reads. | **Folded into step 6.**  Per the path-A architectural decision: shipping step 5 as a standalone read-source switch creates a transitional window where `_jaato` still exists but reads come from the runner — a coherence/divergence risk for the toolbar.  Step 6 atomically removes `_jaato` and switches all reads simultaneously, eliminating the transitional state.  Pre-step-6 verification: see "Pre-step-6 toolbar-coherence test" below. |
-| **Pre-step-6** | Toolbar-coherence verification — pin the wire-fidelity + determinism invariants the atomic seat-flip relies on.  Catches divergence between daemon-side and runner-side `get_context_usage()` reads BEFORE step 6 lands. | **Shipped.**  File: `server/runner/tests/test_pre_step6_toolbar_coherence.py` (5 tests pinning: 2-instance determinism with equal inputs, negative determinism with different inputs, RPC round-trip preserves dict + int, init-time zero-usage shape preservation across all toolbar-relevant fields). |
+| **Pre-step-6** | Toolbar-coherence verification — pin the wire-fidelity + determinism invariants the atomic seat-flip relies on.  Catches divergence between daemon-side and runner-side `get_context_usage()` reads BEFORE step 6 lands. | **Shipped.**  File: `jaato_server/server/runner/tests/test_pre_step6_toolbar_coherence.py` (5 tests pinning: 2-instance determinism with equal inputs, negative determinism with different inputs, RPC round-trip preserves dict + int, init-time zero-usage shape preservation across all toolbar-relevant fields). |
 | **§7c step 6** | Atomic seat-flip — absorbs the read migrations folded from step 5.  **Pre-implementation audit (post-step-4-first-pass) revised the original 6a/6b/6c shape:** the `_jaato.get_session()` readers — originally classified as a single "INTERNAL refactor" sub-step (6b) — actually have 4 distinct dispositions that each need their own treatment.  Updated decomposition below.  Removes the `JAATO_RUNNER_HOSTS_SESSION` env-var doc references along the way. | Pending. |
-|     **§7c step 6 disposition audit** | Per-`get_session()`-reader disposition table built from the actual call sites in `server/core.py`.  Recorded for the next implementer.  See "Step 6 disposition audit" below. | **Shipped (audit-only).** |
+|     **§7c step 6 disposition audit** | Per-`get_session()`-reader disposition table built from the actual call sites in `jaato_server/server/core.py`.  Recorded for the next implementer.  See "Step 6 disposition audit" below. | **Shipped (audit-only).** |
 |     **§7c step 6.1** | Add 3 new runner-RPC handlers (each §7b.2-scale: handler + daemon-side wrapper + unit + e2e tests): `session.set_reference_authorizer`, `session.snapshot_instruction_budget`, `session.inject_prompt`.  Prerequisites for the daemon-side reader migrations in 6.2. | **All 3 shipped:** (a) `session.set_reference_authorizer` (12 tests; bool flag — ReferenceAuthorizer Python object can't cross RPC, holds daemon-side AppArmorManager reference; runner-side references plugin post-migration reads `JaatoSession.is_reference_authorization_enabled()` + uses the existing `apparmor.add_reference_fragment` runner→daemon RPC §3.2.2 to authorize paths). (b) `session.snapshot_instruction_budget` (11 tests; reads `JaatoSession.instruction_budget.snapshot()` for the daemon's `emit_current_state` site at core.py:1091; returns `{"snapshot": <dict|None>}` with deep-copy isolation; None when budget pre-configure). (c) `session.inject_prompt` (20 tests; for the `execute_command` site at core.py:3238; SourceType enum serialized as its lowercase string value across the wire; runner-side handler maps back to enum; unknown enum values rejected with the valid-list hint to catch typos that would silently misroute message priority).  **Step 6.1 closed — 6.2 unblocked.** |
 |     **§7c step 6.2** | Migrate the **6 straightforward `_jaato.get_session()` readers** per the disposition audit below: 2 deletes (lines 610, 697 — daemon-tier executor reaches), 3 new-RPC forwards (lines 725, 1091, 3238 — using the handlers from 6.1), 1 trivial migration to `self._runtime.event_bus` (line 462).  Self-contained commit — does not depend on the architectural callback decisions in 6.2.5. | **Shipped.**  Per-site disposition: (a) line 462 `event_bus` property — migrated to `self._runtime.event_bus` (mirrors `_get_event_bus` from §7c step 4 first pass).  (b) line 610 `set_apparmor_confinement` — body gutted to no-op (zero live callers in OSS tree; the runner subprocess is process-confined at spawn time, so daemon-side thread-level wiring this method installed had no effect post-§7b.2).  (c) line 697 `set_runtime_limits` — body gutted to no-op (WS still calls it; runner-side gets cgroup attach + limits via env vars at spawn time).  (d) line 725 `set_reference_authorizer` — already write-both since §7c step 6.1 (1/3); daemon-side leg drops naturally with the references-plugin runner-side migration in a separate sub-track.  (e) line 1091 `emit_current_state` instruction_budget read — REPLACED with `session_snapshot_instruction_budget_threadsafe` RPC forward; runner-side becomes source of truth for the snapshot.  (f) line 3238 `inject_prompt` — added write-both: forwards via `session_inject_prompt_threadsafe` RPC AND keeps the daemon-side leg (drops in step 6.3 alongside other write-both daemon legs).  Tests: 600/600 server suite green. |
 |     **§7c step 6.2.5** | Migrate the **3 architectural callback-rewire `get_session()` readers** (lines 1891, 1907, 3273 — `_event_bus_tools` + `instruction_budget` callback wiring + `set_prompt_injected_callback`).  Each gates on runner-side event-bus access plumbing which the Phase 3 plan parked as out-of-scope.  Decoupled from 6.2 so that step's progress doesn't get tied to an architectural decision that may not be ready.  May itself fan out into multiple commits depending on the event-bus plumbing decisions. | Pending. |
@@ -613,12 +613,12 @@ external consumers.  Inventory + per-caller migration target:
 |---|---|---|---|
 | `core.py:3213` | `get_cancel_token` closure | Reads `session._cancel_token` (private) | **Delete** — the legacy in-process cancel-token is dead post-§7b.2.  Cancellation already routes through `_runner_rpc.session_request_stop_threadsafe`. |
 | `core.py:3601` | `signal_completion` filter | Reads `session._tools` (filters for tool name) | **Refactor** to use existing `JaatoClient.get_tool_schemas()` (added §7c step 3b at 7b30c237) OR direct `self.registry.get_exposed_tool_schemas()` walk. |
-| `websocket.py:1481` | event-bus access | Reads `jaato_session._runtime.event_bus` | **Trivial migration** — `event_bus` lives daemon-side per §4.2.  Use `server.event_bus` property (already migrated to `self._runtime.event_bus` in §7c step 6.2). |
+| `websocket.py:1481` | event-bus access | Reads `jaato_session._runtime.event_bus` | **Trivial migration** — `event_bus` lives daemon-side per §4.2.  Use `jaato_server.server.event_bus` property (already migrated to `self._runtime.event_bus` in §7c step 6.2). |
 | `websocket.py:1485` | event-bus access (alternate path) | Same as 1481 | Same migration as 1481 |
 | `session_manager.py:1968` | initial state injection | Calls `jaato_session.set_session_state(key, value)` | **Use existing runner-RPC** — `session.set_session_state` handler shipped pre-§7c precursor.  Daemon-side wrapper: `session_set_session_state_threadsafe`. |
 | `session_manager.py:2130` | initial-history seeding | Calls `jaato_session.set_initial_history(initial_history)` | **NEW runner-RPC needed** — `session.set_initial_history` handler.  Wire shape: list of Message dicts; runner-side reconstructs the Message instances.  ~§7b.2-scale (Messages have provider-specific structure but the JaatoSession.set_initial_history method itself is well-bounded). |
 | `session_manager.py:2185` | cross-session prompt injection | Calls `jaato_session.inject_prompt(text, source_id, source_type)` | **Use existing runner-RPC** — `session.inject_prompt` handler shipped at §7c step 6.1 (3/3) commit 14e57709. |
-| `session_manager.py:2558` | turn_accounting restore | Reads `server._jaato.get_context_usage()` + writes `jaato_session._turn_accounting = list(...)` (private attr assignment) | **NEW runner-RPC needed** — `session.restore_turn_accounting` handler.  Wire shape: list of dicts.  Used during session-restore from disk persistence; ~§7b.2-scale. |
+| `session_manager.py:2558` | turn_accounting restore | Reads `jaato_server.server._jaato.get_context_usage()` + writes `jaato_session._turn_accounting = list(...)` (private attr assignment) | **NEW runner-RPC needed** — `session.restore_turn_accounting` handler.  Wire shape: list of dicts.  Used during session-restore from disk persistence; ~§7b.2-scale. |
 | `session_manager.py:2591` | conversation budget restore | Calls `jaato_session.instruction_budget.restore_conversation_from_snapshot(state.budget_state)` + reads `instruction_budget.snapshot()` | **NEW runner-RPC needed** — `session.restore_conversation_budget` handler.  Mirrors the existing `session.snapshot_instruction_budget` (§7c step 6.1 at 1043bfde) but in the inverse direction.  ~§7b.2-scale. |
 
 **Total: 8 callers; 1 delete, 4 reuse-existing-RPC, 3 NEW runner-RPC handlers needed.**
@@ -632,10 +632,10 @@ Decomposed into 4 sub-commits + 1 standalone pre-6.6 commit
 |---|---|---|
 | **§7c step 6.5** (standalone, pre-6.6) | 4 CLEAN introspection migrations: `model_name` / `provider_name` (lines 1747-1748) + `verify_auth` ×2 (1806, 4234).  Read directly from `self._runtime` instead of `self._jaato.X`. | Existing tests cover; minimal new tests. |
 | **§7c step 6.6.1** | Add 3 new runner-RPC handlers consumed by the external `get_session()` migration in 6.6.3: `session.set_initial_history`, `session.restore_turn_accounting`, `session.restore_conversation_budget`.  **Sub-decomposed per the missing-method finding below.**  Prerequisites for 6.6.3. | See sub-table. |
-| **§7c step 6.6.1.0** | **JaatoSession public-method additions + session_manager private-attr-write migration.**  Two of the proposed RPC handlers don't have underlying public methods — daemon `session_manager.py` reaches into private state (`_turn_accounting` direct assignment + `instruction_budget.restore_conversation_from_snapshot` via the private accessor).  Add public methods on JaatoSession (`restore_turn_accounting(turns)` + `restore_conversation_budget(snapshot)`), migrate session_manager to use them.  Same encapsulation discipline as §7c step 3a (private `_agent_id` reach → `set_agent_identity` public method) + §7c step 3b (private `_tools` read → `get_tool_schemas` public method). | **Shipped.**  5 new tests in `shared/tests/test_jaato_session.py` (`TestRestoreTurnAccounting` + `TestRestoreConversationBudget`).  Tests: 659 passing (was 654). |
-| **§7c step 6.6.1.1** | Add `session.set_initial_history` RPC handler + daemon wrapper + unit + e2e tests.  Underlying method `JaatoSession.set_initial_history` already exists (line 8252).  Per 6.1 trio cadence. | **Shipped.**  13 new tests in `server/runner/tests/test_session_set_initial_history_rpc.py`.  Wire shape: `{"messages": [<dict>, ...]}` reusing the existing `shared.plugins.session.serializer.serialize_history` / `deserialize_history` round-trip the disk-persistence path already exercises.  Tests pin: happy path 2-message round-trip, empty-list seed accepted, provenance-fields (model + provider) preservation across the wire, missing/non-list/malformed-dict args → `stage="decode"`, no_host / setter-raises / missing-method error paths, dispatch routing, e2e wrapper for 3 scenarios. |
-| **§7c step 6.6.1.2** | Add `session.restore_turn_accounting` RPC handler + daemon wrapper + unit + e2e tests.  Underlying method `JaatoSession.restore_turn_accounting` added in 6.6.1.0.  Per 6.1 trio cadence. | **Shipped.**  13 new tests in `server/runner/tests/test_session_restore_turn_accounting_rpc.py`.  Wire shape: `{"turns": [<dict>, ...]}` direct (turn entries are already JSON-native dicts in the persistence serializer at `serializer.py:215`; no special encode/decode).  Tests pin: happy path round-trip, empty-list accepted, arbitrary dict keys preserved (cache-token / thinking-token / provenance fields), missing/non-list/non-dict-element args → `stage="decode"` (per-element validation catches wire-corruption / version-skew at the boundary), no_host / setter-raises / missing-method error paths, dispatch routing, e2e wrapper round-trip + caller-mutation-isolation invariant. |
-| **§7c step 6.6.1.3** | Add `session.restore_conversation_budget` RPC handler + daemon wrapper + unit + e2e tests.  Underlying method `JaatoSession.restore_conversation_budget` added in 6.6.1.0.  Per 6.1 trio cadence. | **Shipped.**  13 new tests in `server/runner/tests/test_session_restore_conversation_budget_rpc.py`.  Wire shape: `{"snapshot": <dict>}` direct (the snapshot is a JSON-native dict produced by `InstructionBudget.get_conversation_snapshot()` / `SourceEntry.to_dict()`; same wire-shape-reuse rationale as 6.6.1.1 + 6.6.1.2 — persistence shape IS wire shape).  Tests pin: happy path, empty-dict accepted (matches underlying method's no-op-on-empty contract), nested SourceEntry children preserved, missing/non-dict args → `stage="decode"`, no_host / setter-raises (e.g. invalid gc_policy enum) / missing-method error paths, no-op-when-no-budget contract preserved, dispatch routing, e2e wrapper round-trip + caller-mutation-isolation invariant.  **§7c step 6.6.1 trio CLOSED — 6.6.3 unblocked.** |
+| **§7c step 6.6.1.0** | **JaatoSession public-method additions + session_manager private-attr-write migration.**  Two of the proposed RPC handlers don't have underlying public methods — daemon `session_manager.py` reaches into private state (`_turn_accounting` direct assignment + `instruction_budget.restore_conversation_from_snapshot` via the private accessor).  Add public methods on JaatoSession (`restore_turn_accounting(turns)` + `restore_conversation_budget(snapshot)`), migrate session_manager to use them.  Same encapsulation discipline as §7c step 3a (private `_agent_id` reach → `set_agent_identity` public method) + §7c step 3b (private `_tools` read → `get_tool_schemas` public method). | **Shipped.**  5 new tests in `jaato_server/shared/tests/test_jaato_session.py` (`TestRestoreTurnAccounting` + `TestRestoreConversationBudget`).  Tests: 659 passing (was 654). |
+| **§7c step 6.6.1.1** | Add `session.set_initial_history` RPC handler + daemon wrapper + unit + e2e tests.  Underlying method `JaatoSession.set_initial_history` already exists (line 8252).  Per 6.1 trio cadence. | **Shipped.**  13 new tests in `jaato_server/server/runner/tests/test_session_set_initial_history_rpc.py`.  Wire shape: `{"messages": [<dict>, ...]}` reusing the existing `jaato_server.shared.plugins.session.serializer.serialize_history` / `deserialize_history` round-trip the disk-persistence path already exercises.  Tests pin: happy path 2-message round-trip, empty-list seed accepted, provenance-fields (model + provider) preservation across the wire, missing/non-list/malformed-dict args → `stage="decode"`, no_host / setter-raises / missing-method error paths, dispatch routing, e2e wrapper for 3 scenarios. |
+| **§7c step 6.6.1.2** | Add `session.restore_turn_accounting` RPC handler + daemon wrapper + unit + e2e tests.  Underlying method `JaatoSession.restore_turn_accounting` added in 6.6.1.0.  Per 6.1 trio cadence. | **Shipped.**  13 new tests in `jaato_server/server/runner/tests/test_session_restore_turn_accounting_rpc.py`.  Wire shape: `{"turns": [<dict>, ...]}` direct (turn entries are already JSON-native dicts in the persistence serializer at `serializer.py:215`; no special encode/decode).  Tests pin: happy path round-trip, empty-list accepted, arbitrary dict keys preserved (cache-token / thinking-token / provenance fields), missing/non-list/non-dict-element args → `stage="decode"` (per-element validation catches wire-corruption / version-skew at the boundary), no_host / setter-raises / missing-method error paths, dispatch routing, e2e wrapper round-trip + caller-mutation-isolation invariant. |
+| **§7c step 6.6.1.3** | Add `session.restore_conversation_budget` RPC handler + daemon wrapper + unit + e2e tests.  Underlying method `JaatoSession.restore_conversation_budget` added in 6.6.1.0.  Per 6.1 trio cadence. | **Shipped.**  13 new tests in `jaato_server/server/runner/tests/test_session_restore_conversation_budget_rpc.py`.  Wire shape: `{"snapshot": <dict>}` direct (the snapshot is a JSON-native dict produced by `InstructionBudget.get_conversation_snapshot()` / `SourceEntry.to_dict()`; same wire-shape-reuse rationale as 6.6.1.1 + 6.6.1.2 — persistence shape IS wire shape).  Tests pin: happy path, empty-dict accepted (matches underlying method's no-op-on-empty contract), nested SourceEntry children preserved, missing/non-dict args → `stage="decode"`, no_host / setter-raises (e.g. invalid gc_policy enum) / missing-method error paths, no-op-when-no-budget contract preserved, dispatch routing, e2e wrapper round-trip + caller-mutation-isolation invariant.  **§7c step 6.6.1 trio CLOSED — 6.6.3 unblocked.** |
 | **§7c step 6.6.2** | Architectural callbacks rewire (the original §7c step 6.2.5 work, now folded in).  4 sites: 1969 / 1985 / 3374 / 4264.  Gates on runner-side event-bus access plumbing — may itself fan out. | **Audit revised** in §7c step 6.6.2 disposition audit below.  Audit reveals the original "4 sites" was incomplete (7 callback wiring sites total; 3 were missed: `set_continuation_callback` at 3415, `set_retry_callback` at 3430, `set_mid_turn_interrupt_callback` at 3440).  6 of 7 are pure emit-to-client; 5 of those don't even hit the daemon EventBus (unmapped event types).  Continuation_callback (3415) is the only daemon-logic-driven site.  **Step 6.6.2 collapses into 6.6.4** — the callback wiring naturally disappears alongside `_start_model_thread`'s migration to `session_send_message_threadsafe`.  No event-bus plumbing required.  No new RPC handlers needed (extend the existing `session.send_message` stream channel with notification frames). |
 | **§7c step 6.6.3** | External consumer migrations: 8 `get_session()` callers in `session_manager.py` + `websocket.py` + `core.py`.  Migrate each to its target per the external-consumer table above (1 delete, 4 reuse-existing-RPC, 3 use-new-RPCs from 6.6.1).  Also drops the public `JaatoServer.get_session()` method. | **Audit revised** in §7c step 6.6.3 disposition audit below — original "8 callers" was a 9-site undercount.  Cross-grep of ALL `_jaato.get_session()` reach patterns (private + public) reveals **17 sites total** (8 missing in `session_manager.py`).  5 of the 17 need NEW RPC handlers (`session.append_history_message`, `session.snapshot_conversation_budget`, `session.set_parallel_tools_override`, `session.replay_messages`, `session.resolve_fork_point`).  Sub-decomposition: 6.6.3.0 audit-correction (THIS) → 6.6.3.1-.5 (5 new RPC handlers per 6.1 trio cadence) → 6.6.3.6 (full migration + public method drop). |
 | **§7c step 6.6.4** | Atomic seat-flip moment.  Removes `self._jaato` field; absorbs WIRING deletions; migrates remaining transitively-load-bearing sites; migrates DEFER-§7c read sites; folds in 6.6.2 (architectural callbacks via send_message stream channel); deletes the public `JaatoServer.get_session()` method (already done in 6.6.3.6); collapses truthiness checks. | **Audit revised** in §7c step 6.6.4 disposition audit below.  Cross-grep reveals additional inventory not in prior audits: 4 `_jaato.get_runtime()` reaches in session_manager + websocket (post-step-4-first-pass migration; daemon-side runtime is daemon-tier per §4.2 — these collapse to `self._runtime` reads).  Sub-decomposition matches the reviewer's pre-laid 6.6.4.1-6.6.4.5 split with one addition (6.6.4.0 audit).  Each sub-commit independently reviewable. |
@@ -649,7 +649,7 @@ reviewer's "expect a 6.6.4 disposition audit alongside" framing
 
 #### Audit Step 1 — site inventory (post-§7c-step-6.6.3.6)
 
-Cross-grep for `self._jaato\b` + `server._jaato\b` (per the §10
+Cross-grep for `self._jaato\b` + `jaato_server.server._jaato\b` (per the §10
 audit-discipline note 1) reveals the full remaining surface:
 
   - `core.py`: 66 references (counting truthiness + comments)
@@ -680,7 +680,7 @@ Active code (excluding doc comments):
 | Category | Sites | Disposition |
 |---|---|---|
 | **Truthiness checks** | 2574, 2697, 3013, 3361, 3449 | Collapse in 6.6.4.5 |
-| **runtime access** (§4.2 daemon-tier) | 2826 (get_runtime()), 3362 (get_runtime()), 3450 (get_runtime()) | Migrate to `server._runtime` — same pattern as core.py event_bus migration in §7c step 6.2 |
+| **runtime access** (§4.2 daemon-tier) | 2826 (get_runtime()), 3362 (get_runtime()), 3450 (get_runtime()) | Migrate to `jaato_server.server._runtime` — same pattern as core.py event_bus migration in §7c step 6.2 |
 | **session reset / history reads** | 2575 (reset_session via existing RPC), 3014 (get_history via existing RPC), 2619 (get_context_usage via existing RPC) | Migrate via existing `session.reset` / `session.get_history` / `session.get_context_usage` RPCs in 6.6.4.5 |
 
 **websocket.py** (1 active site post-6.6.3.6):
@@ -757,13 +757,13 @@ Per the reviewer's pre-laid framing + this audit's findings:
 | Sub-commit | Scope | Estimated tests |
 |---|---|---|
 | **§7c step 6.6.4.0** | Audit doc update (THIS commit). | 0 |
-| **§7c step 6.6.4.1** | Notification-frame protocol on the `session.send_message` stream channel.  Frame-type discriminator (`output` vs `notification`); daemon-side wrapper grows a notification-frame demuxer.  No new dispatch route; wire format extension only. | **Shipped.** 15 new tests in `server/runner/tests/test_notification_frame_protocol.py`.  Promoted the pre-built `KIND_EVENT = "event"` scaffolding (in `envelope.py:32` since Phase 2; daemon read loop dispatched as a debug-log no-op) into a typed wire surface.  Zero new dispatch route; new `NotificationFrame` dataclass + `RunnerRPC.emit_notification()` runner-side helper + `OnNotificationCb` daemon-side callback registry threaded through `call()` + `session_send_message()`.  Wire-shape-reuse rationale honored — same JSON-line socket as StreamFrame, different `kind` discriminator. |
-| **§7c step 6.6.4.2** | 7-callback collapse using the new notification protocol.  Daemon-side `_start_model_thread` callback wirings (4 + 3 = 7 sites flagged in §7c step 6.6.2 audit) all delete; runner-side session emits notification frames; daemon's `session_send_message` wrapper demuxes + invokes `server.emit(<Event>)` or `server._start_model_thread(...)` for continuation. | **Shipped — runner-side leg only (Option E split).**  15 new tests in `server/runner/tests/test_session_send_message_notification_emit.py`.  The daemon-side leg-drop + handler-install lands atomically in 6.6.4.3.  This commit lands the runner-side install/restore machinery in `RunnerRPC._handle_session_send_message`: install hook wires 6 session-callback shims (`set_instruction_budget_callback`, `set_prompt_injected_callback`, `set_continuation_callback`, `set_retry_callback`, `set_mid_turn_interrupt_callback`, plus `_event_bus_tools._on_subscribed` direct-attr write), each emitting a `NotificationFrame` with a well-known event_type (`instruction_budget_updated`, `prompt_injected`, `continuation_needed`, `retry`, `mid_turn_interrupt`, `events_subscribed`); finally-block restores originals.  Behavior-preserving: until 6.6.4.3 switches the daemon to `session_send_message_threadsafe`, the runner-side session never processes a turn so callbacks are dormant.  Defensive invariants: `hasattr`-gated install (rolling-upgrade safe); per-callback try/except around setter calls; per-callback try/except inside emission shims; per-key try/except in restore.  Audit-discipline tally: 8 audits, 8 silent-regression catches — Option E split caught the 6.6.4.2/6.6.4.3 coupling that would have orphaned-emit broken the daemon if landed atomically.  6 callback design choice (vs. 7 in original count) reflects that the §7c step 6.6.2 audit's "set_running_state_changed" callback is NOT part of `send_message`'s lifetime — it's set once at session-construction time, so it stays as a one-time install in 6.6.4.4 WIRING refactor, not the per-call install path. |
-| **§7c step 6.6.4.3** | send_message daemon-side leg drop.  `_start_model_thread` switches from `server._jaato.send_message(...)` to `server._runner_rpc.session_send_message_threadsafe(...)`.  Couples tightly with 6.6.4.1+6.6.4.2 (the notification stream is what makes daemon-side _start_model_thread's local state mutations work post-migration).  **Split into 6.6.4.3a + 6.6.4.3b** per implementation-review audit (see below). | ~10-15 |
-| **§7c step 6.6.4.3a** | Prerequisite `session.try_completion_nudge` RPC.  Single round-trip read+inc operation on `_signal_completion_called` / `_completion_nudges_fired` private state — collapses 3 daemon-side reaches (`core.py:3646/3647/3649`) into one RPC.  JaatoSession gains a public `try_completion_nudge(max_nudges)` method returning `(should_nudge: bool, nudges_fired: int)`; runner-side handler + daemon-side wrapper land alongside.  Matches the 6.6.3 missing-method cadence (prerequisite RPC ships before daemon-side migration). | **Shipped.** 17 new tests in `server/runner/tests/test_session_try_completion_nudge_rpc.py`.  Public method `JaatoSession.try_completion_nudge(max_nudges)` added (atomic check-and-increment, returns `(should_nudge, nudges_fired)`); runner handler `_handle_session_try_completion_nudge` with stage codes `decode`/`no_host`/`no_session`/`missing_method`/`call`; daemon wrapper `session_try_completion_nudge[_threadsafe]`.  Defensive contract: rejects bool `max_nudges` (Python int subclass blind spot); rolling-upgrade safe (missing-method on the session class surfaces as typed stage code, not crash). |
-| **§7c step 6.6.4.3b** | Atomic seat-flip: leg drop + 9-callback collapse + 7-wiring delete + handler install.  Switches `_start_model_thread` to `session_send_message_threadsafe(...)`; deletes the 7 daemon-side `set_*_callback` wirings (4 init-time + 3 per-call); installs the daemon-side `on_notification` demuxer fanning to `server.emit(<Event>)` / `server._start_model_thread(...)`; adopts the 6.6.4.3a `try_completion_nudge` RPC for the completion-nudge guard.  Runner-side `_handle_session_send_message` extends to also wire `on_usage_update` + `on_gc_threshold` per-call kwargs as notification-emitting shims (closing the audit-caught kwargs-drop gap). | **Shipped.** 21 new tests in `server/tests/test_send_message_seat_flip_643b.py`.  Runner-side: 2 new event-type constants (`usage_update`, `gc_threshold`) + per-call kwarg shims `_make_usage_update_notification_shim` / `_make_gc_threshold_notification_shim` (no install/restore — kwargs only live for one call).  Daemon-side: `_build_send_message_notification_handler` factory returns 8-branch demuxer (instruction_budget_updated / prompt_injected / continuation_needed / retry / mid_turn_interrupt / events_subscribed / usage_update / gc_threshold + unknown-type forward-compat drop).  Atomic deletions: 4 init-time + 3 per-call setter wirings, both `_jaato.send_message(...)` legs in `_start_model_thread`, completion-nudge private-attr reaches.  AST-based regression-pin tests guard against re-introduction. |
+| **§7c step 6.6.4.1** | Notification-frame protocol on the `session.send_message` stream channel.  Frame-type discriminator (`output` vs `notification`); daemon-side wrapper grows a notification-frame demuxer.  No new dispatch route; wire format extension only. | **Shipped.** 15 new tests in `jaato_server/server/runner/tests/test_notification_frame_protocol.py`.  Promoted the pre-built `KIND_EVENT = "event"` scaffolding (in `envelope.py:32` since Phase 2; daemon read loop dispatched as a debug-log no-op) into a typed wire surface.  Zero new dispatch route; new `NotificationFrame` dataclass + `RunnerRPC.emit_notification()` runner-side helper + `OnNotificationCb` daemon-side callback registry threaded through `call()` + `session_send_message()`.  Wire-shape-reuse rationale honored — same JSON-line socket as StreamFrame, different `kind` discriminator. |
+| **§7c step 6.6.4.2** | 7-callback collapse using the new notification protocol.  Daemon-side `_start_model_thread` callback wirings (4 + 3 = 7 sites flagged in §7c step 6.6.2 audit) all delete; runner-side session emits notification frames; daemon's `session_send_message` wrapper demuxes + invokes `jaato_server.server.emit(<Event>)` or `jaato_server.server._start_model_thread(...)` for continuation. | **Shipped — runner-side leg only (Option E split).**  15 new tests in `jaato_server/server/runner/tests/test_session_send_message_notification_emit.py`.  The daemon-side leg-drop + handler-install lands atomically in 6.6.4.3.  This commit lands the runner-side install/restore machinery in `RunnerRPC._handle_session_send_message`: install hook wires 6 session-callback shims (`set_instruction_budget_callback`, `set_prompt_injected_callback`, `set_continuation_callback`, `set_retry_callback`, `set_mid_turn_interrupt_callback`, plus `_event_bus_tools._on_subscribed` direct-attr write), each emitting a `NotificationFrame` with a well-known event_type (`instruction_budget_updated`, `prompt_injected`, `continuation_needed`, `retry`, `mid_turn_interrupt`, `events_subscribed`); finally-block restores originals.  Behavior-preserving: until 6.6.4.3 switches the daemon to `session_send_message_threadsafe`, the runner-side session never processes a turn so callbacks are dormant.  Defensive invariants: `hasattr`-gated install (rolling-upgrade safe); per-callback try/except around setter calls; per-callback try/except inside emission shims; per-key try/except in restore.  Audit-discipline tally: 8 audits, 8 silent-regression catches — Option E split caught the 6.6.4.2/6.6.4.3 coupling that would have orphaned-emit broken the daemon if landed atomically.  6 callback design choice (vs. 7 in original count) reflects that the §7c step 6.6.2 audit's "set_running_state_changed" callback is NOT part of `send_message`'s lifetime — it's set once at session-construction time, so it stays as a one-time install in 6.6.4.4 WIRING refactor, not the per-call install path. |
+| **§7c step 6.6.4.3** | send_message daemon-side leg drop.  `_start_model_thread` switches from `jaato_server.server._jaato.send_message(...)` to `jaato_server.server._runner_rpc.session_send_message_threadsafe(...)`.  Couples tightly with 6.6.4.1+6.6.4.2 (the notification stream is what makes daemon-side _start_model_thread's local state mutations work post-migration).  **Split into 6.6.4.3a + 6.6.4.3b** per implementation-review audit (see below). | ~10-15 |
+| **§7c step 6.6.4.3a** | Prerequisite `session.try_completion_nudge` RPC.  Single round-trip read+inc operation on `_signal_completion_called` / `_completion_nudges_fired` private state — collapses 3 daemon-side reaches (`core.py:3646/3647/3649`) into one RPC.  JaatoSession gains a public `try_completion_nudge(max_nudges)` method returning `(should_nudge: bool, nudges_fired: int)`; runner-side handler + daemon-side wrapper land alongside.  Matches the 6.6.3 missing-method cadence (prerequisite RPC ships before daemon-side migration). | **Shipped.** 17 new tests in `jaato_server/server/runner/tests/test_session_try_completion_nudge_rpc.py`.  Public method `JaatoSession.try_completion_nudge(max_nudges)` added (atomic check-and-increment, returns `(should_nudge, nudges_fired)`); runner handler `_handle_session_try_completion_nudge` with stage codes `decode`/`no_host`/`no_session`/`missing_method`/`call`; daemon wrapper `session_try_completion_nudge[_threadsafe]`.  Defensive contract: rejects bool `max_nudges` (Python int subclass blind spot); rolling-upgrade safe (missing-method on the session class surfaces as typed stage code, not crash). |
+| **§7c step 6.6.4.3b** | Atomic seat-flip: leg drop + 9-callback collapse + 7-wiring delete + handler install.  Switches `_start_model_thread` to `session_send_message_threadsafe(...)`; deletes the 7 daemon-side `set_*_callback` wirings (4 init-time + 3 per-call); installs the daemon-side `on_notification` demuxer fanning to `jaato_server.server.emit(<Event>)` / `jaato_server.server._start_model_thread(...)`; adopts the 6.6.4.3a `try_completion_nudge` RPC for the completion-nudge guard.  Runner-side `_handle_session_send_message` extends to also wire `on_usage_update` + `on_gc_threshold` per-call kwargs as notification-emitting shims (closing the audit-caught kwargs-drop gap). | **Shipped.** 21 new tests in `jaato_server/server/tests/test_send_message_seat_flip_643b.py`.  Runner-side: 2 new event-type constants (`usage_update`, `gc_threshold`) + per-call kwarg shims `_make_usage_update_notification_shim` / `_make_gc_threshold_notification_shim` (no install/restore — kwargs only live for one call).  Daemon-side: `_build_send_message_notification_handler` factory returns 8-branch demuxer (instruction_budget_updated / prompt_injected / continuation_needed / retry / mid_turn_interrupt / events_subscribed / usage_update / gc_threshold + unknown-type forward-compat drop).  Atomic deletions: 4 init-time + 3 per-call setter wirings, both `_jaato.send_message(...)` legs in `_start_model_thread`, completion-nudge private-attr reaches.  AST-based regression-pin tests guard against re-introduction. |
 | **§7c step 6.6.4.4** | WIRING deletions (per 6.4 audit).  6 daemon-side calls delete: `configure_plugins_only`, `configure_tools` ×2, `set_gc_plugin` ×2, `set_session_plugin`.  Daemon-side `_setup_session_plugin` may need a refactor — the `set_session_plugin` site's daemon-side hook (description-callback emission) might need preservation.  **Flag for 6.6.4.4 implementation review.**  **Narrowed to safe-only per 6.6.4.4 implementation-review audit (see below)**: scope reduced to 3 sites (`set_gc_plugin` ×2 + `set_session_plugin`).  The other 3 (`configure_*` calls) collapse with 6.6.4.5's atomic field removal because they have cascading downstream daemon-side read dependencies. | ~5-10 |
-| **§7c step 6.6.4.5** | Atomic field removal + cleanup.  Removes `self._jaato` field; collapses ~14 truthiness checks; migrates the runtime-access reads (3 sites in session_manager + 1 in websocket) to `server._runtime`; migrates the DEFER-§7c reads; migrates auth_info / get_user_commands / execute_user_command / get_model_completions (with potential new RPC handlers OR daemon-side alternatives); refactors construction sites (1558, 1565); deletes the JaatoClient construction entirely (the daemon constructs JaatoRuntime directly).  **Now also absorbs the 3 deferred WIRING calls** (`configure_plugins_only`, `configure_tools` ×2) per the 6.6.4.4 audit's narrowing.  **Split into 4 sub-commits per 6.6.4.5 implementation-review audit (G3 + Refinement 1)**: 5a (truthiness + runtime reads), 5b (existing-RPC reads + daemon-runtime reads + get_tool_schemas cache), 5d (construction refactor), 5e (atomic field removal).  5c (set_agent_identity/set_ui_hooks RPCs) **eliminated** by missing-method audit — both are daemon-side state mutations that disappear with field removal, no new RPCs needed. | ~20-30 (test churn from removed write-both-specific tests) |
+| **§7c step 6.6.4.5** | Atomic field removal + cleanup.  Removes `self._jaato` field; collapses ~14 truthiness checks; migrates the runtime-access reads (3 sites in session_manager + 1 in websocket) to `jaato_server.server._runtime`; migrates the DEFER-§7c reads; migrates auth_info / get_user_commands / execute_user_command / get_model_completions (with potential new RPC handlers OR daemon-side alternatives); refactors construction sites (1558, 1565); deletes the JaatoClient construction entirely (the daemon constructs JaatoRuntime directly).  **Now also absorbs the 3 deferred WIRING calls** (`configure_plugins_only`, `configure_tools` ×2) per the 6.6.4.4 audit's narrowing.  **Split into 4 sub-commits per 6.6.4.5 implementation-review audit (G3 + Refinement 1)**: 5a (truthiness + runtime reads), 5b (existing-RPC reads + daemon-runtime reads + get_tool_schemas cache), 5d (construction refactor), 5e (atomic field removal).  5c (set_agent_identity/set_ui_hooks RPCs) **eliminated** by missing-method audit — both are daemon-side state mutations that disappear with field removal, no new RPCs needed. | ~20-30 (test churn from removed write-both-specific tests) |
 
 **Total: 9 implementation sub-commits + 1 audit (post-6.6.4.0 audit count).**
 
@@ -785,8 +785,8 @@ the §7c series.
 
 | Sub-commit | Scope | Risk |
 |---|---|---|
-| **5a** | Truthiness collapses + 5 `get_runtime()` → `self._runtime` reads | **Shipped.** 5 new tests in `server/tests/test_get_runtime_migration_645a.py`.  Migrated 4 call sites: `session_manager.py` ×3 (lines 2826, 3361-3364, 3449-3452), `websocket.py` ×1 (line 2092).  The 5th site (`core.py:1565`) is the populator — stays until 5d's construction refactor.  Truthiness collapses **deferred** to 5e (the `self._jaato` truthiness checks remain defensive for pre-init paths until the field itself is removed).  Behavior-preserving migration: `_runtime` is non-None iff `_jaato` was successfully connected. |
-| **5b** | Existing-RPC reads (~10 `get_context_usage`/`get_context_limit`, 1 `get_turn_accounting`, 1 `reset_session`) + 8 daemon-side runtime reads (`auth_info`, `user_commands`, `model_completions`, `execute_user_command`) + `get_tool_schemas` via daemon-side `_runtime` cache (Refinement 2) | **Shipped — narrowed to 15 mechanical sites only.**  12 new tests in `server/tests/test_existing_rpc_migration_645b.py`.  Pre-implementation cross-grep verifying RPC/method existence caught a scope-mismatch in the 6.6.4.5 audit: `auth_info`, `get_user_commands`, `execute_user_command`, `get_model_completions` are session-tier methods (not runtime-tier as labeled) — need new RPCs, deferred to **5c (re-introduced)**.  `get_tool_schemas` cache also deferred to 5c after verifying `JaatoRuntime.get_tool_schemas()` returns the registry's full set (not the session-resolved subset that `JaatoSession.get_tool_schemas()` returns) — semantically different and would cause `signal_completion_in_surface` filter regressions.  Migrations: 4× `get_context_usage`, 6× `get_context_limit`, 1× `get_turn_accounting`, 1× `reset_session` → `set_initial_history` (semantically equivalent at the restore-from-disk site), 1× `get_history`, 2× `get_session().instruction_budget.snapshot()` → `session_snapshot_instruction_budget` RPC.  `_jaato.get_session()` count drops from 4 → 1 (the references-plugin deferred site at core.py:767 stays). |
+| **5a** | Truthiness collapses + 5 `get_runtime()` → `self._runtime` reads | **Shipped.** 5 new tests in `jaato_server/server/tests/test_get_runtime_migration_645a.py`.  Migrated 4 call sites: `session_manager.py` ×3 (lines 2826, 3361-3364, 3449-3452), `websocket.py` ×1 (line 2092).  The 5th site (`core.py:1565`) is the populator — stays until 5d's construction refactor.  Truthiness collapses **deferred** to 5e (the `self._jaato` truthiness checks remain defensive for pre-init paths until the field itself is removed).  Behavior-preserving migration: `_runtime` is non-None iff `_jaato` was successfully connected. |
+| **5b** | Existing-RPC reads (~10 `get_context_usage`/`get_context_limit`, 1 `get_turn_accounting`, 1 `reset_session`) + 8 daemon-side runtime reads (`auth_info`, `user_commands`, `model_completions`, `execute_user_command`) + `get_tool_schemas` via daemon-side `_runtime` cache (Refinement 2) | **Shipped — narrowed to 15 mechanical sites only.**  12 new tests in `jaato_server/server/tests/test_existing_rpc_migration_645b.py`.  Pre-implementation cross-grep verifying RPC/method existence caught a scope-mismatch in the 6.6.4.5 audit: `auth_info`, `get_user_commands`, `execute_user_command`, `get_model_completions` are session-tier methods (not runtime-tier as labeled) — need new RPCs, deferred to **5c (re-introduced)**.  `get_tool_schemas` cache also deferred to 5c after verifying `JaatoRuntime.get_tool_schemas()` returns the registry's full set (not the session-resolved subset that `JaatoSession.get_tool_schemas()` returns) — semantically different and would cause `signal_completion_in_surface` filter regressions.  Migrations: 4× `get_context_usage`, 6× `get_context_limit`, 1× `get_turn_accounting`, 1× `reset_session` → `set_initial_history` (semantically equivalent at the restore-from-disk site), 1× `get_history`, 2× `get_session().instruction_budget.snapshot()` → `session_snapshot_instruction_budget` RPC.  `_jaato.get_session()` count drops from 4 → 1 (the references-plugin deferred site at core.py:767 stays). |
 | **5c** | (re-introduced) 4 user-command/auth_info migrations + `get_tool_schemas` migration via new RPCs.  Sub-decomposes per the 6.6.1/6.6.3 cadence: one new RPC handler per sub-commit with missing-method audit + ~12-15 tests each.  Candidates: `session.get_auth_info`, `session.get_user_commands`, `session.execute_user_command`, `session.get_model_completions`, `session.get_tool_schemas`.  **Path D adopted** (5 individual commits + 5c.0 audit prereq) — preserves per-handler bisectability + per-commit reviewability. |
 
 #### §7c step 6.6.4.5c missing-method audit (pre-implementation)
@@ -830,12 +830,12 @@ wire-shape decisions per-handler reviewers will need.
 | Sub-commit | Scope |
 |---|---|
 | **5c.0** | This audit doc (no code) |
-| **5c.1** | Add `JaatoSession.get_auth_info()` public method + `session.get_auth_info` RPC handler + daemon wrapper + tests + migrate 2 daemon callsites (core.py:2073, 4481).  **Shipped.** 14 new tests in `server/runner/tests/test_session_get_auth_info_rpc.py`.  Public method `JaatoSession.get_auth_info()` added (returns `_provider.get_auth_info()` with try/except defensive wrap; returns `""` when no provider).  Runner handler `_handle_session_get_auth_info` with stage codes `no_host`/`no_session`/`missing_method`/`call`.  Daemon wrapper `session_get_auth_info[_threadsafe]`.  2 daemon callsites migrated; both wrapped in try/except (display-only, fall back to `""` on transport error). |
-| **5c.2** | `session.get_user_commands` RPC + wrapper + tests + migrate 2 daemon callsites (core.py:3977, 4195).  Wire-shape: serialize `UserCommand` dataclass.  **Shipped.**  13 new tests in `server/runner/tests/test_session_get_user_commands_rpc.py`.  Wire decision per the §7c step 6.6.4.5c.2 audit: dict-shape-only (Path B), not Message/Part round-trip (Path A) — pre-implementation grep verified `UserCommand` and `CommandParameter` are NamedTuples with primitive fields only (str/bool), no callables/Type[X]/class refs to strip.  Daemon-side wrapper reconstructs `UserCommand`/`CommandParameter` NamedTuple instances on receipt so existing `parse_command_args(cmd, raw_args)` works unmodified.  Handler callable stays runner-side; daemon invokes via `session.execute_user_command` (5c.3) — no callable crosses the wire either direction. |
-| **5c.3** | `session.execute_user_command` RPC + wrapper + tests + migrate 1 daemon callsite (core.py:4000).  Wire-shape: handle `HelpLines`-or-other non-JSON result.  **Shipped.**  21 new tests in `server/runner/tests/test_session_execute_user_command_rpc.py`.  Wire decision per the §7c step 6.6.4.5c.3 mid-implementation audit: **Path A (per-type reconstruction) bounded to 3 shapes** — pre-implementation grep killed Path B (stringify-pre-wire) by surfacing 3 daemon-side structured-access sites: `isinstance(result, HelpLines)` + `result.lines` (4073), `isinstance(result, dict)` + `result.get("success")` / `result["current_model"]` (4078), `isinstance(result, dict)` IPC-return fallback (4099).  Wire format: `{"_kind": "HelpLines", "lines": [[text, style], ...]}` / `{"_kind": "dict", "value": <json-dict>}` / `{"_kind": "str", "value": <str>}` (everything-else coerced).  Daemon wrapper reconstructs HelpLines NamedTuple instances + re-tuples the lines (wire flattens to lists; HelpLines.lines contract is `List[tuple]`). |
-| **5c.4** | `session.get_model_completions` RPC + wrapper + tests + migrate 1 daemon callsite (core.py:4224).  Wire-shape: serialize `CommandCompletion`.  **Shipped — scope expanded to 2 callsites.**  16 new tests in `server/runner/tests/test_session_get_model_completions_rpc.py`.  Mid-implementation audit caught a 5c.0 inventory miss: `command_router.py:1149` is a second daemon-side consumer of `_jaato.get_model_completions`, reads both `.value` AND `.description` for the model-subcommand-expansion autocomplete catalog.  Without 5c.4 migration of this site, model-subcommand expansion would silently stop working post-5e field removal.  Wire format mirrors 5c.2's UserCommand pattern: dict-shape-only (Path A) with daemon-side `CommandCompletion` NamedTuple reconstruction.  Audit-discipline tally: 16 audits, 16 silent-regression catches. |
-| **5c.5** | `session.get_tool_schemas` RPC + wrapper + tests + migrate 2 daemon callsites (core.py:1407, 3721).  Wire-shape: serialize `ToolSchema` with traits/nested schemas.  **Shipped — Path D finale.**  17 new tests in `server/runner/tests/test_session_get_tool_schemas_rpc.py`.  Pre-implementation grep confirmed all 7 ToolSchema fields + nested EditableContent fields are JSON-encodable; `traits: FrozenSet[str]` round-trips as `traits: List[str]` on wire and back to FrozenSet on receipt.  Daemon wrapper reconstructs ToolSchema + EditableContent dataclass instances; daemon callsites at core.py:1407 (`for schema in ... .name + .category`) and core.py:3759 (`signal_completion_in_surface` filter via `getattr(t, 'name', ...)`) work unmodified.  Both wrapped in try/except for best-effort fallback to `[]`.  All 5c sub-commits complete; Path D's 5-handler decomposition closes. |
-| **5d** | Construction refactor — daemon constructs `JaatoRuntime` directly; remove `self._jaato.get_runtime()` indirection at construction site (lines 1550-1565).  Pre-audit per Refinement 3: verify `JaatoRuntime.__init__()` signature can be called daemon-direct.  **Shipped — Path A transitional.**  9 new tests in `server/tests/test_construction_refactor_645d.py`.  Daemon now constructs `JaatoRuntime` directly inside `_run_connect_provider` (preserves the ThreadPoolExecutor concurrency with plugin loading).  Three new substages: `create_runtime` + `runtime_connect` (inside the threadpool task) + a post-join `self._runtime.configure_plugins(self.registry, self.permission_plugin, self.ledger)` (so daemon-side reads on `self._runtime.registry` work against the daemon-direct runtime, not JaatoClient's internal one).  JaatoClient construction stays transitionally — 5 unguarded daemon-side calls (`configure_plugins_only`, `configure_tools` ×2, `set_agent_identity`, `set_ui_hooks`) still operate on it; 5e drops the JaatoClient + dependent calls atomically.  `JaatoRuntime` added to the `from shared import ...` block.  Confine-context-factory propagation now operates on the daemon-direct runtime. |
+| **5c.1** | Add `JaatoSession.get_auth_info()` public method + `session.get_auth_info` RPC handler + daemon wrapper + tests + migrate 2 daemon callsites (core.py:2073, 4481).  **Shipped.** 14 new tests in `jaato_server/server/runner/tests/test_session_get_auth_info_rpc.py`.  Public method `JaatoSession.get_auth_info()` added (returns `_provider.get_auth_info()` with try/except defensive wrap; returns `""` when no provider).  Runner handler `_handle_session_get_auth_info` with stage codes `no_host`/`no_session`/`missing_method`/`call`.  Daemon wrapper `session_get_auth_info[_threadsafe]`.  2 daemon callsites migrated; both wrapped in try/except (display-only, fall back to `""` on transport error). |
+| **5c.2** | `session.get_user_commands` RPC + wrapper + tests + migrate 2 daemon callsites (core.py:3977, 4195).  Wire-shape: serialize `UserCommand` dataclass.  **Shipped.**  13 new tests in `jaato_server/server/runner/tests/test_session_get_user_commands_rpc.py`.  Wire decision per the §7c step 6.6.4.5c.2 audit: dict-shape-only (Path B), not Message/Part round-trip (Path A) — pre-implementation grep verified `UserCommand` and `CommandParameter` are NamedTuples with primitive fields only (str/bool), no callables/Type[X]/class refs to strip.  Daemon-side wrapper reconstructs `UserCommand`/`CommandParameter` NamedTuple instances on receipt so existing `parse_command_args(cmd, raw_args)` works unmodified.  Handler callable stays runner-side; daemon invokes via `session.execute_user_command` (5c.3) — no callable crosses the wire either direction. |
+| **5c.3** | `session.execute_user_command` RPC + wrapper + tests + migrate 1 daemon callsite (core.py:4000).  Wire-shape: handle `HelpLines`-or-other non-JSON result.  **Shipped.**  21 new tests in `jaato_server/server/runner/tests/test_session_execute_user_command_rpc.py`.  Wire decision per the §7c step 6.6.4.5c.3 mid-implementation audit: **Path A (per-type reconstruction) bounded to 3 shapes** — pre-implementation grep killed Path B (stringify-pre-wire) by surfacing 3 daemon-side structured-access sites: `isinstance(result, HelpLines)` + `result.lines` (4073), `isinstance(result, dict)` + `result.get("success")` / `result["current_model"]` (4078), `isinstance(result, dict)` IPC-return fallback (4099).  Wire format: `{"_kind": "HelpLines", "lines": [[text, style], ...]}` / `{"_kind": "dict", "value": <json-dict>}` / `{"_kind": "str", "value": <str>}` (everything-else coerced).  Daemon wrapper reconstructs HelpLines NamedTuple instances + re-tuples the lines (wire flattens to lists; HelpLines.lines contract is `List[tuple]`). |
+| **5c.4** | `session.get_model_completions` RPC + wrapper + tests + migrate 1 daemon callsite (core.py:4224).  Wire-shape: serialize `CommandCompletion`.  **Shipped — scope expanded to 2 callsites.**  16 new tests in `jaato_server/server/runner/tests/test_session_get_model_completions_rpc.py`.  Mid-implementation audit caught a 5c.0 inventory miss: `command_router.py:1149` is a second daemon-side consumer of `_jaato.get_model_completions`, reads both `.value` AND `.description` for the model-subcommand-expansion autocomplete catalog.  Without 5c.4 migration of this site, model-subcommand expansion would silently stop working post-5e field removal.  Wire format mirrors 5c.2's UserCommand pattern: dict-shape-only (Path A) with daemon-side `CommandCompletion` NamedTuple reconstruction.  Audit-discipline tally: 16 audits, 16 silent-regression catches. |
+| **5c.5** | `session.get_tool_schemas` RPC + wrapper + tests + migrate 2 daemon callsites (core.py:1407, 3721).  Wire-shape: serialize `ToolSchema` with traits/nested schemas.  **Shipped — Path D finale.**  17 new tests in `jaato_server/server/runner/tests/test_session_get_tool_schemas_rpc.py`.  Pre-implementation grep confirmed all 7 ToolSchema fields + nested EditableContent fields are JSON-encodable; `traits: FrozenSet[str]` round-trips as `traits: List[str]` on wire and back to FrozenSet on receipt.  Daemon wrapper reconstructs ToolSchema + EditableContent dataclass instances; daemon callsites at core.py:1407 (`for schema in ... .name + .category`) and core.py:3759 (`signal_completion_in_surface` filter via `getattr(t, 'name', ...)`) work unmodified.  Both wrapped in try/except for best-effort fallback to `[]`.  All 5c sub-commits complete; Path D's 5-handler decomposition closes. |
+| **5d** | Construction refactor — daemon constructs `JaatoRuntime` directly; remove `self._jaato.get_runtime()` indirection at construction site (lines 1550-1565).  Pre-audit per Refinement 3: verify `JaatoRuntime.__init__()` signature can be called daemon-direct.  **Shipped — Path A transitional.**  9 new tests in `jaato_server/server/tests/test_construction_refactor_645d.py`.  Daemon now constructs `JaatoRuntime` directly inside `_run_connect_provider` (preserves the ThreadPoolExecutor concurrency with plugin loading).  Three new substages: `create_runtime` + `runtime_connect` (inside the threadpool task) + a post-join `self._runtime.configure_plugins(self.registry, self.permission_plugin, self.ledger)` (so daemon-side reads on `self._runtime.registry` work against the daemon-direct runtime, not JaatoClient's internal one).  JaatoClient construction stays transitionally — 5 unguarded daemon-side calls (`configure_plugins_only`, `configure_tools` ×2, `set_agent_identity`, `set_ui_hooks`) still operate on it; 5e drops the JaatoClient + dependent calls atomically.  `JaatoRuntime` added to the `from shared import ...` block.  Confine-context-factory propagation now operates on the daemon-direct runtime. |
 
 #### §7c step 6.6.4.5d disposition audit (pre-implementation)
 
@@ -960,7 +960,7 @@ validated Path A's safety over Path B's helper-extraction.
 
 5d ships as a single-commit migration; no further split needed.
 Next concrete step: 5d implementation.
-| **5e** | Atomic `_jaato`-field removal + truthiness collapses + 3 deferred WIRING drops + drop `set_agent_identity` / `set_ui_hooks` calls (per Refinement 1's missing-method audit).  **Shipped — seat-flip closure.**  9 new tests in `server/tests/test_seat_flip_complete_645e.py`.  Every deletion independently justified by a prior audit (audit-cross-reference table in commit message).  Field removed from JaatoServer; `JaatoClient` import dropped; 4 truthiness-check guards collapsed to unconditional bodies; `set_reference_authorizer` daemon-side leg dropped (runner-RPC forwarder already handles it); session_manager.py's `if state.metadata.get('subagents') and server._jaato:` truthiness pivoted to `server._runtime`.  §7c step 6.6.4 closes; seat-flip complete. |
+| **5e** | Atomic `_jaato`-field removal + truthiness collapses + 3 deferred WIRING drops + drop `set_agent_identity` / `set_ui_hooks` calls (per Refinement 1's missing-method audit).  **Shipped — seat-flip closure.**  9 new tests in `jaato_server/server/tests/test_seat_flip_complete_645e.py`.  Every deletion independently justified by a prior audit (audit-cross-reference table in commit message).  Field removed from JaatoServer; `JaatoClient` import dropped; 4 truthiness-check guards collapsed to unconditional bodies; `set_reference_authorizer` daemon-side leg dropped (runner-RPC forwarder already handles it); session_manager.py's `if state.metadata.get('subagents') and server._jaato:` truthiness pivoted to `jaato_server.server._runtime`.  §7c step 6.6.4 closes; seat-flip complete. |
 
 **Refinement 1 — Missing-method audit for 5c (eliminated):**
 
@@ -1012,7 +1012,7 @@ dependency analysis caught **2 silent-regression risks**:
 | Finding | Evidence | Disposition |
 |---|---|---|
 | **4 of 6 sites have cascading daemon-side read deps.** Dropping `configure_*` calls removes `_runtime.configure_plugins(...)` + `_session` creation; ~15 downstream daemon-side reads (`_jaato.get_session()`, `get_history()`, `get_context_*()`, `get_turn_accounting()`, etc.) would fail. | `core.py:767, 1407, 1993, 2035, 2036, 2577, 2731, 3470, 3475, 3601, 3602, 3955, 3978, 4173, 4202, 4393, 4428, 4429`; `session_manager.py:2619, 3014` | Defer 4 unsafe sites (`configure_plugins_only`, `configure_tools` ×2) to 6.6.4.5 alongside the read-site migration that's already planned there.  6.6.4.4 narrows to 3 safe-only sites (`set_gc_plugin` ×2 + `set_session_plugin`). |
-| **Daemon-side description-callback hook silently broken post-6.6.4.3b** (pre-existing, surfaced by seat-flip).  `_setup_session_plugin` wires `on_description_changed` on the daemon-side `session_plugin` instance, but the model invokes `set_description` runner-side → fires runner-side instance's callback → daemon never sees it. | `core.py:2360-2367` (description-callback wiring) + `shared/plugins/session/file_session.py:743-747` (callback fires from inside tool execution) | Orthogonal to 6.6.4.4 — pre-existing regression from 6.6.4.3b.  Fix needs either a new `description_updated` notification-frame event_type (extends 8-event protocol to 9) OR a runner-side `set_description_callback` wired through `_install_session_notification_callbacks`.  Recommend deferring to a follow-up step (e.g., 6.6.4.6 or fold into 6.6.4.5). |
+| **Daemon-side description-callback hook silently broken post-6.6.4.3b** (pre-existing, surfaced by seat-flip).  `_setup_session_plugin` wires `on_description_changed` on the daemon-side `session_plugin` instance, but the model invokes `set_description` runner-side → fires runner-side instance's callback → daemon never sees it. | `core.py:2360-2367` (description-callback wiring) + `jaato_server/shared/plugins/session/file_session.py:743-747` (callback fires from inside tool execution) | Orthogonal to 6.6.4.4 — pre-existing regression from 6.6.4.3b.  Fix needs either a new `description_updated` notification-frame event_type (extends 8-event protocol to 9) OR a runner-side `set_description_callback` wired through `_install_session_notification_callbacks`.  Recommend deferring to a follow-up step (e.g., 6.6.4.6 or fold into 6.6.4.5). |
 
 Audit-discipline tally: **10 audits, 10 silent-regression catches.**
 Today's audit caught the cascade-deps issue (would have broken ~15
@@ -1210,15 +1210,15 @@ user-facing concern was preventing operator-visible feature-flag
 accumulation, which this doesn't violate).
 
 Files touched:
-- `server/core.py` — remove `self._jaato` field + all None-
+- `jaato_server/server/core.py` — remove `self._jaato` field + all None-
   guarded fallbacks (the `if self._jaato:` checks become
   unconditional `if self._runner_rpc:` checks).
-- `shared/jaato_runtime.py` — `create_session` no longer
+- `jaato_server/shared/jaato_runtime.py` — `create_session` no longer
   instantiates `JaatoSession`; builds envelope, dispatches to
   runner, returns runner-RPC handle.
-- `server/__main__.py` — remove `JAATO_RUNNER_HOSTS_SESSION`
+- `jaato_server/server/__main__.py` — remove `JAATO_RUNNER_HOSTS_SESSION`
   env-var read + the conditional bootstrap-envelope dispatch.
-- `server/runner/__main__.py` — flag check goes away;
+- `jaato_server/server/runner/__main__.py` — flag check goes away;
   runner-side JaatoSession host is unconditional.
 
 One commit (logically — the §7c change-set absorbs the
@@ -1236,14 +1236,14 @@ Depends on 7a + 7b.1 + 7b.2.
   (`Session.restored_pending_attach`); flushes on attach via
   the §7b.3 response handlers.
 - **Cgroup attach migration**: per peer-review M3 — currently
-  daemon-side via `shared/ai_tool_runner.py:_cgroup_attach`
+  daemon-side via `jaato_server/shared/ai_tool_runner.py:_cgroup_attach`
   (verified at line 211).  §3.5 (commit 03a5166d) migrated
   subprocess-spawning plugins to forward via runner-RPC but
   **did NOT migrate the cgroup-attach mechanism itself** — the
   daemon-side `set_runtime_limits` callback still threads
   through.  Runner-side cgroup attach lands in §7d as a
   follow-on:
-  - Files: `server/runner/cli_runner.py` gains
+  - Files: `jaato_server/server/runner/cli_runner.py` gains
     `_cgroup_attach_to_session_cgroup()` invoked at Popen time;
     the runner subprocess is itself in the cgroup so child
     processes inherit by default — `_cgroup_attach` becomes
@@ -1291,13 +1291,13 @@ post-§7c-step-6.5 turned up **3 additional sites in
 
 | Site | Callback | What it triggers |
 |---|---|---|
-| 1996 | `_event_bus_tools._on_subscribed = ...` | `server.emit(EventsSubscribedEvent)` |
-| 2011 | `session.set_instruction_budget_callback(cb)` (init path) | `server.emit(InstructionBudgetEvent)` |
-| 3391 | `session.set_prompt_injected_callback(cb)` | `server.emit(MidTurnPromptInjectedEvent)` |
-| 3415 | `session.set_continuation_callback(cb)` | `server._start_model_thread(child_messages)` + `server.emit(AgentStatusChangedEvent)` + `server._pending_continuation = ...` |
-| 3430 | `session.set_retry_callback(cb)` | `server.emit(RetryEvent)` |
-| 3440 | `session.set_mid_turn_interrupt_callback(cb)` | `server.emit(MidTurnInterruptEvent)` + tracing |
-| 4291 | `session.set_instruction_budget_callback(cb)` (auth-completion mirror of 2011) | `server.emit(InstructionBudgetEvent)` |
+| 1996 | `_event_bus_tools._on_subscribed = ...` | `jaato_server.server.emit(EventsSubscribedEvent)` |
+| 2011 | `session.set_instruction_budget_callback(cb)` (init path) | `jaato_server.server.emit(InstructionBudgetEvent)` |
+| 3391 | `session.set_prompt_injected_callback(cb)` | `jaato_server.server.emit(MidTurnPromptInjectedEvent)` |
+| 3415 | `session.set_continuation_callback(cb)` | `jaato_server.server._start_model_thread(child_messages)` + `jaato_server.server.emit(AgentStatusChangedEvent)` + `jaato_server.server._pending_continuation = ...` |
+| 3430 | `session.set_retry_callback(cb)` | `jaato_server.server.emit(RetryEvent)` |
+| 3440 | `session.set_mid_turn_interrupt_callback(cb)` | `jaato_server.server.emit(MidTurnInterruptEvent)` + tracing |
+| 4291 | `session.set_instruction_budget_callback(cb)` (auth-completion mirror of 2011) | `jaato_server.server.emit(InstructionBudgetEvent)` |
 
 **Total: 7 callback sites** (not 4).  Missing 3 sites would
 have produced silent callback gaps post-seat-flip — the same
@@ -1322,7 +1322,7 @@ Three questions per site:
 3. Does the callback do any non-emit daemon-side work?
 
 **Per-event-type bus mapping** (read from `_SERVER_TO_BUS` at
-`server/core.py:127`):
+`jaato_server/server/core.py:127`):
 
 | Event type | In `_SERVER_TO_BUS`? | If yes, bus type |
 |---|---|---|
@@ -1357,7 +1357,7 @@ Three questions per site:
 | 4291 | ✅ Yes (InstructionBudgetEvent) | No (unmapped) | None | **Vestigial** for daemon (mirror of 2011) |
 
 **6 of 7 callbacks are vestigial-for-daemon.**  Their entire
-purpose is "fire `server.emit(<Event>)` to fan out to clients."
+purpose is "fire `jaato_server.server.emit(<Event>)` to fan out to clients."
 Zero daemon-side reactors / plugin subscribers / jaato-premium
 hooks consume any of these 5 unmapped event types.
 
@@ -1371,7 +1371,7 @@ The 7 callback wiring sites all live inside `_start_model_thread`
 `_check_auth_completion`).  This method runs daemon-side.  It:
 
   1. Wires the callbacks onto `_jaato.get_session()`.
-  2. Calls `server._jaato.send_message(prompt, on_output=..., ...)`
+  2. Calls `jaato_server.server._jaato.send_message(prompt, on_output=..., ...)`
      at line 3503 (and 3526 for the formatter-feedback
      continuation loop).
 
@@ -1414,7 +1414,7 @@ audit; F event-bus mirror).  Per-site decision:
   Path: extend the existing `session.send_message` RPC's stream
   channel with **notification frames** alongside output frames.
   Daemon-side wrapper demuxes notification frames and invokes
-  `server.emit(<Event>)`.  This is **Path C (stream-based
+  `jaato_server.server.emit(<Event>)`.  This is **Path C (stream-based
   subscription)** with the **E-filter applied first**:
 
   - Runner-side session installs its OWN callbacks (in-process
@@ -1422,7 +1422,7 @@ audit; F event-bus mirror).  Per-site decision:
     onto the existing stream channel.
   - Daemon-side wrapper for `session_send_message_threadsafe`
     grows a notification-frame demuxer that reconstructs the
-    appropriate `Event` instance and calls `server.emit(...)`.
+    appropriate `Event` instance and calls `jaato_server.server.emit(...)`.
   - **No new RPC handlers needed.**  Zero new wire surface;
     extends the existing stream-frame channel.
 
@@ -1437,10 +1437,10 @@ audit; F event-bus mirror).  Per-site decision:
     frame with the child_messages text.
   - Daemon-side wrapper for `session_send_message_threadsafe`'s
     notification-demuxer recognizes the frame and either:
-    (a) Stashes into `server._pending_continuation` if a
+    (a) Stashes into `jaato_server.server._pending_continuation` if a
         send_message is currently in flight (for the existing
         "pick up after current turn" semantic), OR
-    (b) Calls `server._start_model_thread(child_messages)`
+    (b) Calls `jaato_server.server._start_model_thread(child_messages)`
         directly if the daemon is idle.
   - The daemon-side action is identical to today's
     continuation_callback body; only the trigger source moves.
@@ -1457,7 +1457,7 @@ in `_SERVER_TO_BUS` — they go directly to clients without
 touching the bus.  No event-bus plumbing required for them.
 
 The `AgentStatusChangedEvent` bus emission still happens
-post-seat-flip — it's emitted by `server.emit(...)` daemon-side
+post-seat-flip — it's emitted by `jaato_server.server.emit(...)` daemon-side
 when the daemon receives the continuation notification frame,
 same as today.  No runner-side bus access needed.
 
@@ -1479,7 +1479,7 @@ simplifies dramatically when send_message moves to RPC:
   - Post-§7c step 6.6.4: `_start_model_thread` simply calls
     `session_send_message_threadsafe(prompt, ...)` with a
     notification-handler kwarg.  The notification handler
-    invokes `server.emit(...)` for the 5 vestigial events and
+    invokes `jaato_server.server.emit(...)` for the 5 vestigial events and
     invokes `_start_model_thread(child_messages)` for the
     continuation case.
   - The 7 callback wiring sites + `_pending_continuation`
@@ -1519,7 +1519,7 @@ splitting them would create transitional broken states.
   - **No event-bus plumbing required.**  5 of the 6 emitted
     event types are unmapped in `_SERVER_TO_BUS` (direct-to-client);
     the 1 mapped one (`AgentStatusChangedEvent`) still goes
-    through `server.emit(...)` daemon-side.
+    through `jaato_server.server.emit(...)` daemon-side.
 
   - **Audit caught a 3-site inventory miss.**  The original
     "4 sites" was off by 3 — `set_continuation_callback`,
@@ -1566,7 +1566,7 @@ Full inventory + per-site disposition:
 |---|---|---|---|
 | 1 | `core.py:3229` | `get_cancel_token` closure → `session._cancel_token` | **Delete** — legacy in-process cancel-token dead post-§7b.2 |
 | 2 | `core.py:3617` | `signal_completion` filter → `session._tools` walk | **Use existing** `JaatoClient.get_tool_schemas()` (added §7c step 3b at 7b30c237) |
-| 3 | `websocket.py:1481` | event-bus access → `jaato_session._runtime.event_bus` | **Use existing** `server.event_bus` property (migrated to `self._runtime.event_bus` in §7c step 6.2) |
+| 3 | `websocket.py:1481` | event-bus access → `jaato_session._runtime.event_bus` | **Use existing** `jaato_server.server.event_bus` property (migrated to `self._runtime.event_bus` in §7c step 6.2) |
 | 4 | `websocket.py:1485` | event-bus access (alternate path) | Same as 1481 |
 | 5 | `session_manager.py:1968` | `set_session_state(key, value)` (initial-state injection) | **Use existing** `session_set_session_state_threadsafe` (§3.3c precursor) |
 | 6 | `session_manager.py:2130` | `set_initial_history(initial_history)` | **Use existing** `session_set_initial_history_threadsafe` (§7c step 6.6.1.1, commit 3f859e3a) |
@@ -1664,7 +1664,7 @@ into the per-session cgroup?**
 
 Current state (pre-§7d):
 
-- `server/cgroups.py:CgroupsManager.provision_cgroup(session_id,
+- `jaato_server/server/cgroups.py:CgroupsManager.provision_cgroup(session_id,
   config)` creates the cgroup at `/sys/fs/cgroup/<root>/jaato-
   <session>/` and applies limits.  WS sessions trigger this at
   line `websocket.py:703`.
@@ -1716,7 +1716,7 @@ gate at test_runtime_limits_e2e.py: integration-test entry
 point?**
 
 The test file already exists at
-`jaato-server/shared/tests/test_runtime_limits_e2e.py` with
+`jaato-server/jaato_server/shared/tests/test_runtime_limits_e2e.py` with
 `TestRealKernel` skipif-gated on a writable cgroup parent
 (lines 460-485).  §7d adds new test cases inside the existing
 `TestRealKernel` class:
@@ -1735,7 +1735,7 @@ The test file already exists at
    cgroup.  This is peer-review v2 observation #2's
    stress-case test.
 
-**Q4 — `shared/ai_tool_runner.py:211` daemon-side
+**Q4 — `jaato_server/shared/ai_tool_runner.py:211` daemon-side
 `_cgroup_attach`: stay or delete?**
 
 Today this field is set via `ToolExecutor.set_runtime_limits`,
@@ -1811,7 +1811,7 @@ implementation, contract pinned by tests).
 
 | Sub-step | Scope | Test pin |
 |---|---|---|
-| **7d** | `RunnerSpawner.spawn` accepts optional `cgroup_attach: Callable[[], None]` arg; SessionManager / WS handlers pass `cgroups.make_attach_callback(session_id)` at spawn time; child invokes the callback between `os.fork()` and `_exec_runner`.  **Shipped.**  6 unit-level regression pins in `server/tests/test_runner_cgroup_attach_7d.py` (signature pins, fork-then-attach-then-exec order, WS pre-init hook provisions cgroup before spawn, IPC-style optionality, daemon-side `_cgroup_attach` field preservation per Q4).  3 integration tests in `shared/tests/test_runtime_limits_e2e.py::TestRealKernel` (runner-spawn-into-cgroup, child-inherit, PTY grandchild-inherit stress case).  WS pre-init hook reordered: cgroup-provision moved from post-init session_hook to pre-init so the attach_cb is available at spawn time.  Provisioning is idempotent — post-init hook's redundant re-provisioning is no-op'd by `mkdir(exist_ok=True)` and limit-file overwrites; the post-init hook's `set_runtime_limits(...)` call stays as a documented no-op (preserves §3.12 disk-restore fallback). |
+| **7d** | `RunnerSpawner.spawn` accepts optional `cgroup_attach: Callable[[], None]` arg; SessionManager / WS handlers pass `cgroups.make_attach_callback(session_id)` at spawn time; child invokes the callback between `os.fork()` and `_exec_runner`.  **Shipped.**  6 unit-level regression pins in `jaato_server/server/tests/test_runner_cgroup_attach_7d.py` (signature pins, fork-then-attach-then-exec order, WS pre-init hook provisions cgroup before spawn, IPC-style optionality, daemon-side `_cgroup_attach` field preservation per Q4).  3 integration tests in `jaato_server/shared/tests/test_runtime_limits_e2e.py::TestRealKernel` (runner-spawn-into-cgroup, child-inherit, PTY grandchild-inherit stress case).  WS pre-init hook reordered: cgroup-provision moved from post-init session_hook to pre-init so the attach_cb is available at spawn time.  Provisioning is idempotent — post-init hook's redundant re-provisioning is no-op'd by `mkdir(exist_ok=True)` and limit-file overwrites; the post-init hook's `set_runtime_limits(...)` call stays as a documented no-op (preserves §3.12 disk-restore fallback). |
 
 **Audit-discipline tally: 19 audits, 19 silent-regression
 catches** (today's catch: the daemon-side `_cgroup_attach`
@@ -1844,7 +1844,7 @@ ASKs; the daemon-side queue is orphaned for runner-fired ASKs.
 
 **Q2 — `PromptOperatorHandler.resolve_response()` integration?**
 
-Class exists at `server/runner_rpc_handlers/prompt_operator.py:58`.
+Class exists at `jaato_server/server/runner_rpc_handlers/prompt_operator.py:58`.
 `register()` helper exists at line 215.  Cross-grep:
 **`PromptOperatorHandler` is NEVER instantiated in production
 code** — only tests construct it.  The wiring slot is empty.
@@ -1863,13 +1863,13 @@ to the in-process `_channel` → reads from a queue no one fills
 
 **Q4 — Runner-internal `RunnerRPCClient`?**
 
-Class exists at `server/runner/rpc_client.py:48` with
+Class exists at `jaato_server/server/runner/rpc_client.py:48` with
 `prompt_operator()` method.  Cross-grep:
 **`RunnerRPCClient` is never instantiated** — defined but unwired.
 
 **Q5 — Daemon-side `RunnerRPCServer`?**
 
-Class exists at `server/runner_rpc_server.py:68`.  Cross-grep:
+Class exists at `jaato_server/server/runner_rpc_server.py:68`.  Cross-grep:
 **never instantiated** in production code.  The runner→daemon
 RPC dispatch infrastructure (apparmor fragment, prompt
 operator, telemetry publish) is defined but unwired on both
@@ -1877,8 +1877,8 @@ ends.
 
 **Q6 — Clarification + References runner-RPC channels?**
 
-`shared/plugins/clarification/channels.py` and
-`shared/plugins/references/channels.py` exist as in-process
+`jaato_server/shared/plugins/clarification/channels.py` and
+`jaato_server/shared/plugins/references/channels.py` exist as in-process
 channels.  Neither has a RunnerRPCChannel equivalent.  Only
 the permission plugin shipped a runner-RPC channel
 (`permission/runner_rpc_channel.py`); clarification + references
@@ -1911,9 +1911,9 @@ real daemon emit → client response → handler resolution.
 | Sub-commit | Scope | Test pin |
 |---|---|---|
 | **Step 7.0** | This disposition audit (no code). | 0 |
-| **Step 7.1** | Daemon-side: instantiate `RunnerRPCServer` + `PromptOperatorHandler` per session; bind handler to `JaatoServer.emit`; register handler via `register()` helper; plumb the server into the daemon-side `RunnerRPCClient` read loop's request-frame dispatch path.  **Shipped — scope narrower than Step 7 audit's finding #6 framed.**  9 new tests in `server/tests/test_prompt_operator_wiring_step7_1.py`.  Implementation revealed the bidirectional dispatch IS already wired: `RunnerRPCClient.__init__` lazy-constructs `RunnerRPCServer` (line 152); read loop dispatches `KIND_REQUEST` frames at line 355.  Step 7.1's actual scope was just handler instantiation + registration inside `set_runner_rpc`, plus shutdown teardown.  Corrects Step 7 audit finding #6 (bidirectional dispatch gap was already closed). |
-| **Step 7.2** | Runner-side: instantiate runner-internal `RunnerRPCClient` from the bootstrap socket; attach to runner registry as `registry.runner_rpc_client`; verify the permission plugin picks it up.  **Shipped.**  6 tests in `server/runner/tests/test_runner_rpc_client_wiring_step7_2.py`.  Wiring lives in `_handle_session_bootstrap` inside `server/runner/rpc.py` — after `bootstrap_session(envelope)` returns a healthy host, construct `RunnerRPCClient(self)` (where self is the runner-side `RunnerRPC` dispatcher) and `setattr(host.runtime._registry, "runner_rpc_client", client)`.  Pre-§7.2 the attribute was never assigned; permission plugin's `_get_runner_rpc_channel` always returned None and fell back to the orphaned in-process channel. |
-| **Step 7.3** | Rewire `JaatoServer.respond_to_permission` to call `PromptOperatorHandler.resolve_response(request_id, response)` instead of pushing to `_channel_input_queue` (keep queue path as fallback for daemon-fired ASKs if any remain).  Add e2e integration test for full ASK round-trip.  **Shipped.**  9 tests in `server/tests/test_respond_to_permission_routing_step7_3.py`.  Dual-path routing: Path 1 (runner-fired ASKs) calls `handler.resolve_response(request_id, response, edited_arguments=...)` first.  When that returns False (no pending future), falls through to Path 2 (legacy daemon-fired ASK path: check `_pending_permission_request_id` + push to `_channel_input_queue`).  Unknown requests (neither path resolves) emit `ErrorEvent`.  Path 1 wins over Path 2 in the collision case.  E2E test exercises the full daemon-half round-trip: runner-payload → handler.handle → emit `PermissionRequestedEvent` → `respond_to_permission` → handler's future resolves → result dict deserializes back via `PromptResponse.from_dict`. |
+| **Step 7.1** | Daemon-side: instantiate `RunnerRPCServer` + `PromptOperatorHandler` per session; bind handler to `JaatoServer.emit`; register handler via `register()` helper; plumb the server into the daemon-side `RunnerRPCClient` read loop's request-frame dispatch path.  **Shipped — scope narrower than Step 7 audit's finding #6 framed.**  9 new tests in `jaato_server/server/tests/test_prompt_operator_wiring_step7_1.py`.  Implementation revealed the bidirectional dispatch IS already wired: `RunnerRPCClient.__init__` lazy-constructs `RunnerRPCServer` (line 152); read loop dispatches `KIND_REQUEST` frames at line 355.  Step 7.1's actual scope was just handler instantiation + registration inside `set_runner_rpc`, plus shutdown teardown.  Corrects Step 7 audit finding #6 (bidirectional dispatch gap was already closed). |
+| **Step 7.2** | Runner-side: instantiate runner-internal `RunnerRPCClient` from the bootstrap socket; attach to runner registry as `registry.runner_rpc_client`; verify the permission plugin picks it up.  **Shipped.**  6 tests in `jaato_server/server/runner/tests/test_runner_rpc_client_wiring_step7_2.py`.  Wiring lives in `_handle_session_bootstrap` inside `jaato_server/server/runner/rpc.py` — after `bootstrap_session(envelope)` returns a healthy host, construct `RunnerRPCClient(self)` (where self is the runner-side `RunnerRPC` dispatcher) and `setattr(host.runtime._registry, "runner_rpc_client", client)`.  Pre-§7.2 the attribute was never assigned; permission plugin's `_get_runner_rpc_channel` always returned None and fell back to the orphaned in-process channel. |
+| **Step 7.3** | Rewire `JaatoServer.respond_to_permission` to call `PromptOperatorHandler.resolve_response(request_id, response)` instead of pushing to `_channel_input_queue` (keep queue path as fallback for daemon-fired ASKs if any remain).  Add e2e integration test for full ASK round-trip.  **Shipped.**  9 tests in `jaato_server/server/tests/test_respond_to_permission_routing_step7_3.py`.  Dual-path routing: Path 1 (runner-fired ASKs) calls `handler.resolve_response(request_id, response, edited_arguments=...)` first.  When that returns False (no pending future), falls through to Path 2 (legacy daemon-fired ASK path: check `_pending_permission_request_id` + push to `_channel_input_queue`).  Unknown requests (neither path resolves) emit `ErrorEvent`.  Path 1 wins over Path 2 in the collision case.  E2E test exercises the full daemon-half round-trip: runner-payload → handler.handle → emit `PermissionRequestedEvent` → `respond_to_permission` → handler's future resolves → result dict deserializes back via `PromptResponse.from_dict`. |
 | **Step 7.4 (conditional)** | Clarification + References RunnerRPCChannel equivalents IF investigation confirms they're fired runner-side.  **Investigation complete; deferred to backlog.**  Both plugins are `PLUGIN_TIER = "runner"` and use in-process channels with no RPC bridge — **latent regression** post-seat-flip.  Existing test suite doesn't exercise the regression path (no automated e2e test for clarification/references ASKs).  Per-plugin fix is straightforward but non-trivial (~4-6 hours each plugin mirror of permission's `runner_rpc_channel.py` pattern).  Captured in [`project_backlog_clarification_references_runner_rpc_gap.md`](project_backlog_clarification_references_runner_rpc_gap.md) per the audit-discipline pattern: adjacent gaps surfaced during audit get captured in the backlog, not folded in mid-stream. |
 
 **Audit-discipline tally: 20 audits, 20 silent-regression
@@ -1931,9 +1931,9 @@ on Step 7 shipping; the seat-flip (§7c) + cgroup migration
 If a daemon-side migration commits to the runner-RPC surface,
 the matching handler MUST have:
 
-- A unit test in `jaato-server/server/runner/tests/test_session_<area>_rpc.py`.
+- A unit test in `jaato-server/jaato_server/server/runner/tests/test_session_<area>_rpc.py`.
 - A daemon-side wrapper test in
-  `jaato-server/server/runner/tests/test_session_method_wrappers_e2e.py`
+  `jaato-server/jaato_server/server/runner/tests/test_session_method_wrappers_e2e.py`
   (or a dedicated e2e file).
 - The lifecycle composition test
   (`test_session_dispatch_lifecycle_e2e.py`) extended with the
@@ -2011,14 +2011,14 @@ silent regressions when the audited surface is removed.
 
 The §7c step 6.6.2 audit (commit 9f28f96d) discovered that 5
 of 6 callback-emitted event types are UNMAPPED in
-`server/core.py:127`'s `_SERVER_TO_BUS` dict — they go
+`jaato_server/server/core.py:127`'s `_SERVER_TO_BUS` dict — they go
 directly to clients and never touch the daemon's EventBus.
 This was the load-bearing diagnostic for the audit's
 "event-bus plumbing is mostly DEFER" conclusion.
 
 **Reusable primitive**: any future "is this Event wired to
 the bus or does it go direct-to-client?" question can be
-answered by grepping `_SERVER_TO_BUS` in `server/core.py`:
+answered by grepping `_SERVER_TO_BUS` in `jaato_server/server/core.py`:
 
   - Mapped event types → published to bus + forwarded to
     client (potential daemon-side reactor consumers)
@@ -2088,7 +2088,7 @@ SessionManager._bootstrap_session(envelope):
 ```
 
 So **every `self._jaato.X` site that runs from inside or after
-`server.initialize()` has `self._runner_rpc` available.** Only
+`jaato_server.server.initialize()` has `self._runner_rpc` available.** Only
 sites in `JaatoServer.__init__` itself are truly pre-runner.
 
 ### Available `session.*` RPC handlers (15)
@@ -2230,7 +2230,7 @@ This audit answers it in one pass.
 
 **Q1 — Daemon-side init sequence (source of truth).**
 
-`server/core.py:1615-1777` (`_run_load_plugins` + post-threadpool `configure_plugins` call) executes the following in order:
+`jaato_server/server/core.py:1615-1777` (`_run_load_plugins` + post-threadpool `configure_plugins` call) executes the following in order:
 
 | # | Daemon-side call | Where | What it accomplishes |
 |---|---|---|---|
@@ -2248,7 +2248,7 @@ After step 9, `runtime.create_session(...)` (eventually called via `configure_to
 
 **Q2 — Runner-side `bootstrap_session` sequence (current, post-Path-C).**
 
-`server/runner/session.py:141-260`:
+`jaato_server/server/runner/session.py:141-260`:
 
 | # | Runner-side call | Status |
 |---|---|---|
@@ -2271,7 +2271,7 @@ The Path C fix closed the `_connected` guard.  The next guard fires immediately 
 | 6. `registry.set_workspace_path(...)` | **MISSING** | Broadcast to plugins (CLI, LSP, MCP, file_edit, etc. all consume).  Only call if `envelope.workspace_path` is non-None (headless sessions skip). |
 | 7. `registry.set_config_root(...)` | **MISSING** | Same shape; only call if `envelope.config_root` is non-None. |
 | 8. `PermissionPlugin()` + `initialize(...)` | **MISSING** | Construct permission plugin with `policy: {defaultPolicy: "ask", whitelist/blacklist: empty}` — the daemon's default.  Profile-supplied `plugin_configs["permission"]` overrides aren't currently in the envelope; this is a **secondary gap** (see Q5 below). |
-| 9. `runtime.configure_plugins(registry, permission_plugin, ledger=None)` | **MISSING** | The Layer-4 trigger.  Ledger is daemon-side per §4.2; pass `None` runner-side.  Reliability plugin similarly daemon-side; pass `None`. |
+| 9. `runtime.configure_plugins(registry, permission_plugin, ledger=None)` | **MISSING** | The Layer-4 trigger.  Ledger is daemon-side per §4.2; pass `None` runner-side.  *(Superseded: the runner now constructs its own `TokenLedger` — the daemon never received a runner session's records, so `None` meant no ledger at all; see `jaato_server/server/runner/session.py` Step 9.)*  Reliability plugin similarly daemon-side; pass `None`. |
 
 **Q4 — Are the dependencies tractable inside `bootstrap_session`?**
 
@@ -2360,8 +2360,8 @@ The daemon-side `usage_update` notification handler at `core.py:3524-3561` synch
 
 | Line | Call | What it fetches |
 |---|---|---|
-| 3532 | `server._runner_rpc.session_get_context_limit_threadsafe()` | int (model context window size) |
-| 3539 | `server._runner_rpc.session_get_turn_accounting_threadsafe()` | list (full turn-accounting log, then `len()` for `turns`) |
+| 3532 | `jaato_server.server._runner_rpc.session_get_context_limit_threadsafe()` | int (model context window size) |
+| 3539 | `jaato_server.server._runner_rpc.session_get_turn_accounting_threadsafe()` | list (full turn-accounting log, then `len()` for `turns`) |
 
 This handler fires **DURING** the runner's active `send_message` (it's a notification frame from the runner's own send_message stream).  The handler then makes blocking RPCs back into the same runner that's processing the original message.  Pre-§7c the same handler used in-process daemon-side calls (no race).  Per §7c step 6.6.4.5b migration, these became RPCs.  The migration introduced a new race shape: **daemon-side handlers invoked DURING active send_message now do blocking RPCs into the same runner that's processing the message** — they wait for the runner to finish its current request before serving the new one, but the original send_message hasn't returned, so deadlock-shaped timeout.
 
@@ -2505,7 +2505,7 @@ Path E closed the in-band notification + serialization layers (zero errors this 
 
 YES.  ``docs/design/project_backlog_runner_ui_hooks_gap.md`` (created during the §7c step 6.6.4.5 implementation-review audit, "Finding 3") explicitly identified:
 
-> Post-§7c step 6.6.4.3b seat-flip, the runner-side ``JaatoSession`` is the live session for the model loop and tool execution.  Its ``_ui_hooks`` attribute is **never set** — cross-grep of ``jaato-server/server/runner/`` confirms zero references to ``ui_hooks``, ``set_ui_hooks``, or ``AgentUIHooks``.
+> Post-§7c step 6.6.4.3b seat-flip, the runner-side ``JaatoSession`` is the live session for the model loop and tool execution.  Its ``_ui_hooks`` attribute is **never set** — cross-grep of ``jaato-server/jaato_server/server/runner/`` confirms zero references to ``ui_hooks``, ``set_ui_hooks``, or ``AgentUIHooks``.
 
 The 10 documented callsites in the backlog map to 5 distinct methods:
 
@@ -2578,7 +2578,7 @@ Add 4 new branches to ``_build_send_message_notification_handler`` that re-emit 
 - ``tool_output`` → call into hooks' ``on_tool_output`` → emits ``ToolOutputEvent`` (with agent-pipeline formatting)
 - ``turn_progress`` → call into hooks' ``on_turn_progress`` → emits ``TurnProgressEvent`` (uses cached context_limit from Path E)
 
-Routing through ``ServerAgentHooks`` (vs direct ``server.emit``) preserves the existing daemon-side formatting + state-mutation logic at zero divergence cost.
+Routing through ``ServerAgentHooks`` (vs direct ``jaato_server.server.emit``) preserves the existing daemon-side formatting + state-mutation logic at zero divergence cost.
 
 **Q5 — Test coverage planning.**
 
@@ -2629,9 +2629,9 @@ This audit IS the per-callback-type audit for ``AgentUIHooks``.  The backlog doc
 
 Cycle 8 verdict: Path F's wiring inventory verified present; empirically zero events propagate AND zero errors logged.  Silent failure shape incompatible with the documented wire path.
 
-Cycle 9 (post-Path-G 6-probe instrumentation): all 6 probes fire.  Initial user diagnosis: "missing emit inside ``ServerAgentHooks.on_tool_call_start`` body".  WORKER CORRECTION (commit ``7687cb8f``): verification of ``core.py:2485-2860`` shows all 12 hooks already call ``server.emit(...)``.  Diagnosis was wrong; gap is DOWNSTREAM of ``server.emit``.
+Cycle 9 (post-Path-G 6-probe instrumentation): all 6 probes fire.  Initial user diagnosis: "missing emit inside ``ServerAgentHooks.on_tool_call_start`` body".  WORKER CORRECTION (commit ``7687cb8f``): verification of ``core.py:2485-2860`` shows all 12 hooks already call ``jaato_server.server.emit(...)``.  Diagnosis was wrong; gap is DOWNSTREAM of ``jaato_server.server.emit``.
 
-Cycle 10 (post-Path-G+ 4-probe extension into ``server.emit`` / ``_emit_to_session`` / ``_emit_to_client``): exact localization — **Layer 8: session-save re-entrancy deadlock during ToolCallStartEvent emission**.
+Cycle 10 (post-Path-G+ 4-probe extension into ``jaato_server.server.emit`` / ``_emit_to_session`` / ``_emit_to_client``): exact localization — **Layer 8: session-save re-entrancy deadlock during ToolCallStartEvent emission**.
 
 **Q1 — Layer 8 trace (the precise chain).**
 
@@ -2795,7 +2795,7 @@ I.4 — Defensive: ``_create_main_agent`` has an existing early-return when ``se
 |---|---|
 | ``_create_main_agent`` emits ``AgentCreatedEvent`` exactly once | spy on ``self.emit``, assert event in captured list |
 | Event payload matches the hook's payload shape | field-by-field check |
-| Pre-registered agent path (hook ran first) still skips emit | populate ``server._agents`` beforehand, assert no emit |
+| Pre-registered agent path (hook ran first) still skips emit | populate ``jaato_server.server._agents`` beforehand, assert no emit |
 | AgentState carries profile_name + parent_agent_id | direct field read |
 | AST pin: ``_create_main_agent`` body contains ``AgentCreatedEvent`` | inspect.getsource grep |
 
@@ -2895,7 +2895,7 @@ Field mapping from ``PromptPayload`` (the runner's ASK payload):
 
 J.A — ``call_id`` field: ``PromptPayload`` doesn't carry the tool's ``call_id`` (the runner-side correlator).  Pre-§7c the daemon's ``_setup_permission_hooks`` callback received call_id from its in-process call chain.  Post-§7c the runner→daemon RPC payload (``PromptPayload``) lacks the field.  **Decision**: emit with ``call_id=None`` for cycle-13 verification.  If the TUI's per-tool-block correlation requires call_id, follow-up adds ``call_id: Optional[str]`` to ``PromptPayload`` + propagates from the runner-side ASK origin.
 
-J.B — ``editable_metadata`` field: the daemon-side hook (core.py:3094-3099) looks up the tool's editable schema from ``server.permission_plugin._get_tool_schema(tool_name)``.  Post-§7c the daemon-side permission_plugin instance is the one with the schema (Path D wired it).  We CAN do the schema lookup inside ``PromptOperatorHandler`` IF the handler has a reference to ``server.permission_plugin``.  **Decision**: emit with ``editable_metadata=None`` for cycle-13.  Editing flow is a follow-up if needed; the basic ASK round-trip is the cycle-13 verification target.
+J.B — ``editable_metadata`` field: the daemon-side hook (core.py:3094-3099) looks up the tool's editable schema from ``jaato_server.server.permission_plugin._get_tool_schema(tool_name)``.  Post-§7c the daemon-side permission_plugin instance is the one with the schema (Path D wired it).  We CAN do the schema lookup inside ``PromptOperatorHandler`` IF the handler has a reference to ``jaato_server.server.permission_plugin``.  **Decision**: emit with ``editable_metadata=None`` for cycle-13.  Editing flow is a follow-up if needed; the basic ASK round-trip is the cycle-13 verification target.
 
 Both sub-gaps documented as backlog items if cycle 13 surfaces them.
 

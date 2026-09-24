@@ -1,0 +1,468 @@
+"""UI hooks protocol for agent lifecycle integration.
+
+This module defines the protocol for integrating rich terminal UIs with the
+agent system, enabling visualization of main agent and subagent execution.
+
+The hooks allow UIs to:
+- Track agent creation and lifecycle
+- Capture per-agent output in isolated buffers
+- Monitor per-agent token usage and context consumption
+- Maintain per-agent conversation history
+
+Both main agent and subagents use the same hook interface.
+"""
+
+from typing import Protocol, Dict, Any, Optional, List
+from datetime import datetime
+
+
+class AgentUIHooks(Protocol):
+    """Protocol for UI integration with agent lifecycle.
+
+    These hooks allow the UI to track agent creation, execution, and completion
+    for visualization purposes (e.g., agent panel in rich client).
+
+    Hooks are called from both main agent and subagent execution paths.
+    All hooks are optional - if not implemented, agents run normally without
+    UI integration.
+
+    Thread Safety:
+        All hooks may be called from background threads (especially for subagents).
+        Implementations must be thread-safe.
+    """
+
+    def on_agent_created(
+        self,
+        agent_id: str,
+        agent_name: str,
+        agent_type: str,
+        profile_name: Optional[str],
+        parent_agent_id: Optional[str],
+        icon_lines: Optional[List[str]],
+        created_at: datetime
+    ) -> None:
+        """Called when a new agent is created.
+
+        Args:
+            agent_id: Unique identifier.
+                     Format: "main" for main agent,
+                            "subagent_1", "subagent_2" for top-level subagents,
+                            "parent.child" for nested subagents.
+            agent_name: Display name (e.g., "main", "code-assist", "code-assist.analyzer").
+            agent_type: "main" or "subagent".
+            profile_name: Profile name if subagent (e.g., "code_assistant"), None for main.
+            parent_agent_id: Parent agent's ID if nested subagent, None for main or top-level.
+            icon_lines: Custom ASCII art icon (3 lines) or None for default.
+            created_at: Creation timestamp.
+        """
+        ...
+
+    def on_agent_output(
+        self,
+        agent_id: str,
+        source: str,
+        text: str,
+        mode: str
+    ) -> None:
+        """Called when agent produces output.
+
+        Args:
+            agent_id: Which agent produced this output.
+            source: Output source: "model" for model responses, "user" for user input,
+                   or plugin name for tool output (e.g., "cli", "mcp").
+            text: Output text content.
+            mode: "write" for new output block, "append" to continue previous block.
+        """
+        ...
+
+    def on_agent_status_changed(
+        self,
+        agent_id: str,
+        status: str,
+        error: Optional[str] = None
+    ) -> None:
+        """Called when agent status changes.
+
+        Args:
+            agent_id: Which agent's status changed.
+            status: New status: "active", "done", or "error".
+            error: Error message if status is "error", None otherwise.
+        """
+        ...
+
+    def on_agent_completed(
+        self,
+        agent_id: str,
+        completed_at: datetime,
+        success: bool,
+        token_usage: Optional[Dict[str, int]] = None,
+        turns_used: Optional[int] = None,
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Called when agent completes execution.
+
+        Args:
+            agent_id: Which agent completed.
+            completed_at: Completion timestamp.
+            success: True if agent succeeded, False if errored.
+            token_usage: Dict with "prompt_tokens", "output_tokens", "total_tokens".
+                        None if not available.
+            turns_used: Number of conversation turns used. None if not available.
+            payload: Validated typed payload from ``signal_completion`` when
+                the agent's profile declared a ``completion_payload_schema``.
+                None when the profile uses the legacy untyped ``summary``
+                parameter or when this is a subagent completion (subagents
+                don't currently declare schemas — V1 scope is main-agent
+                completion via the lifecycle tool).
+        """
+        ...
+
+    def on_agent_error(
+        self,
+        agent_id: str,
+        error_type: str,
+        error_summary: str,
+        *,
+        session_id: str,
+        request_id: Optional[str] = None,
+        attempt: str = "0",
+        classification: Optional[str] = None,
+        framework_retries_exhausted: Optional[int] = None,
+        occurred_at: Optional[float] = None,
+    ) -> None:
+        """Called when an agent hits a terminal error the framework could not
+        self-resolve — AFTER its automatic management (``with_retry`` / the
+        completion-nudge loop) is exhausted or never applied.
+
+        Symmetric with :meth:`on_agent_completed`: this is the *failure* side of
+        the lifecycle. Implementations emit ``AgentErrorEvent`` to attached
+        clients so a reactor gets first refusal to recover the stage (re-spawn /
+        reroute / escalate) BEFORE the terminal
+        ``SessionTerminatedEvent(reason="error")`` lands. Fire-and-forget
+        (returns ``None``); control flows through the reactor's own
+        ``create_session`` calls, not a return value.
+
+        Emit ordering is the caller's responsibility: ``on_agent_error`` is
+        invoked *before* the ``SessionTerminatedEvent`` emit at each terminal
+        site, so ``AgentErrorEvent`` reaches the wire first.
+
+        Args:
+            agent_id: The failed agent / cascade stage.
+            error_type: Exception class name (``"APIError"``,
+                ``"RunnerCallError"``, ``"NudgeExhausted"``, ...). Same value
+                that lands on the subsequent ``SessionTerminatedEvent``.
+            error_summary: Human-readable cause.
+            session_id: The failed session (dedupe / handled-marking key).
+            request_id: Provider request id (e.g. OpenAI ``req_…``) when the
+                exception carries one, else ``None``.
+            attempt: Reactor-level re-spawn count for this stage, echoed from the
+                spawn's ``agent_params["attempt"]`` (string on the wire). NOT
+                ``with_retry``'s internal attempt count. ``"0"`` on first spawn.
+            classification: Optional coarse shape hint
+                (``"transient_provider"`` / ``"fatal_contract"`` /
+                ``"unknown"``). Advisory only — never gates this call.
+            framework_retries_exhausted: Optional count of automatic retries the
+                framework burned before giving up. ``None`` when not applicable.
+            occurred_at: Emit timestamp (epoch seconds).
+        """
+        ...
+
+    def on_session_quiescent(
+        self,
+        agent_id: str,
+        reason: str = "natural",
+    ) -> None:
+        """Called when the session has fully wound down after natural
+        completion — i.e., AFTER ``on_agent_completed`` AND the
+        framework's post-completion wrap-up has drained
+        (``_is_running`` returned False, plugin-on-end hooks ran).
+
+        Implementations typically emit ``SessionTerminatedEvent`` to
+        attached clients so they can react without needing the legacy
+        ``subscribe AGENT_COMPLETED + wait 10s for TURN_COMPLETED``
+        heuristic.
+
+        Args:
+            agent_id: Which agent's completion triggered the
+                quiescence.
+            reason: Why the session quiesced.  Currently always
+                ``"natural"`` for this hook (client-requested
+                terminations go through ``session.end`` which emits
+                its own typed event from the command router).
+                Reserved for future paths like ``"timeout"`` or
+                ``"error"`` if those become source-of-truth for
+                quiescence too.
+        """
+        ...
+
+    def on_agent_turn_completed(
+        self,
+        agent_id: str,
+        turn_number: int,
+        prompt_tokens: int,
+        output_tokens: int,
+        total_tokens: int,
+        duration_seconds: float,
+        function_calls: List[Dict[str, Any]],
+        cache_read_tokens: Optional[int] = None,
+        cache_creation_tokens: Optional[int] = None,
+        spend_total_tokens: Optional[int] = None,
+        spend_prompt_tokens: Optional[int] = None,
+        spend_output_tokens: Optional[int] = None,
+        spend_cache_read_tokens: Optional[int] = None,
+        spend_cache_creation_tokens: Optional[int] = None,
+        cost_usd: Optional[float] = None,
+        finish_reason: str = "stop",
+    ) -> None:
+        """Called after each conversation turn completes.
+
+        Enables per-agent, per-turn token accounting.
+
+        Args:
+            agent_id: Which agent completed the turn.
+            turn_number: Turn index (0-based).
+            prompt_tokens: Tokens consumed by the prompt.
+            output_tokens: Tokens generated in the response.
+            total_tokens: Sum of prompt_tokens + output_tokens.
+            duration_seconds: Time taken for the turn.
+            function_calls: List of function calls made during the turn,
+                          each with 'name' and 'duration_seconds' keys.
+            cache_read_tokens: Tokens read from prompt cache (reduced cost).
+                None when the provider does not support caching.
+            cache_creation_tokens: Tokens written to prompt cache.
+                None when the provider does not support caching.
+            spend_cache_read_tokens: Cache reads SUMMED over the turn's
+                responses, where the two above are the last response's.
+                A turn that switches model tier mid-flight re-reads the
+                whole prefix cold at the new model; only the summed
+                figures show that.
+            spend_cache_creation_tokens: Cache writes, summed likewise.
+            finish_reason: The provider's finish reason for the turn's
+                terminal response, as the lowercase ``FinishReason`` enum
+                value (``"stop"``, ``"max_tokens"``, ``"safety"``,
+                ``"error"``, ...).  Defaults to ``"stop"``.  Rides out to
+                clients on ``TurnCompletedEvent.finish_reason`` so an
+                abnormal/truncated turn is machine-detectable instead of
+                looking like a clean completion.
+        """
+        ...
+
+    def on_agent_context_updated(
+        self,
+        agent_id: str,
+        total_tokens: int,
+        prompt_tokens: int,
+        output_tokens: int,
+        turns: int,
+        percent_used: float
+    ) -> None:
+        """Called when agent's context usage changes.
+
+        Enables per-agent context tracking.
+
+        Args:
+            agent_id: Which agent's context updated.
+            total_tokens: Total tokens used.
+            prompt_tokens: Cumulative prompt tokens.
+            output_tokens: Cumulative output tokens.
+            turns: Number of turns.
+            percent_used: Percentage of context window used.
+        """
+        ...
+
+    def on_turn_progress(
+        self,
+        agent_id: str,
+        total_tokens: int,
+        prompt_tokens: int,
+        output_tokens: int,
+        percent_used: float,
+        pending_tool_calls: int,
+        cache_read_tokens: Optional[int] = None,
+        cache_creation_tokens: Optional[int] = None,
+    ) -> None:
+        """Called with incremental progress during turn execution.
+
+        Fires after each model response within a turn, enabling real-time
+        token tracking before the turn completes.
+
+        Args:
+            agent_id: Which agent is progressing.
+            total_tokens: Current total tokens used.
+            prompt_tokens: Current prompt tokens.
+            output_tokens: Current output tokens.
+            percent_used: Percentage of context window used.
+            pending_tool_calls: Number of tool calls pending execution.
+            cache_read_tokens: Tokens read from prompt cache (reduced cost).
+                None when the provider does not support caching.
+            cache_creation_tokens: Tokens written to prompt cache.
+                None when the provider does not support caching.
+        """
+        ...
+
+    def on_agent_gc_config(
+        self,
+        agent_id: str,
+        threshold: float,
+        strategy: str,
+        target_percent: Optional[float] = None,
+        continuous_mode: bool = False
+    ) -> None:
+        """Called when agent's GC configuration is set.
+
+        Enables per-agent GC threshold display in the status bar.
+
+        Args:
+            agent_id: Which agent's GC config is being set.
+            threshold: GC trigger threshold percentage (e.g., 80.0).
+            strategy: GC strategy name (e.g., "truncate", "hybrid", "summarize", "budget").
+            target_percent: Target usage after GC (e.g., 60.0).
+            continuous_mode: True if GC runs after every turn.
+        """
+        ...
+
+    def on_agent_history_updated(
+        self,
+        agent_id: str,
+        history: List[Any]
+    ) -> None:
+        """Called when agent's conversation history changes (after each turn).
+
+        Enables per-agent history isolation.
+
+        Args:
+            agent_id: Which agent's history updated.
+            history: Complete conversation history snapshot (List[Message]).
+        """
+        ...
+
+    def on_tool_call_start(
+        self,
+        agent_id: str,
+        tool_name: str,
+        tool_args: Dict[str, Any],
+        call_id: Optional[str] = None
+    ) -> None:
+        """Called when a tool starts executing.
+
+        Enables real-time tool call visualization in the UI (e.g., showing
+        active tools below the spinner).
+
+        Args:
+            agent_id: Which agent initiated the tool call.
+            tool_name: Name of the tool being called.
+            tool_args: Arguments passed to the tool.
+            call_id: Unique identifier for this tool call (for correlation).
+        """
+        ...
+
+    def on_tool_call_end(
+        self,
+        agent_id: str,
+        tool_name: str,
+        success: bool,
+        duration_seconds: float,
+        error_message: Optional[str] = None,
+        call_id: Optional[str] = None,
+        backgrounded: bool = False,
+        continuation_id: Optional[str] = None,
+        show_output: Optional[bool] = None,
+        show_popup: Optional[bool] = None,
+        is_error_result: bool = False,
+        result_status: Optional[str] = None,
+    ) -> None:
+        """Called when a tool finishes executing.
+
+        Args:
+            agent_id: Which agent's tool call completed.
+            tool_name: Name of the tool that finished.
+            success: Whether the tool executed successfully.
+            duration_seconds: How long the tool took to execute.
+            error_message: Error message if the tool failed.
+            is_error_result: Computed deeper error check — True when the tool
+                returned an error body (e.g. ``{"error": ...}`` or HTTP
+                status_code >= 400) even though ``success`` is True. Distinct
+                from ``success`` (which only catches raised exceptions /
+                permission / missing-executor).
+            result_status: The tool result's own ``status`` string, copied
+                verbatim when it declares one (``send_to_sibling`` →
+                ``accepted`` / ``queued`` / ``refused`` / ``sibling_cold`` /
+                ``no_such_sibling``).  Lets a consumer branch on WHICH
+                outcome occurred without matching on ``error_message``
+                prose.  ``None`` when the tool declares no status — that is
+                silence, not an outcome.
+            call_id: Unique identifier for this tool call (for correlation).
+            backgrounded: True if tool was auto-backgrounded (still producing output).
+            continuation_id: Session ID for tools that expect follow-up calls
+                (e.g., interactive shell sessions). The popup stays open across
+                tools sharing the same continuation_id.
+            show_output: Whether to render output_lines in the main panel.
+                None means use default (True). The popup is unaffected.
+            show_popup: Whether to track/update the tool output popup.
+                None means use default (True). False prevents this tool from
+                becoming the tracked popup tool or updating popup content.
+        """
+        ...
+
+    def on_tool_output(
+        self,
+        agent_id: str,
+        call_id: str,
+        chunk: str,
+        stream_id: str = "",
+        sequence: Optional[int] = None,
+        mime_type: Optional[str] = None,
+        data_b64: Optional[str] = None,
+        final: bool = False,
+        generated_by: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Called when a tool emits output during execution.
+
+        Enables live "tail -f" style output preview in the tool tree.
+        Plugins should call this repeatedly during execution to stream output.
+
+        The media arguments are all keyword-with-default, and callers pass
+        them ONLY when bytes are actually present, so the text path is
+        byte-identical to before they existed and an implementer that
+        predates them keeps working.
+
+        Args:
+            agent_id: Which agent's tool is producing output.
+            call_id: Unique identifier for the tool call (required for correlation).
+            chunk: Output text chunk (may contain newlines).  Empty for a
+                pure-media chunk.
+            stream_id: Correlates chunks belonging to one media stream.
+            sequence: Ordering, passed through from ``StreamChunk.sequence``.
+            mime_type: Tags the ``data_b64`` payload (e.g. ``"audio/wav"``).
+            data_b64: Base64-encoded binary payload.
+            final: Last chunk of this stream.
+            generated_by: Provenance of the bytes (``ToolOutputEvent.
+                generated_by``): the model's own media is stamped
+                ``{"kind": "ai", ...}`` by the session, a tool attachment
+                carries its producer's stamp, and ``None`` claims nothing.
+
+        Note:
+            An implementation receiving ``mime_type``/``data_b64`` must not
+            run the payload through a text formatter -- it corrupts bytes.
+        """
+        ...
+
+    def on_agent_instruction_budget_updated(
+        self,
+        agent_id: str,
+        budget_snapshot: Dict[str, Any]
+    ) -> None:
+        """Called when agent's instruction budget is updated.
+
+        Enables per-agent instruction budget tracking, showing token allocation
+        by source layer (system, session, plugin, enrichment, conversation).
+
+        Args:
+            agent_id: Which agent's budget updated.
+            budget_snapshot: Budget snapshot from InstructionBudget.snapshot().
+                Contains: session_id, agent_id, agent_type, context_limit,
+                total_tokens, gc_eligible_tokens, locked_tokens, preservable_tokens,
+                utilization_percent, available_tokens, gc_headroom_percent,
+                entries (per-source breakdown with children for drill-down).
+        """
+        ...

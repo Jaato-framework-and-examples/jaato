@@ -78,7 +78,8 @@ _COLUMNS: Tuple[Tuple[str, str], ...] = (
     ("provider", "jaato provider plugin"),
     ("upstream", "who the gateway routed to"),
     ("session id", "the provider-console join key"),
-    ("turns", "turns the session consumed"),
+    ("sessions", "sessions the arm opened"),
+    ("turns", "turns the arm's sessions consumed"),
     ("cost", "USD, summed across turns"),
     ("budget", "spend against what was allowed"),
     ("nudges", "completion nudges drawn"),
@@ -194,6 +195,22 @@ def _arrival_fraction(snapshot: Any) -> Optional[float]:
     return float(fraction)
 
 
+def sessions_cell(record: Dict[str, Any]) -> str:
+    """How many sessions the arm opened.
+
+    ``1`` for a session arm; one per stage for a driver arm
+    (``harness.kind: driver``, jaato #1110), whose ``session id`` column
+    shows only the FIRST — the scalar join key — while the whole list sits
+    in the record's ``session_ids``.  A record written before the list
+    existed has no key at all and renders unknown, not ``1``: that would
+    be this report inventing a count.
+    """
+    ids = record.get("session_ids")
+    if not isinstance(ids, list):
+        return UNKNOWN
+    return str(len(ids))
+
+
 def finish_cell(record: Dict[str, Any]) -> str:
     """The finish reason, with the upstream's own word beside it.
 
@@ -282,6 +299,7 @@ def row_cells(record: Dict[str, Any], graders: Sequence[str]) -> List[str]:
         _text(record.get("provider")),
         _text(record.get("upstream_provider")),
         _text(record.get("session_id")),
+        sessions_cell(record),
         _text(record.get("turns")),
         _money(usage.get("cost_usd")),
         budget_cell(record),
@@ -479,7 +497,10 @@ _FOOTNOTES = (
     "<strong>upstream</strong> and the parenthetical in <strong>finish</strong> "
     "stay — until jaato #766 carries the provider's own words off the wire. "
     "<strong>session id</strong> is the provider console's own key: OpenRouter "
-    "groups its Sessions view by exactly this string. "
+    "groups its Sessions view by exactly this string. For a driver arm "
+    "(<code>harness.kind: driver</code>) it is the first of the arm's "
+    "sessions and <strong>sessions</strong> says how many there were; the "
+    "whole list is in the results file. "
     "<strong>budget</strong> names which gate applied — <em>own</em> for a "
     "profile-declared <code>budget_control</code> (such a session is on its own "
     "books and does not draw on the task pool), <em>pool</em> for the task's "

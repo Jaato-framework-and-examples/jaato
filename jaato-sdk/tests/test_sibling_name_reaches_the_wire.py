@@ -97,7 +97,7 @@ def test_every_create_session_kwarg_the_server_takes_is_reachable():
     Server-side-only params are legitimate (in-process/daemon-extension
     concerns), so they are excused BY NAME with a reason.
     """
-    from server.session_manager import SessionManager
+    from jaato_server.server.session_manager import SessionManager
 
     server_params = set(
         inspect.signature(SessionManager._create_session_impl).parameters)

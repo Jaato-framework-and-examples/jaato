@@ -81,6 +81,32 @@ INTENTIONALLY_ABSENT = {
         "recovery wrapper forwards the METHOD and lets the inner client "
         "refuse a daemon too old to serve it -- same reasoning as "
         "MIN_SESSION_STOP_PROTOCOL above",
+    "MIN_SCAFFOLD_EXPLAIN_PROTOCOL":
+        "class constant on IPCClient gating explain_topic; the recovery "
+        "wrapper forwards the METHOD and lets the inner client refuse a "
+        "daemon too old to serve it -- same reasoning as "
+        "MIN_SESSION_STOP_PROTOCOL above",
+    "MIN_SCAFFOLD_INTEGRATION_PROTOCOL":
+        "class constant on IPCClient gating run_integration; the recovery "
+        "wrapper forwards the METHOD and lets the inner client refuse a "
+        "daemon too old to serve it -- same reasoning as "
+        "MIN_SESSION_STOP_PROTOCOL above",
+    "MIN_MEMORY_VERBS_PROTOCOL":
+        "class constant on IPCClient gating the memory verbs (#1232); the "
+        "recovery wrapper forwards every METHOD and lets the inner client "
+        "refuse a daemon too old to serve them -- same reasoning as "
+        "MIN_SESSION_STOP_PROTOCOL above",
+    "MIN_SESSION_MESSAGE_PROTOCOL":
+        "class constant on IPCClient gating send_session_message (session "
+        "group messaging, protocol 1.23); the recovery wrapper forwards the "
+        "METHOD and lets the inner client refuse a daemon too old to serve "
+        "the verb -- same reasoning as MIN_SESSION_STOP_PROTOCOL above",
+    "MIN_SESSION_MESSAGE_FILES_PROTOCOL":
+        "class constant on IPCClient gating the file_refs / text_attachments "
+        "keys of send_session_message (session group messaging phase 3, "
+        "protocol 1.24); the recovery wrapper forwards the METHOD and lets "
+        "the inner client refuse a daemon that would deliver the text "
+        "without the files -- same reasoning as MIN_SESSION_MESSAGE_PROTOCOL",
 }
 
 

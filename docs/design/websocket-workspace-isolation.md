@@ -74,7 +74,7 @@ JaatoWSServer
 
 ### Phase 1: WorkspaceProvisioner ✅
 
-**File: `jaato-server/server/workspace_provisioner.py`**
+**File: `jaato-server/jaato_server/server/workspace_provisioner.py`**
 
 Handles creation, tracking, and cleanup of auto-provisioned workspace
 directories for WebSocket sessions. 22 unit tests passing.
@@ -93,7 +93,7 @@ Key implementation details:
 
 ### Phase 2: AppArmorManager ✅
 
-**File: `jaato-server/server/apparmor.py`**
+**File: `jaato-server/jaato_server/server/apparmor.py`**
 
 Manages AppArmor profiles for workspace confinement. Designed to be optional —
 when AppArmor is not available, the system falls back to directory-level
@@ -118,7 +118,7 @@ Key implementation details:
 
 ### Phase 3: CLI Plugin Integration ✅
 
-**Modified: `jaato-server/shared/plugins/cli/plugin.py`**
+**Modified: `jaato-server/jaato_server/shared/plugins/cli/plugin.py`**
 
 - Added `_apparmor_wrapper` (argv) and `_apparmor_shell_wrapper` (shell string) attributes
 - `set_apparmor_wrapper(argv_wrapper, shell_wrapper)` method
@@ -128,7 +128,7 @@ Key implementation details:
 
 ### Phase 4: Interactive Shell Plugin Integration ✅
 
-**Modified: `jaato-server/shared/plugins/interactive_shell/plugin.py`**
+**Modified: `jaato-server/jaato_server/shared/plugins/interactive_shell/plugin.py`**
 
 - Added `_apparmor_shell_wrapper` attribute
 - `set_apparmor_wrapper(shell_wrapper)` method
@@ -137,7 +137,7 @@ Key implementation details:
 
 ### Phase 5: WebSocket Server Integration ✅
 
-**Modified: `jaato-server/server/websocket.py`**
+**Modified: `jaato-server/jaato_server/server/websocket.py`**
 
 Key changes implemented:
 
@@ -154,7 +154,7 @@ Key changes implemented:
 
 ### Phase 6: Session Manager Integration ✅
 
-**Modified: `jaato-server/server/session_manager.py`**
+**Modified: `jaato-server/jaato_server/server/session_manager.py`**
 
 1. **`Session` dataclass**: Added `provisioned: bool = False`
 2. **`create_session()`**: Accepts `provisioned: bool = False` param
@@ -163,7 +163,7 @@ Key changes implemented:
 
 ### Phase 7: JaatoServer Integration ✅
 
-**Modified: `jaato-server/server/core.py`**
+**Modified: `jaato-server/jaato_server/server/core.py`**
 
 - `set_apparmor_wrapper(argv_wrapper, shell_wrapper)` method
 - Propagates to CLI plugin (both wrappers) and interactive_shell plugin (shell wrapper)
@@ -182,16 +182,16 @@ Key changes implemented:
 
 | File | Action | Status | Description |
 |------|--------|--------|-------------|
-| `server/workspace_provisioner.py` | **NEW** | ✅ | Auto-provisioning, templates, reaper |
-| `server/apparmor.py` | **NEW** | ✅ | AppArmor profile management |
-| `server/websocket.py` | MODIFY | ✅ | Per-client workspaces, provisioning integration |
-| `server/workspace_manager.py` | MODIFY | ✅ | Per-client tracking, integration with provisioner |
-| `server/session_manager.py` | MODIFY | ✅ | Provisioned workspace awareness |
-| `server/core.py` | MODIFY | ✅ | AppArmor wrapper propagation to plugins |
-| `shared/plugins/cli/plugin.py` | MODIFY | ✅ | AppArmor command wrapping |
-| `shared/plugins/interactive_shell/plugin.py` | MODIFY | ✅ | AppArmor command wrapping |
-| `shared/tests/test_workspace_provisioner.py` | **NEW** | ✅ | 22 unit tests |
-| `shared/tests/test_apparmor.py` | **NEW** | ✅ | 22 unit tests |
+| `jaato_server/server/workspace_provisioner.py` | **NEW** | ✅ | Auto-provisioning, templates, reaper |
+| `jaato_server/server/apparmor.py` | **NEW** | ✅ | AppArmor profile management |
+| `jaato_server/server/websocket.py` | MODIFY | ✅ | Per-client workspaces, provisioning integration |
+| `jaato_server/server/workspace_manager.py` | MODIFY | ✅ | Per-client tracking, integration with provisioner |
+| `jaato_server/server/session_manager.py` | MODIFY | ✅ | Provisioned workspace awareness |
+| `jaato_server/server/core.py` | MODIFY | ✅ | AppArmor wrapper propagation to plugins |
+| `jaato_server/shared/plugins/cli/plugin.py` | MODIFY | ✅ | AppArmor command wrapping |
+| `jaato_server/shared/plugins/interactive_shell/plugin.py` | MODIFY | ✅ | AppArmor command wrapping |
+| `jaato_server/shared/tests/test_workspace_provisioner.py` | **NEW** | ✅ | 22 unit tests |
+| `jaato_server/shared/tests/test_apparmor.py` | **NEW** | ✅ | 22 unit tests |
 | `deploy/apparmor/` | **NEW** | DEFERRED | Example profiles, setup script |
 
 ## Configuration
@@ -254,7 +254,7 @@ chown jaato:jaato /etc/apparmor.d/jaato
 echo "jaato ALL=(root) NOPASSWD: /sbin/apparmor_parser" > /etc/sudoers.d/jaato
 
 # Start server
-sudo -u jaato .venv/bin/python -m server \
+sudo -u jaato .venv/bin/python -m jaato_server \
     --web-socket :8080 \
     --workspace-root /srv/jaato/workspaces \
     --daemon

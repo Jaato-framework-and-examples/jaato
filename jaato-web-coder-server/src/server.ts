@@ -8,6 +8,10 @@ import { createServer, type Server } from "node:http";
 import { BindChannel } from "./bind-channel.js";
 import type { ServerConfig } from "./config.js";
 import { FileCredentialStore } from "./credentials.js";
+import { FileNoteStore } from "./notes.js";
+import { FileGitHubStore } from "./github-store.js";
+import { HttpGitHubApi } from "./github-api.js";
+import { GitHubService } from "./github.js";
 import { type IdentityProvider } from "./auth/identity.js";
 import { OidcProvider } from "./auth/oidc.js";
 import { createRouter } from "./routes.js";
@@ -43,8 +47,27 @@ export async function startServer(config: ServerConfig, opts: StartOptions = {})
   // Opt-in: without the block the bundle gets the plain key field it always had.
   const credentials = config.credentials ? new FileCredentialStore(config.credentials.file, config.credentials.key) : undefined;
   log(credentials ? `credential store at ${config.credentials!.file}` : "credential store not configured (no credentials: block)");
+  const notes = config.notes ? new FileNoteStore(config.notes.file, config.notes.key) : undefined;
+  log(notes ? `session-note store at ${config.notes!.file}` : "session-note store not configured (no notes: block); the page will keep notes in the browser");
 
-  const server = createServer(createRouter({ config, idp, sessions, bind, credentials, distDir: opts.distDir, log }));
+  // Opt-in: per-user GitHub connect.  The service answers the daemon's
+  // secret.resolve over the SAME bind channel that mints tickets (#1226).
+  let github: GitHubService | undefined;
+  if (config.github) {
+    const gh = config.github;
+    const store = new FileGitHubStore(gh.file, gh.key);
+    const api = new HttpGitHubApi({
+      clientId: gh.clientId, clientSecret: gh.clientSecret,
+      oauthBaseUrl: gh.oauthBaseUrl, apiBaseUrl: gh.apiBaseUrl, noreplyDomain: gh.noreplyDomain,
+    });
+    github = new GitHubService({ store, api, reloader: bind, workspaceRoot: gh.workspaceRoot, log });
+    bind.attachSecretResolver(github.resolveSecret);
+    log(`github connect enabled (store ${gh.file}; secret.resolve answering on the bind channel${gh.workspaceRoot ? `; workspace writes contained to ${gh.workspaceRoot}` : "; workspace .env writes disabled (no workspace_root)"})`);
+  } else {
+    log("github connect not configured (no github: block)");
+  }
+
+  const server = createServer(createRouter({ config, idp, sessions, bind, credentials, notes, github, distDir: opts.distDir, log }));
   await new Promise<void>((ok, fail) => server.once("error", fail).listen(config.listen.port, config.listen.host, ok));
   const addr = server.address();
   log(`listening on ${typeof addr === "string" ? addr : `${addr?.address}:${addr?.port}`}; public URL ${config.publicUrl}; browsers connect to ${config.daemon.url}`);

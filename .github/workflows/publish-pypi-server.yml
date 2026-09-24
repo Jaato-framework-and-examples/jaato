@@ -70,7 +70,7 @@ jobs:
         run: pip install -e jaato-sdk/ && pip install -e "jaato-server/.[all]"
 
       - name: Run tests
-        run: pytest jaato-server/shared/tests/ jaato-server/server/test_client.py jaato-server/server/test_workspace_command.py
+        run: pytest jaato-server/jaato_server/shared/tests/ jaato-server/jaato_server/server/test_client.py jaato-server/jaato_server/server/test_workspace_command.py
 
   build-and-publish:
     needs: test

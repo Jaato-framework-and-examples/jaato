@@ -1,0 +1,27 @@
+$ cat .jaato/profiles/screener.yaml
+name: screener
+description: Pre-screens inbound support tickets and drafts a reply for a human agent to approve.
+model: echo
+provider: echo
+plugins: []
+regulatory:
+  intended_purpose: Pre-screen inbound support tickets and draft a reply for a human agent to approve before it is sent.
+  risk_class: limited
+  interacts_with_persons: true
+  provider:
+    name: Acme Support GmbH
+    contact: compliance@acme.example
+trace:
+  ledger: .jaato/logs/ledger.jsonl
+  session_log: .jaato/logs/session_trace.jsonl
+record_keeping:
+  retention_days: 180
+  conversation_retention_days: 30
+  integrity: sha256-chain
+budget_control:
+  limits: {turns: 2}
+  degrade:
+    - {at: 100, action: abort}
+plugin_configs:
+  echo:
+    usage: {prompt_tokens: 12, output_tokens: 7, total_tokens: 19}

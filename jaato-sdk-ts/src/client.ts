@@ -18,6 +18,7 @@
 
 import {
   ConnectionClosedError,
+  RequestInterruptedError,
   ConnectionError,
   IncompatibleServerError,
   ReconnectingError,
@@ -38,6 +39,7 @@ import {
   type ClientConfigRequest,
   type CommandRequest,
   type ConnectedEvent,
+  type ExternalEventRequest,
   type JaatoEvent,
   type SendMessageRequest,
   type StopRequest,
@@ -63,6 +65,12 @@ import {
   type PermissionClearRequest,
   type PermissionSetDefaultRequest,
   type PermissionPolicySnapshotRequest,
+  type WorkspaceFileContentEvent,
+  type WorkspaceFileFetchRequest,
+  type MemoryListEvent,
+  type MemoryGetResultEvent,
+  type MemoryUpdateResultEvent,
+  type MemoryDeleteResultEvent,
 } from "./events.js";
 import type {
   CatchallEventHandler,
@@ -139,6 +147,114 @@ export const MIN_SESSION_RELOAD_ENV_PROTOCOL = "1.11";
  * describing a ``.gitignore`` nobody changed.
  */
 export const MIN_WORKSPACE_IGNORE_PROTOCOL = "1.12";
+
+/**
+ * Protocol floor for {@link JaatoClient.fetchWorkspaceFile}.  A missing
+ * VERB: an older daemon answers ``ErrorEvent("Unknown message type")`` and
+ * never the ``workspace.file.content`` the call waits on, so the call is
+ * refused below this version rather than left to time out.
+ */
+export const MIN_FILE_FETCH_PROTOCOL = "1.20";
+
+/**
+ * Protocol floor for {@link JaatoClient.runScaffoldIntegration}.  Same rule
+ * as {@link MIN_WORKSPACE_IGNORE_PROTOCOL}: an older daemon ignores
+ * ``scaffold.integration`` silently, and a client that then reported the
+ * skill as installed would be describing a copy nobody wrote.  So the call
+ * is refused below this version rather than sent blind.
+ */
+export const MIN_SCAFFOLD_INTEGRATION_PROTOCOL = "1.21";
+
+/**
+ * Protocol floor for the memory verbs ({@link JaatoClient.listMemories} and
+ * friends, #1232).  A missing VERB: an older daemon answers ``ErrorEvent(
+ * "Unknown request type")`` with no ``request_id`` and never the result the
+ * call waits on, so every memory call is refused below this version rather
+ * than left to time out.
+ */
+export const MIN_MEMORY_VERBS_PROTOCOL = "1.22";
+
+/**
+ * Protocol floor for {@link JaatoClient.sendSessionMessage}.  Same rule as
+ * {@link MIN_WORKSPACE_IGNORE_PROTOCOL}: an older daemon ignores
+ * ``session.message`` silently, and a client that then reported the message
+ * as delivered would be describing one nobody carried.  So the call is
+ * refused below this version rather than sent blind.
+ */
+export const MIN_SESSION_MESSAGE_PROTOCOL = "1.23";
+
+/**
+ * Protocol floor for a {@link JaatoClient.sendSessionMessage} that carries
+ * `fileRefs` or `textAttachments` (1.24).  Two NEW keys on an existing
+ * verb: a 1.23 daemon reads neither, delivers the text alone and answers
+ * `accepted` — a degraded call that reads as success — so a call carrying
+ * either is refused below this while a text-only call keeps the 1.23 floor.
+ */
+export const MIN_SESSION_MESSAGE_FILES_PROTOCOL = "1.24";
+
+/**
+ * Size limits a daemon enforces, advertised in ``ConnectedEvent.server_info``.
+ *
+ * ``maxMessageSize`` is the largest single WebSocket message the daemon
+ * accepts; a larger one makes it close the connection with 1009.  A staged
+ * file travels as ONE binary message, so ``stagePerFileLimit`` is never
+ * above it.
+ */
+export interface ServerLimits {
+  maxMessageSize: number;
+  stagePerFileLimit: number;
+  stageTotalLimit: number;
+  /** ``false`` when the daemon advertised nothing and these are the legacy values. */
+  advertised: boolean;
+}
+
+/**
+ * What a daemon that advertises no limits enforces: the ``websockets``
+ * default of 1 MiB per message (the daemon never set one), which also caps
+ * a staged file whatever the 10 MB staging cap says.
+ */
+export const LEGACY_SERVER_LIMITS: ServerLimits = {
+  maxMessageSize: 1024 * 1024,
+  stagePerFileLimit: 1024 * 1024,
+  stageTotalLimit: 50 * 1024 * 1024,
+  advertised: false,
+};
+
+/** Read {@link ServerLimits} out of ``server_info``; legacy values when absent. */
+export function serverLimitsFrom(info: Record<string, unknown> | null | undefined): ServerLimits {
+  const num = (v: unknown): number | null =>
+    typeof v === "number" && Number.isFinite(v) && v > 0 ? v : null;
+  const max = num(info?.max_message_size);
+  if (max === null) return { ...LEGACY_SERVER_LIMITS };
+  return {
+    maxMessageSize: max,
+    stagePerFileLimit: Math.min(num(info?.stage_per_file_limit) ?? max, max),
+    stageTotalLimit: num(info?.stage_total_limit) ?? LEGACY_SERVER_LIMITS.stageTotalLimit,
+    advertised: true,
+  };
+}
+
+/**
+ * How long {@link JaatoClient.stageFiles} waits for the daemon's
+ * ``workspace.files.staged`` response before giving up (default 120 s, the
+ * sibling {@link JaatoClient.fetchWorkspaceFile} value).  The wait had no
+ * deadline: if the response never arrived (lost, the daemon errored before
+ * emitting it, the connection stalled without closing) the promise never
+ * settled and the caller's ``staging`` indicator pulsed forever with no
+ * error to react to.  The timeout rejects with a clear message so a caller's
+ * ``catch`` marks the upload ``failed`` instead of hanging (#1248).
+ */
+export const STAGE_FILES_TIMEOUT_MS = 120_000;
+
+/**
+ * What {@link JaatoClient.fetchWorkspaceFile} resolves with.  ``event`` is
+ * the daemon's header; ``data`` is the file's bytes when it was fetched
+ * (``null`` for a metadata-only fetch or a refusal).
+ */
+export interface WorkspaceFileFetchResult {
+  event: WorkspaceFileContentEvent;
+  data: Uint8Array | null;
+}
 
 /**
  * Parse ``"MAJOR.MINOR"`` into ``[major, minor]``.  Extra components
@@ -282,6 +398,16 @@ export class JaatoClient {
   private _state: ConnectionState = ConnectionState.DISCONNECTED;
   private _serverVersion: string | null = null;
   private _serverProtocolVersion: string | null = null;
+  /** Monotonic part of each ``fetchWorkspaceFile`` request id. */
+  private _fileFetchSeq = 0;
+  private _memorySeq = 0;
+  /**
+   * Requests waiting for an answer on the CURRENT connection, told when it
+   * closes so they reject at once instead of waiting out their deadline.
+   * Cleared by each waiter as it settles.
+   */
+  private _closeWaiters: Set<(info: { code: number; reason: string }) => void> = new Set();
+  private _limits: ServerLimits | null = null;
   private _clientId: string | null = null;
   private _sessionId: string | null = null;
   private _statusHandlers: Array<(s: ConnectionStatus) => void> = [];
@@ -360,6 +486,17 @@ export class JaatoClient {
    */
   get serverProtocolVersion(): string | null {
     return this._serverProtocolVersion;
+  }
+
+  /**
+   * The size limits the connected daemon enforces, from
+   * ``ConnectedEvent.server_info``.  Against a daemon that advertises none
+   * (every release before it did) this is {@link LEGACY_SERVER_LIMITS}:
+   * those daemons closed the connection on any message over 1 MiB whatever
+   * their staging caps said.  ``null`` before the first handshake.
+   */
+  get serverLimits(): ServerLimits | null {
+    return this._limits;
   }
 
   /** Client ID assigned by the server in {@link ConnectedEvent}. */
@@ -973,6 +1110,382 @@ export class JaatoClient {
   }
 
   /**
+   * Message another session in this session's GROUP, waking it if it is
+   * cold (protocol 1.22).  The client-tier form of the ``courier`` plugin's
+   * ``send_to_session``: the sender is this connection's OWN session,
+   * resolved daemon-side, and the target must share a group with it — a
+   * cascade, or the same authenticated creator.  A cold target is revived
+   * from disk and driven; a busy one queues the message on the idle-only
+   * peer tier; a terminated one is never woken.  Mirror of Python
+   * ``IPCClient.send_session_message``.
+   *
+   * Fire-and-forget: the daemon answers with one ``session.message.result``
+   * event carrying the receipt — ``status`` is ``accepted`` / ``queued`` /
+   * ``spooled`` (delivered, or held in the target's durable inbox),
+   * ``no_such_session``, ``ambiguous`` (with ``candidates``),
+   * ``session_cold``, ``duplicate``, ``terminated`` or ``refused`` (with
+   * ``error``).  No delivered status claims the peer read or acted on
+   * anything.
+   *
+   * @param target A session id, or a cascade-scoped sibling name.
+   * @param text The message; may be empty when attachments, file
+   *   references or text attachments carry the content.
+   * @param options.attachments Binary content in the canonical wire shape
+   *   (``{mime_type, data, display_name}``), delivered on the drive branch
+   *   only — a busy target's message is spooled rather than stripped.
+   * @param options.fileRefs Files in the SENDER session's workspace to hand
+   *   the target (1.24): workspace-relative paths, or ``{path, workspace?}``
+   *   rows.  References the DAEMON resolves on its own host — never bytes
+   *   read here.  A target sharing the workspace reads the file in place;
+   *   one in another workspace gets a copy under its own inbox (10 MB per
+   *   file, 50 MB per message).  The result event's ``files`` says per file
+   *   what became of it; one refused file refuses the whole message.
+   * @param options.textAttachments ``{text, display_name?, mime_type?}``
+   *   rows (1.24) — a patch, a snippet — inlined for the target up to 32 KiB
+   *   in total, stored as files beyond it.
+   * @param options.eventId Idempotency key; a redelivered id answers
+   *   ``duplicate``, a benign no-op.
+   * @param options.requestId Correlation id echoed on the result event.
+   * @throws Error against a daemon below {@link MIN_SESSION_MESSAGE_PROTOCOL};
+   *   against one below {@link MIN_SESSION_MESSAGE_FILES_PROTOCOL} when
+   *   ``fileRefs`` or ``textAttachments`` are given (it would deliver the
+   *   text without them and call that accepted); or when no content at all
+   *   is given.
+   */
+  async sendSessionMessage(
+    target: string,
+    text = "",
+    options?: {
+      attachments?: Array<Record<string, unknown>>;
+      fileRefs?: Array<string | Record<string, unknown>>;
+      textAttachments?: Array<Record<string, unknown>>;
+      eventId?: string;
+      requestId?: string;
+    },
+  ): Promise<void> {
+    if (
+      this._serverProtocolVersion === null ||
+      !isProtocolCompatible(
+        this._serverProtocolVersion,
+        MIN_SESSION_MESSAGE_PROTOCOL,
+      )
+    ) {
+      throw new Error(
+        `sendSessionMessage: this daemon speaks protocol ` +
+          `${this._serverProtocolVersion ?? "unknown"} and does not serve ` +
+          `session.message (needs >= ${MIN_SESSION_MESSAGE_PROTOCOL}).  ` +
+          `It would ignore the command silently.  Upgrade the daemon.`,
+      );
+    }
+    const fileRefs = options?.fileRefs ?? [];
+    const textAttachments = options?.textAttachments ?? [];
+    if (
+      (fileRefs.length > 0 || textAttachments.length > 0) &&
+      !isProtocolCompatible(
+        this._serverProtocolVersion,
+        MIN_SESSION_MESSAGE_FILES_PROTOCOL,
+      )
+    ) {
+      throw new Error(
+        `sendSessionMessage: this daemon speaks protocol ` +
+          `${this._serverProtocolVersion} and does not carry fileRefs / ` +
+          `textAttachments on session.message (needs >= ` +
+          `${MIN_SESSION_MESSAGE_FILES_PROTOCOL}).  It would deliver the ` +
+          `text without them and report accepted.  Upgrade the daemon, or ` +
+          `send text only.`,
+      );
+    }
+    const attachments = options?.attachments ?? [];
+    if (
+      !text &&
+      attachments.length === 0 &&
+      fileRefs.length === 0 &&
+      textAttachments.length === 0
+    ) {
+      throw new Error(
+        "sendSessionMessage requires text, attachments, fileRefs or " +
+          "textAttachments — a message with no content drives a turn the " +
+          "peer has nothing to answer",
+      );
+    }
+    const payload: Record<string, unknown> = { target, text };
+    if (options?.eventId !== undefined) payload.event_id = options.eventId;
+    if (attachments.length > 0) payload.attachments = attachments;
+    if (fileRefs.length > 0) payload.file_refs = fileRefs;
+    if (textAttachments.length > 0) payload.text_attachments = textAttachments;
+    // CommandRequest carries no request_id of its own, so the correlation
+    // id rides the payload and the daemon echoes it from there.
+    if (options?.requestId !== undefined) payload.request_id = options.requestId;
+    await this.executeCommand("session.message", [], payload);
+  }
+
+  /**
+   * Run ``jaato-scaffold integration <name>`` on the daemon (protocol 1.21)
+   * — install or refresh an integration payload, the ``jaato-sdk`` skill
+   * among them, into the workspace this connection is in.  The sibling of
+   * ``scaffold.explain``: the command must run on the install that serves
+   * the session, because the copy it writes is stamped with THAT
+   * ``jaato-server``'s version and the workspace directory is on THAT host —
+   * so the daemon runs it rather than the caller shelling out to its own
+   * venv, and the application never carries (and so never drifts) a copy of
+   * the skill's text.
+   *
+   * The daemon keeps the copy current with the ``--refresh`` contract: it
+   * re-applies an ``absent`` / ``stale`` / ``outdated`` copy and LEAVES an
+   * ``edited`` / ``diverged`` / ``unstamped`` one alone.  It answers with one
+   * ``scaffold.integration.result`` event whatever happened — ``ok`` with
+   * ``changed`` / ``state_before`` / ``state_after`` / ``skipped_reason``, or
+   * ``ok: false`` with the reason and the ``available`` integrations it
+   * ships.  A refresh it declined to apply is ``ok: true`` with a
+   * ``skipped_reason``, so a client reports it in a notice, not as an error.
+   * Mirror of Python ``IPCClient.run_integration``.
+   *
+   * The integration installs into the caller's OWN workspace, resolved
+   * daemon-side (the same entitlement path ``workspace.file.fetch`` uses), so
+   * there is no directory parameter.
+   *
+   * @param name The integration to run, e.g. ``"claude-code"``.
+   * @throws Error against a daemon below
+   *   {@link MIN_SCAFFOLD_INTEGRATION_PROTOCOL}, which would ignore the
+   *   command silently — indistinguishable from the skill having been
+   *   installed, which a caller must not report.
+   */
+  async runScaffoldIntegration(name: string): Promise<void> {
+    if (
+      this._serverProtocolVersion === null ||
+      !isProtocolCompatible(
+        this._serverProtocolVersion,
+        MIN_SCAFFOLD_INTEGRATION_PROTOCOL,
+      )
+    ) {
+      throw new Error(
+        `runScaffoldIntegration: this daemon speaks protocol ` +
+          `${this._serverProtocolVersion ?? "unknown"} and does not serve ` +
+          `scaffold.integration (needs >= ${MIN_SCAFFOLD_INTEGRATION_PROTOCOL}).  ` +
+          `It would ignore the command silently, which is indistinguishable ` +
+          `from the skill having been installed.  Upgrade the daemon, or run ` +
+          `jaato-scaffold integration in the daemon's own virtualenv.`,
+      );
+    }
+    await this._sendEvent({
+      type: EventTypeValue.COMMAND,
+      command: "scaffold.integration",
+      args: [name],
+    } as CommandRequest);
+  }
+
+  /**
+   * Download one file from the workspace this connection is in (protocol
+   * 1.20, WS only) -- the reverse of {@link stageFiles}.
+   *
+   * ``path`` is workspace-relative (or absolute inside the workspace).  The
+   * daemon answers with a ``workspace.file.content`` header and, on success,
+   * one binary frame the transport attaches to it, so the result carries
+   * the bytes.  A refusal is NOT thrown: it resolves with ``event.ok ===
+   * false`` and ``event.category`` naming why (``not_found``,
+   * ``unsafe_path``, ``credential``, ``too_large``, ...), because a caller
+   * renders those differently.
+   *
+   * Calls are correlated by ``request_id``, so several may be in flight.
+   *
+   * @param options.metadataOnly Ask whether the file exists, its size and
+   *   type, without transferring it.
+   * @param options.timeoutMs Give up after this long (default 120 s).
+   * @throws Error against a daemon below {@link MIN_FILE_FETCH_PROTOCOL},
+   *   or on timeout.
+   */
+  async fetchWorkspaceFile(
+    path: string,
+    options: { metadataOnly?: boolean; timeoutMs?: number } = {},
+  ): Promise<WorkspaceFileFetchResult> {
+    if (
+      this._serverProtocolVersion === null ||
+      !isProtocolCompatible(this._serverProtocolVersion, MIN_FILE_FETCH_PROTOCOL)
+    ) {
+      throw new Error(
+        `fetchWorkspaceFile: this daemon speaks protocol ` +
+          `${this._serverProtocolVersion ?? "unknown"} and does not serve ` +
+          `workspace.file.fetch (needs >= ${MIN_FILE_FETCH_PROTOCOL}).  ` +
+          `Upgrade the daemon to download workspace files.`,
+      );
+    }
+    const requestId = `dl-${++this._fileFetchSeq}-${Date.now().toString(36)}`;
+    const timeoutMs = options.timeoutMs ?? 120_000;
+    const answer = new Promise<WorkspaceFileFetchResult>((resolve, reject) => {
+      const done = () => {
+        clearTimeout(timer);
+        unsub();
+        this._closeWaiters.delete(onClose);
+      };
+      const timer = setTimeout(() => {
+        done();
+        reject(new Error(`fetchWorkspaceFile: no answer for ${path} after ${timeoutMs} ms`));
+      }, timeoutMs);
+      const onClose = (info: { code: number; reason: string }) => {
+        done();
+        reject(new RequestInterruptedError(`fetchWorkspaceFile ${path}`, info.code, info.reason));
+      };
+      this._closeWaiters.add(onClose);
+      const unsub = this.subscribeAll((raw) => {
+        const event = raw as WorkspaceFileContentEvent & { data?: Uint8Array };
+        if (event.type !== EventTypeValue.WORKSPACE_FILE_CONTENT) return;
+        if (event.request_id !== requestId) return;
+        done();
+        resolve({ event, data: event.data ?? null });
+      });
+    });
+    await this._sendEvent({
+      type: EventTypeValue.WORKSPACE_FILE_FETCH_REQUEST,
+      request_id: requestId,
+      path,
+      metadata_only: options.metadataOnly ?? false,
+    } as WorkspaceFileFetchRequest);
+    return answer;
+  }
+
+  /**
+   * Send one memory request and resolve with its correlated answer (#1232).
+   *
+   * Refuses a daemon below {@link MIN_MEMORY_VERBS_PROTOCOL}; rejects on
+   * timeout and on a closed connection -- never resolves with a fabricated
+   * empty answer, which for a list would read as "nothing remembered".
+   * The answer is matched on ``request_id`` AND on its result type, so a
+   * daemon echo of the request itself is not mistaken for the answer.
+   */
+  private async _memoryRequest<T>(
+    method: string,
+    request: Record<string, unknown>,
+    resultType: string,
+    timeoutMs: number,
+  ): Promise<T> {
+    if (
+      this._serverProtocolVersion === null ||
+      !isProtocolCompatible(this._serverProtocolVersion, MIN_MEMORY_VERBS_PROTOCOL)
+    ) {
+      throw new Error(
+        `${method}: this daemon speaks protocol ` +
+          `${this._serverProtocolVersion ?? "unknown"} and does not serve ` +
+          `the memory verbs (needs >= ${MIN_MEMORY_VERBS_PROTOCOL}).  ` +
+          `Upgrade the daemon, or use the "memory" command.`,
+      );
+    }
+    const requestId = `mem-${++this._memorySeq}-${Date.now().toString(36)}`;
+    const answer = new Promise<T>((resolve, reject) => {
+      const done = () => {
+        clearTimeout(timer);
+        unsub();
+        this._closeWaiters.delete(onClose);
+      };
+      const timer = setTimeout(() => {
+        done();
+        reject(new Error(`${method}: no answer after ${timeoutMs} ms`));
+      }, timeoutMs);
+      const onClose = (info: { code: number; reason: string }) => {
+        done();
+        reject(new RequestInterruptedError(method, info.code, info.reason));
+      };
+      this._closeWaiters.add(onClose);
+      const unsub = this.subscribeAll((raw) => {
+        const event = raw as { type?: string; request_id?: string };
+        if (event.type !== resultType) return;
+        if (event.request_id !== requestId) return;
+        done();
+        resolve(raw as unknown as T);
+      });
+    });
+    await this._sendEvent({ ...request, request_id: requestId } as unknown as JaatoEvent);
+    return answer;
+  }
+
+  /**
+   * List the attached session's memory store, quietly (protocol 1.22).
+   *
+   * Unlike the ``memory list`` command this writes nothing to the
+   * transcript.  ``ok === false`` (with ``error`` and ``category``) means
+   * the store could not be read, never "nothing remembered".  Rows carry
+   * ``tier`` (``workspace`` / ``global``), timestamps, usage, both
+   * provenance stamps and the two this-session flags -- not the content;
+   * see {@link getMemory}.  ``may_curate`` says whether this connection may
+   * change them.
+   */
+  async listMemories(options: { timeoutMs?: number } = {}): Promise<MemoryListEvent> {
+    return this._memoryRequest<MemoryListEvent>(
+      "listMemories",
+      { type: EventTypeValue.MEMORY_LIST_REQUEST },
+      EventTypeValue.MEMORY_LIST,
+      options.timeoutMs ?? 10_000,
+    );
+  }
+
+  /** Fetch one memory WITH its content and evidence (protocol 1.22). */
+  async getMemory(
+    memoryId: string,
+    options: { timeoutMs?: number } = {},
+  ): Promise<MemoryGetResultEvent> {
+    return this._memoryRequest<MemoryGetResultEvent>(
+      "getMemory",
+      { type: EventTypeValue.MEMORY_GET_REQUEST, memory_id: memoryId },
+      EventTypeValue.MEMORY_GET_RESULT,
+      options.timeoutMs ?? 10_000,
+    );
+  }
+
+  /**
+   * Edit a memory, or move its maturity (protocol 1.22).
+   *
+   * The structured replacement for ``memory edit`` (which opens
+   * ``$EDITOR`` on the runner's host).  An omitted field is left alone.  A
+   * maturity change is recorded in ``curated_by`` with this connection's
+   * authenticated identity.  Limited to the workspace owner: a refusal
+   * resolves with ``ok === false, category === "not_owner"``.
+   */
+  async updateMemory(
+    memoryId: string,
+    fields: { description?: string; content?: string; tags?: string[]; maturity?: string },
+    options: { timeoutMs?: number } = {},
+  ): Promise<MemoryUpdateResultEvent> {
+    const request: Record<string, unknown> = {
+      type: EventTypeValue.MEMORY_UPDATE_REQUEST,
+      memory_id: memoryId,
+    };
+    for (const key of ["description", "content", "tags", "maturity"] as const) {
+      if (fields[key] !== undefined) request[key] = fields[key];
+    }
+    return this._memoryRequest<MemoryUpdateResultEvent>(
+      "updateMemory",
+      request,
+      EventTypeValue.MEMORY_UPDATE_RESULT,
+      options.timeoutMs ?? 10_000,
+    );
+  }
+
+  /** Approve a memory: ``updateMemory(id, { maturity: "validated" })``. */
+  async approveMemory(memoryId: string, options: { timeoutMs?: number } = {}): Promise<MemoryUpdateResultEvent> {
+    return this.updateMemory(memoryId, { maturity: "validated" }, options);
+  }
+
+  /**
+   * Dismiss a memory: ``updateMemory(id, { maturity: "dismissed" })``.  The
+   * store keeps no dismissed trace, so it is gone from the next list.
+   */
+  async dismissMemory(memoryId: string, options: { timeoutMs?: number } = {}): Promise<MemoryUpdateResultEvent> {
+    return this.updateMemory(memoryId, { maturity: "dismissed" }, options);
+  }
+
+  /** Remove a memory through the plugin's own delete path (protocol 1.22). */
+  async deleteMemory(
+    memoryId: string,
+    options: { timeoutMs?: number } = {},
+  ): Promise<MemoryDeleteResultEvent> {
+    return this._memoryRequest<MemoryDeleteResultEvent>(
+      "deleteMemory",
+      { type: EventTypeValue.MEMORY_DELETE_REQUEST, memory_id: memoryId },
+      EventTypeValue.MEMORY_DELETE_RESULT,
+      options.timeoutMs ?? 10_000,
+    );
+  }
+
+  /**
    * Permanently delete a session by ID.
    *
    * Sends ``session.delete`` — the server removes both
@@ -1163,6 +1676,68 @@ export class JaatoClient {
   }
 
   /**
+   * Publish an external event onto the session's `EventBus`.
+   *
+   * The host's way of telling a running session that something happened
+   * outside it — `order.placed`, `build.finished`, `ticket.assigned`.  It
+   * reaches every agent that called
+   * `subscribeToEvents(event_types: ['external_event'])`, and sinks onward to
+   * the daemon-wide reactor bus, so it is the one verb that can trigger a
+   * reactor from a client.  Mirror of Python
+   * ``IPCClient.send_external_event``.
+   *
+   * `ExternalEventRequest` has existed as a TYPE in both SDKs and as a METHOD
+   * in neither (#1167): the only producer was an out-of-tree web component
+   * hand-rolling the JSON frame.
+   *
+   * **Not** {@link wakeSession}.  A wake drives a USER turn on one session;
+   * this publishes a bus event and drives no turn of its own.  A session with
+   * no `external_event` subscriber receives it and does nothing, which is a
+   * success and the normal state before any agent has subscribed.
+   *
+   * Fire-and-forget.  A refusal arrives on the event stream as an
+   * `ErrorEvent` — `error_type: "ExternalEventError"` when the session has no
+   * bus, `"SessionError"` when the session is gone, and `"RequestError"`
+   * (`Unknown request type: ExternalEventRequest`) from a daemon predating
+   * #1167 on IPC.  That last one is why this method takes no protocol floor:
+   * the refusal is a named error on the stream rather than the silence an
+   * unknown command verb produces, and a floor would ALSO refuse against the
+   * WebSocket daemons where the request has always worked.
+   *
+   * @param name The event name the host chose, e.g. `order.placed`.  This is
+   *   what an agent's `subscribeToEvents(event_names)` filter matches, so it
+   *   must agree with what the persona asked to hear.
+   * @param data Arbitrary JSON-serialisable payload; omitted sends `{}`.
+   * @param options.timestamp ISO 8601, when the thing being reported
+   *   happened.  Omitted lets the daemon stamp arrival time.
+   * @param options.sessionId The target session; omitted means the one this
+   *   client is attached to.
+   * @throws Error if `name` is empty — an unnamed event matches no
+   *   subscriber filter and reaches the model with nothing to say what
+   *   happened.
+   */
+  async sendExternalEvent(
+    name: string,
+    data?: Record<string, unknown>,
+    options?: { timestamp?: string; sessionId?: string },
+  ): Promise<void> {
+    if (!name) {
+      throw new Error(
+        "sendExternalEvent requires a name — an unnamed event matches no " +
+          "subscribeToEvents filter and reaches the model with nothing to " +
+          "say what happened",
+      );
+    }
+    await this._sendEvent({
+      type: EventTypeValue.EVENT_EXTERNAL,
+      name,
+      data: data ?? {},
+      timestamp: options?.timestamp ?? "",
+      session_id: options?.sessionId ?? "",
+    } as ExternalEventRequest);
+  }
+
+  /**
    * Refuse an attachment-bearing resume against a daemon too old to carry it.
    *
    * An additive optional field is normally safe to send blind: an older peer
@@ -1303,8 +1878,13 @@ export class JaatoClient {
    * @param files Each entry needs ``name`` (workspace-relative
    *   path) and ``data`` (the bytes).  ``contentType`` and ``mode``
    *   are optional informational hints.
+   * @param options.timeoutMs How long to wait for the daemon's response
+   *   before rejecting (default {@link STAGE_FILES_TIMEOUT_MS}).  Pass 0 to
+   *   wait indefinitely (the pre-#1248 behaviour).
    * @returns The server's ``StageFilesEvent`` reporting per-file
    *   success / failure.
+   * @throws Error if no ``workspace.files.staged`` response arrives within
+   *   the timeout — so a lost response is a settled rejection, not a hang.
    */
   async stageFiles(
     workspaceId: string,
@@ -1314,6 +1894,7 @@ export class JaatoClient {
       contentType?: string;
       mode?: number;
     }>,
+    options: { timeoutMs?: number } = {},
   ): Promise<StageFilesEvent> {
     if (this._state !== ConnectionState.CONNECTED) {
       throw this._state === ConnectionState.RECONNECTING
@@ -1339,9 +1920,19 @@ export class JaatoClient {
     }) as StagedFileSpec);
 
     // Set up the response waiter BEFORE sending — otherwise the
-    // server's response could race with handler installation.
+    // server's response could race with handler installation.  The wait
+    // is bounded (#1248): a response that never arrives would otherwise
+    // leave this promise unsettled forever, and the caller's status stuck
+    // on "staging".
     const responsePromise = this._waitForNextEvent<StageFilesEvent>(
       (e) => e.type === EventTypeValue.WORKSPACE_FILES_STAGED,
+      {
+        timeoutMs: options.timeoutMs ?? STAGE_FILES_TIMEOUT_MS,
+        label: "stageFiles: no workspace.files.staged response",
+        // The usual reason no response arrives: a file over the daemon's
+        // message limit makes it close the connection (1009) mid-upload.
+        closeLabel: "stageFiles",
+      },
     );
 
     transport.sendEvent({
@@ -1365,17 +1956,52 @@ export class JaatoClient {
    *
    * One-shot subscription used by request/response methods like
    * {@link stageFiles}.  Auto-unsubscribes after the first match.
+   *
+   * With ``options.timeoutMs`` set (> 0), the wait is bounded: if no
+   * matching event arrives in time it **rejects** with an ``Error`` naming
+   * ``options.label`` and the deadline, and unsubscribes — so a request
+   * whose response is lost surfaces as a settled promise the caller can
+   * catch, not a hang (#1248).  Omit ``timeoutMs`` (or pass 0) to keep the
+   * resolve-only behaviour.
+   *
+   * With ``options.closeLabel`` set, the wait also rejects -- at once, with
+   * a {@link RequestInterruptedError} carrying the close code -- when the
+   * connection closes first.  For a request the daemon answers on the same
+   * connection, a close means no answer is coming.
    */
   private _waitForNextEvent<T extends JaatoEvent = JaatoEvent>(
     predicate: (event: JaatoEvent) => boolean,
+    options: { timeoutMs?: number; label?: string; closeLabel?: string } = {},
   ): Promise<T> {
-    return new Promise<T>((resolve) => {
+    return new Promise<T>((resolve, reject) => {
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      let onClose: ((info: { code: number; reason: string }) => void) | null = null;
+      const done = () => {
+        if (timer) clearTimeout(timer);
+        unsub();
+        if (onClose) this._closeWaiters.delete(onClose);
+      };
       const unsub = this.subscribeAll((event) => {
         if (predicate(event)) {
-          unsub();
+          done();
           resolve(event as T);
         }
       });
+      if (options.closeLabel) {
+        const label = options.closeLabel;
+        onClose = (info) => {
+          done();
+          reject(new RequestInterruptedError(label, info.code, info.reason));
+        };
+        this._closeWaiters.add(onClose);
+      }
+      const timeoutMs = options.timeoutMs ?? 0;
+      if (timeoutMs > 0) {
+        timer = setTimeout(() => {
+          done();
+          reject(new Error(`${options.label ?? "waitForNextEvent: no matching event"} after ${timeoutMs} ms`));
+        }, timeoutMs);
+      }
     });
   }
 
@@ -1445,6 +2071,7 @@ export class JaatoClient {
     this._serverVersion = (serverInfo.server_version as string) ?? null;
     this._clientId = (serverInfo.client_id as string) ?? null;
     this._serverProtocolVersion = connected.protocol_version ?? null;
+    this._limits = serverLimitsFrom(serverInfo);
 
     // Wire-protocol compat gate.  Compares against
     // ``protocol_version`` (not the daemon package version) — the
@@ -1570,6 +2197,17 @@ export class JaatoClient {
 
   private _handleClose(info: { code: number; reason: string }): void {
     this._transport = null;
+    // Requests in flight on this connection cannot be answered on the
+    // next one; reject them now, naming the close.
+    const waiters = [...this._closeWaiters];
+    this._closeWaiters.clear();
+    for (const w of waiters) {
+      try {
+        w(info);
+      } catch {
+        // A waiter only rejects its own promise.
+      }
+    }
     if (this._explicitClose || this._state === ConnectionState.CLOSED) {
       this._transition(ConnectionState.CLOSED, {
         reason: info.reason || `code ${info.code}`,

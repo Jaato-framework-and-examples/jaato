@@ -14,18 +14,19 @@ Or copy manually if you prefer:
 cp -r .jaato.example /path/to/your/project/.jaato
 ```
 
-The `.jaato/` directory is gitignored by default, so your local configuration
-won't be committed. If you want to share specific configs with your team, you
-can selectively un-ignore subdirectories in `.gitignore`:
+`.jaato/` mixes configuration you author (profiles, agents, instructions,
+prompts, schemas, processors) with runtime state jaato writes (sessions,
+logs, memories, caches, stored credentials). Only the first belongs in git,
+so let the scaffold write the `.gitignore` block that keeps the two apart:
 
-```gitignore
-.jaato/*
-!.jaato/profiles/
-!.jaato/keybindings/
-!.jaato/instructions/
-!.jaato/prompts/
-!.jaato/themes/
+```bash
+jaato-scaffold new gitignore --workspace .
 ```
+
+It ignores everything under `.jaato/` except the authored entries, sits on
+top of an existing wholesale `.jaato/` rule without editing it, and
+`jaato-scaffold validate` reports a `.gitignore` that hides the assets or
+leaks the state.
 
 ## Directory Layout
 

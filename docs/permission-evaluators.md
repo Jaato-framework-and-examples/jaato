@@ -21,7 +21,7 @@ For simple allow/deny rules, stick with the declarative `whitelist`/`blacklist` 
 Create `.jaato/policies/cli_guard.py`:
 
 ```python
-from shared.plugins.permission.evaluator import PolicyDecision
+from jaato_server.shared.plugins.permission.evaluator import PolicyDecision
 
 def evaluate(tool_name, args, context):
     command = args.get("command", "")
@@ -133,7 +133,7 @@ Evaluators return a `PolicyDecision` indicating what should happen. These mirror
 To deny and pass a message the model can see (like typing `c:message` at the prompt):
 
 ```python
-from shared.plugins.permission.evaluator import PolicyDecision, EvalResult
+from jaato_server.shared.plugins.permission.evaluator import PolicyDecision, EvalResult
 
 def evaluate(tool_name, args, context):
     if risky_condition:
@@ -280,7 +280,7 @@ This means **module-level variables persist across calls** within the same sessi
 
 ```python
 from collections import defaultdict
-from shared.plugins.permission.evaluator import PolicyDecision
+from jaato_server.shared.plugins.permission.evaluator import PolicyDecision
 
 # Module-level state — initialized once, persists across all calls
 _call_counts = defaultdict(int)
@@ -309,7 +309,7 @@ This design means you don't need any special API for state — just use Python v
 
 ```python
 from datetime import datetime
-from shared.plugins.permission.evaluator import PolicyDecision
+from jaato_server.shared.plugins.permission.evaluator import PolicyDecision
 
 def evaluate(tool_name, args, context):
     hour = datetime.now().hour
@@ -321,7 +321,7 @@ def evaluate(tool_name, args, context):
 ### Subagent restrictions
 
 ```python
-from shared.plugins.permission.evaluator import PolicyDecision
+from jaato_server.shared.plugins.permission.evaluator import PolicyDecision
 
 def evaluate(tool_name, args, context):
     # Subagents can only read, not write
@@ -333,7 +333,7 @@ def evaluate(tool_name, args, context):
 ### Argument inspection
 
 ```python
-from shared.plugins.permission.evaluator import PolicyDecision, EvalResult
+from jaato_server.shared.plugins.permission.evaluator import PolicyDecision, EvalResult
 
 def evaluate(tool_name, args, context):
     path = args.get("path", "")
@@ -351,7 +351,7 @@ def evaluate(tool_name, args, context):
 ### Auto-approve safe patterns
 
 ```python
-from shared.plugins.permission.evaluator import PolicyDecision
+from jaato_server.shared.plugins.permission.evaluator import PolicyDecision
 
 SAFE_COMMANDS = {"git status", "git diff", "git log", "npm test", "pytest"}
 
@@ -365,7 +365,7 @@ def evaluate(tool_name, args, context):
 ### Require explanation before destructive tools
 
 ```python
-from shared.plugins.permission.evaluator import PolicyDecision, EvalResult
+from jaato_server.shared.plugins.permission.evaluator import PolicyDecision, EvalResult
 
 def evaluate(tool_name, args, context):
     # First turn: allow freely (model is still orienting)
@@ -385,7 +385,7 @@ def evaluate(tool_name, args, context):
 ### Turn-based escalation
 
 ```python
-from shared.plugins.permission.evaluator import PolicyDecision
+from jaato_server.shared.plugins.permission.evaluator import PolicyDecision
 
 def evaluate(tool_name, args, context):
     # After 15 turns, block new file creation to prevent runaway agents
@@ -398,7 +398,7 @@ def evaluate(tool_name, args, context):
 
 ```python
 import requests
-from shared.plugins.permission.evaluator import PolicyDecision
+from jaato_server.shared.plugins.permission.evaluator import PolicyDecision
 
 def evaluate(tool_name, args, context):
     try:

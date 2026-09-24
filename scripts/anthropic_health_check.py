@@ -121,13 +121,13 @@ def check_environment(results: CheckResult) -> Dict[str, Any]:
     ctx: Dict[str, Any] = {}
 
     # .env should already be loaded by caller
-    from shared.http import (
+    from jaato_server.shared.http import (
         get_proxy_url,
         is_kerberos_proxy_enabled,
         is_ssl_verify_disabled,
         get_httpx_client,
     )
-    from shared.ssl_helper import active_cert_bundle
+    from jaato_server.shared.ssl_helper import active_cert_bundle
 
     # SSL
     ssl_verify_off = is_ssl_verify_disabled()
@@ -160,7 +160,7 @@ def check_environment(results: CheckResult) -> Dict[str, Any]:
     info(f"Kerberos proxy: {kerberos}")
 
     # Credential sources
-    from shared.plugins.model_provider.anthropic.env import (
+    from jaato_server.shared.plugins.model_provider.anthropic.env import (
         resolve_api_key,
         resolve_oauth_token,
         get_checked_credential_locations,
@@ -168,7 +168,7 @@ def check_environment(results: CheckResult) -> Dict[str, Any]:
         resolve_thinking_budget,
         resolve_enable_caching,
     )
-    from shared.plugins.model_provider.anthropic.oauth import (
+    from jaato_server.shared.plugins.model_provider.anthropic.oauth import (
         load_tokens,
         get_valid_access_token,
     )
@@ -259,11 +259,11 @@ def check_token_endpoint(results: CheckResult) -> None:
     """
     header("Step 1: OAuth Token Endpoint")
 
-    from shared.plugins.model_provider.anthropic.oauth import OAUTH_TOKEN_URL
+    from jaato_server.shared.plugins.model_provider.anthropic.oauth import OAUTH_TOKEN_URL
 
     info(f"POST {OAUTH_TOKEN_URL}")
 
-    from shared.http import get_httpx_client
+    from jaato_server.shared.http import get_httpx_client
 
     t0 = time.monotonic()
     try:
@@ -322,7 +322,7 @@ def check_token_refresh(results: CheckResult, ctx: Dict[str, Any]) -> None:
     """
     header("Step 2: OAuth Token Refresh")
 
-    from shared.plugins.model_provider.anthropic.oauth import (
+    from jaato_server.shared.plugins.model_provider.anthropic.oauth import (
         OAUTH_TOKEN_URL,
         load_tokens,
         refresh_tokens,
@@ -400,13 +400,13 @@ def check_messages_api(
         )
         return
 
-    from shared.http import get_httpx_client
+    from jaato_server.shared.http import get_httpx_client
 
     # Build client matching provider logic
     client_kwargs: Dict[str, Any] = {}
     try:
-        from shared.ssl_helper import active_cert_bundle
-        from shared.http.proxy import (
+        from jaato_server.shared.ssl_helper import active_cert_bundle
+        from jaato_server.shared.http.proxy import (
             get_proxy_url,
             is_kerberos_proxy_enabled,
         )
@@ -536,12 +536,12 @@ def check_thinking(
         results.record_fail("Extended thinking", "anthropic package not installed")
         return
 
-    from shared.http import get_httpx_client
+    from jaato_server.shared.http import get_httpx_client
 
     client_kwargs: Dict[str, Any] = {}
     try:
-        from shared.ssl_helper import active_cert_bundle
-        from shared.http.proxy import (
+        from jaato_server.shared.ssl_helper import active_cert_bundle
+        from jaato_server.shared.http.proxy import (
             get_proxy_url,
             is_kerberos_proxy_enabled,
         )

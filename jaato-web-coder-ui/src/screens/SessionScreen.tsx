@@ -3,7 +3,8 @@
  * header (brand, one tab per agent, workspace / model / context on the
  * right), the selected agent's output with pending prompts and the
  * composer under it, one persistent rail on the right whose Plan /
- * Budget / Files sections open and close, and the status bar.  On mount
+ * Budget / Files / Sessions / Memories sections open and close, and the
+ * status bar.  On mount
  * it asks the daemon for its command list and profiles, then creates (or
  * reattaches) a session.
  */
@@ -14,6 +15,7 @@ import { getClient } from "@/sdk/connection";
 import { OutputPane } from "@/components/output/OutputPane";
 import { ToolOutputPopup } from "@/components/output/ToolOutputPopup";
 import { Composer } from "@/components/input/Composer";
+import { PhaseLine } from "@/components/panels/PhaseLine";
 import { AttachStrip } from "@/components/input/AttachStrip";
 import { PermissionPrompt } from "@/components/prompts/PermissionPrompt";
 import { ExitPrompt } from "@/components/prompts/ExitPrompt";
@@ -22,12 +24,17 @@ import { ClarificationPrompt } from "@/components/prompts/ClarificationPrompt";
 import { ReferenceSelectionPrompt } from "@/components/prompts/ReferenceSelectionPrompt";
 import { PlanPanel, planProgress } from "@/components/panels/PlanPanel";
 import { BudgetPanel } from "@/components/panels/BudgetPanel";
-import { WorkspacePanel } from "@/components/panels/WorkspacePanel";
+import { WorkspacePanel, useVisibleWorkspaceFiles } from "@/components/panels/WorkspacePanel";
+import { SessionRow, SessionsPanel, notedSummary } from "@/components/panels/SessionsPanel";
+import { MemoriesPanel } from "@/components/panels/MemoriesPanel";
+import { memoriesSummary } from "@/app/memories";
 import { AgentTabs } from "@/components/panels/AgentTabs";
 import { StatusBar } from "@/components/layout/StatusBar";
 import { Plate } from "@/components/layout/Plate";
 import { RailResizer } from "@/components/layout/RailResizer";
-import { answerClarification, attachSession, cancelClarification, ensureSessions, inputHistory, respondPermission, respondPostAuth, respondReference, submitInput } from "@/app/actions";
+import { RailSectionResizer } from "@/components/layout/RailSectionResizer";
+import { sharesFor, RAIL_SECTION_MIN_PX, type RailSectionId } from "@/store/railSplits";
+import { answerClarification, attachSession, cancelClarification, createSession, ensureSessions, inputHistory, respondPermission, respondPostAuth, respondReference, submitInput } from "@/app/actions";
 import { openSessionWithQueued } from "@/app/staging";
 import { answerExit } from "@/app/exitChoice";
 import { sessionsInWorkspace } from "@/protocol/sessions";
@@ -72,15 +79,31 @@ function SessionHeader() {
  * open, a labelled region with the panel.  The value on the header's
  * right is the one number the section is about, so a closed section
  * still says something.
+ *
+ * An OPEN section takes a share of the rail's height (``share``, a fraction
+ * of the open sections' total) via ``flex-grow`` rather than a fixed cap, and
+ * scrolls INSIDE its own ``min-h-0 overflow-auto`` box.  The rail no longer
+ * scrolls as a whole: the open sections divide its height between them, and
+ * the horizontal handles between them (``RailSectionResizer``) move that
+ * division.  ``data-rail-section`` is the marker those handles measure.
  */
-function RailSection({ title, value, open, onToggle, children }: { title: string; value?: string | null; open: boolean; onToggle: () => void; children: React.ReactNode }) {
+function RailSection({ id, title, value, open, share, onToggle, children }: { id: RailSectionId; title: string; value?: string | null; open: boolean; share: number; onToggle: () => void; children: React.ReactNode }) {
   return (
     <>
-      <button type="button" onClick={onToggle} className="flex items-baseline justify-between px-3.5 py-2 border-b hairline w-full text-left hover:bg-tint/60" aria-expanded={open} aria-label={`${open ? "Close" : "Open"} ${title}`}>
+      <button type="button" onClick={onToggle} className="flex items-baseline justify-between px-3.5 py-2 border-b hairline w-full text-left shrink-0 hover:bg-tint/60" aria-expanded={open} aria-label={`${open ? "Close" : "Open"} ${title}`}>
         <span className="kicker">{title}</span>
         <span className="font-mono text-[11px] text-text-muted">{value ? `${value} ` : ""}{open ? "▾" : "▸"}</span>
       </button>
-      {open && <section aria-label={title} className="border-b hairline overflow-auto min-h-0 shrink-0 max-h-[60%]">{children}</section>}
+      {open && (
+        <section
+          aria-label={title}
+          data-rail-section={id}
+          className="border-b hairline overflow-auto min-h-0"
+          style={{ flexGrow: share, flexShrink: 1, flexBasis: 0, minHeight: RAIL_SECTION_MIN_PX }}
+        >
+          {children}
+        </section>
+      )}
     </>
   );
 }
@@ -90,13 +113,44 @@ function Rail({ agentId }: { agentId: string }) {
   const toggle = useJaato((s) => s.toggleUi);
   const plan = useJaato((s) => s.plan[agentId]);
   const ctx = useJaato((s) => s.context[agentId]);
-  const changed = useJaato((s) => Object.keys(s.workspaceFiles).length);
+  const changed = Object.keys(useVisibleWorkspaceFiles()).length;
+  const isReset = useJaato((s) => s.workspaceReset !== null);
+  const sessions = useJaato((s) => s.sessions);
+  const notes = useJaato((s) => s.notes);
+  const memories = useJaato((s) => s.memories);
   const budget = ctx?.usage.cost_usd != null ? `$${Number(ctx.usage.cost_usd).toFixed(4)}` : ctx?.percentUsed != null ? `${ctx.percentUsed.toFixed(0)}%` : null;
+
+  // Fixed order; each carries its ``ui.show*`` flag and its panel.  The open
+  // subset shares the rail's height, and a handle sits on each boundary
+  // between two OPEN sections — so a closed section (just its header) has
+  // nothing to resize.
+  const sections: { id: RailSectionId; title: string; value: string | null; open: boolean; toggle: () => void; panel: React.ReactNode }[] = [
+    { id: "plan", title: "Plan", value: planProgress(plan), open: ui.showPlan, toggle: () => toggle("showPlan"), panel: <PlanPanel agentId={agentId} /> },
+    { id: "budget", title: "Budget", value: budget, open: ui.showBudget, toggle: () => toggle("showBudget"), panel: <BudgetPanel agentId={agentId} /> },
+    { id: "files", title: "Files", value: changed ? `${changed} ${isReset ? "since reset" : "changed"}` : isReset ? "reset" : null, open: ui.showWorkspace, toggle: () => toggle("showWorkspace"), panel: <WorkspacePanel /> },
+    { id: "sessions", title: "Sessions", value: notedSummary(sessions, notes), open: ui.showSessions, toggle: () => toggle("showSessions"), panel: <SessionsPanel /> },
+    { id: "memories", title: "Memories", value: memoriesSummary(memories), open: ui.showMemories, toggle: () => toggle("showMemories"), panel: <MemoriesPanel /> },
+  ];
+  const openIds = sections.filter((s) => s.open).map((s) => s.id);
+  const shares = sharesFor(ui.railSplits, openIds);
+
+  let prevOpen: { id: RailSectionId; title: string } | null = null;
+  const rows: React.ReactNode[] = [];
+  for (const s of sections) {
+    if (s.open && prevOpen) {
+      rows.push(<RailSectionResizer key={`${prevOpen.id}-${s.id}`} aboveId={prevOpen.id} belowId={s.id} aboveTitle={prevOpen.title} belowTitle={s.title} />);
+    }
+    rows.push(
+      <RailSection key={s.id} id={s.id} title={s.title} value={s.value} open={s.open} share={shares[s.id] ?? 1} onToggle={s.toggle}>
+        {s.panel}
+      </RailSection>,
+    );
+    if (s.open) prevOpen = { id: s.id, title: s.title };
+  }
+
   return (
-    <aside className="hidden md:flex shrink-0 border-l hairline bg-surface flex-col min-h-0 overflow-auto" style={{ width: ui.railWidth }} aria-label="Session rail">
-      <RailSection title="Plan" value={planProgress(plan)} open={ui.showPlan} onToggle={() => toggle("showPlan")}><PlanPanel agentId={agentId} /></RailSection>
-      <RailSection title="Budget" value={budget} open={ui.showBudget} onToggle={() => toggle("showBudget")}><BudgetPanel agentId={agentId} /></RailSection>
-      <RailSection title="Files" value={changed ? `${changed} changed` : null} open={ui.showWorkspace} onToggle={() => toggle("showWorkspace")}><WorkspacePanel /></RailSection>
+    <aside data-rail className="hidden md:flex shrink-0 border-l hairline bg-surface flex-col min-h-0 overflow-hidden" style={{ width: ui.railWidth }} aria-label="Session rail">
+      {rows}
     </aside>
   );
 }
@@ -132,6 +186,7 @@ function ProfilePicker({ onPick, onAttach, onAuth, onSkip }: {
   const profiles = useJaato((s) => s.profiles);
   const commands = useJaato((s) => s.commands);
   const ws = useJaato((s) => s.workspace);
+  const setScreen = useJaato((s) => s.setScreen);
   const sessions = useJaato((s) => s.sessions);
   useEffect(() => { ensureSessions().catch(() => undefined); }, []);
   const auth = authCommands(commands);
@@ -146,6 +201,24 @@ function ProfilePicker({ onPick, onAttach, onAuth, onSkip }: {
       <Plate className="w-full max-w-[880px] flex flex-col" data-testid="session-picker">
         <div className="flex items-baseline justify-between gap-4 px-5 py-4 border-b hairline">
           <div className="flex items-baseline gap-3">
+            {/* The way back.  `WorkspaceScreen` routes FORWARD here and the
+                only routes back were ending a session or disconnecting, so a
+                workspace opened by mistake could only be left by leaving the
+                daemon.  Gated on the MODE rather than on `selected`: the
+                list's own "server-provisioned workspace" link arrives here
+                with nothing selected, and that is a state you may equally
+                want to back out of.  A bordered button, not a `.link` — what
+                was reported is that there is no button to find. */}
+            {ws.mode === "enabled" && (
+              <button
+                type="button"
+                onClick={() => setScreen("workspaces")}
+                title="Back to the workspace list"
+                className="btn btn-sm btn-quiet shrink-0"
+              >
+                <span aria-hidden="true">←</span> Workspaces
+              </button>
+            )}
             {selected ? <><span className="kicker tracking-[0.16em]">Workspace</span><span className="font-mono text-[16px]">{selected.name}</span></> : <span className="display text-[20px]">New session</span>}
           </div>
           {configured && <div className="font-mono text-xs text-text-muted">{binding} <span className="text-steel">from .env</span></div>}
@@ -156,16 +229,12 @@ function ProfilePicker({ onPick, onAttach, onAuth, onSkip }: {
               <div className="px-5 py-4 flex flex-col gap-2.5" aria-label="Resume a session">
                 <div className="kicker kicker-muted text-[12px]">Resume</div>
                 <div className="flex flex-col max-h-72 overflow-auto">
-                  {resumable.map((sess) => (
-                    <button key={sess.id} type="button" onClick={() => onAttach(sess.id)} aria-label={`Resume session ${sess.id}`} className={row}>
-                      <span className={sess.isLoaded ? "text-success" : "text-text-muted"}>{sess.isLoaded ? "●" : "○"}</span>
-                      <span className="min-w-0 flex-1">
-                        <span className="block font-mono text-[13px]">{sess.id}</span>
-                        <span className="block text-[13px] text-text-muted truncate">{[sess.description || sess.name, sess.provider ? `${sess.provider}/${sess.model}` : "", sess.turnCount ? `${sess.turnCount} turns` : ""].filter(Boolean).join(" · ")}</span>
-                      </span>
-                      <span className={`btn btn-sm self-center ${sess.isLoaded ? "btn-steel" : "btn-quiet"}`}>Attach</span>
-                    </button>
-                  ))}
+                  {/* Editable here too, and not read-only as first drawn: if
+                      you forgot to write a note on the way out, the picker is
+                      exactly where you notice, and attaching just to add one
+                      costs a runner spawn -- the cost going BFF-side was
+                      meant to avoid. */}
+                  {resumable.map((sess) => <SessionRow key={sess.id} sess={sess} onAttach={onAttach} />)}
                 </div>
               </div>
               <div className="hidden md:block bg-divider" aria-hidden="true" />
@@ -221,7 +290,6 @@ export function SessionScreen() {
   const references = useJaato((s) => s.referenceSelections);
   const postAuth = useJaato((s) => s.postAuth);
   const wsConfig = useJaato((s) => s.workspace.config);
-  const processing = useJaato((s) => s.processing[selected] ?? false);
   const [picking, setPicking] = useState(true);
   const [creating, setCreating] = useState(false);
   const booted = useRef(false);
@@ -240,8 +308,9 @@ export function SessionScreen() {
     setPicking(false);
     setCreating(true);
     try {
-      const c = getClient();
-      await openSessionWithQueued(() => c.createSession(profile ? { profile } : {}));
+      // ``createSession`` (app/actions) rather than the SDK call: a new
+      // session starts on an empty pane, as an attach always has.
+      await openSessionWithQueued(() => createSession(profile));
     } finally {
       setCreating(false);
     }
@@ -310,9 +379,7 @@ export function SessionScreen() {
             {postAuth && selected === "main" && <PostAuthSetupPrompt p={postAuth} alreadyConfigured={alreadyConfigured} onRespond={(a) => { respondPostAuth(postAuth.requestId, a).catch((err) => useJaato.getState().addSystemBlock(selected, String(err), "error")); }} />}
           </div>
           <div className="px-5 pb-3 pt-2.5 border-t hairline">
-            {processing && !captureMode && (
-              <div className="kicker kicker-muted text-[12px] tracking-[0.1em] mb-1.5 flex items-center gap-2"><span className="pulse text-primary">●</span> Agent working — type to queue a follow-up · <span className="font-mono normal-case tracking-normal">stop</span> or Ctrl+C to interrupt</div>
-            )}
+            {!captureMode && <PhaseLine agentId={selected} />}
             <Composer commands={commands} history={inputHistory} captureMode={captureMode} onSubmit={(t, v) => { submitInput(t, v).catch((err) => useJaato.getState().addSystemBlock(selected, String(err), "error")); }} />
           </div>
           <ToolOutputPopup agentId={selected} />

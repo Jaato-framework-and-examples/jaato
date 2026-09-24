@@ -9,12 +9,12 @@ This plan covers the six Phase 2 deliverables in
 references (§3 / §4.1 / §4.6 / §4.7 / §4.8 / §8.x) point into
 `docs/design/per_session_confined_runner.md`.
 
-## 1. File-layout proposal for `jaato-server/server/runner/`
+## 1. File-layout proposal for `jaato-server/jaato_server/server/runner/`
 
 ```
-jaato-server/server/runner/
+jaato-server/jaato_server/server/runner/
 ├── __init__.py
-├── __main__.py             # `python -m server.runner` entry point
+├── __main__.py             # `python -m jaato_server.runner` entry point
 ├── bootstrap.py            # libapparmor self-confine + /proc verify (§4.6 steps 1-3)
 ├── rpc.py                  # runner-side bidirectional dispatcher (frame loop,
 │                           # request_id table, stream/cancel emission).
@@ -37,38 +37,38 @@ jaato-server/server/runner/
 - New `envelope.py`: typed envelope (§4.8) defined exactly once, importable
   from both daemon and runner.
 - `cli_runner.py` (not `cli.py`): explicitly the runner-side migration of
-  `shared/plugins/cli/plugin.py:_execute_streaming`. Phase 3 may rename
+  `jaato_server/shared/plugins/cli/plugin.py:_execute_streaming`. Phase 3 may rename
   if it absorbs the full plugin.
 
 **Framing module (§2.4 question):** put the shared framing in
-`jaato-server/shared/framing.py`. Rationale: `server/runner/` runs inside
-the runner process, which must NOT import the rest of `server.*`
+`jaato-server/jaato_server/shared/framing.py`. Rationale: `jaato_server/server/runner/` runs inside
+the runner process, which must NOT import the rest of `jaato_server.server.*`
 (`session_manager`, `apparmor.AppArmorManager`, IPC server are
-daemon-only). `shared/` is the right layer.
+daemon-only). `jaato_server/shared/` is the right layer.
 
 ## 2. Task-by-task breakdown
 
 ### 2.1 — Remove daemon-thread per-session confinement
 
 Files touched:
-- `server/__main__.py:_register_ipc_apparmor_hook` (lines 656–835): the
+- `jaato_server/server/__main__.py:_register_ipc_apparmor_hook` (lines 656–835): the
   apparmor profile-provisioning logic stays (still loaded via
-  `AppArmorManager`); the `server.set_apparmor_confinement(...)` call at
+  `AppArmorManager`); the `jaato_server.server.set_apparmor_confinement(...)` call at
   line 827 is removed. Also remove the
   `loop.set_default_executor(SafeThreadPoolExecutor(...))` block (lines
   378–386) — its sole purpose was per-task apparmor reset.
-- `server/websocket.py` and `server/workspace_command.py`: grep for
+- `jaato_server/server/websocket.py` and `jaato_server/server/workspace_command.py`: grep for
   other `set_apparmor_confinement` callers (WS hook had its own); same
   treatment.
-- `server/apparmor.py` lines 1688–1696: delete the module-load
+- `jaato_server/server/apparmor.py` lines 1688–1696: delete the module-load
   registration of `_thread_unconfine_safe` as a SafeThreadPool pre-task
   hook. The helper itself stays for any third-party reuse.
-- `shared/safe_pool.py`: keep the file (verified by grep — **four**
+- `jaato_server/shared/safe_pool.py`: keep the file (verified by grep — **four**
   production callers consume `SafeThreadPoolExecutor` independent of
   the apparmor hook):
-  1. `shared/ai_tool_runner.py:_auto_background_pool` (this repo).
-  2. `server/__main__.py:loop.set_default_executor` (this repo).
-  3. `shared/plugins/subagent/plugin.py` (this repo).
+  1. `jaato_server/shared/ai_tool_runner.py:_auto_background_pool` (this repo).
+  2. `jaato_server/server/__main__.py:loop.set_default_executor` (this repo).
+  3. `jaato_server/shared/plugins/subagent/plugin.py` (this repo).
   4. `jaato-premium/jaato_premium/reactors/engine.py:52` (premium
      0.1.184, added 2026-05-07 — reactor dispatch pool).
 
@@ -97,28 +97,28 @@ What stays for Phase 6 cleanup:
   unused after 2.1, deleted in Phase 6 per the spec.
 
 One commit. Verify daemon still starts and serves an unconfined IPC
-client. The `shared/tests/test_apparmor.py` suite covers the unchanged
+client. The `jaato_server/shared/tests/test_apparmor.py` suite covers the unchanged
 primitives; no test edits needed.
 
-### 2.4 — Factor framing into `shared/framing.py`
+### 2.4 — Factor framing into `jaato_server/shared/framing.py`
 
 Done before 2.5 (§"Critical-path constraint" rule 2).
 
 Files touched:
-- New `shared/framing.py`: hosts `HEADER_SIZE`, `MAX_MESSAGE_SIZE`,
+- New `jaato_server/shared/framing.py`: hosts `HEADER_SIZE`, `MAX_MESSAGE_SIZE`,
   async `read_frame(reader)` / `write_frame(writer, payload)` (pure
-  code-move from `server/ipc.py:489-528`), AND synchronous
+  code-move from `jaato_server/server/ipc.py:489-528`), AND synchronous
   `read_frame_sync(fileobj)` / `write_frame_sync(fileobj, payload)`
   for the runner side, which uses blocking sockets in a worker thread
   (asyncio is daemon-side only).
-- `server/ipc.py`: replace the inline `_read_message` / `_write_message`
-  bodies with calls to `shared.framing` — same byte-for-byte framing,
+- `jaato_server/server/ipc.py`: replace the inline `_read_message` / `_write_message`
+  bodies with calls to `jaato_server.shared.framing` — same byte-for-byte framing,
   no behavioral change.
 
-Tests: `shared/tests/test_framing.py` — round-trip identical bytes,
+Tests: `jaato_server/shared/tests/test_framing.py` — round-trip identical bytes,
 oversize-frame rejection, EOF-mid-header.
 
-### 2.2 — `server/runner/` package
+### 2.2 — `jaato_server/server/runner/` package
 
 Implementation order within the task:
 
@@ -148,7 +148,7 @@ Implementation order within the task:
 ### 2.3 — Daemon-side `RunnerSpawner`
 
 Files added/touched:
-- New `server/runner_spawner.py`:
+- New `jaato_server/server/runner_spawner.py`:
   - `RunnerSpawner.spawn(session_id, workspace_path, profile_name, env)
     → SpawnedRunner(pid, socket)`.
   - `socket.socketpair(AF_UNIX, SOCK_STREAM)` → `os.fork()`. Child:
@@ -156,28 +156,28 @@ Files added/touched:
     sys.executable, ["-m", "server.runner"], env_with_profile)`.
   - Parent: returns the parent socket adapted to asyncio
     (`loop.connect_accepted_socket`).
-- New `server/runner_rpc.py`:
+- New `jaato_server/server/runner_rpc.py`:
   - `RunnerRPCClient` wraps the parent socket. `call(method, args,
     on_output, cancel_token) → result`. Maintains `id → Future`;
     background asyncio task reads frames; `kind: "stream"` → on_output;
     `kind: "response"` → resolves the Future. Cancel-token tripping
     writes a `kind: "cancel"` frame.
-- `server/session_manager.py:create_session`: AFTER
+- `jaato_server/server/session_manager.py:create_session`: AFTER
   `_run_pre_initialize_hooks` returns (apparmor profile now provisioned)
-  and BEFORE `server.initialize()`, call `RunnerSpawner.spawn(...)`.
+  and BEFORE `jaato_server.server.initialize()`, call `RunnerSpawner.spawn(...)`.
   Stash the resulting `RunnerRPCClient` on the `JaatoServer` (new attr
   `runner_rpc`).
-- `server/core.py:JaatoServer`: add `runner_rpc` attribute; plumb into
+- `jaato_server/server/core.py:JaatoServer`: add `runner_rpc` attribute; plumb into
   the per-session `ToolExecutor` so the cli stub can reach it.
 
 Order: write `RunnerSpawner.spawn` first; manually verify it forks
-+ execs `server.runner` and reads `RunnerReadyEvent` over fd 3; THEN
++ execs `jaato_server.server.runner` and reads `RunnerReadyEvent` over fd 3; THEN
 wire into `SessionManager.create_session`.
 
 ### 2.5 — cli plugin migration (the validation vehicle)
 
 Files touched:
-- `shared/plugins/cli/plugin.py`: turn `_execute` and `_execute_streaming`
+- `jaato_server/shared/plugins/cli/plugin.py`: turn `_execute` and `_execute_streaming`
   into thin daemon-side stubs. The stub:
   - Reads `runner_rpc` from a session-injected handle (set by
     `JaatoServer` at plugin configure time — same lifecycle slot
@@ -186,10 +186,10 @@ Files touched:
     "args": args}, on_output=self._get_effective_output_callback(),
     cancel_token=get_current_cancel_token())`.
   - Returns the envelope's `result` (or raises on `error`).
-- `server/runner/cli_runner.py`: receives the actual subprocess.Popen +
+- `jaato_server/server/runner/cli_runner.py`: receives the actual subprocess.Popen +
   thread-pair-reader logic. The on_output callback writes
   `kind: "stream"` frames into `RunnerRPC`.
-- `shared/plugins/cli/__init__.py`: unchanged (`PLUGIN_KIND = "tool"`).
+- `jaato_server/shared/plugins/cli/__init__.py`: unchanged (`PLUGIN_KIND = "tool"`).
 
 **Cancellation flow:**
 1. `JaatoSession.request_stop()` → trips per-call `CancelToken`.
@@ -232,7 +232,7 @@ attribute injection) is already in place to support that.
 
 The original §2.3 implementation lived inside the IPC apparmor
 SESSION hook (post-init), not in `_create_session_impl` between
-the pre-init hooks and `server.initialize()` as the plan said.
+the pre-init hooks and `jaato_server.server.initialize()` as the plan said.
 Reviewer caught this; post-rebase fix moves the IPC hook from
 `add_session_hook` → `add_pre_initialize_hook` so:
 
@@ -258,7 +258,7 @@ the WS hook to 4-arg alongside its runner-spawn migration.
 
 ## 3. Test scenarios for 2.5 (cli) — §4.1.1 contract
 
-`server/runner/tests/test_cli_runner.py` — runner-internal unit tests
+`jaato_server/server/runner/tests/test_cli_runner.py` — runner-internal unit tests
 (no fork; instantiate `RunnerRPC` over `socket.socketpair()` in a worker
 thread):
 
@@ -283,7 +283,7 @@ and the dmesg audit assertion requires CAP_SYSLOG. Per operator
 direction, this regression test runs on a **user-hosted server** with
 the necessary capabilities (not in standard CI). The test still ships
 with `@pytest.mark.apparmor` + `_apparmor_available()` skipif gate
-(reused from `shared/tests/test_apparmor.py`) so it skips cleanly
+(reused from `jaato_server/shared/tests/test_apparmor.py`) so it skips cleanly
 elsewhere rather than failing confusingly. The Phase 2 done-criterion
 "green in CI" in the prompt is read as "green on the user-hosted
 runner that exercises the apparmor mark."
@@ -351,7 +351,7 @@ def test_two_workspaces_one_daemon_no_bounce(tmp_path):
 ```
 
 Fixtures: `_apparmor_available()` (cap + binary check),
-`_start_daemon(sock)` (subprocess `python -m server --ipc-socket
+`_start_daemon(sock)` (subprocess `python -m jaato_server --ipc-socket
 <sock> --daemon`, poll for socket up to 5s), existing `IPCClient`,
 `_wait_for_idle(client, timeout=30)` (drains until
 `AgentCompletedEvent`).
@@ -470,8 +470,8 @@ audit before code commits.
 estimate is roughly:
 - ~600 production code (runner package + RunnerSpawner + framing
   module + cli stub edits + session_manager wiring).
-- ~900 tests (unit tests in `server/runner/tests/`, framing tests
-  in `shared/tests/`, integration tests in
+- ~900 tests (unit tests in `jaato_server/server/runner/tests/`, framing tests
+  in `jaato_server/shared/tests/`, integration tests in
   `tests/integration/`).
 This skew is intentional — the §4.1.1 streaming/cancellation
 contract has many surfaces worth pinning, and the integration test

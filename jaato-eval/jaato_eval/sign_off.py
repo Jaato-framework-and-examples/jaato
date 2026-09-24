@@ -72,11 +72,46 @@ from typing import Optional
 #: staleness, now reachable without a framework release.
 MAX_COMPLETION_NUDGES = 2
 
-#: Daemon ``error_type`` values whose workspace is still worth grading.
-#: Deliberately a one-element set, and deliberately named rather than
-#: pattern-matched: every other terminal keeps the conservative reading,
-#: and widening this is a decision someone has to make explicitly.
-UNSIGNED_TERMINALS = frozenset({"NudgeExhausted"})
+#: The terminal a DRIVER arm (``harness.kind: driver``, jaato #1110) ends
+#: in when its process exits with a code IT CHOSE that is neither ``0``
+#: nor ``EX_TEMPFAIL``.  The endings the driver did not choose — a shell
+#: that could not run the command at all, a signal nobody here sent, the
+#: engine's own kill at the arm ceiling — are BLOCKED instead and never
+#: reach this terminal, because an environment fault graded through here
+#: would be an arm FAILed for something that never ran
+#: (:attr:`jaato_eval.driver.DriverOutcome.fault`).  Not a daemon ``error_type`` — the engine mints it,
+#: because a driver's exit code is the only account the engine has of how
+#: the run ended, and the exit-code vocabulary in :mod:`jaato_eval.driver`
+#: says such an exit means *ran and stopped short*: the tree on disk is
+#: real, there is no sign-off, and the graders sort themselves by that
+#: exactly as they do for a session that spent its nudge budget.
+DRIVER_STOPPED_SHORT = "DriverStoppedShort"
+
+#: Terminal types whose workspace is still worth grading.  Deliberately
+#: named rather than pattern-matched: every other terminal keeps the
+#: conservative reading, and widening this is a decision someone has to
+#: make explicitly.  Two members, each the one unsigned terminal of its
+#: harness kind — ``NudgeExhausted`` for a session arm, whose daemon says
+#: it; :data:`DRIVER_STOPPED_SHORT` for a driver arm, whose exit code says
+#: it.
+UNSIGNED_TERMINALS = frozenset({"NudgeExhausted", DRIVER_STOPPED_SHORT})
+
+
+def describe_unsigned(error_type: Optional[str]) -> str:
+    """One clause naming what the missing sign-off WAS, for a verdict.
+
+    The three graders each say why a payload-reading verdict is BLOCKED,
+    or why a workspace verdict carries a caveat, and before the driver
+    kind every such sentence read "the agent never called
+    signal_completion".  That is false of a driver arm — the process
+    exited non-zero; no agent was asked to sign anything — and a verdict
+    that names the wrong mechanism sends its reader to check a completion
+    schema that was never involved.  One function, so the graders cannot
+    each carry their own paraphrase of the rule this module owns.
+    """
+    if error_type == DRIVER_STOPPED_SHORT:
+        return f"the driver stopped short of its end ({error_type})"
+    return f"the agent never called signal_completion ({error_type})"
 
 
 def is_unsigned_terminal(error_type: Optional[str]) -> bool:

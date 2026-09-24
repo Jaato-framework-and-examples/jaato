@@ -1,0 +1,80 @@
+name: gh-worker
+description: >
+  An agent that works with GitHub through `gh` / `git`, using a token the
+  daemon delivers per-user (docs/design/per-user-github-credentials.md §7).
+  The three things that have to line up are all here: the scrub exemption so
+  the token survives to the subprocess, the non-interactive git/gh defaults,
+  and (in .jaato/agents/gh-worker.md) the persona rules for handling the token.
+
+provider: anthropic
+model: claude-sonnet-4-5
+
+default_agent: gh-worker
+
+plugins:
+  - cli
+  - interactive_shell
+  # The jaato web coder bootstraps the `jaato-sdk` skill into every workspace
+  # it serves (#1263), at `.claude/skills/jaato-sdk`.  `prompt_library` reads
+  # `.claude/skills/`, so the web-session agent can reach that skill — without
+  # it the skill is present on disk (for Claude Code) but invisible to the
+  # in-session agent.  A default profile that serves web sessions must list it.
+  - prompt_library
+
+# 1. Non-interactive defaults, so a missing credential is an error the model
+#    READS rather than a prompt nobody answers.  `GH_TOKEN=app://github` is the
+#    reference the daemon resolves to the real per-user token at every spawn
+#    (#1226); a literal token works here too.  In a web deployment the
+#    `GH_TOKEN=app://…` line usually lives in the workspace .env instead — this
+#    profile carries it so the example is self-contained and `validate`-able.
+env:
+  GH_TOKEN: "app://github"
+  GH_PROMPT_DISABLED: "1"
+  GIT_TERMINAL_PROMPT: "0"
+
+# 2. The scrub exemption (the one that silently bites).  GH_TOKEN is in the
+#    default scrub_secret_env set (#863), so WITHOUT `!GH_TOKEN` it is stripped
+#    from every model-driven subprocess before `gh` runs — a valid config that
+#    does nothing.  `jaato-scaffold validate` reports gh_token_scrubbed_inert
+#    when the exemption is missing.  MCP deliberately keeps `default`: an MCP
+#    server gets no GitHub token.
+plugin_configs:
+  cli:
+    scrub_secret_env: [default, "!GH_TOKEN"]
+  interactive_shell:
+    scrub_secret_env: [default, "!GH_TOKEN"]
+
+  # 3. The outward-facing actions, ENFORCED where the design says enforce and
+  #    ADVISED where it says advise (docs/design/github-workspace-guidance.md
+  #    §7 Q4).  `defaultPolicy: allow` keeps the agent autonomous — the point of
+  #    a gh-worker — so the blacklist is what actually stops a dangerous verb,
+  #    and a blacklist is a HARD stop that works under a headless (ClientType.API)
+  #    driver too, where an interactive prompt has no channel to reach (#950/#951).
+  #
+  #    - Force-push (rule 11) is a hard stop: it rewrites history other people
+  #      pulled and is never the reversible default.  The patterns match the full
+  #      command signature (fnmatch glob), so they are `*`-wrapped to catch the
+  #      `git -C <worktree>` and `cd <worktree> && git push …` forms rule 2 uses.
+  #    - `gh pr merge` / `gh release delete` / `gh repo delete` (rules 10/12):
+  #      the design wanted these to *ask* (confirmable).  The permission policy
+  #      has no per-command ask-list — only a global `defaultPolicy` plus
+  #      allow/deny lists — so with an `allow` default they are shipped as a hard
+  #      deny, which also works headless and matches rule 10 ("draft PRs by
+  #      default; the user merges").  A deployment that wants inline confirmation
+  #      instead sets `defaultPolicy: ask` and drops these three lines.
+  #
+  #    Rules 12/13 beyond these verbs (commenting on someone else's PR, touching
+  #    only the repos the user named, the `gh api … /merge` bypass) are judgement
+  #    the command string does not carry, so they stay prose in the guidance file.
+  permission:
+    policy:
+      defaultPolicy: allow
+      blacklist:
+        patterns:
+          - "*push*--force*"              # git push --force / --force-with-lease
+          - "*push*--force-with-lease*"   # explicit, per §3 (redundant with above)
+          - "*push*-f"                    # git push … -f  (short flag at end)
+          - "*push*-f *"                  # git push -f …  (short flag mid-command)
+          - "*gh pr merge*"               # the user merges (rule 10)
+          - "*gh release delete*"         # irreversible (rule 12)
+          - "*gh repo delete*"            # irreversible (rule 12)

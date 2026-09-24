@@ -195,7 +195,14 @@ export interface Agent {
   type: string;
   parentId?: string | null;
   profile?: string | null;
-  status: string; // idle | processing | awaiting_permission | finished | error …
+  /**
+   * The daemon's own word, verbatim: ``active`` | ``idle`` | ``done`` |
+   * ``error`` | ``cancelled`` (``AgentStatusChangedEvent``).  The client
+   * invents none of its own -- what to SHOW is derived in
+   * ``store/phase.ts``, which reads this beside the pending prompts and
+   * the open tool calls.
+   */
+  status: string;
   error?: string | null;
 }
 
@@ -234,6 +241,73 @@ export interface ContextState {
     finishReason?: string | null;
     usage?: Record<string, number | null | undefined>;
   };
+}
+
+/**
+ * One row of the instruction budget -- a source layer, or a child of one.
+ *
+ * The daemon's ``InstructionBudget.snapshot()`` serialises
+ * ``SourceEntry.to_dict()`` verbatim, so this mirrors that shape rather
+ * than reshaping it: ``tokens`` is the entry's OWN cost and
+ * ``total_tokens`` includes its children, which is the number to show.
+ */
+export interface BudgetEntry {
+  source?: string;
+  /** This entry's own tokens, excluding children. */
+  tokens?: number;
+  /** This entry plus its children -- what the row displays. */
+  total_tokens?: number;
+  /** ``locked`` | ``preservable`` | ``partial`` | ``ephemeral`` | ``conditional``. */
+  gc_policy?: string;
+  gc_eligible_tokens?: number;
+  /** The daemon's own glyph for the policy; the client does not invent one. */
+  indicator?: string;
+  label?: string | null;
+  children?: Record<string, BudgetEntry>;
+  [k: string]: unknown;
+}
+
+/**
+ * ``InstructionBudgetEvent.budget_snapshot`` -- what the context window is
+ * spent ON, by instruction source.
+ *
+ * Distinct from {@link ContextState}, which is how FULL the window is.  The
+ * TUI keeps them apart too (Ctrl+B against the ``context`` command) and the
+ * web rail showed only the second under a section labelled Budget.
+ */
+export interface BudgetState {
+  contextLimit?: number | null;
+  totalTokens?: number | null;
+  utilizationPercent?: number | null;
+  lockedTokens?: number | null;
+  gcEligibleTokens?: number | null;
+  /** Keyed by source name: ``system``, ``plugin``, ``enrichment``, ... */
+  entries: Record<string, BudgetEntry>;
+}
+
+/**
+ * What the Instructions panel says about garbage collection (#1190), per
+ * agent: the policy in force (``gc.config``) and the last pass (``gc``).
+ * Both are replayed by the daemon to a client that attaches late, so an
+ * absent ``lastPass`` means "none reported", not "never ran" -- a daemon
+ * that predates the replay says nothing about passes before the attach.
+ */
+export interface GcState {
+  /** ``undefined`` until the daemon has said; ``strategy: null`` is "no GC configured". */
+  config?: { strategy: string | null; threshold: number | null; targetPercent: number | null; continuous: boolean };
+  lastPass?: {
+    /** When the pass completed (the event's own timestamp, ms since epoch). */
+    at: number;
+    success: boolean;
+    tokensFreed: number | null;
+    tokensBefore: number | null;
+    tokensAfter: number | null;
+    trigger: string | null;
+    strategy: string | null;
+    error: string | null;
+  };
+  /** A pass is under way: between ``started`` and ``completed``. */
+  running?: boolean;
 }
 
 export interface WorkspaceInfo {
@@ -318,6 +392,90 @@ export interface StagedUpload {
   path: string;
   size: number;
   status: "queued" | "staging" | "staged" | "failed";
+  /**
+   * Which session (or picker) this upload belongs to, so the strip shows
+   * only the active context's files rather than one flat global list an
+   * upload in session A visibly followed into unrelated session B (#1250).
+   * Stamped at attach time as ``uploadScope(state)`` — ``session:<id>`` once
+   * a session exists, else ``""`` (the picker, before one opens).  A ``""``
+   * upload is re-stamped to the session it opens, so a picker attachment
+   * ends up scoped to the session it was staged for.
+   */
+  scope: string;
   /** The daemon's (or the client-side precheck's) reason, when ``failed``. */
   error?: string;
+}
+
+/**
+ * One memory as the daemon's ``memory.list`` answer lists it (#1232,
+ * protocol 1.22): every field but the content, which {@link MemoryDetail}
+ * carries.  ``tier`` is which store it came from (``workspace`` /
+ * ``global``) -- deliberately not ``scope``, which means how broadly the
+ * memory APPLIES (``project`` / ``universal``).  ``curated_by`` is ``null``
+ * on every raw memory; ``generated_by`` is ``null`` on a record older than
+ * its stamp.  The two ``*_this_session`` flags are the daemon's, for the
+ * session this client is attached to.
+ */
+export interface MemoryRow {
+  id: string;
+  description: string;
+  tags: string[];
+  /** ``raw`` | ``validated`` | ``escalated`` | ``dismissed``. */
+  maturity: string;
+  confidence?: number | null;
+  scope?: string | null;
+  tier: string;
+  timestamp?: string | null;
+  last_accessed?: string | null;
+  usage_count?: number | null;
+  generated_by?: Record<string, unknown> | null;
+  curated_by?: Record<string, unknown> | null;
+  source_agent?: string | null;
+  source_session?: string | null;
+  written_this_session?: boolean;
+  retrieved_this_session?: boolean;
+}
+
+/** A row expanded: its content, or why it could not be fetched. */
+export type MemoryDetail =
+  | { state: "loading" }
+  | { state: "loaded"; content: string; evidence?: string | null }
+  | { state: "error"; message: string };
+
+/** An open edit form's draft; ``tags`` is the comma-separated text being typed. */
+export interface MemoryDraft {
+  description: string;
+  content: string;
+  tags: string;
+}
+
+/**
+ * The rail's Memories section (``app/memories.ts``).  Per session: dropped
+ * with the rest of the session state, because the store it lists belongs
+ * to the session's workspace.
+ *
+ * ``status`` is what the LAST ask established -- ``idle`` (never asked),
+ * ``loading``, ``loaded``, ``error`` (the daemon answered and could not read
+ * the store: its ``error`` is shown, and the rows are NOT replaced by an
+ * empty list, which would read as "nothing remembered") or ``unsupported``
+ * (a daemon below protocol 1.22, which serves no quiet list).
+ */
+export interface MemoriesState {
+  rows: MemoryRow[];
+  status: "idle" | "loading" | "loaded" | "error" | "unsupported";
+  error: string | null;
+  /** Whether THIS connection may change memories -- the daemon's owner gate, never guessed. */
+  mayCurate: boolean | null;
+  /** Show only memories written or retrieved in this session. */
+  thisSessionOnly: boolean;
+  /** The row whose content is showing. */
+  expanded: string | null;
+  /** Row id -> its content, fetched on expand. */
+  details: Record<string, MemoryDetail>;
+  /** Row id -> the action in flight on it, so its buttons disable. */
+  busy: Record<string, string>;
+  /** Row id -> an edit form's draft; present while the form is open. */
+  editing: Record<string, MemoryDraft>;
+  /** One-line outcome of the last action. */
+  notice: { text: string; error?: boolean } | null;
 }

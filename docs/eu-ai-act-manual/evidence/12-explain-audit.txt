@@ -1,0 +1,47 @@
+$ jaato-scaffold explain audit
+the audit record  (Regulation (EU) 2024/1689, Arts. 12, 13(3)(f), 19)
+  schema version 2
+
+  NOT a sixth store -- a CONTRACT over the stores that already record.
+  13(3)(f) asks the instructions for use to describe the mechanisms a
+  deployer collects, stores and interprets the logs with; this page is
+  that description, computed rather than written down beside the code.
+
+STORES
+  ledger
+      where:  trace.ledger  (env: LEDGER_PATH)
+      format: JSONL, one object per record, appended as it is recorded
+        Every model round trip and every permission verdict. Appended per
+        record since #1109, so a process that dies mid-turn has written what
+        it recorded
+        governed by retention_days
+  session_trace
+      where:  trace.session_log  (env: JAATO_TRACE_LOG)
+      format: line-oriented; the DECISION lines are `key=value`, reason last
+        The application trace: permission DECISION lines (#951/#968), budget
+        ceilings and rungs (#955), tool-runner resolve/result lines. The one
+        artefact every deployment gets
+        governed by retention_days
+  provider_trace
+      where:  trace.provider_log  (env: JAATO_PROVIDER_TRACE)
+      format: JSONL, one object per provider interaction
+        What went to the model and what came back, per agent. The largest
+        store by far and the one a retention policy usually shortens first
+        governed by retention_days
+  session_record
+      where:  <workspace>/.jaato/sessions/<session_id>/
+      format: JSON
+        The session's own state: history, profile snapshot, creator, runner
+        identity. This is the CONVERSATION, not the audit log --
+        `conversation_retention_days` governs it, and it may be deleted while
+        the audit record is kept
+        governed by conversation_retention_days -- this is the CONVERSATION,
+        not the log about it
+
+EVENTS
+  response   -> ledger
+      Art. 12(1) -- each model round trip
+      written by shared/jaato_session.py::_record_token_usage
+        stage              which kind of record this is
+        ts                 unix timestamp
+        iso_ts             the same instant, ISO-8601 UTC

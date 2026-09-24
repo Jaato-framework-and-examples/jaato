@@ -5,7 +5,7 @@ client.  It answers, deterministically and from the client's own
 vantage, the questions that otherwise cost an hour of trial-and-error:
 
 - Is the ``server`` package importable, so autostart's
-  ``python -m server`` will work?
+  ``python -m jaato_server`` will work?
 - Is a daemon listening on the socket, or is the socket file **stale**
   (present but dead) — the state that silently blocks autostart?
 - **Which** daemon am I attached to, and **what HOME does it run with?**
@@ -54,6 +54,10 @@ from typing import Dict, List, Optional, Tuple
 # Import the SDK's own path constants so the doctor diagnoses exactly the
 # files the real client uses — never a re-declared copy that could drift.
 from jaato_sdk.client.ipc import DEFAULT_SOCKET_PATH, DEFAULT_PID_FILE
+# The release check is DATA produced by one stdlib-only module; this
+# file and `jaato-scaffold explain releases` are two renderings of it,
+# never two opinions about what is newest.
+from jaato_sdk import release_channels as _releases
 
 PASS = "PASS"
 WARN = "WARN"
@@ -214,8 +218,8 @@ def probe_daemon(socket_path: str, pidfile: str) -> DaemonInfo:
 def check_python_env() -> List[Check]:
     """Verify the interpreter can import what an SDK client needs.
 
-    Autostart launches the daemon via ``python -m server`` using the
-    *current* ``sys.executable`` — so ``server`` must be importable on
+    Autostart launches the daemon via ``python -m jaato_server`` using the
+    *current* ``sys.executable`` — so ``jaato_server`` must be importable on
     this interpreter, not just ``jaato_sdk``.
     """
     checks = [Check("python", PASS, f"{sys.executable}")]
@@ -223,8 +227,8 @@ def check_python_env() -> List[Check]:
     import importlib.util as _u
     for mod, hint in (
         ("jaato_sdk", "pip install -e jaato-sdk/."),
-        ("server", "pip install -e 'jaato-server/.[all]' — required for "
-                    "autostart (python -m server)"),
+        ("jaato_server", "pip install -e 'jaato-server/.[all]' — required for "
+                         "autostart (python -m jaato_server)"),
     ):
         if _u.find_spec(mod) is not None:
             checks.append(Check(f"import {mod}", PASS, "importable"))
@@ -271,7 +275,7 @@ def check_dependency_coherence() -> List[Check]:
     WARN, not FAIL: a skew misleads, it does not stop work.
     """
     try:
-        from shared.scaffold import dependencies as _deps
+        from jaato_server.shared.scaffold import dependencies as _deps
     except Exception:      # noqa: BLE001 — sdk installed without the server
         return [Check("dependency coherence", WARN,
                       "cannot check: `shared.scaffold` is not importable "
@@ -307,6 +311,165 @@ def check_dependency_coherence() -> List[Check]:
                   ", ".join(seen) + " — metadata agrees with sources")]
 
 
+def check_package_layout() -> List[Check]:
+    """Warn about a stale pre-1.0 top-level ``shared`` / ``server`` package.
+
+    Before the 1.0 namespace rename (#1079) the server shipped as top-level
+    ``shared`` and ``server`` packages and the daemon ran as
+    ``python -m server``.  Both now live under ``jaato_server``, and
+    ``python -m server`` / ``import shared`` / ``import server`` no longer
+    resolve -- the operator migration is to ``python -m jaato_server`` (or the
+    unchanged ``jaato-server`` console script).
+
+    POSITIVE EVIDENCE ONLY -- the #1014 / #1023 posture.  This WARNs only when a
+    top-level ``shared`` or ``server`` actually RESOLVES: a leftover pre-1.0
+    install, or a third-party package colliding on the name (the collision the
+    rename exists to end).  With only ``jaato_server`` installed it is SILENT;
+    the mere absence of the old names is not a finding, or the check would warn
+    about a correct install.  Never FAILs -- a migration hint is not a defect,
+    and ``jaato-doctor`` is documented as usable as a CI gate.
+    """
+    import importlib.util as _u
+    stale: List[Tuple[str, str]] = []
+    for name in ("shared", "server"):
+        try:
+            spec = _u.find_spec(name)
+        except Exception:  # pragma: no cover - a broken parent package etc.
+            spec = None
+        if spec is not None:
+            stale.append((name, getattr(spec, "origin", None) or "?"))
+    if not stale:
+        return [Check("package layout", PASS,
+                      "no stale top-level shared/server package")]
+    names = " and ".join(n for n, _ in stale)
+    where = "\n  ".join(f"{n} -> {o}" for n, o in stale)
+    return [Check(
+        "package layout", WARN,
+        f"a top-level {names} package resolves, which the 1.0 namespace "
+        f"rename (#1079) retired:\n  {where}\n"
+        "The daemon is now jaato_server: start it with "
+        "'python -m jaato_server' or the unchanged 'jaato-server' console "
+        "script -- 'python -m server' no longer works, and 'import shared' / "
+        "'import server' resolve to jaato_server.shared / jaato_server.server. "
+        "If this is a leftover pre-1.0 install, uninstall and reinstall "
+        "jaato-server; if it is another package, the collision is now "
+        "harmless (jaato no longer squats those names).")]
+
+
+def _release_line(dist, status) -> str:
+    """One `name old → new` line for a channel that carries something newer."""
+    return (f"{dist.name} {dist.installed} → {status.latest}  "
+            f"({status.channel.label}, {status.channel.base_url})")
+
+
+def _unknown_reasons(report) -> List[str]:
+    """Why any channel declined to answer, de-duplicated across packages.
+
+    One unreachable index produces one reason per installed package, and a
+    check line that repeats "cannot reach https://pypi.org" four times is a
+    check line people stop reading.
+    """
+    return sorted({s.error for _, s in report.unknown if s.error})
+
+
+def _updates_detail(report) -> str:
+    """The notification itself: what is newer, where, and how to get it.
+
+    Grouped by CHANNEL rather than by package because the install command is
+    a property of the channel — a reader upgrading three packages from
+    TestPyPI should see that command once, not three times.
+    """
+    by_channel: Dict[str, List[str]] = {}
+    for dist, status in report.updates:
+        by_channel.setdefault(status.channel.name, []).append(
+            _release_line(dist, status))
+    lines = ["a newer build is published:"]
+    for channel in _releases.CHANNELS:
+        rows = by_channel.get(channel.name)
+        if not rows:
+            continue
+        lines += [f"  {row}" for row in rows]
+        # Every installer the channel documents, not just pip: a uv user told
+        # only the pip form has to translate it, and the candidate channel's
+        # translation is three flags rather than one (see `release_channels`).
+        lines.append("    install with either:")
+        lines += [f"      {command}" for _, command
+                  in channel.install_commands("<package>")]
+    reasons = _unknown_reasons(report)
+    if reasons:
+        # A partial answer presented as a whole one is the other way this
+        # check misleads, so the silent channel is named beside the news.
+        lines.append("  (not every channel answered: " + "; ".join(reasons) + ")")
+    return "\n".join(lines)
+
+
+def _clean_detail(report) -> str:
+    """Nothing newer — stating whether that is "current" or "ahead".
+
+    A checkout of this repository normally runs a build newer than either
+    channel, and telling its author they are up to date is how a check stops
+    being read, so the two are not collapsed.
+    """
+    seen = ", ".join(f"{d.name} {d.installed}" for d in report.distributions)
+    ahead = [d.name for d in report.distributions
+             if any(c.verdict == "ahead" for c in d.channels)]
+    if not ahead:
+        return f"{seen} — newest on both channels"
+    verb = "is" if len(ahead) == 1 else "are"
+    return (f"{seen} — nothing newer is published, and {', '.join(ahead)} "
+            f"{verb} AHEAD of both channels (an unreleased build, which is "
+            "normal in a checkout)")
+
+
+def check_package_releases(*, timeout: float = _releases.DEFAULT_TIMEOUT,
+                           refresh: bool = False,
+                           enabled: bool = True) -> List[Check]:
+    """Has either of our two indexes published something newer than this build?
+
+    jaato publishes production releases to PyPI and stages release candidates
+    on TestPyPI, and nothing in the framework ever asked either index — so the
+    only way to learn a release existed was to open the project page.  This is
+    the preflight half of the answer; ``jaato-scaffold explain releases``
+    renders the same :mod:`jaato_sdk.release_channels` report at length.  The
+    two are drawings of ONE report, never two opinions about what is newest.
+
+    WARN, never FAIL, in BOTH directions, and they are different arguments.  A
+    newer release is news rather than a defect, and a doctor that exits
+    non-zero because someone shipped would break every harness using it as the
+    gate it is documented to be.  An index that did not answer is not a local
+    fault at all — but it is also not a clean bill of health, so it is
+    reported as the unknown it is, in the wording ``check_mcp_sdk`` already
+    uses for "cannot check".
+
+    Args:
+        timeout: Per-index deadline in seconds.
+        refresh: Ignore the cached index answer and re-ask.
+        enabled: ``False`` for ``--no-release-check``; contacts nothing.
+    """
+    if not enabled:
+        return [Check("package releases", PASS,
+                      "skipped (--no-release-check, or "
+                      f"{_releases.ENV_SWITCH}=off) — no index was contacted")]
+
+    report = _releases.check_releases(timeout=timeout, refresh=refresh)
+    if not report.enabled:
+        return [Check("package releases", PASS,
+                      f"disabled by {_releases.ENV_SWITCH} — no index was "
+                      "contacted")]
+    if not report.distributions:
+        return [Check("package releases", WARN,
+                      "; ".join(report.errors)
+                      or "no jaato distributions are installed here")]
+    if report.updates:
+        return [Check("package releases", WARN, _updates_detail(report))]
+    if report.unknown:
+        return [Check("package releases", WARN,
+                      "cannot check: " + "; ".join(_unknown_reasons(report))
+                      + " — this is not a verdict about your version. Set "
+                      f"{_releases.ENV_SWITCH}=off to stop asking.")]
+    return [Check("package releases", PASS, _clean_detail(report))]
+
+
 def check_mcp_sdk() -> List[Check]:
     """Can the MCP plugin still find the installed SDK's JSON-RPC decode seam?
 
@@ -338,7 +501,7 @@ def check_mcp_sdk() -> List[Check]:
         version = "unknown"
     try:
         from mcp import types as mcp_types
-        from shared.plugins.mcp.plugin import detect_jsonrpc_seam
+        from jaato_server.shared.plugins.mcp.plugin import detect_jsonrpc_seam
     except Exception as exc:             # noqa: BLE001 — sdk without the server
         return [Check("mcp sdk", WARN,
                       f"mcp {version} installed, but the plugin is not "
@@ -370,7 +533,7 @@ def check_integrations() -> List[Check]:
     that stop work.
     """
     try:
-        from shared.scaffold import integrations as _install
+        from jaato_server.shared.scaffold import integrations as _install
     except Exception:      # noqa: BLE001 — sdk installed without the server
         return [Check("integrations", WARN,
                       "cannot check: `shared.scaffold` is not importable "
@@ -539,6 +702,134 @@ def check_daemon_identity(info: DaemonInfo) -> List[Check]:
                   f"USER={info.user or '?'}")]
 
 
+def _daemon_flag_value(argv: Optional[List[str]], flag: str) -> Optional[str]:
+    """The value following *flag* in the daemon's argv, or ``None``."""
+    if not argv or flag not in argv:
+        return None
+    i = argv.index(flag)
+    return argv[i + 1] if i + 1 < len(argv) else None
+
+
+def check_oversight(info: DaemonInfo, socket_path: str, pidfile: str) -> List[Check]:
+    """Name the stop button for the daemon that is running (EU AI Act, Art. 14(4)(e)).
+
+    ``jaato-server --stop`` saves every loaded session, cancels each and
+    returns the runners, from the host shell with no client and no session
+    id -- which is where a person who has to stop a system they did not
+    start is standing.  Nothing a deployer reads named it as the oversight
+    measure, and the invocation depends on how THIS daemon was started
+    (its ``--pid-file`` / ``--ipc-socket``), so it is printed here from the
+    daemon's own argv rather than documented as a default someone has to
+    match up.  One session is ``session stop <id>`` from any attached
+    client, and ``session orphans`` lists what is loaded and unwatched.
+    Never connects: the line names the verbs, it does not run them.
+    """
+    argv = _daemon_cmdline(info.pid) if info.pid is not None else None
+    pid_flag = _daemon_flag_value(argv, "--pid-file") or pidfile
+    sock_flag = _daemon_flag_value(argv, "--ipc-socket") or socket_path
+    invocation = f"jaato-server --stop --pid-file {pid_flag} --ipc-socket {sock_flag}"
+    one = ("one session: `session stop <id>` from an attached client "
+           "(SDK stop_session, daemon protocol >= 1.7); `session orphans` "
+           "lists what is loaded with nobody watching.")
+    if not info.listening:
+        return [Check("stop button", WARN,
+                      f"no daemon listening on {socket_path} -- nothing to stop. "
+                      f"Once one runs: `{invocation}`.  {one}")]
+    who = f"PID {info.pid}" if info.pid is not None else "pid unknown (no pidfile)"
+    return [Check("stop button", PASS,
+                  f"{who}: `{invocation}` saves every loaded session, then "
+                  f"cancels each and reaps the runners.  {one}")]
+
+
+def check_audit_chain(paths: List[str]) -> List[Check]:
+    """Walk chained audit files and report the first link that broke (#1120).
+
+    Article 73(6) asks that, after a serious incident, the logs used in
+    the investigation not have been altered.  ``record_keeping.integrity:
+    sha256-chain`` links each record to the previous one's digest; this
+    is the reader, and it needs nothing but the file and the stdlib.
+
+    **It never FAILS the run.**  ``jaato-doctor`` is documented as usable
+    as a CI gate, and a broken chain is a finding for a person to act on,
+    not a build error -- the rule ``check_package_releases`` already
+    follows.  A break is reported at WARN, loudly, naming the line.
+
+    **An unchained file is reported as unchained, not as intact.**  The
+    question an investigator asks is whether this file was tampered with,
+    and for a file carrying no digests the true answer is that it is
+    evidence of nothing either way.  Answering "fine" would be answering
+    a different question.
+    """
+    from . import audit_chain
+
+    if not paths:
+        return [Check("audit chain", WARN,
+                      "no file named -- pass one or more paths to verify")]
+    checks: List[Check] = []
+    for raw in paths:
+        path = Path(raw)
+        if not path.is_file():
+            checks.append(Check(f"audit chain {path.name}", WARN,
+                                f"{path}: no such file"))
+            continue
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError as exc:
+            checks.append(Check(f"audit chain {path.name}", WARN,
+                                f"{path}: cannot read ({exc})"))
+            continue
+        intact, breaks = audit_chain.verify(lines)
+        if intact:
+            checks.append(Check(
+                f"audit chain {path.name}", PASS,
+                f"{len(lines)} record(s), chain intact -- the file was not "
+                f"edited in place.  It does NOT prove who wrote it: a writer "
+                f"holding the file can re-chain from any point."))
+            continue
+        first = breaks[0]
+        checks.append(Check(
+            f"audit chain {path.name}", WARN,
+            f"line {first.line}: {first.reason}"
+            + (f"  (+{len(breaks) - 1} more)" if len(breaks) > 1 else "")))
+    return checks
+
+
+def check_incidents(
+    paths: List[str], since_days: Optional[float] = None,
+) -> List[Check]:
+    """The incident register: what happened, and how long ago (#1122).
+
+    Article 73 gives a provider 15 days to report a serious incident from
+    becoming AWARE of it -- 10 for a death, 2 for a widespread
+    infringement.  All three clocks start from awareness, so the useful
+    thing to print beside each row is how much of each window is left.
+
+    **The tool does not classify.**  Whether an entry IS a serious
+    incident under Art. 3(49) is a determination about consequences the
+    framework cannot see, so all three windows are rendered and none is
+    chosen.  The header says so, rather than the rows carrying a
+    severity the framework is not in a position to assign.
+
+    **Unreadable is not empty.**  A workspace with no trace configured
+    is reported as one that could not be read -- absence of evidence is
+    not absence of incidents, and answering "none" to a question this
+    could not look at is the one thing a register must never do.  It is
+    the rule the release check already follows for an index that did not
+    answer.
+
+    Never FAILs: an incident is news for a person, and ``jaato-doctor``
+    is documented as usable as a CI gate.
+    """
+    from . import incidents_view
+
+    if not paths:
+        return [Check("incidents", WARN,
+                      "no trace file named — pass one or more paths, or set "
+                      "trace.session_log in the profile and pass that")]
+    return incidents_view.render(paths, since_days=since_days,
+                                 check=Check, pass_=PASS, warn=WARN)
+
+
 def check_home_match(info: DaemonInfo) -> List[Check]:
     """Compare the daemon's HOME to the caller's — the #1 pass:// trap.
 
@@ -564,11 +855,11 @@ def check_home_match(info: DaemonInfo) -> List[Check]:
 
 
 #: The top-level packages whose EVENT SHAPES both sides must agree on.
-#: ``jaato_sdk`` holds the client's event classes and ``server`` the daemon's
-#: emitters; they are the two halves of the wire contract #823 is about.
-#: ``shared`` ships in the same distribution as ``server`` and from the same
-#: ``PYTHONPATH`` entry, so listing it would add a row and no information.
-_SKEW_PACKAGES = ("jaato_sdk", "server")
+#: ``jaato_sdk`` holds the client's event classes and ``jaato_server`` the
+#: daemon's emitters (``jaato_server.server``) plus the shared core
+#: (``jaato_server.shared``) — one top-level package since the #1079 rename,
+#: so the two halves of the wire contract #823 is about are these two names.
+_SKEW_PACKAGES = ("jaato_sdk", "jaato_server")
 
 #: Quote characters a ``pyproject.toml`` version may be wrapped in.
 _QUOTES = "\"'"
@@ -683,8 +974,8 @@ def _daemon_package_dir(pkg: str, entries: List[str],
 def _client_package_dir(pkg: str) -> Optional[Path]:
     """Where THIS process imports ``pkg`` from — the fact, not a derivation.
 
-    ``find_spec`` rather than importing: ``server`` is heavy, and the doctor
-    must be able to report on a package it would rather not execute.
+    ``find_spec`` rather than importing: ``jaato_server`` is heavy, and the
+    doctor must be able to report on a package it would rather not execute.
     """
     import importlib.util as _u
     try:
@@ -868,7 +1159,7 @@ def load_known_env_vars() -> Optional[Dict[str, str]]:
     client-only install); the daemon-env check then WARNs rather than guessing.
     """
     try:
-        from shared.scaffold.introspect import env_vars  # type: ignore
+        from jaato_server.shared.scaffold.introspect import env_vars  # type: ignore
     except Exception:
         return None
     return {n: v.tier for n, v in env_vars().items()}
@@ -1162,7 +1453,7 @@ def check_secret_scrub(workspace: str, config_root: Optional[str]) -> List[Check
     reporting PASS on nothing.
     """
     try:
-        from shared.scaffold.validate import validate_workspace  # type: ignore
+        from jaato_server.shared.scaffold.validate import validate_workspace  # type: ignore
     except Exception:
         return [Check("secret scrub", WARN,
                       "jaato-server's validator is not importable here — cannot "
@@ -1424,17 +1715,25 @@ def run_checks(
     auto_start: bool,
     web_socket: Optional[str] = None,
     ws_token_file: Optional[str] = None,
+    release_check: bool = True,
+    release_timeout: float = _releases.DEFAULT_TIMEOUT,
+    refresh_releases: bool = False,
 ) -> List[Check]:
     """Run every check and return the flat result list (in display order)."""
     info = probe_daemon(socket_path, pidfile)
     checks: List[Check] = []
     checks += check_python_env()
     checks += check_premium_reactors()
+    checks += check_package_layout()
     checks += check_dependency_coherence()
+    checks += check_package_releases(timeout=release_timeout,
+                                     refresh=refresh_releases,
+                                     enabled=release_check)
     checks += check_integrations()
     checks += check_mcp_sdk()
     checks += check_socket(info, auto_start=auto_start)
     checks += check_daemon_identity(info)
+    checks += check_oversight(info, socket_path, pidfile)
     if web_socket:
         checks += check_websocket(web_socket, info, ws_token_file=ws_token_file)
     checks += check_home_match(info)
@@ -1483,6 +1782,22 @@ def _print(checks: List[Check]) -> int:
     return 1 if n_fail else 0
 
 
+def _since_days(raw: Optional[str]) -> Optional[float]:
+    """``--since 15`` / ``--since 15d`` as days, or ``None``.
+
+    An unparseable value reads as ``None`` -- show everything -- rather
+    than as zero.  A register that silently showed nothing because its
+    filter did not parse would answer "no incidents" to a question it
+    never asked, which is the failure this whole verb exists to avoid.
+    """
+    if not raw:
+        return None
+    try:
+        return float(str(raw).strip().rstrip("dD"))
+    except ValueError:
+        return None
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     """CLI entry point: ``python -m jaato_sdk.doctor [options]``."""
     ap = argparse.ArgumentParser(
@@ -1514,6 +1829,32 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--ws-token-file", default=None,
                     help="override the WS bearer-token file path "
                          "(default: the daemon's ~/.jaato/ws.token)")
+    ap.add_argument("--no-release-check", action="store_true",
+                    help="do not ask PyPI / TestPyPI whether a newer jaato "
+                         "package is published (also: "
+                         f"{_releases.ENV_SWITCH}=off)")
+    ap.add_argument("--release-check-timeout", type=float,
+                    default=_releases.DEFAULT_TIMEOUT, metavar="SECONDS",
+                    help="per-index deadline for the release check "
+                         f"(default: {_releases.DEFAULT_TIMEOUT})")
+    ap.add_argument("--refresh-release-check", action="store_true",
+                    help="ignore the cached index answer and re-ask — for "
+                         "'I just published, is it visible?'")
+    ap.add_argument("--incidents", nargs="+", default=None, metavar="PATH",
+                    help="REGISTER MODE (instead of preflight): list the "
+                         "incidents recorded in one or more application "
+                         "trace files, with the Art. 73 reporting clocks "
+                         "beside each. Does NOT classify: whether an entry "
+                         "is a serious incident under Art. 3(49) is a "
+                         "human determination.")
+    ap.add_argument("--since", default=None, metavar="DAYS",
+                    help="with --incidents: keep only entries this recent. "
+                         "Accepts '15' or '15d'.")
+    ap.add_argument("--audit-verify", nargs="+", default=None, metavar="PATH",
+                    help="VERIFY MODE (instead of preflight): walk chained "
+                         "audit files (record_keeping.integrity: sha256-chain) "
+                         "and report the first record whose link broke.  Needs "
+                         "nothing but the file — EU AI Act Art. 73(6).")
     ap.add_argument("--session", default=None, metavar="ID",
                     help="RUNTIME diagnostic mode (instead of preflight): inspect a "
                          "recent session's logs under <workspace>/.jaato/logs — did "
@@ -1521,7 +1862,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                          "workspace=none? Use 'latest' for the newest session.")
     args = ap.parse_args(argv)
 
-    if args.session:
+    if args.incidents:
+        checks = check_incidents(args.incidents, _since_days(args.since))
+    elif args.audit_verify:
+        checks = check_audit_chain(args.audit_verify)
+    elif args.session:
         checks = check_session(args.session, args.workspace)
     else:
         checks = run_checks(
@@ -1534,6 +1879,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             auto_start=not args.no_auto_start,
             web_socket=args.web_socket,
             ws_token_file=args.ws_token_file,
+            release_check=not args.no_release_check,
+            release_timeout=args.release_check_timeout,
+            refresh_releases=args.refresh_release_check,
         )
     return _print(checks)
 

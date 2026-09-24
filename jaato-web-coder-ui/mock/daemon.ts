@@ -22,8 +22,29 @@
  *                 info: no prompt_lines, no warning -- the card falls back to
  *                 the tool arguments
  *   "ask"       → a batch_only clarification with two questions
+ *   "ask long"  → the same, but the first question's choices are ~300 chars
+ *                 each, so the card must wrap them inside the plate (#1245)
  *   "fail"      → a failing tool call
+ *   "…notebook…" → a notebook_execute call whose output is one cell as the
+ *                 daemon sends it: input / stdout / error <nb-row>s
+ *   "…early…notebook…" → the early-exit error cell (no execution count);
+ *                 not as the first word, which the composer runs as a command
+ *   "…touch a.py b.py" → the workspace monitor reports those files as
+ *                 modified, numbered like the daemon's (#1189); not as the
+ *                 first word, which the composer runs as a command
+ *   "…discover tools" → a ``list_tools`` call whose argument is a hashed
+ *                 category id, then the ``tools.id_registry`` naming it --
+ *                 AFTER the call, as the daemon may send it
+ *   "…collect garbage" → one GC pass (``gc`` started, then completed,
+ *                 freeing 14 200 tokens), remembered and replayed on attach
+ *   "…offer <path>" → the model calls the ``offer_download`` host tool the
+ *                 client registered (protocol 1.20): the daemon sends
+ *                 ``tool.execute_request``, waits for the client's
+ *                 ``tool.execute_result``, and the call lands as a tool row
  *   "subagent"  → spawns a subagent that streams in its own tab
+ *   "…remember <text>" → a ``store_memory`` call that succeeds and adds a
+ *                 RAW memory written in this session to the store the
+ *                 memory verbs (protocol 1.22) answer from
  *   "model this is broken" (verbatim test) → echoes the text back
  *   anything else → a short streamed markdown reply
  *
@@ -42,7 +63,23 @@ const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, SPEED ? ms 
 const ts = () => new Date().toISOString();
 
 interface Client {
-  ws: WebSocket; sessionId: string | null; pending: Map<string, (v: unknown) => void>; ignored: Set<string>;
+  ws: WebSocket; id: string; sessionId: string | null; pending: Map<string, (v: unknown) => void>; ignored: Set<string>;
+  /**
+   * The workspace THIS CONNECTION selected, and whether the daemon
+   * provisioned one for it at ``session.new``.  Both are per-connection in
+   * the daemon (``remove_client`` drops them when the socket closes), and
+   * ``_resolve_staging_workspace`` consults exactly these two, in this
+   * order.  The mock used to refuse staging on a different rule — "no
+   * session and not workspace mode" — which is why the suite could not see
+   * a reconnect losing the selection.
+   */
+  selected: string | null; provisioned: boolean;
+  /** The permission policy, as the DAEMON holds it: the status bar's
+   *  segment is a control, so the readout has to follow what the plate
+   *  just did.  The real daemon re-emits ``permission.status`` after a
+   *  ``permissions`` command; this models that loop so the e2e can see
+   *  it. */
+  policy: { effective_default: string; suspension_scope: string | null };
   /**
    * A ``workspace.files.stage_request`` in progress: the daemon reads one
    * BINARY frame per declared file, in order, before answering with
@@ -51,9 +88,169 @@ interface Client {
    * drained so the stream stays aligned.
    */
   staging: { workspaceId: string; specs: { name: string; size: number }[]; frames: Buffer[]; refused: Record<string, string>[] | null } | null;
+  /** Host tools this connection registered (``tools.register_client``). */
+  clientTools: Set<string>;
+  /** Integrations already installed into this connection's workspace via
+   *  ``scaffold.integration`` (#1263), so a re-refresh reports ``current`` /
+   *  ``changed:false`` the way the daemon's ``--refresh`` does. */
+  installedIntegrations: Set<string>;
 }
 const STAGE_PER_FILE_LIMIT = 10 * 1024 * 1024;
 const STAGE_TOTAL_LIMIT = 50 * 1024 * 1024;
+// The daemon's WebSocket message limit (``DEFAULT_WS_MAX_MESSAGE_SIZE``),
+// enforced by the socket and advertised in the handshake exactly as the
+// daemon does, so the client's pre-check runs against the real shape.
+const MAX_MESSAGE_SIZE = 16 * 1024 * 1024;
+
+/**
+ * The session's workspace monitor, as the daemon keeps it (#1189): every
+ * flushed batch is numbered one more than the last, each path remembers the
+ * number of its latest change, and ``epoch`` names the monitor instance.
+ * Keyed by session, not by connection -- a reconnecting client attaches to
+ * the same monitor and gets its snapshot, which is what the Files panel's
+ * reset has to survive.
+ */
+interface MockMonitor { epoch: string; seq: number; files: Map<string, { status: string; seq: number }> }
+const MONITORS = new Map<string, MockMonitor>();
+function monitorFor(c: Client): MockMonitor {
+  const key = c.sessionId ?? `_client:${c.id}`;
+  let m = MONITORS.get(key);
+  if (!m) { m = { epoch: randomUUID().slice(0, 12), seq: 0, files: new Map() }; MONITORS.set(key, m); }
+  return m;
+}
+/**
+ * GC as the daemon reports it (#1190): the policy at session start, a pass
+ * as ``gc`` started / completed, and BOTH replayed to a client that
+ * attaches -- the daemon's ``_emit_gc_state`` -- with the pass carrying its
+ * own timestamp.  Keyed by session so a reconnecting client gets the replay.
+ */
+const MOCK_GC_POLICY = { strategy: "budget", threshold: 80, target_percent: 60, continuous_mode: false };
+const LAST_GC = new Map<string, Record<string, unknown>>();
+
+/**
+ * The memory store the memory verbs answer from (#1232, protocol 1.22), in
+ * the daemon's row shape (``MemoryPlugin.memory_row``): every field but the
+ * content, plus ``tier``, and the two this-session flags computed for the
+ * asking session.  Keyed by session so parallel tests do not curate each
+ * other's memories; seeded with one of each kind the panel draws.
+ */
+interface MockMemory {
+  id: string; description: string; content: string; tags: string[]; maturity: string; tier: string;
+  scope: string; timestamp: string; usage_count: number; source_session: string | null;
+  curated_by: Record<string, unknown> | null; retrieved: boolean;
+}
+const MEMORIES = new Map<string, MockMemory[]>();
+function memoriesFor(c: Client): MockMemory[] {
+  const key = c.sessionId ?? `_client:${c.id}`;
+  let list = MEMORIES.get(key);
+  if (!list) {
+    list = [
+      { id: "mem_raw_1", description: "The build uses pnpm, not npm", content: "Run pnpm install; npm install breaks the lockfile.", tags: ["build", "pnpm"], maturity: "raw", tier: "workspace", scope: "project", timestamp: ts(), usage_count: 0, source_session: null, curated_by: null, retrieved: false },
+      { id: "mem_ok_1", description: "Tests live beside their modules", content: "Every foo.ts has foo.test.ts next to it.", tags: ["tests", "layout"], maturity: "validated", tier: "workspace", scope: "project", timestamp: ts(), usage_count: 3, source_session: null, curated_by: { kind: "human", user: "mock:tester", at: ts() }, retrieved: true },
+      { id: "mem_global_1", description: "Prefer small commits", content: "One change per commit, with the reason in the body.", tags: ["git", "style"], maturity: "validated", tier: "global", scope: "universal", timestamp: ts(), usage_count: 1, source_session: null, curated_by: { kind: "human", user: "mock:tester", at: ts() }, retrieved: false },
+    ];
+    MEMORIES.set(key, list);
+  }
+  return list;
+}
+function memoryRow(c: Client, m: MockMemory): Record<string, unknown> {
+  return {
+    id: m.id, description: m.description, tags: m.tags, maturity: m.maturity, confidence: 0.8, scope: m.scope,
+    tier: m.tier, timestamp: m.timestamp, last_accessed: null, usage_count: m.usage_count,
+    generated_by: { provider: "mock", model: "mock-1" }, curated_by: m.curated_by,
+    source_agent: "main", source_session: m.source_session,
+    written_this_session: !!c.sessionId && m.source_session === c.sessionId,
+    retrieved_this_session: m.retrieved,
+  };
+}
+/** Answer one ``memory.*.request`` the way ``memory_verbs.answer_memory_request`` does. */
+function answerMemoryRequest(c: Client, ev: Record<string, unknown>): void {
+  const type = String(ev.type);
+  const requestId = String(ev.request_id ?? "");
+  const common = { request_id: requestId, source: "runner", error: "", category: "" };
+  if (!c.sessionId) {
+    const refusal = { ...common, ok: false, category: "no_session", error: "no session is attached to this connection" };
+    if (type === "memory.list.request") send(c, { type: "memory.list", memories: [], may_curate: true, ...refusal });
+    else send(c, { type: type.replace(".request", ".result"), memory_id: String(ev.memory_id ?? ""), ...refusal });
+    return;
+  }
+  const list = memoriesFor(c);
+  if (type === "memory.list.request") {
+    send(c, { type: "memory.list", memories: list.map((m) => memoryRow(c, m)), may_curate: true, ok: true, ...common });
+    return;
+  }
+  const id = String(ev.memory_id ?? "");
+  const index = list.findIndex((m) => m.id === id);
+  const result = type.replace(".request", ".result");
+  if (index < 0) {
+    send(c, { type: result, memory_id: id, ...common, ok: false, category: "not_found", error: `Memory not found: ${id}` });
+    return;
+  }
+  const m = list[index]!;
+  if (type === "memory.get.request") {
+    send(c, { type: result, memory_id: id, ...common, ok: true, memory: { ...memoryRow(c, m), content: m.content, evidence: null } });
+  } else if (type === "memory.delete.request") {
+    list.splice(index, 1);
+    send(c, { type: result, memory_id: id, ...common, ok: true });
+  } else if (type === "memory.update.request") {
+    if (typeof ev.description === "string") m.description = ev.description;
+    if (typeof ev.content === "string") m.content = ev.content;
+    if (Array.isArray(ev.tags)) m.tags = (ev.tags as unknown[]).map(String);
+    if (typeof ev.maturity === "string" && ev.maturity !== m.maturity) {
+      m.maturity = ev.maturity;
+      m.curated_by = ev.maturity === "validated" || ev.maturity === "escalated" ? { kind: "human", via: "memory.update", user: "mock:tester", at: ts() } : null;
+    }
+    const row = memoryRow(c, m);
+    // The storage layer keeps no dismissed trace: gone from the next list.
+    if (m.maturity === "dismissed") list.splice(index, 1);
+    send(c, { type: result, memory_id: id, ...common, ok: true, memory: row });
+  }
+}
+function sendGcState(c: Client): void {
+  send(c, { type: "gc.config", agent_id: "main", ...MOCK_GC_POLICY });
+  const last = c.sessionId ? LAST_GC.get(c.sessionId) : undefined;
+  if (last) send(c, last);
+}
+
+function emitWorkspaceChanges(c: Client, changes: { path: string; status: string }[]): void {
+  const m = monitorFor(c);
+  m.seq += 1;
+  for (const ch of changes) {
+    if (ch.status === "deleted") m.files.delete(ch.path);
+    else m.files.set(ch.path, { status: ch.status, seq: m.seq });
+  }
+  send(c, { type: "workspace.files_changed", changes, seq: m.seq, epoch: m.epoch });
+}
+function sendWorkspaceSnapshot(c: Client): void {
+  const m = monitorFor(c);
+  const files = [...m.files.entries()].map(([path, v]) => ({ path, status: v.status }));
+  const seqs = Object.fromEntries([...m.files.entries()].map(([path, v]) => [path, v.seq]));
+  send(c, { type: "workspace.files_snapshot", files, total: files.length, seq: m.seq, epoch: m.epoch, seqs });
+}
+
+/**
+ * ``workspace.file.fetch`` (protocol 1.20), with the daemon's rules
+ * (``server/workspace_download.py``): a path that climbs out is
+ * ``unsafe_path`` before anything else, ``.env`` is ``credential``, and a
+ * file exists here when the session's monitor has reported it.  On success
+ * the header is followed by ONE binary frame -- the mock's content is the
+ * path itself, so a test can check it got the right file.
+ */
+function answerFileFetch(c: Client, ev: Record<string, unknown>): void {
+  const requestId = String(ev.request_id ?? "");
+  const metadataOnly = ev.metadata_only === true;
+  const path = String(ev.path ?? "").replace(/^\.\//, "");
+  const answer = (fields: Record<string, unknown>) => send(c, { type: "workspace.file.content", request_id: requestId, metadata_only: metadataOnly, ...fields });
+  if (!c.selected && !c.provisioned && !c.sessionId) { answer({ ok: false, path, category: "workspace_not_found", error: "No workspace selected" }); return; }
+  if (!path || path.startsWith("/") || path.split("/").includes("..")) { answer({ ok: false, path, category: "unsafe_path", error: `${path} is outside the workspace` }); return; }
+  const name = path.split("/").pop() ?? path;
+  if (name === ".env") { answer({ ok: false, path, category: "credential", error: `${path} holds credentials and cannot be downloaded` }); return; }
+  const status = monitorFor(c).files.get(path)?.status;
+  if (!status || status === "deleted") { answer({ ok: false, path, category: "not_found", error: `no file at ${path}` }); return; }
+  const data = Buffer.from(`mock content of ${path}\n`);
+  answer({ ok: true, path, name, size: data.length, mime_type: name.endsWith(".txt") ? "text/plain" : "application/octet-stream" });
+  if (!metadataOnly && c.ws.readyState === c.ws.OPEN) c.ws.send(data);
+}
 
 function finishStaging(c: Client): void {
   const st = c.staging!;
@@ -70,16 +267,28 @@ function finishStaging(c: Client): void {
   });
   send(c, { type: "workspace.files.staged", workspace_id: st.workspaceId, staged, failed });
   // The daemon's workspace monitor then reports the new files.
-  if (staged.length) send(c, { type: "workspace.files_changed", changes: staged.map((path) => ({ path, status: "created" })) });
+  if (staged.length) emitWorkspaceChanges(c, staged.map((path) => ({ path, status: "created" })));
 }
+
+/**
+ * Sessions ``session.delete`` has removed.  The real daemon deletes the
+ * RECORD, so the next listing does not carry it -- a mock that answered the
+ * delete and went on listing the session would certify a client that never
+ * has to cope with the row going away.
+ */
+const deletedSessions = new Set<string>();
 
 /** What ``session.list`` answers: the daemon's free-form per-session dicts. */
 function sessionListing(c: Client): Record<string, unknown>[] {
-  return [
-    { id: "20260916_090000", name: "", description: "fix the budget panel", model_provider: "anthropic", model_name: "claude-sonnet-4", is_loaded: true, is_current: c.sessionId === "20260916_090000", client_count: 1, turn_count: 3, workspace_path: "/srv/workspaces/project-a" },
+  return ([
+    // `awaiting` / `awaiting_since` are protocol 1.17: the one way a client
+    // working in session A learns that B is blocked on a person.  Sent here
+    // in the daemon's own spelling, because a mock that speaks the client's
+    // vocabulary certifies a reading no real daemon produces.
+    { id: "20260916_090000", name: "", description: "fix the budget panel", model_provider: "anthropic", model_name: "claude-sonnet-4", is_loaded: true, is_current: c.sessionId === "20260916_090000", client_count: 1, turn_count: 3, workspace_path: "/srv/workspaces/project-a", awaiting: "permission", awaiting_since: new Date(Date.now() - 4 * 60_000).toISOString() },
     { id: "20260915_170000", name: "old notes", description: "", model_provider: "", model_name: "", is_loaded: false, is_current: false, client_count: 0, turn_count: 1, workspace_path: "/srv/workspaces/project-b" },
     ...(c.sessionId && !c.sessionId.startsWith("2026") ? [{ id: c.sessionId, name: "mock session", description: "", model_provider: "mock", model_name: "mock-1", is_loaded: true, is_current: true, client_count: 1, turn_count: 0, workspace_path: "/work" }] : []),
-  ];
+  ] as Record<string, unknown>[]).filter((s) => !deletedSessions.has(String(s.id)));
 }
 
 /** The conversation ``history.request`` replays for the sessions above. */
@@ -138,10 +347,61 @@ async function turn(c: Client, text: string, agentId = "main"): Promise<void> {
   // The daemon echoes the prompt to every attached client before the model
   // speaks -- the same ``agent.output`` shape, with source ``user``.
   send(c, { type: "agent.output", agent_id: agentId, source: "user", text, mode: "write" });
-  send(c, { type: "agent.status_changed", agent_id: agentId, status: "processing" });
+  // ``active`` is the daemon's own word for a turn under way
+  // (``jaato_sdk/events.py``: active | idle | done | error).  The mock
+  // used to say "processing", which is a word the CLIENT invented and
+  // no daemon emits -- so the e2e suite certified an indicator that
+  // could not work against a real daemon.
+  send(c, { type: "agent.status_changed", agent_id: agentId, status: "active" });
   await sleep(50);
 
-  if (lower.includes("subagent")) {
+  const touch = /\btouch\s+(.+)$/i.exec(text);
+  const remember = /\bremember\s+(.+)$/i.exec(text);
+  if (remember) {
+    // The model stores a memory; the daemon runs ``store_memory`` and the
+    // client re-lists on the successful ``tool.call_end``.
+    const body = remember[1] ?? "";
+    const callId = randomUUID();
+    send(c, { type: "tool.call_start", agent_id: agentId, tool_name: "store_memory", tool_args: { description: body, content: body, tags: ["mock", "note"] }, call_id: callId });
+    memoriesFor(c).push({ id: `mem_${callId.slice(0, 8)}`, description: body, content: body, tags: ["mock", "note"], maturity: "raw", tier: "workspace", scope: "project", timestamp: ts(), usage_count: 0, source_session: c.sessionId, curated_by: null, retrieved: false });
+    send(c, { type: "tool.call_end", agent_id: agentId, tool_name: "store_memory", call_id: callId, success: true, duration_seconds: 0.01, error_message: null });
+    await stream(c, agentId, "Noted.");
+  } else if (touch) {
+    const paths = (touch[1] ?? "").split(/\s+/).filter(Boolean);
+    emitWorkspaceChanges(c, paths.map((path) => ({ path, status: "modified" })));
+    await stream(c, agentId, `Touched ${paths.join(", ")}.`);
+  } else if (lower.includes("collect garbage")) {
+    send(c, { type: "gc", agent_id: agentId, phase: "started", trigger_reason: "manual", strategy: "budget" });
+    await sleep(30);
+    const done = { type: "gc", agent_id: agentId, phase: "completed", trigger_reason: "manual", strategy: "budget", success: true, tokens_before: 90000, tokens_after: 75800, tokens_freed: 14200, timestamp: new Date(Date.now() - 12 * 60_000).toISOString() };
+    if (c.sessionId) LAST_GC.set(c.sessionId, done);
+    send(c, done);
+    await stream(c, agentId, "Collected.");
+  } else if (lower.includes("discover tools")) {
+    const callId = randomUUID();
+    send(c, { type: "tool.call_start", agent_id: agentId, tool_name: "list_tools", tool_args: { category_id: "c_bbc5e661" }, call_id: callId });
+    send(c, { type: "tool.call_end", agent_id: agentId, tool_name: "list_tools", call_id: callId, success: true, duration_seconds: 0.01, error_message: null, show_output: false });
+    send(c, { type: "tools.id_registry", mappings: { c_bbc5e661: "system", t_a3f2b1c0: "cli_based_tool" } });
+    await stream(c, agentId, "I have a system category.");
+  } else if (/\boffer\s+\S+/.test(lower)) {
+    // The model calls the client's ``offer_download`` host tool.  As on the
+    // daemon, the execution is a round trip to the client that registered it,
+    // and the call reaches the transcript as an ordinary tool row.
+    const path = (/\boffer\s+(\S+)/i.exec(text)?.[1]) ?? "";
+    if (path === "out/report.txt") emitWorkspaceChanges(c, [{ path, status: "created" }]);
+    const callId = randomUUID().slice(0, 8);
+    const args = { path };
+    send(c, { type: "tool.call_start", agent_id: agentId, tool_name: "offer_download", tool_args: args, call_id: callId });
+    if (!c.clientTools.has("offer_download")) {
+      send(c, { type: "tool.call_end", agent_id: agentId, tool_name: "offer_download", call_id: callId, success: false, error_message: "No client registered offer_download" });
+    } else {
+      send(c, { type: "tool.execute_request", call_id: callId, agent_id: "", tool_name: "offer_download", tool_args: args });
+      const result = (await waitFor(c, `tool:${callId}`)) as { error?: string };
+      const ok = !result.error;
+      send(c, { type: "tool.call_end", agent_id: agentId, tool_name: "offer_download", call_id: callId, success: ok, error_message: ok ? null : result.error, is_error_result: !ok, duration_seconds: 0.02, show_output: false });
+      await stream(c, agentId, ok ? "Here it is -- use the button above." : `I could not offer it: ${result.error}`);
+    }
+  } else if (lower.includes("subagent")) {
     const subId = `sub-${randomUUID().slice(0, 6)}`;
     send(c, { type: "agent.created", agent_id: subId, agent_name: "researcher", agent_type: "subagent", parent_agent_id: agentId, profile_name: "researcher" });
     await stream(c, agentId, "Delegating to a researcher subagent…\n");
@@ -178,10 +438,22 @@ async function turn(c: Client, text: string, agentId = "main"): Promise<void> {
     send(c, { type: "permission.resolved", agent_id: agentId, request_id: reqId, tool_name: "write_file", granted, method: "user" });
     send(c, { type: "tool.call_end", agent_id: agentId, tool_name: "write_file", call_id: callId, success: granted, duration_seconds: 0.21, error_message: granted ? null : "Permission denied by user", show_output: false });
     // WorkspaceFilesChangedEvent.changes carries {path, status} — the daemon's key.
-    if (granted) send(c, { type: "workspace.files_changed", changes: [{ path: "src/app.py", status: "modified" }, { path: ".jaato/logs/session.log", status: "created" }] });
+    if (granted) emitWorkspaceChanges(c, [{ path: "src/app.py", status: "modified" }, { path: ".jaato/logs/session.log", status: "created" }]);
     await stream(c, agentId, granted ? `Written (you answered \`${answer}\`).` : "Understood, not writing the file.");
   } else if (lower.includes("ask")) {
     const reqId = randomUUID();
+    // "ask long" gives the first question ~300-char choices, like the report
+    // (#1245): the card must wrap them inside the plate, not run one uppercase
+    // line off its right edge across the rail.  Plain "ask" keeps the short
+    // choices.
+    const longChoices = lower.includes("long");
+    const choices = longChoices
+      ? [
+          "Adopt React 19 with the App Router, server components everywhere, and a strict TypeScript config that treats every implicit any as a build error so the whole team is forced to annotate as they go",
+          "Reach for Svelte 5 runes and a thin adapter layer, keeping the existing REST endpoints untouched while the store is migrated one feature at a time behind a flag nobody outside the team can toggle yet",
+          "Stay on Solid for its fine-grained reactivity and the smaller bundle, accepting that the ecosystem is thinner and that a few of the component libraries the designers picked will have to be rebuilt by hand",
+        ]
+      : ["React 19", "Svelte 5", "Solid"];
     send(c, {
       type: "clarification.batch", agent_id: agentId, request_id: reqId, tool_name: "request_clarification", batch_only: true,
       context: "Before I start:",
@@ -191,20 +463,53 @@ async function turn(c: Client, text: string, agentId = "main"): Promise<void> {
       // the card's vocabulary, which is how a card that could not render the
       // daemon's passed every e2e test.
       questions: [
-        { index: 1, text: "Which framework should the client use?", question_type: "single_choice", required: true, choices: [{ text: "React 19" }, { text: "Svelte 5", default: true }, { text: "Solid" }] },
+        { index: 1, text: "Which framework should the client use?", question_type: "single_choice", required: true, choices: choices.map((text, i) => (i === 1 ? { text, default: true } : { text })) },
         { index: 2, text: "Anything else I should know?", question_type: "free_text", required: false },
       ],
     });
     const answers = (await waitFor(c, `clar:${reqId}`)) as string[];
     // Like the server's ClarificationChannel._parse_answer: a bare number picks that option.
-    const choices = ["React 19", "Svelte 5", "Solid"];
     const first = /^\d+$/.test(answers[0] ?? "") ? (choices[Number(answers[0]) - 1] ?? answers[0]) : answers[0];
     await stream(c, agentId, `Thanks — you chose **${first}** and said "${answers[1]}".`);
+  } else if (lower.includes("live")) {
+    // A tool still RUNNING with output on screen, until ``session.stop``: the
+    // live-output popup exists only in that window, which the no-delay e2e
+    // mock would otherwise close before a test could look at it.
+    const callId = randomUUID();
+    send(c, { type: "tool.call_start", agent_id: agentId, tool_name: "cli_based_tool", tool_args: { command: "npm test" }, call_id: callId });
+    for (const line of ["> vitest run", " ✓ src/app.test.ts (12 tests)", " RUN  src/slow.test.ts"]) {
+      send(c, { type: "tool.output", agent_id: agentId, call_id: callId, chunk: line + "\n" });
+    }
+    await new Promise<void>((r) => c.pending.set("hang", () => r()));
+    send(c, { type: "tool.call_end", agent_id: agentId, tool_name: "cli_based_tool", call_id: callId, success: false, duration_seconds: 1.2 });
+    await stream(c, agentId, "Stopped mid-turn.");
   } else if (lower.includes("hang")) {
     // A turn that runs until ``session.stop``: how a test presses Exit
     // mid-turn without betting on a clock (the e2e mock runs with no delays).
     await new Promise<void>((r) => c.pending.set("hang", () => r()));
     await stream(c, agentId, "Stopped mid-turn.");
+  } else if (lower.includes("notebook")) {
+    // The daemon's own wire, not a paraphrase of it: each chunk is what
+    // core.on_tool_output sends after the formatter pipeline has run on the
+    // notebook plugin's emitters (_format_*_cell), one chunk at a time.
+    // Regenerate it from the server rather than editing it by hand -- a mock
+    // that drifts into the client's vocabulary certifies a renderer that
+    // does not work, which is how #1193 stayed invisible.
+    const callId = randomUUID();
+    const chunks = lower.includes("early")
+      ? ['<nb-row type="error" label="Err:">\nNo code provided\n</nb-row>\n']
+      : [
+          '<nb-row type="input" label="In [1]:">\n<j-code language="ipython">\n<j-line n="1">print(\'before the error\')</j-line>\n<j-line n="2">1/0</j-line>\n</j-code>\n\n</nb-row>\n',
+          '<nb-row type="stdout" label="Out [1]:">\nbefore the error\n</nb-row>\n',
+          '<nb-row type="error" label="Err [1]:">\nTraceback (most recent call last):\n  File "<cell>", line 2\nZeroDivisionError: division by zero\n</nb-row>\n',
+        ];
+    send(c, { type: "tool.call_start", agent_id: agentId, tool_name: "notebook_execute", tool_args: { code: "print('before the error')\n1/0" }, call_id: callId });
+    for (const chunk of chunks) {
+      send(c, { type: "tool.output", agent_id: agentId, call_id: callId, chunk });
+      await sleep(40);
+    }
+    send(c, { type: "tool.call_end", agent_id: agentId, tool_name: "notebook_execute", call_id: callId, success: true, duration_seconds: 0.4, show_output: true });
+    await stream(c, agentId, "The cell raised a ZeroDivisionError.");
   } else if (lower.includes("fail")) {
     const callId = randomUUID();
     send(c, { type: "tool.call_start", agent_id: agentId, tool_name: "run_command", tool_args: { command: "false" }, call_id: callId });
@@ -229,7 +534,7 @@ async function turn(c: Client, text: string, agentId = "main"): Promise<void> {
   } else if (lower.includes("code")) {
     await stream(c, agentId, CODE_REPLY, 10);
   } else {
-    await stream(c, agentId, `You said: *${text.replace(/\*/g, "")}*\n\nThis is the **mock daemon**. Try \`code\`, \`tool\`, \`permit\`, \`ask\`, \`fail\` or \`subagent\`.`);
+    await stream(c, agentId, `You said: *${text.replace(/\*/g, "")}*\n\nThis is the **mock daemon**. Try \`code\`, \`tool\`, \`live\`, \`permit\`, \`ask\`, \`fail\` or \`subagent\`.`);
   }
 
   send(c, { type: "context.updated", agent_id: agentId, usage: { prompt_tokens: 1200, output_tokens: 340, total_tokens: 1540, cache_read_tokens: 800 }, context_limit: 200000, percent_used: 0.77, tokens_remaining: 198460, turns: 1 });
@@ -237,15 +542,24 @@ async function turn(c: Client, text: string, agentId = "main"): Promise<void> {
   send(c, { type: "agent.status_changed", agent_id: agentId, status: "idle" });
 }
 
-const wss = new WebSocketServer({ host: HOST, port: PORT });
+let clientSeq = 0;
+// Sessions the mock has created, by id.  A daemon keeps its sessions across
+// connections, so a client that reconnects can attach to the one it had.
+const LIVE_SESSIONS = new Set<string>();
+const wss = new WebSocketServer({ host: HOST, port: PORT, maxPayload: MAX_MESSAGE_SIZE });
 wss.on("connection", (ws, req) => {
   const url = new URL(req.url ?? "/", "http://x");
   const auth = req.headers.authorization ?? "";
   const presented = url.searchParams.get("token") ?? (auth.startsWith("Bearer ") ? auth.slice(7) : "");
   if (TOKEN && presented !== TOKEN) { ws.close(1008, "unauthorized"); return; }
 
-  const c: Client = { ws, sessionId: null, pending: new Map(), ignored: new Set(), staging: null };
-  send(c, { type: "connected", protocol_version: "1.12", server_info: { server_version: "mock-0.0.1", client_id: randomUUID() } });
+  const c: Client = {
+    ws, id: `client_${++clientSeq}`, sessionId: null, pending: new Map(), ignored: new Set(),
+    selected: null, provisioned: false, staging: null, clientTools: new Set(),
+    policy: { effective_default: "ask", suspension_scope: null },
+    installedIntegrations: new Set(),
+  };
+  send(c, { type: "connected", protocol_version: "1.22", server_info: { server_version: "mock-0.0.1", client_id: randomUUID(), max_message_size: MAX_MESSAGE_SIZE, stage_per_file_limit: Math.min(STAGE_PER_FILE_LIMIT, MAX_MESSAGE_SIZE), stage_total_limit: STAGE_TOTAL_LIMIT } });
 
   ws.on("message", async (raw, isBinary) => {
     if (c.staging) {
@@ -264,12 +578,29 @@ wss.on("connection", (ws, req) => {
         const specs = ((ev.files as { name: string; size: number }[] | undefined) ?? []).map((f) => ({ name: String(f.name ?? ""), size: Number(f.size ?? 0) }));
         const workspaceId = String(ev.workspace_id ?? "");
         let refused: Record<string, string>[] | null = null;
-        if (!c.sessionId && !WORKSPACES) refused = specs.map((f) => ({ name: f.name, category: "workspace_not_found", error: "No workspace selected for client (workspace_id='')" }));
+        // The daemon's rule: this connection's selection, else a workspace
+        // it provisioned for it.  Attaching a session restores neither.
+        if (!c.selected && !c.provisioned) refused = specs.map((f) => ({ name: f.name, category: "workspace_not_found", error: `No workspace selected for client ${c.id} (workspace_id='')` }));
         else if (specs.reduce((a, f) => a + f.size, 0) > STAGE_TOTAL_LIMIT) refused = specs.map((f) => ({ name: f.name, category: "size_limit_total", error: `declared total exceeds cap ${STAGE_TOTAL_LIMIT}` }));
         c.staging = { workspaceId, specs, frames: [], refused };
         if (!specs.length) finishStaging(c);
         break;
       }
+      case "workspace.file.fetch":
+        answerFileFetch(c, ev);
+        break;
+      case "memory.list.request":
+      case "memory.get.request":
+      case "memory.update.request":
+      case "memory.delete.request":
+        answerMemoryRequest(c, ev);
+        break;
+      case "tools.register_client":
+        for (const t of (ev.tools as { name?: string }[] | undefined) ?? []) if (t.name) c.clientTools.add(t.name);
+        break;
+      case "tool.execute_result":
+        c.pending.get(`tool:${String(ev.call_id)}`)?.(ev);
+        break;
       case "workspace.list":
         if (!WORKSPACES) send(c, { type: "error", error: "Workspace mode not enabled", error_type: "WorkspaceModeDisabled", recoverable: true });
         else send(c, { type: "workspace.list_response", root: "/srv/workspaces", workspaces: [
@@ -278,6 +609,7 @@ wss.on("connection", (ws, req) => {
         ] });
         break;
       case "workspace.select":
+        c.selected = String(ev.name);
         send(c, { type: "config.status", workspace: String(ev.name), configured: ev.name === "project-a", provider: ev.name === "project-a" ? "anthropic" : null, model: ev.name === "project-a" ? "claude-sonnet-4" : null, available_providers: ["anthropic", "google_genai", "openrouter"], missing_fields: ev.name === "project-a" ? [] : ["provider", "api_key"] });
         break;
       case "workspace.create":
@@ -299,13 +631,18 @@ wss.on("connection", (ws, req) => {
         const args = (ev.args as string[] | undefined) ?? [];
         if (cmd === "session.new") {
           c.sessionId = `sess-${randomUUID().slice(0, 8)}`;
+          LIVE_SESSIONS.add(c.sessionId);
+          // A client with no workspace gets one provisioned as part of
+          // ``session.new``; one that selected keeps what it selected.
+          if (!c.selected) c.provisioned = true;
           send(c, { type: "init.progress", step: "plugins", status: "running", message: "Loading plugins", step_number: 1, total_steps: 2 });
           await sleep(120);
           send(c, { type: "init.progress", step: "provider", status: "complete", message: "Ready", step_number: 2, total_steps: 2 });
           send(c, { type: "agent.created", agent_id: "main", agent_name: "main", agent_type: "main", profile_name: args.includes("--profile") ? args[args.indexOf("--profile") + 1] : null });
           send(c, { type: "session.info", session_name: "mock session", model_provider: "mock", model_name: "mock-1", profile_name: args.includes("--profile") ? args[args.indexOf("--profile") + 1] : null, models: ["mock-1", "mock-2"], sessions: sessionListing(c) });
           // PermissionStatusEvent, emitted by the daemon at init: effective_default + suspension_scope.
-          send(c, { type: "permission.status", effective_default: "ask", suspension_scope: null });
+          send(c, { type: "permission.status", ...c.policy });
+          send(c, { type: "gc.config", agent_id: "main", ...MOCK_GC_POLICY });
           send(c, { type: "system.message", message: "Connected to the mock daemon. Try: code, tool, permit, ask, fail, subagent.", style: "info" });
         } else if (cmd === "mock-auth") {
           // A daemon-level auth plugin command: works with NO session, like
@@ -328,9 +665,14 @@ wss.on("connection", (ws, req) => {
           // The daemon answers with a system.message naming the outcome; a
           // loaded session's attached clients also hear "Session deleted:".
           const target = String(args[0] ?? "");
+          const known = sessionListing(c).some((s) => s.id === target);
           if (target && target === c.sessionId) {
             send(c, { type: "system.message", message: "Session deleted: mock session", style: "warning" });
             c.sessionId = null;
+            deletedSessions.add(target);
+            send(c, { type: "system.message", message: `Session '${target}' deleted.`, style: "info" });
+          } else if (known) {
+            deletedSessions.add(target);
             send(c, { type: "system.message", message: `Session '${target}' deleted.`, style: "info" });
           } else {
             send(c, { type: "system.message", message: `Session '${target}' not found.`, style: "warning" });
@@ -339,11 +681,27 @@ wss.on("connection", (ws, req) => {
           send(c, { type: "session.list", sessions: sessionListing(c) });
         } else if (cmd === "session.attach") {
           const target = String(args[0] ?? "");
-          if (!HISTORIES[target]) { send(c, { type: "error", error: `Session not found: ${target}`, error_type: "SessionError", recoverable: true }); break; }
+          if (!HISTORIES[target] && !LIVE_SESSIONS.has(target)) { send(c, { type: "error", error: `Session not found: ${target}`, error_type: "SessionError", recoverable: true }); break; }
           c.sessionId = target;
+          if (LIVE_SESSIONS.has(target)) {
+            // Re-attaching binds the session to THIS connection and nothing
+            // else: the workspace selection is the client's own to re-assert.
+            send(c, { type: "agent.created", agent_id: "main", agent_name: "main", agent_type: "main", profile_name: null });
+            send(c, { type: "session.info", session_id: target, session_name: "mock session", model_provider: "mock", model_name: "mock-1", profile_name: null, models: ["mock-1", "mock-2"], sessions: sessionListing(c) });
+            // The daemon rebuilds an attaching client's Files mirror with a
+            // snapshot -- sent even when empty, since it carries the epoch.
+            sendWorkspaceSnapshot(c);
+            sendGcState(c);
+            break;
+          }
           send(c, { type: "agent.created", agent_id: "main", agent_name: "main", agent_type: "main", profile_name: null });
           send(c, { type: "session.info", session_id: target, session_name: target === "20260916_090000" ? "fix the budget panel" : "old notes", model_provider: target === "20260916_090000" ? "anthropic" : "mock", model_name: target === "20260916_090000" ? "claude-sonnet-4" : "mock-1", profile_name: null, models: ["mock-1"], sessions: sessionListing(c) });
-          send(c, { type: "permission.status", effective_default: "allow", suspension_scope: null });
+          // Attaching reports the policy of the SESSION being attached,
+          // which is what the daemon does and is why it differs from the
+          // one a fresh session starts on.  Adopted as this connection's
+          // policy so the plate goes on agreeing with the bar.
+          c.policy = { effective_default: "allow", suspension_scope: null };
+          send(c, { type: "permission.status", ...c.policy });
         } else if (cmd === "session.profiles") {
           send(c, { type: "session.profiles", profiles: [{ name: "researcher", description: "Deep research", provider: "anthropic", model: "claude-sonnet-4" }, { name: "coder", description: "Coding agent", provider: "openrouter", model: "openai/gpt-5" }] });
         } else if (cmd === "workspace.ignore") {
@@ -357,6 +715,38 @@ wss.on("connection", (ws, req) => {
             if (ignored) c.ignored.add(p); else c.ignored.delete(p);
             send(c, { type: "workspace.ignore.result", path: p, ok: true, ignored, gitignore_path: "/work/.gitignore" });
           }
+        } else if (cmd === "scaffold.integration") {
+          // The daemon runs ``jaato-scaffold integration <name> --refresh``
+          // into the caller's workspace and answers with the four --refresh
+          // fields (protocol 1.21).  The mock models the ``--refresh``
+          // contract's two everyday outcomes: the first call installs an
+          // ``absent`` copy (``changed``), a later one finds it ``current``.
+          // It stamps the skill files into the workspace monitor too, so the
+          // Files panel lists ``.claude/skills/jaato-sdk/SKILL.md`` with the
+          // provenance stamp beside it — the e2e's assertion.
+          const name = args[0] ?? "";
+          const target = "/work/.claude/skills/jaato-sdk";
+          if (name !== "claude-code") {
+            send(c, { type: "scaffold.integration.result", integration: name, ok: false,
+              available: ["claude-code"], server_version: "mock-0.0.1",
+              error: `scaffold.integration: unknown integration '${name}'; this daemon ships: claude-code` });
+          } else if (c.installedIntegrations.has(name)) {
+            // --refresh declines an already-current copy; the daemon reports
+            // it as changed:false with a "current: <version>" skipped_reason,
+            // which the client shows no notice for (steady state).
+            send(c, { type: "scaffold.integration.result", integration: name, ok: true,
+              changed: false, state_before: "current", state_after: "current",
+              skipped_reason: "current: mock-0.0.1", target, available: ["claude-code"], server_version: "mock-0.0.1" });
+          } else {
+            c.installedIntegrations.add(name);
+            emitWorkspaceChanges(c, [
+              { path: ".claude/skills/jaato-sdk/SKILL.md", status: "created" },
+              { path: ".claude/skills/jaato-sdk/.jaato-integration", status: "created" },
+            ]);
+            send(c, { type: "scaffold.integration.result", integration: name, ok: true,
+              changed: true, state_before: "absent", state_after: "current",
+              skipped_reason: "", target, available: ["claude-code"], server_version: "mock-0.0.1" });
+          }
         } else if (cmd === "session.stop") {
           send(c, { type: "system.message", message: "Stopped.", style: "warning" });
         } else if (cmd === "model") {
@@ -364,6 +754,28 @@ wss.on("connection", (ws, req) => {
           send(c, { type: "system.message", message: `Model switched to ${args[0] ?? "mock-1"}`, style: "info" });
         } else if (cmd === "tools.list") {
           send(c, { type: "system.message", message: "Tools:\n  ✓ run_command\n  ✓ write_file\n  ✗ web_search (disabled)", style: "info" });
+        } else if (cmd === "mock-drop") {
+          // Drop the socket without closing the client: the SDK reconnects,
+          // and the new connection starts with no workspace and no session,
+          // exactly as the daemon's ``remove_client`` leaves it.
+          send(c, { type: "system.message", message: "Dropping the connection.", style: "warning" });
+          // ``terminate``: destroy the socket with no close frame, which is
+          // what a dropped connection looks like (and 1006 is a reserved
+          // code the ws library refuses to send).
+          setTimeout(() => c.ws.terminate(), 10);
+        } else if (cmd === "permissions") {
+          // The daemon applies the change and re-emits its status, which
+          // is the loop the status-bar plate depends on: it marks the
+          // default in force and offers Suspend or Resume from that
+          // value.  Until the daemon read the policy from the plugin
+          // that ENFORCES it, this event carried the profile's seeded
+          // answer and the readout disagreed with the control.
+          const [verb, arg] = args;
+          if (verb === "default" && arg) c.policy.effective_default = arg;
+          else if (verb === "suspend") c.policy.suspension_scope = arg === "--turn" ? "turn" : "idle";
+          else if (verb === "resume") c.policy.suspension_scope = null;
+          send(c, { type: "system.message", message: `mock: permissions ${args.join(" ")}`.trim(), style: "info" });
+          send(c, { type: "permission.status", ...c.policy });
         } else if (cmd === "reset") {
           send(c, { type: "system.message", message: "History cleared.", style: "info" });
         } else {
@@ -375,6 +787,7 @@ wss.on("connection", (ws, req) => {
         send(c, { type: "command.list", commands: [
           { name: "model", description: "Switch model (mock)" }, { name: "waypoint", description: "Manage waypoints" },
           { name: "mock-auth", description: "Mock Provider authentication" }, { name: "mock-auth login", description: "Sign in to Mock Provider" },
+          { name: "mock-drop", description: "Drop the socket (mock; the client reconnects)" },
           { name: "waypoint list", description: "List waypoints" }, { name: "permissions status", description: "Show permission status" },
         ] });
         break;

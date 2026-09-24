@@ -24,10 +24,24 @@ export {
   MIN_PROTOCOL_VERSION,
   MIN_ATTACHMENT_RESUME_PROTOCOL,
   MIN_WORKSPACE_IGNORE_PROTOCOL,
+  MIN_FILE_FETCH_PROTOCOL,
+  MIN_MEMORY_VERBS_PROTOCOL,
+  STAGE_FILES_TIMEOUT_MS,
+  LEGACY_SERVER_LIMITS,
+  serverLimitsFrom,
+  type ServerLimits,
   isProtocolCompatible,
+  type WorkspaceFileFetchResult,
   type JaatoClientOptions,
   type TokenProvider,
 } from "./client.js";
+// app:// secret resolution, application side (#1226): the hook an application
+// registers on its bind channel to answer the daemon's secret.resolve.
+export {
+  SecretResolveResponder,
+  type SecretResolveHandler,
+  type SecretResolveOutcome,
+} from "./secretResolver.js";
 // High-level convenience facade (mirror of jaato-sdk's convenience.py).
 export {
   Session,

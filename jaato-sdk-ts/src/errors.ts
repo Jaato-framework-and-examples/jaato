@@ -45,6 +45,34 @@ export class ConnectionClosedError extends Error {
 }
 
 /**
+ * The connection closed while a request was waiting for its answer.
+ *
+ * A request/response call (``stageFiles``, ``fetchWorkspaceFile``) whose
+ * connection drops cannot be answered by the next connection: the daemon
+ * treats a reconnect as a new client, and the request died with the old
+ * one.  Rejecting at once, with the close code, is what separates "the
+ * daemon refused this" from "the daemon is slow".  ``code`` 1009 is the
+ * daemon refusing a message over its ``max_message_size``.
+ */
+export class RequestInterruptedError extends ConnectionError {
+  /** WebSocket close code of the connection that carried the request. */
+  readonly code: number;
+  /** Close reason, when the peer sent one. */
+  readonly reason: string;
+
+  constructor(label: string, code: number, reason: string) {
+    const why =
+      code === 1009
+        ? "the daemon refused a message larger than its limit (1009)"
+        : `connection closed (code ${code}${reason ? `: ${reason}` : ""})`;
+    super(`${label}: ${why}; the request did not complete`);
+    this.name = "RequestInterruptedError";
+    this.code = code;
+    this.reason = reason;
+  }
+}
+
+/**
  * The server's wire-protocol version is incompatible with this SDK.
  *
  * Non-retryable — an old (or wrong-major) daemon will not become

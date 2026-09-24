@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jaato-server"
-version = "0.16.0"
+version = "1.1.0"
 description = "Jaato Server - LLM tool orchestration runtime and daemon"
 readme = "PKG_README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 license = "BUSL-1.1"
 authors = [
     {name = "apanoia"}
@@ -17,13 +17,16 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
 ]
 dependencies = [
     # --- Core (always installed) ---
-    "jaato-sdk",  # SDK protocol: base plugin classes, type system (Message, ToolSchema, ProviderResponse), event definitions
+    # Floor = the SDK version this repo ships, not the oldest that happens to
+    # work: jaato-server imports SDK symbols unconditionally from seven
+    # provider modules, so a resolver picking an older SDK fails at provider
+    # import with an error naming neither package (#1055).  Guarded by
+    # shared/tests/test_sdk_floor_is_the_sdk_we_ship.py.
+    "jaato-sdk>=0.28.0.dev0",  # SDK protocol: base plugin classes, type system (Message, ToolSchema, ProviderResponse), event definitions
     "requests",  # HTTP fallback client: OAuth token flows, permission/reference/todo channels, Kerberos proxy support
     "mcp[cli]",  # MCP plugin: stdio-based MCP client for connecting to external MCP tool servers
     "google-api-core",  # Core error handling: retry_utils.py rate-limit detection, token_accounting.py
@@ -124,43 +127,43 @@ all = [
 ]
 
 [project.scripts]
-jaato-server = "server.__main__:main"
-jaato-scaffold = "shared.scaffold.__main__:main"
+jaato-server = "jaato_server.server.__main__:main"
+jaato-scaffold = "jaato_server.shared.scaffold.__main__:main"
 
 # Entry points for plugin discovery
 # External packages can register plugins by adding to this group
 [project.entry-points."jaato.plugins"]
-artifact_tracker = "shared.plugins.artifact_tracker:create_plugin"
-background = "shared.plugins.background:create_plugin"
-bundle = "shared.plugins.bundle:create_plugin"
-calculator = "shared.plugins.calculator:create_plugin"
-cli = "shared.plugins.cli:create_plugin"
-environment = "shared.plugins.environment:create_plugin"
-mcp = "shared.plugins.mcp:create_plugin"
-lsp = "shared.plugins.lsp:create_plugin"
-memory = "shared.plugins.memory:create_plugin"
-multimodal = "shared.plugins.multimodal:create_plugin"
-permission = "shared.plugins.permission:create_plugin"
-references = "shared.plugins.references:create_plugin"
-template = "shared.plugins.template:create_plugin"
-todo = "shared.plugins.todo:create_plugin"
-anthropic_auth = "shared.plugins.anthropic_auth:create_plugin"
-ast_search = "shared.plugins.ast_search:create_plugin"
+artifact_tracker = "jaato_server.shared.plugins.artifact_tracker:create_plugin"
+background = "jaato_server.shared.plugins.background:create_plugin"
+bundle = "jaato_server.shared.plugins.bundle:create_plugin"
+calculator = "jaato_server.shared.plugins.calculator:create_plugin"
+cli = "jaato_server.shared.plugins.cli:create_plugin"
+environment = "jaato_server.shared.plugins.environment:create_plugin"
+mcp = "jaato_server.shared.plugins.mcp:create_plugin"
+lsp = "jaato_server.shared.plugins.lsp:create_plugin"
+memory = "jaato_server.shared.plugins.memory:create_plugin"
+multimodal = "jaato_server.shared.plugins.multimodal:create_plugin"
+permission = "jaato_server.shared.plugins.permission:create_plugin"
+references = "jaato_server.shared.plugins.references:create_plugin"
+template = "jaato_server.shared.plugins.template:create_plugin"
+todo = "jaato_server.shared.plugins.todo:create_plugin"
+anthropic_auth = "jaato_server.shared.plugins.anthropic_auth:create_plugin"
+ast_search = "jaato_server.shared.plugins.ast_search:create_plugin"
 
 # Entry points for GC strategy plugins
 # GC plugins implement context window garbage collection strategies
 [project.entry-points."jaato.gc_plugins"]
-gc_truncate = "shared.plugins.gc_truncate:create_plugin"
-gc_summarize = "shared.plugins.gc_summarize:create_plugin"
-gc_hybrid = "shared.plugins.gc_hybrid:create_plugin"
-gc_budget = "shared.plugins.gc_budget:create_plugin"
+gc_truncate = "jaato_server.shared.plugins.gc_truncate:create_plugin"
+gc_summarize = "jaato_server.shared.plugins.gc_summarize:create_plugin"
+gc_hybrid = "jaato_server.shared.plugins.gc_hybrid:create_plugin"
+gc_budget = "jaato_server.shared.plugins.gc_budget:create_plugin"
 
 # Entry points for Cache Control plugins
 # Cache plugins manage provider-specific prompt caching strategies
 [project.entry-points."jaato.cache_plugins"]
-cache_anthropic = "shared.plugins.cache_anthropic:create_plugin"
-cache_zhipuai = "shared.plugins.cache_zhipuai:create_plugin"
-cache_google_genai = "shared.plugins.cache_google_genai:create_plugin"
+cache_anthropic = "jaato_server.shared.plugins.cache_anthropic:create_plugin"
+cache_zhipuai = "jaato_server.shared.plugins.cache_zhipuai:create_plugin"
+cache_google_genai = "jaato_server.shared.plugins.cache_google_genai:create_plugin"
 
 # Entry points for embedding subsystem (references plugin semantic matching).
 # External packages register embedding_provider and semantic_matcher factories.
@@ -180,14 +183,14 @@ cache_google_genai = "shared.plugins.cache_google_genai:create_plugin"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["shared*", "server*", "jaato_embedded*"]
+include = ["jaato_server*", "jaato_embedded*"]
 
 # Integrations ship WITH the framework they wire into another tool, so an
 # applied copy cannot describe a different version than the one running.
 # `jaato-scaffold integration <name>` applies one; `jaato-doctor` compares
 # the stamp it leaves against this distribution's version.
 [tool.setuptools.package-data]
-"shared.scaffold" = ["integrations/*/integration.json", "integrations/*/payload/*.md",
+"jaato_server.shared.scaffold" = ["integrations/*/integration.json", "integrations/*/payload/*.md",
                      "integrations/*/payload/*.sh", "integrations/*/payload/references/*.md"]
 
 [tool.pytest.ini_options]

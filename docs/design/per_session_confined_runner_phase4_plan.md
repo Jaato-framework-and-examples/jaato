@@ -81,11 +81,11 @@ New tasks (§4.5–§4.7) get their own audit commits per the discipline.
 ~30 LoC change.
 
 **Files touched:**
-- `shared/plugins/permission/types.py` (or wherever `PromptPayload`
+- `jaato_server/shared/plugins/permission/types.py` (or wherever `PromptPayload`
   is defined) — add `call_id: Optional[str] = None` field.
-- `shared/plugins/permission/runner_rpc_channel.py` — populate
+- `jaato_server/shared/plugins/permission/runner_rpc_channel.py` — populate
   `call_id` when constructing the `PromptPayload` for the ASK relay.
-- `server/runner_rpc_handlers/prompt_operator.py` — pass `call_id`
+- `jaato_server/server/runner_rpc_handlers/prompt_operator.py` — pass `call_id`
   through to the emitted `PermissionInputModeEvent` (already-shipped
   Path J emit, just needs the field wired).
 
@@ -127,13 +127,13 @@ runner with a sub-AppArmor profile (`jaato-ws-{session_id}//{subagent_id}`)
 + sub-cgroup.  Default-share path already shipped in Phase 3.
 
 **Files touched:**
-- `shared/plugins/subagent/plugin.py` — branch on
+- `jaato_server/shared/plugins/subagent/plugin.py` — branch on
   `agent_params.isolated`; default → share parent's runner;
   opt-in → call `SessionManager._spawn_isolated_runner(...)`.
-- `server/session_manager.py` — add `_spawn_isolated_runner` helper
+- `jaato_server/server/session_manager.py` — add `_spawn_isolated_runner` helper
   reusing `_spawn_session_runner_unconditional` machinery with a
   sub-profile name.
-- `server/apparmor.py` — sub-profile generation (likely already
+- `jaato_server/server/apparmor.py` — sub-profile generation (likely already
   supports `parent_name//{child}` syntax; verify).
 
 **Tests:** integration test gated on `_can_migrate_to(_find_writable_cgroup_parent())`
@@ -196,12 +196,12 @@ issues `runner.shutdown` to runners that have been idle for N
 seconds.  Saves ~30 MB RSS per stale session.
 
 **Files touched:**
-- `server/__main__.py` — new daemon config field (env var
+- `jaato_server/server/__main__.py` — new daemon config field (env var
   `JAATO_RUNNER_IDLE_SHUTDOWN_SECONDS`, default disabled).
-- `server/session_manager.py` — periodic idle-scan task; tracks
+- `jaato_server/server/session_manager.py` — periodic idle-scan task; tracks
   per-runner last-activity timestamp; issues shutdown when idle
   exceeds threshold.
-- `server/runner_spawn.py` — runners restart-on-demand for
+- `jaato_server/server/runner_spawn.py` — runners restart-on-demand for
   shutdown sessions (next session.send_message re-spawns).
 
 **Open clarification (audit):** restart-on-demand vs session-failure

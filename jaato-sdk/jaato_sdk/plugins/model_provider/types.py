@@ -37,7 +37,7 @@ which files were affected:
 
 Usage::
 
-    from shared.plugins.model_provider.types import ToolSchema, TRAIT_FILE_WRITER
+    from jaato_server.shared.plugins.model_provider.types import ToolSchema, TRAIT_FILE_WRITER
 
     ToolSchema(
         name="myWriteTool",
@@ -71,7 +71,7 @@ passed through unchanged).
 
 Usage::
 
-    from shared.plugins.model_provider.types import ToolSchema, TRAIT_GREPPABLE_CONTENT
+    from jaato_server.shared.plugins.model_provider.types import ToolSchema, TRAIT_GREPPABLE_CONTENT
 
     ToolSchema(
         name="call_service",
@@ -102,7 +102,7 @@ workspace profile doesn't grant.
 
 Usage::
 
-    from shared.plugins.model_provider.types import ToolSchema, TRAIT_FRAMEWORK_LEVEL
+    from jaato_server.shared.plugins.model_provider.types import ToolSchema, TRAIT_FRAMEWORK_LEVEL
 
     ToolSchema(
         name="spawn_subagent",
@@ -545,10 +545,17 @@ class Attachment:
         mime_type: MIME type of the data (e.g., 'image/png', 'application/pdf').
         data: Raw binary data.
         display_name: Optional name for referencing in the response.
+        generated_by: Provenance, when the tool that produced the bytes can
+            say who made them -- an image-generation tool stamps
+            ``jaato_sdk.events.ai_generated_by(...)``; a tool that fetched
+            or read a file leaves it ``None``, because relaying is not
+            generating.  Carried onto ``ToolOutputEvent.generated_by`` when
+            the attachment reaches a client (EU AI Act Art. 50(2)).
     """
     mime_type: str
     data: bytes
     display_name: Optional[str] = None
+    generated_by: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -1450,9 +1457,19 @@ def parse_tool_call_arguments(
         A genuinely absent or empty arguments slot is a **success**:
         ``({}, None)``, the zero-argument call the model really did
         make.  A payload that decodes to something other than an object
-        (``"null"``, ``"[1, 2]"``, a bare number) is a **failure**:
-        it cannot be a keyword-argument mapping, and coercing it would
-        be the same fabrication one layer along.
+        (``"null"``, ``"[1, 2]"``, a bare number, a bare string) is a
+        **failure**: it cannot be a keyword-argument mapping, and
+        coercing it would be the same fabrication one layer along.
+
+        The one exception is a payload that has been **JSON-encoded a
+        second time** -- the single decode then yields a ``str`` whose
+        own value is the arguments object.  That is recovered by decoding
+        the extra level, so a double-encoded multi-line argument reaches
+        the tool as text with real newlines rather than the two-character
+        literal ``\\n`` (issue #1242).  A genuine literal backslash-n
+        inside a normally-encoded object is NOT touched: the first decode
+        of such a payload is already a ``dict``, so it never reaches the
+        second-level decode.
     """
     if raw is None:
         return {}, None
@@ -1466,9 +1483,27 @@ def parse_tool_call_arguments(
         decoded = json.loads(raw)
     except (json.JSONDecodeError, ValueError):
         return {}, raw
-    if not isinstance(decoded, dict):
-        return {}, raw
-    return decoded, None
+    if isinstance(decoded, dict):
+        return decoded, None
+    # A provider (or a gateway in front of it) that JSON-encodes the
+    # arguments object a SECOND time delivers a JSON string whose own
+    # value is the arguments object, so the single decode above yields a
+    # ``str`` rather than a mapping.  Recover the object one level down --
+    # its ``\n`` escapes resolve to real newlines on the inner decode, so a
+    # double-encoded multi-line argument reaches the tool as text with real
+    # line breaks instead of literal ``\n`` (issue #1242).  ONLY when the
+    # inner value is itself an object: a bare string / number / array is a
+    # genuinely malformed argument slot, not a double-encoded mapping, and
+    # coercing it would be the fabrication #750 forbids -- so those stay
+    # unreadable, exactly as before.
+    if isinstance(decoded, str):
+        try:
+            inner = json.loads(decoded)
+        except (json.JSONDecodeError, ValueError):
+            return {}, raw
+        if isinstance(inner, dict):
+            return inner, None
+    return {}, raw
 
 
 def unreadable_arguments_error(call: "FunctionCall") -> Dict[str, Any]:

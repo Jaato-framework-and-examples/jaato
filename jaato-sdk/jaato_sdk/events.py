@@ -23,7 +23,7 @@ from enum import Enum
 from typing import Any, Dict, List, Optional, Union
 import json
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 # =============================================================================
@@ -220,7 +220,258 @@ from pydantic import BaseModel, ConfigDict, Field
 # older client ignores the fields and never sends the verb; an older daemon
 # answers the verb with ``ErrorEvent("Unknown message type")``, a visible
 # failure, so there is no SDK minimum to refuse below.
-PROTOCOL_VERSION = "1.13"
+#
+# 1.14 -- ``ToolOutputEvent.generated_by``: provenance on model-generated
+# media (Regulation (EU) 2024/1689, Art. 50(2): the output of an AI system
+# must be marked in a machine-readable format as artificially generated).
+# The model's own speech and images, delivered under ``MODEL_MEDIA_CALL_ID``,
+# now carry ``{"kind": "ai", "provider", "model", "session_id", "agent_id"}``,
+# and a tool-result attachment carries whatever its producer stamped
+# (``Attachment.generated_by``); a chunk a tool merely relayed carries
+# nothing, because a fetched image is not AI-generated because an agent
+# fetched it.  Additive optional field: an older client ignores it.
+#
+# 1.15 -- the FIRST-INTERACTION announcement (Art. 50(1)), and the client's
+# way of declining it.  ``SessionInfoEvent.disclosure_announcement`` carries
+# the text a profile declaring ``regulatory.interacts_with_persons: true``
+# owes the person, on the shape a client can read BEFORE any turn -- so a
+# voice client renders it in the medium the person is using rather than
+# after the first reply.  The same text also goes out as
+# ``AgentOutputEvent(source="system")``, which every client already renders.
+# ``PresentationContext.client_discloses_ai`` is the suppression: a client
+# that already shows an "AI assistant" badge asserts the Act's "unless this
+# is obvious" clause, which only the party that can see the screen is in a
+# position to assert.
+#
+# Additive optional fields in both directions: an older client ignores the
+# announcement (and is then a client that does not disclose, which is the
+# state it was already in), and an older daemon never reads the flag (and
+# then announces, which is the safe direction).  No SDK minimum.
+#
+# 1.16 -- ``IncidentEvent`` (``incident.raised``).  Art. 73 gives a provider
+# 15 days to report a serious incident from becoming AWARE of it (10 for a
+# death, 2 for a widespread infringement), and the framework already knew
+# when the events that could be one happened -- it recorded none of them as
+# such, each being a log line in a different format with no severity and no
+# clock.  The event carries ``kind``, ``at``, the binding, a one-line
+# ``cause`` and the ``site`` that raised it.
+#
+# It does NOT say whether the entry IS a serious incident under Art. 3(49):
+# that is a human determination about consequences the framework cannot
+# see.  A new EVENT degrades the way 1.8's did -- ``deserialize_event``
+# raises on an unrecognised type and the SDK reader logs and continues --
+# so an older client on a 1.16 daemon loses the event and logs a line.  No
+# SDK minimum: the direction is a NEW daemon emitting to an OLD client,
+# which cannot opt out, so a minimum would fail the wrong party.
+#
+# 1.17 -- ``awaiting`` / ``awaiting_since`` on a ``session.list`` row.  A
+# session that raises a permission ASK or a ``request_clarification`` is
+# BLOCKED until a human answers, and that fact reached only the clients
+# attached to THAT session: events go to ``session.attached_clients`` and
+# ``_client_to_session`` is 1:1, so a browser working in session A never
+# learned that session B wanted it.  ``SessionManager.broadcast_event`` is
+# not the answer either -- its docstring reserves it for events that are
+# not tied to a specific session.  So the fact rides the listing every
+# client already polls: ``awaiting`` is ``"permission"`` /
+# ``"clarification"`` / absent, and ``awaiting_since`` is when the prompt
+# was raised, ISO-8601 UTC.
+#
+# ``is_processing`` could not carry it.  A session blocked on a prompt is
+# still processing; telling WORKING from WAITING ON YOU is the whole point
+# and one boolean cannot.
+#
+# TWO fields rather than ``awaiting`` widening into ``{kind, since}``: the
+# degradation argument depends on ``awaiting`` staying a scalar, so a
+# reader doing ``typeof row.awaiting === "string"`` keeps working and a
+# reader that wants the clock opts into one more key.  The clock is not a
+# nicety -- the listing is a POLL, so without it a client can only date the
+# wait from when IT first saw the flag, which under-reports every wait that
+# predates the client and resets to zero on every reconnect.
+#
+# Additive optional fields on an already free-form row, both directions: an
+# older client ignores two keys; a newer client against an older daemon
+# reads absent, which is "nothing is waiting" -- today's behaviour, and
+# visibly no worse than today.  So no SDK minimum to refuse below.
+#
+# WHY A BUMP HERE WHEN #812's ``orphaned`` / ``runner`` TOOK NONE, on this
+# very dict: what a client DOES with the field.  Those two are diagnostics
+# a human reads.  This one gates whether a client interrupts a person, so
+# "can this daemon tell me?" is a question a client will actually ask, and
+# ``ConnectedEvent.protocol_version`` is the only way to ask it.  A client
+# that cannot distinguish "no session is waiting" from "this daemon never
+# says" reports the first when the truth is the second -- the
+# absence-of-evidence rule this tree applies everywhere else.
+#
+# 1.18 -- ``scaffold.explain`` + ``ScaffoldExplainEvent``.  A new VERB, so
+# the 1.7 rule applies: an older daemon ignores an unknown command
+# silently, and silence here is indistinguishable from "that topic does
+# not exist", which is the exact confusion the verb exists to remove.  The
+# SDK therefore refuses below ``MIN_SCAFFOLD_EXPLAIN_PROTOCOL`` rather than
+# waiting out a reply nobody will send.
+#
+# ``jaato-scaffold explain`` introspects the framework installed in the
+# CALLING process.  That is right whenever the CLI and the daemon share a
+# virtualenv, and silently wrong the moment they do not -- an application
+# with ``jaato-sdk`` in its own venv, driving a daemon owned by another
+# user over IPC, has TWO installs and the CLI was answering about the one
+# that is not serving its sessions.  Topics an extension contributes to the
+# DAEMON's venv (premium's ``reactors``) came back as ``unknown explain
+# scope``, which reads as "no such topic" and sends a reader looking for a
+# feature they already have.
+#
+# The daemon answers about ITSELF -- the same merged dispatch, including
+# its own ``jaato.scaffold_topics`` entry points -- and the answer carries
+# ``server_version`` so a client reports WHOSE install spoke.  The CLI asks
+# only when it cannot answer locally, or when told to with ``--connect``:
+# a topic the caller's own venv serves is still answered with no socket
+# touched, because quietly giving an offline introspection an egress would
+# change what running it means (the argument ``explain releases`` already
+# makes about being its own topic).
+#
+# 1.19 -- ``seq`` / ``epoch`` on ``WorkspaceFilesChangedEvent`` and
+# ``seq`` / ``epoch`` / ``seqs`` on ``WorkspaceFilesSnapshotEvent`` (#1189).
+# A client can reset its Files panel to "only what changes from now on" --
+# the TUI's ``workspace_clear`` -- and have that survive a reconnect.
+# Without numbering it could not: a reconnect sends a snapshot that the
+# client applies wholesale, and ``{path, status}`` does not say WHEN a file
+# changed, so the reset was undone by the next reattach -- rare in a
+# terminal, routine in a browser that sleeps.  The monitor stamps each
+# flushed batch with a counter (not a clock: nothing to skew between daemon
+# and browser) and names itself with an ``epoch`` that is NOT persisted, so
+# a mark taken before a session reload is recognisably void rather than
+# compared against a counter that restarted, which would empty the panel
+# silently.
+#
+# Additive optional fields in both directions.  ``seqs`` is a separate map
+# because the entries of ``files`` are ``Dict[str, str]`` and an older
+# client validates them as such.  A client against an older daemon sees no
+# epoch and falls back to "reset until the next snapshot" -- the TUI's
+# behaviour before this, and no worse than it.  No SDK minimum.
+#
+# 1.20 -- ``workspace.file.fetch`` / ``workspace.file.content``: DOWNLOAD a
+# file from the caller's workspace (WS only).  The reverse of
+# ``StageFilesRequest``: a remote client could put bytes into a workspace
+# and had no way to take any out, so an asset the agent produced was
+# reachable only through somebody with a shell on the host.  The answer is
+# one TEXT header followed, on success, by ONE raw BINARY frame of exactly
+# ``size`` bytes -- sent back to back under the connection's send lock, so
+# nothing interleaves between the two.  ``metadata_only`` asks for the
+# header alone (does the file exist, how big, what type), which is what a
+# host tool offering a download checks before it offers one.
+#
+# A missing VERB (the 1.7 rule): an older daemon answers ``ErrorEvent
+# ("Unknown message type")`` and never the content event a caller is
+# waiting on, so the TS SDK refuses below ``MIN_FILE_FETCH_PROTOCOL`` rather
+# than wait.  The result is client-initiated (the 1.10 shape), so an old
+# client never receives it unprompted.
+#
+# 1.20 -- ``secret.resolve`` / ``secret.resolve.result`` and ``secret.reload``
+# / ``secret.reload.result`` (#1226), the keystone of the per-user-GitHub
+# epic.  A workspace ``.env`` (or profile ``env:``) carries a REFERENCE, not a
+# secret -- ``GH_TOKEN=app://github`` -- and the daemon resolves it at every
+# session spawn by asking the application that OWNS the workspace, over the
+# same #1074 bind channel the ticket verbs ride.  This is the first
+# daemon -> application request direction on that channel; ``secret.reload`` is
+# the application -> daemon revocation counterpart (§6.4).  Landed in the same
+# 1.20 as ``workspace.file.fetch`` above (two PRs, one version); its verbs and
+# events are disjoint, so the two share the number without collision.
+#
+# A NEW verb (the 1.7 rule) would ordinarily force an SDK minimum, and here it
+# deliberately does NOT, because the party that would refuse is the wrong one:
+# the DAEMON sends ``secret.resolve`` and an application that does not answer
+# (an older SDK, no handler wired) is handled by the daemon's own deadline --
+# the reference is dropped exactly as a refusal drops it (or, for
+# ``app://name?required``, the bootstrap is refused).  So an unanswered request
+# degrades identically to a ``denied`` result, and there is nothing to
+# negotiate.  ``secret.reload`` from an application predating 1.20 is a verb
+# that application never sends.  The new EVENTS degrade the 1.8 way: a client
+# that receives one it does not know logs and continues.
+#
+# 1.21 -- ``scaffold.integration`` + ``ScaffoldIntegrationEvent``.  The
+# sibling of ``scaffold.explain`` (1.18): where that renders a topic on the
+# DAEMON's install, this RUNS a named ``jaato-scaffold integration`` into the
+# caller's OWN workspace on the daemon's install and host.  The application
+# holds no copy of the payload (the ``jaato-sdk`` skill) and cannot drift from
+# the framework; it asks the daemon to keep the copy current with the same
+# ``--refresh`` contract the CLI has (apply on absent / stale / outdated, skip
+# edited / diverged / unstamped), and the event reports ``state_before`` /
+# ``state_after`` / ``changed`` / ``skipped_reason`` so a client can say a
+# refresh was left alone rather than silently failing.  It resolves the
+# workspace daemon-side (the ``scaffold.explain`` / ``workspace.file.fetch``
+# entitlement path), so there is no path parameter to check.
+#
+# A NEW verb (the 1.7 rule): an older daemon ignores the command silently,
+# and silence there is indistinguishable from "the skill was installed", so a
+# client that reported an install would be reporting one that never happened.
+# Both SDKs therefore refuse below ``MIN_SCAFFOLD_INTEGRATION_PROTOCOL`` rather
+# than wait out a reply nobody will send.  The result event degrades the 1.8
+# way: an older client that somehow receives one it does not know logs and
+# continues.
+#
+# 1.22 -- the memory verbs (#1232): ``memory.list.request`` /
+# ``memory.get.request`` / ``memory.update.request`` /
+# ``memory.delete.request``, answered by ``MemoryListEvent`` (widened) and
+# ``memory.get.result`` / ``memory.update.result`` / ``memory.delete.result``,
+# each echoing the caller's ``request_id``.  A QUIET list: unlike the
+# ``memory list`` user command it prints nothing to the transcript, so a
+# client's side rail may ask as often as it needs.
+#
+# The rows come from the plugin copy that HOLDS the store.  ``memory`` is
+# ``PLUGIN_TIER = "runner"``, and the command path used to fill
+# ``MemoryListEvent`` from the DAEMON's copy of the plugin while the command
+# itself ran on the runner -- the #1179 defect class.  The answer is now read
+# from the runner over the control lane, carries ``source`` (``runner`` /
+# ``daemon``, the latter only where there is no runner at all), and a failed
+# ask answers ``ok=False`` with ``error`` / ``category`` -- never an empty
+# list, which reads as "nothing remembered".
+#
+# The rows widen with fields that already exist on ``Memory``
+# (``timestamp``, ``last_accessed``, ``usage_count``, ``generated_by``,
+# ``curated_by``, ``source_agent``, ``source_session``) plus ``tier``
+# (``workspace`` / ``global`` -- the two stores are merged) and two
+# per-session flags.  Content is NOT listed; ``memory.get.request`` fetches
+# it per row.  ``memory.update.request`` edits description / tags / content
+# and moves maturity (approve = ``validated``, dismiss = ``dismissed``)
+# through the one helper that stamps ``curated_by``; update and delete are
+# limited to the workspace OWNER, decided daemon-side.
+#
+# New VERBS (the 1.7 rule): an older daemon answers ``ErrorEvent("Unknown
+# request type")`` with no ``request_id`` and never the result a caller
+# waits on, so both SDKs refuse below ``MIN_MEMORY_VERBS_PROTOCOL``.  The
+# widened ``MemoryListEvent`` is additive -- an older client ignores the new
+# keys -- and the result events degrade the 1.8 way.
+# 1.23 -- ``session.message`` + ``SessionMessageResultEvent``.  Any-to-any
+# messaging between sessions that share a GROUP -- a cascade, or an
+# authenticated creator (``server.session_groups``) -- with a COLD target
+# woken to process the message.  The client-tier form of the ``courier``
+# plugin's ``send_to_session``: the same daemon method
+# (``SessionManager.deliver_group_message``), the sender being the caller's
+# own session, answered by one typed result event carrying the receipt rather
+# than a ``SystemMessageEvent`` string, because a driver branches on the
+# receipt (``accepted`` / ``queued`` / ``no_such_session`` / ``ambiguous`` /
+# ``session_cold`` / ``duplicate`` / ``terminated`` / ``refused``) and must
+# not parse prose to do it.  It carries the caller's ``request_id`` (the 1.3
+# rule) so several sends on one connection can be told apart.
+#
+# A NEW verb (the 1.7 rule): an older daemon ignores the command silently,
+# and "delivered" would then describe a message nobody carried, so both SDKs
+# refuse below ``MIN_SESSION_MESSAGE_PROTOCOL``.  The result event degrades
+# the 1.8 way.
+# 1.24 -- ``session.message`` carries FILES (session group messaging phase
+# 3, design §4.5): ``file_refs`` (paths in the sender's workspace, verified
+# daemon-side and referenced in place when the target shares the workspace,
+# COPIED into the target's inbox when it does not) and ``text_attachments``
+# (inlined into the wrapper up to 32 KiB, stored as files beyond it), with
+# ``SessionMessageResultEvent.files`` saying per file what became of it
+# (``referenced`` / ``copied`` / ``inlined`` / ``refused`` with a reason).
+# The two payload keys are NEW on an existing verb, and an older daemon
+# ignores keys it does not read -- so a message sent with files to a 1.23
+# daemon would be delivered WITHOUT them and answered ``accepted``: the
+# #845 shape, a degraded call that reads as success.  Both SDKs therefore
+# refuse a call that CARRIES either key below
+# ``MIN_SESSION_MESSAGE_FILES_PROTOCOL``, and leave a text-only call at the
+# 1.23 floor.  ``files`` on the result event is additive (default empty).
+PROTOCOL_VERSION = "1.24"
 
 
 # =============================================================================
@@ -316,6 +567,10 @@ class EventType(str, Enum):
     # above.  The two are one keyword apart and the wrong one was already on
     # the wire, so the names are kept deliberately unalike (#1069).
     BUDGET_RUNG_FIRED = "budget.rung_fired"
+    # Something a PERSON should look at (Arts. 72, 73, 26(5)).  Emphatically
+    # not "a serious incident": whether an entry is one under Art. 3(49) is
+    # a human determination about consequences the framework cannot see.
+    INCIDENT_RAISED = "incident.raised"
     GC_CONFIG = "gc.config"
     GC = "gc"                       # GC lifecycle (phase-switched)
 
@@ -335,7 +590,15 @@ class EventType(str, Enum):
     SESSION_DESCRIPTION_UPDATED = "session.description_updated"  # Description changed
 
     # Memory management (Server -> Client)
-    MEMORY_LIST = "memory.list"  # Memory list for completion cache and pager display
+    MEMORY_LIST = "memory.list"  # Memory list for completion cache, pager display and the rail (1.22)
+    # Memory verbs (#1232, 1.22): request/result pairs correlated by request_id
+    MEMORY_LIST_REQUEST = "memory.list.request"  # Client -> Server
+    MEMORY_GET_REQUEST = "memory.get.request"  # Client -> Server
+    MEMORY_GET_RESULT = "memory.get.result"  # Server -> Client
+    MEMORY_UPDATE_REQUEST = "memory.update.request"  # Client -> Server
+    MEMORY_UPDATE_RESULT = "memory.update.result"  # Server -> Client
+    MEMORY_DELETE_REQUEST = "memory.delete.request"  # Client -> Server
+    MEMORY_DELETE_RESULT = "memory.delete.result"  # Server -> Client
 
     # Sandbox management (Server -> Client)
     SANDBOX_PATHS = "sandbox.paths"  # Sandbox allowed paths for @@ completion cache
@@ -403,6 +666,11 @@ class EventType(str, Enum):
     # docs/sdk-file-staging.md for the wire protocol.
     WORKSPACE_FILES_STAGE_REQUEST = "workspace.files.stage_request"  # Client -> Server
     WORKSPACE_FILES_STAGED = "workspace.files.staged"  # Server -> Client
+    # File download from a workspace (Client <-> Server, WS only, 1.20).
+    # The server answers with one TEXT content header, followed on success
+    # by ONE raw BINARY frame of ``size`` bytes.  See docs/sdk-file-staging.md.
+    WORKSPACE_FILE_FETCH_REQUEST = "workspace.file.fetch"  # Client -> Server
+    WORKSPACE_FILE_CONTENT = "workspace.file.content"  # Server -> Client
 
     # Agent profiles (Client <-> Server)
     SESSION_PROFILES = "session.profiles"  # Server -> Client: available profiles
@@ -411,6 +679,9 @@ class EventType(str, Enum):
     WORKSPACE_FILES_CHANGED = "workspace.files_changed"  # Incremental delta
     WORKSPACE_FILES_SNAPSHOT = "workspace.files_snapshot"  # Full state on reconnect
     WORKSPACE_IGNORE_RESULT = "workspace.ignore.result"  # Answer to `workspace.ignore <path>` (1.12)
+    SCAFFOLD_EXPLAIN_RESULT = "scaffold.explain.result"  # Answer to `scaffold.explain <topic>` (1.18)
+    SESSION_MESSAGE_RESULT = "session.message.result"  # Answer to `session.message` (1.22)
+    SCAFFOLD_INTEGRATION_RESULT = "scaffold.integration.result"  # Answer to `scaffold.integration <name>` (1.21)
 
     # External events (Client -> Server, from web components)
     EVENT_EXTERNAL = "event.external"
@@ -456,6 +727,18 @@ class EventType(str, Enum):
     TICKET_BIND_RESULT = "ticket.bind.result"          # Server -> Client
     TICKET_REVOKE_REQUEST = "ticket.revoke"            # Client -> Server
     TICKET_REVOKE_RESULT = "ticket.revoke.result"      # Server -> Client
+
+    # app:// secret resolution (#1226) — the ONE request direction that runs
+    # daemon -> application, over the same bind channel #1074's ticket verbs
+    # ride (application -> daemon).  The daemon asks the owning application to
+    # resolve a per-user secret reference (e.g. GH_TOKEN=app://github) at spawn;
+    # the application answers.  See "app:// secret references" below.
+    SECRET_RESOLVE_REQUEST = "secret.resolve"          # Server -> Application
+    SECRET_RESOLVE_RESULT = "secret.resolve.result"    # Application -> Server
+    # Revocation (#1226 §6.4): the application asks the daemon to
+    # session.reload_env the owner's loaded sessions, scoped by ownership.
+    SECRET_RELOAD_REQUEST = "secret.reload"            # Application -> Server
+    SECRET_RELOAD_RESULT = "secret.reload.result"      # Server -> Application
 
     # Event subscription notifications (Server -> Client)
     EVENTS_SUBSCRIBED = "events.subscribed"
@@ -907,6 +1190,17 @@ class ToolOutputEvent(Event):
         final: Last chunk of this stream, so a client can close its
             playback buffer or finish writing the file without waiting
             on a separate completion event.
+        generated_by: Provenance of the bytes, for the Art. 50(2) marking
+            (protocol 1.14).  The model's own media carries
+            :func:`ai_generated_by` -- ``{"kind": "ai", "provider",
+            "model", "session_id", "agent_id"}`` -- stamped at delivery by
+            the session that knows which binding produced it; a
+            tool-result attachment carries what its producer put on
+            ``Attachment.generated_by``; ``None`` means nothing is CLAIMED
+            about the bytes, which is what a tool that merely relayed a
+            file must say.  Machine-readable half of the marking; the
+            client-facing half (a visible label, a manifest sidecar) is
+            the consumer's, and this is what it reads.
 
     Note:
         When ``mime_type``/``data_b64`` are set the chunk MUST bypass the
@@ -922,6 +1216,7 @@ class ToolOutputEvent(Event):
     mime_type: Optional[str] = None  # Tags the data_b64 payload
     data_b64: Optional[str] = None  # Base64 binary payload
     final: bool = False  # Last chunk of this stream
+    generated_by: Optional[Dict[str, Any]] = None  # Provenance (1.14)
 
     def is_media(self) -> bool:
         """Whether this event carries a binary payload.
@@ -941,6 +1236,33 @@ class ToolOutputEvent(Event):
         rediscovers the literal ``"model-output"``.
         """
         return self.is_media() and self.call_id == MODEL_MEDIA_CALL_ID
+
+
+#: The ``generated_by.kind`` that says "an AI system produced these bytes".
+GENERATED_BY_AI = "ai"
+
+
+def ai_generated_by(
+    provider: Optional[str],
+    model: Optional[str],
+    session_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """The provenance stamp for bytes a MODEL produced (protocol 1.14).
+
+    One shape for every producer, so a client can branch on ``kind`` and
+    an archive can recompute who made what from the session record:
+    ``provider`` / ``model`` are the binding that answered, ``session_id``
+    the daemon's session, ``agent_id`` the agent within it.  Keys whose
+    value is unknown are omitted rather than sent as ``null`` -- absent is
+    "not measured here", never a claim.
+    """
+    stamp: Dict[str, Any] = {"kind": GENERATED_BY_AI}
+    for key, value in (("provider", provider), ("model", model),
+                       ("session_id", session_id), ("agent_id", agent_id)):
+        if value:
+            stamp[key] = value
+    return stamp
 
 
 class PermissionResponseOption(BaseModel):
@@ -1640,17 +1962,150 @@ class RetryEvent(Event):
 
 
 class SessionListEvent(Event):
-    """List of available sessions - for user display."""
+    """List of available sessions - for user display.
+
+    Each row is a free-form dict.  Two of its keys are worth naming here
+    because a client BRANCHES on them rather than displaying them:
+
+    ``awaiting`` (protocol 1.17)
+        ``"permission"`` / ``"clarification"`` when that session is blocked
+        on an unanswered human prompt, absent otherwise.  It is the only
+        way a client attached to session A learns that session B wants it:
+        prompt events go to ``session.attached_clients``, and a client is
+        attached to one session at a time.  Absent on a row that is not
+        loaded, and on any daemon below 1.17 -- so absent means "nothing
+        is waiting, as far as this daemon says", never a positive "no".
+
+    ``awaiting_since`` (protocol 1.17)
+        When that prompt was raised, ISO-8601 UTC, so a client can render
+        "waiting 4 min" instead of "waiting".  A separate key rather than
+        a widening of ``awaiting``, which stays a scalar an older client
+        can ignore.  Absent means NOT MEASURED, never "just now".
+
+    ``inbox_pending`` (session group messaging, phase 2)
+        How many messages wait in that session's durable inbox -- spooled
+        by ``send_to_session`` / ``session.message`` because the target was
+        mid-turn with a payload it could not queue, or cold and not yet
+        revived.  Counted for cold rows too: a cold session with a pending
+        message is the one the daemon's watchdog is about to revive.  A
+        diagnostic a human reads (the #812 shape), additive and unbumped;
+        absent on a daemon that predates it.
+    """
     type: EventType = Field(default=EventType.SESSION_LIST)
     sessions: List[Dict[str, Any]] = Field(default_factory=list)
     # ^ List of {id: str, name: str, created_at: str, last_active: str, ...}
 
 
 class MemoryListEvent(Event):
-    """List of available memories - for completion cache and pager display."""
+    """The memory store, as the plugin that HOLDS it reports it.
+
+    Two emitters, one shape: the answer to :class:`MemoryListRequest`
+    (protocol 1.22, ``request_id`` echoed) and the push after a ``memory``
+    user command (the TUI's completion cache).  ``SessionInfoEvent.memories``
+    carries the same rows, read the same way.  ``memory`` is
+    ``PLUGIN_TIER = "runner"``, so on a runner-served session -- the default
+    -- the rows are read from the RUNNER's plugin over the control lane.
+    Before 1.22 the command push read the DAEMON's copy while the command
+    itself ran on the runner (#1232), which on a split host, or wherever the
+    daemon copy had no storage, answered ``[]``.
+
+    Each row (a dict, so an older client ignores the keys it does not know):
+
+    ``id`` / ``description`` / ``tags`` / ``maturity`` (``raw`` |
+    ``validated`` | ``escalated`` | ``dismissed``) / ``confidence`` /
+    ``scope`` (``project`` | ``universal`` -- how broadly it applies)
+        What every emitter has always sent.
+    ``tier`` (1.22)
+        ``workspace`` or ``global`` (``~/.jaato/memories``): the rail merges
+        both stores, and a row says which one it came from.  Deliberately
+        NOT ``scope``, which already means something else on a memory.
+    ``timestamp`` / ``last_accessed`` / ``usage_count`` / ``generated_by``
+    / ``curated_by`` / ``source_agent`` / ``source_session`` (1.22)
+        Fields that already exist on the stored record, passed through.
+        ``curated_by`` is ``None`` on every ``raw`` memory by definition;
+        ``generated_by`` is ``None`` on a record written before #1123 --
+        *provenance unknown*, never human-authored.  ``content`` is NOT
+        listed: :class:`MemoryGetRequest` fetches it per row, so a large
+        store does not arrive in one frame.
+    ``written_this_session`` / ``retrieved_this_session`` (1.22)
+        Whether the session the request was served for wrote this memory,
+        or retrieved it with ``retrieve_memories``.  Answer-only: the
+        command push carries neither.
+
+    Fields (1.22, all additive):
+        request_id: The :class:`MemoryListRequest` this answers; ``""`` on
+            the command push.
+        ok: ``False`` when the store could not be read -- the runner did
+            not answer, the session does not enable the memory plugin.
+            ``memories`` is then EMPTY AND MEANINGLESS: an empty list is
+            never how a failure is spelled, because it reads as "nothing
+            remembered".
+        error / category: Why not.  ``category`` is one of
+            ``no_session``, ``no_plugin``, ``runner_unreachable``,
+            ``not_found``, ``invalid``, ``not_owner``, ``unknown_op``,
+            ``store_error``.
+        source: ``runner`` or ``daemon`` -- which plugin copy answered.
+            ``daemon`` only where there is no runner at all (embedded,
+            standalone), where the daemon's copy IS the store.
+        may_curate: Whether THIS caller may update / delete (the workspace
+            owner, or anyone on an unowned workspace), decided daemon-side
+            by the same predicate that refuses the verbs.  ``None`` on the
+            command push.
+    """
     type: EventType = Field(default=EventType.MEMORY_LIST)
     memories: List[Dict[str, Any]] = Field(default_factory=list)
-    # ^ List of {id: str, description: str, tags: List[str]}
+    request_id: str = ""
+    ok: bool = True
+    error: str = ""
+    category: str = ""
+    source: str = ""
+    may_curate: Optional[bool] = None
+
+
+class MemoryGetResultEvent(Event):
+    """Answer to :class:`MemoryGetRequest` (1.22): one memory, with content.
+
+    ``memory`` is the list row plus ``content`` and ``evidence``, or
+    ``None`` when ``ok`` is ``False`` (``category="not_found"`` for an id
+    neither tier holds).
+    """
+    type: EventType = Field(default=EventType.MEMORY_GET_RESULT)
+    request_id: str = ""
+    memory_id: str = ""
+    ok: bool = True
+    error: str = ""
+    category: str = ""
+    source: str = ""
+    memory: Optional[Dict[str, Any]] = None
+
+
+class MemoryUpdateResultEvent(Event):
+    """Answer to :class:`MemoryUpdateRequest` (1.22).
+
+    ``memory`` is the row AFTER the update, so a client can replace its
+    copy without a second list.  ``category="not_owner"`` is the owner gate
+    refusing; ``invalid`` is the plugin's schema validator refusing (an empty
+    description, a one-letter tag, a maturity outside the vocabulary).
+    """
+    type: EventType = Field(default=EventType.MEMORY_UPDATE_RESULT)
+    request_id: str = ""
+    memory_id: str = ""
+    ok: bool = True
+    error: str = ""
+    category: str = ""
+    source: str = ""
+    memory: Optional[Dict[str, Any]] = None
+
+
+class MemoryDeleteResultEvent(Event):
+    """Answer to :class:`MemoryDeleteRequest` (1.22)."""
+    type: EventType = Field(default=EventType.MEMORY_DELETE_RESULT)
+    request_id: str = ""
+    memory_id: str = ""
+    ok: bool = True
+    error: str = ""
+    category: str = ""
+    source: str = ""
 
 
 class SandboxPathsEvent(Event):
@@ -1717,6 +2172,15 @@ class SessionInfoEvent(Event):
     # ^ [{name, methods}, ...] for services command completions
     tool_id_mappings: Dict[str, str] = Field(default_factory=dict)
     # ^ {hash_id: human_name, ...} for resolving opaque tool/category IDs in display
+    # The Article 50(1) first-interaction announcement (protocol 1.15), or
+    # ``None`` when this session does not announce -- see
+    # ``shared.ai_disclosure.announcement_for``.  Carried HERE as well as on
+    # the ``AgentOutputEvent(source="system")`` that also goes out, because
+    # this is the shape a client can act on before a turn exists: a voice
+    # client owns the speaker and can say it aloud, which the framework
+    # cannot do for it (there is no TTS in the tree).  The event states the
+    # obligation; the medium is the client's.
+    disclosure_announcement: Optional[str] = None
 
 
 class SessionDescriptionUpdatedEvent(Event):
@@ -1909,6 +2373,16 @@ class WorkspaceFilesChangedEvent(Event):
     type: EventType = Field(default=EventType.WORKSPACE_FILES_CHANGED)
     changes: List[Dict[str, str]] = Field(default_factory=list)
     # ^ List of {"path": str, "status": "created"|"modified"|"deleted"}
+    seq: Optional[int] = None
+    # ^ Protocol 1.19 (#1189): this batch's number from the session's
+    #   workspace monitor, one more than the last.  Every entry in
+    #   ``changes`` changed at this ``seq``.  A counter, not a clock.
+    epoch: Optional[str] = None
+    # ^ Protocol 1.19: which monitor instance numbered it.  A ``seq`` from
+    #   a different epoch is not comparable -- the monitor is rebuilt when a
+    #   session is reloaded and counts again from 0 -- so a reader keeping a
+    #   "changed since" mark discards it when the epoch changes.  Both
+    #   fields are absent from a daemon older than 1.19.
 
 
 class WorkspaceFilesSnapshotEvent(Event):
@@ -1923,6 +2397,22 @@ class WorkspaceFilesSnapshotEvent(Event):
     # ^ List of {"path": str, "status": "created"|"modified"|"deleted"}
     total: int = 0
     # ^ Convenience: count of non-deleted entries
+    seq: Optional[int] = None
+    # ^ Protocol 1.19 (#1189): the monitor's latest batch number at the
+    #   moment of the snapshot -- what a client records as its mark when it
+    #   resets the panel right after attaching.
+    epoch: Optional[str] = None
+    # ^ Protocol 1.19: the monitor instance, as on the changed event.
+    seqs: Dict[str, int] = Field(default_factory=dict)
+    # ^ Protocol 1.19: path -> the ``seq`` of that path's latest change.  A
+    #   PARALLEL map rather than a third key on each ``files`` entry, because
+    #   those entries are ``Dict[str, str]`` and an older client validates
+    #   them as such -- an integer there would fail its whole event, where an
+    #   unknown top-level field is ignored.  A path with no entry changed
+    #   before this monitor numbered anything (restored across a reload):
+    #   read it as 0.  This map is what lets a client that reset its panel
+    #   keep only what changed afterwards across a reconnect, which replaces
+    #   its list wholesale.
 
 
 class WorkspaceIgnoreResultEvent(Event):
@@ -1959,6 +2449,196 @@ class WorkspaceIgnoreResultEvent(Event):
     ok: bool = True
     error: str = ""
     gitignore_path: str = ""
+
+
+class SessionMessageResultEvent(Event):
+    """The receipt for one ``session.message`` (protocol 1.22).
+
+    A message from the CALLER'S session to another session in a common
+    group -- a shared cascade, or a shared authenticated creator -- delivered
+    by ``SessionManager.deliver_group_message``, the same method the
+    ``courier`` plugin's ``send_to_session`` tool calls.  A cold target is
+    woken to process it.  FIRE AND FORGET: ``status`` says what happened to
+    the message, never what the peer decided, and there is no reply channel.
+
+    Fields:
+        request_id: The caller's correlation id, echoed (1.3 rule), so
+            several sends on one connection can be told apart.
+        target: The address the caller sent -- a session id or a sibling
+            name -- echoed.
+        status: ``accepted`` (a turn was started on the target; ``woken``
+            says whether it was revived to do so), ``queued`` (the target is
+            mid-turn and collects the message when the turn ends),
+            ``spooled`` (the target could not take the message now -- it is
+            mid-turn and the message carries attachments, or it is cold and
+            did not revive -- so the message waits in the target's durable
+            inbox and is driven at its next turn boundary or when the daemon
+            revives it), ``no_such_session``, ``ambiguous`` (a name matching several
+            members; ``candidates`` lists their ids), ``session_cold``
+            (waking is disabled), ``duplicate`` (``event_id`` already
+            actioned -- a benign no-op), ``terminated`` (the target ended
+            on an error or an exhausted budget and is never woken), or
+            ``refused`` with ``error``.
+        ok: Whether the target HOLDS the message (``accepted`` / ``queued``
+            / ``spooled``) or it was a benign ``duplicate``.  Everything else
+            is ``False``.
+        spooled: Whether a copy of the message is in the target's durable
+            inbox -- always for ``spooled``, and also for ``queued`` (the
+            copy survives an unload between the queue and the turn that
+            drains it).  Additive, default ``False``, so an older daemon's
+            receipt reads as it did.
+        files: One row per ``file_ref`` / ``text_attachment`` the caller
+            sent (1.24, additive): ``{name, disposition, ...}`` with
+            ``disposition`` one of ``referenced`` (the target shares the
+            sender's workspace and reads the file in place; ``path`` is
+            workspace-relative, with ``sha256`` and ``size``), ``copied``
+            (into the target's inbox, ``path`` in the target's terms),
+            ``inlined`` (a text attachment carried in the message body) or
+            ``refused`` (with ``reason``: ``outside_sender_workspace``,
+            ``not_found``, ``not_a_file``, ``credential``,
+            ``file_too_large``, ``message_files_too_large``,
+            ``target_workspace_unresolved``, ``copy_failed``,
+            ``copy_mismatch``) or ``discarded`` (a copy taken back because
+            the message was then refused or not delivered).  A refused file
+            refuses the WHOLE message (``status: refused``), never a
+            delivery with one file missing.
+        message_id: The daemon-minted id of the delivered message; ``""``
+            when nothing was delivered.
+        target_session_id: The resolved target, when one was resolved.
+        sibling_name: The target's cascade-scoped name, when it has one.
+        group_key: The group key the delivery was made under.
+        woken: Whether the target was revived from disk to receive it.
+        headless: Whether the target ran with no attached client.
+        candidates: For ``ambiguous``, the session ids the name matched.
+        error: Why not, when ``ok`` is ``False``.
+    """
+    type: EventType = Field(default=EventType.SESSION_MESSAGE_RESULT)
+    request_id: Optional[str] = None
+    target: str = ""
+    status: str = ""
+    ok: bool = False
+    message_id: str = ""
+    target_session_id: str = ""
+    sibling_name: str = ""
+    group_key: str = ""
+    woken: bool = False
+    headless: bool = False
+    spooled: bool = False
+    candidates: List[str] = Field(default_factory=list)
+    files: List[Dict[str, Any]] = Field(default_factory=list)
+    error: str = ""
+
+
+class ScaffoldExplainEvent(Event):
+    """One ``jaato-scaffold explain`` topic, rendered by the DAEMON (1.18).
+
+    ``explain`` introspects the framework installed in the CALLING process,
+    which is right when the CLI and the daemon share a virtualenv and wrong
+    the moment they do not.  An application that installs ``jaato-sdk`` into
+    its own venv and drives a daemon owned by another user over IPC has two
+    installs: the CLI's, and the one actually serving its sessions.  Topics
+    contributed by an extension that only the DAEMON has — premium's
+    ``reactors`` is the worked case — were then reported as
+    ``unknown explain scope``, which is indistinguishable from *no such
+    topic exists* and sends a reader to look for a feature they have.
+
+    So the daemon answers about itself.  It renders the topic through the
+    same merged dispatch the CLI uses, including every topic its own
+    ``jaato.scaffold_topics`` entry points contribute, and the CLI prints
+    the result marked with where it came from — a reader must never have to
+    guess which of the two installs an answer describes.
+
+    Fields:
+        topic: The topic asked for, echoed so a client can correlate.
+        ok: Whether the topic rendered.
+        text: The human rendering, as the CLI would print it.
+        data: The structured rendering — what ``--json`` prints, VERBATIM.
+            Usually an object, and deliberately not typed as one: the
+            in-tree ``profile`` topic renders an array of field rows, and
+            wrapping it to satisfy a narrower field would make the daemon's
+            ``--json`` differ from the same command's local ``--json`` —
+            two installs disagreeing about one topic, which is the failure
+            this event exists to remove rather than one to introduce.  A
+            reader branching on keys must check the shape first.
+        topics: Every topic THIS daemon serves, as ``scope_catalog`` rows
+            (``scope`` / ``arg`` / ``blurb`` / ``contributed_by`` / ...).
+            Always populated, including when ``ok`` is ``False``, because
+            "which topics does the daemon have" is exactly the question a
+            failed lookup raises.
+        error: Why not, when ``ok`` is ``False`` — no such topic on the
+            daemon either, a usage error (a topic needing a name, given
+            none), or the renderer raised.
+        server_version: The daemon's jaato-server version, so a client can
+            report WHOSE install answered rather than implying its own.
+    """
+    type: EventType = Field(default=EventType.SCAFFOLD_EXPLAIN_RESULT)
+    topic: str = ""
+    ok: bool = True
+    text: str = ""
+    data: Any = Field(default_factory=dict)
+    topics: List[Dict[str, Any]] = Field(default_factory=list)
+    error: str = ""
+    server_version: str = ""
+
+
+class ScaffoldIntegrationEvent(Event):
+    """The result of running ``jaato-scaffold integration`` on the DAEMON (1.21).
+
+    The sibling of :class:`ScaffoldExplainEvent`.  ``explain`` renders a topic
+    from the daemon's install; this RUNS a named integration — the
+    ``jaato-sdk`` skill is the one that ships — into the caller's own
+    workspace, on the daemon's install and host.  The point is the same: the
+    stamp records the version of whichever ``jaato-server`` runs it, and the
+    workspace directory is on that host, so the install that serves the
+    session is the one that must write the skill.  An application that carried
+    its own copy of the payload could drift from the framework; asking the
+    daemon means it never can.
+
+    The daemon applies the ``--refresh`` contract: it re-applies a copy that
+    is ``absent`` / ``stale`` / ``outdated`` (nothing local is lost) and
+    LEAVES an ``edited`` / ``diverged`` / ``unstamped`` copy untouched, saying
+    which in ``skipped_reason``.  A skipped refresh is correct behaviour, not
+    a failure — ``ok`` stays ``True`` — so a client reports it in a notice
+    rather than as an error.
+
+    Fields:
+        integration: The integration name asked for, echoed to correlate.
+        ok: Whether the verb ran.  ``False`` only for a verb-level refusal —
+            an unknown integration, no resolvable workspace, or the daemon
+            could not load its own scaffold code.  A refresh the daemon
+            declined to apply (an edited copy) is ``ok=True`` with a
+            ``skipped_reason``.
+        changed: Whether files were written.  ``False`` for a copy already
+            current, and for a skipped one.
+        state_before: The ``compare()`` state the copy was in — ``absent`` /
+            ``current`` / ``stale`` / ``outdated`` / ``edited`` / ``diverged``
+            / ``unstamped``.
+        state_after: The state after the verb ran.
+        skipped_reason: Why the refresh was left alone, with the same detail
+            text ``compare()`` produces, or ``""`` when it was applied.
+        target: The absolute path the integration installs at, so a client
+            can point a reader at the file it wrote.
+        text: The human rendering, the lines the CLI would print.
+        error: Why not, when ``ok`` is ``False``.
+        available: Every integration THIS daemon ships, so a refusal that
+            names an unknown one is actionable — the caller's own list is by
+            construction the wrong one.
+        server_version: The daemon's ``jaato-server`` version — the version
+            the stamp records, so a client reports WHOSE install wrote the
+            skill.
+    """
+    type: EventType = Field(default=EventType.SCAFFOLD_INTEGRATION_RESULT)
+    integration: str = ""
+    ok: bool = True
+    changed: bool = False
+    state_before: str = ""
+    state_after: str = ""
+    skipped_reason: str = ""
+    target: str = ""
+    text: str = ""
+    error: str = ""
+    available: List[str] = Field(default_factory=list)
+    server_version: str = ""
 
 
 # =============================================================================
@@ -2069,6 +2749,61 @@ class GetInstructionBudgetRequest(Event):
     """
     type: EventType = Field(default=EventType.INSTRUCTION_BUDGET_REQUEST)
     agent_id: Optional[str] = None  # None = main agent
+
+
+class MemoryListRequest(Event):
+    """List the attached session's memory store, quietly (#1232, 1.22).
+
+    Answered by :class:`MemoryListEvent` carrying this ``request_id``.
+    Unlike the ``memory list`` user command it prints nothing to the
+    transcript, so a client may ask as often as it needs.  Session-scoped:
+    the store is read through the session's own runner.
+    """
+    type: EventType = Field(default=EventType.MEMORY_LIST_REQUEST)
+    request_id: str = ""
+
+
+class MemoryGetRequest(Event):
+    """Fetch one memory WITH its content (1.22).
+
+    Answered by :class:`MemoryGetResultEvent`.  Viewing follows the
+    session's visibility, like the list.
+    """
+    type: EventType = Field(default=EventType.MEMORY_GET_REQUEST)
+    request_id: str = ""
+    memory_id: str = ""
+
+
+class MemoryUpdateRequest(Event):
+    """Edit a memory, or approve / dismiss it (1.22).
+
+    The structured replacement for ``memory edit``, which spawns ``$EDITOR``
+    on the runner's host and so cannot be driven from a browser.  Every
+    field is optional; ``None`` leaves it as it is.  ``maturity`` moves the
+    lifecycle -- ``validated`` approves, ``dismissed`` dismisses -- through
+    the plugin's one ``curated_by``-stamping helper, which records the
+    caller as the curator.  Limited to the workspace owner (anyone, on an
+    unowned workspace); answered by :class:`MemoryUpdateResultEvent`.
+    """
+    type: EventType = Field(default=EventType.MEMORY_UPDATE_REQUEST)
+    request_id: str = ""
+    memory_id: str = ""
+    description: Optional[str] = None
+    content: Optional[str] = None
+    tags: Optional[List[str]] = None
+    maturity: Optional[str] = None
+
+
+class MemoryDeleteRequest(Event):
+    """Remove a memory from whichever tier holds it (1.22).
+
+    Through the plugin's existing delete path (``delete_memory``), not a
+    second one.  Limited to the workspace owner; answered by
+    :class:`MemoryDeleteResultEvent`.
+    """
+    type: EventType = Field(default=EventType.MEMORY_DELETE_REQUEST)
+    request_id: str = ""
+    memory_id: str = ""
 
 
 class CommandListRequest(Event):
@@ -2693,6 +3428,137 @@ class TicketRevokeResultEvent(Event):
     detail: Optional[str] = None
 
 
+class SecretResolveRequest(Event):
+    """Ask the owning application to resolve an ``app://`` secret reference (#1226).
+
+    The ONE request direction that runs **daemon -> application**.  Every other
+    verb on the #1074 bind channel is application -> daemon (``ticket.bind`` /
+    ``ticket.revoke``); this rides the same authenticated connection in the
+    opposite direction, correlated by ``request_id``, with a daemon-side
+    deadline.  It is sent when ``JaatoServer._resolve_session_env`` meets a
+    value like ``GH_TOKEN=app://github`` in a workspace owned by ``app:user``:
+    the daemon identifies the application from the qualified owner and asks
+    *that* application, and only that one, to mint the secret for *that* user.
+
+    The application is free not to answer (an older SDK, no handler wired): the
+    daemon's deadline then elapses and the reference is dropped with a WARNING
+    (or, for the strict form ``app://github?required``, the bootstrap is
+    refused).  So there is no SDK minimum to negotiate — a request that goes
+    unanswered degrades exactly as a refusal does.
+
+    Attributes:
+        request_id: Correlates this request with the
+            :class:`SecretResolveResultEvent` that answers it.  One bind
+            channel serves every workspace of every user the application owns,
+            so a result that cannot be attributed to a request is useless.
+        user: The **unqualified** identity to resolve for — the ``user`` half
+            of the workspace owner ``app:user``.  The application already knows
+            which ``app_id`` it is (the credential it authenticated the bind
+            channel with), so it is never sent: the daemon has resolved the
+            application from the owner precisely so it can pick the connection
+            to ask, and echoing the app id would let a request name an
+            application other than the one it reaches.
+        workspace: The absolute workspace path the session runs in, so the
+            application can key a per-workspace binding (``(sub, workspace) ->
+            credential`` in the design's picture).
+        name: The reference name — ``github`` in ``app://github`` — naming
+            which of that user's secrets to mint.
+    """
+    type: EventType = Field(default=EventType.SECRET_RESOLVE_REQUEST)
+    request_id: str = ""
+    user: str = ""
+    workspace: str = ""
+    name: str = ""
+
+
+class SecretResolveResultEvent(Event):
+    """The application's answer to :class:`SecretResolveRequest` (#1226).
+
+    ``status`` is one of:
+
+    * ``"ok"``        — the secret was resolved; ``value`` carries it and
+      ``expires_at`` MAY carry an ISO-8601 UTC instant it stops being valid.
+    * ``"not_found"`` — the application has no binding for this
+      ``(user, workspace, name)``.  The reference is dropped.
+    * ``"denied"``    — the application refuses to resolve it.  Dropped.
+    * ``"error"``     — the application tried and failed; ``detail`` says why.
+      Dropped.
+
+    Only ``"ok"`` carries a ``value``.  Every other status drops the reference
+    from the session's environment — a literal ``app://github`` reaching a
+    subprocess is a token that fails with a confusing 401, so the daemon never
+    forwards the unresolved form (#1226 §6.1).
+
+    Attributes:
+        value: The resolved secret, present only when ``status == "ok"``.  It
+            reaches the bootstrap envelope's env dict and **nowhere else** — not
+            the session record, not the snapshot, not the workspace ``.env``,
+            all of which keep ``app://<name>`` so a revived session resolves
+            afresh (which is also what lets revocation take effect).
+        expires_at: ISO-8601 UTC instant the value stops being valid, when the
+            application knows one (a GitHub App user token lasts ~8h).  The
+            daemon schedules a ``session.reload_env`` a margin before it
+            (``JAATO_OAUTH_REFRESH_MARGIN``) so the session never holds a dead
+            token.  Absent means "no expiry known": the value is used until the
+            session is next re-resolved for another reason.
+        detail: Human-readable elaboration, omitted when there is nothing to
+            say.  Never the secret.
+    """
+    type: EventType = Field(default=EventType.SECRET_RESOLVE_RESULT)
+    request_id: str = ""
+    status: str = ""
+    value: Optional[str] = None
+    expires_at: Optional[str] = None
+    detail: Optional[str] = None
+
+
+class SecretReloadRequest(Event):
+    """The application asks the daemon to re-resolve a user's loaded sessions (#1226 §6.4).
+
+    The revocation path: the application deletes a binding (a *Disconnect
+    GitHub*, a *workspace -> none*) and tells the daemon to
+    ``session.reload_env`` every LOADED session the affected user owns, so the
+    now-revoked ``app://`` reference drops out of the environment rather than
+    lingering until the process ends.  Sent application -> daemon on the bind
+    channel, like ``ticket.revoke``, and **scoped to the calling application**:
+    the daemon qualifies ``user`` with the ``app_id`` the bind connection
+    authenticated as, so one application can never reload another's ``alice``.
+
+    Attributes:
+        request_id: Correlates with :class:`SecretReloadResultEvent`.
+        user: The **unqualified** identity whose sessions to reload.  The
+            daemon qualifies it itself (``f"{app_id}:{user}"``) exactly as
+            ``ticket.bind`` does, so the app id is never a request field.
+    """
+    type: EventType = Field(default=EventType.SECRET_RELOAD_REQUEST)
+    request_id: str = ""
+    user: str = ""
+
+
+class SecretReloadResultEvent(Event):
+    """The daemon's answer to :class:`SecretReloadRequest` (#1226 §6.4).
+
+    ``status`` is one of:
+
+    * ``"ok"``      — the owner's loaded sessions were re-resolved; ``reloaded``
+      says how many.  ``0`` is the ordinary answer when the user has no session
+      loaded, and is not a failure.
+    * ``"denied"``  — this connection may not ask (not an app-credential
+      connection, or no app credentials configured on this daemon).
+
+    Attributes:
+        reloaded: How many loaded sessions were re-resolved.  ``0`` whenever
+            ``status`` is not ``"ok"``, and the ordinary answer for a user with
+            nothing loaded.
+        detail: Human-readable elaboration, omitted when there is nothing to say.
+    """
+    type: EventType = Field(default=EventType.SECRET_RELOAD_RESULT)
+    request_id: str = ""
+    status: str = ""
+    reloaded: int = 0
+    detail: Optional[str] = None
+
+
 # =============================================================================
 # Workspace Management Requests (Client -> Server)
 # =============================================================================
@@ -2830,6 +3696,65 @@ class StageFilesEvent(Event):
     failed: List[Dict[str, str]] = Field(default_factory=list)  # [{"name", "category", "error"}]
 
 
+class WorkspaceFileFetchRequest(Event):
+    """Download one file from the caller's workspace (WS only, protocol 1.20).
+
+    The reverse of :class:`StageFilesRequest`.  ``path`` is relative to the
+    workspace root, or absolute when it lies inside it; the daemon resolves
+    it against the workspace THIS connection is in (the session's, else the
+    one it selected) and refuses anything that resolves outside it, symlinks
+    followed first.
+
+    **Wire protocol:** the server answers with one TEXT
+    :class:`WorkspaceFileContentEvent` carrying the same ``request_id``.
+    When ``ok`` is true and ``metadata_only`` was false, exactly ONE raw
+    BINARY frame of ``size`` bytes follows it immediately -- the two are
+    written back to back under the connection's send lock, so no other
+    frame can arrive between them.
+
+    ``metadata_only`` asks for the header alone: whether the file exists,
+    its size and type.  A host tool offering a download asks this first, so
+    the model is told "no such file" instead of offering a link that fails.
+    """
+    type: EventType = Field(default=EventType.WORKSPACE_FILE_FETCH_REQUEST)
+    request_id: str = ""
+    path: str = ""
+    metadata_only: bool = False
+
+
+class WorkspaceFileContentEvent(Event):
+    """Server's answer to :class:`WorkspaceFileFetchRequest` (protocol 1.20).
+
+    ``request_id`` echoes the request.  ``path`` is the file's path relative
+    to the workspace root (normalised, so a client can key on it), ``name``
+    its basename, ``size`` its length in bytes and ``mime_type`` a guess
+    from its name (``application/octet-stream`` when there is none).
+
+    On failure ``ok`` is false, no binary frame follows, and ``category``
+    is one of:
+
+    - ``"workspace_not_found"`` -- this connection is in no workspace.
+    - ``"unsafe_path"`` -- empty, or resolves outside the workspace.
+    - ``"not_found"`` -- nothing at that path.
+    - ``"not_a_file"`` -- a directory or another non-regular file.
+    - ``"credential"`` -- a file that holds credentials (the workspace
+      ``.env``, a stored ``*_auth.json``); refused by name so a download
+      link can never carry a key out of the workspace.
+    - ``"too_large"`` -- over the daemon's download cap.
+    - ``"io_error"`` -- the read failed; ``error`` carries the OS message.
+    """
+    type: EventType = Field(default=EventType.WORKSPACE_FILE_CONTENT)
+    request_id: str = ""
+    ok: bool = False
+    path: str = ""
+    name: str = ""
+    size: int = 0
+    mime_type: str = ""
+    metadata_only: bool = False
+    category: str = ""
+    error: str = ""
+
+
 class ClientType(str, Enum):
     """Presentation-layer categories for PresentationContext.
 
@@ -2896,6 +3821,14 @@ class PresentationContext(BaseModel):
             (the default) means the client can present none -- the honest
             answer for a plain terminal.
         client_type: The kind of client (see ``ClientType`` enum).
+        client_discloses_ai: Whether this client already tells the person
+            they are interacting with an AI system, so the framework
+            withholds its own Article 50(1) announcement.
+        locale: The BCP 47 language tag of the person's interface
+            (``"de-DE"``, ``"es"``), when the client knows it.  Recorded
+            beside the Article 50(1) announcement so the audit record says
+            which language the person was addressed in; ``None`` is
+            recorded as absent, never defaulted (#1157).
     """
 
     # ── Dimensions ──────────────────────────────────────────────
@@ -2927,6 +3860,35 @@ class PresentationContext(BaseModel):
 
     # ── Client hint ─────────────────────────────────────────────
     client_type: ClientType = ClientType.TERMINAL
+
+    # ── Disclosure (Regulation (EU) 2024/1689, Art. 50(1)) ──────
+    # ``True`` when this client ALREADY tells the person they are talking
+    # to an AI -- a persistent badge, a product whose whole surface says
+    # so.  The framework then withholds its own first-interaction
+    # announcement, which is the Act's "unless this is obvious from the
+    # point of view of a natural person who is reasonably well-informed,
+    # observant and circumspect" clause.
+    #
+    # Asserted by the client because the client is the only party that can
+    # see the screen; and for the same reason it is deliberately NOT read
+    # by ``jaato-scaffold validate`` -- a per-connection assertion cannot
+    # answer a question about a profile, so ``disclosure_absent`` stays
+    # exactly as it is.  Default ``False``: a client that has not said it
+    # discloses has not disclosed.
+    client_discloses_ai: bool = False
+
+    # ── Locale (Regulation (EU) 2024/1689, Art. 50(1), #1157) ───
+    # The BCP 47 tag of the interface the person is using, declared by
+    # the client because only the client knows what language its
+    # surface is in.  Read by exactly one thing: the ``announcement``
+    # audit record, which binds the disclosure text to the channel and
+    # language it was delivered in.  Not consulted by the model's
+    # prompt -- the persona decides the language it speaks -- and never
+    # inferred from the daemon's own environment: a daemon's ``LANG``
+    # says nothing about the person on the other end of the socket, and
+    # an audit row asserting a locale nobody declared is worse than one
+    # that says the locale was not declared.
+    locale: Optional[str] = None
 
     # ── Communication style ────────────────────────────────────
     # When None, inferred from client_type: CHAT → CONVERSATIONAL,
@@ -3037,44 +3999,49 @@ class PresentationContext(BaseModel):
 
         return "\n".join(lines)
 
+    @field_validator("renderable_media", mode="before")
+    @classmethod
+    def _renderable_media_is_a_list(cls, value: Any) -> Any:
+        """A scalar mime is one entry, never its characters.
+
+        ``list("image/*")`` is ``['i', 'm', 'a', ...]`` -- a client that
+        serialised the field as a bare string would then match nothing in
+        :meth:`can_render_media`, with nothing reporting why.  ``None``
+        reads as the empty default.
+        """
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [value]
+        return value
+
     def to_dict(self) -> Dict[str, Any]:
-        """Serialize to a plain dict for event transport."""
-        return {
-            "content_width": self.content_width,
-            "content_height": self.content_height,
-            "supports_markdown": self.supports_markdown,
-            "supports_tables": self.supports_tables,
-            "supports_code_blocks": self.supports_code_blocks,
-            "supports_images": self.supports_images,
-            "supports_rich_text": self.supports_rich_text,
-            "supports_unicode": self.supports_unicode,
-            "supports_mermaid": self.supports_mermaid,
-            "supports_expandable_content": self.supports_expandable_content,
-            "client_type": self.client_type.value,
-            "communication_style": self.communication_style.value if self.communication_style else None,
-        }
+        """Serialize to a plain dict for event transport.
+
+        Every field on the model, by the model's own dump -- not a
+        hand-maintained list.  The list is how ``client_discloses_ai``
+        (#1116) and ``renderable_media`` (#824) were declared on this
+        class and carried by neither direction, so a client asserting it
+        disclosed already was announced to anyway and the suppression the
+        guard proved on the predicate never held over the wire (#1157).
+        A field added later rides automatically; enums are dumped as
+        their values (``mode="json"``), which is what :meth:`from_dict`
+        and every older daemon read.
+        """
+        return self.model_dump(mode="json")
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'PresentationContext':
-        """Create from a dict (e.g. deserialized from ClientConfigRequest)."""
-        return cls(
-            content_width=data.get("content_width", 80),
-            content_height=data.get("content_height"),
-            supports_markdown=data.get("supports_markdown", True),
-            supports_tables=data.get("supports_tables", True),
-            supports_code_blocks=data.get("supports_code_blocks", True),
-            supports_images=data.get("supports_images", False),
-            supports_rich_text=data.get("supports_rich_text", True),
-            supports_unicode=data.get("supports_unicode", True),
-            supports_mermaid=data.get("supports_mermaid", False),
-            supports_expandable_content=data.get("supports_expandable_content", False),
-            client_type=ClientType(data.get("client_type", "terminal")),
-            communication_style=(
-                CommunicationStyle(data["communication_style"])
-                if data.get("communication_style")
-                else None
-            ),
-        )
+        """Create from a dict (e.g. deserialized from ClientConfigRequest).
+
+        The model's own validation: an absent key takes the field's
+        default (an older client that sends none of the Art. 50(1) fields
+        reads as not disclosing, with no locale -- the safe direction), an
+        unknown key is ignored (a newer client against an older daemon),
+        and enums accept their values.  ``renderable_media`` sent as a
+        bare string is coerced by the validator above.
+        """
+        return cls.model_validate(dict(data or {}))
 
 
 class ClientConfigRequest(Event):
@@ -3218,6 +4185,46 @@ class BudgetRungFiredEvent(Event):
     usage: Optional[Dict[str, float]] = None
     driving_dimension: Optional[str] = None
     tier_changes: Dict[str, str] = Field(default_factory=dict)
+
+
+class IncidentEvent(Event):
+    """Something happened that a person should look at (protocol 1.16).
+
+    Article 73 gives a provider 15 days to report a serious incident from
+    the moment it becomes AWARE of it -- 10 for a death, 2 for a
+    widespread infringement.  All three clocks start from awareness, and
+    the framework already knew when the events that could be one
+    happened; it recorded none of them as such, each being a log line in
+    a different format with no severity and no clock.
+
+    **This event does not classify.**  Whether an entry IS a serious
+    incident under Art. 3(49) is a determination about consequences --
+    harm to a person, disruption of critical infrastructure -- that the
+    framework cannot see.  It reports the fact and the clock; a person
+    decides.  The absence of a ``severity`` field is that decision, not
+    an omission.
+
+    The same record goes to the application trace as an ``INCIDENT:``
+    line (``shared.incidents``), which is what ``jaato-doctor
+    --incidents`` reads and what a deployment gets without configuring
+    anything.
+
+    Attributes:
+        kind: One of ``shared.incidents.INCIDENT_KINDS``.
+        at: Unix timestamp of when the framework became aware.
+        cause: One line saying what happened.
+        site: ``file.py::function`` -- what noticed.
+        provider / model / tier: The binding that was serving, when
+            there was one.  Absent rather than ``null`` when unknown.
+    """
+    type: EventType = Field(default=EventType.INCIDENT_RAISED)
+    kind: str = ""
+    at: float = 0.0
+    cause: str = ""
+    site: Optional[str] = None
+    provider: Optional[str] = None
+    model: Optional[str] = None
+    tier: Optional[str] = None
 
 
 class MidTurnInterruptEvent(Event):
@@ -3504,6 +4511,9 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.GC.value: GCEvent,
     EventType.SESSION_INFO.value: SessionInfoEvent,
     EventType.MEMORY_LIST.value: MemoryListEvent,
+    EventType.MEMORY_GET_RESULT.value: MemoryGetResultEvent,
+    EventType.MEMORY_UPDATE_RESULT.value: MemoryUpdateResultEvent,
+    EventType.MEMORY_DELETE_RESULT.value: MemoryDeleteResultEvent,
     EventType.SANDBOX_PATHS.value: SandboxPathsEvent,
     EventType.SERVICE_LIST.value: ServiceListEvent,
     EventType.SESSION_DESCRIPTION_UPDATED.value: SessionDescriptionUpdatedEvent,
@@ -3516,6 +4526,10 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.EVENTS_SUBSCRIBED.value: EventsSubscribedEvent,
     EventType.COMMAND.value: CommandRequest,
     EventType.INSTRUCTION_BUDGET_REQUEST.value: GetInstructionBudgetRequest,
+    EventType.MEMORY_LIST_REQUEST.value: MemoryListRequest,
+    EventType.MEMORY_GET_REQUEST.value: MemoryGetRequest,
+    EventType.MEMORY_UPDATE_REQUEST.value: MemoryUpdateRequest,
+    EventType.MEMORY_DELETE_REQUEST.value: MemoryDeleteRequest,
     EventType.COMMAND_LIST_REQUEST.value: CommandListRequest,
     EventType.COMMAND_LIST.value: CommandListEvent,
     EventType.COMMAND_LIST_REFRESH.value: CommandListRefreshEvent,
@@ -3531,6 +4545,7 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.MID_TURN_PROMPT_QUEUED.value: MidTurnPromptQueuedEvent,
     EventType.MID_TURN_PROMPT_INJECTED.value: MidTurnPromptInjectedEvent,
     EventType.BUDGET_RUNG_FIRED.value: BudgetRungFiredEvent,
+    EventType.INCIDENT_RAISED.value: IncidentEvent,
     EventType.MID_TURN_INTERRUPT.value: MidTurnInterruptEvent,
     EventType.INTERRUPTED_TURN_RECOVERED.value: InterruptedTurnRecoveredEvent,
     # Workspace management
@@ -3548,9 +4563,15 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.WORKSPACE_FILES_CHANGED.value: WorkspaceFilesChangedEvent,
     EventType.WORKSPACE_FILES_SNAPSHOT.value: WorkspaceFilesSnapshotEvent,
     EventType.WORKSPACE_IGNORE_RESULT.value: WorkspaceIgnoreResultEvent,
+    EventType.SCAFFOLD_EXPLAIN_RESULT.value: ScaffoldExplainEvent,
+    EventType.SESSION_MESSAGE_RESULT.value: SessionMessageResultEvent,
+    EventType.SCAFFOLD_INTEGRATION_RESULT.value: ScaffoldIntegrationEvent,
     # Workspace file staging (multi-frame: TEXT request + N BINARY blobs)
     EventType.WORKSPACE_FILES_STAGE_REQUEST.value: StageFilesRequest,
     EventType.WORKSPACE_FILES_STAGED.value: StageFilesEvent,
+    # Workspace file download (TEXT header + one BINARY frame, 1.20)
+    EventType.WORKSPACE_FILE_FETCH_REQUEST.value: WorkspaceFileFetchRequest,
+    EventType.WORKSPACE_FILE_CONTENT.value: WorkspaceFileContentEvent,
     # Peer channel
     EventType.PEER_HEARTBEAT.value: PeerHeartbeatEvent,
     EventType.PEER_SPAWN_REQUEST.value: PeerSpawnRequestEvent,
@@ -3586,6 +4607,10 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.TICKET_BIND_RESULT.value: TicketBindResultEvent,
     EventType.TICKET_REVOKE_REQUEST.value: TicketRevokeRequest,
     EventType.TICKET_REVOKE_RESULT.value: TicketRevokeResultEvent,
+    EventType.SECRET_RESOLVE_REQUEST.value: SecretResolveRequest,
+    EventType.SECRET_RESOLVE_RESULT.value: SecretResolveResultEvent,
+    EventType.SECRET_RELOAD_REQUEST.value: SecretReloadRequest,
+    EventType.SECRET_RELOAD_RESULT.value: SecretReloadResultEvent,
 }
 
 

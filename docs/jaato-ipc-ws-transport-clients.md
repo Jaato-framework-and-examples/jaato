@@ -73,8 +73,28 @@ All communication between client and server uses **JSON-serialized dataclass eve
 | Client → Server | Commands | `CommandRequest`, `StopRequest` |
 | Client → Server | Configuration | `ClientConfigRequest` |
 | Client → Server | Workspace management | `WorkspaceListRequest`, `WorkspaceSelectRequest` |
-| Bidirectional | External events | `ExternalEventRequest` (client→server) |
+| Client → Server | External events | `ExternalEventRequest` (**both transports** since #1167 — `IPCClient.send_external_event()` / `JaatoClient.sendExternalEvent()`) |
 | Server ↔ Server | Peer gossip | `PeerHeartbeatEvent`, `PeerSpawnRequestEvent` |
+
+> **`ExternalEventRequest` was WS-only before #1167.** The row above said
+> "Bidirectional" with no transport qualifier, in a document about both
+> transports — and it was the one Client→Server row with no IPC route at all:
+> the request deserialized correctly, fell through every `isinstance` arm of
+> `SessionManager.handle_request`, and was answered
+> `ErrorEvent("Unknown request type: ExternalEventRequest")`. It is now
+> dispatched on both, through one shared publish
+> (`jaato_server/server/external_event.py`), and both SDKs carry a method for it —
+> previously the type existed in each and the method in neither, so the only
+> producer was a client hand-rolling the JSON frame. The payload's `source`
+> names the transport the request arrived on (`"ipc"` / `"websocket"`).
+>
+> **Degradation, and why there is no protocol floor for it.** Against a
+> daemon predating the change, an IPC `send_external_event` is answered by
+> that named `ErrorEvent` on the event stream rather than being ignored —
+> so the 1.7 rule (a missing *verb* is silently ignored, hence an SDK
+> minimum) does not apply. A floor would also refuse against every WS daemon
+> where the request has always worked, since the wire shape is unchanged and
+> the protocol version is transport-agnostic.
 
 ### Serialization
 
@@ -117,7 +137,7 @@ client = IPCClient(
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `socket_path` | `str` | Platform-dependent | Unix: `/tmp/jaato.sock`; Windows: `jaato` (becomes `\\.\pipe\jaato`) |
-| `auto_start` | `bool` | `True` | Launch `python -m server --daemon` if server not running |
+| `auto_start` | `bool` | `True` | Launch `python -m jaato_server --daemon` if server not running |
 | `env_file` | `str` | `.env` | Path to `.env` file (resolved relative to `workspace_path`) |
 | `workspace_path` | `Optional[str]` | `None` | Working directory; falls back to `os.getcwd()` |
 
@@ -161,7 +181,7 @@ Establishes the IPC connection and performs the handshake:
 
 On connection failure with `auto_start=True`, the client:
 - Checks for a running server via PID file (Unix) or pipe probe (Windows)
-- Launches `python -m server --daemon --ipc-socket <path>`
+- Launches `python -m jaato_server --daemon --ipc-socket <path>`
 - Waits for the socket/pipe to appear (up to 10s)
 - Retries the connection with backoff
 
@@ -367,7 +387,7 @@ All send methods (`send_message`, `respond_to_permission`, etc.) call `_check_ca
 
 ## 5. WebSocket Client (JaatoWSServer)
 
-**File**: `jaato-server/server/websocket.py`
+**File**: `jaato-server/jaato_server/server/websocket.py`
 
 The WebSocket server enables remote clients (web dashboards, browser integrations) to connect to Jaato. It wraps `JaatoServer` and provides multi-client support with optional TLS, workspace provisioning, and AppArmor isolation.
 
@@ -891,7 +911,7 @@ The IPC client's `_start_server()` method:
 1. Checks for a running server via PID file and pipe probe
 2. On Unix: cleans up stale socket files from crashed servers
 3. On Windows: passes the resolved pipe path (`\\.\pipe\jaato`) to avoid MSYS2 backslash mangling
-4. Launches `python -m server --ipc-socket <path> --daemon`
+4. Launches `python -m jaato_server --ipc-socket <path> --daemon`
 5. Waits up to 10 seconds for the IPC endpoint to appear
 
 ### Event Buffering
@@ -919,9 +939,9 @@ The `<jaato-task>` web component can ship files inline in the WS `session.new` e
 | `jaato-sdk/jaato_sdk/client/recovery.py` | 961 | 34 KB | IPCRecoveryClient — auto-reconnect wrapper |
 | `jaato-sdk/jaato_sdk/client/config.py` | 413 | 14 KB | RecoveryConfig, config loading |
 | `jaato-sdk/jaato_sdk/client/__init__.py` | 15 | 475 B | Public exports |
-| `jaato-server/server/ipc.py` | 710 | 26 KB | JaatoIPCServer — IPC server |
-| `jaato-server/server/websocket.py` | 1787 | 74 KB | JaatoWSServer — WebSocket server |
-| `jaato-server/shared/jaato_client.py` | 1088 | 40 KB | JaatoClient — server-side facade |
+| `jaato-server/jaato_server/server/ipc.py` | 710 | 26 KB | JaatoIPCServer — IPC server |
+| `jaato-server/jaato_server/server/websocket.py` | 1787 | 74 KB | JaatoWSServer — WebSocket server |
+| `jaato-server/jaato_server/shared/jaato_client.py` | 1088 | 40 KB | JaatoClient — server-side facade |
 | `jaato-tui/backend.py` | 569 | 18 KB | Backend abstraction for TUI |
 | `jaato-tui/rich_client.py` | 2888 | 135 KB | RichClient TUI implementation |
 | `examples/client.json` | 29 | 1 KB | Example client configuration |

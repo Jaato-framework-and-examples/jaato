@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { after, before, beforeEach, describe, test } from "node:test";
 import { BindChannel } from "../src/bind-channel.js";
 import { FileCredentialStore } from "../src/credentials.js";
+import { FileNoteStore } from "../src/notes.js";
 import { createRouter, isSameOrigin } from "../src/routes.js";
 import { SessionStore } from "../src/session.js";
 import { APP_CREDENTIAL, FakeIdp, startMockDaemon, testConfig, type MockDaemon } from "./helpers.js";
@@ -29,7 +30,8 @@ describe("routes", () => {
     await bind.connect();
     sessions = new SessionStore(config.session.secret, config.session.ttlSeconds);
     const credentials = new FileCredentialStore(join(mkdtempSync(join(tmpdir(), "jwcs-cred-")), "credentials.json"), "c".repeat(48));
-    http.on("request", createRouter({ config, idp, sessions, bind, credentials, distDir: dist, log: (m) => logs.push(m) }));
+    const notes = new FileNoteStore(join(mkdtempSync(join(tmpdir(), "jwcs-note-")), "notes.json"), "n".repeat(48));
+    http.on("request", createRouter({ config, idp, sessions, bind, credentials, notes, distDir: dist, log: (m) => logs.push(m) }));
   });
   after(async () => { await bind.close(); await new Promise<void>((r) => http.close(() => r())); await daemon.close(); });
   beforeEach(() => { daemon.binds.length = 0; daemon.revokes.length = 0; idp.refuse = null; });
@@ -54,7 +56,7 @@ describe("routes", () => {
 
   test("config.json points the bundle at the ticket endpoint, not at a token", async () => {
     const r = await fetch(`${base}/config.json`);
-    assert.deepEqual(await r.json(), { daemon: daemon.url, ticketUrl: "./api/ticket", loginUrl: "./auth/login", autoConnect: true, credentialsUrl: "./api/credentials" });
+    assert.deepEqual(await r.json(), { daemon: daemon.url, ticketUrl: "./api/ticket", loginUrl: "./auth/login", autoConnect: true, credentialsUrl: "./api/credentials", notesUrl: "./api/notes" });
     assert.equal(r.headers.get("cache-control"), "no-store");
   });
 
@@ -150,7 +152,7 @@ describe("routes", () => {
     assert.equal((await fetch(`${base}/api/credentials/${ok.entry.id}`, { method: "DELETE", headers: { cookie, ...so } })).status, 204);
   });
 
-  test("credentials: without a store the routes are 404 and config.json names no credentialsUrl", async () => {
+  test("without a store the credential and note routes are 404 and config.json names neither url", async () => {
     const dist = mkdtempSync(join(tmpdir(), "jwcs-dist-"));
     writeFileSync(join(dist, "index.html"), "<!doctype html>");
     const bare = createServer();
@@ -161,11 +163,60 @@ describe("routes", () => {
     try {
       const cfg = await (await fetch(`${bareBase}/config.json`)).json();
       assert.equal(cfg.credentialsUrl, undefined);
+      assert.equal(cfg.notesUrl, undefined, "neither store is named when neither exists");
       const cookie = await signIn("alice");
       assert.equal((await fetch(`${bareBase}/api/credentials`, { headers: { cookie } })).status, 404);
+      assert.equal((await fetch(`${bareBase}/api/notes`, { headers: { cookie } })).status, 404);
     } finally {
       await new Promise<void>((r) => bare.close(() => r()));
     }
+  });
+
+  test("notes: no session → 401; write, read back, and one user never sees another's", async () => {
+    assert.equal((await fetch(`${base}/api/notes`)).status, 401);
+    const alice = await signIn("alice");
+    const bob = await signIn("bob");
+
+    const put = await fetch(`${base}/api/notes/20260919_084517`, { method: "PUT", headers: { cookie: alice, ...so }, body: JSON.stringify({ text: "ask about the grace period" }) });
+    assert.equal(put.status, 200);
+    assert.equal((await put.json()).note.text, "ask about the grace period");
+
+    const listed = await (await fetch(`${base}/api/notes`, { headers: { cookie: alice } })).json();
+    assert.deepEqual(listed.notes.map((n: { sessionId: string }) => n.sessionId), ["20260919_084517"]);
+    assert.deepEqual((await (await fetch(`${base}/api/notes`, { headers: { cookie: bob } })).json()).notes, []);
+
+    // The note's TEXT is written for a person and read by nobody else -- a
+    // log is somebody else, so it must not be in one.
+    assert.ok(!logs.some((l) => l.includes("grace period")), "the log never carries a note's text");
+  });
+
+  test("notes: writes are same-origin only; an emptied note is forgotten; DELETE is idempotent", async () => {
+    const cookie = await signIn("alice");
+    const cross = { cookie, "sec-fetch-site": "cross-site", "content-type": "application/json" };
+    assert.equal((await fetch(`${base}/api/notes/s-cross`, { method: "PUT", headers: cross, body: JSON.stringify({ text: "x" }) })).status, 403);
+    assert.equal((await fetch(`${base}/api/notes/s-cross`, { method: "DELETE", headers: cross })).status, 403);
+
+    await fetch(`${base}/api/notes/s-empty`, { method: "PUT", headers: { cookie, ...so }, body: JSON.stringify({ text: "something" }) });
+    const cleared = await fetch(`${base}/api/notes/s-empty`, { method: "PUT", headers: { cookie, ...so }, body: JSON.stringify({ text: "  " }) });
+    assert.equal((await cleared.json()).note, null, "clearing the box forgets the note");
+
+    // End session deletes the note beside the session, and a session that
+    // never had one is not an error.
+    assert.equal((await fetch(`${base}/api/notes/never-noted`, { method: "DELETE", headers: { cookie, ...so } })).status, 204);
+  });
+
+  test("notes: a bad session id or an oversized note is 400, not 500", async () => {
+    const cookie = await signIn("alice");
+    // A traversal never reaches the handler: both fetch and the server's own
+    // ``new URL`` normalise ``/api/notes/..`` to ``/api/`` first, so it is an
+    // unknown path rather than a refused id.  The id guard covers what
+    // SURVIVES normalisation.
+    assert.equal((await fetch(`${base}/api/notes/..`, { method: "PUT", headers: { cookie, ...so }, body: JSON.stringify({ text: "x" }) })).status, 404);
+    assert.equal((await fetch(`${base}/api/notes/bad%20name`, { method: "PUT", headers: { cookie, ...so }, body: JSON.stringify({ text: "x" }) })).status, 400);
+    assert.equal((await fetch(`${base}/api/notes/s1`, { method: "PUT", headers: { cookie, ...so }, body: "not json" })).status, 400);
+    assert.equal((await fetch(`${base}/api/notes/s1`, { method: "PUT", headers: { cookie, ...so }, body: JSON.stringify({ text: "x".repeat(2001) }) })).status, 400);
+    assert.equal((await fetch(`${base}/api/notes/s1`, { method: "POST", headers: { cookie, ...so }, body: "{}" })).status, 405);
+    assert.equal((await fetch(`${base}/api/notes`, { method: "PUT", headers: { cookie, ...so }, body: "{}" })).status, 405, "PUT needs a session id");
   });
 
   test("the IdP refusing the account (missing role) is a 403 with the reason, and no session", async () => {

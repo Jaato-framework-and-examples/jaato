@@ -12,9 +12,12 @@
  *    no bytes are sent for it.
  *  • The daemon caps one file at 10 MB and one request at 50 MB
  *    (``DEFAULT_STAGE_PER_FILE_LIMIT`` / ``DEFAULT_STAGE_TOTAL_LIMIT`` in
- *    ``server/websocket.py``).  The same numbers are applied before
- *    sending — the daemon would refuse anyway, but only after the frames
- *    were on the wire.
+ *    ``server/websocket.py``), and a file travels as ONE WebSocket
+ *    message, so it is also capped by the daemon's message limit.  A
+ *    daemon advertises all three in its handshake (``serverLimits`` on
+ *    the SDK client); one that advertises nothing enforces 1 MiB per
+ *    message.  The limits are applied before sending: an over-size
+ *    message is not refused politely, the daemon closes the connection.
  *  • When the message is sent, the prompt gains one trailing line naming
  *    the files staged during its composition, so the model knows where
  *    they are; the TUI convention for pointing at a workspace file is
@@ -58,6 +61,14 @@ export function formatSize(bytes: number): string {
   return `${bytes} B`;
 }
 
+/** The caps a request is judged against; the SDK's ``ServerLimits`` fits. */
+export interface SizeLimits {
+  stagePerFileLimit: number;
+  stageTotalLimit: number;
+  /** ``false`` when the daemon advertised nothing and these are the legacy values. */
+  advertised?: boolean;
+}
+
 export interface SizeVerdict {
   /** ``null`` when the file may be sent; otherwise the reason, in the daemon's words. */
   reason: string | null;
@@ -68,14 +79,24 @@ export interface SizeVerdict {
  * per-file cap is refused on its own; a batch over the total cap refuses
  * every file in it, since the daemon answers the whole request that way.
  */
-export function checkSizes(sizes: number[]): SizeVerdict[] {
+export function checkSizes(sizes: number[], limits?: SizeLimits | null): SizeVerdict[] {
+  const perFile = limits?.stagePerFileLimit ?? STAGE_PER_FILE_LIMIT;
+  const cap = limits?.stageTotalLimit ?? STAGE_TOTAL_LIMIT;
   const total = sizes.reduce((a, b) => a + Math.max(b, 0), 0);
-  if (total > STAGE_TOTAL_LIMIT) {
-    const reason = `declared total ${total} bytes exceeds cap ${STAGE_TOTAL_LIMIT}`;
+  if (total > cap) {
+    const reason = `declared total ${total} bytes exceeds cap ${cap}`;
     return sizes.map(() => ({ reason }));
   }
+  // A daemon that advertised no limits is an older one whose real cap is
+  // its 1 MiB message size, not the staging cap it would quote: say so,
+  // since the remedy (upgrade the daemon) is not what "exceeds cap" implies.
+  const legacy = limits != null && limits.advertised === false;
   return sizes.map((size) => ({
-    reason: size > STAGE_PER_FILE_LIMIT ? `declared size ${size} bytes exceeds per-file cap ${STAGE_PER_FILE_LIMIT}` : null,
+    reason: size <= perFile
+      ? null
+      : legacy
+        ? `${formatSize(size)} is over this daemon's ${formatSize(perFile)} message limit; upgrade jaato-server to attach larger files`
+        : `declared size ${size} bytes exceeds per-file cap ${perFile}`,
   }));
 }
 

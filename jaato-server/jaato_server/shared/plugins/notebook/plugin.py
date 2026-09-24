@@ -1,0 +1,1687 @@
+"""Notebook plugin for Python code execution with GPU support.
+
+This plugin provides interactive Python notebook capabilities:
+- Execute Python code with state preserved across calls
+- Multiple backend support (local, Kaggle GPU)
+- Variable inspection and notebook management
+- Streaming output support for real-time execution feedback
+- Security analysis for sandbox compliance
+- Notebook Tool Bindings for tool access from notebook scripts
+"""
+
+import asyncio
+import contextvars
+import io
+import os
+import queue
+import tempfile
+import threading
+import types
+from datetime import datetime
+from enum import Enum
+from typing import Any, AsyncIterator, Callable, Dict, FrozenSet, List, Optional
+
+from jaato_sdk.plugins.base import UserCommand, PermissionDisplayInfo
+from jaato_sdk.plugins.model_provider.types import ToolSchema, DISCOVERABILITY_EAGER
+from ..streaming.protocol import StreamingCapable, StreamChunk, ChunkCallback
+from .types import ExecutionStatus, OutputType
+from .kernel_sandbox import boundary_notice
+from .backends import NotebookBackend, LocalJupyterBackend, KaggleBackend, _KAGGLE_AVAILABLE
+from .code_analyzer import CodeAnalyzer, AnalysisResult, RiskLevel
+from .tool_stubs import ToolBridge, ToolExecutionError, generate_tools_module, generate_tool_signatures
+from jaato_server.shared.ai_tool_runner import get_current_tool_output_callback
+from jaato_server.shared.plugins.runner_forwarding import RunnerForwardingMixin
+from ..workspace_venv import pip_apparmor_rules
+from ..workspace_home import home_exec_apparmor_rules
+from jaato_server.shared.trace import trace as _trace_write
+
+# Thread-local storage for per-session tool bindings state.
+# Plugin instances are shared across subagents within a session;
+# thread-local ensures each subagent thread gets its own executor/bindings.
+_thread_local = threading.local()
+
+
+def _refusal_text(refusal: Dict[str, Any]) -> str:
+    """Render a refusal dict from ``_guard_execution`` as one line of prose.
+
+    The dict is the model-facing shape the non-streaming path returns
+    (``{"error": ..., "reason": ...}``); the streaming path has only a text
+    chunk, so the two fields are joined rather than one of them dropped — the
+    ``error`` names the class of refusal and the ``reason`` is what an author
+    acts on.
+    """
+    detail = refusal.get("reason") or refusal.get("details") or ""
+    headline = refusal.get("error", "Notebook execution refused")
+    return f"{headline}: {detail}" if detail else headline
+
+
+class SandboxMode(Enum):
+    """Sandbox enforcement mode for notebook execution."""
+    DISABLED = "disabled"      # No analysis, execute everything
+    WARN = "warn"              # Analyze and show risks, but allow execution
+    BLOCK_CRITICAL = "block_critical"  # Block CRITICAL risks, warn others
+    STRICT = "strict"          # Block HIGH and CRITICAL risks
+
+
+# The backend name held before ``initialize()`` runs.  NOT the default a
+# session gets: ``initialize()`` resolves "subprocess" unless the config asks
+# for "local", and only the subprocess backend contains a cell's filesystem
+# reach (issue #710).
+DEFAULT_BACKEND = "local"
+
+# Max output size to return to model (avoid context overflow)
+MAX_OUTPUT_LENGTH = 10000
+
+
+class NotebookPlugin(StreamingCapable, RunnerForwardingMixin):
+    """Plugin for Python notebook execution with GPU support.
+
+    Provides tools for:
+    - Creating and managing notebooks
+    - Executing Python code with persistent state
+    - Switching between local (instant) and Kaggle (GPU) backends
+    - Variable inspection
+    - Streaming execution output in real-time
+
+    Configuration (``plugin_configs.notebook``):
+        default_backend: 'subprocess' (default), 'local' or 'kaggle'
+        enable_kaggle: Whether to enable Kaggle backend (default: True)
+        max_output_length: Max output chars to return (default: 10000)
+        sandbox_mode: Static code analysis posture (default: 'warn')
+        allow_inprocess_exec / allow_uncontained_exec / allow_read_paths:
+            the two boundaries and the narrow grant — see
+            ``_guard_execution`` and ``kernel_sandbox``.
+
+    Implements StreamingCapable for real-time output streaming during execution.
+
+    **Execution is gated twice before any backend sees a cell**
+    (``_guard_execution``, on BOTH the streaming and non-streaming paths): the
+    static analyzer reads the cell's source, and the selected backend must
+    state the boundary its execution runs inside
+    (``NotebookBackend.execution_boundary``).  A backend that states none
+    refuses rather than running model-authored code uncontained (issue #710).
+    """
+
+    def __init__(self):
+        self._backends: Dict[str, NotebookBackend] = {}
+        self._active_backend_name: str = DEFAULT_BACKEND
+        self._current_notebook_id: Optional[str] = None
+        self._max_output_length: int = MAX_OUTPUT_LENGTH
+        self._initialized = False
+        self._agent_name: Optional[str] = None
+        self._kaggle_enabled: bool = True  # Whether to try kaggle when requested
+        self._kaggle_init_attempted: bool = False  # Lazy init flag
+        # Callback for streaming output during execution (tail -f style)
+        self._tool_output_callback: Optional[Callable[[str], None]] = None
+        # Sandbox configuration
+        self._workspace_root: Optional[str] = None
+        self._sandbox_mode: SandboxMode = SandboxMode.WARN
+        self._code_analyzer: Optional[CodeAnalyzer] = None
+        self._plugin_registry = None  # Set via set_plugin_registry() for path authorization
+        # Cache last analysis for permission display
+        self._last_analysis: Optional[AnalysisResult] = None
+        # Notebook Tool Bindings state
+        self._tool_bindings_enabled: bool = os.environ.get("JAATO_TOOL_BINDINGS", "true").lower() not in ("0", "false", "no")  # env: expose jaato tools as callable Python bindings inside notebooks (default true)
+        self._tool_bindings_signatures: Optional[str] = None  # Cached for system instructions (not thread-local)
+        # Tool bindings state (_tool_executor, _tool_bindings_bridge,
+        # _tool_bindings_module) is stored in thread-local via properties
+        # so subagent threads don't overwrite the parent's bindings.
+        # Tools to exclude from bindings (notebook tools themselves to prevent recursion)
+        self._tool_bindings_exclude: FrozenSet[str] = frozenset({
+            "notebook_execute", "notebook_create", "notebook_variables",
+            "notebook_reset", "notebook_list", "notebook_backends",
+        })
+
+    @property
+    def _tool_executor(self):
+        """Per-thread tool executor from set_session()."""
+        return getattr(_thread_local, 'tool_executor', None)
+
+    @_tool_executor.setter
+    def _tool_executor(self, value):
+        _thread_local.tool_executor = value
+
+    @property
+    def _tool_bindings_bridge(self) -> Optional[ToolBridge]:
+        """Per-thread tool bindings bridge."""
+        return getattr(_thread_local, 'tool_bindings_bridge', None)
+
+    @_tool_bindings_bridge.setter
+    def _tool_bindings_bridge(self, value):
+        _thread_local.tool_bindings_bridge = value
+
+    @property
+    def _tool_bindings_module(self) -> Optional[types.ModuleType]:
+        """Per-thread tool bindings module."""
+        return getattr(_thread_local, 'tool_bindings_module', None)
+
+    @_tool_bindings_module.setter
+    def _tool_bindings_module(self, value):
+        _thread_local.tool_bindings_module = value
+
+    @property
+    def name(self) -> str:
+        return "notebook"
+
+    def _trace(self, msg: str) -> None:
+        """Write trace message for debugging."""
+        _trace_write("NOTEBOOK", msg)
+
+    def initialize(self, config: Optional[Dict[str, Any]] = None) -> None:
+        """Initialize the notebook plugin.
+
+        Args:
+            config: Optional dict with:
+                - default_backend: 'local' or 'kaggle'
+                - enable_kaggle: Whether to enable Kaggle backend
+                - max_output_length: Max output chars to return
+                - agent_name: Agent name for trace logging
+                - workspace_root: Workspace root for sandbox path validation
+                - sandbox_mode: 'disabled', 'warn', 'block_critical', or 'strict'
+                - allow_uncontained_exec / allow_read_paths: the filesystem
+                  boundary knobs, consumed by the subprocess backend
+                - allow_inprocess_exec: the process boundary knob, consumed by
+                  the local backend
+
+        The whole config dict is handed to each backend, so a backend takes
+        the keys it owns and ignores the rest.
+        """
+        config = config or {}
+        self._config = config  # Store for lazy kaggle init
+        self._agent_name = config.get("agent_name")
+        self._max_output_length = config.get("max_output_length", MAX_OUTPUT_LENGTH)
+        self._kaggle_enabled = config.get("enable_kaggle", True)
+
+        # Initialize sandbox configuration
+        self._workspace_root = config.get("workspace_root")
+        sandbox_mode_str = config.get("sandbox_mode", "warn")
+        try:
+            self._sandbox_mode = SandboxMode(sandbox_mode_str)
+        except ValueError:
+            self._sandbox_mode = SandboxMode.WARN
+
+        # Create code analyzer (will be rebuilt when plugin_registry is set)
+        self._rebuild_code_analyzer()
+
+        # Always initialize local backend
+        local_backend = LocalJupyterBackend()
+        local_backend.initialize(config)
+        self._backends["local"] = local_backend
+
+        # Opt-in subprocess-kernel backend (design 1c): each notebook runs in its
+        # OWN subprocess rooted at workspace_root, so notebook code's relative
+        # paths resolve in-workspace (no process-global chdir, core.py:915).
+        # Default stays "local" (in-process) until the PR 3 cutover.
+        from .backends.subprocess_kernel import SubprocessKernelBackend
+        subprocess_backend = SubprocessKernelBackend()
+        subprocess_backend.initialize(config)
+        self._backends["subprocess"] = subprocess_backend
+
+        # Kaggle backend is initialized lazily when first requested (gpu=true)
+        # This avoids stalling during plugin init if kaggle auth is missing/slow
+        if not _KAGGLE_AVAILABLE:
+            self._trace("Kaggle backend not available: kaggle package not installed")
+
+        # 1c cutover: the subprocess kernel (cwd=workspace, so notebook relative
+        # paths resolve in-workspace) is the DEFAULT.  "local" opts back to the
+        # in-process backend — kept one release as the CWD-escape fallback.
+        # kaggle is chosen per-call via gpu.
+        requested = (config.get("default_backend") or config.get("backend")
+                     or "subprocess")
+        self._active_backend_name = (
+            "local" if requested == "local" else "subprocess")
+
+        # Idempotent, and repeated here because the registry may hand us the
+        # registry before OR after initialize(); the subprocess backend that
+        # takes the wiring only exists from this point on.
+        self._wire_sandbox_paths()
+
+        self._initialized = True
+        self._trace(f"Initialized with backend={self._active_backend_name}")
+
+    def _ensure_kaggle_backend(self) -> Optional[str]:
+        """Lazily initialize kaggle backend on first use.
+
+        Returns:
+            None if successful, error message string if failed.
+        """
+        self._trace(f"_ensure_kaggle_backend: called, kaggle_in_backends={('kaggle' in self._backends)}, init_attempted={self._kaggle_init_attempted}, enabled={self._kaggle_enabled}, available={_KAGGLE_AVAILABLE}")
+
+        if "kaggle" in self._backends:
+            return None  # Already initialized
+
+        if self._kaggle_init_attempted:
+            return "Kaggle backend initialization already failed"
+
+        self._kaggle_init_attempted = True
+
+        if not self._kaggle_enabled:
+            return "Kaggle backend disabled in config"
+
+        if not _KAGGLE_AVAILABLE:
+            return "Kaggle package not installed. Install with: pip install kaggle"
+
+        try:
+            kaggle_backend = KaggleBackend()
+            kaggle_backend.set_trace_fn(self._trace)  # Wire up tracing
+            kaggle_backend.initialize(getattr(self, '_config', None))
+            self._backends["kaggle"] = kaggle_backend
+            self._trace("Kaggle backend initialized successfully (lazy)")
+            return None
+        except Exception as e:
+            self._trace(f"Kaggle backend initialization failed: {e}")
+            return str(e)
+
+    def shutdown(self) -> None:
+        """Shutdown all backends."""
+        for backend in self._backends.values():
+            try:
+                backend.shutdown()
+            except Exception:
+                pass
+        self._backends.clear()
+        self._current_notebook_id = None
+        self._initialized = False
+        self._kaggle_init_attempted = False
+
+    def reset_for_next_session(self) -> None:
+        """Cascade-sharing reset — NO-OP for this plugin.
+
+        Phase 1 hotfix (server 0.6.148+): added to satisfy the
+        ``ToolPlugin`` / ``EnrichmentPlugin`` protocol's runtime
+        ``isinstance`` check.  Per Daniel's litmus test (see
+        ``docs/design/runner-cascade-sharing.md`` §4.3), this
+        plugin holds no per-session state that the next cascade
+        session would benefit from having cleared.  Override in
+        future PRs if the litmus test changes.
+        """
+        pass
+
+
+    def get_config_schema(self) -> dict:
+        """Return JSON Schema for this plugin's configuration."""
+        return {
+            "type": "object",
+            "properties": {
+                "default_backend": {
+                    "type": "string",
+                    "default": "subprocess",
+                    "description": (
+                        "Default execution backend. 'subprocess' runs each "
+                        "notebook in its own workspace-contained kernel "
+                        "process; 'local' is the in-process backend, which "
+                        "runs cells in the host interpreter and is gated on "
+                        "AppArmor or allow_inprocess_exec"
+                    ),
+                    "enum": ["subprocess", "local", "kaggle"],
+                },
+                "enable_kaggle": {
+                    "type": "boolean",
+                    "default": True,
+                    "description": "Enable Kaggle backend",
+                },
+                "max_output_length": {
+                    "type": "integer",
+                    "default": 10000,
+                    "description": "Maximum output characters",
+                },
+                "sandbox_mode": {
+                    "type": "string",
+                    "default": "warn",
+                    "description": "Sandbox mode",
+                    "enum": ["disabled", "warn", "block_critical", "strict"],
+                },
+                "allow_inprocess_exec": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Permit the 'local' backend to run model-authored "
+                        "cells IN-PROCESS on a host with no kernel-enforced "
+                        "AppArmor profile. Cell code can then reach this "
+                        "process's memory and state. Env sibling: "
+                        "JAATO_NOTEBOOK_ALLOW_INPROCESS_EXEC"
+                    ),
+                },
+                "allow_uncontained_exec": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Permit notebook cells to reach OUTSIDE the workspace "
+                        "(issue #710). A different question from "
+                        "allow_inprocess_exec: this one removes the "
+                        "filesystem boundary, that one removes the process "
+                        "boundary. Announced at WARNING. Env sibling: "
+                        "JAATO_NOTEBOOK_ALLOW_UNCONTAINED_EXEC"
+                    ),
+                },
+                "allow_read_paths": {
+                    "type": "array",
+                    "default": [],
+                    "description": (
+                        "Extra absolute paths notebook cells may READ outside "
+                        "the workspace (a reference dataset, a shared corpus). "
+                        "Narrower than allow_uncontained_exec, and the "
+                        "per-profile counterpart of the operator's 'sandbox "
+                        "add' command, which is honoured as well"
+                    ),
+                },
+                "workspace_venv": {
+                    "type": "string",
+                    "default": "",
+                    "description": (
+                        "Path to a workspace-scoped venv to run the "
+                        "subprocess kernel from (empty = off; subprocess "
+                        "backend only). Relative paths resolve against the "
+                        "workspace root. Created if absent with "
+                        "--system-site-packages; the model's in-notebook pip "
+                        "installs persist there. Recommended: .jaato/tool-venv"
+                    ),
+                },
+                "workspace_home": {
+                    "type": "string",
+                    "default": "",
+                    "description": (
+                        "Path to a workspace-scoped HOME for the kernel "
+                        "subprocess (#1225; empty = off). HOME + the XDG base "
+                        "dirs are pointed at it so a cell's ~ writes stay "
+                        "per-workspace instead of shared across the daemon's "
+                        "HOME. Usually set once under "
+                        "plugin_configs.cli.workspace_home and mirrored here "
+                        "by the daemon. Do NOT store secrets here."
+                    ),
+                },
+            },
+        }
+
+    @classmethod
+    def get_apparmor_rules(
+        cls,
+        *,
+        workspace_path: str,
+        session_id: str,
+        config_root: Optional[str],
+        plugin_config: Dict[str, Any],
+    ) -> List[str]:
+        """Contribute pip's AppArmor rules to the profile.
+
+        In-notebook ``pip install`` / ``!pip`` needs the distro/UA OS-id reads
+        (crashes without them under confinement) plus, when a ``workspace_venv``
+        is set, an ``ix`` grant on the venv bin so a bare ``!pip`` / console
+        script runs.  Scoped to sessions that load ``notebook`` —
+        least-privilege.  See ``pip_apparmor_rules``.
+        """
+        return pip_apparmor_rules(plugin_config.get("workspace_venv"), workspace_path) + (
+            home_exec_apparmor_rules(plugin_config.get("workspace_home"), workspace_path)
+        )
+
+    def set_workspace_path(self, path: str) -> None:
+        """Set workspace root path (auto-wired by PluginRegistry).
+
+        This is called during plugin registration to enable sandbox path
+        validation for notebook code execution.
+
+        Args:
+            path: Absolute path to the workspace root directory.
+        """
+        self._workspace_root = path
+        self._rebuild_code_analyzer()
+        # Propagate to the subprocess-kernel backend so its kernels spawn with
+        # cwd=workspace — the workspace can be set AFTER initialize() (the #344
+        # set_workspace_path flow), and kernels spawn lazily on first execute.
+        sub = self._backends.get("subprocess")
+        if sub is not None:
+            sub.initialize({"workspace_root": path})
+        self._trace(f"Workspace path set to: {path}")
+
+    def set_plugin_registry(self, registry) -> None:
+        """Set the plugin registry for checking external path authorization.
+
+        This is called during plugin registration to enable path authorization
+        checks via the registry (e.g., for whitelisted external paths).
+
+        Args:
+            registry: The PluginRegistry instance.
+        """
+        self._plugin_registry = registry
+        registry.register_category("code", "Code analysis, editing, refactoring, and LSP diagnostics")
+        self._rebuild_code_analyzer()
+        self._wire_sandbox_paths()
+        self._maybe_build_tool_bindings()
+        self._trace("set_plugin_registry: registry set")
+
+    def _wire_sandbox_paths(self) -> None:
+        """Let kernels honour ``sandbox add`` / ``sandbox deny`` (issue #710).
+
+        The kernel enforces containment in its OWN process, so it cannot call
+        the registry; it is handed the operator-granted paths with every cell
+        instead.  Wired here because the registry is where those grants live,
+        and re-read per cell because they change mid-session.
+
+        Only the subprocess backend takes this — the in-process backend shares
+        the runner's process, where the registry is directly reachable.
+        """
+        backend = self._backends.get("subprocess")
+        if backend is None or not hasattr(backend, "set_sandbox_paths_fn"):
+            return
+        backend.set_sandbox_paths_fn(self._current_sandbox_paths)
+
+    def _current_sandbox_paths(self) -> Dict[str, List[str]]:
+        """The session's authorized / denied external paths, as they stand now.
+
+        Returns:
+            ``{"read": [...], "write": [...], "deny": [...]}``.  A
+            ``readwrite`` authorization appears in both ``read`` and ``write``;
+            a ``readonly`` one only in ``read``.  Denials are listed separately
+            because they outrank every allowance, including the workspace
+            itself.  An empty dict when no registry is wired — containment to
+            the workspace alone, which is the safe reading.
+        """
+        registry = self._plugin_registry
+        if registry is None:
+            return {"read": [], "write": [], "deny": []}
+        detailed = {}
+        denied = {}
+        if hasattr(registry, "list_authorized_paths_detailed"):
+            detailed = registry.list_authorized_paths_detailed() or {}
+        if hasattr(registry, "list_denied_paths"):
+            denied = registry.list_denied_paths() or {}
+        read = list(detailed)
+        write = [path for path, entry in detailed.items()
+                 if (entry or {}).get("access") == "readwrite"]
+        return {"read": read, "write": write, "deny": list(denied)}
+
+    def _guard_execution(self, code: str) -> Optional[Dict[str, Any]]:
+        """Decide whether this cell may run at all, before any backend sees it.
+
+        Two checks, in the order that costs least:
+
+        1. **The static analyzer** (``sandbox_mode``), which reads the cell's
+           source for paths outside the workspace and for subprocess/shell
+           escapes.  Advisory by construction — it inspects text, so an
+           obfuscated path passes — and it blocks only in ``strict`` /
+           ``block_critical``.
+        2. **The backend's declared boundary**
+           (``NotebookBackend.execution_boundary``), which is what actually
+           bounds the cell once it runs.  A backend that cannot state one
+           refuses here rather than executing uncontained (issue #710).
+
+        Both checks used to live on the non-streaming path alone, so the
+        streaming path — the live one, since ``supports_streaming`` returns
+        True for ``notebook_execute`` — ran with neither.  A gate that covers
+        one of two dispatch paths is the shape #710 reports one layer down.
+
+        Args:
+            code: The cell source, as the model wrote it.
+
+        Returns:
+            An error dict to return to the model instead of running the cell,
+            or ``None`` when the cell may proceed.
+        """
+        blocked = self._analyzer_verdict(code)
+        if blocked is not None:
+            return blocked
+        backend = self._backends.get(self._active_backend_name)
+        if backend is None:
+            return None
+        allowed, reason = backend.execution_boundary()
+        if not allowed:
+            self._trace(f"Blocked code execution: no boundary ({reason})")
+            return {"error": "Notebook execution refused", "reason": reason}
+        return None
+
+    def _analyzer_verdict(self, code: str) -> Optional[Dict[str, Any]]:
+        """Run the static code analyzer and decide whether it blocks this cell.
+
+        Caches the analysis on ``self._last_analysis`` for the permission
+        display, warns on risks that do not block, and returns the model-facing
+        error dict when ``sandbox_mode`` says to stop.
+
+        Returns:
+            The error dict when the cell is blocked, else ``None`` — including
+            when the analyzer found risks the current mode only warns about.
+        """
+        if self._sandbox_mode == SandboxMode.DISABLED or not self._code_analyzer:
+            return None
+        analysis = self._code_analyzer.analyze(code)
+        self._last_analysis = analysis
+        if not analysis.has_risks:
+            return None
+        max_level = analysis.max_risk_level
+        should_block = False
+        if self._sandbox_mode == SandboxMode.STRICT:
+            should_block = max_level in (RiskLevel.HIGH, RiskLevel.CRITICAL)
+        elif self._sandbox_mode == SandboxMode.BLOCK_CRITICAL:
+            should_block = max_level == RiskLevel.CRITICAL
+        if not should_block:
+            self._trace(f"Code analysis warning: {analysis.get_summary()}")
+            return None
+        self._trace(f"Blocked code execution: {analysis.get_summary()}")
+        return {
+            "error": "Code blocked by sandbox",
+            "reason": analysis.get_summary(),
+            "details": analysis.format_risks(max_items=10),
+            "external_paths": analysis.external_paths,
+            "hint": "Code contains patterns that could bypass workspace sandboxing. "
+                    "Use workspace-relative paths and avoid subprocess/shell commands.",
+        }
+
+    def set_session(self, session: Any) -> None:
+        """Set the session reference for tool bindings executor access.
+
+        Auto-wired by the session during configure(). When tool bindings
+        are enabled, grabs the session's ToolExecutor to create the bridge
+        that notebook scripts use to call tools directly.
+
+        Args:
+            session: JaatoSession instance with ``_executor`` attribute.
+        """
+        executor = getattr(session, '_executor', None)
+        if executor is not None:
+            _thread_local.tool_executor = executor
+            self._maybe_build_tool_bindings()
+            self._trace("set_session: executor captured for tool bindings")
+        else:
+            self._trace("set_session: no executor on session")
+
+    def _maybe_build_tool_bindings(self) -> None:
+        """Build the tool bindings module if all prerequisites are met.
+
+        Prerequisites:
+        - Tool bindings enabled via JAATO_TOOL_BINDINGS env var
+        - Plugin registry available (for tool schemas)
+        - Tool executor available (for the bridge)
+
+        Called from set_plugin_registry() and set_session() — whichever
+        fires last completes the wiring.
+        """
+        if not self._tool_bindings_enabled:
+            return
+        if self._plugin_registry is None or self._tool_executor is None:
+            return
+        if self._tool_bindings_module is not None:
+            return  # Already built
+
+        schemas = self._plugin_registry.get_exposed_tool_schemas()
+        self._tool_bindings_bridge = ToolBridge(self._tool_executor.execute)
+        self._tool_bindings_module = generate_tools_module(
+            schemas, self._tool_bindings_bridge, exclude_tools=self._tool_bindings_exclude,
+        )
+        # Cache signatures for system instructions (instance var, not
+        # thread-local) so get_system_instructions() can include them
+        # regardless of which thread calls it.
+        self._tool_bindings_signatures = generate_tool_signatures(
+            schemas, exclude_tools=self._tool_bindings_exclude,
+        )
+        self._trace(
+            f"Tool bindings module built: {len(schemas)} schemas, "
+            f"{len(self._tool_bindings_module.list_tools())} tools exposed"
+        )
+
+        # Inject into all existing notebook namespaces
+        for backend in self._backends.values():
+            if isinstance(backend, LocalJupyterBackend):
+                backend.inject_tools_module(self._tool_bindings_module)
+            elif hasattr(backend, "set_tool_executor"):
+                # Subprocess-kernel backend (1c): wire the executor that serves
+                # the kernel's cross-process tool_call frames — the out-of-process
+                # analogue of inject_tools_module.
+                backend.set_tool_executor(self._tool_executor.execute)
+
+    def _rebuild_code_analyzer(self) -> None:
+        """Rebuild the code analyzer with current configuration.
+
+        Called when workspace_root or plugin_registry changes to ensure
+        the analyzer uses the latest sandbox settings.
+        """
+        self._code_analyzer = CodeAnalyzer(
+            workspace_root=self._workspace_root,
+            plugin_registry=self._plugin_registry,
+            allow_tmp=True,  # Allow /tmp access like other sandboxed tools
+        )
+
+    def set_tool_output_callback(self, callback: Optional[Callable[[str], None]]) -> None:
+        """Set the callback for streaming output during execution.
+
+        When set, the plugin will stream formatted notebook output to the callback
+        during code execution, enabling live preview in the UI tool tree.
+
+        Args:
+            callback: Function that accepts output chunks, or None to disable.
+        """
+        self._tool_output_callback = callback
+        self._trace(f"set_tool_output_callback: callback={'SET' if callback else 'CLEARED'}")
+
+    def _get_effective_output_callback(self) -> Optional[Callable[[str], None]]:
+        """Get the effective output callback for the current execution.
+
+        Checks thread-local storage first (for parallel execution),
+        then falls back to the instance-level callback.
+
+        Returns:
+            The callback to use, or None if not set.
+        """
+        # Thread-local takes priority (parallel execution)
+        thread_callback = get_current_tool_output_callback()
+        if thread_callback is not None:
+            return thread_callback
+        # Fall back to instance-level (sequential execution)
+        return self._tool_output_callback
+
+    @property
+    def _active_backend(self) -> NotebookBackend:
+        """Get the currently active backend."""
+        return self._backends[self._active_backend_name]
+
+    def get_tool_schemas(self) -> List[ToolSchema]:
+        """Return tool schemas for notebook operations."""
+        return [
+            ToolSchema(
+                name="notebook_execute",
+                description=(
+                    "Execute Python code in a persistent notebook environment. "
+                    "Variables and imports persist across executions. "
+                    "Use for data analysis, calculations, and prototyping."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "code": {
+                            "type": "string",
+                            "description": (
+                                "Python code to execute. For strings containing "
+                                "apostrophes, use double quotes (\"it's\") or "
+                                "triple-quoted strings (\"\"\"...\"\"\") — "
+                                "single quotes with inner apostrophes ('it's') "
+                                "are a SyntaxError."
+                            )
+                        },
+                        "notebook_id": {
+                            "type": "string",
+                            "description": "Optional notebook ID. Creates new if not specified."
+                        },
+                    },
+                    "required": ["code"]
+                },
+                category="code",
+                discoverability=DISCOVERABILITY_EAGER,
+            ),
+            ToolSchema(
+                name="notebook_create",
+                description=(
+                    "Create a new Python notebook. Use gpu=true for GPU-accelerated "
+                    "computing (via Kaggle, async execution). Default is local (instant)."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "Name for the notebook"
+                        },
+                        "gpu": {
+                            "type": "boolean",
+                            "description": "Enable GPU (uses Kaggle backend, async)",
+                            "default": False
+                        },
+                    },
+                    "required": ["name"]
+                },
+                category="code",
+                discoverability=DISCOVERABILITY_EAGER,
+            ),
+            ToolSchema(
+                name="notebook_variables",
+                description="Get all variables defined in the current notebook with their types.",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "notebook_id": {
+                            "type": "string",
+                            "description": "Notebook ID. Uses current notebook if not specified."
+                        },
+                    },
+                },
+                category="code",
+                discoverability=DISCOVERABILITY_EAGER,
+            ),
+            ToolSchema(
+                name="notebook_reset",
+                description="Reset the notebook, clearing all variables and execution state.",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "notebook_id": {
+                            "type": "string",
+                            "description": "Notebook ID. Uses current notebook if not specified."
+                        },
+                    },
+                },
+                category="code",
+                discoverability=DISCOVERABILITY_EAGER,
+            ),
+            ToolSchema(
+                name="notebook_list",
+                description="List all active notebooks with their backends and status.",
+                parameters={
+                    "type": "object",
+                    "properties": {},
+                },
+                category="code",
+                discoverability=DISCOVERABILITY_EAGER,
+            ),
+            ToolSchema(
+                name="notebook_backends",
+                description="List available notebook backends and their capabilities (GPU, quotas).",
+                parameters={
+                    "type": "object",
+                    "properties": {},
+                },
+                category="code",
+                discoverability=DISCOVERABILITY_EAGER,
+            ),
+        ]
+
+    def get_executors(self) -> Dict[str, Callable[[Dict[str, Any]], Any]]:
+        """Return executor mappings.
+
+        Phase 3 §3.5 wave 2: forwards via runner-RPC when a runner
+        is attached so the spawned Python interpreter inherits the
+        runner's AppArmor profile.  Falls through to in-process
+        otherwise.
+        """
+        return self.wrap_executors_for_runner_forwarding({
+            "notebook_execute": self._execute_code,
+            "notebook_create": self._create_notebook,
+            "notebook_variables": self._get_variables,
+            "notebook_reset": self._reset_notebook,
+            "notebook_list": self._list_notebooks,
+            "notebook_backends": self._list_backends,
+        })
+
+    def get_system_instructions(self) -> Optional[str]:
+        """Return system instructions for notebook tools.
+
+        When tool bindings are enabled and the tools module is built,
+        appends tool bindings guidance with auto-generated function
+        signatures.
+        """
+        backends_info = []
+        for name, backend in self._backends.items():
+            caps = backend.capabilities
+            gpu_info = f"GPU: {caps.gpu_type}" if caps.supports_gpu else "No GPU"
+            backends_info.append(f"- {name}: {gpu_info}")
+
+        # Sandbox information
+        sandbox_info = ""
+        if self._sandbox_mode != SandboxMode.DISABLED:
+            sandbox_info = f"""
+
+**Sandbox Restrictions (mode: {self._sandbox_mode.value}):**
+- Code is analyzed for security risks before execution
+- File access should use workspace-relative paths only
+- Shell commands (!) and subprocess are flagged as high risk
+- External path references (e.g., /home/, /etc/) will be blocked
+- Use the file_edit or filesystem_query tools for file operations instead
+"""
+            if self._workspace_root:
+                sandbox_info += f"- Workspace root: {self._workspace_root}\n"
+
+        boundary_info = self._boundary_instruction_block()
+
+        # Tool bindings information
+        bindings_info = ""
+        if self._tool_bindings_enabled and self._tool_bindings_signatures is not None:
+            signatures = self._tool_bindings_signatures
+            bindings_info = "\n".join([
+                "",
+                "**Notebook Tool Bindings:**",
+                "The notebook environment has a `tools` module pre-loaded. You can call any",
+                "jaato tool directly from Python scripts instead of making separate tool calls.",
+                "This is especially useful for:",
+                "- Batch operations (loops over files, bulk searches)",
+                "- Aggregation (collecting results from multiple tool calls)",
+                "- Conditional logic (branching based on tool results)",
+                "- Cross-referencing (using output of one tool as input to another)",
+                "",
+                "**Usage:**",
+                "```python",
+                "# Call tools directly",
+                'result = tools.web_search(query="python dataclasses")',
+                'content = tools.file_read(path="src/main.py")',
+                "",
+                "# Batch operations in loops",
+                'for f in ["a.py", "b.py", "c.py"]:',
+                "    result = tools.file_read(path=f)",
+                '    print(f"{f}: {len(result.get(\'content\', \'\'))} chars")',
+                "",
+                "# Error handling",
+                "try:",
+                '    result = tools.file_read(path="missing.txt")',
+                "except tools.ToolExecutionError as e:",
+                '    print(f"Failed: {e.message}")',
+                "",
+                "# List available tools",
+                "tools.list_tools()",
+                "```",
+                "",
+                "**Available tool functions:**",
+                signatures,
+                "",
+            ])
+
+        return f"""You have access to Python notebook tools for executing code:
+
+**Available Backends:**
+{chr(10).join(backends_info)}
+
+**Key Tools:**
+- `notebook_execute`: Run Python code with persistent state (variables preserved)
+- `notebook_create`: Create a new notebook (use gpu=true for GPU computing)
+- `notebook_variables`: Inspect defined variables
+- `notebook_reset`: Clear notebook state
+
+**Usage Tips:**
+- For quick calculations: Just use notebook_execute (auto-creates local notebook)
+- For GPU workloads: First create a notebook with gpu=true, then execute
+- Variables persist across executions in the same notebook
+- Use !pip install package for installing packages
+
+**GPU Backend (Kaggle):**
+- 30 hours/week free GPU (P100/T4)
+- Execution is async (may take 1-5 minutes)
+- Best for: ML training, large computations
+{boundary_info}{sandbox_info}{bindings_info}"""
+
+    @staticmethod
+    def _boundary_announcement(result: Any) -> Dict[str, Any]:
+        """The boundary this KERNEL established, for its FIRST result (#1012).
+
+        The system prompt carries the same fact as a standing statement; this
+        is the kernel's own report, so a kernel that respawned under a
+        different posture — or one whose interpreter could install no audit
+        hook — contradicts the prompt visibly in the result the model is
+        already reading, instead of being discovered through a refusal
+        mid-task.
+
+        A separate method rather than three lines inside ``_execute_code``
+        because that function is baselined by the complexity ratchet at 40 and
+        may not grow; merging an always-present dict also keeps the branch out
+        of the caller entirely.
+
+        Args:
+            result: The backend's ``ExecutionResult``. A backend that predates
+                ``boundary_kind`` — or any object that simply lacks it — is
+                read as "no announcement", never as an unknown tier.
+
+        Returns:
+            ``{"execution_boundary": {...}}`` on a kernel's first result, else
+            an empty dict. The tier is the kernel's own; the prose comes from
+            ``kernel_sandbox.boundary_notice``, the one place it is written.
+        """
+        announced = getattr(result, "boundary_kind", None)
+        if not announced:
+            return {}
+        return {"execution_boundary": {
+            "boundary": announced,
+            "notes": list(boundary_notice(announced)),
+        }}
+
+    def _boundary_instruction_block(self) -> str:
+        """State the ACTIVE execution boundary and its consequences (#1012).
+
+        The standing half of #1012's answer — the per-kernel half is the
+        ``execution_boundary`` key ``_execute_code`` puts on the first result
+        from a fresh kernel. This one lands in the system prompt, so it is
+        paid on every request and on the prompt-cache prefix; three things
+        keep that cost bounded and the prefix stable:
+
+        - **Only the active tier's lines are rendered**, never a table of all
+          four. The text comes from ``kernel_sandbox.boundary_notice``, which
+          is the one place a tier's consequences are written down.
+        - **Two consequences, not an essay** — which tier, and what it means
+          for imports and for spawning. Everything else a model needs it can
+          find out by running a cell.
+        - **The answer is stable within a session.** Each backend's
+          ``boundary_kind`` derives from the process's AppArmor state, the
+          operator's opt-out and whether a workspace resolved, none of which
+          changes under a running daemon. A kernel that respawns under a
+          different posture is the case this cannot cover, and is exactly
+          what the per-result announcement exists for.
+
+        Returns:
+            A markdown block, or ``""`` when the active backend claims no
+            tier (``kaggle``, a third-party backend) — saying nothing beats
+            asserting a boundary this plugin cannot name.
+        """
+        backend = self._backends.get(self._active_backend_name)
+        if backend is None:
+            return ""
+        kind = backend.boundary_kind()
+        lines = boundary_notice(kind)
+        if not lines:
+            return ""
+        bullets = "\n".join(f"- {line}" for line in lines)
+        return (f"\n**Notebook execution boundary: {kind}**\n{bullets}\n")
+
+    def get_auto_approved_tools(self) -> List[str]:
+        """Read-only tools are auto-approved."""
+        return ["notebook_variables", "notebook_list", "notebook_backends"]
+
+    def get_user_commands(self) -> List[UserCommand]:
+        """No user commands for now."""
+        return []
+
+    def format_permission_request(
+        self,
+        tool_name: str,
+        arguments: Dict[str, Any],
+        channel_type: str,
+    ) -> Optional[PermissionDisplayInfo]:
+        """Format code execution for permission display."""
+        if tool_name == "notebook_execute":
+            code = arguments.get("code", "")
+            notebook_id = arguments.get("notebook_id", self._current_notebook_id or "new")
+
+            # Get backend info
+            backend_name = self._active_backend_name
+            if notebook_id and notebook_id in self._get_all_notebooks():
+                # Find which backend has this notebook
+                for name, backend in self._backends.items():
+                    for nb in backend.list_notebooks():
+                        if nb.notebook_id == notebook_id:
+                            backend_name = name
+                            break
+
+            # Analyze code for security risks
+            warnings_text = None
+            warning_level = None
+            if self._sandbox_mode != SandboxMode.DISABLED and self._code_analyzer:
+                analysis = self._code_analyzer.analyze(code)
+                self._last_analysis = analysis
+
+                if analysis.has_risks:
+                    # Build warnings for separate display
+                    risk_lines = [analysis.get_summary()]
+                    if analysis.external_paths:
+                        risk_lines.append(f"External paths: {', '.join(analysis.external_paths[:3])}")
+                    risk_lines.append("")
+                    risk_lines.append(analysis.format_risks(max_items=5))
+                    warnings_text = "\n".join(risk_lines)
+
+                    # Map risk level to warning level
+                    max_level = analysis.max_risk_level
+                    if max_level in (RiskLevel.CRITICAL, RiskLevel.HIGH):
+                        warning_level = "error"
+                    elif max_level == RiskLevel.MEDIUM:
+                        warning_level = "warning"
+                    else:
+                        warning_level = "info"
+
+            summary = f"Execute IPython ({backend_name}): {notebook_id}"
+            if self._last_analysis and self._last_analysis.has_risks:
+                max_level = self._last_analysis.max_risk_level
+                if max_level:
+                    summary += f" [{max_level.value.upper()} RISK]"
+
+            return PermissionDisplayInfo(
+                summary=summary,
+                details=code,
+                format_hint="code",
+                language="ipython",
+                warnings=warnings_text,
+                warning_level=warning_level,
+            )
+        return None
+
+    def _get_all_notebooks(self) -> Dict[str, str]:
+        """Get all notebook IDs mapped to their backend names."""
+        notebooks = {}
+        for name, backend in self._backends.items():
+            for nb in backend.list_notebooks():
+                notebooks[nb.notebook_id] = name
+        return notebooks
+
+    def _execute_code(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute Python code in a notebook."""
+        code = args.get("code", "")
+        notebook_id = args.get("notebook_id")
+
+        if not code.strip():
+            return {"error": "No code provided"}
+
+        # Static analysis + the backend's declared boundary (issue #710).
+        refusal = self._guard_execution(code)
+        if refusal is not None:
+            return refusal
+
+        # Auto-create notebook if needed
+        if not notebook_id:
+            if self._current_notebook_id:
+                notebook_id = self._current_notebook_id
+            else:
+                # Create a default local notebook
+                result = self._create_notebook({"name": "default", "gpu": False})
+                if "error" in result:
+                    return result
+                notebook_id = result["notebook_id"]
+
+        # Find which backend has this notebook
+        backend = None
+        for name, b in self._backends.items():
+            for nb in b.list_notebooks():
+                if nb.notebook_id == notebook_id:
+                    backend = b
+                    break
+            if backend:
+                break
+
+        if not backend:
+            return {"error": f"Notebook {notebook_id} not found"}
+
+        self._trace(f"Executing in {notebook_id}: {code[:50]}...")
+
+        # Execute within a trusted bridge scope: the outer notebook_execute
+        # tool call was already permission-approved, and the user saw every
+        # ``tools.X(...)`` call in the approved code.  Bridge-dispatched
+        # inner tool calls inherit that approval via a thread-local flag
+        # the permission plugin checks (shared.ai_tool_runner.in_trusted_bridge_context).
+        from jaato_server.shared.ai_tool_runner import trusted_bridge_context
+        with trusted_bridge_context():
+            result = backend.execute(notebook_id, code)
+
+        # Format response
+        response: Dict[str, Any] = {
+            "notebook_id": notebook_id,
+            "status": result.status.value,
+            "execution_count": result.execution_count,
+        }
+
+        # Get effective callback (checks thread-local for parallel execution)
+        output_callback = self._get_effective_output_callback()
+
+        if result.status == ExecutionStatus.COMPLETED:
+            # Format output with notebook cell markers for the formatter pipeline
+            exec_count = result.execution_count or 1
+            output_parts = []
+
+            # Input cell with the code
+            input_cell = self._format_input_cell(code, exec_count)
+            output_parts.append(input_cell)
+            # Stream to UI if callback is set
+            if output_callback:
+                output_callback(input_cell + "\n")
+
+            # Output cells for each type
+            for output in result.outputs:
+                cell_output = None
+                if output.output_type == OutputType.STDOUT and output.content:
+                    cell_output = self._format_stdout_cell(output.content, exec_count)
+                elif output.output_type == OutputType.RESULT and output.content:
+                    cell_output = self._format_result_cell(output.content, exec_count)
+                elif output.output_type == OutputType.STDERR and output.content:
+                    cell_output = self._format_stderr_cell(output.content, exec_count)
+                elif output.output_type == OutputType.DISPLAY:
+                    mime = output.mime_type or "unknown"
+                    if mime.startswith("image/"):
+                        content = f"[Image: {mime}]"
+                    else:
+                        content = output.content[:500] if output.content else ""
+                    cell_output = self._format_display_cell(content, exec_count)
+
+                if cell_output:
+                    output_parts.append(cell_output)
+                    # Stream to UI if callback is set
+                    if output_callback:
+                        output_callback(cell_output + "\n")
+
+            response["output"] = "\n".join(output_parts)
+            response["variables"] = result.variables
+            if result.duration_seconds:
+                response["duration_seconds"] = round(result.duration_seconds, 2)
+
+        elif result.status == ExecutionStatus.FAILED:
+            exec_count = result.execution_count or 1
+            # Format error with markers
+            input_cell = self._format_input_cell(code, exec_count)
+            error_content = result.error_message or "Unknown error"
+            if result.traceback:
+                error_content += f"\n{result.traceback}"
+            error_cell = self._format_error_cell(error_content, exec_count)
+
+            response["output"] = input_cell + "\n" + error_cell
+            response["error"] = result.error_message
+
+            # Stream to UI if callback is set
+            if output_callback:
+                output_callback(input_cell + "\n")
+                output_callback(error_cell + "\n")
+
+        elif result.status in (ExecutionStatus.QUEUED, ExecutionStatus.RUNNING):
+            response["message"] = "Execution in progress (async backend). Poll with notebook_variables to check status."
+
+        # Include tool bindings call log if any calls were made
+        if self._tool_bindings_bridge and self._tool_bindings_bridge.call_log:
+            binding_calls = []
+            for record in self._tool_bindings_bridge.call_log:
+                entry = {
+                    "tool": record.tool_name,
+                    "success": record.success,
+                    "duration_seconds": round(record.duration_seconds, 3),
+                }
+                if record.error:
+                    entry["error"] = record.error
+                binding_calls.append(entry)
+            response["tool_calls"] = binding_calls
+            # Clear the log after including it so it doesn't accumulate
+            self._tool_bindings_bridge.call_log.clear()
+
+        response.update(self._boundary_announcement(result))
+
+        # Log response summary
+        output_len = len(response.get("output", ""))
+        error = response.get("error", "")
+        self._trace(f"Response: status={result.status.value}, output_len={output_len}, error={error[:100] if error else 'none'}")
+
+        response['_telemetry'] = {
+            'jaato.notebook.operation': 'execute',
+            'jaato.notebook.status': result.status.value,
+            'jaato.notebook.execution_count': result.execution_count or 0,
+        }
+
+        return response
+
+    def _create_notebook(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Create a new notebook."""
+        name = args.get("name", "untitled")
+        gpu = args.get("gpu", False)
+        self._trace(f"_create_notebook: name={name}, gpu={gpu}")
+
+        # Choose backend based on GPU requirement
+        if gpu:
+            # Lazy init kaggle backend on first GPU request
+            error = self._ensure_kaggle_backend()
+            if error:
+                return {
+                    "error": f"GPU backend (Kaggle) not available: {error}",
+                    "hint": "Install kaggle package and configure credentials",
+                }
+            backend = self._backends["kaggle"]
+        else:
+            # Honor the active (non-gpu) backend — "subprocess" by default since
+            # the 1c cutover, "local" only when explicitly opted out.  Hardcoding
+            # "local" here silently bypassed the subprocess kernel entirely
+            # (notebooks ran in-process, so os.getcwd() == the daemon launch dir).
+            backend = self._active_backend
+
+        try:
+            info = backend.create_notebook(name, gpu_enabled=gpu)
+            self._current_notebook_id = info.notebook_id
+
+            self._trace(f"Created notebook {info.notebook_id} on {info.backend}")
+
+            return {
+                "notebook_id": info.notebook_id,
+                "name": info.name,
+                "backend": info.backend,
+                "gpu_enabled": info.gpu_enabled,
+                "message": f"Notebook created. Use notebook_execute with code to run Python.",
+            }
+        except Exception as e:
+            return {"error": f"Failed to create notebook: {e}"}
+
+    def _get_variables(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Get variables from a notebook."""
+        notebook_id = args.get("notebook_id", self._current_notebook_id)
+
+        if not notebook_id:
+            return {"error": "No notebook specified and no current notebook"}
+
+        # Find the backend
+        for name, backend in self._backends.items():
+            for nb in backend.list_notebooks():
+                if nb.notebook_id == notebook_id:
+                    variables = backend.get_variables(notebook_id)
+                    return {
+                        "notebook_id": notebook_id,
+                        "backend": name,
+                        "variable_count": len(variables),
+                        "variables": variables,
+                    }
+
+        return {"error": f"Notebook {notebook_id} not found"}
+
+    def _reset_notebook(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Reset a notebook."""
+        notebook_id = args.get("notebook_id", self._current_notebook_id)
+
+        if not notebook_id:
+            return {"error": "No notebook specified and no current notebook"}
+
+        # Find and reset
+        for name, backend in self._backends.items():
+            for nb in backend.list_notebooks():
+                if nb.notebook_id == notebook_id:
+                    new_notebook_id = backend.reset_notebook(notebook_id)
+                    # Update current notebook reference if it changed
+                    if self._current_notebook_id == notebook_id:
+                        self._current_notebook_id = new_notebook_id
+                    result = {
+                        "notebook_id": new_notebook_id,
+                        "message": "Notebook reset. All variables cleared.",
+                    }
+                    if new_notebook_id != notebook_id:
+                        result["message"] += f" New notebook_id: {new_notebook_id}"
+                        result["previous_notebook_id"] = notebook_id
+                    return result
+
+        return {"error": f"Notebook {notebook_id} not found"}
+
+    def _list_notebooks(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """List all notebooks."""
+        notebooks = []
+        for name, backend in self._backends.items():
+            for nb in backend.list_notebooks():
+                notebooks.append({
+                    "notebook_id": nb.notebook_id,
+                    "name": nb.name,
+                    "backend": nb.backend,
+                    "gpu_enabled": nb.gpu_enabled,
+                    "execution_count": nb.execution_count,
+                    "variable_count": len(nb.variables),
+                })
+
+        return {
+            "notebook_count": len(notebooks),
+            "current_notebook": self._current_notebook_id,
+            "notebooks": notebooks,
+        }
+
+    def _list_backends(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """List available backends and their capabilities."""
+        backends = []
+        for name, backend in self._backends.items():
+            caps = backend.capabilities
+            backends.append({
+                "name": caps.name,
+                "available": backend.is_available(),
+                "supports_gpu": caps.supports_gpu,
+                "gpu_type": caps.gpu_type,
+                "max_runtime_hours": caps.max_runtime_hours,
+                "weekly_quota_hours": caps.weekly_quota_hours,
+                "is_async": caps.is_async,
+                "requires_auth": caps.requires_auth,
+            })
+
+        # Show kaggle as potential backend if available but not yet initialized
+        if "kaggle" not in self._backends and _KAGGLE_AVAILABLE and self._kaggle_enabled:
+            backends.append({
+                "name": "kaggle",
+                "available": "not_initialized",  # Will be initialized on first GPU request
+                "supports_gpu": True,
+                "gpu_type": "P100/T4",
+                "max_runtime_hours": 9.0,
+                "weekly_quota_hours": 30.0,
+                "is_async": True,
+                "requires_auth": True,
+                "note": "Will initialize on first GPU notebook request",
+            })
+
+        return {
+            "active_backend": self._active_backend_name,
+            "backends": backends,
+        }
+
+    # ==================== StreamingCapable Implementation ====================
+
+    def supports_streaming(self, tool_name: str) -> bool:
+        """Check if a tool supports streaming execution.
+
+        Only notebook_execute supports streaming for now.
+        """
+        return tool_name == "notebook_execute"
+
+    def get_streaming_tool_names(self) -> List[str]:
+        """Get list of tools that support streaming."""
+        return ["notebook_execute"]
+
+    def _error_chunk(
+        self,
+        message: str,
+        on_chunk: Optional[ChunkCallback],
+    ) -> StreamChunk:
+        """Build one ``error`` chunk, deliver it to ``on_chunk``, and return it.
+
+        Every early exit on the streaming path — no code, a refused cell, a
+        notebook that could not be created, a notebook that does not exist —
+        ends the same way: one error chunk, delivered to the callback when the
+        caller supplied one, and yielded.  Collecting that here keeps those
+        exits identical to each other (a chunk that reached the callback but
+        not the generator, or the reverse, is a client desync) and keeps the
+        generator readable.
+
+        Args:
+            message: Human-readable text, wrapped in the ``<notebook-cell
+                type="error">`` marker the formatter pipeline expects.
+            on_chunk: The caller's per-chunk callback, or ``None``.
+
+        Returns:
+            The chunk, for the caller to ``yield``.
+        """
+        chunk = StreamChunk(
+            content=f'<notebook-cell type="error">{message}</notebook-cell>',
+            chunk_type="error",
+        )
+        if on_chunk:
+            on_chunk(chunk)
+        return chunk
+
+    async def execute_streaming(
+        self,
+        tool_name: str,
+        arguments: Dict[str, Any],
+        on_chunk: Optional[ChunkCallback] = None,
+    ) -> AsyncIterator[StreamChunk]:
+        """Execute notebook code with streaming output.
+
+        Yields StreamChunks as stdout/stderr/results become available.
+        Output is wrapped with <notebook-cell> markers for the formatter pipeline.
+
+        Args:
+            tool_name: Should be "notebook_execute".
+            arguments: Tool arguments (code, notebook_id).
+            on_chunk: Optional callback for each chunk.
+
+        Yields:
+            StreamChunk objects for input, stdout, stderr, result, and errors.
+        """
+        if tool_name != "notebook_execute":
+            raise ValueError(f"Streaming not supported for tool: {tool_name}")
+
+        code = arguments.get("code", "")
+        notebook_id = arguments.get("notebook_id")
+
+        if not code.strip():
+            yield self._error_chunk("No code provided", on_chunk)
+            return
+
+        # The same pre-dispatch gate the non-streaming path applies.  This is
+        # the LIVE path (supports_streaming is True for notebook_execute), and
+        # before #710 it ran neither the static analyzer nor any boundary
+        # check — so `sandbox_mode: strict` blocked nothing in a daemon.
+        refusal = self._guard_execution(code)
+        if refusal is not None:
+            yield self._error_chunk(_refusal_text(refusal), on_chunk)
+            return
+
+        # Auto-create notebook if needed
+        if not notebook_id:
+            notebook_id = self._current_notebook_id
+            if not notebook_id:
+                result = self._create_notebook({"name": "default", "gpu": False})
+                if "error" in result:
+                    yield self._error_chunk(result["error"], on_chunk)
+                    return
+                notebook_id = result["notebook_id"]
+
+        # Find the backend
+        backend = None
+        backend_name = "local"
+        for name, b in self._backends.items():
+            for nb in b.list_notebooks():
+                if nb.notebook_id == notebook_id:
+                    backend = b
+                    backend_name = name
+                    break
+            if backend:
+                break
+
+        if not backend:
+            yield self._error_chunk(f"Notebook {notebook_id} not found", on_chunk)
+            return
+
+        # Next execution number (cosmetic "In [N]:" label).  Read it via the
+        # NotebookInfo protocol, not a backend-specific internal — the subprocess
+        # kernel backend has no `_execution_counts`.
+        prior = next((nb.execution_count for nb in backend.list_notebooks()
+                      if nb.notebook_id == notebook_id), 0)
+        exec_count = prior + 1
+
+        self._trace(f"Streaming execution in {notebook_id}: {code[:50]}...")
+
+        # Yield the input cell first (so formatter can display In[n]:)
+        input_chunk = StreamChunk(
+            content=self._format_input_cell(code, exec_count),
+            chunk_type="input",
+            metadata={"notebook_id": notebook_id, "execution_count": exec_count},
+        )
+        if on_chunk:
+            on_chunk(input_chunk)
+        yield input_chunk
+
+        # Execute with streaming output capture
+        async for chunk in self._execute_streaming_impl(
+            backend, notebook_id, code, exec_count, on_chunk
+        ):
+            yield chunk
+
+    async def _execute_streaming_impl(
+        self,
+        backend: NotebookBackend,
+        notebook_id: str,
+        code: str,
+        exec_count: int,
+        on_chunk: Optional[ChunkCallback] = None,
+    ) -> AsyncIterator[StreamChunk]:
+        """Implementation of streaming execution using a background thread.
+
+        Runs the execution in a thread and yields output chunks as they arrive.
+        """
+        output_queue: queue.Queue = queue.Queue()
+        result_holder: List[Any] = [None]  # To hold the final result
+        error_holder: List[Optional[Exception]] = [None]
+
+        def run_execution():
+            """Run execution in a background thread.
+
+            Enters the trusted bridge context on **this** thread because
+            the flag is thread-local — entering it outside would not
+            propagate to ``backend.execute``.
+            """
+            from jaato_server.shared.ai_tool_runner import trusted_bridge_context
+            try:
+                with trusted_bridge_context():
+                    result = backend.execute(notebook_id, code)
+                result_holder[0] = result
+            except Exception as e:
+                error_holder[0] = e
+
+        # Start execution in a background thread, within a COPY of the current
+        # context.  ContextVars do NOT propagate to a raw thread, and the
+        # subprocess backend's _spawn reads the session workspace from the
+        # session_context ContextVar (get_workspace_root) — without this copy it
+        # would miss the per-session value and the kernel would chdir to the
+        # daemon launch dir (the streaming-path analogue of the thread-local
+        # trusted_bridge note in run_execution; same root cause, ContextVars
+        # instead of a thread-local).
+        ctx = contextvars.copy_context()
+        exec_thread = threading.Thread(
+            target=lambda: ctx.run(run_execution), daemon=True)
+        exec_thread.start()
+
+        # Wait for execution to complete (with periodic checks)
+        while exec_thread.is_alive():
+            await asyncio.sleep(0.1)
+
+        # Check for errors
+        if error_holder[0]:
+            chunk = StreamChunk(
+                content=f"<notebook-cell type=\"error\">{str(error_holder[0])}</notebook-cell>",
+                chunk_type="error",
+            )
+            if on_chunk:
+                on_chunk(chunk)
+            yield chunk
+            return
+
+        result = result_holder[0]
+        if result is None:
+            chunk = StreamChunk(
+                content="<notebook-cell type=\"error\">Execution returned no result</notebook-cell>",
+                chunk_type="error",
+            )
+            if on_chunk:
+                on_chunk(chunk)
+            yield chunk
+            return
+
+        # Yield output chunks based on result
+        sequence = 1
+
+        if result.status == ExecutionStatus.COMPLETED:
+            for output in result.outputs:
+                if output.output_type == OutputType.STDOUT and output.content:
+                    chunk = StreamChunk(
+                        content=self._format_stdout_cell(output.content, exec_count),
+                        chunk_type="stdout",
+                        sequence=sequence,
+                        metadata={"notebook_id": notebook_id, "execution_count": exec_count},
+                    )
+                    sequence += 1
+                    if on_chunk:
+                        on_chunk(chunk)
+                    yield chunk
+
+                elif output.output_type == OutputType.STDERR and output.content:
+                    chunk = StreamChunk(
+                        content=self._format_stderr_cell(output.content, exec_count),
+                        chunk_type="stderr",
+                        sequence=sequence,
+                        metadata={"notebook_id": notebook_id, "execution_count": exec_count},
+                    )
+                    sequence += 1
+                    if on_chunk:
+                        on_chunk(chunk)
+                    yield chunk
+
+                elif output.output_type == OutputType.RESULT and output.content:
+                    chunk = StreamChunk(
+                        content=self._format_result_cell(output.content, exec_count),
+                        chunk_type="result",
+                        sequence=sequence,
+                        metadata={"notebook_id": notebook_id, "execution_count": exec_count},
+                    )
+                    sequence += 1
+                    if on_chunk:
+                        on_chunk(chunk)
+                    yield chunk
+
+                elif output.output_type == OutputType.DISPLAY:
+                    mime = output.mime_type or "unknown"
+                    if mime.startswith("image/"):
+                        content = f"[Image: {mime}]"
+                    else:
+                        content = output.content[:500] if output.content else ""
+                    chunk = StreamChunk(
+                        content=self._format_display_cell(content, exec_count),
+                        chunk_type="display",
+                        sequence=sequence,
+                        metadata={"notebook_id": notebook_id, "execution_count": exec_count, "mime": mime},
+                    )
+                    sequence += 1
+                    if on_chunk:
+                        on_chunk(chunk)
+                    yield chunk
+
+        elif result.status == ExecutionStatus.FAILED:
+            error_content = result.error_message or "Unknown error"
+            if result.traceback:
+                error_content += f"\n{result.traceback}"
+            chunk = StreamChunk(
+                content=self._format_error_cell(error_content, exec_count),
+                chunk_type="error",
+                sequence=sequence,
+                metadata={"notebook_id": notebook_id, "execution_count": exec_count},
+            )
+            if on_chunk:
+                on_chunk(chunk)
+            yield chunk
+
+        # Final summary chunk
+        duration = result.duration_seconds or 0
+        summary = f"Execution completed in {duration:.2f}s"
+        if result.variables:
+            summary += f", {len(result.variables)} variables defined"
+
+        yield StreamChunk(
+            content=summary,
+            chunk_type="summary",
+            sequence=sequence + 1,
+            metadata={
+                "notebook_id": notebook_id,
+                "execution_count": exec_count,
+                "status": result.status.value,
+                "duration_seconds": duration,
+                "variables": result.variables,
+            },
+        )
+
+    # ==================== Notebook Cell Formatting ====================
+    #
+    # These methods emit <nb-row> markers directly for client-side rendering.
+    # The format is: <nb-row type="..." label="...">content</nb-row>
+    #
+    # Labels:
+    #   input  → "In [n]:"
+    #   stdout → "Out [n]:"
+    #   stderr → "Err [n]:"
+    #   result → "Out [n]:"
+    #   display → "Out [n]:"
+    #   error  → "Err [n]:"
+
+    def _format_input_cell(self, code: str, exec_count: int) -> str:
+        """Format code as an input cell with nb-row markers.
+
+        Uses 'ipython' language to skip LSP validation.  Cells support
+        per-line ``!shell`` escapes (see cell_transform.py); ``%magic`` is
+        NOT implemented.
+        """
+        label = f"In [{exec_count}]:"
+        return f'<nb-row type="input" label="{label}">\n```ipython\n{code}\n```\n</nb-row>'
+
+    def _format_stdout_cell(self, content: str, exec_count: int) -> str:
+        """Format stdout output with nb-row markers."""
+        if len(content) > self._max_output_length:
+            content = content[:self._max_output_length] + "\n... (truncated)"
+        label = f"Out [{exec_count}]:"
+        return f'<nb-row type="stdout" label="{label}">\n{content}\n</nb-row>'
+
+    def _format_stderr_cell(self, content: str, exec_count: int) -> str:
+        """Format stderr output with nb-row markers."""
+        if len(content) > self._max_output_length:
+            content = content[:self._max_output_length] + "\n... (truncated)"
+        label = f"Err [{exec_count}]:"
+        return f'<nb-row type="stderr" label="{label}">\n{content}\n</nb-row>'
+
+    def _format_result_cell(self, content: str, exec_count: int) -> str:
+        """Format execution result with nb-row markers."""
+        if len(content) > self._max_output_length:
+            content = content[:self._max_output_length] + "\n... (truncated)"
+        label = f"Out [{exec_count}]:"
+        return f'<nb-row type="result" label="{label}">\n{content}\n</nb-row>'
+
+    def _format_display_cell(self, content: str, exec_count: int) -> str:
+        """Format display output (images, etc.) with nb-row markers."""
+        label = f"Out [{exec_count}]:"
+        return f'<nb-row type="display" label="{label}">\n{content}\n</nb-row>'
+
+    def _format_error_cell(self, content: str, exec_count: int) -> str:
+        """Format error output with nb-row markers."""
+        if len(content) > 2000:
+            content = content[:2000] + "\n... (truncated)"
+        label = f"Err [{exec_count}]:"
+        return f'<nb-row type="error" label="{label}">\n{content}\n</nb-row>'
+
+
+def create_plugin() -> NotebookPlugin:
+    """Factory function to create the notebook plugin."""
+    return NotebookPlugin()

@@ -116,7 +116,7 @@ it a `config` object whose `ticketUrl` replaces the launcher's `token`.
 ## 4. The daemon-side contract (#1074, implemented in PR #1075)
 
 Everything in this section is read from PR #1075's branch
-(`server/ws_tickets.py`, `server/websocket.py`, `jaato_sdk/events.py`),
+(`jaato_server/server/ws_tickets.py`, `jaato_server/server/websocket.py`, `jaato_sdk/events.py`),
 not assumed. Protocol **1.10**.
 
 ### 4.1 Credentials
@@ -270,7 +270,7 @@ None of this changes the launcher's behaviour: with `token` present and no
 
 ### 5.3 The daemon
 
-Only #1074. The BFF adds nothing to `server/`.
+Only #1074. The BFF adds nothing to `jaato_server/server/`.
 
 ## 6. Modes
 
@@ -334,7 +334,7 @@ The daemon side of the same pairing:
 
 ```bash
 # /etc/jaato/ws-apps.json, mode 0600:  {"jaato-web-coder": "<the same credential>"}
-python -m server --web-socket 127.0.0.1:8080 --ws-app-credentials /etc/jaato/ws-apps.json --daemon
+python -m jaato_server --web-socket 127.0.0.1:8080 --ws-app-credentials /etc/jaato/ws-apps.json --daemon
 ```
 
 `--ws-token-file` may stay beside it so the TUI and `npx @jaato/web-coder-ui` keep
@@ -555,7 +555,7 @@ than self-daemonising:
 | Unit | Runs | Note |
 |---|---|---|
 | `keycloak.service` | Keycloak's own `kc.sh start` with `--hostname` set to the public URL and `--hostname-backchannel-dynamic=true` | the host's existing install |
-| `jaato-server.service` | `python -m server --web-socket 127.0.0.1:8080 --ws-app-credentials /etc/jaato/ws-apps.json` **without `--daemon`** | `--daemon` double-forks, which fights systemd's process tracking; `Type=simple` and let systemd own it |
+| `jaato-server.service` | `python -m jaato_server --web-socket 127.0.0.1:8080 --ws-app-credentials /etc/jaato/ws-apps.json` **without `--daemon`** | `--daemon` double-forks, which fights systemd's process tracking; `Type=simple` and let systemd own it |
 | `jaato-web-coder-server.service` | `jaato-web-coder-server --config /etc/jaato-web-coder/server.yaml` | `DynamicUser=` or a dedicated user; the secret files are readable by that user only |
 
 Plus the reverse proxy's site config (`/`, `/auth/`, `/daemon` with the
@@ -615,3 +615,47 @@ feature off (`credentials:` absent) `config.json` names no
 field it always had. The daemon's own `~/.jaato/<provider>_auth.json` tiers
 are untouched: they serve the mono-user installs this client is not
 intended for.
+
+## 13. A note the person wrote about a session
+
+Several sessions running, and nothing says which of them needs *you*. The
+picker names each by what the **agent** thought it was about
+(`Session.description`, written by the model and rewritten every turn), and
+the only other field is `Session.name` — free text, create-only, no rename
+verb anywhere in the tree. Neither is a place to put "waiting on an answer
+about the grace period, then re-run the e2e suite".
+
+The shapes, weighed as §12's were:
+
+| Shape | Why not |
+|---|---|
+| a `session.note` verb, stored in the session record | the note is per *person*, and the daemon knows people only as `app:user`. It would sit in the protocol for one client and the TUI would carry it and never call it. `description` already demonstrates the failure mode: a model-written field cannot hold a human's text |
+| a file in the workspace tree (`.jaato/notes/<id>.md`) | `readFile`-reachable by the agent, so "the model never sees it" would mean *not injected into the prompt* rather than *unreachable* |
+| **application state in the BFF** | no daemon change, no protocol bump, and genuinely outside the agent's reach |
+
+`src/notes.ts` is that store, and it reuses §12's envelope rather than
+introducing a second storage posture in one process: AES-256-GCM under a key
+HKDF-derived from `notes.key_file` (its own info string, so one secret file
+can serve both stores without either's key being the other's), `owner\0
+sessionId` as the AAD, atomic temp-file-plus-rename at mode 0600. Owner is
+the OIDC `sub`. A PUT with empty text *is* a delete, so clearing the box and
+deleting the note are one act rather than two affordances for one intent.
+
+**The session id is opaque here.** The store keeps text under a key; the
+browser joins that key against the `session.list` listing it already holds.
+Nothing in this server models a session, knows whether one exists, or
+notices when one is deleted — which is why a note about a deleted session is
+a stranded row rather than an error, and why `End session` on the page
+forgets the note itself. Consequence of keying on the person rather than the
+session: a note on a session you did not create is *your* note about their
+session.
+
+Bounds are per owner (`MAX_NOTE_CHARS`, `MAX_NOTES_PER_OWNER`) and the id
+must match `SESSION_ID_RE` before it becomes a path component. The note's
+**text is never logged**, at any level.
+
+With `notes:` absent, `config.json` names no `notesUrl`, the routes are 404,
+and the bundle falls back to `localStorage` — which is the right answer for
+a local `npx @jaato/web-coder-ui` against a daemon, and is *said* rather
+than assumed: the scope reaches the UI, which renders "kept in this browser
+only", because a silent fallback is a promise the storage does not keep.
