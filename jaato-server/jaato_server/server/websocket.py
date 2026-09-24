@@ -1022,6 +1022,20 @@ class JaatoWSServer:
             (see ``core.py`` step 2).
             """
             if not workspace_path:
+                # #1296: this hook fires for EVERY session bootstrap on
+                # this daemon, not only WS-provisioned ones (it is
+                # registered on the shared, transport-agnostic
+                # ``_pre_initialize_hooks`` list), so a session created
+                # with no workspace_path at all — an IPC/embedded/API
+                # session that never selected one — reaches here
+                # routinely.  DEBUG, not WARNING: making this branch loud
+                # would reproduce exactly the log-spam this issue exists
+                # to avoid, one level up from branch (c) below.
+                logger.debug(
+                    "AppArmor pre-init: no workspace_path for session %s "
+                    "— nothing to confine, skipping",
+                    session_id,
+                )
                 return
 
             # Gate: only WS-provisioned sessions (workspace under
@@ -1030,12 +1044,39 @@ class JaatoWSServer:
             try:
                 ws_workspace_root = os.path.realpath(ws_server._workspace_root)
                 sess_workspace = os.path.realpath(workspace_path)
-            except OSError:
+            except OSError as exc:
+                # #1296: unlike the two branches around it, this one is
+                # NOT the routine "this session isn't mine" exit — it
+                # only fires once a real workspace_path was handed in and
+                # the kernel refused to resolve it (or the WS server's
+                # own configured root cannot be resolved), which is
+                # anomalous rather than a normal session shape.  WARNING,
+                # naming both paths so a broken symlink or a vanished
+                # root is diagnosable from the log alone.
+                logger.warning(
+                    "AppArmor pre-init: realpath failed for session %s "
+                    "(workspace_path=%r, ws_workspace_root=%r): %s: %s "
+                    "— skipping AppArmor confinement for this session",
+                    session_id, workspace_path, ws_server._workspace_root,
+                    type(exc).__name__, exc,
+                )
                 return
             if not (
                 sess_workspace == ws_workspace_root
                 or sess_workspace.startswith(ws_workspace_root + os.sep)
             ):
+                # #1296: the ROUTINE exit — every non-WS session
+                # (IPC / user-CWD) takes this branch, since the hook is
+                # registered for every session bootstrap regardless of
+                # transport.  DEBUG only, so it stays greppable on
+                # demand without adding one line per ordinary session
+                # creation at the daemon's default log level.
+                logger.debug(
+                    "AppArmor pre-init: session %s workspace %s is not "
+                    "under the WS server's workspace_root %s — IPC or "
+                    "user-CWD session, not WS-provisioned",
+                    session_id, sess_workspace, ws_workspace_root,
+                )
                 return  # IPC or user-CWD session — not WS-provisioned
 
             daemon_loop = ws_server._event_loop
