@@ -30,7 +30,7 @@ def _tool(plugin_name, tool_name):
 
 
 def test_a_tools_parameters_are_published():
-    t = _tool("subagent", "send_to_sibling")
+    t = _tool("courier", "send_to_sibling")
     assert t is not None
     assert t["parameters"]["properties"].keys() == {"sibling_name", "message"}
     assert t["parameters"]["required"] == ["sibling_name", "message"]
@@ -42,9 +42,9 @@ def test_the_published_signature_matches_the_live_schema():
     Compared against ``get_tool_schemas()`` rather than a copy, because a
     guard that compares two documents proves only that they agree.
     """
-    from jaato_server.shared.plugins.subagent.plugin import SubagentPlugin
-    live = {s.name: s for s in SubagentPlugin().get_tool_schemas()}
-    data, _ = explain.plugin("subagent")
+    from jaato_server.shared.plugins.courier.plugin import CourierPlugin
+    live = {s.name: s for s in CourierPlugin().get_tool_schemas()}
+    data, _ = explain.plugin("courier")
     for entry in data["tools"]:
         schema = live.get(entry["name"])
         if schema is None:      # dynamic/registry-only tools
@@ -72,25 +72,25 @@ def test_the_rendering_distinguishes_required_from_optional():
 
 
 def test_the_human_rendering_shows_the_signature():
-    _data, text = explain.plugin("subagent")
+    _data, text = explain.plugin("courier")
     assert "send_to_sibling(sibling_name, message)" in text
 
 
 def test_introspection_copies_rather_than_shares_the_schema():
     """A consumer mutating what it was handed must not reshape the plugin."""
     PL = introspect.plugins()
-    tool = next(t for t in PL["subagent"].tools if t.name == "send_to_sibling")
+    tool = next(t for t in PL["courier"].tools if t.name == "send_to_sibling")
     tool.parameters["properties"]["injected"] = {"type": "string"}
 
-    from jaato_server.shared.plugins.subagent.plugin import SubagentPlugin
-    live = next(s for s in SubagentPlugin().get_tool_schemas()
+    from jaato_server.shared.plugins.courier.plugin import CourierPlugin
+    live = next(s for s in CourierPlugin().get_tool_schemas()
                 if s.name == "send_to_sibling")
     assert "injected" not in live.parameters["properties"]
 
 
 def test_the_json_surface_round_trips():
     """It is consumed as JSON by a CLI caller, so it must serialize."""
-    data, _ = explain.plugin("subagent")
+    data, _ = explain.plugin("courier")
     back = json.loads(json.dumps(data, default=str))
     entry = next(t for t in back["tools"] if t["name"] == "send_to_sibling")
     assert entry["parameters"]["required"] == ["sibling_name", "message"]

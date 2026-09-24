@@ -175,6 +175,15 @@ export const MIN_SCAFFOLD_INTEGRATION_PROTOCOL = "1.21";
 export const MIN_MEMORY_VERBS_PROTOCOL = "1.22";
 
 /**
+ * Protocol floor for {@link JaatoClient.sendSessionMessage}.  Same rule as
+ * {@link MIN_WORKSPACE_IGNORE_PROTOCOL}: an older daemon ignores
+ * ``session.message`` silently, and a client that then reported the message
+ * as delivered would be describing one nobody carried.  So the call is
+ * refused below this version rather than sent blind.
+ */
+export const MIN_SESSION_MESSAGE_PROTOCOL = "1.23";
+
+/**
  * Size limits a daemon enforces, advertised in ``ConnectedEvent.server_info``.
  *
  * ``maxMessageSize`` is the largest single WebSocket message the daemon
@@ -1089,6 +1098,73 @@ export class JaatoClient {
       command: "workspace.ignore",
       args: [path],
     } as CommandRequest);
+  }
+
+  /**
+   * Message another session in this session's GROUP, waking it if it is
+   * cold (protocol 1.22).  The client-tier form of the ``courier`` plugin's
+   * ``send_to_session``: the sender is this connection's OWN session,
+   * resolved daemon-side, and the target must share a group with it — a
+   * cascade, or the same authenticated creator.  A cold target is revived
+   * from disk and driven; a busy one queues the message on the idle-only
+   * peer tier; a terminated one is never woken.  Mirror of Python
+   * ``IPCClient.send_session_message``.
+   *
+   * Fire-and-forget: the daemon answers with one ``session.message.result``
+   * event carrying the receipt — ``status`` is ``accepted`` / ``queued``
+   * (delivered), ``no_such_session``, ``ambiguous`` (with ``candidates``),
+   * ``session_cold``, ``duplicate``, ``terminated`` or ``refused`` (with
+   * ``error``).  Neither delivered status claims the peer read or acted on
+   * anything.
+   *
+   * @param target A session id, or a cascade-scoped sibling name.
+   * @param text The message; may be empty when attachments carry the content.
+   * @param options.attachments Binary content in the canonical wire shape
+   *   (``{mime_type, data, display_name}``), delivered on the drive branch
+   *   only — a busy target answers ``refused`` rather than dropping them.
+   * @param options.eventId Idempotency key; a redelivered id answers
+   *   ``duplicate``, a benign no-op.
+   * @param options.requestId Correlation id echoed on the result event.
+   * @throws Error against a daemon below {@link MIN_SESSION_MESSAGE_PROTOCOL},
+   *   or when neither text nor attachments is given.
+   */
+  async sendSessionMessage(
+    target: string,
+    text = "",
+    options?: {
+      attachments?: Array<Record<string, unknown>>;
+      eventId?: string;
+      requestId?: string;
+    },
+  ): Promise<void> {
+    if (
+      this._serverProtocolVersion === null ||
+      !isProtocolCompatible(
+        this._serverProtocolVersion,
+        MIN_SESSION_MESSAGE_PROTOCOL,
+      )
+    ) {
+      throw new Error(
+        `sendSessionMessage: this daemon speaks protocol ` +
+          `${this._serverProtocolVersion ?? "unknown"} and does not serve ` +
+          `session.message (needs >= ${MIN_SESSION_MESSAGE_PROTOCOL}).  ` +
+          `It would ignore the command silently.  Upgrade the daemon.`,
+      );
+    }
+    const attachments = options?.attachments ?? [];
+    if (!text && attachments.length === 0) {
+      throw new Error(
+        "sendSessionMessage requires text or attachments — a message with " +
+          "no content drives a turn the peer has nothing to answer",
+      );
+    }
+    const payload: Record<string, unknown> = { target, text };
+    if (options?.eventId !== undefined) payload.event_id = options.eventId;
+    if (attachments.length > 0) payload.attachments = attachments;
+    // CommandRequest carries no request_id of its own, so the correlation
+    // id rides the payload and the daemon echoes it from there.
+    if (options?.requestId !== undefined) payload.request_id = options.requestId;
+    await this.executeCommand("session.message", [], payload);
   }
 
   /**

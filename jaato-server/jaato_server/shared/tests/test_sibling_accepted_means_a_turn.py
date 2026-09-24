@@ -173,8 +173,8 @@ def test_draining_keeps_parent_priority_ahead_of_siblings():
 
 def test_the_tool_description_no_longer_promises_what_it_cannot_do():
     """The receipt vocabulary is a contract the model reads."""
-    from jaato_server.shared.plugins.subagent.plugin import SubagentPlugin
-    schema = next(s for s in SubagentPlugin().get_tool_schemas()
+    from jaato_server.shared.plugins.courier.plugin import CourierPlugin
+    schema = next(s for s in CourierPlugin().get_tool_schemas()
                   if s.name == "send_to_sibling")
     assert "a turn has been started on it" in schema.description
     assert "is now taking a turn" not in schema.description

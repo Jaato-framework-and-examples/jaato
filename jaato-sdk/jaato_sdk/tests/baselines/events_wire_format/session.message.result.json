@@ -1,0 +1,17 @@
+{
+  "type": "session.message.result",
+  "timestamp": "<TIMESTAMP>",
+  "session_id": "",
+  "request_id": null,
+  "target": "",
+  "status": "",
+  "ok": false,
+  "message_id": "",
+  "target_session_id": "",
+  "sibling_name": "",
+  "group_key": "",
+  "woken": false,
+  "headless": false,
+  "candidates": [],
+  "error": ""
+}

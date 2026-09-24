@@ -2,7 +2,7 @@
 
 ``daemon.plugin_execute`` ships ``plugin_name``, ``tool_name`` and ``args``
 — and no caller identity.  So a daemon-side plugin instance answering a
-forwarded call has no idea who asked.  For ``subagent.list_siblings``,
+forwarded call has no idea who asked.  For ``courier.list_siblings``,
 whose entire job is "describe the cascade around ME", that is fatal: it
 failed EVERY forwarded call.
 
@@ -21,7 +21,7 @@ reached, which is why the guard could never pass.
 from types import SimpleNamespace
 
 from jaato_server.shared.plugins.registry import PluginRegistry
-from jaato_server.shared.plugins.subagent.plugin import SubagentPlugin
+from jaato_server.shared.plugins.courier.plugin import CourierPlugin
 from jaato_server.shared.tool_result_builder import split_executor_result
 
 
@@ -48,7 +48,7 @@ def test_registry_session_id_is_per_session():
 
 
 def _plugin_with(registry, manager):
-    p = SubagentPlugin()
+    p = CourierPlugin()
     p.set_plugin_registry(registry)
     if manager is not None:
         p.set_session_manager(manager)

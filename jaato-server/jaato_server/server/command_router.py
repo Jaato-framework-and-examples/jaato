@@ -25,6 +25,85 @@ from jaato_server.shared.peer_identity import unreachable_client_paths
 logger = logging.getLogger(__name__)
 
 
+#: The verbs that reach ANOTHER session, each handled by a method taking
+#: ``(client_id, args, payload)``.  A table rather than three ``elif``
+#: branches so ``_dispatch`` -- frozen in the complexity baseline -- does not
+#: grow by one decision per verb of this family.
+_SESSION_MESSAGING_VERBS = {
+    "session.send": "_handle_session_send",
+    "session.wake": "_handle_session_wake",
+    "session.message": "_handle_session_message",
+}
+
+
+def _mapping_attachments(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The ``attachments`` a payload carries, mapping entries only.
+
+    Shared by the ``session.wake`` and ``session.message`` decoders so the
+    two verbs cannot disagree about what an attachment on the wire is.  A
+    path, a number or any other non-mapping entry is dropped here rather
+    than handed onward as something the multimodal path would have to
+    re-check (#845): the daemon cannot read a client's files, which is why
+    ``_normalize_attachments`` expands paths on the sending side.
+    """
+    raw = payload.get("attachments")
+    return [a for a in raw if isinstance(a, dict)] if isinstance(raw, list) else []
+
+
+def _decode_message_request(
+    args: List[Any], payload: Optional[dict],
+) -> "tuple[str, str, Optional[str], Optional[str], List[dict]]":
+    """Decode a ``session.message`` request from either accepted shape.
+
+    Returns ``(target, text, event_id, request_id, attachments)``.  The
+    structured ``payload`` wins over positional ``args`` field by field;
+    the trailing positional form joins the remainder so a typed message
+    need not be quoted.  ``attachments`` and ``request_id`` are
+    payload-only -- bytes have no positional spelling (#845), and
+    ``CommandRequest`` has no field for a correlation id, so the SDK puts
+    it in the payload and it is echoed from there.  Only mapping
+    attachments survive, as for ``session.wake``.
+    """
+    p = payload or {}
+    target = p.get("target") or (args[0] if len(args) > 0 else None)
+    text = p.get("text") or (" ".join(args[1:]) if len(args) > 1 else "")
+    request_id = p.get("request_id")
+    attachments = _mapping_attachments(p)
+    return (
+        str(target).strip() if target is not None else "",
+        str(text or ""),
+        p.get("event_id"),
+        str(request_id) if request_id is not None else None,
+        attachments,
+    )
+
+
+def _message_result_event(request_id: Optional[str], target: str,
+                          receipt: Dict[str, Any]) -> Any:
+    """Render a ``deliver_group_message`` receipt as the typed result event.
+
+    ``ok`` is the DELIVERED set plus the benign ``duplicate`` (a redelivered
+    ``event_id`` is an idempotent no-op, not a failed delivery -- the
+    ``session.wake`` reading).
+    """
+    from jaato_sdk.events import SessionMessageResultEvent
+    status = str(receipt.get("status") or "refused")
+    return SessionMessageResultEvent(
+        request_id=request_id,
+        target=target,
+        status=status,
+        ok=status in ("accepted", "queued", "duplicate"),
+        message_id=receipt.get("message_id") or "",
+        target_session_id=receipt.get("target_session_id") or "",
+        sibling_name=receipt.get("sibling_name") or "",
+        group_key=receipt.get("group_key") or "",
+        woken=bool(receipt.get("woken")),
+        headless=bool(receipt.get("headless")),
+        candidates=list(receipt.get("candidates") or []),
+        error=receipt.get("error") or receipt.get("detail") or "",
+    )
+
+
 def _decode_wake_request(
     args: List[Any], payload: Optional[dict],
 ) -> "tuple[Optional[str], Optional[str], str, Optional[str], List[dict]]":
@@ -48,10 +127,7 @@ def _decode_wake_request(
     text = p.get("text") or (args[1] if len(args) > 1 else None)
     source = p.get("source") or (args[2] if len(args) > 2 else "user")
     event_id = p.get("event_id") or (args[3] if len(args) > 3 else None)
-    raw = p.get("attachments")
-    attachments = (
-        [a for a in raw if isinstance(a, dict)] if isinstance(raw, list) else []
-    )
+    attachments = _mapping_attachments(p)
     return session_id, text, source, event_id, attachments
 
 
@@ -408,12 +484,14 @@ class CommandRouter:
                 self._handle_session_save(client_id, session_id, event.args)
                 return
 
-            elif cmd == "session.send":
-                self._handle_session_send(client_id, event.args, event.payload)
-                return
-
-            elif cmd == "session.wake":
-                self._handle_session_wake(client_id, event.args, event.payload)
+            elif cmd in ("session.send", "session.wake", "session.message"):
+                # One branch for the three verbs that reach ANOTHER session
+                # (nudge a named stage, wake by id, message a group peer):
+                # same shape, same (args, payload) contract.  The literals
+                # stay here so a reader (and the session.send guard) finds
+                # the verb where every other verb is.
+                getattr(self, _SESSION_MESSAGING_VERBS[cmd])(
+                    client_id, event.args, event.payload)
                 return
 
             elif cmd == "session.bind_wake":
@@ -1216,6 +1294,55 @@ class CommandRouter:
         self._event_sink.send_event(client_id, SystemMessageEvent(
             message=f"session.send: {receipt['status']} → {name!r}",
         ))
+
+    def _handle_session_message(
+        self, client_id: str, args: list, payload: Optional[dict],
+    ) -> None:
+        """Handle ``session.message`` — a message from the CALLER'S session to
+        another session in a common group (protocol 1.23).
+
+        The client-tier form of the ``courier`` plugin's ``send_to_session``:
+        the same daemon method, ``SessionManager.deliver_group_message``, with
+        the sender being the caller's own session — resolved from
+        ``client_id``, never from the payload, so a client can only speak AS
+        the session it is attached to.  A cold target is woken.
+
+        Accepts a structured ``payload`` (SDK callers) —
+        ``{target, text, attachments?, event_id?, request_id?}`` — or
+        positional ``args`` ``[target, text...]``; see
+        :func:`_decode_message_request`.
+
+        Always answers with ONE :class:`SessionMessageResultEvent` carrying
+        the receipt — a driver branches on ``status``, so the receipt travels
+        as fields rather than as a ``SystemMessageEvent`` string — except for
+        a caller with no session, which is a ``SessionError`` (the reply that
+        settles a client's ``ask()`` rather than hanging it, #1007).
+        """
+        from jaato_sdk.events import ErrorEvent
+        target, text, event_id, request_id, attachments = (
+            _decode_message_request(args, payload))
+
+        session = self._session_manager.get_client_session(client_id)
+        if session is None:
+            self._event_sink.send_event(client_id, ErrorEvent(
+                error=("session.message: no active session — attach to (or "
+                       "create) the session you want to speak as"),
+                error_type="SessionError",
+                recoverable=True,
+                request_id=request_id,
+            ))
+            return
+        if not target or not (text or attachments):
+            receipt = {"status": "refused",
+                       "error": ("session.message requires <target> and "
+                                 "<message> (or attachments)")}
+        else:
+            receipt = self._session_manager.deliver_group_message(
+                session.session_id, target, text,
+                attachments=attachments, event_id=event_id,
+            )
+        self._event_sink.send_event(
+            client_id, _message_result_event(request_id, target, receipt))
 
     def _handle_session_wake(
         self, client_id: str, args: list, payload: Optional[dict],
