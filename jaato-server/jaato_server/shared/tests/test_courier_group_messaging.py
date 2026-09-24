@@ -518,7 +518,11 @@ REVERSIONS = [
     ),
     Reversion(
         target=_SM,
-        find="        wrapped = _wrap_untrusted_with_manifest(body, items, f\"peer:{sender_addr}\")",
+        find=(
+            "        wrapped = _wrap_untrusted_with_manifest(\n"
+            "            body, items, f\"peer:{sender_addr}\",\n"
+            "            files=payload.files, text_attachments=payload.inline_text)"
+        ),
         replace="        wrapped = body",
         because="the inbound body is no longer wrapped as untrusted content",
         test="test_the_daemon_stamps_the_sender_and_wraps_the_body",
