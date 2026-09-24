@@ -1,8 +1,8 @@
 {
   "type": "agent.error",
   "timestamp": "<TIMESTAMP>",
-  "agent_id": "",
   "session_id": "",
+  "agent_id": "",
   "error_type": "",
   "error_summary": "",
   "request_id": null,

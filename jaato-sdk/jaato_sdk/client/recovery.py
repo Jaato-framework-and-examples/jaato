@@ -983,6 +983,17 @@ class IPCRecoveryClient:
         return await self._memory_client("delete_memory").delete_memory(
             memory_id, timeout=timeout)
 
+    async def get_diagnostics(self, *, timeout: float = 10.0):
+        """See :meth:`IPCClient.get_diagnostics`.
+
+        No inner client raises ``ConnectionError`` rather than returning a
+        fabricated result -- a probe answered from nothing would be a
+        guessed confinement verdict, the one thing #1294's re-probe must
+        never be.
+        """
+        return await self._memory_client("get_diagnostics").get_diagnostics(
+            timeout=timeout)
+
     async def respond_to_post_auth_setup(
         self,
         request_id: str,

@@ -2458,6 +2458,42 @@ class RunnerRPCClient:
             timeout=timeout,
         )
 
+    async def session_diagnostics(
+        self, *, timeout: Optional[float] = 5.0,
+    ) -> "Dict[str, Any]":
+        """The live self-probe of THIS runner's confinement (#1294).
+
+        Control lane -- the probe is a handful of ``/proc`` reads, not
+        model or user code, so it answers even mid-turn.  No session-id
+        argument: it always asks about the session this channel is
+        already bound to, which is what makes "no cross-session reach" a
+        property of the call shape rather than something a caller has to
+        get right.
+
+        Returns:
+            ``{"probe": {...}, "notebook_boundary_kind": ...,
+            "consumption": {...}, "protocol_version": str}``.  See
+            :meth:`server.runner.rpc.RunnerRPC._handle_session_diagnostics`
+            for the full shape of ``probe``.
+
+        Raises:
+            RunnerCallError on transport failure or a runner-side refusal
+                (no_host / no_session).  Callers report it as
+                ``runner_unreachable`` rather than guessing a confinement
+                verdict from nothing.
+        """
+        return await self._call_named(
+            "session.diagnostics", {}, timeout=timeout,
+        )
+
+    def session_diagnostics_threadsafe(
+        self, *, timeout: Optional[float] = 5.0,
+    ) -> "Dict[str, Any]":
+        return self._run_threadsafe(
+            self.session_diagnostics(timeout=timeout),
+            timeout=timeout,
+        )
+
     async def session_get_user_commands(
         self, *, timeout: Optional[float] = 10.0,
     ) -> "Dict[str, Any]":

@@ -71,6 +71,7 @@ import {
   type MemoryGetResultEvent,
   type MemoryUpdateResultEvent,
   type MemoryDeleteResultEvent,
+  type DiagnosticsResultEvent,
 } from "./events.js";
 import type {
   CatchallEventHandler,
@@ -191,6 +192,15 @@ export const MIN_SESSION_MESSAGE_PROTOCOL = "1.23";
  * either is refused below this while a text-only call keeps the 1.23 floor.
  */
 export const MIN_SESSION_MESSAGE_FILES_PROTOCOL = "1.24";
+
+/**
+ * Protocol floor for {@link JaatoClient.getDiagnostics} (#1294). A missing
+ * VERB, the same shape as {@link MIN_MEMORY_VERBS_PROTOCOL}: an older
+ * daemon answers ``ErrorEvent("Unknown request type")`` with no
+ * ``request_id`` and never the result the call waits on, so the call is
+ * refused below this version rather than left to time out.
+ */
+export const MIN_DIAGNOSTICS_PROTOCOL = "1.25";
 
 /**
  * Size limits a daemon enforces, advertised in ``ConnectedEvent.server_info``.
@@ -1344,32 +1354,37 @@ export class JaatoClient {
   }
 
   /**
-   * Send one memory request and resolve with its correlated answer (#1232).
+   * Send one quiet request/result-pair request and resolve with its
+   * correlated answer (#1232's ``_memoryRequest``, generalised for #1294's
+   * diagnostics verb so a second copy of this plumbing does not drift from
+   * the first).
    *
-   * Refuses a daemon below {@link MIN_MEMORY_VERBS_PROTOCOL}; rejects on
-   * timeout and on a closed connection -- never resolves with a fabricated
-   * empty answer, which for a list would read as "nothing remembered".
-   * The answer is matched on ``request_id`` AND on its result type, so a
-   * daemon echo of the request itself is not mistaken for the answer.
+   * Refuses a daemon below ``minProtocol``; rejects on timeout and on a
+   * closed connection -- never resolves with a fabricated empty answer,
+   * which for a list would read as "nothing remembered". The answer is
+   * matched on ``request_id`` AND on its result type, so a daemon echo of
+   * the request itself is not mistaken for the answer.
    */
-  private async _memoryRequest<T>(
+  private async _quietRequest<T>(
     method: string,
     request: Record<string, unknown>,
     resultType: string,
     timeoutMs: number,
+    minProtocol: string,
+    featureLabel: string,
+    idPrefix: string,
   ): Promise<T> {
     if (
       this._serverProtocolVersion === null ||
-      !isProtocolCompatible(this._serverProtocolVersion, MIN_MEMORY_VERBS_PROTOCOL)
+      !isProtocolCompatible(this._serverProtocolVersion, minProtocol)
     ) {
       throw new Error(
         `${method}: this daemon speaks protocol ` +
           `${this._serverProtocolVersion ?? "unknown"} and does not serve ` +
-          `the memory verbs (needs >= ${MIN_MEMORY_VERBS_PROTOCOL}).  ` +
-          `Upgrade the daemon, or use the "memory" command.`,
+          `${featureLabel} (needs >= ${minProtocol}).`,
       );
     }
-    const requestId = `mem-${++this._memorySeq}-${Date.now().toString(36)}`;
+    const requestId = `${idPrefix}-${++this._memorySeq}-${Date.now().toString(36)}`;
     const answer = new Promise<T>((resolve, reject) => {
       const done = () => {
         clearTimeout(timer);
@@ -1409,11 +1424,14 @@ export class JaatoClient {
    * change them.
    */
   async listMemories(options: { timeoutMs?: number } = {}): Promise<MemoryListEvent> {
-    return this._memoryRequest<MemoryListEvent>(
+    return this._quietRequest<MemoryListEvent>(
       "listMemories",
       { type: EventTypeValue.MEMORY_LIST_REQUEST },
       EventTypeValue.MEMORY_LIST,
       options.timeoutMs ?? 10_000,
+      MIN_MEMORY_VERBS_PROTOCOL,
+      'the memory verbs (upgrade the daemon, or use the "memory" command)',
+      "mem",
     );
   }
 
@@ -1422,11 +1440,14 @@ export class JaatoClient {
     memoryId: string,
     options: { timeoutMs?: number } = {},
   ): Promise<MemoryGetResultEvent> {
-    return this._memoryRequest<MemoryGetResultEvent>(
+    return this._quietRequest<MemoryGetResultEvent>(
       "getMemory",
       { type: EventTypeValue.MEMORY_GET_REQUEST, memory_id: memoryId },
       EventTypeValue.MEMORY_GET_RESULT,
       options.timeoutMs ?? 10_000,
+      MIN_MEMORY_VERBS_PROTOCOL,
+      'the memory verbs (upgrade the daemon, or use the "memory" command)',
+      "mem",
     );
   }
 
@@ -1451,11 +1472,14 @@ export class JaatoClient {
     for (const key of ["description", "content", "tags", "maturity"] as const) {
       if (fields[key] !== undefined) request[key] = fields[key];
     }
-    return this._memoryRequest<MemoryUpdateResultEvent>(
+    return this._quietRequest<MemoryUpdateResultEvent>(
       "updateMemory",
       request,
       EventTypeValue.MEMORY_UPDATE_RESULT,
       options.timeoutMs ?? 10_000,
+      MIN_MEMORY_VERBS_PROTOCOL,
+      'the memory verbs (upgrade the daemon, or use the "memory" command)',
+      "mem",
     );
   }
 
@@ -1477,11 +1501,40 @@ export class JaatoClient {
     memoryId: string,
     options: { timeoutMs?: number } = {},
   ): Promise<MemoryDeleteResultEvent> {
-    return this._memoryRequest<MemoryDeleteResultEvent>(
+    return this._quietRequest<MemoryDeleteResultEvent>(
       "deleteMemory",
       { type: EventTypeValue.MEMORY_DELETE_REQUEST, memory_id: memoryId },
       EventTypeValue.MEMORY_DELETE_RESULT,
       options.timeoutMs ?? 10_000,
+      MIN_MEMORY_VERBS_PROTOCOL,
+      'the memory verbs (upgrade the daemon, or use the "memory" command)',
+      "mem",
+    );
+  }
+
+  /**
+   * Self-diagnose the attached session's confinement and runtime facts
+   * (#1294): cached record fields (``runner_identity``, ``confinement_id``,
+   * ``sandbox_mode``, ``consumption``, ``notebook_boundary_kind``,
+   * ``protocol_version``, ``server_version``) plus ``probe`` -- a LIVE
+   * re-check of whether the runner's threads are genuinely confined right
+   * now, measured fresh on every call and never merged into the cached
+   * fields. Always about the caller's OWN attached session -- there is no
+   * way to name a different one. ``ok === false`` (with ``error`` and
+   * ``category``) means nothing could be reported at all (no session
+   * attached, or the workspace owner gate refused the caller); even then
+   * ``probe`` may independently be ``null`` while the cached fields are
+   * populated, which is what a runner that did not answer looks like.
+   */
+  async getDiagnostics(options: { timeoutMs?: number } = {}): Promise<DiagnosticsResultEvent> {
+    return this._quietRequest<DiagnosticsResultEvent>(
+      "getDiagnostics",
+      { type: EventTypeValue.DIAGNOSTICS_REQUEST },
+      EventTypeValue.DIAGNOSTICS_RESULT,
+      options.timeoutMs ?? 10_000,
+      MIN_DIAGNOSTICS_PROTOCOL,
+      "the diagnostics verb",
+      "diag",
     );
   }
 

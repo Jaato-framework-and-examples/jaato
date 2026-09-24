@@ -97,6 +97,8 @@ from jaato_sdk.events import (
     MemoryUpdateResultEvent,
     MemoryDeleteRequest,
     MemoryDeleteResultEvent,
+    DiagnosticsRequest,
+    DiagnosticsResultEvent,
     describe_event_type_problems,
 )
 
@@ -2554,6 +2556,82 @@ class IPCClient:
         """Remove a memory through the plugin's own delete path (1.22)."""
         return await self._memory_request(  # type: ignore[return-value]
             "delete_memory", MemoryDeleteRequest(memory_id=memory_id), timeout)
+
+    # =========================================================================
+    # Self-diagnostics (#1294, protocol 1.25)
+    #
+    # A live confinement re-probe plus the cached facts a session already
+    # tracks, for the CALLER'S OWN attached session -- the request carries
+    # no session id, so there is nothing here to name another session with.
+    # =========================================================================
+
+    MIN_DIAGNOSTICS_PROTOCOL = "1.25"
+
+    def _require_diagnostics_protocol(self, method: str) -> None:
+        """Refuse the diagnostics verb against a daemon that does not serve it."""
+        if _protocol_compatible(
+                self.server_protocol_version, self.MIN_DIAGNOSTICS_PROTOCOL):
+            return
+        spoken = self.server_protocol_version or "unknown (not connected)"
+        raise ValueError(
+            f"{method}: this daemon speaks protocol {spoken} and does not "
+            f"serve session.diagnostics (needs >= "
+            f"{self.MIN_DIAGNOSTICS_PROTOCOL}).  It would answer 'Unknown "
+            f"request type' and never the result this call waits on.  "
+            f"Upgrade the daemon."
+        )
+
+    async def get_diagnostics(
+        self, *, timeout: float = 10.0,
+    ) -> DiagnosticsResultEvent:
+        """A live self-diagnosis of the attached session (#1294).
+
+        Reports two kinds of fact, and the result keeps them apart:
+        CACHED ones the daemon already tracked about this session
+        (``runner_identity``, ``confinement_id``, ``sandbox_mode``), and a
+        LIVE re-probe of the runner's confinement (``probe``), measured
+        fresh at the moment of this call.  A cached ``sandbox_mode``
+        reading "confined" is exactly the shape #1253 was filed about, so
+        never read ``sandbox_mode`` as what ``probe`` would have said --
+        ask, and compare.
+
+        Raises:
+            ValueError: Against a daemon below
+                :attr:`MIN_DIAGNOSTICS_PROTOCOL`.
+            TimeoutError / ConnectionError: No answer arrived.
+        """
+        self._require_diagnostics_protocol("get_diagnostics")
+        request_id = f"diag_{uuid.uuid4().hex[:16]}"
+        event = DiagnosticsRequest(request_id=request_id)
+        q = self._subscribe_events()
+        incidental: list = []
+        try:
+            if not await self._send_event(event):
+                raise ConnectionError(
+                    "get_diagnostics: the request could not be sent "
+                    "(not connected)")
+
+            async def _wait() -> Optional[Event]:
+                while True:
+                    got = await q.get()
+                    if got is None:
+                        return None
+                    if getattr(got, "request_id", None) == request_id and \
+                            got.type != event.type:
+                        return got
+                    if len(self._event_subscribers) == 1:
+                        incidental.append(got)
+
+            answer = await asyncio.wait_for(_wait(), timeout=timeout)
+        finally:
+            self._unsubscribe_events(q)
+            if incidental and not self._event_subscribers:
+                self._buffered_events.extend(incidental)
+        if answer is None:
+            raise ConnectionError(
+                "get_diagnostics: the connection closed before the "
+                "daemon answered")
+        return answer  # type: ignore[return-value]
 
     async def list_profiles(self) -> None:
         """Request list of available agent profiles.

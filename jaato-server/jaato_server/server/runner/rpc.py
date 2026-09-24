@@ -272,6 +272,13 @@ NAMED_METHOD_HANDLERS: Dict[str, str] = {
     # ``memory`` command's list came back from the wrong store.  Control
     # lane: a rail refresh must not queue behind the turn in flight.
     "session.memory": "_handle_session_memory",
+    # The self-diagnostics live re-probe (#1294): "am I actually confined,
+    # right now" plus the facts only this process can answer -- the
+    # notebook's active execution boundary, this session's own
+    # consumption.  Control lane: the probe is a handful of /proc reads,
+    # not model or user code, and a diagnostic reachable only between
+    # turns would not be much of one.
+    "session.diagnostics": "_handle_session_diagnostics",
 }
 
 #: How many recently-registered request ids the reader thread remembers,
@@ -1803,6 +1810,124 @@ class RunnerRPC:
                 "stage": "call",
             }
         return True, answer
+
+    @staticmethod
+    def _notebook_boundary_kind(registry: Any) -> Optional[str]:
+        """The active notebook backend's execution boundary, or ``None``.
+
+        Reads the same fact :meth:`notebook.plugin.NotebookPlugin
+        ._boundary_instruction_block` puts in the system prompt --
+        ``backend.boundary_kind()`` on whichever backend is active -- so
+        the diagnostics answer and the prompt line cannot disagree.
+        ``None`` covers both "the notebook plugin is not loaded" and "the
+        active backend claims no tier" (``kaggle``, a third-party
+        backend): a caller reading ``None`` cannot tell those apart, which
+        is fine here -- neither is a confinement claim this verb owns.
+        """
+        try:
+            notebook = registry.get_plugin("notebook") if registry else None
+            if notebook is None:
+                return None
+            backend = notebook._backends.get(notebook._active_backend_name)
+            if backend is None:
+                return None
+            kind = backend.boundary_kind()
+            return str(kind) if kind else None
+        except Exception:  # noqa: BLE001 -- a probe must not raise
+            return None
+
+    def _handle_session_diagnostics(
+        self, args: Dict[str, Any],
+    ) -> "tuple[bool, Any]":
+        """``session.diagnostics`` -- this runner's live self-probe (#1294).
+
+        Answers the one question a cached record cannot: is the
+        confinement this session's record claims still actually there,
+        RIGHT NOW.  Reuses #1023's ``scan_thread_profiles`` /
+        ``current_confinement`` rather than a second implementation of
+        either -- see :func:`server.runner.bootstrap.probe_confinement_now`,
+        which does the actual read.  Everything else this handler answers
+        (the notebook's boundary, this session's own spend) is likewise a
+        REUSE of an existing accessor, never a recomputation: budget and
+        consumption already have one definition
+        (:meth:`JaatoSession.get_consumption`) and this is not a second
+        one.
+
+        Scoped to THIS runner's own session by construction: there is no
+        session-id argument, so there is nothing here for a caller to name
+        another session with.  The daemon composes the rest of a
+        diagnostics answer (which pid, whether pool-served, the cascade,
+        this session's record-time ``sandbox_mode``) from what it already
+        knows about the session that dispatched this call.
+
+        Args:
+            args: Unused (reserved so a future addition needs no new
+                method name).
+
+        Returns:
+            ``(True, {"probe": {...}, "notebook_boundary_kind": ...,
+            "consumption": {...}, "protocol_version": str})``.  ``probe``
+            is :func:`probe_confinement_now`'s own dict -- see its
+            docstring for the shape, including its own ``ok`` / ``error``
+            for a probe that could not run.  ``consumption`` carries an
+            ``"error"`` key instead of raising when the session's own
+            accessor fails, because a diagnostics call must not itself
+            become the thing that needs diagnosing.
+
+            ``(False, {"error", "stage"})`` only for ``no_host`` /
+            ``no_session``, which the daemon reports as
+            ``runner_unreachable``.
+        """
+        from jaato_sdk.events import PROTOCOL_VERSION
+        from jaato_server.server.runner.bootstrap import probe_confinement_now
+
+        with self._session_lock:
+            host = self._session_host
+        if host is None:
+            return False, {
+                "error": "session not bootstrapped on this runner",
+                "stage": "no_host",
+            }
+        session = host.session
+        if session is None:
+            return False, {
+                "error": (
+                    "session host bootstrapped but JaatoSession is None "
+                    "(test-stub mode or configure() failed)"
+                ),
+                "stage": "no_session",
+            }
+
+        expected_profile = str(getattr(host.envelope, "profile_name", "") or "")
+        try:
+            probe = probe_confinement_now(expected_profile)
+        except Exception as exc:  # noqa: BLE001 -- a probe must not raise
+            probe = {
+                "ok": False,
+                "error": f"probe_confinement_now raised {type(exc).__name__}: {exc}",
+                "expected_profile": expected_profile,
+                "current_profile": "",
+                "current_mode": None,
+                "enforced": False,
+                "confined": False,
+                "scan": None,
+            }
+
+        runtime = getattr(session, "_runtime", None)
+        registry = getattr(runtime, "registry", None) if runtime else None
+        notebook_boundary_kind = self._notebook_boundary_kind(registry)
+
+        try:
+            consumption = session.get_consumption("summary")
+        except Exception as exc:  # noqa: BLE001 -- diagnostics must not raise
+            consumption = {"error": f"{type(exc).__name__}: {exc}"}
+
+        return True, {
+            "probe": probe,
+            "notebook_boundary_kind": notebook_boundary_kind,
+            "consumption": consumption,
+            "protocol_version": PROTOCOL_VERSION,
+        }
 
     def _handle_session_reload_env(self, args: Dict[str, Any]) -> "tuple[bool, Any]":
         """``session.reload_env`` -- re-apply the session env and rebuild the provider.

@@ -48,6 +48,7 @@ import type {
   GcState,
   ContextState,
   MemoriesState,
+  DiagnosticsState,
   InitProgress,
   OutputBlock,
   PendingClarification,
@@ -239,6 +240,8 @@ export interface JaatoState {
   exitChoice: ExitChoice | null;
   /** The rail's Memories section (#1232, ``app/memories.ts``). */
   memories: MemoriesState;
+  /** The rail's Diagnostics section (#1294, ``app/diagnostics.ts``). */
+  diagnostics: DiagnosticsState;
 
   ui: {
     showPlan: boolean;
@@ -249,6 +252,8 @@ export interface JaatoState {
     showSessions: boolean;
     /** The Memories rail section (#1232): the session's memory store, and the owner's curation of it. */
     showMemories: boolean;
+    /** The Diagnostics rail section (#1294): the session's own confinement/runtime self-check. */
+    showDiagnostics: boolean;
     theme: string;
     /** Tool call currently pinned in the live-output popup. */
     popupCallId?: string | null;
@@ -309,9 +314,11 @@ export interface JaatoState {
   dismissClarification: (requestId: string) => void;
   dismissReferenceSelection: (requestId: string) => void;
   dismissPostAuth: () => void;
-  toggleUi: (key: "showPlan" | "showBudget" | "showWorkspace" | "showTools" | "showSessions" | "showMemories") => void;
+  toggleUi: (key: "showPlan" | "showBudget" | "showWorkspace" | "showTools" | "showSessions" | "showMemories" | "showDiagnostics") => void;
   /** Merge into the Memories section's state (``app/memories.ts`` is its one writer). */
   patchMemories: (patch: Partial<MemoriesState> | ((m: MemoriesState) => Partial<MemoriesState>)) => void;
+  /** Merge into the Diagnostics section's state (``app/diagnostics.ts`` is its one writer). */
+  patchDiagnostics: (patch: Partial<DiagnosticsState> | ((d: DiagnosticsState) => Partial<DiagnosticsState>)) => void;
   /** The TUI's Ctrl+T: expand or collapse every tool block, and new ones follow. */
   setToolsExpanded: (expanded: boolean) => void;
   /** Add (``+1``, before a silent request) or give back (``-1``, when it failed to send) one silent reply. */
@@ -380,6 +387,7 @@ const emptySessionState = () => ({
   busySince: {} as Record<string, number>,
   exitChoice: null as ExitChoice | null,
   memories: emptyMemories(),
+  diagnostics: emptyDiagnostics(),
 });
 
 /** The Memories section before anything was asked (and after a session change). */
@@ -387,6 +395,15 @@ export function emptyMemories(): MemoriesState {
   return {
     rows: [], status: "idle", error: null, mayCurate: null, thisSessionOnly: false,
     expanded: null, details: {}, busy: {}, editing: {}, notice: null,
+  };
+}
+
+/** The Diagnostics section before anything was asked (and after a session change). */
+export function emptyDiagnostics(): DiagnosticsState {
+  return {
+    status: "idle", error: null, category: null, runnerIdentity: null, confinementId: "",
+    sandboxMode: null, consumption: null, notebookBoundaryKind: null, protocolVersion: "",
+    serverVersion: "", probe: null, checkedAt: null,
   };
 }
 
@@ -1144,7 +1161,7 @@ export const useJaato = create<JaatoState>()((set, get) => ({
   commands: mergeCommandSpecs([]),
   uploads: [],
   ...emptySessionState(),
-  ui: { showPlan: false, showBudget: false, showWorkspace: false, showTools: false, showSessions: false, showMemories: false, theme: "light", popupCallId: null, railWidth: loadRailWidth(), railSplits: loadRailSplits() },
+  ui: { showPlan: false, showBudget: false, showWorkspace: false, showTools: false, showSessions: false, showMemories: false, showDiagnostics: false, theme: "light", popupCallId: null, railWidth: loadRailWidth(), railSplits: loadRailSplits() },
 
   dispatch: (events) =>
     set((state) => {
@@ -1232,6 +1249,9 @@ export const useJaato = create<JaatoState>()((set, get) => ({
   setPopup: (callId) => set((st) => ({ ui: { ...st.ui, popupCallId: callId } })),
   patchMemories: (patch) => set((st) => ({
     memories: { ...st.memories, ...(typeof patch === "function" ? patch(st.memories) : patch) },
+  })),
+  patchDiagnostics: (patch) => set((st) => ({
+    diagnostics: { ...st.diagnostics, ...(typeof patch === "function" ? patch(st.diagnostics) : patch) },
   })),
   setRailWidth: (w) => set((st) => { const railWidth = clampRailWidth(w); saveRailWidth(railWidth); return { ui: { ...st.ui, railWidth } }; }),
   setRailSplits: (splits) => set((st) => { const railSplits = sanitizeSplits(splits); saveRailSplits(railSplits); return { ui: { ...st.ui, railSplits } }; }),

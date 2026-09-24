@@ -1183,3 +1183,34 @@ test("memories rail lists the store, re-lists on a store_memory, and approves an
   await expect(panel.getByRole("status")).toHaveText("Removed.");
   await expect(panel.locator('[data-memory-id="mem_raw_1"]')).toHaveCount(0);
 });
+
+test("diagnostics rail shows the record and a live re-check, distinctly, and can be refused (#1294)", async ({ page }) => {
+  await openSession(page);
+  await page.getByRole("button", { name: "Toggle the session's confinement diagnostics" }).click();
+  const panel = page.getByRole("region", { name: "Diagnostics" });
+
+  // Opening the section asks once, with no prompt typed -- the live-view
+  // entry point is a click, not a hidden key combination.
+  const record = panel.getByRole("region", { name: "Session record" });
+  const live = panel.getByRole("region", { name: "Live confinement check" });
+  await expect(record).toBeVisible();
+  await expect(live).toBeVisible();
+  await expect(record).toContainText("apparmor");
+  await expect(live).toContainText("Enforced");
+
+  // Nothing is printed into the transcript: the verb is quiet.
+  await expect(page.getByText("mock: executed session.diagnostics")).toHaveCount(0);
+
+  // Nothing here offers to export, download, or copy the result.
+  await expect(panel.getByRole("button", { name: /export/i })).toHaveCount(0);
+  await expect(panel.getByRole("button", { name: /download/i })).toHaveCount(0);
+  await expect(panel.getByRole("button", { name: /copy/i })).toHaveCount(0);
+
+  // Arm a refusal, then explicitly re-check -- the daemon's owner gate,
+  // rendered in words, replacing nothing already on screen until it
+  // answers.
+  await composer(page).fill("diag refuse");
+  await composer(page).press("Enter");
+  await panel.getByRole("button", { name: "Re-check now" }).click();
+  await expect(page.getByRole("alert")).toContainText("Only the owner");
+});

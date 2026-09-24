@@ -1,0 +1,17 @@
+{
+  "type": "session.diagnostics.result",
+  "timestamp": "<TIMESTAMP>",
+  "session_id": "",
+  "request_id": "",
+  "ok": true,
+  "error": "",
+  "category": "",
+  "runner_identity": null,
+  "confinement_id": "",
+  "sandbox_mode": null,
+  "consumption": null,
+  "notebook_boundary_kind": null,
+  "protocol_version": "",
+  "server_version": "",
+  "probe": null
+}

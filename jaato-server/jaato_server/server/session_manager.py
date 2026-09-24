@@ -58,6 +58,7 @@ from jaato_server.shared.runtime_limits import RuntimeLimits, apply_isolated_def
 from jaato_server.shared.session_envelope import BootstrapEnvelope
 from jaato_server.shared.instruction_suppression import normalize_suppression
 from .awaiting import awaiting_of
+from .diagnostics_verbs import DIAGNOSTICS_REQUEST_TYPES
 from .memory_verbs import MEMORY_REQUEST_TYPES
 from .core import JaatoServer
 from .session_logging import set_logging_context, clear_logging_context, get_session_handler
@@ -14860,11 +14861,17 @@ class SessionManager:
             self._apply_client_config(client_id, event, peer=peer)
             return
 
-        # The memory verbs (#1232) answer BEFORE the session lookup, so a
-        # client with no session is told so under its own request_id rather
-        # than by the uncorrelated "Session not found" below.
-        if isinstance(event, MEMORY_REQUEST_TYPES):
-            self._handle_memory_request(client_id, session_id, event, user_id=user_id)
+        # The quiet request/result verbs -- memory (#1232) and
+        # self-diagnostics (#1294) -- answer BEFORE the session lookup, so
+        # a client with no session is told so under its own request_id
+        # rather than by the uncorrelated "Session not found" below.  ONE
+        # isinstance check covering both tuples, not two: ``handle_request``
+        # is on the complexity ratchet and a baselined function may not
+        # grow, so the dispatch between them is a job for
+        # ``_dispatch_quiet_request`` rather than a second top-level ``if``
+        # here (the #1167 / #1069 move, applied again).
+        if isinstance(event, MEMORY_REQUEST_TYPES + DIAGNOSTICS_REQUEST_TYPES):
+            self._dispatch_quiet_request(client_id, session_id, event, user_id=user_id)
             return
 
         session = self.get_session(session_id)
@@ -15516,6 +15523,27 @@ class SessionManager:
                     error_type="PluginNotFound",
                 ))
 
+    def _dispatch_quiet_request(
+        self,
+        client_id: str,
+        session_id: str,
+        event: Any,
+        *,
+        user_id: Optional[str],
+    ) -> None:
+        """Route one of the quiet request/result verbs to its handler.
+
+        ``handle_request`` checks membership of the COMBINED type tuple in
+        one ``if`` (its own complexity ceiling), so the choice between the
+        memory verbs (#1232) and the self-diagnostics verb (#1294) lives
+        here instead -- a second top-level branch in the caller would grow
+        a function that is not allowed to.
+        """
+        if isinstance(event, MEMORY_REQUEST_TYPES):
+            self._handle_memory_request(client_id, session_id, event, user_id=user_id)
+            return
+        self._handle_diagnostics_request(client_id, session_id, event, user_id=user_id)
+
     def _handle_memory_request(
         self,
         client_id: str,
@@ -15545,6 +15573,39 @@ class SessionManager:
         self._emit_to_client(client_id, answer_memory_request(
             server, event,
             session_id=session_id, user_id=user_id, owner=owner,
+        ))
+
+    def _handle_diagnostics_request(
+        self,
+        client_id: str,
+        session_id: str,
+        event: Any,
+        *,
+        user_id: Optional[str],
+    ) -> None:
+        """Serve one self-diagnostics request (#1294) and answer it, correlated.
+
+        Resolves what only the manager knows -- the CALLER's own attached
+        session and its workspace's owner -- and hands both, plus the
+        ``Session`` record itself (for the cached facts only it holds), to
+        :func:`jaato_server.server.diagnostics_verbs.answer_diagnostics_request`.
+        There is no session id on the request to resolve instead: the verb
+        can only ever be about ``session_id``, which the router already
+        bound to this connection.  Exactly one result event is emitted,
+        whatever happened.
+        """
+        from jaato_server.server.diagnostics_verbs import answer_diagnostics_request
+
+        session = self.get_session(session_id) if session_id else None
+        server = getattr(session, "server", None) if session else None
+        owner = (
+            self._workspace_owner_of(getattr(session, "workspace_path", None))
+            if session else None
+        )
+        self._emit_to_client(client_id, answer_diagnostics_request(
+            server, event,
+            session_id=session_id, user_id=user_id, owner=owner,
+            session=session,
         ))
 
     def _handle_permission_remove(

@@ -18,7 +18,7 @@ import sys
 import pathlib
 import tempfile
 import threading
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 #: Module logger.  ``handle_input`` reported a failed ``session.delete``
 #: through a name nothing bound: the except handler raised NameError
@@ -431,6 +431,100 @@ def _pop_ipc_system_hints(display) -> list:
     hints = display._pending_system_hints
     display._pending_system_hints = []
     return hints
+
+
+async def handle_diagnostics_command(client, display) -> None:
+    """Self-diagnose THIS session's confinement and runtime facts (#1294).
+
+    Calls the daemon's quiet ``session.diagnostics`` verb (protocol 1.25)
+    and prints exactly two things it answers with, kept apart on purpose:
+    the session RECORD (cached facts the daemon already tracked -- a
+    runner identity, the AppArmor profile the record claims,
+    ``sandbox_mode``, spend, the notebook boundary, the protocol/build),
+    and a LIVE re-probe measured fresh on the runner at the moment of this
+    call.  A cached ``sandbox_mode`` reading "confined" when it is not is
+    exactly the #1253 shape this exists to catch, so the two are never
+    merged into one verdict here.
+
+    Nothing is written to disk and nothing offered for export -- this is
+    a live-view print, the same scope the web client's Diagnostics rail
+    section has.
+    """
+    try:
+        answer = await client.get_diagnostics()
+    except Exception as exc:  # noqa: BLE001 -- report, never crash the session
+        display.add_system_message(f"diagnostics: {exc}", style="system_error")
+        return
+
+    if not getattr(answer, "ok", False):
+        category = getattr(answer, "category", "") or ""
+        error = getattr(answer, "error", "") or ""
+        if category == "not_owner":
+            text = "Only the owner of this workspace can view its diagnostics."
+        elif category == "no_session":
+            text = "No session is attached."
+        elif category == "runner_unreachable":
+            text = f"The session's runner did not answer{': ' + error if error else '.'}"
+        else:
+            text = error or "The daemon refused the request."
+        display.add_system_message(f"diagnostics: {text}", style="system_error")
+        return
+
+    lines: List[Tuple[str, str]] = [
+        ("Session Diagnostics (#1294)", "bold"),
+        ("", ""),
+        ("Session record (as tracked by the daemon)", "bold"),
+    ]
+    identity = getattr(answer, "runner_identity", None) or {}
+    if identity:
+        pool = "pool-served" if identity.get("pool_served") else "cold-spawned"
+        stale = " (stale record)" if identity.get("stale") else ""
+        cascade = f", cascade {identity.get('cascade_driver_id')}" if identity.get("cascade_driver_id") else ""
+        lines.append((f"  runner:       pid {identity.get('runner_pid', '?')}, {pool}{cascade}{stale}", "dim"))
+    else:
+        lines.append(("  runner:       (none -- in-process)", "dim"))
+    lines.append((f"  confinement:  {getattr(answer, 'confinement_id', '') or '(none requested)'}", "dim"))
+    lines.append((f"  sandbox mode: {getattr(answer, 'sandbox_mode', None) or '(none)'}", "dim"))
+    lines.append((f"  notebook:     {getattr(answer, 'notebook_boundary_kind', None) or '(no notebook plugin)'}", "dim"))
+    lines.append((f"  protocol:     {getattr(answer, 'protocol_version', '')}", "dim"))
+    lines.append((f"  server:       {getattr(answer, 'server_version', '')}", "dim"))
+    lines.append(("", ""))
+    lines.append(("Live re-check (just measured)", "bold"))
+
+    probe = getattr(answer, "probe", None)
+    if probe is None:
+        lines.append(("  This session has no runner subprocess to probe -- it runs", "dim"))
+        lines.append(("  in-process, which is not the confined-runner posture this", "dim"))
+        lines.append(("  check reports on.", "dim"))
+    elif not probe.get("ok"):
+        lines.append((f"  Could not determine confinement: {probe.get('error') or 'the probe did not answer.'}", "system_warning"))
+    else:
+        if probe.get("enforced"):
+            verdict, style = "Enforced", "system_success"
+        elif probe.get("confined"):
+            verdict, style = "Confined, not enforced (complain mode)", "system_warning"
+        else:
+            verdict, style = "Not confined", "system_error"
+        lines.append((f"  {verdict}", style))
+        lines.append((f"  expected profile: {probe.get('expected_profile') or '(none declared)'}", "dim"))
+        current = probe.get("current_profile") or "(unlabelled)"
+        mode = f" ({probe.get('current_mode')})" if probe.get("current_mode") else ""
+        lines.append((f"  kernel reports:   {current}{mode}", "dim"))
+        scan = probe.get("scan")
+        if scan:
+            lines.append((
+                f"  threads: {scan.get('scanned')} scanned, {scan.get('matched')} matched, "
+                f"{scan.get('divergent')} divergent, {scan.get('unreadable')} unreadable, "
+                f"{scan.get('gone')} gone", "dim",
+            ))
+            uniform = "" if scan.get("uniform") else " -- NOT uniform"
+            lines.append((f"  route: {scan.get('route')}{uniform}", "dim"))
+            for t in scan.get("divergent_threads") or []:
+                lines.append((f"    divergent tid={t.get('tid')} name={t.get('name') or '(unknown)'} label={t.get('label')}", "system_error"))
+            for t in scan.get("unreadable_threads") or []:
+                lines.append((f"    unreadable tid={t.get('tid')} name={t.get('name') or '(unknown)'} ({t.get('reason')})", "system_warning"))
+
+    display.show_lines(lines)
 
 
 async def handle_screenshot_command_ipc(user_input: str, display, agent_registry, ipc_client) -> None:
@@ -2495,6 +2589,14 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                 if cmd == "keybindings":
                     from ui_utils import handle_keybindings_command
                     handle_keybindings_command(text, display)
+                    continue
+
+                # Diagnostics command - self-diagnose THIS session's confinement
+                # and runtime facts (#1294).  A quiet request/result pair, the
+                # same shape ``memory`` uses; nothing here writes a file or
+                # offers to export what it prints.
+                elif cmd == "diagnostics":
+                    await handle_diagnostics_command(client, display)
                     continue
 
                 # Screenshot command - handle locally (client-side only)

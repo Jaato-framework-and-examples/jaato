@@ -45,6 +45,8 @@
  *   "…remember <text>" → a ``store_memory`` call that succeeds and adds a
  *                 RAW memory written in this session to the store the
  *                 memory verbs (protocol 1.22) answer from
+ *   "…diag refuse" → arms the owner-gate refusal for the NEXT
+ *                 ``session.diagnostics`` check (#1294)
  *   "model this is broken" (verbatim test) → echoes the text back
  *   anything else → a short streamed markdown reply
  *
@@ -206,6 +208,49 @@ function answerMemoryRequest(c: Client, ev: Record<string, unknown>): void {
     send(c, { type: result, memory_id: id, ...common, ok: true, memory: row });
   }
 }
+/**
+ * Answer ``session.diagnostics.request`` (#1294) the way
+ * ``diagnostics_verbs.answer_diagnostics_request`` does: cached record
+ * fields the daemon already tracked, plus a live re-probe measured on
+ * this "call" -- kept as two separate blocks in the answer, exactly as
+ * the real daemon never merges them.  ``mock-diag-refused`` in the
+ * prompt (see the scenario language) makes the next check answer the
+ * owner-gate refusal instead, so the panel's refusal rendering is
+ * exercised against the real shape rather than only a hand-written unit
+ * fixture.
+ */
+let MOCK_DIAG_REFUSE_NEXT = false;
+function answerDiagnosticsRequest(c: Client, ev: Record<string, unknown>): void {
+  const requestId = String(ev.request_id ?? "");
+  if (!c.sessionId) {
+    send(c, { type: "session.diagnostics.result", request_id: requestId, ok: false, category: "no_session", error: "no session is attached to this connection" });
+    return;
+  }
+  if (MOCK_DIAG_REFUSE_NEXT) {
+    MOCK_DIAG_REFUSE_NEXT = false;
+    send(c, { type: "session.diagnostics.result", request_id: requestId, ok: false, category: "not_owner", error: "only the owner of this session's workspace may view its diagnostics" });
+    return;
+  }
+  send(c, {
+    type: "session.diagnostics.result",
+    request_id: requestId,
+    ok: true,
+    runner_identity: { runner_pid: 4242, pool_served: true, pool_slot_pid: 4200, cascade_driver_id: null, apparmor_profile: `jaato-ws-mock-${c.sessionId.slice(0, 8)}`, stale: false },
+    confinement_id: `jaato-ws-mock-${c.sessionId.slice(0, 8)}`,
+    sandbox_mode: "apparmor",
+    consumption: { totals: { usd: 0.0142, tokens: 18234 } },
+    notebook_boundary_kind: "apparmor",
+    protocol_version: "1.25",
+    server_version: "mock",
+    probe: {
+      ok: true, error: "", expected_profile: `jaato-ws-mock-${c.sessionId.slice(0, 8)}`,
+      current_profile: `jaato-ws-mock-${c.sessionId.slice(0, 8)}`, current_mode: "enforce",
+      enforced: true, confined: true,
+      scan: { scanned: 5, matched: 5, divergent: 0, unreadable: 0, gone: 0, uniform: true, route: "task_dir", divergent_threads: [], unreadable_threads: [] },
+    },
+  });
+}
+
 function sendGcState(c: Client): void {
   send(c, { type: "gc.config", agent_id: "main", ...MOCK_GC_POLICY });
   const last = c.sessionId ? LAST_GC.get(c.sessionId) : undefined;
@@ -366,6 +411,12 @@ async function turn(c: Client, text: string, agentId = "main"): Promise<void> {
     memoriesFor(c).push({ id: `mem_${callId.slice(0, 8)}`, description: body, content: body, tags: ["mock", "note"], maturity: "raw", tier: "workspace", scope: "project", timestamp: ts(), usage_count: 0, source_session: c.sessionId, curated_by: null, retrieved: false });
     send(c, { type: "tool.call_end", agent_id: agentId, tool_name: "store_memory", call_id: callId, success: true, duration_seconds: 0.01, error_message: null });
     await stream(c, agentId, "Noted.");
+  } else if (lower.includes("diag refuse")) {
+    // Arms the owner-gate refusal for the NEXT ``session.diagnostics``
+    // check, so the panel's refusal rendering is exercised against the
+    // daemon's real answer shape rather than only a hand-written fixture.
+    MOCK_DIAG_REFUSE_NEXT = true;
+    await stream(c, agentId, "The next diagnostics check will be refused.");
   } else if (touch) {
     const paths = (touch[1] ?? "").split(/\s+/).filter(Boolean);
     emitWorkspaceChanges(c, paths.map((path) => ({ path, status: "modified" })));
@@ -559,7 +610,7 @@ wss.on("connection", (ws, req) => {
     policy: { effective_default: "ask", suspension_scope: null },
     installedIntegrations: new Set(),
   };
-  send(c, { type: "connected", protocol_version: "1.22", server_info: { server_version: "mock-0.0.1", client_id: randomUUID(), max_message_size: MAX_MESSAGE_SIZE, stage_per_file_limit: Math.min(STAGE_PER_FILE_LIMIT, MAX_MESSAGE_SIZE), stage_total_limit: STAGE_TOTAL_LIMIT } });
+  send(c, { type: "connected", protocol_version: "1.25", server_info: { server_version: "mock-0.0.1", client_id: randomUUID(), max_message_size: MAX_MESSAGE_SIZE, stage_per_file_limit: Math.min(STAGE_PER_FILE_LIMIT, MAX_MESSAGE_SIZE), stage_total_limit: STAGE_TOTAL_LIMIT } });
 
   ws.on("message", async (raw, isBinary) => {
     if (c.staging) {
@@ -594,6 +645,9 @@ wss.on("connection", (ws, req) => {
       case "memory.update.request":
       case "memory.delete.request":
         answerMemoryRequest(c, ev);
+        break;
+      case "session.diagnostics.request":
+        answerDiagnosticsRequest(c, ev);
         break;
       case "tools.register_client":
         for (const t of (ev.tools as { name?: string }[] | undefined) ?? []) if (t.name) c.clientTools.add(t.name);
