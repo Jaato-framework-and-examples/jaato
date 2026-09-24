@@ -2151,7 +2151,7 @@ class PluginRegistry:
         answering a FORWARDED call had no supported way to learn which
         session was asking.  ``daemon.plugin_execute`` ships
         ``plugin_name``, ``tool_name`` and ``args`` — no caller identity
-        — so a plugin like ``subagent.list_siblings``, whose entire job
+        — so a plugin like ``courier.list_siblings``, whose entire job
         is "tell me about the cascade around ME", could not name the
         caller and failed every forwarded call.
 

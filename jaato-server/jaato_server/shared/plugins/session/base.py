@@ -394,6 +394,15 @@ class SessionInfo:
     sibling_name: Optional[str] = None
     """Workspace path (directory) where this session was created."""
 
+    created_by: Optional[str] = None
+    """The transport-authenticated user that created the session (record
+    2.9, #859), carried on the LISTING so a COLD session still answers the
+    group predicate (``server.session_groups``): a peer messaging a resting
+    session must learn whether they share an owner without loading it.
+    ``None`` for a record predating the field or an unauthenticated
+    creator -- and a ``None`` owner joins no user group, the safe direction.
+    """
+
     def display_name(self) -> str:
         """Return a display-friendly name for the session."""
         if self.description:

@@ -100,7 +100,7 @@ BASELINE: Dict[str, int] = {
     # this chain, and a baselined function may not grow -- so the six uniform
     # ``cascade.*`` arms were lifted into ``_dispatch_cascade_command``, which
     # pays for the new branch and leaves the chain shorter than it was.
-    "jaato-server/jaato_server/server/command_router.py::CommandRouter._dispatch": 29,
+    "jaato-server/jaato_server/server/command_router.py::CommandRouter._dispatch": 28,
     "jaato-server/jaato_server/server/command_router.py::CommandRouter._execute_daemon_command": 16,
     "jaato-server/jaato_server/server/command_router.py::CommandRouter._handle_session_bind_wake": 18,
     "jaato-server/jaato_server/server/command_router.py::CommandRouter._handle_session_new": 18,

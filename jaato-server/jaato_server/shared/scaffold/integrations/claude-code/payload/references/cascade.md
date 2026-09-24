@@ -71,8 +71,9 @@ silent display is indistinguishable from a hung cascade.
 
 When two or more agents argue across turns, give each its own long-lived session
 and have the driver relay the opponent's last turn. Each side then keeps its own
-history natively. `send_to_sibling` is fire-and-forget and is not a control-flow
-primitive.
+history natively. `send_to_sibling` (the `courier` plugin; `send_to_session`
+is its group-scoped, cold-waking sibling) is fire-and-forget and is not a
+control-flow primitive.
 
 ## Journaling and resume
 

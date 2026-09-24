@@ -161,7 +161,7 @@ groups therefore span workspaces, and:
 
 ### 4.1 Group membership (G1)
 
-One module, `server/session_groups.py`, stdlib-only, with one predicate:
+One module, `jaato_server/server/session_groups.py`, stdlib-only, with one predicate:
 
 ```
 group_keys(session) -> frozenset[str]
@@ -355,7 +355,7 @@ address, so a spooled PDF and a typed sentence are weighed the same way.
 |---|---|
 | model tool `send_to_session` | `{target: <id or name>, text, file_refs?, attachments?, reply_to?}` → receipt. `TRAIT_UNTRUSTED_CONTENT` **not** set (the receipt is framework text); permission-gated naming the target, as `send_to_sibling` is. Visible only when the session is in at least one group (`is_tool_visible`, the telepathy precedent) |
 | model tool `list_group_sessions` | the roster of 4.2; auto-approved (read-only); rows carry untrusted descriptions |
-| client verb `session.message` (protocol 1.18) | the same envelope from an SDK/operator, answered by one typed `SessionMessageResultEvent` carrying the receipt — a request/result pair with `request_id`, not a `SystemMessageEvent` string. Missing-verb rule: the SDK refuses below 1.18, because an older daemon ignores the command and "delivered" would describe nothing |
+| client verb `session.message` (protocol 1.22) | the same envelope from an SDK/operator, answered by one typed `SessionMessageResultEvent` carrying the receipt — a request/result pair with `request_id`, not a `SystemMessageEvent` string. Missing-verb rule: the SDK refuses below 1.22, because an older daemon ignores the command and "delivered" would describe nothing |
 | receipt | `{status, message_id, target_session_id, woken: bool, spooled: bool, headless: bool, files: [{name, disposition: referenced|copied|refused, reason?}]}` with `status` from `shared.message_delivery` plus `spooled` (accepted for later delivery) and `ambiguous` |
 | trace | one `GROUP_DELIVERY:` line per attempt in the application trace, beside `SIBLING_DELIVERY` / `DELIVERY_*`, naming sender, target, group key, branch (drive/queue/spool/wake), bytes and file dispositions |
 | listing | `session.list` rows gain `inbox_pending: <n>` — the #1138 shape: a fact a client attached elsewhere cannot otherwise learn |
@@ -380,6 +380,20 @@ speaks, and it is checked.
 ---
 
 ## 5. Rollout
+
+**Status: Phase 1 is implemented** (`jaato_server/server/session_groups.py`,
+the `membership` section of `SessionWorkspaceIndex`,
+`SessionManager.deliver_group_message` / `build_group_roster`, the `courier`
+plugin under `jaato_server/shared/plugins/courier/`, the `session.message`
+router verb with `SessionMessageResultEvent` at protocol 1.22, and
+`send_session_message` / `sendSessionMessage` in the two SDKs). Two
+departures from the text above, each recorded where it applies: the
+plugin does **not** gate visibility per turn (§11 — the runner-side
+session carries no cascade id, so the predicate could not be answered
+there), and the Phase 1 envelope is text plus inline attachments only
+(`text_attachments` / `file_refs` are Phase 3). Phases 2 and 3 remain
+design.
+
 
 | Phase | Delivers | New code, roughly |
 |---|---|---|
@@ -467,7 +481,7 @@ the characteristics on which they differ.
 | **Durability if the target unloads before draining** | lost (runner-side queue) | lost | lost if deferred and the daemon restarts | lost | persisted inbox, drained on load and at turn end, retried by the watchdog |
 | **Answer to the caller** | receipt dict: `accepted` / `queued` / `no_such_sibling` / `sibling_cold` / `refused` | a `SystemMessageEvent` string, or `ErrorEvent(SessionSendError)` | `WakeOutcome` enum; on the wire only an `ErrorEvent(WakeError)` on failure, silence on success | `InjectPromptResultEvent` with the `message_delivery` vocabulary when a `request_id` is sent | typed `SessionMessageResultEvent`: status, `message_id`, `woken`, `spooled`, `headless`, per-file dispositions |
 | **Trace line** | `SIBLING_DELIVERY` | `DELIVERY_*` only | none specific | `DELIVERY_*` | `GROUP_DELIVERY` |
-| **Protocol** | n/a | current | 1.5 for attachments | 1.3 for the result event, 1.5 for attachments | 1.18 |
+| **Protocol** | n/a | current | 1.5 for attachments | 1.3 for the result event, 1.5 for attachments | 1.22 |
 
 Three things the table makes visible.
 
@@ -662,14 +676,14 @@ half-forwarded runner-tier shape is the exception the
 not the pattern `shared/plugins/CLAUDE.md` prescribes for a plugin whose
 body runs daemon-side.
 
-**Proposed: `shared/plugins/courier/`.**
+**Landed: `jaato_server/shared/plugins/courier/`.**
 
 | Property | Value | Why |
 |---|---|---|
 | `PLUGIN_KIND` / `PLUGIN_TIER` | `"tool"` / `"daemon_callable"` | the body needs the `SessionManager`; the schema must surface runner-side. This is exactly the cross-tier pattern, so every executor is forwarded, not two of nine |
 | tools | `send_to_session`, `list_group_sessions` | §4.6; both stamped `category="coordination"` so the listing groups them with the sibling tools |
 | `set_session_manager` | declared | wired by the existing sweep; no new daemon code |
-| `is_tool_visible` | hides both when `group_keys(session)` is empty | the telepathy precedent: a tool whose executor would refuse every call is never shown |
+| `is_tool_visible` | **not gated** — the runner-side `JaatoSession` carries no `cascade_driver_id`, so the predicate cannot be answered where the tool surface is built; a session in no group gets a refusal that says so | the telepathy precedent was the plan; hiding on a fact the runner cannot see would hide the tools from exactly the cascade members who need them |
 | `get_system_instructions` | a short paragraph, only when visible | says what a group is, that a message may wake a peer, and that a receipt is not a reply |
 | `get_auto_approved_tools` | `list_group_sessions` only | read-only; `send_to_session` is permission-gated and the prompt names the target, as `send_to_sibling`'s does |
 | `get_config_schema` | the knobs below, with types and enums | so `validate` checks values, not only names (#925) |
@@ -683,8 +697,10 @@ plugin_configs:
     max_message_bytes: 8192
     max_pending_per_target: 20
     max_exchanges_per_group: 200
-    text_attachment_inline_bytes: 32768
-    cross_workspace_files: copy          # copy | refuse
+    # Phase 3 knobs, not read yet (declaring an unread knob is the
+    # silent-ignore shape validate exists to catch):
+    #   text_attachment_inline_bytes: 32768
+    #   cross_workspace_files: copy      # copy | refuse
   permission:
     policy:
       whitelist: {tools: [send_to_session]}

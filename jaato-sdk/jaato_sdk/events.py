@@ -407,7 +407,25 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 # than wait out a reply nobody will send.  The result event degrades the 1.8
 # way: an older client that somehow receives one it does not know logs and
 # continues.
-PROTOCOL_VERSION = "1.21"
+#
+# 1.22 -- ``session.message`` + ``SessionMessageResultEvent``.  Any-to-any
+# messaging between sessions that share a GROUP -- a cascade, or an
+# authenticated creator (``server.session_groups``) -- with a COLD target
+# woken to process the message.  The client-tier form of the ``courier``
+# plugin's ``send_to_session``: the same daemon method
+# (``SessionManager.deliver_group_message``), the sender being the caller's
+# own session, answered by one typed result event carrying the receipt rather
+# than a ``SystemMessageEvent`` string, because a driver branches on the
+# receipt (``accepted`` / ``queued`` / ``no_such_session`` / ``ambiguous`` /
+# ``session_cold`` / ``duplicate`` / ``terminated`` / ``refused``) and must
+# not parse prose to do it.  It carries the caller's ``request_id`` (the 1.3
+# rule) so several sends on one connection can be told apart.
+#
+# A NEW verb (the 1.7 rule): an older daemon ignores the command silently,
+# and "delivered" would then describe a message nobody carried, so both SDKs
+# refuse below ``MIN_SESSION_MESSAGE_PROTOCOL``.  The result event degrades
+# the 1.8 way.
+PROTOCOL_VERSION = "1.22"
 
 
 # =============================================================================
@@ -608,6 +626,7 @@ class EventType(str, Enum):
     WORKSPACE_FILES_SNAPSHOT = "workspace.files_snapshot"  # Full state on reconnect
     WORKSPACE_IGNORE_RESULT = "workspace.ignore.result"  # Answer to `workspace.ignore <path>` (1.12)
     SCAFFOLD_EXPLAIN_RESULT = "scaffold.explain.result"  # Answer to `scaffold.explain <topic>` (1.18)
+    SESSION_MESSAGE_RESULT = "session.message.result"  # Answer to `session.message` (1.22)
     SCAFFOLD_INTEGRATION_RESULT = "scaffold.integration.result"  # Answer to `scaffold.integration <name>` (1.21)
 
     # External events (Client -> Server, from web components)
@@ -2262,6 +2281,57 @@ class WorkspaceIgnoreResultEvent(Event):
     ok: bool = True
     error: str = ""
     gitignore_path: str = ""
+
+
+class SessionMessageResultEvent(Event):
+    """The receipt for one ``session.message`` (protocol 1.22).
+
+    A message from the CALLER'S session to another session in a common
+    group -- a shared cascade, or a shared authenticated creator -- delivered
+    by ``SessionManager.deliver_group_message``, the same method the
+    ``courier`` plugin's ``send_to_session`` tool calls.  A cold target is
+    woken to process it.  FIRE AND FORGET: ``status`` says what happened to
+    the message, never what the peer decided, and there is no reply channel.
+
+    Fields:
+        request_id: The caller's correlation id, echoed (1.3 rule), so
+            several sends on one connection can be told apart.
+        target: The address the caller sent -- a session id or a sibling
+            name -- echoed.
+        status: ``accepted`` (a turn was started on the target; ``woken``
+            says whether it was revived to do so), ``queued`` (the target is
+            mid-turn and collects the message when the turn ends),
+            ``no_such_session``, ``ambiguous`` (a name matching several
+            members; ``candidates`` lists their ids), ``session_cold``
+            (waking is disabled), ``duplicate`` (``event_id`` already
+            actioned -- a benign no-op), ``terminated`` (the target ended
+            on an error or an exhausted budget and is never woken), or
+            ``refused`` with ``error``.
+        ok: Whether the message was DELIVERED (``accepted`` / ``queued``) or
+            was a benign ``duplicate``.  Everything else is ``False``.
+        message_id: The daemon-minted id of the delivered message; ``""``
+            when nothing was delivered.
+        target_session_id: The resolved target, when one was resolved.
+        sibling_name: The target's cascade-scoped name, when it has one.
+        group_key: The group key the delivery was made under.
+        woken: Whether the target was revived from disk to receive it.
+        headless: Whether the target ran with no attached client.
+        candidates: For ``ambiguous``, the session ids the name matched.
+        error: Why not, when ``ok`` is ``False``.
+    """
+    type: EventType = Field(default=EventType.SESSION_MESSAGE_RESULT)
+    request_id: Optional[str] = None
+    target: str = ""
+    status: str = ""
+    ok: bool = False
+    message_id: str = ""
+    target_session_id: str = ""
+    sibling_name: str = ""
+    group_key: str = ""
+    woken: bool = False
+    headless: bool = False
+    candidates: List[str] = Field(default_factory=list)
+    error: str = ""
 
 
 class ScaffoldExplainEvent(Event):
@@ -4237,6 +4307,7 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.WORKSPACE_FILES_SNAPSHOT.value: WorkspaceFilesSnapshotEvent,
     EventType.WORKSPACE_IGNORE_RESULT.value: WorkspaceIgnoreResultEvent,
     EventType.SCAFFOLD_EXPLAIN_RESULT.value: ScaffoldExplainEvent,
+    EventType.SESSION_MESSAGE_RESULT.value: SessionMessageResultEvent,
     EventType.SCAFFOLD_INTEGRATION_RESULT.value: ScaffoldIntegrationEvent,
     # Workspace file staging (multi-frame: TEXT request + N BINARY blobs)
     EventType.WORKSPACE_FILES_STAGE_REQUEST.value: StageFilesRequest,

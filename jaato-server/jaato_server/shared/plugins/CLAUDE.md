@@ -120,6 +120,10 @@ class MyCrossTierPlugin(DaemonForwardingMixin):
         return self.wrap_executors_for_daemon_forwarding(raw)
 ```
 
+The in-tree instance of the pattern is `courier` (`shared/plugins/courier/`):
+four executors, every one forwarded, wired daemon-side by the generic
+`set_session_manager` sweep at session construction.
+
 **Why both instances?**  Discovery loads the plugin BOTH sides
 (daemon-side `discover()` with no filter + runner-side
 `discover(tier_filter="runner")` accepts `daemon_callable`).  The

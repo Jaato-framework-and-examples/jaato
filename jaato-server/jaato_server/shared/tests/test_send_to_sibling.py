@@ -276,12 +276,12 @@ def test_cid_exchange_cap_terminates_a_ping_pong():
 
 def test_a_refusal_is_a_failed_call_on_both_signals():
     """Not a successful call reporting bad news."""
-    from jaato_server.shared.plugins.subagent.plugin import SubagentPlugin
+    from jaato_server.shared.plugins.courier.plugin import CourierPlugin
     from jaato_sdk.plugins.model_provider.types import tool_result_is_error
 
     sm = _sm(_session("s-a", name="a"))
     reg = type("R", (), {"session_id": "s-a"})()
-    p = SubagentPlugin()
+    p = CourierPlugin()
     p.set_plugin_registry(reg)
     p.set_session_manager(sm)
 
@@ -292,12 +292,12 @@ def test_a_refusal_is_a_failed_call_on_both_signals():
 
 
 def test_a_successful_send_reports_success_on_both_signals():
-    from jaato_server.shared.plugins.subagent.plugin import SubagentPlugin
+    from jaato_server.shared.plugins.courier.plugin import CourierPlugin
     from jaato_sdk.plugins.model_provider.types import tool_result_is_error
 
     sm = _sm(_session("s-a", name="a"), _session("s-b", name="b"))
     reg = type("R", (), {"session_id": "s-a"})()
-    p = SubagentPlugin()
+    p = CourierPlugin()
     p.set_plugin_registry(reg)
     p.set_session_manager(sm)
 
@@ -314,7 +314,7 @@ def test_there_is_no_blocking_form():
     The tool takes only an address and a body — no reply-to, no wait, no
     timeout — so a caller cannot express "wait for them".
     """
-    from jaato_server.shared.plugins.subagent.plugin import SubagentPlugin
-    p = SubagentPlugin()
+    from jaato_server.shared.plugins.courier.plugin import CourierPlugin
+    p = CourierPlugin()
     schema = next(s for s in p.get_tool_schemas() if s.name == "send_to_sibling")
     assert set(schema.parameters["properties"]) == {"sibling_name", "message"}

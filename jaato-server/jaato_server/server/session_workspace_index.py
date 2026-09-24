@@ -48,6 +48,19 @@ richer values:
   timestamp is not a reason to withhold diagnostic information from an
   operator — the identity says which process, and the ambiguity is about which
   workspace.
+
+**Group membership (session group messaging).**  A third independent section,
+``membership``, maps session id to the two facts the group predicate
+(``server.session_groups``) reads -- ``created_by`` and ``cascade_driver_id``
+-- plus the cascade-scoped ``sibling_name``.  It is what lets a peer resolve a
+COLD session across workspaces: "which sessions does user X own" and "which
+sessions carry cascade Y" are questions a per-workspace listing cannot
+answer, and the index is the one daemon-owned, cross-workspace place a
+session id is already recorded.  Written from ``_save_session`` beside the
+workspace mapping, so the two cannot disagree about which sessions exist.
+A file written before the section existed loads with no memberships: a cold
+session then joins no group until its next save, which is the safe
+direction (a message to it is refused, never misrouted).
 """
 from __future__ import annotations
 
@@ -61,6 +74,20 @@ logger = logging.getLogger(__name__)
 
 # Durable, daemon-owned default location (mirrors ~/.jaato/ws.token).
 _DEFAULT_INDEX_PATH = pathlib.Path.home() / ".jaato" / "session_workspace_index.json"
+
+
+_MEMBERSHIP_FIELDS = ("created_by", "cascade_driver_id", "sibling_name")
+
+
+def _membership_row(raw: Dict[str, object]) -> Dict[str, Optional[str]]:
+    """Normalise a membership row to exactly the three known fields, each a
+    non-empty string or ``None``.  An empty string is an absent fact, the
+    same reading the group predicate gives it."""
+    row: Dict[str, Optional[str]] = {}
+    for key in _MEMBERSHIP_FIELDS:
+        value = raw.get(key)
+        row[key] = str(value) if isinstance(value, str) and value else None
+    return row
 
 
 class SessionWorkspaceIndex:
@@ -82,6 +109,12 @@ class SessionWorkspaceIndex:
         #: ``_map``: written by :meth:`record_identity`, read by
         #: :meth:`identity`, and never consulted by :meth:`resolve`.
         self._identity: Dict[str, Dict[str, object]] = {}
+        #: ``session_id -> {"created_by", "cascade_driver_id", "sibling_name"}``
+        #: (session group messaging).  Independent of ``_map`` and
+        #: ``_identity``: written by :meth:`record_membership`, read by
+        #: :meth:`membership` / :meth:`members`, never consulted by
+        #: :meth:`resolve`.
+        self._membership: Dict[str, Dict[str, Optional[str]]] = {}
         self._load()
 
     def _load(self) -> None:
@@ -116,6 +149,12 @@ class SessionWorkspaceIndex:
             self._identity = {
                 str(k): v for k, v in identity.items() if isinstance(v, dict)
             }
+        membership = raw.get("membership", {})
+        if isinstance(membership, dict):
+            self._membership = {
+                str(k): _membership_row(v)
+                for k, v in membership.items() if isinstance(v, dict)
+            }
 
     def _save_locked(self) -> None:
         """Atomically persist (caller holds ``self._lock``)."""
@@ -127,6 +166,7 @@ class SessionWorkspaceIndex:
                     "map": self._map,
                     "ambiguous": sorted(self._ambiguous),
                     "identity": self._identity,
+                    "membership": self._membership,
                 }),
                 encoding="utf-8",
             )
@@ -224,6 +264,69 @@ class SessionWorkspaceIndex:
         with self._lock:
             return {k: dict(v) for k, v in self._identity.items()}
 
+    def record_membership(
+        self,
+        session_id: str,
+        *,
+        created_by: Optional[str],
+        cascade_driver_id: Optional[str],
+        sibling_name: Optional[str],
+    ) -> None:
+        """Record the group facts for ``session_id`` (session group messaging).
+
+        Independent of :meth:`record` and :meth:`record_identity`, and like
+        them it skips the disk write when nothing changed -- this runs from
+        ``_save_session`` on every turn.
+
+        The facts are recorded even when all three are ``None``: a row that
+        says "this session has no owner and no cascade" is the answer a peer
+        resolving it needs (it joins no group, so the message is refused by
+        name), where an ABSENT row is indistinguishable from an index written
+        before the section existed.
+
+        Args:
+            session_id: The session.
+            created_by: Its authenticated creator (record 2.9), or ``None``.
+            cascade_driver_id: Its cascade (record 2.10), or ``None``.
+            sibling_name: Its cascade-scoped address, or ``None``.
+        """
+        if not session_id:
+            return
+        row = _membership_row({
+            "created_by": created_by,
+            "cascade_driver_id": cascade_driver_id,
+            "sibling_name": sibling_name,
+        })
+        with self._lock:
+            if self._membership.get(session_id) == row:
+                return
+            self._membership[session_id] = row
+            self._save_locked()
+
+    def membership(self, session_id: str) -> Optional[Dict[str, Optional[str]]]:
+        """The recorded group facts for ``session_id``, or ``None`` when the
+        index holds no row for it.
+
+        An AMBIGUOUS id is answered too: ambiguity is about which WORKSPACE
+        a colliding id belongs to, and :meth:`resolve` already refuses the
+        wake.  A caller that needs the workspace as well asks it separately
+        and gets the refusal there.
+        """
+        with self._lock:
+            row = self._membership.get(session_id)
+            return dict(row) if row is not None else None
+
+    def members(self) -> Dict[str, Dict[str, Optional[str]]]:
+        """Snapshot of every recorded membership row, keyed by session id.
+
+        A fresh copy, safe to iterate outside the lock.  The caller filters
+        by group key (``session_groups.group_keys_for``) -- the index stores
+        facts, not a derived grouping, so a change to the predicate needs no
+        index migration.
+        """
+        with self._lock:
+            return {k: dict(v) for k, v in self._membership.items()}
+
     def forget(self, session_id: str) -> None:
         """Drop any mapping (and ambiguity mark) for ``session_id``.
 
@@ -240,9 +343,13 @@ class SessionWorkspaceIndex:
                 session_id in self._map
                 or session_id in self._ambiguous
                 or session_id in self._identity
+                or session_id in self._membership
             )
             self._map.pop(session_id, None)
             self._ambiguous.discard(session_id)
+            # A deleted session is in no group: leaving the row would let a
+            # later timestamp collision inherit a dead session's owner.
+            self._membership.pop(session_id, None)
             # The identity goes with the mapping: a deleted session's pid is
             # not evidence about anything, and leaving it would let a later
             # timestamp collision inherit a dead process's record.

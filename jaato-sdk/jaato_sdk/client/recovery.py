@@ -832,6 +832,29 @@ class IPCRecoveryClient:
         if self._client:
             await self._client.reload_session_env(session_id)
 
+    async def send_session_message(
+        self,
+        target: str,
+        text: str = "",
+        *,
+        attachments: Optional[list] = None,
+        event_id: Optional[str] = None,
+        request_id: Optional[str] = None,
+    ) -> None:
+        """Message another session in this session's group, waking it if cold.
+
+        See :meth:`IPCClient.send_session_message` for full docs.  The inner
+        client raises against a daemon too old to serve the verb, which
+        would otherwise ignore it while the caller believed the message was
+        delivered.
+        """
+        self._check_can_send()
+        if self._client:
+            await self._client.send_session_message(
+                target, text, attachments=attachments, event_id=event_id,
+                request_id=request_id,
+            )
+
     async def toggle_workspace_ignore(self, path: str) -> None:
         """Add an entry to the session workspace's ``.gitignore``, or remove it again.
 

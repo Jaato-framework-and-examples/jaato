@@ -2142,6 +2142,91 @@ class IPCClient:
             args=[path],
         ))
 
+    MIN_SESSION_MESSAGE_PROTOCOL = "1.22"
+
+    async def send_session_message(
+        self,
+        target: str,
+        text: str = "",
+        *,
+        attachments: Optional[list] = None,
+        event_id: Optional[str] = None,
+        request_id: Optional[str] = None,
+    ) -> None:
+        """Message another session in this session's GROUP, waking it if cold.
+
+        The client-tier form of the ``courier`` plugin's ``send_to_session``
+        (protocol 1.22).  The sender is this connection's OWN session --
+        resolved daemon-side from the connection, never from here -- and the
+        target must share a group with it: a cascade, or the same
+        authenticated creator (``server.session_groups``).  A cold target is
+        revived from disk and driven; a busy one queues the message on the
+        idle-only peer tier; a terminated one is never woken.
+
+        Fire-and-forget: the daemon answers with ONE
+        ``SessionMessageResultEvent`` carrying the receipt -- ``status`` is
+        ``accepted`` / ``queued`` (delivered), ``no_such_session``,
+        ``ambiguous`` (with ``candidates``), ``session_cold``, ``duplicate``,
+        ``terminated`` or ``refused`` (with ``error``).  Neither delivered
+        status claims the peer read or acted on anything.
+
+        Args:
+            target: A session id, or a cascade-scoped sibling name.
+            text: The message.  May be empty when ``attachments`` carry the
+                content (#838).
+            attachments: Optional binary content, as :meth:`send_message`
+                accepts (a file-path ``str`` or a ``{mime_type, data,
+                display_name}`` dict), normalised by
+                :meth:`_normalize_attachments`.  Attachments ride the drive
+                branch only: a busy target answers ``refused`` rather than
+                dropping them.
+            event_id: Idempotency key.  A redelivered id answers
+                ``duplicate``, a benign no-op.
+            request_id: Correlation id echoed on the result event, so several
+                sends on one connection can be told apart.
+
+        Raises:
+            ValueError: if neither ``text`` nor ``attachments`` is given, or
+                against a daemon below :attr:`MIN_SESSION_MESSAGE_PROTOCOL`,
+                which would ignore the command silently -- and "delivered"
+                would then describe a message nobody carried.
+        """
+        if not _protocol_compatible(
+                self.server_protocol_version,
+                self.MIN_SESSION_MESSAGE_PROTOCOL):
+            spoken = self.server_protocol_version or "unknown (not connected)"
+            raise ValueError(
+                f"send_session_message: this daemon speaks protocol {spoken} "
+                f"and does not serve session.message (needs >= "
+                f"{self.MIN_SESSION_MESSAGE_PROTOCOL}).  It would ignore the "
+                f"command silently, which reads like success.  Upgrade the "
+                f"daemon."
+            )
+        wire_attachments: List[Dict[str, Any]] = []
+        if attachments:
+            wire_attachments = self._normalize_attachments(attachments)
+        if not text and not wire_attachments:
+            raise ValueError(
+                "send_session_message requires text or attachments — a "
+                "message with no content drives a turn the peer has nothing "
+                "to answer"
+            )
+        payload: Dict[str, Any] = {"target": target, "text": text}
+        if event_id is not None:
+            payload["event_id"] = event_id
+        if wire_attachments:
+            payload["attachments"] = wire_attachments
+        # ``CommandRequest`` carries no ``request_id`` of its own (and its
+        # base drops unknown fields), so the correlation id rides the
+        # payload and the daemon echoes it from there.
+        if request_id is not None:
+            payload["request_id"] = request_id
+        await self._send_event(CommandRequest(
+            command="session.message",
+            args=[],
+            payload=payload,
+        ))
+
     MIN_SCAFFOLD_EXPLAIN_PROTOCOL = "1.18"
 
     async def explain_topic(

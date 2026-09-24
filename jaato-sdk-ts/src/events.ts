@@ -104,6 +104,7 @@ export type JaatoEvents =
   | WorkspaceFilesSnapshotEvent
   | WorkspaceIgnoreResultEvent
   | ScaffoldExplainEvent
+  | SessionMessageResultEvent
   | ScaffoldIntegrationEvent
   | StageFilesRequest
   | StageFilesEvent
@@ -241,6 +242,7 @@ export type EventType =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -379,6 +381,7 @@ export type EventType1 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -522,6 +525,7 @@ export type EventType2 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -663,6 +667,7 @@ export type EventType3 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -803,6 +808,7 @@ export type EventType4 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -951,6 +957,7 @@ export type EventType5 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -1096,6 +1103,7 @@ export type EventType6 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -1240,6 +1248,7 @@ export type EventType7 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -1378,6 +1387,7 @@ export type EventType8 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -1520,6 +1530,7 @@ export type EventType9 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -1660,6 +1671,7 @@ export type EventType10 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -1809,6 +1821,7 @@ export type EventType11 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -1957,6 +1970,7 @@ export type EventType12 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -2104,6 +2118,7 @@ export type EventType13 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -2254,6 +2269,7 @@ export type EventType14 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -2399,6 +2415,7 @@ export type EventType15 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -2538,6 +2555,7 @@ export type EventType16 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -2680,6 +2698,7 @@ export type EventType17 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -2822,6 +2841,7 @@ export type EventType18 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -2970,6 +2990,7 @@ export type EventType19 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -3111,6 +3132,7 @@ export type EventType20 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -3256,6 +3278,7 @@ export type EventType21 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -3396,6 +3419,7 @@ export type EventType22 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -3537,6 +3561,7 @@ export type EventType23 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -3678,6 +3703,7 @@ export type EventType24 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -3817,6 +3843,7 @@ export type EventType25 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -3961,6 +3988,7 @@ export type EventType26 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -4101,6 +4129,7 @@ export type EventType27 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -4240,6 +4269,7 @@ export type EventType28 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -4387,6 +4417,7 @@ export type EventType29 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -4528,6 +4559,7 @@ export type EventType30 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -4670,6 +4702,7 @@ export type EventType31 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -4827,6 +4860,7 @@ export type EventType32 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -4965,6 +4999,7 @@ export type EventType33 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -5120,6 +5155,7 @@ export type EventType34 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -5262,6 +5298,7 @@ export type EventType35 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -5400,6 +5437,7 @@ export type EventType36 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -5546,6 +5584,7 @@ export type EventType37 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -5688,6 +5727,7 @@ export type EventType38 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -5827,6 +5867,7 @@ export type EventType39 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -5965,6 +6006,7 @@ export type EventType40 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -6107,6 +6149,7 @@ export type EventType41 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -6251,6 +6294,7 @@ export type EventType42 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -6393,6 +6437,7 @@ export type EventType43 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -6533,6 +6578,7 @@ export type EventType44 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -6683,6 +6729,7 @@ export type EventType45 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -6843,6 +6890,7 @@ export type EventType46 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -6983,6 +7031,7 @@ export type EventType47 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -7123,6 +7172,7 @@ export type EventType48 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -7263,6 +7313,7 @@ export type EventType49 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -7401,6 +7452,7 @@ export type EventType50 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -7564,6 +7616,7 @@ export type EventType51 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -7706,6 +7759,7 @@ export type EventType52 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -7848,6 +7902,7 @@ export type EventType53 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -7988,6 +8043,7 @@ export type EventType54 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -8126,6 +8182,7 @@ export type EventType55 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -8264,6 +8321,7 @@ export type EventType56 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -8403,6 +8461,7 @@ export type EventType57 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -8545,6 +8604,7 @@ export type EventType58 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -8683,6 +8743,7 @@ export type EventType59 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -8820,6 +8881,7 @@ export type EventType60 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -8960,6 +9022,7 @@ export type EventType61 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -9097,6 +9160,7 @@ export type EventType62 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -9238,6 +9302,7 @@ export type EventType63 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -9375,6 +9440,7 @@ export type EventType64 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -9513,6 +9579,7 @@ export type EventType65 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -9653,6 +9720,7 @@ export type EventType66 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -9793,6 +9861,7 @@ export type EventType67 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -9933,6 +10002,7 @@ export type EventType68 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -10071,6 +10141,7 @@ export type EventType69 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -10215,6 +10286,7 @@ export type EventType70 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -10362,6 +10434,7 @@ export type EventType71 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -10501,6 +10574,7 @@ export type EventType72 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -10639,6 +10713,7 @@ export type EventType73 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -10784,6 +10859,7 @@ export type EventType74 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -10928,6 +11004,7 @@ export type EventType75 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -11067,6 +11144,7 @@ export type EventType76 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -11207,6 +11285,7 @@ export type EventType77 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -11344,6 +11423,7 @@ export type EventType78 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -11485,6 +11565,7 @@ export type EventType79 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -11623,6 +11704,7 @@ export type EventType80 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -11762,6 +11844,7 @@ export type EventType81 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -11900,6 +11983,7 @@ export type EventType82 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -12040,6 +12124,7 @@ export type EventType83 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -12178,6 +12263,7 @@ export type EventType84 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -12321,6 +12407,7 @@ export type EventType85 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -12461,6 +12548,7 @@ export type EventType86 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -12603,6 +12691,7 @@ export type EventType87 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -12745,6 +12834,7 @@ export type EventType88 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -12888,6 +12978,7 @@ export type EventType89 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -13030,6 +13121,7 @@ export type EventType90 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -13175,6 +13267,7 @@ export type EventType91 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -13214,17 +13307,18 @@ export type EventType91 =
   | "gates.snapshot";
 export type Timestamp91 = string;
 export type SessionId91 = string;
-export type Integration = string;
-export type Ok3 = boolean;
-export type Changed = boolean;
-export type StateBefore = string;
-export type StateAfter = string;
-export type SkippedReason = string;
+export type RequestId22 = string | null;
 export type Target = string;
-export type Text5 = string;
+export type Status3 = string;
+export type Ok3 = boolean;
+export type MessageId = string;
+export type TargetSessionId = string;
+export type SiblingName = string;
+export type GroupKey = string;
+export type Woken = boolean;
+export type Headless = boolean;
+export type Candidates = string[];
 export type Error11 = string;
-export type Available = string[];
-export type ServerVersion1 = string;
 /**
  * All event types in the protocol.
  */
@@ -13323,6 +13417,7 @@ export type EventType92 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -13362,12 +13457,17 @@ export type EventType92 =
   | "gates.snapshot";
 export type Timestamp92 = string;
 export type SessionId92 = string;
-export type WorkspaceId = string;
-export type Name8 = string;
-export type Size = number;
-export type ContentType = string | null;
-export type Mode1 = number | null;
-export type Files1 = StagedFileSpec[];
+export type Integration = string;
+export type Ok4 = boolean;
+export type Changed = boolean;
+export type StateBefore = string;
+export type StateAfter = string;
+export type SkippedReason = string;
+export type Target1 = string;
+export type Text5 = string;
+export type Error12 = string;
+export type Available = string[];
+export type ServerVersion1 = string;
 /**
  * All event types in the protocol.
  */
@@ -13466,6 +13566,7 @@ export type EventType93 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -13505,11 +13606,12 @@ export type EventType93 =
   | "gates.snapshot";
 export type Timestamp93 = string;
 export type SessionId93 = string;
-export type WorkspaceId1 = string;
-export type Staged = string[];
-export type Failed = {
-  [k: string]: string;
-}[];
+export type WorkspaceId = string;
+export type Name8 = string;
+export type Size = number;
+export type ContentType = string | null;
+export type Mode1 = number | null;
+export type Files1 = StagedFileSpec[];
 /**
  * All event types in the protocol.
  */
@@ -13608,6 +13710,7 @@ export type EventType94 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -13647,9 +13750,11 @@ export type EventType94 =
   | "gates.snapshot";
 export type Timestamp94 = string;
 export type SessionId94 = string;
-export type RequestId22 = string;
-export type Path2 = string;
-export type MetadataOnly = boolean;
+export type WorkspaceId1 = string;
+export type Staged = string[];
+export type Failed = {
+  [k: string]: string;
+}[];
 /**
  * All event types in the protocol.
  */
@@ -13748,6 +13853,7 @@ export type EventType95 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -13788,14 +13894,8 @@ export type EventType95 =
 export type Timestamp95 = string;
 export type SessionId95 = string;
 export type RequestId23 = string;
-export type Ok4 = boolean;
-export type Path3 = string;
-export type Name9 = string;
-export type Size1 = number;
-export type MimeType1 = string;
-export type MetadataOnly1 = boolean;
-export type Category = string;
-export type Error12 = string;
+export type Path2 = string;
+export type MetadataOnly = boolean;
 /**
  * All event types in the protocol.
  */
@@ -13894,6 +13994,7 @@ export type EventType96 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -13933,20 +14034,15 @@ export type EventType96 =
   | "gates.snapshot";
 export type Timestamp96 = string;
 export type SessionId96 = string;
-export type ServerId = string;
-export type ServerName = string;
-export type ServerVersion2 = string;
-export type ActiveSessions = number;
-export type ActiveAgents = number;
-export type AvailableProviders1 = string[];
-export type AvailableModels1 = string[];
-export type Tags = string[];
-export type CpuPercent = number;
-export type MemoryPercent = number;
-export type UptimeSeconds = number;
-export type TrustState = string;
-export type SuccessRate1H = number;
-export type EscalatedTools = number;
+export type RequestId24 = string;
+export type Ok5 = boolean;
+export type Path3 = string;
+export type Name9 = string;
+export type Size1 = number;
+export type MimeType1 = string;
+export type MetadataOnly1 = boolean;
+export type Category = string;
+export type Error13 = string;
 /**
  * All event types in the protocol.
  */
@@ -14045,6 +14141,7 @@ export type EventType97 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -14084,17 +14181,20 @@ export type EventType97 =
   | "gates.snapshot";
 export type Timestamp97 = string;
 export type SessionId97 = string;
-export type RequestId24 = string;
-export type OriginServer = string;
-export type AgentName1 = string;
-export type Task = string;
-export type Context1 = string;
-export type ProfileJson = string;
-export type InlineConfigJson = string;
-export type WorkspaceGitUrl = string;
-export type WorkspaceBranch = string;
-export type WorkspaceCommit = string;
-export type WorkspaceTempBranch = string;
+export type ServerId = string;
+export type ServerName = string;
+export type ServerVersion2 = string;
+export type ActiveSessions = number;
+export type ActiveAgents = number;
+export type AvailableProviders1 = string[];
+export type AvailableModels1 = string[];
+export type Tags = string[];
+export type CpuPercent = number;
+export type MemoryPercent = number;
+export type UptimeSeconds = number;
+export type TrustState = string;
+export type SuccessRate1H = number;
+export type EscalatedTools = number;
 /**
  * All event types in the protocol.
  */
@@ -14193,6 +14293,7 @@ export type EventType98 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -14233,7 +14334,16 @@ export type EventType98 =
 export type Timestamp98 = string;
 export type SessionId98 = string;
 export type RequestId25 = string;
-export type RemoteAgentId = string;
+export type OriginServer = string;
+export type AgentName1 = string;
+export type Task = string;
+export type Context1 = string;
+export type ProfileJson = string;
+export type InlineConfigJson = string;
+export type WorkspaceGitUrl = string;
+export type WorkspaceBranch = string;
+export type WorkspaceCommit = string;
+export type WorkspaceTempBranch = string;
 /**
  * All event types in the protocol.
  */
@@ -14332,6 +14442,7 @@ export type EventType99 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -14372,7 +14483,7 @@ export type EventType99 =
 export type Timestamp99 = string;
 export type SessionId99 = string;
 export type RequestId26 = string;
-export type Reason1 = string;
+export type RemoteAgentId = string;
 /**
  * All event types in the protocol.
  */
@@ -14471,6 +14582,7 @@ export type EventType100 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -14511,9 +14623,7 @@ export type EventType100 =
 export type Timestamp100 = string;
 export type SessionId100 = string;
 export type RequestId27 = string;
-export type RemoteAgentId1 = string;
-export type Text6 = string;
-export type Source1 = string;
+export type Reason1 = string;
 /**
  * All event types in the protocol.
  */
@@ -14612,6 +14722,7 @@ export type EventType101 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -14652,11 +14763,9 @@ export type EventType101 =
 export type Timestamp101 = string;
 export type SessionId101 = string;
 export type RequestId28 = string;
-export type RemoteAgentId2 = string;
-export type Success4 = boolean;
-export type Summary = string;
-export type Error13 = string;
-export type WorkspaceModified = boolean;
+export type RemoteAgentId1 = string;
+export type Text6 = string;
+export type Source1 = string;
 /**
  * All event types in the protocol.
  */
@@ -14755,6 +14864,7 @@ export type EventType102 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -14795,7 +14905,11 @@ export type EventType102 =
 export type Timestamp102 = string;
 export type SessionId102 = string;
 export type RequestId29 = string;
-export type RemoteAgentId3 = string;
+export type RemoteAgentId2 = string;
+export type Success4 = boolean;
+export type Summary = string;
+export type Error14 = string;
+export type WorkspaceModified = boolean;
 /**
  * All event types in the protocol.
  */
@@ -14894,6 +15008,7 @@ export type EventType103 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -14934,7 +15049,7 @@ export type EventType103 =
 export type Timestamp103 = string;
 export type SessionId103 = string;
 export type RequestId30 = string;
-export type RemoteAgentId4 = string;
+export type RemoteAgentId3 = string;
 /**
  * All event types in the protocol.
  */
@@ -15033,6 +15148,7 @@ export type EventType104 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -15072,10 +15188,8 @@ export type EventType104 =
   | "gates.snapshot";
 export type Timestamp104 = string;
 export type SessionId104 = string;
-export type GateName = string;
-export type TenantId = string;
-export type Owner = string;
-export type AnnouncedAt = string;
+export type RequestId31 = string;
+export type RemoteAgentId4 = string;
 /**
  * All event types in the protocol.
  */
@@ -15174,6 +15288,7 @@ export type EventType105 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -15213,14 +15328,10 @@ export type EventType105 =
   | "gates.snapshot";
 export type Timestamp105 = string;
 export type SessionId105 = string;
-export type GateName1 = string;
-export type TenantId1 = string;
-export type Owner1 = string;
-export type Outcome = {
-  [k: string]: unknown;
-} | null;
-export type ReleasedAt = string;
-export type WasAnnounced = boolean;
+export type GateName = string;
+export type TenantId = string;
+export type Owner = string;
+export type AnnouncedAt = string;
 /**
  * All event types in the protocol.
  */
@@ -15319,6 +15430,7 @@ export type EventType106 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -15358,17 +15470,14 @@ export type EventType106 =
   | "gates.snapshot";
 export type Timestamp106 = string;
 export type SessionId106 = string;
-export type GateName2 = string;
-export type TenantId2 = string;
-export type State = string;
-export type Owner2 = string | null;
-export type Intent1 = {
+export type GateName1 = string;
+export type TenantId1 = string;
+export type Owner1 = string;
+export type Outcome = {
   [k: string]: unknown;
 } | null;
-export type AcquiredAt = string | null;
-export type ExpiresAt = string | null;
-export type Gates = GateState[];
-export type SnapshotAt = string;
+export type ReleasedAt = string;
+export type WasAnnounced = boolean;
 /**
  * All event types in the protocol.
  */
@@ -15467,6 +15576,7 @@ export type EventType107 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -15506,13 +15616,17 @@ export type EventType107 =
   | "gates.snapshot";
 export type Timestamp107 = string;
 export type SessionId107 = string;
-export type Text7 = string;
-export type SourceType = string;
-export type SourceId = string | null;
-export type Attachments1 = {
+export type GateName2 = string;
+export type TenantId2 = string;
+export type State = string;
+export type Owner2 = string | null;
+export type Intent1 = {
   [k: string]: unknown;
-}[];
-export type RequestId31 = string | null;
+} | null;
+export type AcquiredAt = string | null;
+export type ExpiresAt = string | null;
+export type Gates = GateState[];
+export type SnapshotAt = string;
 /**
  * All event types in the protocol.
  */
@@ -15611,6 +15725,7 @@ export type EventType108 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -15650,9 +15765,13 @@ export type EventType108 =
   | "gates.snapshot";
 export type Timestamp108 = string;
 export type SessionId108 = string;
-export type RequestId32 = string;
-export type Status3 = string;
-export type Detail = string | null;
+export type Text7 = string;
+export type SourceType = string;
+export type SourceId = string | null;
+export type Attachments1 = {
+  [k: string]: unknown;
+}[];
+export type RequestId32 = string | null;
 /**
  * All event types in the protocol.
  */
@@ -15751,6 +15870,7 @@ export type EventType109 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -15791,12 +15911,8 @@ export type EventType109 =
 export type Timestamp109 = string;
 export type SessionId109 = string;
 export type RequestId33 = string;
-export type Messages =
-  | {
-      [k: string]: unknown;
-    }[]
-  | null;
-export type TimeoutSeconds = number;
+export type Status4 = string;
+export type Detail = string | null;
 /**
  * All event types in the protocol.
  */
@@ -15895,6 +16011,7 @@ export type EventType110 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -15935,8 +16052,12 @@ export type EventType110 =
 export type Timestamp110 = string;
 export type SessionId110 = string;
 export type RequestId34 = string;
-export type ResponseText = string;
-export type Error14 = string;
+export type Messages =
+  | {
+      [k: string]: unknown;
+    }[]
+  | null;
+export type TimeoutSeconds = number;
 /**
  * All event types in the protocol.
  */
@@ -16035,6 +16156,7 @@ export type EventType111 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -16075,9 +16197,8 @@ export type EventType111 =
 export type Timestamp111 = string;
 export type SessionId111 = string;
 export type RequestId35 = string;
-export type AfterMessage = number | null;
-export type AfterToolCall = string | null;
-export type AfterTimestamp = string | null;
+export type ResponseText = string;
+export type Error15 = string;
 /**
  * All event types in the protocol.
  */
@@ -16176,6 +16297,7 @@ export type EventType112 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -16216,8 +16338,9 @@ export type EventType112 =
 export type Timestamp112 = string;
 export type SessionId112 = string;
 export type RequestId36 = string;
-export type ForkIndex = number;
-export type Error15 = string;
+export type AfterMessage = number | null;
+export type AfterToolCall = string | null;
+export type AfterTimestamp = string | null;
 /**
  * All event types in the protocol.
  */
@@ -16316,6 +16439,7 @@ export type EventType113 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -16355,11 +16479,9 @@ export type EventType113 =
   | "gates.snapshot";
 export type Timestamp113 = string;
 export type SessionId113 = string;
-export type WakeRef = string;
-export type Outcome1 = string;
-export type Detail1 = string;
-export type ExpiresAt1 = number;
-export type Endpoint = string;
+export type RequestId37 = string;
+export type ForkIndex = number;
+export type Error16 = string;
 /**
  * All event types in the protocol.
  */
@@ -16458,6 +16580,7 @@ export type EventType114 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -16497,8 +16620,11 @@ export type EventType114 =
   | "gates.snapshot";
 export type Timestamp114 = string;
 export type SessionId114 = string;
-export type WakeRef1 = string;
-export type Source2 = string;
+export type WakeRef = string;
+export type Outcome1 = string;
+export type Detail1 = string;
+export type ExpiresAt1 = number;
+export type Endpoint = string;
 /**
  * All event types in the protocol.
  */
@@ -16597,6 +16723,7 @@ export type EventType115 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -16636,8 +16763,8 @@ export type EventType115 =
   | "gates.snapshot";
 export type Timestamp115 = string;
 export type SessionId115 = string;
-export type Tools3 = string[];
-export type Patterns = string[];
+export type WakeRef1 = string;
+export type Source2 = string;
 /**
  * All event types in the protocol.
  */
@@ -16736,6 +16863,7 @@ export type EventType116 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -16775,8 +16903,8 @@ export type EventType116 =
   | "gates.snapshot";
 export type Timestamp116 = string;
 export type SessionId116 = string;
-export type Tools4 = string[];
-export type Patterns1 = string[];
+export type Tools3 = string[];
+export type Patterns = string[];
 /**
  * All event types in the protocol.
  */
@@ -16875,6 +17003,7 @@ export type EventType117 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -16914,9 +17043,8 @@ export type EventType117 =
   | "gates.snapshot";
 export type Timestamp117 = string;
 export type SessionId117 = string;
-export type Target1 = string;
-export type Tools5 = string[];
-export type Patterns2 = string[];
+export type Tools4 = string[];
+export type Patterns1 = string[];
 /**
  * All event types in the protocol.
  */
@@ -17015,6 +17143,7 @@ export type EventType118 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -17055,6 +17184,8 @@ export type EventType118 =
 export type Timestamp118 = string;
 export type SessionId118 = string;
 export type Target2 = string;
+export type Tools5 = string[];
+export type Patterns2 = string[];
 /**
  * All event types in the protocol.
  */
@@ -17153,6 +17284,7 @@ export type EventType119 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -17192,7 +17324,7 @@ export type EventType119 =
   | "gates.snapshot";
 export type Timestamp119 = string;
 export type SessionId119 = string;
-export type Policy = string;
+export type Target3 = string;
 /**
  * All event types in the protocol.
  */
@@ -17291,6 +17423,7 @@ export type EventType120 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -17330,7 +17463,7 @@ export type EventType120 =
   | "gates.snapshot";
 export type Timestamp120 = string;
 export type SessionId120 = string;
-export type RequestId37 = string;
+export type Policy = string;
 /**
  * All event types in the protocol.
  */
@@ -17429,6 +17562,7 @@ export type EventType121 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -17469,14 +17603,6 @@ export type EventType121 =
 export type Timestamp121 = string;
 export type SessionId121 = string;
 export type RequestId38 = string;
-export type DefaultPolicy = string;
-export type SessionDefaultPolicy = string | null;
-export type WhitelistTools = string[];
-export type WhitelistPatterns = string[];
-export type BlacklistTools = string[];
-export type BlacklistPatterns = string[];
-export type SessionWhitelist = string[];
-export type SessionBlacklist = string[];
 /**
  * All event types in the protocol.
  */
@@ -17575,6 +17701,7 @@ export type EventType122 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -17615,9 +17742,14 @@ export type EventType122 =
 export type Timestamp122 = string;
 export type SessionId122 = string;
 export type RequestId39 = string;
-export type User = string;
-export type TtlSeconds = number;
-export type SingleUse = boolean;
+export type DefaultPolicy = string;
+export type SessionDefaultPolicy = string | null;
+export type WhitelistTools = string[];
+export type WhitelistPatterns = string[];
+export type BlacklistTools = string[];
+export type BlacklistPatterns = string[];
+export type SessionWhitelist = string[];
+export type SessionBlacklist = string[];
 /**
  * All event types in the protocol.
  */
@@ -17716,6 +17848,7 @@ export type EventType123 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -17756,12 +17889,9 @@ export type EventType123 =
 export type Timestamp123 = string;
 export type SessionId123 = string;
 export type RequestId40 = string;
-export type Status4 = string;
-export type Ticket = string;
-export type Qualified = string;
-export type AppId = string;
-export type ExpiresAt2 = string;
-export type Detail2 = string | null;
+export type User = string;
+export type TtlSeconds = number;
+export type SingleUse = boolean;
 /**
  * All event types in the protocol.
  */
@@ -17860,6 +17990,7 @@ export type EventType124 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -17900,8 +18031,12 @@ export type EventType124 =
 export type Timestamp124 = string;
 export type SessionId124 = string;
 export type RequestId41 = string;
-export type Ticket1 = string;
-export type User1 = string;
+export type Status5 = string;
+export type Ticket = string;
+export type Qualified = string;
+export type AppId = string;
+export type ExpiresAt2 = string;
+export type Detail2 = string | null;
 /**
  * All event types in the protocol.
  */
@@ -18000,6 +18135,7 @@ export type EventType125 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -18040,9 +18176,8 @@ export type EventType125 =
 export type Timestamp125 = string;
 export type SessionId125 = string;
 export type RequestId42 = string;
-export type Status5 = string;
-export type Revoked = number;
-export type Detail3 = string | null;
+export type Ticket1 = string;
+export type User1 = string;
 /**
  * All event types in the protocol.
  */
@@ -18141,6 +18276,7 @@ export type EventType126 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -18181,9 +18317,9 @@ export type EventType126 =
 export type Timestamp126 = string;
 export type SessionId126 = string;
 export type RequestId43 = string;
-export type User2 = string;
-export type Workspace3 = string;
-export type Name10 = string;
+export type Status6 = string;
+export type Revoked = number;
+export type Detail3 = string | null;
 /**
  * All event types in the protocol.
  */
@@ -18282,6 +18418,7 @@ export type EventType127 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -18322,10 +18459,9 @@ export type EventType127 =
 export type Timestamp127 = string;
 export type SessionId127 = string;
 export type RequestId44 = string;
-export type Status6 = string;
-export type Value = string | null;
-export type ExpiresAt3 = string | null;
-export type Detail4 = string | null;
+export type User2 = string;
+export type Workspace3 = string;
+export type Name10 = string;
 /**
  * All event types in the protocol.
  */
@@ -18424,6 +18560,7 @@ export type EventType128 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -18464,7 +18601,10 @@ export type EventType128 =
 export type Timestamp128 = string;
 export type SessionId128 = string;
 export type RequestId45 = string;
-export type User3 = string;
+export type Status7 = string;
+export type Value = string | null;
+export type ExpiresAt3 = string | null;
+export type Detail4 = string | null;
 /**
  * All event types in the protocol.
  */
@@ -18563,6 +18703,7 @@ export type EventType129 =
   | "workspace.files_snapshot"
   | "workspace.ignore.result"
   | "scaffold.explain.result"
+  | "session.message.result"
   | "scaffold.integration.result"
   | "event.external"
   | "inject_prompt.request"
@@ -18603,7 +18744,147 @@ export type EventType129 =
 export type Timestamp129 = string;
 export type SessionId129 = string;
 export type RequestId46 = string;
-export type Status7 = string;
+export type User3 = string;
+/**
+ * All event types in the protocol.
+ */
+export type EventType130 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp130 = string;
+export type SessionId130 = string;
+export type RequestId47 = string;
+export type Status8 = string;
 export type Reloaded = number;
 export type Detail5 = string | null;
 
@@ -20462,6 +20743,59 @@ export interface Data1 {
   [k: string]: unknown;
 }
 /**
+ * The receipt for one ``session.message`` (protocol 1.22).
+ *
+ * A message from the CALLER'S session to another session in a common
+ * group -- a shared cascade, or a shared authenticated creator -- delivered
+ * by ``SessionManager.deliver_group_message``, the same method the
+ * ``courier`` plugin's ``send_to_session`` tool calls.  A cold target is
+ * woken to process it.  FIRE AND FORGET: ``status`` says what happened to
+ * the message, never what the peer decided, and there is no reply channel.
+ *
+ * Fields:
+ *     request_id: The caller's correlation id, echoed (1.3 rule), so
+ *         several sends on one connection can be told apart.
+ *     target: The address the caller sent -- a session id or a sibling
+ *         name -- echoed.
+ *     status: ``accepted`` (a turn was started on the target; ``woken``
+ *         says whether it was revived to do so), ``queued`` (the target is
+ *         mid-turn and collects the message when the turn ends),
+ *         ``no_such_session``, ``ambiguous`` (a name matching several
+ *         members; ``candidates`` lists their ids), ``session_cold``
+ *         (waking is disabled), ``duplicate`` (``event_id`` already
+ *         actioned -- a benign no-op), ``terminated`` (the target ended
+ *         on an error or an exhausted budget and is never woken), or
+ *         ``refused`` with ``error``.
+ *     ok: Whether the message was DELIVERED (``accepted`` / ``queued``) or
+ *         was a benign ``duplicate``.  Everything else is ``False``.
+ *     message_id: The daemon-minted id of the delivered message; ``""``
+ *         when nothing was delivered.
+ *     target_session_id: The resolved target, when one was resolved.
+ *     sibling_name: The target's cascade-scoped name, when it has one.
+ *     group_key: The group key the delivery was made under.
+ *     woken: Whether the target was revived from disk to receive it.
+ *     headless: Whether the target ran with no attached client.
+ *     candidates: For ``ambiguous``, the session ids the name matched.
+ *     error: Why not, when ``ok`` is ``False``.
+ */
+export interface SessionMessageResultEvent {
+  type?: EventType91;
+  timestamp?: Timestamp91;
+  session_id?: SessionId91;
+  request_id?: RequestId22;
+  target?: Target;
+  status?: Status3;
+  ok?: Ok3;
+  message_id?: MessageId;
+  target_session_id?: TargetSessionId;
+  sibling_name?: SiblingName;
+  group_key?: GroupKey;
+  woken?: Woken;
+  headless?: Headless;
+  candidates?: Candidates;
+  error?: Error11;
+}
+/**
  * The result of running ``jaato-scaffold integration`` on the DAEMON (1.21).
  *
  * The sibling of :class:`ScaffoldExplainEvent`.  ``explain`` renders a topic
@@ -20508,18 +20842,18 @@ export interface Data1 {
  *         skill.
  */
 export interface ScaffoldIntegrationEvent {
-  type?: EventType91;
-  timestamp?: Timestamp91;
-  session_id?: SessionId91;
+  type?: EventType92;
+  timestamp?: Timestamp92;
+  session_id?: SessionId92;
   integration?: Integration;
-  ok?: Ok3;
+  ok?: Ok4;
   changed?: Changed;
   state_before?: StateBefore;
   state_after?: StateAfter;
   skipped_reason?: SkippedReason;
-  target?: Target;
+  target?: Target1;
   text?: Text5;
-  error?: Error11;
+  error?: Error12;
   available?: Available;
   server_version?: ServerVersion1;
 }
@@ -20563,9 +20897,9 @@ export interface ScaffoldIntegrationEvent {
  * already-existing workspace mid-session.
  */
 export interface StageFilesRequest {
-  type?: EventType92;
-  timestamp?: Timestamp92;
-  session_id?: SessionId92;
+  type?: EventType93;
+  timestamp?: Timestamp93;
+  session_id?: SessionId93;
   workspace_id?: WorkspaceId;
   files?: Files1;
 }
@@ -20613,9 +20947,9 @@ export interface StagedFileSpec {
  *   AppArmor refusal, ...).  ``error`` carries the OS message.
  */
 export interface StageFilesEvent {
-  type?: EventType93;
-  timestamp?: Timestamp93;
-  session_id?: SessionId93;
+  type?: EventType94;
+  timestamp?: Timestamp94;
+  session_id?: SessionId94;
   workspace_id?: WorkspaceId1;
   staged?: Staged;
   failed?: Failed;
@@ -20641,10 +20975,10 @@ export interface StageFilesEvent {
  * the model is told "no such file" instead of offering a link that fails.
  */
 export interface WorkspaceFileFetchRequest {
-  type?: EventType94;
-  timestamp?: Timestamp94;
-  session_id?: SessionId94;
-  request_id?: RequestId22;
+  type?: EventType95;
+  timestamp?: Timestamp95;
+  session_id?: SessionId95;
+  request_id?: RequestId23;
   path?: Path2;
   metadata_only?: MetadataOnly;
 }
@@ -20670,18 +21004,18 @@ export interface WorkspaceFileFetchRequest {
  * - ``"io_error"`` -- the read failed; ``error`` carries the OS message.
  */
 export interface WorkspaceFileContentEvent {
-  type?: EventType95;
-  timestamp?: Timestamp95;
-  session_id?: SessionId95;
-  request_id?: RequestId23;
-  ok?: Ok4;
+  type?: EventType96;
+  timestamp?: Timestamp96;
+  session_id?: SessionId96;
+  request_id?: RequestId24;
+  ok?: Ok5;
   path?: Path3;
   name?: Name9;
   size?: Size1;
   mime_type?: MimeType1;
   metadata_only?: MetadataOnly1;
   category?: Category;
-  error?: Error12;
+  error?: Error13;
 }
 /**
  * Heartbeat sent between peer servers at a configurable interval.
@@ -20691,9 +21025,9 @@ export interface WorkspaceFileContentEvent {
  * to expose cluster state to the model.
  */
 export interface PeerHeartbeatEvent {
-  type?: EventType96;
-  timestamp?: Timestamp96;
-  session_id?: SessionId96;
+  type?: EventType97;
+  timestamp?: Timestamp97;
+  session_id?: SessionId97;
   server_id?: ServerId;
   server_name?: ServerName;
   server_version?: ServerVersion2;
@@ -20718,10 +21052,10 @@ export interface PeerHeartbeatEvent {
  * this spawn lifecycle.
  */
 export interface PeerSpawnRequestEvent {
-  type?: EventType97;
-  timestamp?: Timestamp97;
-  session_id?: SessionId97;
-  request_id?: RequestId24;
+  type?: EventType98;
+  timestamp?: Timestamp98;
+  session_id?: SessionId98;
+  request_id?: RequestId25;
   origin_server?: OriginServer;
   agent_name?: AgentName1;
   task?: Task;
@@ -20740,10 +21074,10 @@ export interface PeerSpawnRequestEvent {
  * ephemeral session and is about to start processing.
  */
 export interface PeerSpawnAcceptedEvent {
-  type?: EventType98;
-  timestamp?: Timestamp98;
-  session_id?: SessionId98;
-  request_id?: RequestId25;
+  type?: EventType99;
+  timestamp?: Timestamp99;
+  session_id?: SessionId99;
+  request_id?: RequestId26;
   remote_agent_id?: RemoteAgentId;
 }
 /**
@@ -20753,10 +21087,10 @@ export interface PeerSpawnAcceptedEvent {
  * capacity limits, missing provider, unknown profile).
  */
 export interface PeerSpawnRejectedEvent {
-  type?: EventType99;
-  timestamp?: Timestamp99;
-  session_id?: SessionId99;
-  request_id?: RequestId26;
+  type?: EventType100;
+  timestamp?: Timestamp100;
+  session_id?: SessionId100;
+  request_id?: RequestId27;
   reason?: Reason1;
 }
 /**
@@ -20767,10 +21101,10 @@ export interface PeerSpawnRejectedEvent {
  * to the parent session via ``inject_prompt``.
  */
 export interface PeerAgentOutputEvent {
-  type?: EventType100;
-  timestamp?: Timestamp100;
-  session_id?: SessionId100;
-  request_id?: RequestId27;
+  type?: EventType101;
+  timestamp?: Timestamp101;
+  session_id?: SessionId101;
+  request_id?: RequestId28;
   remote_agent_id?: RemoteAgentId1;
   text?: Text6;
   source?: Source1;
@@ -20783,14 +21117,14 @@ export interface PeerAgentOutputEvent {
  * populated only when ``success`` is False.
  */
 export interface PeerAgentCompletedEvent {
-  type?: EventType101;
-  timestamp?: Timestamp101;
-  session_id?: SessionId101;
-  request_id?: RequestId28;
+  type?: EventType102;
+  timestamp?: Timestamp102;
+  session_id?: SessionId102;
+  request_id?: RequestId29;
   remote_agent_id?: RemoteAgentId2;
   success?: Success4;
   summary?: Summary;
-  error?: Error13;
+  error?: Error14;
   workspace_modified?: WorkspaceModified;
 }
 /**
@@ -20800,20 +21134,20 @@ export interface PeerAgentCompletedEvent {
  * a previously spawned remote subagent.
  */
 export interface PeerStopRequestEvent {
-  type?: EventType102;
-  timestamp?: Timestamp102;
-  session_id?: SessionId102;
-  request_id?: RequestId29;
+  type?: EventType103;
+  timestamp?: Timestamp103;
+  session_id?: SessionId103;
+  request_id?: RequestId30;
   remote_agent_id?: RemoteAgentId3;
 }
 /**
  * Confirmation that a remote peer received and processed the stop request.
  */
 export interface PeerStopAcknowledgedEvent {
-  type?: EventType103;
-  timestamp?: Timestamp103;
-  session_id?: SessionId103;
-  request_id?: RequestId30;
+  type?: EventType104;
+  timestamp?: Timestamp104;
+  session_id?: SessionId104;
+  request_id?: RequestId31;
   remote_agent_id?: RemoteAgentId4;
 }
 /**
@@ -20825,9 +21159,9 @@ export interface PeerStopAcknowledgedEvent {
  * observe the spawned session's events.
  */
 export interface GateAnnouncedEvent {
-  type?: EventType104;
-  timestamp?: Timestamp104;
-  session_id?: SessionId104;
+  type?: EventType105;
+  timestamp?: Timestamp105;
+  session_id?: SessionId105;
   gate_name?: GateName;
   tenant_id?: TenantId;
   owner?: Owner;
@@ -20847,9 +21181,9 @@ export interface Intent {
  * on TTL expiry.
  */
 export interface GateReleasedEvent {
-  type?: EventType105;
-  timestamp?: Timestamp105;
-  session_id?: SessionId105;
+  type?: EventType106;
+  timestamp?: Timestamp106;
+  session_id?: SessionId106;
   gate_name?: GateName1;
   tenant_id?: TenantId1;
   owner?: Owner1;
@@ -20865,9 +21199,9 @@ export interface GateReleasedEvent {
  * the registry replays the live state once at subscription time.
  */
 export interface GatesSnapshotEvent {
-  type?: EventType106;
-  timestamp?: Timestamp106;
-  session_id?: SessionId106;
+  type?: EventType107;
+  timestamp?: Timestamp107;
+  session_id?: SessionId107;
   gates?: Gates;
   snapshot_at?: SnapshotAt;
 }
@@ -20918,14 +21252,14 @@ export interface GateState {
  * patterns via the priority dimension.
  */
 export interface InjectPromptRequest {
-  type?: EventType107;
-  timestamp?: Timestamp107;
-  session_id?: SessionId107;
+  type?: EventType108;
+  timestamp?: Timestamp108;
+  session_id?: SessionId108;
   text?: Text7;
   source_type?: SourceType;
   source_id?: SourceId;
   attachments?: Attachments1;
-  request_id?: RequestId31;
+  request_id?: RequestId32;
 }
 /**
  * Server's response to :class:`InjectPromptRequest`.
@@ -20977,11 +21311,11 @@ export interface InjectPromptRequest {
  * absence is left checkable instead of forgeable.
  */
 export interface InjectPromptResultEvent {
-  type?: EventType108;
-  timestamp?: Timestamp108;
-  session_id?: SessionId108;
-  request_id?: RequestId32;
-  status?: Status3;
+  type?: EventType109;
+  timestamp?: Timestamp109;
+  session_id?: SessionId109;
+  request_id?: RequestId33;
+  status?: Status4;
   detail?: Detail;
 }
 /**
@@ -20999,10 +21333,10 @@ export interface InjectPromptResultEvent {
  * flows compose this with ``resolve_fork_point``.
  */
 export interface ReplayMessagesRequest {
-  type?: EventType109;
-  timestamp?: Timestamp109;
-  session_id?: SessionId109;
-  request_id?: RequestId33;
+  type?: EventType110;
+  timestamp?: Timestamp110;
+  session_id?: SessionId110;
+  request_id?: RequestId34;
   messages?: Messages;
   timeout_seconds?: TimeoutSeconds;
 }
@@ -21010,12 +21344,12 @@ export interface ReplayMessagesRequest {
  * Server's response to :class:`ReplayMessagesRequest`.
  */
 export interface ReplayMessagesResultEvent {
-  type?: EventType110;
-  timestamp?: Timestamp110;
-  session_id?: SessionId110;
-  request_id?: RequestId34;
+  type?: EventType111;
+  timestamp?: Timestamp111;
+  session_id?: SessionId111;
+  request_id?: RequestId35;
   response_text?: ResponseText;
-  error?: Error14;
+  error?: Error15;
 }
 /**
  * Resolve a fork point in the session's history to a message index.
@@ -21033,10 +21367,10 @@ export interface ReplayMessagesResultEvent {
  * tool uses internally.
  */
 export interface ResolveForkPointRequest {
-  type?: EventType111;
-  timestamp?: Timestamp111;
-  session_id?: SessionId111;
-  request_id?: RequestId35;
+  type?: EventType112;
+  timestamp?: Timestamp112;
+  session_id?: SessionId112;
+  request_id?: RequestId36;
   after_message?: AfterMessage;
   after_tool_call?: AfterToolCall;
   after_timestamp?: AfterTimestamp;
@@ -21045,12 +21379,12 @@ export interface ResolveForkPointRequest {
  * Server's response to :class:`ResolveForkPointRequest`.
  */
 export interface ResolveForkPointResultEvent {
-  type?: EventType112;
-  timestamp?: Timestamp112;
-  session_id?: SessionId112;
-  request_id?: RequestId36;
+  type?: EventType113;
+  timestamp?: Timestamp113;
+  session_id?: SessionId113;
+  request_id?: RequestId37;
   fork_index?: ForkIndex;
-  error?: Error15;
+  error?: Error16;
 }
 /**
  * Server returns the result of ``session.bind_wake`` / ``session.unbind_wake``.
@@ -21062,9 +21396,9 @@ export interface ResolveForkPointResultEvent {
  * binding's Unix expiry — the values the caller's waker keys on.
  */
 export interface WakeBindResultEvent {
-  type?: EventType113;
-  timestamp?: Timestamp113;
-  session_id?: SessionId113;
+  type?: EventType114;
+  timestamp?: Timestamp114;
+  session_id?: SessionId114;
   wake_ref?: WakeRef;
   outcome?: Outcome1;
   detail?: Detail1;
@@ -21091,9 +21425,9 @@ export interface WakeBindResultEvent {
  * notification is a signal to attach, not the untrusted payload).
  */
 export interface SessionWokenEvent {
-  type?: EventType114;
-  timestamp?: Timestamp114;
-  session_id?: SessionId114;
+  type?: EventType115;
+  timestamp?: Timestamp115;
+  session_id?: SessionId115;
   wake_ref?: WakeRef1;
   source?: Source2;
 }
@@ -21106,9 +21440,9 @@ export interface SessionWokenEvent {
  * additive.
  */
 export interface PermissionAddWhitelistRequest {
-  type?: EventType115;
-  timestamp?: Timestamp115;
-  session_id?: SessionId115;
+  type?: EventType116;
+  timestamp?: Timestamp116;
+  session_id?: SessionId116;
   tools?: Tools3;
   patterns?: Patterns;
 }
@@ -21120,9 +21454,9 @@ export interface PermissionAddWhitelistRequest {
  * both lists are additive.
  */
 export interface PermissionAddBlacklistRequest {
-  type?: EventType116;
-  timestamp?: Timestamp116;
-  session_id?: SessionId116;
+  type?: EventType117;
+  timestamp?: Timestamp117;
+  session_id?: SessionId117;
   tools?: Tools4;
   patterns?: Patterns1;
 }
@@ -21133,10 +21467,10 @@ export interface PermissionAddBlacklistRequest {
  * ``"blacklist"``.  Empty lists are no-ops.
  */
 export interface PermissionRemoveRequest {
-  type?: EventType117;
-  timestamp?: Timestamp117;
-  session_id?: SessionId117;
-  target?: Target1;
+  type?: EventType118;
+  timestamp?: Timestamp118;
+  session_id?: SessionId118;
+  target?: Target2;
   tools?: Tools5;
   patterns?: Patterns2;
 }
@@ -21149,10 +21483,10 @@ export interface PermissionRemoveRequest {
  * session-level overrides.
  */
 export interface PermissionClearRequest {
-  type?: EventType118;
-  timestamp?: Timestamp118;
-  session_id?: SessionId118;
-  target?: Target2;
+  type?: EventType119;
+  timestamp?: Timestamp119;
+  session_id?: SessionId119;
+  target?: Target3;
 }
 /**
  * Set the session-level default permission policy.
@@ -21162,19 +21496,19 @@ export interface PermissionClearRequest {
  * the base default for this session only.
  */
 export interface PermissionSetDefaultRequest {
-  type?: EventType119;
-  timestamp?: Timestamp119;
-  session_id?: SessionId119;
+  type?: EventType120;
+  timestamp?: Timestamp120;
+  session_id?: SessionId120;
   policy?: Policy;
 }
 /**
  * Request a structured snapshot of the current permission policy.
  */
 export interface PermissionPolicySnapshotRequest {
-  type?: EventType120;
-  timestamp?: Timestamp120;
-  session_id?: SessionId120;
-  request_id?: RequestId37;
+  type?: EventType121;
+  timestamp?: Timestamp121;
+  session_id?: SessionId121;
+  request_id?: RequestId38;
 }
 /**
  * Structured permission policy snapshot.
@@ -21185,10 +21519,10 @@ export interface PermissionPolicySnapshotRequest {
  * the stringly-typed ``permissions check`` command.
  */
 export interface PermissionPolicySnapshotEvent {
-  type?: EventType121;
-  timestamp?: Timestamp121;
-  session_id?: SessionId121;
-  request_id?: RequestId38;
+  type?: EventType122;
+  timestamp?: Timestamp122;
+  session_id?: SessionId122;
+  request_id?: RequestId39;
   default_policy?: DefaultPolicy;
   session_default_policy?: SessionDefaultPolicy;
   whitelist_tools?: WhitelistTools;
@@ -21237,10 +21571,10 @@ export interface PermissionPolicySnapshotEvent {
  *         socket for a side channel, and a weaker posture either way.
  */
 export interface TicketBindRequest {
-  type?: EventType122;
-  timestamp?: Timestamp122;
-  session_id?: SessionId122;
-  request_id?: RequestId39;
+  type?: EventType123;
+  timestamp?: Timestamp123;
+  session_id?: SessionId123;
+  request_id?: RequestId40;
   user?: User;
   ttl_seconds?: TtlSeconds;
   single_use?: SingleUse;
@@ -21288,11 +21622,11 @@ export interface TicketBindRequest {
  *         say — a reader of ``"unknown"`` is back where they started.
  */
 export interface TicketBindResultEvent {
-  type?: EventType123;
-  timestamp?: Timestamp123;
-  session_id?: SessionId123;
-  request_id?: RequestId40;
-  status?: Status4;
+  type?: EventType124;
+  timestamp?: Timestamp124;
+  session_id?: SessionId124;
+  request_id?: RequestId41;
+  status?: Status5;
   ticket?: Ticket;
   qualified?: Qualified;
   app_id?: AppId;
@@ -21328,10 +21662,10 @@ export interface TicketBindResultEvent {
  *         application instead.
  */
 export interface TicketRevokeRequest {
-  type?: EventType124;
-  timestamp?: Timestamp124;
-  session_id?: SessionId124;
-  request_id?: RequestId41;
+  type?: EventType125;
+  timestamp?: Timestamp125;
+  session_id?: SessionId125;
+  request_id?: RequestId42;
   ticket?: Ticket1;
   user?: User1;
 }
@@ -21357,11 +21691,11 @@ export interface TicketRevokeRequest {
  *         say.
  */
 export interface TicketRevokeResultEvent {
-  type?: EventType125;
-  timestamp?: Timestamp125;
-  session_id?: SessionId125;
-  request_id?: RequestId42;
-  status?: Status5;
+  type?: EventType126;
+  timestamp?: Timestamp126;
+  session_id?: SessionId126;
+  request_id?: RequestId43;
+  status?: Status6;
   revoked?: Revoked;
   detail?: Detail3;
 }
@@ -21402,10 +21736,10 @@ export interface TicketRevokeResultEvent {
  *         which of that user's secrets to mint.
  */
 export interface SecretResolveRequest {
-  type?: EventType126;
-  timestamp?: Timestamp126;
-  session_id?: SessionId126;
-  request_id?: RequestId43;
+  type?: EventType127;
+  timestamp?: Timestamp127;
+  session_id?: SessionId127;
+  request_id?: RequestId44;
   user?: User2;
   workspace?: Workspace3;
   name?: Name10;
@@ -21444,11 +21778,11 @@ export interface SecretResolveRequest {
  *         say.  Never the secret.
  */
 export interface SecretResolveResultEvent {
-  type?: EventType127;
-  timestamp?: Timestamp127;
-  session_id?: SessionId127;
-  request_id?: RequestId44;
-  status?: Status6;
+  type?: EventType128;
+  timestamp?: Timestamp128;
+  session_id?: SessionId128;
+  request_id?: RequestId45;
+  status?: Status7;
   value?: Value;
   expires_at?: ExpiresAt3;
   detail?: Detail4;
@@ -21472,10 +21806,10 @@ export interface SecretResolveResultEvent {
  *         ``ticket.bind`` does, so the app id is never a request field.
  */
 export interface SecretReloadRequest {
-  type?: EventType128;
-  timestamp?: Timestamp128;
-  session_id?: SessionId128;
-  request_id?: RequestId45;
+  type?: EventType129;
+  timestamp?: Timestamp129;
+  session_id?: SessionId129;
+  request_id?: RequestId46;
   user?: User3;
 }
 /**
@@ -21496,11 +21830,11 @@ export interface SecretReloadRequest {
  *     detail: Human-readable elaboration, omitted when there is nothing to say.
  */
 export interface SecretReloadResultEvent {
-  type?: EventType129;
-  timestamp?: Timestamp129;
-  session_id?: SessionId129;
-  request_id?: RequestId46;
-  status?: Status7;
+  type?: EventType130;
+  timestamp?: Timestamp130;
+  session_id?: SessionId130;
+  request_id?: RequestId47;
+  status?: Status8;
   reloaded?: Reloaded;
   detail?: Detail5;
 }
@@ -21619,6 +21953,7 @@ export const EventTypeValue = {
   WORKSPACE_FILES_SNAPSHOT: "workspace.files_snapshot",
   WORKSPACE_IGNORE_RESULT: "workspace.ignore.result",
   SCAFFOLD_EXPLAIN_RESULT: "scaffold.explain.result",
+  SESSION_MESSAGE_RESULT: "session.message.result",
   SCAFFOLD_INTEGRATION_RESULT: "scaffold.integration.result",
   EVENT_EXTERNAL: "event.external",
   INJECT_PROMPT_REQUEST: "inject_prompt.request",

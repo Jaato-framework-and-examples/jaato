@@ -12,8 +12,9 @@ smaller, local mitigation rather than a general spawn-depth bound (#680):
 an ``inherit`` snapshot includes the persona that makes the parent
 delegate, so an ``inherit`` child is primed to spawn ``inherit`` itself.
 The child therefore receives the parent's plugins **minus the subagent
-plugin**, so it can neither spawn nor message siblings.  A caller that
-needs a spawning child names a real profile.
+plugin**, so it cannot spawn (peer messaging lives in the ``courier``
+plugin now and is not stripped -- a message is not a replication).  A
+caller that needs a spawning child names a real profile.
 
 These tests pin the acceptance criteria that can regress silently.  The
 guard lives here (``shared/tests``) rather than beside the plugin because
@@ -126,7 +127,7 @@ def test_inherit_resolves_under_allow_inline_false():
 
 def test_inherit_child_cannot_spawn():
     """The self-replication guard: the inherit child does not receive the
-    subagent plugin, so it can neither spawn nor message siblings."""
+    subagent plugin, so it cannot spawn."""
     plugin = _plugin(parent_plugins=["cli", "subagent", "todo"])
     profile, _override, err = plugin._build_inherit_profile("", None)
     assert err is None, err

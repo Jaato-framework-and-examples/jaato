@@ -2869,6 +2869,62 @@ def _check_completion_assets(profiles, ws: Path, config_root: str, out) -> None:
                     profile=pname, where=where))
 
 
+#: The two peer tools that moved from the ``subagent`` plugin to ``courier``.
+SIBLING_TOOLS = ("send_to_sibling", "list_siblings")
+
+
+def _check_sibling_tools_moved(profiles, ws: Path, config_root: str, out) -> None:
+    """A persona that names ``send_to_sibling`` / ``list_siblings`` needs the
+    ``courier`` plugin, not ``subagent`` (``sibling_tools_moved``, **error**).
+
+    The two tools left the ``subagent`` plugin for ``courier`` (session group
+    messaging).  A profile that listed ``subagent`` for them still loads and
+    still spawns; what breaks is the persona's promise -- the model hunts for
+    a tool its instructions name and finds it through nothing, spending its
+    completion-nudge budget on the search.  Nothing at runtime says why, so
+    the move is reported here, at authoring time, by name.
+
+    Checked wherever the persona text lives: the ``default_agent`` file
+    (located through the same resolver the session uses, read but never
+    RENDERED -- rendering runs prefetch scripts and validate is side-effect
+    free) and the deprecated inline ``system_instructions``.  A profile whose
+    ``plugins:`` already carries ``courier`` is fine, and one that names the
+    tools nowhere is not judged: the tools are not in every persona, and a
+    finding on the plugin list alone would fire on every ``subagent`` user.
+    """
+    from jaato_server.shared.plugins.subagent.config import find_agent_file
+
+    for pname, profile in sorted((profiles or {}).items()):
+        plugin_names = set(getattr(profile, "plugins", None) or [])
+        if "courier" in plugin_names:
+            continue
+        texts = []
+        inline = getattr(profile, "system_instructions", None)
+        if inline:
+            texts.append(("system_instructions", str(inline)))
+        agent_name = getattr(profile, "default_agent", None)
+        if agent_name:
+            path = find_agent_file(agent_name, str(ws), config_root)
+            if path is not None:
+                try:
+                    texts.append(("default_agent",
+                                  Path(path).read_text(encoding="utf-8")))
+                except (OSError, UnicodeDecodeError):
+                    pass
+        for where, text in texts:
+            named = [t for t in SIBLING_TOOLS if t in text]
+            if not named:
+                continue
+            out.append(Diagnostic(
+                "error", "sibling_tools_moved",
+                f"the persona names {', '.join(named)}, which moved from the "
+                f"`subagent` plugin to `courier` -- add `courier` to "
+                f"`plugins:` (or `courier(tools:[{', '.join(named)}])`), "
+                f"or the model will hunt for a tool it cannot find.",
+                profile=pname, where=where))
+            break
+
+
 def _check_initial_plans(profiles, ws: Path, config_root: str, out) -> None:
     """A profile's predefined plan (``plugin_configs.todo.initial_plan_name``,
     #1195) must name a plan that LOADS.
@@ -3036,6 +3092,7 @@ def validate_workspace(
     _check_completion_assets(result.profiles, ws, config_root, out)
     _check_initial_plans(result.profiles, ws, config_root, out)
     _check_default_agent_exists(result.profiles, ws, config_root, out)
+    _check_sibling_tools_moved(result.profiles, ws, config_root, out)
     _check_memory_curation(result.profiles, out)
     _check_regulatory_declared(result.profiles, out)
     for d in out[_before:]:

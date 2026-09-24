@@ -393,6 +393,9 @@ def serialize_session_info(state: SessionState) -> Dict[str, Any]:
         # Needed while the session is COLD -- see SessionInfo.
         'cascade_driver_id': state.cascade_driver_id,
         'sibling_name': state.sibling_name,
+        # The group predicate's other half (server.session_groups): a cold
+        # session answers "do we share an owner" off the listing.
+        'created_by': state.created_by,
     }
 
 
@@ -412,6 +415,7 @@ def deserialize_session_info(data: Dict[str, Any]) -> SessionInfo:
         updated_at=_naive(datetime.fromisoformat(data['updated_at'])),
         cascade_driver_id=data.get('cascade_driver_id'),
         sibling_name=data.get('sibling_name'),
+        created_by=data.get('created_by'),  # None on pre-2.9 records
         turn_count=data.get('turn_count', 0),
         # Pre-2.3 sessions wrote 'model' instead of 'profile_name'.
         # Old indexes deserialize with profile_name=None; consumers
