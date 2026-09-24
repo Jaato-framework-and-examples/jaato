@@ -204,7 +204,7 @@ declared to the capability contract as `reasoning_replay`:
 | the session keeps thought parts in history | `JaatoSession._add_model_response_to_history`, gated `provider.replay_reasoning is True` | a mock or a non-opted provider changes nothing |
 | the converter replays them | `message_to_openai(..., reasoning_fields=)` → `{"reasoning_content": text}` by default, `content: ""` next to `tool_calls` | a vendor with a second field overrides `_reasoning_replay_fields` (MiniMax adds `reasoning_details`) |
 | GC sizes them | `gc/utils.estimate_message_tokens` | replayed reasoning is context, and a K3 turn at max effort carries tens of thousands of tokens of it |
-| persistence round-trips them | `serialize_message` / `deserialize_message` (already did) | a revived session replays what it replayed live |
+| persistence round-trips them | `serialize_message` / `deserialize_message` — since #1290; before it they did **not** (below) | a revived session replays what it replayed live |
 
 Reasoning is read off streaming deltas through `_reasoning_from_delta`, so a
 wire that streams it under another field (MiniMax's `reasoning_details[]`)
@@ -219,6 +219,63 @@ profile's `extra_body`), `_tool_choice_vocabulary` + `_narrow_tool_choice`
 silent drop, never a 400), `_MAX_TOKENS_WIRE_NAME` (`max_completion_tokens`
 where the vendor deprecated `max_tokens`), `_wire_tools` and
 `_map_finish_reason`.
+
+### Reasoning That Came Back as Text (#1290)
+
+The table above said persistence "already did" round-trip thought parts. It
+did not. `serialize_part` knew four shapes — text, function call, function
+response, inline data — and a reasoning part (`text=None`, `thought='...'`)
+matched none, so it was written as `{'type': 'unknown', 'repr': repr(part)}`.
+`deserialize_part` turned that into `Part(text="[Unrecognized part: Part(...)]")`:
+an ordinary TEXT part in a MODEL message. On MiniMax, Kimi and MiMo a revived
+session therefore sent a Python repr of its own reasoning to the model as
+assistant content, and sent no `reasoning_content`. Seen live on a MiniMax
+session revived from disk.
+
+It was wider than a cold revive. The same serializer is the runner-RPC
+history wire (`session.get_history`, `agent_history_updated`,
+`session.set_history`) and the subagent state file, and every save of a
+revived session wrote the repr text back as a real text part.
+
+| Surface | Change |
+|---|---|
+| `shared/plugins/session/serializer.py` | a part is tagged with its primary field; `thought`, `executable_code` and `code_execution_result` are primary types when alone and extra keys beside another type, so a part with text AND reasoning keeps both. `PERSISTED_PART_FIELDS` is guarded against `dataclasses.fields(Part)`, so a field added later fails the build instead of being dropped |
+| the `unknown` fallback | written as `{'type': 'unknown', 'fields': [...]}` (names only, no content, WARNING), and **dropped** on load with a WARNING — never turned into text |
+| `deserialize_history` | removes a message whose recorded parts were all dropped. The #674 invariant removes empty text blocks but keeps a message with zero parts, and no wire accepts an empty assistant turn |
+| `CommandRouter._serialize_part` (`HistoryEvent`) | a reasoning part is `{"type": "thought"}` instead of `unknown` + `str(part)`. Clients ignore a type they do not render |
+| `_emit_conversation_replay` | a part with reasoning and text emits both |
+
+**Legacy records are repaired on load, in MODEL messages only.** Two shapes
+exist on disk: the `unknown` entry with its `repr`, and the text part that
+entry became after one more save. Both are recovered into a thought part.
+The text shape is recognised only when the WHOLE text is
+`[Unrecognized part: Part(...)]`, so a model quoting it keeps its text. The
+repr is **parsed, never evaluated**: `ast.parse(mode="eval")`, then only a
+`Part(...)` call with keyword arguments naming known fields, the structured
+fields `None` and the string fields `None` or a string literal. Anything
+else is dropped with a WARNING.
+
+Stated costs:
+
+- **A record written now cannot be read by an older release** if it holds
+  a thought part: the old deserializer raises `ValueError("Unknown part
+  type: thought")`. Downgrading past this change needs the session records
+  it wrote to be removed or edited.
+- **Removing an emptied MODEL message can leave two USER messages in a
+  row.** It holds no function call (calls always serialize), so no pairing
+  breaks.
+- **A legacy entry whose repr cannot be parsed is lost**, where before it
+  was replayed as text. That text was never something the model said.
+- The MiMo `400` for a revived tool loop is **inferred** from the vendor's
+  rule, not reproduced against the live API. The guard drives the real MiMo
+  provider's converter and asserts the request carries `reasoning_content`.
+
+Not changed: `ToolResult.attachments` / `enrichment_metadata` /
+`model_suffix` and `FunctionCall.unreadable_args` are still not persisted by
+this serializer.
+
+Guard: `jaato_server/shared/tests/test_thought_parts_survive_persistence_1290.py`,
+five reversions.
 
 ### Tool Execution Flow
 

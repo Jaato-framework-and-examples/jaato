@@ -3062,7 +3062,12 @@ class CommandRouter:
 
     @staticmethod
     def _serialize_part(part) -> dict:
-        """Serialize a message part to a dict.
+        """Serialize a message part to a dict for ``HistoryEvent``.
+
+        This is the CLIENT-facing shape, distinct from the persistence
+        shape in ``shared/plugins/session/serializer.py``.  A reasoning part
+        renders as ``{"type": "thought", ...}`` and a text part that also
+        carries reasoning keeps it under ``thought`` (#1290).
 
         Args:
             part: Message Part object.
@@ -3070,8 +3075,22 @@ class CommandRouter:
         Returns:
             Dict with part data.
         """
+        thought = getattr(part, 'thought', None)
         if hasattr(part, 'text') and part.text is not None:
-            return {"type": "text", "text": part.text}
+            data = {"type": "text", "text": part.text}
+            # A part carrying text AND reasoning keeps both (#1290).
+            if thought is not None:
+                data["thought"] = thought
+            return data
+        elif thought is not None and not (
+                getattr(part, 'function_call', None)
+                or getattr(part, 'function_response', None)):
+            # Reasoning kept in history by a ``replay_reasoning`` provider
+            # (#1290).  It used to fall to the ``unknown`` branch below and
+            # reach the client as ``str(part)``.  Clients that do not render
+            # ``thought`` ignore the type, as they ignore any type they do
+            # not know.
+            return {"type": "thought", "thought": thought}
         elif hasattr(part, 'function_call') and part.function_call:
             fc = part.function_call
             return {

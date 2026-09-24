@@ -2693,7 +2693,9 @@ class JaatoServer:
                                 text=part.thought,
                                 mode="write",
                             ))
-                        elif part.text:
+                        # Not ``elif``: a part may carry reasoning AND
+                        # text, and a restored session keeps both (#1290).
+                        if part.text:
                             emit(AgentOutputEvent(
                                 agent_id=agent_id,
                                 source="model",
