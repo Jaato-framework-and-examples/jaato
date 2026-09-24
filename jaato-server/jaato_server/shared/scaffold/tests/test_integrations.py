@@ -36,6 +36,61 @@ def test_missing_shared_payload_is_not_reported_as_unknown(dest, monkeypatch, tm
     assert "unknown integration" not in " ".join(lines)
 
 
+def test_a_missing_shared_payload_is_found_through_payload_from(tmp_path, monkeypatch):
+    """The same case as above, without stubbing `payload_dir`.
+
+    The test above replaces `payload_dir` outright, so it pins the MESSAGE
+    and would pass whether or not `payload_dir` honours `payload_from`.  Here
+    the real Pi manifest ships alone — no `claude-code/` beside it — so the
+    only route to the error is `payload_dir` resolving `payload_from` to a
+    directory this build does not have.
+    """
+    import shutil
+    root = tmp_path / "integrations"
+    shutil.copytree(I._source_root() / "pi", root / "pi")
+    monkeypatch.setattr(I, "_source_root", lambda: root)
+    assert I.available() == ["pi"]
+    assert I.payload_dir("pi") == root / "claude-code" / "payload"
+
+    dest = tmp_path / "dest"
+    changed, lines = I.install("pi", dest)
+    assert not changed
+    assert lines == ["integration 'pi' payload 'claude-code' is missing from this build"]
+    assert not dest.exists()
+
+
+def _pi_rows(checks):
+    return [c for c in checks if c.name == "integration (pi)"]
+
+
+def test_doctor_is_silent_about_pi_where_pi_is_not_installed(tmp_path, monkeypatch):
+    """The real Pi manifest's `detect` is what keeps a Claude Code user from a
+    permanent 'install the Pi skill' warning they cannot clear."""
+    from jaato_sdk.doctor import check_integrations
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    empty = tmp_path / "bin"
+    empty.mkdir()
+    monkeypatch.setenv("PATH", str(empty))
+    assert I.harness_present("pi") is False
+    assert _pi_rows(check_integrations()) == []
+
+
+def test_doctor_nudges_where_pi_is_installed_and_the_skill_is_not(tmp_path, monkeypatch):
+    """The complement: with a `pi` executable on PATH the suggestion returns."""
+    from jaato_sdk.doctor import WARN, check_integrations
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    pi = bindir / "pi"
+    pi.write_text("#!/bin/sh\n")
+    pi.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bindir))
+    assert I.harness_present("pi") is True
+    rows = _pi_rows(check_integrations())
+    assert [c.status for c in rows] == [WARN]
+    assert "not applied" in rows[0].detail
+
+
 def test_pi_install_stamps_pi(tmp_path):
     dest = tmp_path / ".pi" / "skills" / "jaato-sdk"
     changed, _ = I.install("pi", dest)

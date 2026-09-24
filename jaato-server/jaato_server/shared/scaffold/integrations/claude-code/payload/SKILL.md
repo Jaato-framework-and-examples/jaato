@@ -272,7 +272,7 @@ specific build and says which:
 
 ```
 jaato-scaffold integration                           # list integrations + state
-jaato-scaffold integration <harness> --force         # refresh claude-code or pi
+jaato-scaffold integration <harness> --refresh       # update claude-code or pi; keeps local edits
 jaato-doctor                                         # reports absent / stale / edited
 ```
 
