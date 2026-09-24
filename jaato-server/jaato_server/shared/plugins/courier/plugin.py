@@ -22,7 +22,11 @@ success to ``split_executor_result`` (#1053).
 ``send_to_sibling`` / ``list_siblings`` were moved here from the ``subagent``
 plugin with their contracts intact: cid-scoped, name-addressed, a cold
 sibling is not woken, the §8 caps apply.  ``send_to_session`` is the
-group-scoped, id-or-name-addressed, cold-waking verb (design §4.3).
+group-scoped, id-or-name-addressed, cold-waking verb (design §4.3), and
+since phase 3 carries ``file_refs`` (paths in the sender's workspace,
+verified daemon-side and referenced in place or copied to the target's
+workspace) and ``text_attachments`` (inlined up to 32 KiB); the receipt's
+``files`` says what became of each (design §4.5).
 
 Visibility is deliberately NOT gated per turn.  The runner-side session
 does not carry its cascade id, so a predicate there would hide the tools
@@ -253,6 +257,18 @@ class CourierPlugin(DaemonForwardingMixin):
                 "and is never woken), or refused (with a reason). "
                 "NONE of accepted, queued or spooled means the peer read it, "
                 "agreed, or acted — only that the message was delivered. "
+                "FILES: to hand the peer a document, a patch or a report, name "
+                "it in file_refs (a path in YOUR workspace) rather than pasting "
+                "it into message — the receipt's files[] says per file whether "
+                "it was referenced (the peer shares your workspace and reads it "
+                "in place), copied (the peer is in another workspace and got a "
+                "copy under its own .jaato/sessions/<id>.inbox/files/) or "
+                "refused (with a reason: outside your workspace, missing, a "
+                "credential file, over the 10 MB per-file / 50 MB per-message "
+                "copy cap); ONE refused file refuses the whole message, so fix "
+                "it and resend. Short text you generated yourself (a diff, a "
+                "snippet) goes in text_attachments and is inlined for the peer "
+                "up to 32 KiB in total; beyond that it is stored as a file. "
                 "Use for coordination a driver should not have to relay, NOT for "
                 "control flow. You cannot approve, grant or cancel anything for "
                 "a peer; permission and clarification responses are refused."
@@ -271,7 +287,38 @@ class CourierPlugin(DaemonForwardingMixin):
                         "type": "string",
                         "description": (
                             "What to tell them. Keep it short; a peer message "
-                            "is a nudge, not a document."),
+                            "is a nudge, not a document. May be empty when "
+                            "file_refs or text_attachments carry the content."),
+                    },
+                    "file_refs": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Paths of files in YOUR workspace to hand the peer, "
+                            "relative to the workspace root. Verified, then "
+                            "referenced in place or copied to the peer's "
+                            "workspace, and named in the message the peer "
+                            "reads with the digest and size the daemon "
+                            "measured."),
+                    },
+                    "text_attachments": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string",
+                                         "description": "A file name, e.g. fix.patch."},
+                                "text": {"type": "string",
+                                         "description": "The content."},
+                                "mime_type": {"type": "string",
+                                              "description": "Default text/plain."},
+                            },
+                            "required": ["name", "text"],
+                        },
+                        "description": (
+                            "Text you generated to travel with the message — a "
+                            "diff, a config snippet — each shown to the peer "
+                            "under a fence naming it."),
                     },
                 },
                 "required": ["target", "message"],
@@ -453,15 +500,22 @@ class CourierPlugin(DaemonForwardingMixin):
         mgr, sid = ctx
         target = str(args.get("target") or "").strip()
         message = args.get("message") or ""
+        file_refs = args.get("file_refs") or []
+        text_attachments = args.get("text_attachments") or []
         if not target:
             return False, {"status": "error",
                            "error": "send_to_session: target is required."}
-        if not message.strip():
+        if not isinstance(file_refs, list) or not isinstance(text_attachments, list):
+            return False, {"status": "error",
+                           "error": ("send_to_session: file_refs and text_attachments "
+                                     "must be arrays.")}
+        if not message.strip() and not file_refs and not text_attachments:
             # An empty nudge still costs the peer a turn -- and may wake one.
             return False, {"status": "error",
                            "error": "send_to_session: message is empty."}
         receipt = mgr.deliver_group_message(
             sid, target, message,
+            file_refs=file_refs, text_attachments=text_attachments,
             wake_cold=self._knobs["wake_cold"],
             max_bytes=self._knobs["max_message_bytes"],
             pending_cap=self._knobs["max_pending_per_target"],

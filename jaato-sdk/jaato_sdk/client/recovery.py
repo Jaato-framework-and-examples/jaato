@@ -838,6 +838,8 @@ class IPCRecoveryClient:
         text: str = "",
         *,
         attachments: Optional[list] = None,
+        file_refs: Optional[list] = None,
+        text_attachments: Optional[list] = None,
         event_id: Optional[str] = None,
         request_id: Optional[str] = None,
     ) -> None:
@@ -846,12 +848,14 @@ class IPCRecoveryClient:
         See :meth:`IPCClient.send_session_message` for full docs.  The inner
         client raises against a daemon too old to serve the verb, which
         would otherwise ignore it while the caller believed the message was
-        delivered.
+        delivered -- and against one too old to carry ``file_refs`` /
+        ``text_attachments``, which would deliver the text without them.
         """
         self._check_can_send()
         if self._client:
             await self._client.send_session_message(
-                target, text, attachments=attachments, event_id=event_id,
+                target, text, attachments=attachments, file_refs=file_refs,
+                text_attachments=text_attachments, event_id=event_id,
                 request_id=request_id,
             )
 

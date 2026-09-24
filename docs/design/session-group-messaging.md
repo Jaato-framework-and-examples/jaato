@@ -418,15 +418,41 @@ protocol bump: both are additive). Two limits, stated: the cold-retry
 schedule is in memory, so after a daemon restart a cold inbox waits for
 whatever next loads its session; and a drive that fails keeps the entry
 with `attempts` bumped rather than a bound of its own -- the entry's TTL
-(24 h, the wake-binding precedent) is what ends it. Phase 3 remains
-design.
+(24 h, the wake-binding precedent) is what ends it.
+
+**Phase 3 is implemented** (the payload width of §4.5). `file_refs` and
+`text_attachments` ride both `send_to_session` and `session.message`
+(protocol 1.24; both SDKs refuse a call carrying either key below it, the
+#845 rule, and a text-only call keeps the 1.23 floor).
+`SessionManager._prepare_group_payload` verifies every reference before
+anything is delivered -- inside the sender's own workspace on the
+RESOLVED path and before existence, a regular file, not a credential file
+(the `workspace_download` rule) -- and answers by workspace: the same as
+the target's and the file is `referenced` in place with the digest and
+size the daemon measured; another and it is `copied` into
+`<ws>/.jaato/sessions/<id>.inbox/files/<message_id>/` (`session_inbox.
+store_file`: streamed, atomic, digest re-verified) under the STAGING caps,
+which now have one definition in `server/transfer_limits.py`. Text
+attachments are inlined under a fence the text cannot close, up to 32 KiB
+per message, and stored as files beyond it. The receipt carries `files`
+with one disposition per row (`referenced` / `copied` / `inlined` /
+`refused` with a reason / `discarded`), and a message is delivered whole
+or not at all: one refused reference refuses it, and whatever was copied
+is taken back -- also when a copied-for message is then not delivered.
+Two departures from the text above, each for a stated reason: delivered
+files live in a `files/` SIBLING of the spooled-bytes directory rather
+than inside `<message_id>/`, because the drive deletes that directory
+with the envelope and a delivered file must outlive it; and `inlined` is
+a fourth disposition, since a text attachment carried in the body is
+neither referenced nor copied. Stated limit: delivered files are pruned
+only with the session record.
 
 
 | Phase | Delivers | New code, roughly |
 |---|---|---|
 | 1 | `session_groups.py`; index carries owner + name; `deliver_group_message` over the existing drive/queue/wake primitives (text + inline attachments, wake on cold, no spool); the `courier` plugin (§11) holding `send_to_session`, `list_group_sessions` and the two sibling tools moved out of `subagent`; `session.message` + result event; `GROUP_DELIVERY` trace | one module, one method on `SessionManager`, one new plugin (four executors, two of them relocated), one router handler, one SDK method per SDK |
 | 2 | the inbox: spool on busy/failed-revive, drain on load and turn end, watchdog retry; `_pending_wakes` folded into it; `inbox_pending` on the listing -- **shipped** | inbox module + three drain hooks |
-| 3 | `file_refs` and `text_attachments`; cross-workspace copy through the staging write path; receipt file dispositions | envelope validation + copy helper |
+| 3 | `file_refs` and `text_attachments`; cross-workspace copy under the staging caps; receipt file dispositions -- **shipped** | envelope validation + copy helper |
 
 Phase 1 is what the requirement asks for and is almost entirely
 composition. Phase 2 is what makes "it will be processed" a guarantee

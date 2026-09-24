@@ -9,6 +9,7 @@ responses through the ``EventSink`` protocol.
 
 import json
 import logging
+from dataclasses import dataclass
 import os
 import pathlib
 import uuid
@@ -50,31 +51,54 @@ def _mapping_attachments(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     return [a for a in raw if isinstance(a, dict)] if isinstance(raw, list) else []
 
 
+@dataclass
+class _MessageRequest:
+    """One decoded ``session.message``: the fields the two accepted shapes
+    agree on, plus the payload-only ones."""
+    target: str
+    text: str
+    event_id: Optional[str]
+    request_id: Optional[str]
+    attachments: List[dict]
+    file_refs: List[Any]
+    text_attachments: List[dict]
+
+    @property
+    def has_content(self) -> bool:
+        return bool(self.text or self.attachments or self.file_refs
+                    or self.text_attachments)
+
+
 def _decode_message_request(
     args: List[Any], payload: Optional[dict],
-) -> "tuple[str, str, Optional[str], Optional[str], List[dict]]":
+) -> _MessageRequest:
     """Decode a ``session.message`` request from either accepted shape.
 
-    Returns ``(target, text, event_id, request_id, attachments)``.  The
-    structured ``payload`` wins over positional ``args`` field by field;
-    the trailing positional form joins the remainder so a typed message
-    need not be quoted.  ``attachments`` and ``request_id`` are
-    payload-only -- bytes have no positional spelling (#845), and
-    ``CommandRequest`` has no field for a correlation id, so the SDK puts
-    it in the payload and it is echoed from there.  Only mapping
-    attachments survive, as for ``session.wake``.
+    The structured ``payload`` wins over positional ``args`` field by
+    field; the trailing positional form joins the remainder so a typed
+    message need not be quoted.  ``attachments``, ``file_refs``,
+    ``text_attachments`` and ``request_id`` are payload-only -- bytes have
+    no positional spelling (#845), and ``CommandRequest`` has no field for
+    a correlation id, so the SDK puts it in the payload and it is echoed
+    from there.  Only mapping attachments survive, as for ``session.wake``;
+    ``file_refs`` and ``text_attachments`` are handed on as lists and
+    judged row by row by the daemon method, which refuses a malformed row
+    BY INDEX rather than dropping it (design §4.5).
     """
     p = payload or {}
     target = p.get("target") or (args[0] if len(args) > 0 else None)
     text = p.get("text") or (" ".join(args[1:]) if len(args) > 1 else "")
     request_id = p.get("request_id")
-    attachments = _mapping_attachments(p)
-    return (
-        str(target).strip() if target is not None else "",
-        str(text or ""),
-        p.get("event_id"),
-        str(request_id) if request_id is not None else None,
-        attachments,
+    refs = p.get("file_refs")
+    texts = p.get("text_attachments")
+    return _MessageRequest(
+        target=str(target).strip() if target is not None else "",
+        text=str(text or ""),
+        event_id=p.get("event_id"),
+        request_id=str(request_id) if request_id is not None else None,
+        attachments=_mapping_attachments(p),
+        file_refs=list(refs) if isinstance(refs, list) else [],
+        text_attachments=list(texts) if isinstance(texts, list) else [],
     )
 
 
@@ -102,6 +126,7 @@ def _message_result_event(request_id: Optional[str], target: str,
         woken=bool(receipt.get("woken")),
         headless=bool(receipt.get("headless")),
         candidates=list(receipt.get("candidates") or []),
+        files=list(receipt.get("files") or []),
         error=receipt.get("error") or receipt.get("detail") or "",
     )
 
@@ -1310,9 +1335,9 @@ class CommandRouter:
         the session it is attached to.  A cold target is woken.
 
         Accepts a structured ``payload`` (SDK callers) —
-        ``{target, text, attachments?, event_id?, request_id?}`` — or
-        positional ``args`` ``[target, text...]``; see
-        :func:`_decode_message_request`.
+        ``{target, text, attachments?, file_refs?, text_attachments?,
+        event_id?, request_id?}`` — or positional ``args``
+        ``[target, text...]``; see :func:`_decode_message_request`.
 
         Always answers with ONE :class:`SessionMessageResultEvent` carrying
         the receipt — a driver branches on ``status``, so the receipt travels
@@ -1321,8 +1346,7 @@ class CommandRouter:
         settles a client's ``ask()`` rather than hanging it, #1007).
         """
         from jaato_sdk.events import ErrorEvent
-        target, text, event_id, request_id, attachments = (
-            _decode_message_request(args, payload))
+        req = _decode_message_request(args, payload)
 
         session = self._session_manager.get_client_session(client_id)
         if session is None:
@@ -1331,20 +1355,22 @@ class CommandRouter:
                        "create) the session you want to speak as"),
                 error_type="SessionError",
                 recoverable=True,
-                request_id=request_id,
+                request_id=req.request_id,
             ))
             return
-        if not target or not (text or attachments):
+        if not req.target or not req.has_content:
             receipt = {"status": "refused",
                        "error": ("session.message requires <target> and "
-                                 "<message> (or attachments)")}
+                                 "<message> (or attachments, file_refs or "
+                                 "text_attachments)")}
         else:
             receipt = self._session_manager.deliver_group_message(
-                session.session_id, target, text,
-                attachments=attachments, event_id=event_id,
+                session.session_id, req.target, req.text,
+                attachments=req.attachments, file_refs=req.file_refs,
+                text_attachments=req.text_attachments, event_id=req.event_id,
             )
         self._event_sink.send_event(
-            client_id, _message_result_event(request_id, target, receipt))
+            client_id, _message_result_event(req.request_id, req.target, receipt))
 
     def _handle_session_wake(
         self, client_id: str, args: list, payload: Optional[dict],

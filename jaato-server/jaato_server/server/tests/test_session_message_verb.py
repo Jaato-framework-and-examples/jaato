@@ -52,7 +52,8 @@ def test_the_sender_is_the_callers_session_and_the_receipt_is_typed():
                    "event_id": "e1"})
 
     r._session_manager.deliver_group_message.assert_called_once_with(
-        "s-a", "beta", "hello", attachments=[], event_id="e1")
+        "s-a", "beta", "hello", attachments=[], file_refs=[],
+        text_attachments=[], event_id="e1")
     evt = _only_answer(r)
     assert isinstance(evt, SessionMessageResultEvent)
     assert evt.request_id == "req-9"
@@ -66,7 +67,8 @@ def test_positional_args_join_the_message():
     r._session_manager.deliver_group_message.return_value = {"status": "queued"}
     r._handle_session_message("c1", ["s-b", "the", "file", "is", "free"], None)
     r._session_manager.deliver_group_message.assert_called_once_with(
-        "s-a", "s-b", "the file is free", attachments=[], event_id=None)
+        "s-a", "s-b", "the file is free", attachments=[], file_refs=[],
+        text_attachments=[], event_id=None)
     assert _only_answer(r).ok is True
 
 
@@ -116,7 +118,8 @@ def test_attachments_alone_are_content_and_travel_as_dicts_only():
     r._handle_session_message(
         "c1", [], {"target": "s-b", "text": "", "attachments": [att, "junk"]})
     r._session_manager.deliver_group_message.assert_called_once_with(
-        "s-a", "s-b", "", attachments=[att], event_id=None)
+        "s-a", "s-b", "", attachments=[att], file_refs=[],
+        text_attachments=[], event_id=None)
 
 
 def test_the_dispatcher_routes_the_verb():
