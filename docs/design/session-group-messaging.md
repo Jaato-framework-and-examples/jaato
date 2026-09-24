@@ -606,3 +606,89 @@ proposed verb reaches it in both directions.
 child's content as untrusted, on the reasoning that the child is the
 parent's own spawn under the parent's permission policy. A group peer is
 not that, which is why the proposed verb wraps.
+
+---
+
+## 11. Where it lands: a `coordination` plugin
+
+There is no `coordination` plugin today. The word is the `category` the
+subagent plugin stamps on seven of its tool schemas (`list_siblings`,
+`send_to_sibling`, `spawn_subagent`, `send_to_subagent`, …), which
+`list_tools` uses to group them. A profile cannot gate on a category:
+exposure is decided by the plugin name in `plugins:`, narrowed by
+`plugin(tools:[…])`, and refused per tool name by the permission policy.
+So "where does it land" is a question about a plugin, and the answer is
+to make the category one.
+
+**Where the peer tools live today.** `send_to_sibling` and
+`list_siblings` are declared by the `subagent` plugin (`PLUGIN_TIER =
+"runner"`), with only those two executors wrapped by
+`DaemonForwardingMixin`; the daemon-side instance receives the
+`SessionManager` through the generic sweep at session construction, which
+hands it to every exposed plugin declaring `set_session_manager`. That
+half-forwarded runner-tier shape is the exception the
+`test_runner_tier_plugins_dont_secretly_need_daemon_state` gate tolerates,
+not the pattern `shared/plugins/CLAUDE.md` prescribes for a plugin whose
+body runs daemon-side.
+
+**Proposed: `shared/plugins/coordination/`.**
+
+| Property | Value | Why |
+|---|---|---|
+| `PLUGIN_KIND` / `PLUGIN_TIER` | `"tool"` / `"daemon_callable"` | the body needs the `SessionManager`; the schema must surface runner-side. This is exactly the cross-tier pattern, so every executor is forwarded, not two of nine |
+| tools | `send_to_session`, `list_group_sessions` | §4.6; both stamped `category="coordination"` so the listing groups them with the sibling tools |
+| `set_session_manager` | declared | wired by the existing sweep; no new daemon code |
+| `is_tool_visible` | hides both when `group_keys(session)` is empty | the telepathy precedent: a tool whose executor would refuse every call is never shown |
+| `get_system_instructions` | a short paragraph, only when visible | says what a group is, that a message may wake a peer, and that a receipt is not a reply |
+| `get_auto_approved_tools` | `list_group_sessions` only | read-only; `send_to_session` is permission-gated and the prompt names the target, as `send_to_sibling`'s does |
+| `get_config_schema` | the knobs below, with types and enums | so `validate` checks values, not only names (#925) |
+
+```yaml
+plugins:
+  - coordination                         # or coordination(tools:[list_group_sessions])
+plugin_configs:
+  coordination:
+    wake_cold: true                      # false: a cold peer answers `sibling_cold`
+    max_message_bytes: 8192
+    max_pending_per_target: 20
+    max_exchanges_per_group: 200
+    text_attachment_inline_bytes: 32768
+    cross_workspace_files: copy          # copy | refuse
+  permission:
+    policy:
+      whitelist: {tools: [send_to_session]}
+```
+
+Four gating layers, each already in the tree:
+
+1. **`plugins:`** — not in `_ALWAYS_INITIALIZE_PLUGINS`, so a profile that
+   does not list it has no peer tools at all.
+2. **`tools:[…]` scope** — a read-only member lists `list_group_sessions`
+   alone.
+3. **the permission policy** — whitelist or blacklist by tool name; a
+   subagent's own `plugin_configs.permission` block governs it (#957).
+4. **per-turn visibility** — a session in no group never sees the tools,
+   so a profile can carry the plugin unconditionally.
+
+The client verb `session.message` is independent of the plugin, as
+`session.send` is of `subagent`: it lives in the command router and needs
+no plugin exposed on the target.
+
+**Why not the alternatives.**
+
+| Home | Cost |
+|---|---|
+| `subagent` | a session that must coordinate and never spawn carries `spawn_subagent` in its schema or scopes it away by hand; the plugin's instructions are spawn-first rules; it is runner-tier with a partial forwarding set; and it is already the largest plugin in the tree |
+| `telepathy` | in-process, runner-tier, parent-implicit — the wrong axis (§10) |
+| session built-ins | the shape telepathy was extracted from: tools belong in plugins |
+
+**The sibling tools, and a stated cost.** The clean end state has
+`coordination` holding every peer tool and `subagent` holding the
+parent-child ones. Moving `send_to_sibling` / `list_siblings` in the same
+change would break every cascade profile that lists `subagent` for those
+two, so Phase 1 leaves them where they are (the §7 promise) and the move is
+a follow-up: `subagent` stops declaring them, `validate` reports a profile
+that lists `subagent` without `coordination` and whose persona mentions a
+sibling tool, and the daemon-side executors become one set. For one
+release two plugins carry peer-messaging tools. That is the price of not
+breaking existing profiles, and it is stated rather than hidden.
