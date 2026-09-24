@@ -1079,7 +1079,17 @@ class JaatoWSServer:
                     profile=getattr(server, "_profile", None),
                     session_id=session_id,
                     workspace_path=workspace_path,
-                    config_root=None,
+                    # #1293: was hardcoded ``None``.  ``server.config_root``
+                    # is already set by ``_construct_and_initialize_server``
+                    # (BEFORE pre-init hooks run) from the same
+                    # ``envelope.config_root`` the IPC path
+                    # (``_provision_ipc_apparmor_and_spawn_runner``) threads
+                    # through — reading it here keeps this hook's plugin
+                    # rule set (and thus the rendered profile) consistent
+                    # with what the IPC path would have computed for the
+                    # same session, instead of silently omitting any
+                    # config_root-relative grant a plugin contributes.
+                    config_root=getattr(server, "config_root", None),
                     managed_workspace_root=ws_workspace_root,
                 )
                 # #1033: the profile is named after the BOUNDARY, so a
@@ -1345,7 +1355,9 @@ class JaatoWSServer:
                 profile=getattr(server, "_profile", None),
                 session_id=session_id,
                 workspace_path=sess.workspace_path,
-                config_root=None,
+                # #1293: mirror the pre-init hook — read the server's own
+                # resolved config_root rather than hardcoding ``None``.
+                config_root=getattr(server, "config_root", None),
                 managed_workspace_root=ws_workspace_root,
             )
             if not apparmor.provision_profile(
