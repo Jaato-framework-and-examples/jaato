@@ -479,3 +479,88 @@ export interface MemoriesState {
   /** One-line outcome of the last action. */
   notice: { text: string; error?: boolean } | null;
 }
+
+/**
+ * One thread the runner's live re-probe scanned (#1294): ``label`` is the
+ * AppArmor profile that thread's kernel task reported, or ``(unreadable)``
+ * when the scan could not read it.
+ */
+export interface DiagnosticsThread {
+  tid: number;
+  name: string | null;
+  label?: string;
+  reason?: string;
+}
+
+/**
+ * The result of ONE on-demand re-probe of the runner's confinement
+ * (``server.runner.bootstrap.probe_confinement_now``, #1294) — measured
+ * fresh at the moment it was asked, never a cached value.
+ *
+ * ``ok === false`` means the probe itself could not determine an answer
+ * (a ``/proc`` read failed, the thread walk raised) — rendered as exactly
+ * that, never as a guessed ``enforced`` / ``confined``.  ``scan`` is
+ * ``null`` in that same case; otherwise it is the thread-level breakdown
+ * (#1023's ``ThreadProfileScan``) this probe found.
+ */
+export interface DiagnosticsProbe {
+  ok: boolean;
+  error: string;
+  expected_profile: string;
+  current_profile: string;
+  current_mode: string | null;
+  enforced: boolean;
+  confined: boolean;
+  scan: {
+    scanned: number;
+    matched: number;
+    divergent: number;
+    unreadable: number;
+    gone: number;
+    uniform: boolean;
+    route: string;
+    divergent_threads: DiagnosticsThread[];
+    unreadable_threads: DiagnosticsThread[];
+  } | null;
+}
+
+/**
+ * The rail's Diagnostics section (#1294, ``app/diagnostics.ts``): the
+ * caller's own attached session, self-diagnosed. Per session, and reset
+ * with the rest of the session state.
+ *
+ * TWO KINDS OF FIELD, and the panel keeps them visually apart:
+ *   - the RECORD fields (``runnerIdentity`` through ``serverVersion``) are
+ *     the daemon's own ``Session`` bookkeeping -- CACHED, not re-measured
+ *     by this call.  A cached ``sandboxMode`` reading "confined" when it is
+ *     not is exactly what #1253 was filed about.
+ *   - ``probe`` is measured FRESH on the runner at the moment of the last
+ *     successful call (see ``checkedAt``) and is never merged into the
+ *     record fields above.
+ *
+ * ``status`` is what the LAST ask established, the same vocabulary
+ * {@link MemoriesState} uses: ``idle`` (never asked), ``loading``,
+ * ``loaded``, ``error`` (the daemon answered and refused or could not
+ * report — its ``error``/``category`` are shown, and the prior answer is
+ * NOT replaced by a blank one) or ``unsupported`` (a daemon below protocol
+ * 1.25, which serves no diagnostics verb).
+ */
+export interface DiagnosticsState {
+  status: "idle" | "loading" | "loaded" | "error" | "unsupported";
+  error: string | null;
+  category: string | null;
+  runnerIdentity: Record<string, unknown> | null;
+  confinementId: string;
+  sandboxMode: string | null;
+  consumption: Record<string, unknown> | null;
+  notebookBoundaryKind: string | null;
+  protocolVersion: string;
+  serverVersion: string;
+  /** The last live re-probe -- ``null`` before any successful answer, or
+   *  when that session carries no runner to probe. */
+  probe: DiagnosticsProbe | null;
+  /** ``Date.now()`` of the answer that populated the fields above --
+   *  when the record was last read AND the probe was last measured, since
+   *  one call answers both. */
+  checkedAt: number | null;
+}

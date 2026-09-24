@@ -111,6 +111,7 @@ def test_no_lane_names_a_method_the_dispatcher_does_not_serve():
 _CONTROL_PLANE = frozenset({
     "session.append_history_message",
     "session.apply_budget_degrade",
+    "session.diagnostics",
     "session.end",
     "session.get_all_session_state",
     "session.get_auth_info",

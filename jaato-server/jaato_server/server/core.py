@@ -5248,6 +5248,50 @@ class JaatoServer:
             )
         return {**answer, "source": "runner"}
 
+    def diagnostics_probe(self, *, timeout: float = 5.0) -> Dict[str, Any]:
+        """The live self-probe (#1294): "is the confined runner still confined".
+
+        Confinement is enforced on the RUNNER's threads, so the live half
+        of a diagnostics answer can only come from there -- this asks it,
+        over the control lane, the same way :meth:`memory_op` asks for the
+        store it holds.  A session with no runner (embedded, standalone
+        WS) has nothing to probe: it reports that plainly rather than
+        inventing a confinement verdict about a process that does not
+        exist.
+
+        Returns:
+            ``{"ok": False, "category": ..., "error": ...}`` when there is
+            no runner, or when the runner did not answer -- **never** a
+            guessed confinement verdict.  Otherwise the runner's own
+            ``session_diagnostics()`` dict (``probe`` /
+            ``notebook_boundary_kind`` / ``consumption`` /
+            ``protocol_version``), unchanged: this method is a transport,
+            not a second opinion about what the answer means.
+        """
+        rpc = getattr(self, "_runner_rpc", None)
+        if rpc is None:
+            return {
+                "ok": False,
+                "category": "no_runner",
+                "error": (
+                    "this session has no runner subprocess to probe -- "
+                    "it runs in-process, which is not the confined-runner "
+                    "posture this probe reports on"
+                ),
+            }
+        try:
+            return dict(rpc.session_diagnostics_threadsafe(timeout=timeout))
+        except Exception as exc:  # noqa: BLE001 -- reported, never guessed
+            logger.warning(
+                "diagnostics_probe: the runner did not answer (%s) -- "
+                "reporting that, never a guessed confinement verdict", exc,
+            )
+            return {
+                "ok": False,
+                "category": "runner_unreachable",
+                "error": f"the runner did not answer: {exc}",
+            }
+
     def memory_list_event(self, timeout: float = 5.0) -> Optional[MemoryListEvent]:
         """The unsolicited ``MemoryListEvent``: the completion-cache push.
 

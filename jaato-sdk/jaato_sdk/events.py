@@ -471,7 +471,24 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 # refuse a call that CARRIES either key below
 # ``MIN_SESSION_MESSAGE_FILES_PROTOCOL``, and leave a text-only call at the
 # 1.23 floor.  ``files`` on the result event is additive (default empty).
-PROTOCOL_VERSION = "1.24"
+# 1.25 -- ``session.diagnostics`` (#1294): a self-service, per-session
+# diagnostics REQUEST/RESULT pair, quiet like the memory verbs.  Answers
+# for the CALLER'S OWN attached session only: the request declares no
+# session-naming field of its own (the inherited ``Event.session_id`` is
+# stamped by the router on OUTGOING events and read by nothing on the way
+# in), and the daemon resolves "this session" from the connection's own
+# attachment before this verb is reached, never from the request body.
+# The result
+# carries two kinds of field, kept apart on purpose: cached facts the
+# daemon already tracked about the session (``runner_identity``,
+# ``confinement_id``, the record's own ``sandbox_mode``), and a LIVE
+# re-probe (``probe``) run fresh on the runner at the moment of the call.
+# A cached ``sandbox_mode`` field reading "confined" is exactly what #1253
+# was filed about, so the two are never merged into one verdict. Missing
+# on an older daemon degrades to the 1.7 rule: the SDK refuses below
+# ``MIN_DIAGNOSTICS_PROTOCOL`` rather than waiting out a request an old
+# daemon answers "Unknown request type" to.
+PROTOCOL_VERSION = "1.25"
 
 
 # =============================================================================
@@ -599,6 +616,11 @@ class EventType(str, Enum):
     MEMORY_UPDATE_RESULT = "memory.update.result"  # Server -> Client
     MEMORY_DELETE_REQUEST = "memory.delete.request"  # Client -> Server
     MEMORY_DELETE_RESULT = "memory.delete.result"  # Server -> Client
+
+    # Self-diagnostics (#1294, 1.25): a live confinement re-probe plus the
+    # cached facts a session already tracks, for the caller's OWN session.
+    DIAGNOSTICS_REQUEST = "session.diagnostics.request"  # Client -> Server
+    DIAGNOSTICS_RESULT = "session.diagnostics.result"  # Server -> Client
 
     # Sandbox management (Server -> Client)
     SANDBOX_PATHS = "sandbox.paths"  # Sandbox allowed paths for @@ completion cache
@@ -2108,6 +2130,82 @@ class MemoryDeleteResultEvent(Event):
     source: str = ""
 
 
+class DiagnosticsResultEvent(Event):
+    """Answer to :class:`DiagnosticsRequest` (#1294, 1.25): the caller's
+    own session, self-diagnosed.
+
+    Everything here is about the session the caller is ATTACHED to -- the
+    request carries no session id, so there is nothing to widen the
+    answer to another session with.
+
+    Two families of field, and they answer different questions:
+
+    **Cached** (what the daemon already tracked about this session,
+    stamped at spawn/bootstrap -- never re-measured for this call):
+        ``runner_identity``: ``{runner_pid, pool_served, pool_slot_pid,
+            cascade_driver_id, apparmor_profile, stale}`` -- the same
+            shape :class:`~server.session_identity.RunnerIdentity`
+            persists (#812).  ``None`` when this session has no runner
+            (in-process).  ``stale`` is ``True`` only for a record
+            restored from disk after a daemon restart -- the pid it
+            names belongs to a previous process lifetime.
+        ``confinement_id``: the AppArmor profile name the session's
+            record claims (#1033), or ``""`` when none was requested.
+        ``sandbox_mode``: the session record's own value --
+            ``"apparmor"`` / ``"apparmor-complain"`` / ``"soft"`` / ``None``
+            (#1014's vocabulary).  This is a CACHED claim, exactly the
+            kind #1253 was filed about reading as confined when it was
+            not; ``probe`` below is the live check that claim can be
+            compared against.
+        ``consumption``: this session's own spend, as
+            :meth:`JaatoSession.get_consumption` already reports it --
+            reused, not recomputed.
+        ``notebook_boundary_kind``: the active notebook backend's
+            execution boundary (#1012's ``kernel_sandbox.BOUNDARY_*``),
+            or ``None`` when no notebook plugin is loaded.
+        ``protocol_version`` / ``server_version``: what this daemon
+            speaks and runs.
+
+    **Live** (measured fresh, at the moment of this call, on the runner --
+    never a cached value):
+        ``probe``: the on-demand re-probe
+        (``server.runner.bootstrap.probe_confinement_now``) --
+        ``{ok, error, expected_profile, current_profile, current_mode,
+        enforced, confined, scan}`` where ``scan`` is
+        ``{scanned, matched, divergent, unreadable, gone, uniform, route,
+        divergent_threads, unreadable_threads}`` (thread-level detail,
+        tid/name/label, per #1023's ``ThreadProfileScan``) or ``None``
+        when the walk itself could not run.  ``ok=False`` means the probe
+        could not determine an answer -- absence of evidence, rendered as
+        exactly that rather than as a guessed ``True`` or ``False``.
+        ``None`` (the whole field) when this session has no runner to
+        probe.
+
+    Fields:
+        request_id: The :class:`DiagnosticsRequest` this answers.
+        ok: ``False`` when nothing could be reported at all (no session,
+            or the caller was refused by the owner gate).  Even then a
+            live ``probe`` may still be ``None`` while everything else is
+            populated -- see ``category``.
+        error / category: Why not, when ``ok`` is ``False``.
+            ``category`` is one of ``no_session``, ``not_owner``,
+            ``runner_unreachable``.
+    """
+    type: EventType = Field(default=EventType.DIAGNOSTICS_RESULT)
+    request_id: str = ""
+    ok: bool = True
+    error: str = ""
+    category: str = ""
+    runner_identity: Optional[Dict[str, Any]] = None
+    confinement_id: str = ""
+    sandbox_mode: Optional[str] = None
+    consumption: Optional[Dict[str, Any]] = None
+    notebook_boundary_kind: Optional[str] = None
+    protocol_version: str = ""
+    server_version: str = ""
+    probe: Optional[Dict[str, Any]] = None
+
+
 class SandboxPathsEvent(Event):
     """List of sandbox-allowed paths - for @@ completion cache.
 
@@ -2804,6 +2902,21 @@ class MemoryDeleteRequest(Event):
     type: EventType = Field(default=EventType.MEMORY_DELETE_REQUEST)
     request_id: str = ""
     memory_id: str = ""
+
+
+class DiagnosticsRequest(Event):
+    """Ask for a live self-diagnosis of the caller's OWN session (#1294, 1.25).
+
+    Declares no session-naming field of its own: the inherited
+    ``Event.session_id`` is stamped by the router on OUTGOING events and
+    read by nothing on the way in, so the daemon always answers for
+    whichever session THIS connection is attached to -- never a value
+    read off the request.  Answered by :class:`DiagnosticsResultEvent`,
+    which re-probes the runner's confinement fresh rather than reading a
+    cached claim.
+    """
+    type: EventType = Field(default=EventType.DIAGNOSTICS_REQUEST)
+    request_id: str = ""
 
 
 class CommandListRequest(Event):
@@ -4514,6 +4627,7 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.MEMORY_GET_RESULT.value: MemoryGetResultEvent,
     EventType.MEMORY_UPDATE_RESULT.value: MemoryUpdateResultEvent,
     EventType.MEMORY_DELETE_RESULT.value: MemoryDeleteResultEvent,
+    EventType.DIAGNOSTICS_RESULT.value: DiagnosticsResultEvent,
     EventType.SANDBOX_PATHS.value: SandboxPathsEvent,
     EventType.SERVICE_LIST.value: ServiceListEvent,
     EventType.SESSION_DESCRIPTION_UPDATED.value: SessionDescriptionUpdatedEvent,
@@ -4530,6 +4644,7 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.MEMORY_GET_REQUEST.value: MemoryGetRequest,
     EventType.MEMORY_UPDATE_REQUEST.value: MemoryUpdateRequest,
     EventType.MEMORY_DELETE_REQUEST.value: MemoryDeleteRequest,
+    EventType.DIAGNOSTICS_REQUEST.value: DiagnosticsRequest,
     EventType.COMMAND_LIST_REQUEST.value: CommandListRequest,
     EventType.COMMAND_LIST.value: CommandListEvent,
     EventType.COMMAND_LIST_REFRESH.value: CommandListRefreshEvent,

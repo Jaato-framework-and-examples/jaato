@@ -28,6 +28,10 @@ API:
   this process, not just the one ``/proc/self/attr/current`` reports.
   See the section header below it for why the process-level readback
   provably cannot see the condition it is there to catch.
+- :func:`probe_confinement_now` — the #1294 on-demand re-probe: the same
+  two primitives, run again whenever a live caller asks "is the boundary
+  this session's record claims still actually there", rather than only
+  once at bootstrap.
 
 Failure modes are distinguished so the daemon-side error message can
 explain the cause:
@@ -817,6 +821,120 @@ def verify_thread_confinement(
         route=scan.route,
         names=scan.names,
     )
+
+
+def probe_confinement_now(
+    expected_profile: str,
+    *,
+    proc_attr_path: str = DEFAULT_PROC_ATTR_PATH,
+    task_dir: str = DEFAULT_TASK_ATTR_DIR,
+) -> Dict[str, Any]:
+    """One ON-DEMAND re-probe of this process's confinement, right now (#1294).
+
+    :func:`verify_thread_confinement` answers the question ONCE, at
+    bootstrap, and either the runner enters the session or it does not.
+    This is the other question: *is the boundary a running session was
+    told it has still actually there* — asked whenever a caller wants to
+    know, over the ``session.diagnostics`` control-lane verb, using the
+    same primitives (:func:`current_confinement`,
+    :func:`scan_thread_profiles`) rather than a second implementation of
+    either.
+
+    It is deliberately the LIVE half of a diagnostics answer, never the
+    whole of one: a cached ``sandbox_mode`` field is exactly what read as
+    "confined" in the incident #1253 was filed for, and the point of this
+    function is to be the thing a caller can compare that cached claim
+    against.  The daemon side of the verb keeps the two apart in the
+    result it sends a client, rather than letting a fresh probe quietly
+    become "the" answer and erasing the distinction that motivated it.
+
+    Never raises.  A probe that cannot run at all (``/proc`` unreadable, a
+    non-Linux host) answers ``ok=False`` with ``error`` naming why —
+    **never** a guessed ``enforced`` value.  Absence of evidence is not
+    "confined: false", and it is not "confined: true" either; the #1014
+    posture applies here exactly as it does to every other reader of this
+    label.
+
+    Args:
+        expected_profile: The profile this session's record claims it
+            runs under (``""`` for an unconfined session, in which case
+            the probe still reports the CURRENT label -- a session that
+            was told it is unconfined and is not is exactly the divergence
+            this exists to catch too).
+        proc_attr_path: Override for tests.
+        task_dir: Override for tests; see :func:`scan_thread_profiles`.
+
+    Returns:
+        A JSON-safe dict:
+
+        - ``ok``: whether the probe could run at all.
+        - ``error``: why not, when ``ok`` is ``False``.
+        - ``expected_profile``: echoed back, so a client need not carry
+          it separately to render "expected vs actual".
+        - ``current_profile`` / ``current_mode``: the label read RIGHT
+          NOW, mode-tolerant (see :mod:`shared.apparmor_label`).
+        - ``enforced`` / ``confined``: :class:`AppArmorLabel`'s own two
+          predicates -- ``enforced`` is the only one that may back a
+          claim a kernel boundary exists.
+        - ``scan``: the :class:`ThreadProfileScan` reduced to primitives
+          (counts, the route the walk took, and the divergent /
+          unreadable threads by tid/name/label), or ``None`` when the
+          walk itself could not run.
+    """
+    try:
+        label = current_confinement(proc_attr_path)
+    except OSError as exc:
+        return {
+            "ok": False,
+            "error": f"could not read {proc_attr_path}: {type(exc).__name__}: {exc}",
+            "expected_profile": expected_profile,
+            "current_profile": "",
+            "current_mode": None,
+            "enforced": False,
+            "confined": False,
+            "scan": None,
+        }
+
+    try:
+        scan = scan_thread_profiles(expected_profile, task_dir=task_dir)
+    except Exception as exc:  # noqa: BLE001 -- a probe must not raise
+        return {
+            "ok": False,
+            "error": f"thread scan failed: {type(exc).__name__}: {exc}",
+            "expected_profile": expected_profile,
+            "current_profile": label.profile,
+            "current_mode": label.mode,
+            "enforced": label.enforced,
+            "confined": label.confined,
+            "scan": None,
+        }
+
+    return {
+        "ok": True,
+        "error": "",
+        "expected_profile": expected_profile,
+        "current_profile": label.profile,
+        "current_mode": label.mode,
+        "enforced": label.enforced,
+        "confined": label.confined,
+        "scan": {
+            "scanned": scan.scanned,
+            "matched": len(scan.matched),
+            "divergent": len(scan.divergent),
+            "unreadable": len(scan.unreadable),
+            "gone": len(scan.gone),
+            "uniform": scan.uniform,
+            "route": scan.route,
+            "divergent_threads": [
+                {"tid": tid, "name": scan.name_of(tid), "label": lbl}
+                for tid, lbl in scan.divergent
+            ],
+            "unreadable_threads": [
+                {"tid": tid, "name": scan.name_of(tid), "reason": reason}
+                for tid, reason in scan.unreadable
+            ],
+        },
+    }
 
 
 def _raise_confinement_incident(expected_profile: str, scan: Any) -> None:
