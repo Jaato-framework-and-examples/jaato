@@ -18,7 +18,7 @@ import sys
 import pathlib
 import tempfile
 import threading
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 #: Module logger.  ``handle_input`` reported a failed ``session.delete``
 #: through a name nothing bound: the except handler raised NameError
@@ -433,6 +433,104 @@ def _pop_ipc_system_hints(display) -> list:
     return hints
 
 
+def _diagnostics_refusal_text(category: str, error: str) -> str:
+    """The human-readable reason a ``session.diagnostics`` request was
+    refused (#1294) -- split out of :func:`handle_diagnostics_command` so
+    that function stays a thin orchestrator (cyclomatic-complexity ratchet,
+    ``jaato-server/jaato_server/shared/tests/test_cyclomatic_complexity_audit.py``).
+    """
+    if category == "not_owner":
+        return "Only the owner of this workspace can view its diagnostics."
+    if category == "no_session":
+        return "No session is attached."
+    if category == "runner_unreachable":
+        return f"The session's runner did not answer{': ' + error if error else '.'}"
+    return error or "The daemon refused the request."
+
+
+def _diagnostics_record_lines(answer: Any) -> List[Tuple[str, str]]:
+    """The session RECORD half of the diagnostics view (#1294) -- the
+    CACHED facts the daemon already tracked, never re-measured for this
+    call.  Split out of :func:`handle_diagnostics_command` for the same
+    complexity-ratchet reason as :func:`_diagnostics_refusal_text`.
+    """
+    lines: List[Tuple[str, str]] = [
+        ("Session record (as tracked by the daemon)", "bold"),
+    ]
+    identity = getattr(answer, "runner_identity", None) or {}
+    if identity:
+        pool = "pool-served" if identity.get("pool_served") else "cold-spawned"
+        stale = " (stale record)" if identity.get("stale") else ""
+        cascade = f", cascade {identity.get('cascade_driver_id')}" if identity.get("cascade_driver_id") else ""
+        lines.append((f"  runner:       pid {identity.get('runner_pid', '?')}, {pool}{cascade}{stale}", "dim"))
+    else:
+        lines.append(("  runner:       (none -- in-process)", "dim"))
+    lines.append((f"  confinement:  {getattr(answer, 'confinement_id', '') or '(none requested)'}", "dim"))
+    lines.append((f"  sandbox mode: {getattr(answer, 'sandbox_mode', None) or '(none)'}", "dim"))
+    lines.append((f"  notebook:     {getattr(answer, 'notebook_boundary_kind', None) or '(no notebook plugin)'}", "dim"))
+    lines.append((f"  protocol:     {getattr(answer, 'protocol_version', '')}", "dim"))
+    lines.append((f"  server:       {getattr(answer, 'server_version', '')}", "dim"))
+    return lines
+
+
+def _diagnostics_scan_lines(scan: Dict[str, Any]) -> List[Tuple[str, str]]:
+    """Per-thread AppArmor-label scan detail, when the live probe measured
+    one (#1294) -- split out of :func:`_diagnostics_probe_lines` for the
+    same complexity-ratchet reason as its siblings above.
+    """
+    lines: List[Tuple[str, str]] = [(
+        f"  threads: {scan.get('scanned')} scanned, {scan.get('matched')} matched, "
+        f"{scan.get('divergent')} divergent, {scan.get('unreadable')} unreadable, "
+        f"{scan.get('gone')} gone", "dim",
+    )]
+    uniform = "" if scan.get("uniform") else " -- NOT uniform"
+    lines.append((f"  route: {scan.get('route')}{uniform}", "dim"))
+    for t in scan.get("divergent_threads") or []:
+        lines.append((f"    divergent tid={t.get('tid')} name={t.get('name') or '(unknown)'} label={t.get('label')}", "system_error"))
+    for t in scan.get("unreadable_threads") or []:
+        lines.append((f"    unreadable tid={t.get('tid')} name={t.get('name') or '(unknown)'} ({t.get('reason')})", "system_warning"))
+    return lines
+
+
+def _diagnostics_probe_lines(probe: Optional[Dict[str, Any]]) -> List[Tuple[str, str]]:
+    """The LIVE re-probe half of the diagnostics view (#1294) -- measured
+    fresh on the runner at the moment of the call, never merged with the
+    cached record (:func:`_diagnostics_record_lines`): a cached
+    ``sandbox_mode`` reading "confined" when it is not is exactly the
+    #1253 shape this view exists to catch.  Split out of
+    :func:`handle_diagnostics_command` for the same complexity-ratchet
+    reason as its siblings above.
+    """
+    if probe is None:
+        return [
+            ("  This session has no runner subprocess to probe -- it runs", "dim"),
+            ("  in-process, which is not the confined-runner posture this", "dim"),
+            ("  check reports on.", "dim"),
+        ]
+    if not probe.get("ok"):
+        return [(
+            f"  Could not determine confinement: "
+            f"{probe.get('error') or 'the probe did not answer.'}",
+            "system_warning",
+        )]
+
+    if probe.get("enforced"):
+        verdict, style = "Enforced", "system_success"
+    elif probe.get("confined"):
+        verdict, style = "Confined, not enforced (complain mode)", "system_warning"
+    else:
+        verdict, style = "Not confined", "system_error"
+    lines: List[Tuple[str, str]] = [(f"  {verdict}", style)]
+    lines.append((f"  expected profile: {probe.get('expected_profile') or '(none declared)'}", "dim"))
+    current = probe.get("current_profile") or "(unlabelled)"
+    mode = f" ({probe.get('current_mode')})" if probe.get("current_mode") else ""
+    lines.append((f"  kernel reports:   {current}{mode}", "dim"))
+    scan = probe.get("scan")
+    if scan:
+        lines.extend(_diagnostics_scan_lines(scan))
+    return lines
+
+
 async def handle_diagnostics_command(client, display) -> None:
     """Self-diagnose THIS session's confinement and runtime facts (#1294).
 
@@ -449,6 +547,11 @@ async def handle_diagnostics_command(client, display) -> None:
     Nothing is written to disk and nothing offered for export -- this is
     a live-view print, the same scope the web client's Diagnostics rail
     section has.
+
+    Thin orchestrator by design (gate, then hand off to the three helpers
+    above): everything that decides what a LINE says lives in one of
+    them, so this function stays well under the cyclomatic-complexity
+    ratchet rather than growing one branch per new field.
     """
     try:
         answer = await client.get_diagnostics()
@@ -457,73 +560,21 @@ async def handle_diagnostics_command(client, display) -> None:
         return
 
     if not getattr(answer, "ok", False):
-        category = getattr(answer, "category", "") or ""
-        error = getattr(answer, "error", "") or ""
-        if category == "not_owner":
-            text = "Only the owner of this workspace can view its diagnostics."
-        elif category == "no_session":
-            text = "No session is attached."
-        elif category == "runner_unreachable":
-            text = f"The session's runner did not answer{': ' + error if error else '.'}"
-        else:
-            text = error or "The daemon refused the request."
+        text = _diagnostics_refusal_text(
+            getattr(answer, "category", "") or "",
+            getattr(answer, "error", "") or "",
+        )
         display.add_system_message(f"diagnostics: {text}", style="system_error")
         return
 
     lines: List[Tuple[str, str]] = [
         ("Session Diagnostics (#1294)", "bold"),
         ("", ""),
-        ("Session record (as tracked by the daemon)", "bold"),
     ]
-    identity = getattr(answer, "runner_identity", None) or {}
-    if identity:
-        pool = "pool-served" if identity.get("pool_served") else "cold-spawned"
-        stale = " (stale record)" if identity.get("stale") else ""
-        cascade = f", cascade {identity.get('cascade_driver_id')}" if identity.get("cascade_driver_id") else ""
-        lines.append((f"  runner:       pid {identity.get('runner_pid', '?')}, {pool}{cascade}{stale}", "dim"))
-    else:
-        lines.append(("  runner:       (none -- in-process)", "dim"))
-    lines.append((f"  confinement:  {getattr(answer, 'confinement_id', '') or '(none requested)'}", "dim"))
-    lines.append((f"  sandbox mode: {getattr(answer, 'sandbox_mode', None) or '(none)'}", "dim"))
-    lines.append((f"  notebook:     {getattr(answer, 'notebook_boundary_kind', None) or '(no notebook plugin)'}", "dim"))
-    lines.append((f"  protocol:     {getattr(answer, 'protocol_version', '')}", "dim"))
-    lines.append((f"  server:       {getattr(answer, 'server_version', '')}", "dim"))
+    lines.extend(_diagnostics_record_lines(answer))
     lines.append(("", ""))
     lines.append(("Live re-check (just measured)", "bold"))
-
-    probe = getattr(answer, "probe", None)
-    if probe is None:
-        lines.append(("  This session has no runner subprocess to probe -- it runs", "dim"))
-        lines.append(("  in-process, which is not the confined-runner posture this", "dim"))
-        lines.append(("  check reports on.", "dim"))
-    elif not probe.get("ok"):
-        lines.append((f"  Could not determine confinement: {probe.get('error') or 'the probe did not answer.'}", "system_warning"))
-    else:
-        if probe.get("enforced"):
-            verdict, style = "Enforced", "system_success"
-        elif probe.get("confined"):
-            verdict, style = "Confined, not enforced (complain mode)", "system_warning"
-        else:
-            verdict, style = "Not confined", "system_error"
-        lines.append((f"  {verdict}", style))
-        lines.append((f"  expected profile: {probe.get('expected_profile') or '(none declared)'}", "dim"))
-        current = probe.get("current_profile") or "(unlabelled)"
-        mode = f" ({probe.get('current_mode')})" if probe.get("current_mode") else ""
-        lines.append((f"  kernel reports:   {current}{mode}", "dim"))
-        scan = probe.get("scan")
-        if scan:
-            lines.append((
-                f"  threads: {scan.get('scanned')} scanned, {scan.get('matched')} matched, "
-                f"{scan.get('divergent')} divergent, {scan.get('unreadable')} unreadable, "
-                f"{scan.get('gone')} gone", "dim",
-            ))
-            uniform = "" if scan.get("uniform") else " -- NOT uniform"
-            lines.append((f"  route: {scan.get('route')}{uniform}", "dim"))
-            for t in scan.get("divergent_threads") or []:
-                lines.append((f"    divergent tid={t.get('tid')} name={t.get('name') or '(unknown)'} label={t.get('label')}", "system_error"))
-            for t in scan.get("unreadable_threads") or []:
-                lines.append((f"    unreadable tid={t.get('tid')} name={t.get('name') or '(unknown)'} ({t.get('reason')})", "system_warning"))
-
+    lines.extend(_diagnostics_probe_lines(getattr(answer, "probe", None)))
     display.show_lines(lines)
 
 
@@ -2585,23 +2636,31 @@ async def run_ipc_mode(socket_path: str, auto_start: bool = True, env_file: str 
                         continue
 
                 # ==================== TUI-specific commands (not in shared parser) ====================
-                # Keybindings command - handle locally using shared function
-                if cmd == "keybindings":
+                # Simple TUI commands that are one call with no further
+                # inline parsing of their own are dispatched through ONE
+                # table lookup rather than one ``elif`` apiece.  This
+                # function is already well past the complexity ceiling and
+                # baselined (#1294 was refused by the ratchet for adding
+                # ``diagnostics`` as a fourth ``elif`` here, +1 on an
+                # already-frozen function) -- a table lookup is a single
+                # decision point however many entries it holds, so a new
+                # command lands here for free instead of costing +1 per
+                # addition the way another ``elif`` branch would.
+                # ``theme`` stays its own ``elif`` below: it has substantial
+                # inline sub-command parsing of its own and does not fit
+                # this "one call, no further parsing" shape.
+                async def _dispatch_keybindings_command() -> None:
                     from ui_utils import handle_keybindings_command
                     handle_keybindings_command(text, display)
-                    continue
 
-                # Diagnostics command - self-diagnose THIS session's confinement
-                # and runtime facts (#1294).  A quiet request/result pair, the
-                # same shape ``memory`` uses; nothing here writes a file or
-                # offers to export what it prints.
-                elif cmd == "diagnostics":
-                    await handle_diagnostics_command(client, display)
-                    continue
-
-                # Screenshot command - handle locally (client-side only)
-                elif cmd == "screenshot":
-                    await handle_screenshot_command_ipc(text, display, agent_registry, client)
+                simple_tui_commands: Dict[str, Callable[[], Awaitable[None]]] = {
+                    "keybindings": _dispatch_keybindings_command,
+                    "diagnostics": lambda: handle_diagnostics_command(client, display),
+                    "screenshot": lambda: handle_screenshot_command_ipc(
+                        text, display, agent_registry, client),
+                }
+                if cmd in simple_tui_commands:
+                    await simple_tui_commands[cmd]()
                     continue
 
                 # Theme command - handle locally
