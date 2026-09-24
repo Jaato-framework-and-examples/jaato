@@ -47,6 +47,7 @@ import type {
   BudgetState,
   GcState,
   ContextState,
+  MemoriesState,
   InitProgress,
   OutputBlock,
   PendingClarification,
@@ -236,6 +237,8 @@ export interface JaatoState {
   busySince: Record<string, number>;
   /** The open exit confirmation, or ``null`` (``app/exitChoice.ts``). */
   exitChoice: ExitChoice | null;
+  /** The rail's Memories section (#1232, ``app/memories.ts``). */
+  memories: MemoriesState;
 
   ui: {
     showPlan: boolean;
@@ -244,6 +247,8 @@ export interface JaatoState {
     showTools: boolean;
     /** The Sessions rail section: survey every session and note it without leaving this one. */
     showSessions: boolean;
+    /** The Memories rail section (#1232): the session's memory store, and the owner's curation of it. */
+    showMemories: boolean;
     theme: string;
     /** Tool call currently pinned in the live-output popup. */
     popupCallId?: string | null;
@@ -304,7 +309,9 @@ export interface JaatoState {
   dismissClarification: (requestId: string) => void;
   dismissReferenceSelection: (requestId: string) => void;
   dismissPostAuth: () => void;
-  toggleUi: (key: "showPlan" | "showBudget" | "showWorkspace" | "showTools" | "showSessions") => void;
+  toggleUi: (key: "showPlan" | "showBudget" | "showWorkspace" | "showTools" | "showSessions" | "showMemories") => void;
+  /** Merge into the Memories section's state (``app/memories.ts`` is its one writer). */
+  patchMemories: (patch: Partial<MemoriesState> | ((m: MemoriesState) => Partial<MemoriesState>)) => void;
   /** The TUI's Ctrl+T: expand or collapse every tool block, and new ones follow. */
   setToolsExpanded: (expanded: boolean) => void;
   /** Add (``+1``, before a silent request) or give back (``-1``, when it failed to send) one silent reply. */
@@ -372,7 +379,16 @@ const emptySessionState = () => ({
   permissionStatus: null,
   busySince: {} as Record<string, number>,
   exitChoice: null as ExitChoice | null,
+  memories: emptyMemories(),
 });
+
+/** The Memories section before anything was asked (and after a session change). */
+export function emptyMemories(): MemoriesState {
+  return {
+    rows: [], status: "idle", error: null, mayCurate: null, thisSessionOnly: false,
+    expanded: null, details: {}, busy: {}, editing: {}, notice: null,
+  };
+}
 
 /** Drop one key, returning a new record (React identity) — or the same one. */
 function without<T>(rec: Record<string, T>, key: string): Record<string, T> {
@@ -1128,7 +1144,7 @@ export const useJaato = create<JaatoState>()((set, get) => ({
   commands: mergeCommandSpecs([]),
   uploads: [],
   ...emptySessionState(),
-  ui: { showPlan: false, showBudget: false, showWorkspace: false, showTools: false, showSessions: false, theme: "light", popupCallId: null, railWidth: loadRailWidth(), railSplits: loadRailSplits() },
+  ui: { showPlan: false, showBudget: false, showWorkspace: false, showTools: false, showSessions: false, showMemories: false, theme: "light", popupCallId: null, railWidth: loadRailWidth(), railSplits: loadRailSplits() },
 
   dispatch: (events) =>
     set((state) => {
@@ -1214,6 +1230,9 @@ export const useJaato = create<JaatoState>()((set, get) => ({
   setWorkspaceListNotice: (n) => set((st) => ({ workspace: { ...st.workspace, notice: n } })),
   setTheme: (theme) => set((st) => ({ ui: { ...st.ui, theme } })),
   setPopup: (callId) => set((st) => ({ ui: { ...st.ui, popupCallId: callId } })),
+  patchMemories: (patch) => set((st) => ({
+    memories: { ...st.memories, ...(typeof patch === "function" ? patch(st.memories) : patch) },
+  })),
   setRailWidth: (w) => set((st) => { const railWidth = clampRailWidth(w); saveRailWidth(railWidth); return { ui: { ...st.ui, railWidth } }; }),
   setRailSplits: (splits) => set((st) => { const railSplits = sanitizeSplits(splits); saveRailSplits(railSplits); return { ui: { ...st.ui, railSplits } }; }),
   addUploads: (items) => set((st) => ({ uploads: [...st.uploads, ...items] })),

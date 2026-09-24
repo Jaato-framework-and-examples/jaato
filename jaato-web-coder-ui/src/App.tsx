@@ -9,6 +9,7 @@ import { SessionScreen } from "@/screens/SessionScreen";
 // to bootstrap the jaato-sdk skill into each workspace this client serves
 // (#1263), on workspace selection and on session start.
 import "@/app/bootstrapSkill";
+import "@/app/memories";
 
 export default function App() {
   const screen = useJaato((s) => s.screen);

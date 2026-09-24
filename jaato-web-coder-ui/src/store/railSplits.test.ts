@@ -14,6 +14,7 @@ import {
   sanitizeSplits,
   sharesFor,
   type RailSectionId,
+  type RailSplits,
 } from "./railSplits";
 
 describe("moveBoundary changes exactly the two neighbours", () => {
@@ -32,7 +33,7 @@ describe("moveBoundary changes exactly the two neighbours", () => {
   });
 
   it("only two keys differ from the input", () => {
-    const before = { plan: 2, budget: 1, files: 3, sessions: 1 };
+    const before: RailSplits = { plan: 2, budget: 1, files: 3, sessions: 1, memories: 1 };
     const after = moveBoundary(before, "budget", "files", 100, 300, -50);
     const changed = (Object.keys(after) as RailSectionId[]).filter((k) => after[k] !== before[k as RailSectionId]);
     expect(changed.sort()).toEqual(["budget", "files"]);

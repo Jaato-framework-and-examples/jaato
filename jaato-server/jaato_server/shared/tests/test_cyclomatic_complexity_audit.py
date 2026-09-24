@@ -135,7 +135,7 @@ BASELINE: Dict[str, int] = {
     # have made the one behavioural difference (which exceptions survive)
     # unreviewable.  Splitting it is worth doing on its own.
     "jaato-server/jaato_server/server/core.py::JaatoServer._start_model_thread.model_thread._finish_turn": 26,
-    "jaato-server/jaato_server/server/core.py::JaatoServer.execute_command": 28,
+    "jaato-server/jaato_server/server/core.py::JaatoServer.execute_command": 27,
     "jaato-server/jaato_server/server/core.py::JaatoServer.initialize": 44,
     "jaato-server/jaato_server/server/core.py::JaatoServer.initialize._run_load_plugins": 17,
     "jaato-server/jaato_server/server/core.py::JaatoServer.shutdown": 35,
@@ -167,7 +167,7 @@ BASELINE: Dict[str, int] = {
     "jaato-server/jaato_server/server/runner_spawn.py::build_session_envelope": 36,
     "jaato-server/jaato_server/server/runner_spawn.py::spawn_session_runner": 16,
     "jaato-server/jaato_server/server/session_manager.py::SessionManager._build_isolated_envelope": 21,
-    "jaato-server/jaato_server/server/session_manager.py::SessionManager._build_session_info_event": 22,
+    "jaato-server/jaato_server/server/session_manager.py::SessionManager._build_session_info_event": 21,
     "jaato-server/jaato_server/server/session_manager.py::SessionManager._cascade_teardown_isolated_subagents": 20,
     "jaato-server/jaato_server/server/session_manager.py::SessionManager._create_session_impl": 52,
     "jaato-server/jaato_server/server/session_manager.py::SessionManager._expand_prompt_references": 18,
@@ -188,7 +188,7 @@ BASELINE: Dict[str, int] = {
     # three-way ``target`` switch, was lifted into
     # ``_handle_permission_remove``.  Same move as #812's and #1069's, and it
     # leaves the chain shorter than it was.
-    "jaato-server/jaato_server/server/session_manager.py::SessionManager.handle_request": 93,
+    "jaato-server/jaato_server/server/session_manager.py::SessionManager.handle_request": 80,
     "jaato-server/jaato_server/server/session_manager.py::SessionManager.wake_session": 17,
     "jaato-server/jaato_server/server/test_client.py::format_event": 29,
     "jaato-server/jaato_server/server/tests/test_runner_cgroup_attach_7d.py::test_websocket_pre_init_hook_provisions_cgroup_before_spawn": 23,

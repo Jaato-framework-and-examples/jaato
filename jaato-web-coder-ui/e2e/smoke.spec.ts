@@ -1139,3 +1139,47 @@ test("the jaato-sdk skill is bootstrapped into the workspace on session start (#
   ).toBeVisible();
   await expect(page.getByText(/claude-code skill installed \(jaato-server mock-0\.0\.1\)/)).toBeVisible();
 });
+
+test("memories rail lists the store, re-lists on a store_memory, and approves and removes (#1232)", async ({ page }) => {
+  await openSession(page);
+  await page.getByRole("button", { name: "Toggle the session's memories" }).click();
+  const panel = page.getByRole("region", { name: "Memories" });
+
+  // The seeded store: one raw (unvetted), two approved, one of them global.
+  await expect(panel.getByTestId("memory-row")).toHaveCount(3);
+  await expect(page.getByRole("button", { name: "Close Memories" })).toContainText("3 memories · 1 unvetted");
+  const raw = panel.locator('[data-memory-id="mem_raw_1"]');
+  await expect(raw).toContainText("unvetted");
+  await expect(panel.locator('[data-memory-id="mem_global_1"]')).toContainText("global");
+
+  // Nothing is printed into the transcript: the verbs are quiet.
+  await expect(page.getByText("mock: executed memory")).toHaveCount(0);
+
+  // Expanding fetches the content the list does not carry.
+  await raw.getByRole("button", { name: /^Show memory/ }).click();
+  await expect(raw.getByTestId("memory-content")).toHaveText("Run pnpm install; npm install breaks the lockfile.");
+
+  // A successful store_memory in the conversation re-lists, and the new
+  // memory says it was written here.
+  await composer(page).fill("please remember the api is versioned");
+  await composer(page).press("Enter");
+  await expect(panel.getByTestId("memory-row")).toHaveCount(4);
+  await expect(panel.getByText("written in this session")).toBeVisible();
+  await expect(panel.getByText("used in this session")).toBeVisible();
+  // The filter keeps what was written OR retrieved here: the new memory,
+  // and the seeded one this session's retrieval surfaced.
+  await panel.getByRole("checkbox", { name: /This session only/ }).check();
+  await expect(panel.getByTestId("memory-row")).toHaveCount(2);
+  await panel.getByRole("checkbox", { name: /This session only/ }).uncheck();
+
+  // Approve: the unvetted marker goes, and the daemon's store is re-read.
+  await raw.getByRole("button", { name: /^Approve memory/ }).click();
+  await expect(panel.getByRole("status")).toHaveText("Approved.");
+  await expect(raw).not.toContainText("unvetted");
+
+  // Remove is two steps.
+  await raw.getByRole("button", { name: /^Remove memory/ }).click();
+  await raw.getByRole("button", { name: /^Confirm remove memory/ }).click();
+  await expect(panel.getByRole("status")).toHaveText("Removed.");
+  await expect(panel.locator('[data-memory-id="mem_raw_1"]')).toHaveCount(0);
+});
