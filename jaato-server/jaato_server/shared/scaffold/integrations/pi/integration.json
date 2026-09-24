@@ -1,0 +1,14 @@
+{
+  "tool": "Pi",
+  "target": {
+    "user": ".pi/agent/skills/jaato-sdk",
+    "workspace": ".pi/skills/jaato-sdk"
+  },
+  "detect": {
+    "commands": ["pi"],
+    "why": "The `pi` executable on PATH is the one signal jaato cannot manufacture: its installer writes only under ~/.pi/agent/skills and never puts a binary on PATH."
+  },
+  "payload_from": "claude-code",
+  "summary": "the jaato-sdk skill — how to build on this SDK, for an agent working in Pi",
+  "why": "Pi loads Agent Skills from ~/.pi/agent/skills (all repos) or <project>/.pi/skills (one project). Installing from here rather than copying by hand keeps the guide and the framework on the same version."
+}

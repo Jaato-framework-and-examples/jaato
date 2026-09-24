@@ -125,7 +125,9 @@ def available() -> List[str]:
 
 
 def payload_dir(name: str) -> Path:
-    return _source_root() / name / "payload"
+    """Payload for ``name``, optionally shared with another integration."""
+    source = manifest(name).get("payload_from", name)
+    return _source_root() / source / "payload"
 
 
 class IntegrationManifestError(ValueError):
@@ -431,8 +433,12 @@ def install(name: str, dest: Path, *, force: bool = False,
     """
     src = payload_dir(name)
     if not src.is_dir():
-        return False, [f"unknown integration '{name}' — this build ships: "
-                       f"{', '.join(available()) or '(none)'}"]
+        if name not in available():
+            return False, [f"unknown integration '{name}' — this build ships: "
+                           f"{', '.join(available()) or '(none)'}"]
+        source = manifest(name).get("payload_from", name)
+        return False, [f"integration '{name}' payload '{source}' is missing "
+                       "from this build"]
 
     state, detail = compare(name, dest)
     verdict = _existing_copy_verdict(dest, state, detail, force=force, refresh=refresh)
@@ -445,7 +451,10 @@ def install(name: str, dest: Path, *, force: bool = False,
         return False, [f"would write {dest}/"] + [f"  + {f}" for f in files]
 
     if dest.exists():
-        shutil.rmtree(dest)
+        try:
+            shutil.rmtree(dest)
+        except OSError as exc:
+            return False, [f"could not replace {dest}: {exc}"]
     shutil.copytree(src, dest)
     (dest / STAMP).write_text(json.dumps(
         {"integration": name, "tool": manifest(name).get("tool", name),

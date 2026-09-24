@@ -54,7 +54,7 @@ import sys
 from functools import partial
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional
 
 from . import explain as _explain
 from . import validate as _validate
@@ -105,7 +105,7 @@ class ExplainScope:
     render: Callable[..., Any]
     kind: str = "simple"
     arg: str = ""
-    render_named: Optional[Callable[..., Any]] = None
+    render_named: Callable[..., Any] | None = None
     blurb: str = ""
 
 
@@ -575,7 +575,7 @@ def _cmd_explain(args) -> int:
 
 # -------------------------------------------------------------- validate
 
-def _resolve_target(target: str) -> Tuple[str, Optional[str], Optional[str]]:
+def _resolve_target(target: str) -> tuple[str, str | None, str | None]:
     """Map a workspace dir OR a profile file to (workspace, set, profile_name).
 
     A profile file at ``<ws>/.jaato/profiles/<set>/<name>.yaml`` yields the
@@ -603,9 +603,8 @@ def _is_canonical_profile_layout(p: Path) -> bool:
     par = p.parent
     if par.name == "profiles" and par.parent.name == ".jaato":
         return True  # <ws>/.jaato/profiles/<name>.yaml
-    if par.parent.name == "profiles" and par.parent.parent.name == ".jaato":
-        return True  # <ws>/.jaato/profiles/<set>/<name>.yaml
-    return False
+    # <ws>/.jaato/profiles/<set>/<name>.yaml
+    return par.parent.name == "profiles" and par.parent.parent.name == ".jaato"
 
 
 def _cmd_validate(args) -> int:
@@ -952,10 +951,7 @@ def _discover_external_verbs() -> list:
     log = logging.getLogger(__name__)
     from .api import VERB_ENTRY_POINT_GROUP
 
-    try:  # entry_points(group=) is 3.10+; guard for older interpreters.
-        eps = entry_points(group=VERB_ENTRY_POINT_GROUP)
-    except TypeError:  # pragma: no cover - py<3.10
-        eps = entry_points().get(VERB_ENTRY_POINT_GROUP, [])
+    eps = entry_points(group=VERB_ENTRY_POINT_GROUP)
 
     verbs = []
     for ep in eps:
@@ -1075,11 +1071,11 @@ def main(argv=None) -> int:
                          "daemon restarts — instead of the plain client")
     pn.add_argument("--transport", choices=["ipc", "ws", "in_process"], default="ipc",
                     help="client transport: 'ipc' (local daemon over a Unix socket, "
-                         "default), 'ws' (remote daemon over ws:// / wss:// — "
+                         "default), 'ws' (remote daemon over WebSocket — "
                          "requires --url), or 'in_process' (embedded — runs the "
                          "runtime + session in THIS process, no daemon/socket; "
                          "incompatible with --recoverable).")
-    pn.add_argument("--url", help="WebSocket URL for --transport ws (ws:// or wss://)")
+    pn.add_argument("--url", help="WebSocket URL for --transport ws")
     pn.add_argument("--token", help="bearer token for --transport ws (optional)")
     pn.add_argument("--ca", help="CA-bundle path for --transport ws wss:// with a "
                                  "self-signed / dev cert (scoped ca=, never os.environ)")
@@ -1095,11 +1091,11 @@ def main(argv=None) -> int:
     pi = sub.add_parser(
         "integration", help="wire jaato into a tool you work in (bare: list them)",
         description="An integration is jaato's side of a contract with another "
-                    "tool — today `claude-code`, which installs the jaato-sdk "
-                    "skill where Claude Code looks for skills.  Each copy is "
-                    "stamped with the build it came from, so `jaato-doctor` can "
-                    "say when one has gone stale.  With no name, lists what this "
-                    "build ships and where each one stands.")
+                    "tool. The `claude-code` and `pi` integrations install the "
+                    "shared jaato-sdk skill where each harness looks for skills. "
+                    "Each copy is stamped with the build it came from, so "
+                    "`jaato-doctor` can say when one has gone stale. With no "
+                    "name, lists what this build ships and where each stands.")
     pi.add_argument("name", nargs="?", default=None,
                     help="integration name (omit to list)")
     scope = pi.add_mutually_exclusive_group()
