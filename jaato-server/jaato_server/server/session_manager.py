@@ -9549,8 +9549,25 @@ class SessionManager:
         # pass one explicitly.  An explicit per-session override (e.g.
         # from a future inline-spec field) takes precedence over the
         # client-level default.
+        #
+        # #1293: ``_resolve_restore_config_root`` already gives disk-restore
+        # a THIRD fallback tier — ``<workspace_path>/.jaato`` — when neither
+        # a saved value nor the attaching client's own config_root exists.
+        # This CREATE path stopped at the second tier, so a client that
+        # never sends ``ClientConfigRequest.config_root`` (every WS client
+        # in this tree — the TS SDK's ``openSession`` only forwards an
+        # explicit ``configRoot``, never derives one from ``workspacePath``,
+        # unlike the Python ``IPCClient``) created a session with
+        # ``config_root=None``: ``file_edit`` cannot resolve its backup base
+        # directory and is not exposed, and the AppArmor policy generator's
+        # ``{config_root_rules}`` renders empty.  Reusing the SAME resolver
+        # (called with no "saved" value) is what makes create and revive
+        # agree on what an omitted config_root means, rather than a second,
+        # driftable copy of the same fallback.
         if config_root is None:
-            config_root = client_config.get('config_root')
+            config_root = self._resolve_restore_config_root(
+                None, client_config.get('config_root'), workspace_path,
+            )
         import os
         if not session_env_file and workspace_path:
             # Default to workspace/.env

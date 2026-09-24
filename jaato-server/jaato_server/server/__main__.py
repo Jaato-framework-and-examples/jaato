@@ -515,7 +515,25 @@ class JaatoDaemon:
         # (for the workspace-overlap precedence check) and the
         # daemon's main asyncio loop (needed by AppArmorManager and
         # the runner-RPC start coroutine).
-        self._wire_ipc_apparmor_dependencies()
+        #
+        # #1293: this call moved BELOW the ``self._ws_server =
+        # JaatoWSServer(...)`` construction (was here, before it, so
+        # ``self._ws_server`` was always ``None`` at the time it was
+        # read).  ``SessionManager._ws_server_ref`` was therefore
+        # permanently ``None`` for the daemon's whole life, so
+        # ``_workspace_under_ws_root`` always answered ``False`` and the
+        # "WS-overlap precedence" skip in
+        # ``_provision_ipc_apparmor_and_spawn_runner`` never fired.  Every
+        # WS-provisioned session (create AND revive) therefore ran BOTH
+        # spawn paths: the unconditional IPC path first — UNCONFINED,
+        # since a WS client never sets the IPC-only
+        # ``ClientConfigRequest.apparmor`` opt-in — and the WS pre-init
+        # hook second, which confines unconditionally whenever the host
+        # supports it.  No session/plugin construction between the old
+        # call site and here reads ``self._ws_server`` (session creation
+        # cannot reach either apparmor path before ``CommandRouter`` is
+        # wired further below), so moving the call changes nothing except
+        # which value of ``self._ws_server`` it captures.
 
         # Discover session-independent plugins (auth plugins).
         self._discover_daemon_plugins()
@@ -617,6 +635,13 @@ class JaatoDaemon:
             tasks.append(t)
             scheme = "wss" if ws_ssl_ctx else "ws"
             logger.info(f"WebSocket server will listen on {scheme}://{host}:{port}")
+
+        # #1293: wire the IPC AppArmor + runner-spawn dependencies onto
+        # the session manager AFTER both transports (IPC, WS) have been
+        # constructed, so ``self._ws_server`` is the real object when
+        # ``self.web_socket`` is configured — see the comment above where
+        # this call used to sit, before ``self._ws_server`` existed.
+        self._wire_ipc_apparmor_dependencies()
 
         if not tasks:
             logger.error("No servers configured. Use --ipc-socket and/or --web-socket")
