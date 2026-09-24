@@ -4,9 +4,12 @@ This module handles converting internal types (Message, Part) to and
 from JSON-serializable dictionaries for storage.
 """
 
+import ast
 import base64
+import dataclasses
+import logging
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from jaato_sdk.media_identity import ATTACHMENT_ID_KEY, mint_attachment_id
 from jaato_sdk.plugins.model_provider.types import (
@@ -18,22 +21,98 @@ from jaato_sdk.plugins.model_provider.types import (
 )
 from .base import SessionState, SessionInfo
 
+logger = logging.getLogger(__name__)
+
+
+#: ``Part`` fields that are plain strings and can ride BESIDE a part's
+#: primary content rather than being it.  ``thought`` is the one that matters
+#: (#1290): the providers that set ``replay_reasoning`` keep a thought part in
+#: history on purpose, and one that is lost on persistence is replayed as
+#: nothing.  Each is also a primary type of its own when it is the only thing
+#: the part carries.  Order is the order a part's primary type is chosen in.
+_AUXILIARY_FIELDS = ("thought", "executable_code", "code_execution_result")
+
+#: Every ``Part`` field this module round-trips.  A guard test compares it
+#: against ``dataclasses.fields(Part)``, so a field added to ``Part`` fails
+#: the build here instead of being dropped on the way to disk the way
+#: ``thought`` was.
+PERSISTED_PART_FIELDS = frozenset(
+    {"text", "function_call", "function_response", "inline_data",
+     *_AUXILIARY_FIELDS}
+)
+
+#: The exact prefix the pre-#1290 text fallback wrote.  A legacy record
+#: carries it on a MODEL-message text part; see
+#: :func:`_repair_legacy_part`.
+_LEGACY_UNRECOGNIZED_PREFIX = "[Unrecognized part: "
+
 
 def _naive(dt: datetime) -> datetime:
     """Strip timezone info to ensure naive datetime for consistent comparison."""
     return dt.replace(tzinfo=None) if dt.tzinfo else dt
 
 
+def _set_field_names(part: Any) -> List[str]:
+    """Names of the fields ``part`` carries a value in -- never the values.
+
+    Used by the warnings about a part this module cannot persist or restore.
+    Only NAMES are logged: a part's content can be a model's reasoning, a
+    tool result or a user's attachment, and none of that belongs in a log.
+    """
+    try:
+        if dataclasses.is_dataclass(part) and not isinstance(part, type):
+            return [f.name for f in dataclasses.fields(part)
+                    if getattr(part, f.name, None) is not None]
+        return sorted(k for k, v in vars(part).items() if v is not None)
+    except TypeError:
+        return []
+
+
 def serialize_part(part: Part) -> Dict[str, Any]:
     """Serialize a Part object to a dictionary.
 
-    Handles text, function calls, function responses, and inline data.
+    The dictionary is tagged with the part's PRIMARY content (``type``:
+    ``text``, ``function_call``, ``function_response``, ``inline_data``,
+    ``thought``, ``executable_code`` or ``code_execution_result``, chosen in
+    that order).  Any auxiliary string field the part also carries --
+    ``thought`` beside ``text``, for instance -- rides as an extra key of the
+    same name, so a part carrying both keeps both (#1290).
+
+    A part with none of those fields set is recorded as
+    ``{'type': 'unknown', 'fields': [...]}`` naming the fields it did carry,
+    and a WARNING says so.  The content is deliberately NOT written: the
+    record used to hold ``repr(part)``, which :func:`deserialize_part` turned
+    back into a TEXT part and so replayed a Python repr to the model as
+    something the assistant had said.
 
     Args:
         part: A Part object.
 
     Returns:
         Dictionary representation of the part.
+    """
+    data = _serialize_primary(part)
+    if data is None:
+        fields = _set_field_names(part)
+        logger.warning(
+            "session serializer: a %s carries no field this serializer "
+            "persists (non-None fields: %s); it is recorded as 'unknown' "
+            "and will be dropped when the session is restored",
+            type(part).__name__, ", ".join(fields) or "none",
+        )
+        return {'type': 'unknown', 'fields': fields}
+    for name in _AUXILIARY_FIELDS:
+        value = getattr(part, name, None)
+        if value is not None and data['type'] != name:
+            data[name] = value
+    return data
+
+
+def _serialize_primary(part: Part) -> Optional[Dict[str, Any]]:
+    """The tagged dict for ``part``'s primary content, or ``None``.
+
+    Auxiliary fields are added by :func:`serialize_part`; this decides only
+    which content the part IS.
     """
     # Text part
     if part.text is not None:
@@ -90,29 +169,67 @@ def serialize_part(part: Part) -> Dict[str, Any]:
             ATTACHMENT_ID_KEY: inline.get(ATTACHMENT_ID_KEY),
         }
 
-    # Unknown part type - try to capture what we can
-    return {
-        'type': 'unknown',
-        'repr': repr(part)
-    }
+    # A part whose primary content is one of the auxiliary strings --
+    # reasoning (#1290), or Gemini's code execution.  The key carries the
+    # field's own name so the dict reads the same whichever role it plays.
+    for name in _AUXILIARY_FIELDS:
+        value = getattr(part, name, None)
+        if value is not None:
+            return {'type': name, name: value}
+
+    return None
 
 
-def deserialize_part(data: Dict[str, Any]) -> Part:
+def deserialize_part(data: Dict[str, Any]) -> Optional[Part]:
     """Deserialize a dictionary to a Part object.
+
+    Auxiliary string fields (``thought``, ``executable_code``,
+    ``code_execution_result``) are restored from their keys whatever the
+    part's primary type, so a part that carried text and reasoning comes
+    back carrying both.
+
+    An ``unknown`` entry returns ``None`` -- the caller drops it -- and logs
+    a WARNING.  It is never turned into a text part: before #1290 it came
+    back as ``Part(text="[Unrecognized part: <repr>]")``, which a revived
+    session then sent to the model as assistant content.  A legacy
+    ``unknown`` entry whose repr is a thought part is recovered by
+    :func:`deserialize_message` before it reaches here (MODEL messages
+    only).
 
     Args:
         data: Dictionary representation of a part.
 
     Returns:
-        Reconstructed Part object.
+        The reconstructed Part, or ``None`` for an entry that is dropped.
 
     Raises:
         ValueError: If the part type is not recognized.
+    """
+    part = _deserialize_primary(data)
+    if part is None:
+        return None
+    for name in _AUXILIARY_FIELDS:
+        value = data.get(name)
+        if isinstance(value, str) and data.get('type') != name:
+            setattr(part, name, value)
+    return part
+
+
+def _deserialize_primary(data: Dict[str, Any]) -> Optional[Part]:
+    """The Part for ``data``'s primary type, before auxiliary fields.
+
+    ``None`` means "drop this entry" (an ``unknown`` record); an
+    unrecognised ``type`` still raises, because a record naming a type no
+    release wrote is corruption rather than something to skip past.
     """
     part_type = data.get('type')
 
     if part_type == 'text':
         return Part(text=data['text'])
+
+    if part_type in _AUXILIARY_FIELDS:
+        value = data.get(part_type)
+        return Part(**{part_type: value if isinstance(value, str) else ""})
 
     if part_type == 'function_call':
         return Part(function_call=FunctionCall(
@@ -154,10 +271,153 @@ def deserialize_part(data: Dict[str, Any]) -> Part:
         })
 
     if part_type == 'unknown':
-        # Best effort - create a text part with the repr
-        return Part(text=f"[Unrecognized part: {data.get('repr', '?')}]")
+        # Dropped, never turned into text (#1290).  Name the fields the
+        # writer saw when it recorded them; a legacy record carries a repr
+        # instead, whose CONTENT is not logged -- only its length.
+        fields = data.get('fields')
+        if isinstance(fields, list):
+            described = ", ".join(str(f) for f in fields) or "none"
+        else:
+            described = f"legacy repr of {len(str(data.get('repr', '')))} chars"
+        logger.warning(
+            "session serializer: dropping a part recorded as 'unknown' "
+            "(%s); it cannot be restored and is not replayed as text",
+            described,
+        )
+        return None
 
     raise ValueError(f"Unknown part type: {part_type}")
+
+
+# ---------------------------------------------------------------------------
+# Legacy repair (#1290)
+# ---------------------------------------------------------------------------
+#
+# Records written before #1290 hold a reasoning part in one of two shapes:
+#
+#   {'type': 'unknown', 'repr': "Part(text=None, ..., thought='...', ...)"}
+#       -- what serialize_part wrote for it, directly;
+#   {'type': 'text', 'text': "[Unrecognized part: Part(text=None, ...)]"}
+#       -- what that entry became once deserialize_part had turned it into
+#          text and the history was saved again (every runner round trip
+#          does this, so a revived session's next save writes this form).
+#
+# Both are recovered into a thought part, in MODEL messages only.  The repr
+# is PARSED, never evaluated: ``ast.parse(mode="eval")`` builds a syntax
+# tree without running anything, and only a ``Part(...)`` call whose every
+# argument is a keyword naming a known field, with a ``None`` or a string
+# literal as its value, is accepted.  Anything else -- a nested
+# FunctionCall, a positional argument, a name that is not ``Part`` -- is
+# refused, and the entry is dropped with a WARNING.
+
+#: Sentinel: this entry is not a legacy shape; deserialize it normally.
+_NOT_LEGACY = object()
+
+#: Fields a repaired part may carry.  The four structured fields can only
+#: be ``None`` in a repr we accept -- their values are nested objects whose
+#: repr cannot be parsed back safely -- and a part that was ``unknown`` had
+#: all four ``None`` by construction.
+_REPR_STRING_FIELDS = frozenset(_AUXILIARY_FIELDS)
+_REPR_NONE_ONLY_FIELDS = frozenset(
+    {"text", "function_call", "function_response", "inline_data"}
+)
+
+
+def _part_from_repr(expr: str) -> Optional[Part]:
+    """Restore the Part a pre-#1290 ``repr(part)`` described, or ``None``.
+
+    Strict by design: the repr must be exactly a ``Part(...)`` call with
+    keyword arguments only, each naming a ``Part`` field; the structured
+    fields must be ``None`` and the string fields ``None`` or a string
+    literal.  ``ast.literal_eval`` semantics, one level up -- nothing is
+    ever executed.  ``None`` means the repr could not be read safely, or
+    described a part with nothing in it; the caller drops the entry.
+    """
+    try:
+        tree = ast.parse(expr.strip(), mode="eval")
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return None
+    call = tree.body
+    if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+            and call.func.id == "Part" and not call.args):
+        return None
+    values: Dict[str, str] = {}
+    for kw in call.keywords:
+        if kw.arg is None or kw.arg in values:
+            return None
+        ok, value = _repr_keyword_value(kw)
+        if not ok:
+            return None
+        if value is not None:
+            values[kw.arg] = value
+    return Part(**values) if values else None
+
+
+def _repr_keyword_value(kw: ast.keyword) -> tuple:
+    """Judge one ``field=value`` of a legacy repr: ``(acceptable, value)``.
+
+    Acceptable is a literal ``None`` for any known field, or a string
+    literal for a string field.  Anything else -- a call, a name, a number,
+    an unknown field -- is not, and the whole repr is refused.
+    """
+    if not isinstance(kw.value, ast.Constant):
+        return False, None
+    value = kw.value.value
+    known = kw.arg in _REPR_NONE_ONLY_FIELDS or kw.arg in _REPR_STRING_FIELDS
+    if value is None:
+        return known, None
+    if kw.arg in _REPR_STRING_FIELDS and isinstance(value, str):
+        return True, value
+    return False, None
+
+
+def _legacy_repr(data: Dict[str, Any]) -> Optional[str]:
+    """The ``Part(...)`` repr a legacy entry carries, or ``None``.
+
+    ``None`` means the entry is not one of the two legacy shapes and must be
+    deserialized normally.  The text form is recognised only when the WHOLE
+    text is the fallback's shape -- a model that merely quotes it keeps its
+    text -- and only when the entry carries nothing else.
+    """
+    kind = data.get('type')
+    if kind == 'unknown':
+        raw = data.get('repr')
+        return raw if isinstance(raw, str) else None
+    if kind != 'text' or any(name in data for name in _AUXILIARY_FIELDS):
+        return None
+    text = data.get('text')
+    if not isinstance(text, str):
+        return None
+    if not (text.startswith(_LEGACY_UNRECOGNIZED_PREFIX + "Part(")
+            and text.endswith(")]")):
+        return None
+    return text[len(_LEGACY_UNRECOGNIZED_PREFIX):-1]
+
+
+def _repair_legacy_part(data: Dict[str, Any]) -> Union[Part, None, object]:
+    """Recover a pre-#1290 reasoning part from a MODEL-message entry.
+
+    Returns the restored Part, ``None`` to drop the entry (a legacy shape
+    whose repr could not be read safely), or :data:`_NOT_LEGACY` when the
+    entry is not a legacy shape at all.
+    """
+    expr = _legacy_repr(data)
+    if expr is None:
+        return _NOT_LEGACY
+    part = _part_from_repr(expr)
+    if part is None:
+        logger.warning(
+            "session serializer: dropping a legacy '%s' entry whose "
+            "recorded repr (%d chars) could not be parsed safely into a "
+            "part (#1290)", data.get('type'), len(expr),
+        )
+        return None
+    logger.info(
+        "session serializer: restored a legacy '%s' entry as a %s part "
+        "(#1290)", data.get('type'),
+        "+".join(_set_field_names(part)) or "empty",
+    )
+    return part
 
 
 def serialize_message(message: Message) -> Dict[str, Any]:
@@ -190,15 +450,35 @@ def deserialize_message(data: Dict[str, Any]) -> Message:
     sessions that lack these keys deserialize with None defaults
     (backward-compatible).
 
+    In a MODEL message, a pre-#1290 reasoning part (recorded as an
+    ``unknown`` repr, or as the ``[Unrecognized part: Part(...)]`` text that
+    entry used to become) is recovered as a thought part -- see
+    :func:`_repair_legacy_part`.  The repair is confined to MODEL messages
+    because only the model produces reasoning, and a user who typed that
+    string meant it as text.
+
+    Entries that are dropped (``unknown``, an unreadable legacy repr) leave
+    the message with fewer parts, possibly none; :func:`deserialize_history`
+    removes a message that was emptied that way.
+
     Args:
         data: Dictionary representation of message.
 
     Returns:
         Reconstructed Message object.
     """
-    parts = [deserialize_part(p) for p in data.get('parts', [])]
+    role = Role(data['role'])
+    parts: List[Part] = []
+    for raw in data.get('parts', []):
+        part: Any = _NOT_LEGACY
+        if role == Role.MODEL and isinstance(raw, dict):
+            part = _repair_legacy_part(raw)
+        if part is _NOT_LEGACY:
+            part = deserialize_part(raw)
+        if part is not None:
+            parts.append(part)
     return Message(
-        role=Role(data['role']),
+        role=role,
         parts=parts,
         model=data.get('model'),
         provider=data.get('provider'),
@@ -241,13 +521,34 @@ def serialize_history(history: List[Any]) -> List[Dict[str, Any]]:
 def deserialize_history(data: List[Dict[str, Any]]) -> List[Message]:
     """Deserialize a list of dictionaries to conversation history.
 
+    A message whose record HAD parts and came back with none -- every one
+    of them an ``unknown`` entry or an unreadable legacy repr (#1290) -- is
+    removed with a WARNING rather than restored empty.  The history
+    invariant (``shared/history_invariant.py``) removes empty text blocks
+    but keeps a message with zero parts, and no wire accepts an assistant
+    turn with no content.  Removing it cannot orphan a tool result: such a
+    message held no function call, since calls always serialize.  A
+    message that was ALREADY empty in the record is left alone -- that is
+    not something this module did.
+
     Args:
         data: List of dictionary representations.
 
     Returns:
         List of Message objects.
     """
-    return [deserialize_message(d) for d in (data or [])]
+    messages: List[Message] = []
+    for record in (data or []):
+        message = deserialize_message(record)
+        if not message.parts and record.get('parts'):
+            logger.warning(
+                "session serializer: dropping a %s message whose %d "
+                "recorded part(s) could not be restored (#1290)",
+                message.role.value, len(record.get('parts') or []),
+            )
+            continue
+        messages.append(message)
+    return messages
 
 
 def serialize_session_state(state: SessionState) -> Dict[str, Any]:
