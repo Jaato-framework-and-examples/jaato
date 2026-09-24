@@ -5,8 +5,9 @@ right now is written here BEFORE the sender is given its receipt, so "it
 will be processed" is a guarantee rather than a receipt.  One inbox per
 session, many messages, under the session's own record directory::
 
-    <workspace>/.jaato/sessions/<session_id>.inbox/<message_id>.json   # envelope
-    <workspace>/.jaato/sessions/<session_id>.inbox/<message_id>/       # spooled bytes
+    <workspace>/.jaato/sessions/<session_id>.inbox/<message_id>.json     # envelope
+    <workspace>/.jaato/sessions/<session_id>.inbox/<message_id>/         # spooled bytes
+    <workspace>/.jaato/sessions/<session_id>.inbox/files/<message_id>/   # delivered files
 
 Under ``.jaato/sessions/`` because that is the directory a revive already
 reads, it is workspace STATE (the scaffold's ``.gitignore`` block already
@@ -31,6 +32,16 @@ observer (``defer_until_client``)           wake, the former single slot)
 anything, once loaded by anything           the first drain after the load
 ==========================================  ======================================
 
+The third directory is phase 3 (design §4.5): a file a peer REFERENCED from
+another workspace, or a text attachment too large to inline, is COPIED
+there so the target can read it inside its own confinement, and the
+message names it by that path.  It is distinct from ``<message_id>/``
+because the two have different lifetimes -- spooled bytes are consumed by
+the drive that re-inflates them and go with the envelope, while a
+delivered file must OUTLIVE the envelope: the target reads it with its own
+tools on the turn the message started, and on later ones.  It goes with
+the session's record (:func:`remove_all`) and with nothing sooner.
+
 Stdlib-only, like :mod:`.session_groups`: it is read from the daemon's
 listing path and must import nothing that path cannot.  Every write is a
 temp file plus :func:`os.replace`, so a crash mid-write leaves no
@@ -41,6 +52,7 @@ read is still a message somebody sent.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import logging
 import os
@@ -51,6 +63,8 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from .transfer_limits import STAGE_PER_FILE_LIMIT, STAGE_TOTAL_LIMIT
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +79,26 @@ DEFAULT_INBOX_TTL_SECONDS = 24 * 3600.0
 #: ``InboxEntry.kind`` values.
 KIND_PEER = "peer"      # a group message; driven on the idle-only SIBLING tier
 KIND_WAKE = "wake"      # a deferred ``session.wake``; driven as a USER turn
+
+#: Name of the delivered-files directory inside an inbox.  Chosen so it can
+#: never collide with a ``<message_id>/`` bytes directory: message ids are
+#: hex (:func:`new_message_id`), and ``files`` is not.
+FILES_DIRNAME = "files"
+
+#: How much text-attachment content one message may carry INLINE, in the
+#: wrapper, in bytes (design §4.5: 32 KiB).  Beyond it a text attachment is
+#: stored as a file and delivered as a reference, so the body a target's
+#: model reads on one turn stays bounded whatever a peer sends.
+TEXT_ATTACHMENT_INLINE_CAP = 32 * 1024
+
+#: The copy caps -- the STAGING caps, by design: a file copied on behalf of
+#: a message is bounded exactly as one staged on behalf of a client.
+FILE_COPY_PER_FILE_LIMIT = STAGE_PER_FILE_LIMIT
+FILE_COPY_TOTAL_LIMIT = STAGE_TOTAL_LIMIT
+
+#: Copy chunk: the digest is computed as the bytes stream, so a 10 MB file
+#: is never held whole.
+_COPY_CHUNK = 1 << 20
 
 _ENVELOPE_VERSION = 1
 _SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
@@ -96,6 +130,17 @@ class InboxEntry:
     created_at: float
     expires_at: float
     attachments: List[Dict[str, Any]] = field(default_factory=list)
+    #: Phase 3: the FILE manifest the wrapper names -- one row per file
+    #: reference (``name`` / ``path`` / ``sha256`` / ``size`` /
+    #: ``mime_type`` / ``disposition``), where ``path`` is already in the
+    #: TARGET's terms (relative to its workspace).  Nothing here is read
+    #: back from disk at drive time; the rows are rendered into the wrapper
+    #: exactly as the live path would have rendered them.
+    files: List[Dict[str, Any]] = field(default_factory=list)
+    #: Phase 3: the text attachments small enough to travel INLINE
+    #: (``display_name`` / ``mime_type`` / ``text``), stored in the envelope
+    #: because they are bounded by :data:`TEXT_ATTACHMENT_INLINE_CAP`.
+    text_attachments: List[Dict[str, Any]] = field(default_factory=list)
     event_id: Optional[str] = None
     #: A deferred wake: eligible only once the session has an attached
     #: client, because the woken turn may need the client's host tools.
@@ -188,7 +233,9 @@ def update(storage_dir: Path, entry: InboxEntry) -> None:
 
 def remove(storage_dir: Path, entry: InboxEntry) -> None:
     """Delete an envelope and its spooled bytes; the directory itself goes
-    when it is empty."""
+    when it is empty.  The files DELIVERED with the message
+    (:func:`files_dir`) are deliberately not touched: the target may still
+    be reading them, and they go with the session record."""
     root = inbox_dir(storage_dir, entry.session_id)
     try:
         (root / f"{entry.message_id}.json").unlink()
@@ -205,6 +252,77 @@ def remove(storage_dir: Path, entry: InboxEntry) -> None:
 def remove_all(storage_dir: Path, session_id: str) -> None:
     """Delete a session's whole inbox (the session record is being deleted)."""
     shutil.rmtree(inbox_dir(storage_dir, session_id), ignore_errors=True)
+
+
+def files_dir(storage_dir: Path, session_id: str, message_id: str) -> Path:
+    """Where the files delivered WITH *message_id* live (phase 3): a copied
+    cross-workspace reference, or a text attachment over the inline cap."""
+    return inbox_dir(storage_dir, session_id) / FILES_DIRNAME / message_id
+
+
+def store_file(
+    storage_dir: Path, session_id: str, message_id: str, index: int,
+    display_name: Any, *, source: Optional[Path] = None,
+    data: Optional[bytes] = None,
+) -> Dict[str, Any]:
+    """Put ONE file into the target's delivered-files directory and return
+    ``{"file": <path relative to the storage dir>, "sha256", "size"}``.
+
+    Either *source* (a file to copy, streamed) or *data* (bytes to write).
+    The name is the display name's basename with an index prefix, exactly
+    as spooled bytes are named, so two references to files called
+    ``report.md`` in different directories do not overwrite each other.
+    A temp file plus :func:`os.replace`, and the digest is taken from the
+    bytes as they are written -- a caller that re-verifies against the
+    digest it computed on the source is checking the COPY, not re-reading
+    the source it already trusted.  Raises ``OSError`` on any failure;
+    nothing half-written is left under the final name.
+    """
+    root = files_dir(storage_dir, session_id, message_id)
+    root.mkdir(parents=True, exist_ok=True)
+    name = _safe_name(index, display_name)
+    dest = root / name
+    tmp = dest.with_name(dest.name + f".tmp-{uuid.uuid4().hex[:8]}")
+    digest = hashlib.sha256()
+    size = 0
+    try:
+        with open(tmp, "wb") as out:
+            if source is not None:
+                with open(source, "rb") as src:
+                    while True:
+                        chunk = src.read(_COPY_CHUNK)
+                        if not chunk:
+                            break
+                        out.write(chunk)
+                        digest.update(chunk)
+                        size += len(chunk)
+            else:
+                payload = data or b""
+                out.write(payload)
+                digest.update(payload)
+                size = len(payload)
+        os.replace(tmp, dest)
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    rel = dest.relative_to(Path(storage_dir)).as_posix()
+    return {"file": rel, "sha256": digest.hexdigest(), "size": size}
+
+
+def remove_files(storage_dir: Path, session_id: str, message_id: str) -> None:
+    """Delete the files delivered with *message_id* -- the undo for a
+    message that was copied for and then NOT delivered."""
+    shutil.rmtree(files_dir(storage_dir, session_id, message_id),
+                  ignore_errors=True)
+    parent = inbox_dir(storage_dir, session_id) / FILES_DIRNAME
+    try:
+        if parent.is_dir() and not any(parent.iterdir()):
+            parent.rmdir()
+    except OSError:
+        pass
 
 
 def pending(storage_dir: Path, session_id: str) -> List[InboxEntry]:

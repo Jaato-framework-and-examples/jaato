@@ -83,10 +83,10 @@ REVERSIONS = [
     Reversion(
         target="jaato-server/jaato_server/server/session_manager.py",
         find="""    items = _wake_attachments(attachments)
-    body = text or ""
+    texts = list(text_attachments or [])
 """,
         replace="""    items = []
-    body = text or ""
+    texts = list(text_attachments or [])
 """,
         test="test_the_manifest_sits_inside_the_untrusted_boundary",
         because="media arrived with no account of itself inside the "

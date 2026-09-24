@@ -40,7 +40,7 @@ async def test_attachments_are_content_and_travel_normalised():
 @pytest.mark.asyncio
 async def test_no_content_is_refused_before_sending():
     c, sent = _client("1.23")
-    with pytest.raises(ValueError, match="text or attachments"):
+    with pytest.raises(ValueError, match="requires text, attachments"):
         await c.send_session_message("s-b")
     assert sent == []
 
@@ -59,3 +59,30 @@ async def test_refused_before_the_handshake():
     with pytest.raises(ValueError):
         await c.send_session_message("s-b", "hi")
     assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_file_refs_and_text_attachments_ride_the_payload_at_1_24():
+    c, sent = _client("1.24")
+    await c.send_session_message(
+        "s-b", "", file_refs=["reports/q3.md", {"path": "a", "workspace": "/w"}],
+        text_attachments=[{"name": "fix.patch", "text": "--- a"}])
+    p = sent[0].payload
+    assert p["file_refs"] == ["reports/q3.md", {"path": "a", "workspace": "/w"}]
+    assert p["text_attachments"] == [{"name": "fix.patch", "text": "--- a"}]
+    assert p["text"] == "" and "attachments" not in p
+
+
+@pytest.mark.asyncio
+async def test_files_are_refused_below_1_24_and_text_alone_is_not():
+    """A 1.23 daemon reads neither key: it would deliver the text WITHOUT
+    the files and answer accepted -- a degraded call that reads as success."""
+    c, sent = _client("1.23")
+    with pytest.raises(ValueError, match="file_refs / text_attachments"):
+        await c.send_session_message("s-b", "see", file_refs=["a.md"])
+    with pytest.raises(ValueError, match="file_refs / text_attachments"):
+        await c.send_session_message("s-b", "see",
+                                     text_attachments=[{"text": "x"}])
+    assert sent == []
+    await c.send_session_message("s-b", "see")
+    assert sent[0].payload == {"target": "s-b", "text": "see"}

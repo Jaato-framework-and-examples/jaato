@@ -15026,6 +15026,9 @@ export type Woken = boolean;
 export type Headless = boolean;
 export type Spooled = boolean;
 export type Candidates = string[];
+export type Files1 = {
+  [k: string]: unknown;
+}[];
 export type Error15 = string;
 /**
  * All event types in the protocol.
@@ -15333,7 +15336,7 @@ export type Name8 = string;
 export type Size = number;
 export type ContentType = string | null;
 export type Mode1 = number | null;
-export type Files1 = StagedFileSpec[];
+export type Files2 = StagedFileSpec[];
 /**
  * All event types in the protocol.
  */
@@ -22943,6 +22946,21 @@ export interface Data1 {
  *         copy survives an unload between the queue and the turn that
  *         drains it).  Additive, default ``False``, so an older daemon's
  *         receipt reads as it did.
+ *     files: One row per ``file_ref`` / ``text_attachment`` the caller
+ *         sent (1.24, additive): ``{name, disposition, ...}`` with
+ *         ``disposition`` one of ``referenced`` (the target shares the
+ *         sender's workspace and reads the file in place; ``path`` is
+ *         workspace-relative, with ``sha256`` and ``size``), ``copied``
+ *         (into the target's inbox, ``path`` in the target's terms),
+ *         ``inlined`` (a text attachment carried in the message body) or
+ *         ``refused`` (with ``reason``: ``outside_sender_workspace``,
+ *         ``not_found``, ``not_a_file``, ``credential``,
+ *         ``file_too_large``, ``message_files_too_large``,
+ *         ``target_workspace_unresolved``, ``copy_failed``,
+ *         ``copy_mismatch``) or ``discarded`` (a copy taken back because
+ *         the message was then refused or not delivered).  A refused file
+ *         refuses the WHOLE message (``status: refused``), never a
+ *         delivery with one file missing.
  *     message_id: The daemon-minted id of the delivered message; ``""``
  *         when nothing was delivered.
  *     target_session_id: The resolved target, when one was resolved.
@@ -22969,6 +22987,7 @@ export interface SessionMessageResultEvent {
   headless?: Headless;
   spooled?: Spooled;
   candidates?: Candidates;
+  files?: Files1;
   error?: Error15;
 }
 /**
@@ -23077,7 +23096,7 @@ export interface StageFilesRequest {
   timestamp?: Timestamp100;
   session_id?: SessionId100;
   workspace_id?: WorkspaceId;
-  files?: Files1;
+  files?: Files2;
 }
 /**
  * Per-file metadata sent inside a :class:`StageFilesRequest`.

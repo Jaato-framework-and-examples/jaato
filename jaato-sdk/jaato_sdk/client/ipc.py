@@ -2152,19 +2152,57 @@ class IPCClient:
 
     MIN_SESSION_MESSAGE_PROTOCOL = "1.23"
 
+    #: Floor for a ``session.message`` that carries ``file_refs`` or
+    #: ``text_attachments`` (1.24).  Two NEW keys on an existing verb: a
+    #: 1.23 daemon reads neither, delivers the text alone and answers
+    #: ``accepted`` -- a degraded call that reads as success, the #845
+    #: shape -- so a call carrying either is refused below this, while a
+    #: text-only call keeps the 1.23 floor.
+    MIN_SESSION_MESSAGE_FILES_PROTOCOL = "1.24"
+
+    def _require_session_message_protocol(self, *, with_files: bool) -> None:
+        """Refuse a daemon that would not serve ``session.message`` as
+        asked: one below the verb's floor ignores the command silently, and
+        one below the FILES floor delivers the text without the files and
+        calls that ``accepted`` -- both read as success to the caller."""
+        spoken = self.server_protocol_version or "unknown (not connected)"
+        if not _protocol_compatible(
+                self.server_protocol_version,
+                self.MIN_SESSION_MESSAGE_PROTOCOL):
+            raise ValueError(
+                f"send_session_message: this daemon speaks protocol {spoken} "
+                f"and does not serve session.message (needs >= "
+                f"{self.MIN_SESSION_MESSAGE_PROTOCOL}).  It would ignore the "
+                f"command silently, which reads like success.  Upgrade the "
+                f"daemon."
+            )
+        if with_files and not _protocol_compatible(
+                self.server_protocol_version,
+                self.MIN_SESSION_MESSAGE_FILES_PROTOCOL):
+            raise ValueError(
+                f"send_session_message: this daemon speaks protocol {spoken} "
+                f"and does not carry file_refs / text_attachments on "
+                f"session.message (needs >= "
+                f"{self.MIN_SESSION_MESSAGE_FILES_PROTOCOL}).  It would "
+                f"deliver the text without them and report accepted.  "
+                f"Upgrade the daemon, or send text only."
+            )
+
     async def send_session_message(
         self,
         target: str,
         text: str = "",
         *,
         attachments: Optional[list] = None,
+        file_refs: Optional[list] = None,
+        text_attachments: Optional[list] = None,
         event_id: Optional[str] = None,
         request_id: Optional[str] = None,
     ) -> None:
         """Message another session in this session's GROUP, waking it if cold.
 
         The client-tier form of the ``courier`` plugin's ``send_to_session``
-        (protocol 1.23).  The sender is this connection's OWN session --
+        (protocol 1.23; files since 1.24).  The sender is this connection's OWN session --
         resolved daemon-side from the connection, never from here -- and the
         target must share a group with it: a cascade, or the same
         authenticated creator (``server.session_groups``).  A cold target is
@@ -2186,44 +2224,56 @@ class IPCClient:
                 accepts (a file-path ``str`` or a ``{mime_type, data,
                 display_name}`` dict), normalised by
                 :meth:`_normalize_attachments`.  Attachments ride the drive
-                branch only: a busy target answers ``refused`` rather than
-                dropping them.
+                branch only: a busy target's message is SPOOLED to its
+                durable inbox rather than queued with the bytes dropped.
+            file_refs: Files in the SENDER session's workspace to hand the
+                target (1.24): paths relative to that workspace, or
+                ``{path, workspace?}`` dicts.  These are references the
+                DAEMON resolves -- never bytes read here -- so a path names
+                a file on the daemon's host, inside the session's own
+                workspace.  A target sharing the workspace reads it in
+                place; one in another workspace gets a copy under its own
+                inbox (10 MB per file, 50 MB per message).  The result
+                event's ``files`` says per file what became of it; one
+                refused file refuses the whole message.
+            text_attachments: ``{text, display_name?, mime_type?}`` dicts
+                (1.24) -- a patch, a snippet -- inlined for the target up to
+                32 KiB in total, stored as files beyond it.
             event_id: Idempotency key.  A redelivered id answers
                 ``duplicate``, a benign no-op.
             request_id: Correlation id echoed on the result event, so several
                 sends on one connection can be told apart.
 
         Raises:
-            ValueError: if neither ``text`` nor ``attachments`` is given, or
+            ValueError: if the message carries no content at all, or
                 against a daemon below :attr:`MIN_SESSION_MESSAGE_PROTOCOL`,
                 which would ignore the command silently -- and "delivered"
-                would then describe a message nobody carried.
+                would then describe a message nobody carried; or, when
+                ``file_refs`` / ``text_attachments`` are given, below
+                :attr:`MIN_SESSION_MESSAGE_FILES_PROTOCOL`, which would
+                deliver the text WITHOUT them and call that ``accepted``.
         """
-        if not _protocol_compatible(
-                self.server_protocol_version,
-                self.MIN_SESSION_MESSAGE_PROTOCOL):
-            spoken = self.server_protocol_version or "unknown (not connected)"
-            raise ValueError(
-                f"send_session_message: this daemon speaks protocol {spoken} "
-                f"and does not serve session.message (needs >= "
-                f"{self.MIN_SESSION_MESSAGE_PROTOCOL}).  It would ignore the "
-                f"command silently, which reads like success.  Upgrade the "
-                f"daemon."
-            )
+        refs = list(file_refs or [])
+        texts = list(text_attachments or [])
+        self._require_session_message_protocol(with_files=bool(refs or texts))
         wire_attachments: List[Dict[str, Any]] = []
         if attachments:
             wire_attachments = self._normalize_attachments(attachments)
-        if not text and not wire_attachments:
+        if not text and not wire_attachments and not refs and not texts:
             raise ValueError(
-                "send_session_message requires text or attachments — a "
-                "message with no content drives a turn the peer has nothing "
-                "to answer"
+                "send_session_message requires text, attachments, file_refs "
+                "or text_attachments — a message with no content drives a "
+                "turn the peer has nothing to answer"
             )
         payload: Dict[str, Any] = {"target": target, "text": text}
         if event_id is not None:
             payload["event_id"] = event_id
         if wire_attachments:
             payload["attachments"] = wire_attachments
+        if refs:
+            payload["file_refs"] = refs
+        if texts:
+            payload["text_attachments"] = texts
         # ``CommandRequest`` carries no ``request_id`` of its own (and its
         # base drops unknown fields), so the correlation id rides the
         # payload and the daemon echoes it from there.

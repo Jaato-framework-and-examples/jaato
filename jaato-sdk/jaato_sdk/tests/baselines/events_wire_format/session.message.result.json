@@ -14,5 +14,6 @@
   "headless": false,
   "spooled": false,
   "candidates": [],
+  "files": [],
   "error": ""
 }

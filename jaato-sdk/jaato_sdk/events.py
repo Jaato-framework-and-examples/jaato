@@ -457,7 +457,21 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 # and "delivered" would then describe a message nobody carried, so both SDKs
 # refuse below ``MIN_SESSION_MESSAGE_PROTOCOL``.  The result event degrades
 # the 1.8 way.
-PROTOCOL_VERSION = "1.23"
+# 1.24 -- ``session.message`` carries FILES (session group messaging phase
+# 3, design §4.5): ``file_refs`` (paths in the sender's workspace, verified
+# daemon-side and referenced in place when the target shares the workspace,
+# COPIED into the target's inbox when it does not) and ``text_attachments``
+# (inlined into the wrapper up to 32 KiB, stored as files beyond it), with
+# ``SessionMessageResultEvent.files`` saying per file what became of it
+# (``referenced`` / ``copied`` / ``inlined`` / ``refused`` with a reason).
+# The two payload keys are NEW on an existing verb, and an older daemon
+# ignores keys it does not read -- so a message sent with files to a 1.23
+# daemon would be delivered WITHOUT them and answered ``accepted``: the
+# #845 shape, a degraded call that reads as success.  Both SDKs therefore
+# refuse a call that CARRIES either key below
+# ``MIN_SESSION_MESSAGE_FILES_PROTOCOL``, and leave a text-only call at the
+# 1.23 floor.  ``files`` on the result event is additive (default empty).
+PROTOCOL_VERSION = "1.24"
 
 
 # =============================================================================
@@ -2473,6 +2487,21 @@ class SessionMessageResultEvent(Event):
             copy survives an unload between the queue and the turn that
             drains it).  Additive, default ``False``, so an older daemon's
             receipt reads as it did.
+        files: One row per ``file_ref`` / ``text_attachment`` the caller
+            sent (1.24, additive): ``{name, disposition, ...}`` with
+            ``disposition`` one of ``referenced`` (the target shares the
+            sender's workspace and reads the file in place; ``path`` is
+            workspace-relative, with ``sha256`` and ``size``), ``copied``
+            (into the target's inbox, ``path`` in the target's terms),
+            ``inlined`` (a text attachment carried in the message body) or
+            ``refused`` (with ``reason``: ``outside_sender_workspace``,
+            ``not_found``, ``not_a_file``, ``credential``,
+            ``file_too_large``, ``message_files_too_large``,
+            ``target_workspace_unresolved``, ``copy_failed``,
+            ``copy_mismatch``) or ``discarded`` (a copy taken back because
+            the message was then refused or not delivered).  A refused file
+            refuses the WHOLE message (``status: refused``), never a
+            delivery with one file missing.
         message_id: The daemon-minted id of the delivered message; ``""``
             when nothing was delivered.
         target_session_id: The resolved target, when one was resolved.
@@ -2496,6 +2525,7 @@ class SessionMessageResultEvent(Event):
     headless: bool = False
     spooled: bool = False
     candidates: List[str] = Field(default_factory=list)
+    files: List[Dict[str, Any]] = Field(default_factory=list)
     error: str = ""
 
 

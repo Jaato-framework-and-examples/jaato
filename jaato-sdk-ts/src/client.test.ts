@@ -20,6 +20,8 @@ import {
   MIN_SCAFFOLD_INTEGRATION_PROTOCOL,
   MIN_FILE_FETCH_PROTOCOL,
   MIN_MEMORY_VERBS_PROTOCOL,
+  MIN_SESSION_MESSAGE_PROTOCOL,
+  MIN_SESSION_MESSAGE_FILES_PROTOCOL,
   MIN_PROTOCOL_VERSION,
   STAGE_FILES_TIMEOUT_MS,
   LEGACY_SERVER_LIMITS,
@@ -678,6 +680,49 @@ describe("JaatoClient session management", () => {
       /scaffold\.integration/,
     );
     assert.equal(getSent().length, 0);
+  });
+
+  test("sendSessionMessage carries fileRefs and textAttachments at 1.24", async () => {
+    await client.close();
+    installMockWebSocket();
+    client = new JaatoClient({ url: "ws://localhost:8080" });
+    await connectAndAck(client, MIN_SESSION_MESSAGE_FILES_PROTOCOL);
+    if (lastInstance) lastInstance.sent = [];
+    await client.sendSessionMessage("s-b", "", {
+      fileRefs: ["reports/q3.md", { path: "a", workspace: "/w" }],
+      textAttachments: [{ name: "fix.patch", text: "--- a" }],
+      requestId: "r1",
+    });
+    const [ev] = getSent();
+    assert.equal((ev as { command?: string }).command, "session.message");
+    const payload = (ev as { payload?: Record<string, unknown> }).payload ?? {};
+    assert.deepEqual(payload.file_refs, ["reports/q3.md", { path: "a", workspace: "/w" }]);
+    assert.deepEqual(payload.text_attachments, [{ name: "fix.patch", text: "--- a" }]);
+    assert.equal(payload.text, "");
+    assert.equal(payload.request_id, "r1");
+    assert.equal("attachments" in payload, false);
+  });
+
+  test("sendSessionMessage refuses files below 1.24 and still sends text alone at 1.23", async () => {
+    // A 1.23 daemon reads neither key: it would deliver the text WITHOUT
+    // the files and answer accepted -- a degraded call that reads as success.
+    await client.close();
+    installMockWebSocket();
+    client = new JaatoClient({ url: "ws://localhost:8080" });
+    await connectAndAck(client, MIN_SESSION_MESSAGE_PROTOCOL);
+    if (lastInstance) lastInstance.sent = [];
+    await assert.rejects(
+      () => client.sendSessionMessage("s-b", "see", { fileRefs: ["a.md"] }),
+      /fileRefs \/ textAttachments/,
+    );
+    await assert.rejects(
+      () => client.sendSessionMessage("s-b", "see", { textAttachments: [{ text: "x" }] }),
+      /fileRefs \/ textAttachments/,
+    );
+    assert.equal(getSent().length, 0);
+    await client.sendSessionMessage("s-b", "see");
+    assert.equal(getSent().length, 1);
+    await assert.rejects(() => client.sendSessionMessage("s-b"), /requires text/);
   });
 
   test("deleteSession carries the session id as the first arg", async () => {

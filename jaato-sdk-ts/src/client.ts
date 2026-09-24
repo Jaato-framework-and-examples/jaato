@@ -184,6 +184,15 @@ export const MIN_MEMORY_VERBS_PROTOCOL = "1.22";
 export const MIN_SESSION_MESSAGE_PROTOCOL = "1.23";
 
 /**
+ * Protocol floor for a {@link JaatoClient.sendSessionMessage} that carries
+ * `fileRefs` or `textAttachments` (1.24).  Two NEW keys on an existing
+ * verb: a 1.23 daemon reads neither, delivers the text alone and answers
+ * `accepted` — a degraded call that reads as success — so a call carrying
+ * either is refused below this while a text-only call keeps the 1.23 floor.
+ */
+export const MIN_SESSION_MESSAGE_FILES_PROTOCOL = "1.24";
+
+/**
  * Size limits a daemon enforces, advertised in ``ConnectedEvent.server_info``.
  *
  * ``maxMessageSize`` is the largest single WebSocket message the daemon
@@ -1111,28 +1120,45 @@ export class JaatoClient {
    * ``IPCClient.send_session_message``.
    *
    * Fire-and-forget: the daemon answers with one ``session.message.result``
-   * event carrying the receipt — ``status`` is ``accepted`` / ``queued``
-   * (delivered), ``no_such_session``, ``ambiguous`` (with ``candidates``),
+   * event carrying the receipt — ``status`` is ``accepted`` / ``queued`` /
+   * ``spooled`` (delivered, or held in the target's durable inbox),
+   * ``no_such_session``, ``ambiguous`` (with ``candidates``),
    * ``session_cold``, ``duplicate``, ``terminated`` or ``refused`` (with
-   * ``error``).  Neither delivered status claims the peer read or acted on
+   * ``error``).  No delivered status claims the peer read or acted on
    * anything.
    *
    * @param target A session id, or a cascade-scoped sibling name.
-   * @param text The message; may be empty when attachments carry the content.
+   * @param text The message; may be empty when attachments, file
+   *   references or text attachments carry the content.
    * @param options.attachments Binary content in the canonical wire shape
    *   (``{mime_type, data, display_name}``), delivered on the drive branch
-   *   only — a busy target answers ``refused`` rather than dropping them.
+   *   only — a busy target's message is spooled rather than stripped.
+   * @param options.fileRefs Files in the SENDER session's workspace to hand
+   *   the target (1.24): workspace-relative paths, or ``{path, workspace?}``
+   *   rows.  References the DAEMON resolves on its own host — never bytes
+   *   read here.  A target sharing the workspace reads the file in place;
+   *   one in another workspace gets a copy under its own inbox (10 MB per
+   *   file, 50 MB per message).  The result event's ``files`` says per file
+   *   what became of it; one refused file refuses the whole message.
+   * @param options.textAttachments ``{text, display_name?, mime_type?}``
+   *   rows (1.24) — a patch, a snippet — inlined for the target up to 32 KiB
+   *   in total, stored as files beyond it.
    * @param options.eventId Idempotency key; a redelivered id answers
    *   ``duplicate``, a benign no-op.
    * @param options.requestId Correlation id echoed on the result event.
-   * @throws Error against a daemon below {@link MIN_SESSION_MESSAGE_PROTOCOL},
-   *   or when neither text nor attachments is given.
+   * @throws Error against a daemon below {@link MIN_SESSION_MESSAGE_PROTOCOL};
+   *   against one below {@link MIN_SESSION_MESSAGE_FILES_PROTOCOL} when
+   *   ``fileRefs`` or ``textAttachments`` are given (it would deliver the
+   *   text without them and call that accepted); or when no content at all
+   *   is given.
    */
   async sendSessionMessage(
     target: string,
     text = "",
     options?: {
       attachments?: Array<Record<string, unknown>>;
+      fileRefs?: Array<string | Record<string, unknown>>;
+      textAttachments?: Array<Record<string, unknown>>;
       eventId?: string;
       requestId?: string;
     },
@@ -1151,16 +1177,42 @@ export class JaatoClient {
           `It would ignore the command silently.  Upgrade the daemon.`,
       );
     }
-    const attachments = options?.attachments ?? [];
-    if (!text && attachments.length === 0) {
+    const fileRefs = options?.fileRefs ?? [];
+    const textAttachments = options?.textAttachments ?? [];
+    if (
+      (fileRefs.length > 0 || textAttachments.length > 0) &&
+      !isProtocolCompatible(
+        this._serverProtocolVersion,
+        MIN_SESSION_MESSAGE_FILES_PROTOCOL,
+      )
+    ) {
       throw new Error(
-        "sendSessionMessage requires text or attachments — a message with " +
-          "no content drives a turn the peer has nothing to answer",
+        `sendSessionMessage: this daemon speaks protocol ` +
+          `${this._serverProtocolVersion} and does not carry fileRefs / ` +
+          `textAttachments on session.message (needs >= ` +
+          `${MIN_SESSION_MESSAGE_FILES_PROTOCOL}).  It would deliver the ` +
+          `text without them and report accepted.  Upgrade the daemon, or ` +
+          `send text only.`,
+      );
+    }
+    const attachments = options?.attachments ?? [];
+    if (
+      !text &&
+      attachments.length === 0 &&
+      fileRefs.length === 0 &&
+      textAttachments.length === 0
+    ) {
+      throw new Error(
+        "sendSessionMessage requires text, attachments, fileRefs or " +
+          "textAttachments — a message with no content drives a turn the " +
+          "peer has nothing to answer",
       );
     }
     const payload: Record<string, unknown> = { target, text };
     if (options?.eventId !== undefined) payload.event_id = options.eventId;
     if (attachments.length > 0) payload.attachments = attachments;
+    if (fileRefs.length > 0) payload.file_refs = fileRefs;
+    if (textAttachments.length > 0) payload.text_attachments = textAttachments;
     // CommandRequest carries no request_id of its own, so the correlation
     // id rides the payload and the daemon echoes it from there.
     if (options?.requestId !== undefined) payload.request_id = options.requestId;

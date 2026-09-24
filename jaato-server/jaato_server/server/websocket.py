@@ -50,6 +50,7 @@ from .workspace_provisioner import WorkspaceProvisioner, ProvisionedWorkspace
 from .apparmor import AppArmorManager
 from .cgroups import CgroupsManager
 from .session_logging import set_logging_context, clear_logging_context
+from .transfer_limits import STAGE_PER_FILE_LIMIT, STAGE_TOTAL_LIMIT
 from jaato_sdk.events import (
     Event,
     EventType,
@@ -190,8 +191,11 @@ _SERVERS_JSON = Path.home() / ".jaato" / "servers.json"
 # Total:    protects against many smaller uploads totalling something huge.
 # Both are advisory defaults — when we add per-deployment config, these
 # become the fallback when the operator hasn't set values themselves.
-DEFAULT_STAGE_PER_FILE_LIMIT = 10 * 1024 * 1024   # 10 MB
-DEFAULT_STAGE_TOTAL_LIMIT    = 50 * 1024 * 1024   # 50 MB
+# ONE definition, in ``transfer_limits``: the cross-workspace copy a group
+# message makes into its target's inbox is bounded by the same two numbers
+# (design §4.5), so they must not be able to drift apart.
+DEFAULT_STAGE_PER_FILE_LIMIT = STAGE_PER_FILE_LIMIT
+DEFAULT_STAGE_TOTAL_LIMIT    = STAGE_TOTAL_LIMIT
 
 #: The largest single WebSocket message the daemon accepts, in bytes.
 #:

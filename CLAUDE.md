@@ -1063,8 +1063,53 @@ additive, no protocol bump. Stated limit: the cold-retry schedule is in
 memory, so after a restart a cold inbox waits for whatever next loads its
 session. Guard: `shared/tests/test_durable_inbox_phase2.py`, six reversions.
 
-Not built here (Phase 3 of the design): `file_refs` / `text_attachments`
-and cross-workspace file copy. Design and rollout:
+**Phase 3: files on a message** (design §4.5). A peer can hand another
+session a FILE without pasting it into the 8 KiB body -- `file_refs` on
+`send_to_session` / `session.message`, paths in the SENDER's workspace --
+and short generated text (a patch, a snippet) as `text_attachments`. A
+reference is a claim the daemon verifies and re-issues in the target's
+terms, because a path in workspace A is not a usable reference for a
+runner confined to B:
+
+| The reference | Verdict |
+|---|---|
+| resolves (symlinks followed) outside the sender's workspace, or names another `workspace` | `refused: outside_sender_workspace` -- a session may only reference what it could itself read; judged before existence, so the refusal is not an oracle |
+| `.env` at any depth, `.jaato/*_auth.json` | `refused: credential` (the `workspace_download` rule) |
+| missing, or not a regular file | `refused: not_found` / `not_a_file` |
+| target in the SAME workspace | **`referenced`**: the relative path plus the digest and size the daemon measured, in a `[files referenced by this message]` manifest inside the untrusted wrapper; nothing is copied |
+| target in ANOTHER workspace | **`copied`** under `<ws_b>/.jaato/sessions/<id>.inbox/files/<message_id>/NN-<name>` -- streamed, temp file plus `os.replace`, the copy's digest re-verified against the source's (`copy_mismatch` otherwise), bounded by the STAGING caps (`server/transfer_limits.py`: 10 MB per file, 50 MB per message, `file_too_large` / `message_files_too_large`) so a message cannot put more bytes in a workspace than a stage can |
+| a text attachment | **`inlined`** under a fence longer than any backtick run it contains, up to 32 KiB per message; beyond that stored as a file and `copied` with `reason: over_inline_cap` |
+
+**All or nothing.** One reference that does not pass refuses the whole
+message (`status: refused`, every file's disposition in the receipt's
+`files`), and whatever was already copied is taken back and reported
+`discarded` -- a peer never acts on a manifest with a file silently
+missing from it, and a receipt never claims a copy that is not there. The
+same discard runs when a copied-for message is then not delivered
+(backpressure, a terminal target). Copy rather than symlink: a link out
+of the workspace is exactly what `_resolve_under_root` and the AppArmor
+profile refuse.
+
+**The delivered files outlive the envelope.** `files/<message_id>/` is a
+sibling of the spooled-bytes directory, not inside it, because the two
+have different lifetimes: spooled bytes are consumed by the drive that
+re-inflates them and go with the envelope, while a delivered file is
+read by the target on the turn the message started and on later ones. It
+goes with the session record (`delete_session` -> `remove_all`) and with
+nothing sooner. A spooled message keeps its manifest and inline text in
+the envelope, so a drain renders exactly what the live path would have.
+
+Protocol **1.24**: two NEW keys on an existing verb, and an older daemon
+ignores keys it does not read -- so a message with files sent to a 1.23
+daemon would be delivered WITHOUT them and answered `accepted`, the #845
+shape. Both SDKs refuse a call that carries either key below
+`MIN_SESSION_MESSAGE_FILES_PROTOCOL` and leave a text-only call at the
+1.23 floor; `SessionMessageResultEvent.files` is additive. Guard:
+`shared/tests/test_group_message_files_phase3.py`, seven reversions
+(containment, the credential rule, the per-file cap, all-or-nothing, the
+digest re-check, the discard on non-delivery, and the drive deleting the
+files it just named). Stated limit: delivered files are never pruned
+before the session record is deleted. Design and rollout:
 [Session Group Messaging](docs/design/session-group-messaging.md).
 
 ### A Failure the Framework Was Told Was a Success (#1053)
@@ -10507,7 +10552,7 @@ This is not optional cleanup — treat missing or inaccurate docstrings as a def
 - [Path Boundary Pattern](docs/path-boundary-pattern.md) - MSYS2/Windows path handling for new components, and the cross-process rule: a **relative path never crosses the daemon boundary** — client-supplied `workspace_path` / `config_root` / `env_file` / trace-log paths are REJECTED, not resolved against the daemon's cwd (#742)
 - [OpenTelemetry Design](docs/opentelemetry-design.md) - Comprehensive OTel tracing integration
 - [Reliability Policies Config](docs/reliability-policies-config.md) - JSON schema, per-tool thresholds, prerequisite policies, usage examples
-- [Session Group Messaging](docs/design/session-group-messaging.md) - Assessment and design for any-to-any messaging between sessions that share a group (`created_by` owner or `cascade_driver_id`), waking an idle, detached, or unloaded target to process the message, with a payload of text, file references and text/binary attachments. Inventories the primitives that already exist against the requirement, names the eight missing blocks and proposes a three-phase rollout that composes rather than duplicates. **Phase 1 is shipped**: `server/session_groups.py`, the index's `membership` section, `SessionManager.deliver_group_message`, the `courier` plugin (`send_to_session` / `list_group_sessions` plus the relocated `send_to_sibling` / `list_siblings`), the `session.message` verb (protocol 1.23) and both SDK methods — see [Session Group Messaging](#session-group-messaging-the-courier-plugin). **Phase 2 is shipped too**: the durable per-session inbox (`server/session_inbox.py`), spooled on a busy target with bytes or a failed revive, drained at turn end, on attach and by the lifetime watchdog with backoff, with `_pending_wakes` folded into it and `inbox_pending` on the listing. Phase 3 (file references, cross-workspace copy) remains design.
+- [Session Group Messaging](docs/design/session-group-messaging.md) - Assessment and design for any-to-any messaging between sessions that share a group (`created_by` owner or `cascade_driver_id`), waking an idle, detached, or unloaded target to process the message, with a payload of text, file references and text/binary attachments. Inventories the primitives that already exist against the requirement, names the eight missing blocks and proposes a three-phase rollout that composes rather than duplicates. **Phase 1 is shipped**: `server/session_groups.py`, the index's `membership` section, `SessionManager.deliver_group_message`, the `courier` plugin (`send_to_session` / `list_group_sessions` plus the relocated `send_to_sibling` / `list_siblings`), the `session.message` verb (protocol 1.23) and both SDK methods — see [Session Group Messaging](#session-group-messaging-the-courier-plugin). **Phase 2 is shipped too**: the durable per-session inbox (`server/session_inbox.py`), spooled on a busy target with bytes or a failed revive, drained at turn end, on attach and by the lifetime watchdog with backoff, with `_pending_wakes` folded into it and `inbox_pending` on the listing. **Phase 3 is shipped**: `file_refs` / `text_attachments` on the verb, verified daemon-side and referenced in place or copied into the target's inbox under the staging caps (`server/transfer_limits.py`), with the receipt's `files` dispositions and protocol 1.24.
 - [Daemon Extensions](docs/design/daemon-extensions.md) - Extension points for external packages (session hooks, WS interceptors, custom aspects, remote handlers)
 - [Application Identity](docs/design/app-identity.md) - Naming the application an integrator built, rather than reporting every SDK-based harness upstream as "jaato". `AppIdentity` + the four-tier precedence (provider knob → provider env → `JaatoRuntime(app_identity=)` → `JAATO_APP_*`), the `(powered by jaato)` suffix, header-safety sanitisation, and why the env vars are `host`-scoped.
 - [Env Vars vs Profile Keys](docs/design/env-vars-vs-profile-keys.md) - Which of the 186 env vars earned a typed profile/`plugin_configs` key, and which are correctly env-only. The tagged catalog lives in `jaato_server/shared/env_scope.py` (scope: `session` / `host` / `ambient` / `internal`, plus the typed key where one exists) and is enforced by `test_env_scope_catalog.py`; 38 session-scoped knobs with no typed key sit in a may-only-shrink ratchet, each carrying a tier and a **proposed** key (`explain env untyped` prints both). Includes the credential policy for the three providers whose peers expose an `api_key` knob and they don't.
