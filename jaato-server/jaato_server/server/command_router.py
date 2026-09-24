@@ -82,7 +82,8 @@ def _message_result_event(request_id: Optional[str], target: str,
                           receipt: Dict[str, Any]) -> Any:
     """Render a ``deliver_group_message`` receipt as the typed result event.
 
-    ``ok`` is the DELIVERED set plus the benign ``duplicate`` (a redelivered
+    ``ok`` is the DELIVERED set, ``spooled`` (the target's durable inbox
+    holds it -- phase 2) and the benign ``duplicate`` (a redelivered
     ``event_id`` is an idempotent no-op, not a failed delivery -- the
     ``session.wake`` reading).
     """
@@ -92,7 +93,8 @@ def _message_result_event(request_id: Optional[str], target: str,
         request_id=request_id,
         target=target,
         status=status,
-        ok=status in ("accepted", "queued", "duplicate"),
+        ok=status in ("accepted", "queued", "spooled", "duplicate"),
+        spooled=bool(receipt.get("spooled")),
         message_id=receipt.get("message_id") or "",
         target_session_id=receipt.get("target_session_id") or "",
         sibling_name=receipt.get("sibling_name") or "",
@@ -1593,6 +1595,11 @@ class CommandRouter:
             # only way to ask.
             "awaiting": s.awaiting,
             "awaiting_since": s.awaiting_since,
+            # Session group messaging, phase 2: how many messages wait in
+            # this session's durable inbox.  A diagnostic in #812's shape
+            # (additive, no bump): a cold session with a pending message is
+            # the one the watchdog is about to revive.
+            "inbox_pending": s.inbox_pending,
         } for s in sessions]
 
         self._event_sink.send_event(client_id, SessionListEvent(sessions=session_data))

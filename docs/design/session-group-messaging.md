@@ -391,14 +391,41 @@ departures from the text above, each recorded where it applies: the
 plugin does **not** gate visibility per turn (§11 — the runner-side
 session carries no cascade id, so the predicate could not be answered
 there), and the Phase 1 envelope is text plus inline attachments only
-(`text_attachments` / `file_refs` are Phase 3). Phases 2 and 3 remain
+(`text_attachments` / `file_refs` are Phase 3).
+
+**Phase 2 is implemented** (`jaato_server/server/session_inbox.py` and
+the drain schedule on `SessionManager`). The inbox is one directory per
+session beside its record, `<workspace>/.jaato/sessions/<id>.inbox/`, one
+envelope per message and the bytes in files beside it, every write a
+temp file plus `os.replace`. `deliver_group_message` spools on the
+outcomes §4.4 names -- a `queued` message leaves a `runner_queued` copy
+that the turn's end consumes, a busy target with attachments and a cold
+target whose revive failed get the whole message and the new `spooled`
+receipt -- and never on backpressure (the pending cap), which a spool
+would defeat. Three drain triggers: the turn-end hook
+(`_after_main_agent_done`, one entry per turn boundary), the client's
+attach (`drive_pending_wake`, now `drain_session_inbox(trigger="attach")`
+and the only trigger that may drive a deferred wake), and the #812
+lifetime watchdog (`_sweep_inbox`: loaded sessions that are not
+mid-turn, and cold sessions revived with a 30 s-doubling backoff capped at
+10 min). A load clears `runner_queued` and re-arms the schedule; a delete
+removes the inbox with the record. `_pending_wakes` is gone -- a deferred
+`session.wake` is an inbox entry (`kind=wake`, `defer_until_client`) --
+and the `event_id` dedup gained a durable half (a redelivery after a
+restart finds its spooled entry). `session.list` rows carry
+`inbox_pending`, and `SessionMessageResultEvent` gains `spooled` (no
+protocol bump: both are additive). Two limits, stated: the cold-retry
+schedule is in memory, so after a daemon restart a cold inbox waits for
+whatever next loads its session; and a drive that fails keeps the entry
+with `attempts` bumped rather than a bound of its own -- the entry's TTL
+(24 h, the wake-binding precedent) is what ends it. Phase 3 remains
 design.
 
 
 | Phase | Delivers | New code, roughly |
 |---|---|---|
 | 1 | `session_groups.py`; index carries owner + name; `deliver_group_message` over the existing drive/queue/wake primitives (text + inline attachments, wake on cold, no spool); the `courier` plugin (§11) holding `send_to_session`, `list_group_sessions` and the two sibling tools moved out of `subagent`; `session.message` + result event; `GROUP_DELIVERY` trace | one module, one method on `SessionManager`, one new plugin (four executors, two of them relocated), one router handler, one SDK method per SDK |
-| 2 | the inbox: spool on busy/failed-revive, drain on load and turn end, watchdog retry; `_pending_wakes` folded into it; `inbox_pending` on the listing | inbox module + three drain hooks |
+| 2 | the inbox: spool on busy/failed-revive, drain on load and turn end, watchdog retry; `_pending_wakes` folded into it; `inbox_pending` on the listing -- **shipped** | inbox module + three drain hooks |
 | 3 | `file_refs` and `text_attachments`; cross-workspace copy through the staging write path; receipt file dispositions | envelope validation + copy helper |
 
 Phase 1 is what the requirement asks for and is almost entirely

@@ -54,7 +54,8 @@ def _make_sm() -> SessionManager:
     sm._cascade_client_sweep_thread = None
     sm._cid_last_session_ts = {}  # Bug B fix, server 0.6.161+
     sm._HEADLESS_CLIENT_ID = "_headless"
-    sm._pending_wakes = {}  # wake deferred-turn store (production has it)
+    sm._inbox_dirty, sm._inbox_cold_retry = set(), {}
+    sm._inbox_draining = set()
     # no wake bindings in these cascade tests → the sweep's wake-durability
     # exemption is a no-op (has_live_binding_for_cid → False).
     sm._wake_binding_registry = _NoWakeBindings()

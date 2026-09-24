@@ -29,7 +29,7 @@ def _sess(sid, workspace, created_by=None):
     return SimpleNamespace(
         session_id=sid, name=sid, description="", model_provider="", model_name="",
         is_loaded=True, client_count=0, turn_count=0, workspace_path=workspace,
-        created_by=created_by, orphaned=False, runner=None,
+        created_by=created_by, orphaned=False, runner=None, inbox_pending=0,
         awaiting=None, awaiting_since=None,
     )
 

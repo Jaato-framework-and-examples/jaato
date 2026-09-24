@@ -343,6 +343,7 @@ def _sm() -> SessionManager:
     # No persisted rows: this module is about the in-memory overlay, and a
     # real workspace scan would reach the developer's own ``~/.jaato``.
     sm._get_persisted_sessions = lambda workspace_path=None: []
+    sm._session_config = SimpleNamespace(storage_path=".jaato/sessions")
     return sm
 
 
@@ -636,7 +637,7 @@ def test_the_listing_row_carries_awaiting():
             session_id="blocked", name="blocked", description="",
             model_provider="", model_name="", is_loaded=True, client_count=0,
             turn_count=0, workspace_path="/ws", created_by=None,
-            orphaned=False, runner=None,
+            orphaned=False, runner=None, inbox_pending=0,
             awaiting=AWAITING_PERMISSION,
             awaiting_since="1970-01-01T00:16:40+00:00",
         ),

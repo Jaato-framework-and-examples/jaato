@@ -63,7 +63,10 @@ DEFAULT_KNOBS: Dict[str, Any] = {
 #: send tools cost another session a turn and stay permission-gated.
 _READ_ONLY_TOOLS = ("list_group_sessions", "list_siblings")
 
-_GROUP_STATUS_OK = ("accepted", "queued")
+#: The receipt statuses that mean the TARGET HOLDS THE MESSAGE.  ``spooled``
+#: (phase 2) is the durable inbox: the message will be driven at the
+#: target's next turn boundary or when the watchdog revives it.
+_GROUP_STATUS_OK = ("accepted", "queued", "spooled")
 
 
 class CourierPlugin(DaemonForwardingMixin):
@@ -239,13 +242,17 @@ class CourierPlugin(DaemonForwardingMixin):
                 "status is one of: accepted (the peer was idle or was woken; a "
                 "turn has been started on it — woken says which), queued (the "
                 "peer is mid-turn; your message is delivered when that turn "
-                "ends), no_such_session, ambiguous (a name matching several "
+                "ends), spooled (the peer is mid-turn and the message carries "
+                "attachments, or it is unloaded and did not revive; the "
+                "message waits in the peer's durable inbox and is delivered at "
+                "its next turn boundary or when the daemon revives it), "
+                "no_such_session, ambiguous (a name matching several "
                 "sessions; candidates lists their ids — resend with a "
                 "session_id), session_cold (waking is disabled here), "
                 "terminated (the peer ended on an error or an exhausted budget "
                 "and is never woken), or refused (with a reason). "
-                "NEITHER accepted NOR queued means the peer read it, agreed, or "
-                "acted — only that the message was delivered. "
+                "NONE of accepted, queued or spooled means the peer read it, "
+                "agreed, or acted — only that the message was delivered. "
                 "Use for coordination a driver should not have to relay, NOT for "
                 "control flow. You cannot approve, grant or cancel anything for "
                 "a peer; permission and clarification responses are refused."
@@ -401,8 +408,8 @@ class CourierPlugin(DaemonForwardingMixin):
             "same user — and send_to_session delivers a message to one of them, "
             "WAKING it if it is unloaded. list_siblings / send_to_sibling are the "
             "cascade-only pair, and never wake. Every send returns a receipt, "
-            "not a reply: accepted or queued means the message was delivered, "
-            "nothing more. There is no way to wait for a peer, so do not "
+            "not a reply: accepted, queued or spooled means the message was "
+            "delivered, nothing more. There is no way to wait for a peer, so do not "
             "design a workflow that needs an answer back through this channel; "
             "results still travel through your completion payload."
         )

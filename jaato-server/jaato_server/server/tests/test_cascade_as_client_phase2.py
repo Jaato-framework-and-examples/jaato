@@ -39,7 +39,8 @@ def _make_sm() -> SessionManager:
     sm._cascade_client_sweep_stop = None
     sm._cascade_client_sweep_thread = None
     sm._HEADLESS_CLIENT_ID = "_headless"
-    sm._pending_wakes = {}  # wake deferred-turn store (production has it)
+    sm._inbox_dirty, sm._inbox_cold_retry = set(), {}
+    sm._inbox_draining = set()
 
     class _NoWakeBindings:
         def has_live_binding_for_cid(self, cid):

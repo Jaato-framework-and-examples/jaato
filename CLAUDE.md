@@ -1032,9 +1032,39 @@ Three things are deliberate:
   cascade members who need them; a session in no group gets a refusal
   saying so instead.
 
-Not built here (Phase 2/3 of the design): the durable inbox that survives an
-unload between queue and drain, `file_refs` / `text_attachments`, and
-cross-workspace file copy. Design and rollout:
+**Phase 2: the durable inbox** (`server/session_inbox.py`). A message
+*accepted for delivery* that cannot be handed to a running turn is written
+under the target's own record directory --
+`<workspace>/.jaato/sessions/<id>.inbox/<message_id>.json`, bytes in files
+beside it, every write a temp file plus `os.replace` -- BEFORE the sender
+gets its receipt, so "it will be processed" is a guarantee rather than a
+receipt. The record listing globs `*.json` at the top of that directory, so
+the `<id>.inbox/` directory beside `<id>.json` is invisible to it.
+
+| The target was | Receipt | Drained by |
+|---|---|---|
+| mid-turn, text queued runner-side | `queued`, `spooled: true` -- a `runner_queued` COPY | the turn-end hook REMOVES it (the turn consumed it); a load re-arms it, since the runner that held the text is gone |
+| mid-turn, and the message carries bytes (drive branch only, #845) | **`spooled`** | the turn-end hook DRIVES it on the idle-only SIBLING tier, bytes re-inflated |
+| cold, and the revive failed | **`spooled`** | the lifetime watchdog: revive with backoff (30 s doubling, capped at 10 min), then drive |
+| revived cold with no client and a cascade observer | a deferred `session.wake` (`kind=wake`, `defer_until_client`) | the client's attach -- `drive_pending_wake` is now `drain_session_inbox(trigger="attach")`, the ONE trigger that may drive it |
+| at the pending cap | `refused`, nothing spooled | a spool would defeat backpressure |
+
+`_pending_wakes` is gone: the deferred wake was a single in-memory slot and
+is an inbox entry now, so it survives an unload and a daemon restart. One
+entry is driven per drain call -- a drive starts a turn, and the next entry
+belongs at the next turn boundary, which is itself a trigger. A `terminated`
+target drops the entry (never woken, design §4.7); a failed drive keeps it
+with `attempts` bumped; the entry's 24 h TTL ends it. The `event_id` dedup
+gained a durable half: a redelivery after a restart finds its spooled entry
+and is `duplicate`. `session.list` rows carry `inbox_pending` (cold rows
+too -- a cold session with a pending message is the one the watchdog is
+about to revive) and `SessionMessageResultEvent` gains `spooled`; both are
+additive, no protocol bump. Stated limit: the cold-retry schedule is in
+memory, so after a restart a cold inbox waits for whatever next loads its
+session. Guard: `shared/tests/test_durable_inbox_phase2.py`, six reversions.
+
+Not built here (Phase 3 of the design): `file_refs` / `text_attachments`
+and cross-workspace file copy. Design and rollout:
 [Session Group Messaging](docs/design/session-group-messaging.md).
 
 ### A Failure the Framework Was Told Was a Success (#1053)
@@ -10477,7 +10507,7 @@ This is not optional cleanup — treat missing or inaccurate docstrings as a def
 - [Path Boundary Pattern](docs/path-boundary-pattern.md) - MSYS2/Windows path handling for new components, and the cross-process rule: a **relative path never crosses the daemon boundary** — client-supplied `workspace_path` / `config_root` / `env_file` / trace-log paths are REJECTED, not resolved against the daemon's cwd (#742)
 - [OpenTelemetry Design](docs/opentelemetry-design.md) - Comprehensive OTel tracing integration
 - [Reliability Policies Config](docs/reliability-policies-config.md) - JSON schema, per-tool thresholds, prerequisite policies, usage examples
-- [Session Group Messaging](docs/design/session-group-messaging.md) - Assessment and design for any-to-any messaging between sessions that share a group (`created_by` owner or `cascade_driver_id`), waking an idle, detached, or unloaded target to process the message, with a payload of text, file references and text/binary attachments. Inventories the primitives that already exist against the requirement, names the eight missing blocks and proposes a three-phase rollout that composes rather than duplicates. **Phase 1 is shipped**: `server/session_groups.py`, the index's `membership` section, `SessionManager.deliver_group_message`, the `courier` plugin (`send_to_session` / `list_group_sessions` plus the relocated `send_to_sibling` / `list_siblings`), the `session.message` verb (protocol 1.23) and both SDK methods — see [Session Group Messaging](#session-group-messaging-the-courier-plugin). Phases 2 (durable inbox) and 3 (file references, cross-workspace copy) remain design.
+- [Session Group Messaging](docs/design/session-group-messaging.md) - Assessment and design for any-to-any messaging between sessions that share a group (`created_by` owner or `cascade_driver_id`), waking an idle, detached, or unloaded target to process the message, with a payload of text, file references and text/binary attachments. Inventories the primitives that already exist against the requirement, names the eight missing blocks and proposes a three-phase rollout that composes rather than duplicates. **Phase 1 is shipped**: `server/session_groups.py`, the index's `membership` section, `SessionManager.deliver_group_message`, the `courier` plugin (`send_to_session` / `list_group_sessions` plus the relocated `send_to_sibling` / `list_siblings`), the `session.message` verb (protocol 1.23) and both SDK methods — see [Session Group Messaging](#session-group-messaging-the-courier-plugin). **Phase 2 is shipped too**: the durable per-session inbox (`server/session_inbox.py`), spooled on a busy target with bytes or a failed revive, drained at turn end, on attach and by the lifetime watchdog with backoff, with `_pending_wakes` folded into it and `inbox_pending` on the listing. Phase 3 (file references, cross-workspace copy) remains design.
 - [Daemon Extensions](docs/design/daemon-extensions.md) - Extension points for external packages (session hooks, WS interceptors, custom aspects, remote handlers)
 - [Application Identity](docs/design/app-identity.md) - Naming the application an integrator built, rather than reporting every SDK-based harness upstream as "jaato". `AppIdentity` + the four-tier precedence (provider knob → provider env → `JaatoRuntime(app_identity=)` → `JAATO_APP_*`), the `(powered by jaato)` suffix, header-safety sanitisation, and why the env vars are `host`-scoped.
 - [Env Vars vs Profile Keys](docs/design/env-vars-vs-profile-keys.md) - Which of the 186 env vars earned a typed profile/`plugin_configs` key, and which are correctly env-only. The tagged catalog lives in `jaato_server/shared/env_scope.py` (scope: `session` / `host` / `ambient` / `internal`, plus the typed key where one exists) and is enforced by `test_env_scope_catalog.py`; 38 session-scoped knobs with no typed key sit in a may-only-shrink ratchet, each carrying a tier and a **proposed** key (`explain env untyped` prints both). Includes the credential policy for the three providers whose peers expose an `api_key` knob and they don't.

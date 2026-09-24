@@ -27,13 +27,17 @@ What these tests pin, in the order the payload travels:
 """
 
 import threading
+from types import SimpleNamespace as NS
 
 import pytest
+
+from jaato_server.server import session_inbox
+from jaato_server.server.session_inbox import InboxEntry
+from jaato_server.server.session_workspace_index import SessionWorkspaceIndex
 
 from jaato_server.server.command_router import CommandRouter, _decode_wake_request
 from jaato_server.server.session_manager import (
     SessionManager,
-    _PendingWake,
     _is_contentless_wake,
     _wake_attachments,
     _wrap_wake_content,
@@ -197,11 +201,14 @@ def test_a_text_only_wake_is_wrapped_exactly_as_before():
 class _Manager(SessionManager):
     """A SessionManager with only what the wake path touches."""
 
-    def __init__(self, loaded=True):
+    def __init__(self, loaded=True, workspace=None):
         self._lock = threading.RLock()
-        warm = type("S", (), {"attached_clients": {"c1"}})()
+        warm = type("S", (), {"attached_clients": {"c1"},
+                              "workspace_path": workspace})()
         self._sessions = {"s-1": warm} if loaded else {}
-        self._pending_wakes = {}
+        self._inbox_dirty, self._inbox_cold_retry = set(), {}
+        self._inbox_draining = set()
+        self._session_config = NS(storage_path=".jaato/sessions")
         self._wake_seen_event_ids = {}
         self.drove = []
 
@@ -228,14 +235,21 @@ def test_a_wake_carrying_nothing_is_still_refused():
     assert sm.drove == []
 
 
-def test_a_deferred_wake_replays_the_bytes_it_arrived_with():
+def test_a_deferred_wake_replays_the_bytes_it_arrived_with(tmp_path):
     """A wake deferred for a client that had not attached yet is driven
     later.  Replaying its text WITHOUT its utterance would drive a turn about
-    nothing — the failure this issue is about, one layer in."""
-    sm = _Manager()
-    sm._pending_wakes["s-1"] = _PendingWake(
-        text="", source="phone", wake_ref="", cascade_driver_id="cid",
-        expires_at=float("inf"), attachments=[UTTERANCE])
+    nothing — the failure this issue is about, one layer in.  Since phase 2
+    the deferred wake is a durable inbox entry, so the bytes are spooled to
+    disk and re-inflated on the drive."""
+    sm = _Manager(workspace=str(tmp_path))
+    storage_dir = sm._session_storage_dir(str(tmp_path))
+    sm._spool_inbox(storage_dir, session_id="s-1", kind="wake", source="phone",
+                    source_id="phone", text="", items=[UTTERANCE],
+                    expires_at=float("inf"), defer_until_client=True,
+                    cascade_driver_id="cid")
+    [entry] = session_inbox.pending(storage_dir, "s-1")
+    assert entry.attachments[0]["file"] and "QUJD" not in open(
+        storage_dir / "s-1.inbox" / f"{entry.message_id}.json").read()
     assert sm.drive_pending_wake("s-1") is True
     sid, text, atts = sm.drove[0]
     assert atts == [UTTERANCE]
@@ -263,11 +277,12 @@ def test_the_drive_puts_the_bytes_on_the_request_itself():
     assert sent[0].attachments == [UTTERANCE]
 
 
-def test_pending_wake_defaults_to_no_attachments():
-    """Every pre-#845 construction site is unchanged."""
-    pw = _PendingWake(text="t", source="user", wake_ref="", 
-                      cascade_driver_id=None, expires_at=0.0)
-    assert pw.attachments == []
+def test_an_inbox_entry_defaults_to_no_attachments():
+    """Every construction site that names no bytes carries none."""
+    entry = InboxEntry(message_id="m", session_id="s", kind="wake",
+                       source="user", source_id="user", text="t",
+                       created_at=0.0, expires_at=0.0)
+    assert entry.attachments == []
 
 
 # ------------------------------------------------------- 5. inject is idle-only

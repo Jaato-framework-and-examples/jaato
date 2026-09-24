@@ -61,7 +61,8 @@ def _sm():
     sm._cascade_client_sweep_thread = None
     sm._cid_last_session_ts = {}
     sm._HEADLESS_CLIENT_ID = "_headless"
-    sm._pending_wakes = {}
+    sm._inbox_dirty, sm._inbox_cold_retry = set(), {}
+    sm._inbox_draining = set()
     sm._wake_binding_registry = _NoWakeBindings()
     sm.to_client = []
     sm._event_callback = lambda cid_, ev: sm.to_client.append((cid_, ev))

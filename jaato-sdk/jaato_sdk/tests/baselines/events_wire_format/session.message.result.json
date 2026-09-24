@@ -12,6 +12,7 @@
   "group_key": "",
   "woken": false,
   "headless": false,
+  "spooled": false,
   "candidates": [],
   "error": ""
 }
