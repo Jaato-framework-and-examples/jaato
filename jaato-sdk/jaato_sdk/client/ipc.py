@@ -89,6 +89,14 @@ from jaato_sdk.events import (
     PermissionClearRequest,
     PermissionSetDefaultRequest,
     PermissionPolicySnapshotRequest,
+    MemoryListRequest,
+    MemoryListEvent,
+    MemoryGetRequest,
+    MemoryGetResultEvent,
+    MemoryUpdateRequest,
+    MemoryUpdateResultEvent,
+    MemoryDeleteRequest,
+    MemoryDeleteResultEvent,
     describe_event_type_problems,
 )
 
@@ -2142,7 +2150,7 @@ class IPCClient:
             args=[path],
         ))
 
-    MIN_SESSION_MESSAGE_PROTOCOL = "1.22"
+    MIN_SESSION_MESSAGE_PROTOCOL = "1.23"
 
     async def send_session_message(
         self,
@@ -2156,7 +2164,7 @@ class IPCClient:
         """Message another session in this session's GROUP, waking it if cold.
 
         The client-tier form of the ``courier`` plugin's ``send_to_session``
-        (protocol 1.22).  The sender is this connection's OWN session --
+        (protocol 1.23).  The sender is this connection's OWN session --
         resolved daemon-side from the connection, never from here -- and the
         target must share a group with it: a cascade, or the same
         authenticated creator (``server.session_groups``).  A cold target is
@@ -2348,6 +2356,154 @@ class IPCClient:
             command="scaffold.integration",
             args=[name or ""],
         ))
+
+    # =========================================================================
+    # The memory verbs (#1232, protocol 1.22)
+    #
+    # A QUIET read of the attached session's memory store, plus the rail's
+    # structured edit / approve / dismiss / remove.  Each is a request/result
+    # pair correlated by ``request_id``, answered from the plugin copy that
+    # holds the store (the runner's), and each refuses a daemon below 1.22:
+    # an older one answers "Unknown request type" with no request_id and
+    # never the result a caller waits on.
+    # =========================================================================
+
+    MIN_MEMORY_VERBS_PROTOCOL = "1.22"
+
+    def _require_memory_verbs_protocol(self, method: str) -> None:
+        """Refuse a memory verb against a daemon that does not serve it."""
+        if _protocol_compatible(
+                self.server_protocol_version, self.MIN_MEMORY_VERBS_PROTOCOL):
+            return
+        spoken = self.server_protocol_version or "unknown (not connected)"
+        raise ValueError(
+            f"{method}: this daemon speaks protocol {spoken} and does not "
+            f"serve the memory verbs (needs >= "
+            f"{self.MIN_MEMORY_VERBS_PROTOCOL}).  It would answer 'Unknown "
+            f"request type' and never the result this call waits on.  "
+            f"Upgrade the daemon, or use the `memory` command."
+        )
+
+    async def _memory_request(self, method: str, event: Event, timeout: float) -> Event:
+        """Send one memory request and return its correlated answer.
+
+        Subscribes BEFORE sending, so an answer that arrives before this
+        coroutine resumes is not missed; re-buffers the incidental events it
+        read when it is the only subscriber, as :meth:`_await_inject_result`
+        does.  Raises ``TimeoutError`` when no answer arrives, and
+        ``ConnectionError`` when the connection closes first -- never a
+        synthesised empty answer, which for a list would read as "nothing
+        remembered".
+        """
+        self._require_memory_verbs_protocol(method)
+        request_id = f"mem_{uuid.uuid4().hex[:16]}"
+        event.request_id = request_id  # type: ignore[attr-defined]
+        q = self._subscribe_events()
+        incidental: list = []
+        try:
+            if not await self._send_event(event):
+                raise ConnectionError(
+                    f"{method}: the request could not be sent (not connected)")
+
+            async def _wait() -> Optional[Event]:
+                while True:
+                    got = await q.get()
+                    if got is None:
+                        return None
+                    if getattr(got, "request_id", None) == request_id and \
+                            got.type != event.type:
+                        return got
+                    if len(self._event_subscribers) == 1:
+                        incidental.append(got)
+
+            answer = await asyncio.wait_for(_wait(), timeout=timeout)
+        finally:
+            self._unsubscribe_events(q)
+            if incidental and not self._event_subscribers:
+                self._buffered_events.extend(incidental)
+        if answer is None:
+            raise ConnectionError(
+                f"{method}: the connection closed before the daemon answered")
+        return answer
+
+    async def list_memories(self, *, timeout: float = 10.0) -> MemoryListEvent:
+        """List the attached session's memory store, quietly (1.22).
+
+        Unlike the ``memory list`` command this prints nothing to the
+        transcript.  The answer's ``ok`` is ``False`` -- with ``error`` and
+        ``category`` -- when the store could not be read; its ``memories``
+        are then meaningless, never "nothing remembered".  Rows carry
+        ``tier`` (``workspace`` / ``global``), timestamps, usage, both
+        provenance stamps and the two this-session flags, but not the
+        content: see :meth:`get_memory`.  ``may_curate`` says whether this
+        connection may change them.
+
+        Raises:
+            ValueError: Against a daemon below
+                :attr:`MIN_MEMORY_VERBS_PROTOCOL`.
+            TimeoutError / ConnectionError: No answer arrived.
+        """
+        return await self._memory_request(  # type: ignore[return-value]
+            "list_memories", MemoryListRequest(), timeout)
+
+    async def get_memory(
+        self, memory_id: str, *, timeout: float = 10.0,
+    ) -> MemoryGetResultEvent:
+        """Fetch one memory WITH its content and evidence (1.22)."""
+        return await self._memory_request(  # type: ignore[return-value]
+            "get_memory", MemoryGetRequest(memory_id=memory_id), timeout)
+
+    async def update_memory(
+        self,
+        memory_id: str,
+        *,
+        description: Optional[str] = None,
+        content: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        maturity: Optional[str] = None,
+        timeout: float = 10.0,
+    ) -> MemoryUpdateResultEvent:
+        """Edit a memory, or move its maturity (1.22).
+
+        The structured replacement for ``memory edit`` (which spawns
+        ``$EDITOR`` on the runner's host).  ``None`` leaves a field alone.
+        A maturity change is recorded in ``curated_by`` with THIS
+        connection's authenticated identity.  Limited to the workspace
+        owner: a refusal is ``ok=False, category="not_owner"``.
+        """
+        return await self._memory_request(  # type: ignore[return-value]
+            "update_memory",
+            MemoryUpdateRequest(
+                memory_id=memory_id, description=description,
+                content=content, tags=tags, maturity=maturity,
+            ),
+            timeout,
+        )
+
+    async def approve_memory(
+        self, memory_id: str, *, timeout: float = 10.0,
+    ) -> MemoryUpdateResultEvent:
+        """Approve a memory: ``update_memory(maturity="validated")``."""
+        return await self.update_memory(
+            memory_id, maturity="validated", timeout=timeout)
+
+    async def dismiss_memory(
+        self, memory_id: str, *, timeout: float = 10.0,
+    ) -> MemoryUpdateResultEvent:
+        """Dismiss a memory: ``update_memory(maturity="dismissed")``.
+
+        The store keeps no dismissed trace -- a dismissed raw memory is
+        unlinked from the queue -- so it is gone from the next list.
+        """
+        return await self.update_memory(
+            memory_id, maturity="dismissed", timeout=timeout)
+
+    async def delete_memory(
+        self, memory_id: str, *, timeout: float = 10.0,
+    ) -> MemoryDeleteResultEvent:
+        """Remove a memory through the plugin's own delete path (1.22)."""
+        return await self._memory_request(  # type: ignore[return-value]
+            "delete_memory", MemoryDeleteRequest(memory_id=memory_id), timeout)
 
     async def list_profiles(self) -> None:
         """Request list of available agent profiles.

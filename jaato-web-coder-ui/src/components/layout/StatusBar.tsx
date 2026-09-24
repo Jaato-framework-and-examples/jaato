@@ -61,6 +61,7 @@ export function StatusBar() {
       {/* No shortcut letter: Ctrl+P/T/R/F/G/W are spoken for, and the free
           set should be checked rather than guessed. */}
       <button type="button" onClick={() => toggle("showSessions")} className={tab(ui.showSessions)} title="Toggle your sessions and their notes" aria-label="Toggle your sessions and their notes">Sessions</button>
+      <button type="button" onClick={() => toggle("showMemories")} className={tab(ui.showMemories)} title="Toggle the session's memories" aria-label="Toggle the session's memories">Memories</button>
       <button type="button" onClick={() => setToolsExpanded(!ui.showTools)} className={tab(ui.showTools)} title={ui.showTools ? "Tool call boxes expanded — click to collapse them (Ctrl+T)" : "Tool call boxes collapsed — click to expand them (Ctrl+T)"} aria-label="Toggle tool call boxes (Ctrl+T)">Tools</button>
       {/* The ``exit`` command as a button: asks what becomes of the session -- detach, end, or cancel the task -- before leaving. */}
       <button type="button" onClick={() => { requestExit().catch(() => undefined); }} className={`${tab(false)} hover:text-error`} title="Leave: detach from the session, or end it (the exit command)" aria-label="Exit (detach from or end the session)">Exit</button>

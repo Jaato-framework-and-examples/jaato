@@ -1,0 +1,7 @@
+{
+  "type": "memory.delete.request",
+  "timestamp": "<TIMESTAMP>",
+  "session_id": "",
+  "request_id": "",
+  "memory_id": ""
+}

@@ -1,4 +1,4 @@
-"""``IPCClient.send_session_message`` -- sends the verb, and refuses a daemon that would ignore it (1.22)."""
+"""``IPCClient.send_session_message`` -- sends the verb, and refuses a daemon that would ignore it (1.23)."""
 import pytest
 
 from jaato_sdk.client.ipc import IPCClient
@@ -20,7 +20,7 @@ def _client(protocol):
 
 @pytest.mark.asyncio
 async def test_sends_the_verb_with_a_payload_carrying_the_correlation_id():
-    c, sent = _client("1.22")
+    c, sent = _client("1.23")
     await c.send_session_message("s-b", "hello", event_id="e1", request_id="r1")
     assert isinstance(sent[0], CommandRequest)
     assert sent[0].command == "session.message" and sent[0].args == []
@@ -30,7 +30,7 @@ async def test_sends_the_verb_with_a_payload_carrying_the_correlation_id():
 
 @pytest.mark.asyncio
 async def test_attachments_are_content_and_travel_normalised():
-    c, sent = _client("1.22")
+    c, sent = _client("1.23")
     att = {"mime_type": "audio/wav", "data": "AAAA", "display_name": "n.wav"}
     await c.send_session_message("s-b", attachments=[att])
     assert sent[0].payload["text"] == ""
@@ -39,7 +39,7 @@ async def test_attachments_are_content_and_travel_normalised():
 
 @pytest.mark.asyncio
 async def test_no_content_is_refused_before_sending():
-    c, sent = _client("1.22")
+    c, sent = _client("1.23")
     with pytest.raises(ValueError, match="text or attachments"):
         await c.send_session_message("s-b")
     assert sent == []
@@ -47,7 +47,7 @@ async def test_no_content_is_refused_before_sending():
 
 @pytest.mark.asyncio
 async def test_refused_below_the_floor():
-    c, sent = _client("1.21")
+    c, sent = _client("1.22")
     with pytest.raises(ValueError, match="session.message"):
         await c.send_session_message("s-b", "hi")
     assert sent == []

@@ -56,6 +56,7 @@ from jaato_server.shared.runtime_limits import RuntimeLimits, apply_isolated_def
 from jaato_server.shared.session_envelope import BootstrapEnvelope
 from jaato_server.shared.instruction_suppression import normalize_suppression
 from .awaiting import awaiting_of
+from .memory_verbs import MEMORY_REQUEST_TYPES
 from .core import JaatoServer
 from .session_logging import set_logging_context, clear_logging_context, get_session_handler
 from .session_identity import RunnerIdentity, identity_from_server
@@ -4516,11 +4517,24 @@ class SessionManager:
         """
         if getattr(session, "created_by", None) == qualified_owner:
             return True
+        owner = self._workspace_owner_of(getattr(session, "workspace_path", None))
+        return owner is not None and owner == qualified_owner
+
+    def _workspace_owner_of(self, workspace_path: Optional[str]) -> Optional[str]:
+        """The qualified owner ``app:user`` of ``workspace_path``, or ``None``.
+
+        The one owner lookup this manager has, shared by
+        :meth:`_session_owned_by` (``secret.reload``) and the memory rail's
+        owner gate (#1232).  It reads the WS server's ``WorkspaceManager``
+        through the resolver the daemon wiring already hands in
+        (:meth:`set_app_secret_resolver`), so a transport with no workspace
+        manager -- IPC alone, an embedding process -- answers ``None``:
+        there is no owner to ask about, which the gate reads as UNOWNED.
+        """
         resolver = self._app_secret_resolver
-        workspace = getattr(session, "workspace_path", None)
-        if resolver is not None and workspace:
-            return resolver.owner_for(workspace) == qualified_owner
-        return False
+        if resolver is None or not workspace_path:
+            return None
+        return resolver.owner_for(workspace_path)
 
     def set_visible_sessions_resolver(
         self,
@@ -13610,12 +13624,14 @@ class SessionManager:
         # Client fetches models when user requests completions
         models_data = []
 
-        # Get memory metadata from the session's server for completion cache
+        # The memory completion cache, read from the copy that holds the
+        # store -- the runner's (#1232).  An unreadable store contributes
+        # an empty cache here (the field has no way to say "unknown"); the
+        # rail asks through ``MemoryListRequest``, which does say so.
         memories_data = []
         if session.server:
-            mem_plugin = session.server._find_plugin_for_command("memory")
-            if mem_plugin and hasattr(mem_plugin, 'get_memory_metadata'):
-                memories_data = mem_plugin.get_memory_metadata()
+            memory_list = session.server.memory_list_event(timeout=2.0)
+            memories_data = memory_list.memories if memory_list else []
 
         # Get sandbox paths from the session's server for @@ completion cache
         sandbox_paths_data = []
@@ -13919,6 +13935,13 @@ class SessionManager:
             self._apply_client_config(client_id, event, peer=peer)
             return
 
+        # The memory verbs (#1232) answer BEFORE the session lookup, so a
+        # client with no session is told so under its own request_id rather
+        # than by the uncorrelated "Session not found" below.
+        if isinstance(event, MEMORY_REQUEST_TYPES):
+            self._handle_memory_request(client_id, session_id, event, user_id=user_id)
+            return
+
         session = self.get_session(session_id)
         if not session:
             # LOG IT.  This reply is a client's only notice that the session
@@ -14164,70 +14187,7 @@ class SessionManager:
                 ))
 
         elif isinstance(event, GetInstructionBudgetRequest):
-            # Get instruction budget for the requested agent.  ``None`` (or
-            # the legacy default ``"main"``) targets this server's main
-            # agent, whose actual id may be a custom ``--agent <name>``.
-            main_id = server.main_agent_id
-            agent_id = event.agent_id or main_id
-
-            if agent_id == main_id or agent_id == "main":
-                # Main agent budget — Phase 3 §7c step 6.6.3.6:
-                # forward to runner-side via the existing
-                # ``session.snapshot_instruction_budget`` RPC (§7c
-                # step 6.1 (2/3) at commit 1043bfde).
-                snapshot = None
-                rpc = getattr(server, "_runner_rpc", None)
-                if rpc is not None:
-                    snapshotter = getattr(
-                        rpc,
-                        "session_snapshot_instruction_budget_threadsafe",
-                        None,
-                    )
-                    if callable(snapshotter):
-                        try:
-                            snapshot = snapshotter(timeout=5.0)
-                        except Exception as exc:  # noqa: BLE001
-                            logger.debug(
-                                "snapshot_instruction_budget forward failed: %s",
-                                exc,
-                            )
-                if snapshot is not None:
-                    self._emit_to_client(client_id, InstructionBudgetEvent(
-                        agent_id=agent_id,
-                        budget_snapshot=snapshot,
-                    ))
-                else:
-                    self._emit_to_client(client_id, ErrorEvent(
-                        error="No instruction budget available for main agent",
-                        error_type="BudgetNotFound",
-                    ))
-            else:
-                # Subagent budget from SubagentPlugin
-                subagent_plugin = server.registry.get_plugin("subagent") if server.registry else None
-                if subagent_plugin and hasattr(subagent_plugin, '_active_sessions'):
-                    session_info = subagent_plugin._active_sessions.get(agent_id)
-                    if session_info:
-                        subagent_session = session_info.get('session')
-                        if subagent_session and hasattr(subagent_session, 'instruction_budget') and subagent_session.instruction_budget:
-                            self._emit_to_client(client_id, InstructionBudgetEvent(
-                                agent_id=agent_id,
-                                budget_snapshot=subagent_session.instruction_budget.snapshot(),
-                            ))
-                        else:
-                            self._emit_to_client(client_id, ErrorEvent(
-                                error=f"No instruction budget available for agent {agent_id}",
-                                error_type="BudgetNotFound",
-                            ))
-                    else:
-                        self._emit_to_client(client_id, ErrorEvent(
-                            error=f"Agent not found: {agent_id}",
-                            error_type="AgentNotFound",
-                        ))
-                else:
-                    self._emit_to_client(client_id, ErrorEvent(
-                        error=f"Subagent plugin not available",
-                        error_type="PluginNotFound",
-                    ))
+            self._handle_instruction_budget_request(client_id, server, event)
 
         # ─── SDK feature parity — session-primitive verbs ───────────────
         # Typed WS verbs over JaatoSession's public primitives so SDK
@@ -14546,6 +14506,121 @@ class SessionManager:
                 error=f"Unknown request type: {type(event).__name__}",
                 error_type="RequestError",
             ))
+
+    def _handle_instruction_budget_request(
+        self,
+        client_id: str,
+        server: Any,
+        event: Any,
+    ) -> None:
+        """Serve one ``GetInstructionBudgetRequest`` for the main agent or a subagent.
+
+        Lifted out of :meth:`handle_request` by #1232, verbatim.  That chain
+        is on the cyclomatic-complexity ratchet and a baselined function may
+        not grow, so the memory-verb arm added in the same change is paid
+        for by moving the branchiest remaining arm -- this one, with its
+        main-agent / subagent split -- out of it.  Behaviour unchanged: the
+        main agent's budget is read from the RUNNER
+        (``session.snapshot_instruction_budget``), a subagent's from the
+        subagent plugin's live session.
+        """
+        from jaato_sdk.events import InstructionBudgetEvent
+
+        # Get instruction budget for the requested agent.  ``None`` (or
+        # the legacy default ``"main"``) targets this server's main
+        # agent, whose actual id may be a custom ``--agent <name>``.
+        main_id = server.main_agent_id
+        agent_id = event.agent_id or main_id
+
+        if agent_id == main_id or agent_id == "main":
+            # Main agent budget — Phase 3 §7c step 6.6.3.6:
+            # forward to runner-side via the existing
+            # ``session.snapshot_instruction_budget`` RPC (§7c
+            # step 6.1 (2/3) at commit 1043bfde).
+            snapshot = None
+            rpc = getattr(server, "_runner_rpc", None)
+            if rpc is not None:
+                snapshotter = getattr(
+                    rpc,
+                    "session_snapshot_instruction_budget_threadsafe",
+                    None,
+                )
+                if callable(snapshotter):
+                    try:
+                        snapshot = snapshotter(timeout=5.0)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug(
+                            "snapshot_instruction_budget forward failed: %s",
+                            exc,
+                        )
+            if snapshot is not None:
+                self._emit_to_client(client_id, InstructionBudgetEvent(
+                    agent_id=agent_id,
+                    budget_snapshot=snapshot,
+                ))
+            else:
+                self._emit_to_client(client_id, ErrorEvent(
+                    error="No instruction budget available for main agent",
+                    error_type="BudgetNotFound",
+                ))
+        else:
+            # Subagent budget from SubagentPlugin
+            subagent_plugin = server.registry.get_plugin("subagent") if server.registry else None
+            if subagent_plugin and hasattr(subagent_plugin, '_active_sessions'):
+                session_info = subagent_plugin._active_sessions.get(agent_id)
+                if session_info:
+                    subagent_session = session_info.get('session')
+                    if subagent_session and hasattr(subagent_session, 'instruction_budget') and subagent_session.instruction_budget:
+                        self._emit_to_client(client_id, InstructionBudgetEvent(
+                            agent_id=agent_id,
+                            budget_snapshot=subagent_session.instruction_budget.snapshot(),
+                        ))
+                    else:
+                        self._emit_to_client(client_id, ErrorEvent(
+                            error=f"No instruction budget available for agent {agent_id}",
+                            error_type="BudgetNotFound",
+                        ))
+                else:
+                    self._emit_to_client(client_id, ErrorEvent(
+                        error=f"Agent not found: {agent_id}",
+                        error_type="AgentNotFound",
+                    ))
+            else:
+                self._emit_to_client(client_id, ErrorEvent(
+                    error=f"Subagent plugin not available",
+                    error_type="PluginNotFound",
+                ))
+
+    def _handle_memory_request(
+        self,
+        client_id: str,
+        session_id: str,
+        event: Any,
+        *,
+        user_id: Optional[str],
+    ) -> None:
+        """Serve one memory-rail request (#1232) and answer it, correlated.
+
+        Resolves what only the manager knows -- the session's server and its
+        workspace's OWNER -- and hands both to
+        :func:`jaato_server.server.memory_verbs.answer_memory_request`, which
+        applies the owner gate and asks the runner holding the store.
+        ``user_id`` is the transport's authenticated identity, never a field
+        of the request.  Exactly one result event is emitted, whatever
+        happened.
+        """
+        from jaato_server.server.memory_verbs import answer_memory_request
+
+        session = self.get_session(session_id) if session_id else None
+        server = getattr(session, "server", None) if session else None
+        owner = (
+            self._workspace_owner_of(getattr(session, "workspace_path", None))
+            if session else None
+        )
+        self._emit_to_client(client_id, answer_memory_request(
+            server, event,
+            session_id=session_id, user_id=user_id, owner=owner,
+        ))
 
     def _handle_permission_remove(
         self,

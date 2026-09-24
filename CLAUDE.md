@@ -1015,7 +1015,7 @@ no daemon-wide group — and an empty string is an absent fact.
 | the cold half of "who is in my group" | a `membership` section on the `SessionWorkspaceIndex` (owner, cascade, sibling name), written beside the workspace mapping on every save; a per-workspace listing cannot answer "which sessions does this user own", and `SessionInfo` carries `created_by` so a cold record answers the predicate too |
 | the verb | `SessionManager.deliver_group_message`: resolve (id first, name second — a name matching several members of a user group is `ambiguous` with the ids, never delivered to the first match), refuse unless `same_group`, the sibling grammar/size/cap checks, wrap as untrusted `peer:<sender>` with the #845 attachment manifest, then **loaded** → `deliver_prompt_to_session` on the idle-only `SIBLING` tier, **cold** → `resume_session` + `send_message_to_session` (no deferred-turn gate: a peer is not a client and none will attach, so the woken target runs headless). `event_id` shares `wake_session`'s dedup LRU. One `GROUP_DELIVERY:` daemon-log line per attempt |
 | the model surface | the `courier` plugin, `PLUGIN_TIER = "daemon_callable"` with every executor forwarded — the cross-tier pattern in full, where `subagent` had wrapped two of nine. All four tools are `category="coordination"`; only the two listings are auto-approved; knobs `wake_cold`, `max_message_bytes`, `max_pending_per_target`, `max_exchanges_per_group` |
-| the client surface | `session.message` (protocol **1.22**) → one `SessionMessageResultEvent` carrying the receipt and the caller's `request_id`; `IPCClient.send_session_message` / `sendSessionMessage`, refused below `MIN_SESSION_MESSAGE_PROTOCOL` (the 1.7 missing-verb rule) |
+| the client surface | `session.message` (protocol **1.23**) → one `SessionMessageResultEvent` carrying the receipt and the caller's `request_id`; `IPCClient.send_session_message` / `sendSessionMessage`, refused below `MIN_SESSION_MESSAGE_PROTOCOL` (the 1.7 missing-verb rule) |
 
 Three things are deliberate:
 
@@ -7080,6 +7080,74 @@ a test that stubbed enough of a server to run it would be asserting the
 stubs — and what the defect was is a missing call site, which is exactly
 what a walk of the call sites can answer.
 
+### A Memory Store Nobody Could See From the Browser (#1232)
+
+The web client had no view of the session's memories. The only route was
+the `memory` command, which prints a listing into the transcript, and
+`memory edit`, which opens `$EDITOR` on the daemon's host — a browser
+cannot drive that. The rail now has a **Memories** section, and the daemon
+has four quiet verbs behind it (protocol **1.22**):
+
+| Request | Answer | What it does |
+|---|---|---|
+| `MemoryListRequest` | `MemoryListEvent` (+ `request_id`, `ok`, `category`, `source`, `may_curate`) | both tiers, raw and curated; rows carry `tier`, timestamps, `usage_count`, `generated_by`, `curated_by`, source agent/session and two this-session flags, and no content |
+| `MemoryGetRequest` | `MemoryGetResultEvent` | one memory with its content and evidence |
+| `MemoryUpdateRequest` | `MemoryUpdateResultEvent` | a structured edit (description, content, tags) or a maturity change: approve is `validated`, dismiss is `dismissed` |
+| `MemoryDeleteRequest` | `MemoryDeleteResultEvent` | the plugin's own `delete_memory` path |
+
+Each answer echoes the caller's `request_id`. Both SDKs refuse the verbs
+below 1.22 (`list_memories` and friends / `listMemories` and friends): an
+older daemon answers "Unknown request type" and never the result.
+
+**The answer comes from the runner's copy.** `memory` is
+`PLUGIN_TIER = "runner"`, and the `memory` command used to run on the
+runner and then fill its `MemoryListEvent` from the DAEMON's copy of the
+plugin — a store no runner-served session writes to (the #1179 class).
+`JaatoServer.memory_op` asks the runner (`session.memory`, a named
+control-lane handler, so a refresh answers during a turn). A failed ask
+answers `ok=False, category="runner_unreachable"`, never an empty list and
+never the daemon's copy. The daemon's plugin answers only when there is no
+runner at all (embedded, standalone WS), where it is the store. The
+`memory` command's push and the `SessionInfoEvent.memories` snapshot now go
+through the same method, and are withheld when the read failed.
+`jaato_server/shared/plugins/memory/verbs.py` holds the one definition of what each
+verb does, so the runner and the no-runner path cannot disagree.
+
+**Only the workspace owner may change memories.** `memory_verbs.may_curate`
+is the one predicate: the owner may, anyone may on an unowned workspace,
+and an identity-less connection on an owned workspace may look but not
+change. The identity comes from the transport, never from the request. A
+refused mutation answers `not_owner` without reaching the runner, and the
+list carries `may_curate` so the rail hides buttons the daemon would refuse.
+Stated cost: an IPC client on a workspace the WS server records as owned is
+refused, because an IPC identity is an OS account and never equals an
+`app:user` owner; it still has the `memory` command.
+
+**An approval records who approved it.** Approve and dismiss go through
+`_stamp_curation`, the one writer of `curated_by`. A rail action has no
+model in context, so the daemon passes the person the transport
+authenticated (`{"kind": "human", "via": "memory.update", "user": …}`).
+Moving back out of a curated maturity clears the stamp. Dismissing a raw
+memory unlinks it from the queue, so it is gone from the next list.
+Deleting from a tier now rebuilds that tier's index too.
+
+The rail section (`app/memories.ts`, `components/panels/MemoriesPanel.tsx`)
+lists the whole store by default, with a "this session only" toggle. Rows
+written or retrieved in this session are highlighted, and a raw memory
+says **unvetted** in words. The header reads `12 memories · 3 unvetted`.
+Expanding a row fetches its content. The list is refreshed on attach and
+on every `session.info`, on a successful `store_memory` / `update_memory` /
+`delete_memory` in any agent, on the `memory` command's push, on window
+focus, and after each rail action. A failed read is shown and keeps the
+rows it had.
+
+Guard: `jaato_server/shared/tests/test_memory_rail_1232.py`, six reversions (the daemon
+answering from its own copy, the owner predicate, the gate not applied, an
+approval with no stamp, the human curator dropped, and the
+`handle_request` arm removed). `handle_request` stayed on its ratchet by
+lifting the instruction-budget arm into `_handle_instruction_budget_request`
+(93 → 80).
+
 ### A File the Browser Could Not Put in the Workspace
 
 The premium `<jaato-task>` component (and the knowledge-manager client
@@ -10409,7 +10477,7 @@ This is not optional cleanup — treat missing or inaccurate docstrings as a def
 - [Path Boundary Pattern](docs/path-boundary-pattern.md) - MSYS2/Windows path handling for new components, and the cross-process rule: a **relative path never crosses the daemon boundary** — client-supplied `workspace_path` / `config_root` / `env_file` / trace-log paths are REJECTED, not resolved against the daemon's cwd (#742)
 - [OpenTelemetry Design](docs/opentelemetry-design.md) - Comprehensive OTel tracing integration
 - [Reliability Policies Config](docs/reliability-policies-config.md) - JSON schema, per-tool thresholds, prerequisite policies, usage examples
-- [Session Group Messaging](docs/design/session-group-messaging.md) - Assessment and design for any-to-any messaging between sessions that share a group (`created_by` owner or `cascade_driver_id`), waking an idle, detached, or unloaded target to process the message, with a payload of text, file references and text/binary attachments. Inventories the primitives that already exist against the requirement, names the eight missing blocks and proposes a three-phase rollout that composes rather than duplicates. **Phase 1 is shipped**: `server/session_groups.py`, the index's `membership` section, `SessionManager.deliver_group_message`, the `courier` plugin (`send_to_session` / `list_group_sessions` plus the relocated `send_to_sibling` / `list_siblings`), the `session.message` verb (protocol 1.22) and both SDK methods — see [Session Group Messaging](#session-group-messaging-the-courier-plugin). Phases 2 (durable inbox) and 3 (file references, cross-workspace copy) remain design.
+- [Session Group Messaging](docs/design/session-group-messaging.md) - Assessment and design for any-to-any messaging between sessions that share a group (`created_by` owner or `cascade_driver_id`), waking an idle, detached, or unloaded target to process the message, with a payload of text, file references and text/binary attachments. Inventories the primitives that already exist against the requirement, names the eight missing blocks and proposes a three-phase rollout that composes rather than duplicates. **Phase 1 is shipped**: `server/session_groups.py`, the index's `membership` section, `SessionManager.deliver_group_message`, the `courier` plugin (`send_to_session` / `list_group_sessions` plus the relocated `send_to_sibling` / `list_siblings`), the `session.message` verb (protocol 1.23) and both SDK methods — see [Session Group Messaging](#session-group-messaging-the-courier-plugin). Phases 2 (durable inbox) and 3 (file references, cross-workspace copy) remain design.
 - [Daemon Extensions](docs/design/daemon-extensions.md) - Extension points for external packages (session hooks, WS interceptors, custom aspects, remote handlers)
 - [Application Identity](docs/design/app-identity.md) - Naming the application an integrator built, rather than reporting every SDK-based harness upstream as "jaato". `AppIdentity` + the four-tier precedence (provider knob → provider env → `JaatoRuntime(app_identity=)` → `JAATO_APP_*`), the `(powered by jaato)` suffix, header-safety sanitisation, and why the env vars are `host`-scoped.
 - [Env Vars vs Profile Keys](docs/design/env-vars-vs-profile-keys.md) - Which of the 186 env vars earned a typed profile/`plugin_configs` key, and which are correctly env-only. The tagged catalog lives in `jaato_server/shared/env_scope.py` (scope: `session` / `host` / `ambient` / `internal`, plus the typed key where one exists) and is enforced by `test_env_scope_catalog.py`; 38 session-scoped knobs with no typed key sit in a may-only-shrink ratchet, each carrying a tier and a **proposed** key (`explain env untyped` prints both). Includes the credential policy for the three providers whose peers expose an `api_key` knob and they don't.

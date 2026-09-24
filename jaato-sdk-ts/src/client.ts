@@ -67,6 +67,10 @@ import {
   type PermissionPolicySnapshotRequest,
   type WorkspaceFileContentEvent,
   type WorkspaceFileFetchRequest,
+  type MemoryListEvent,
+  type MemoryGetResultEvent,
+  type MemoryUpdateResultEvent,
+  type MemoryDeleteResultEvent,
 } from "./events.js";
 import type {
   CatchallEventHandler,
@@ -162,13 +166,22 @@ export const MIN_FILE_FETCH_PROTOCOL = "1.20";
 export const MIN_SCAFFOLD_INTEGRATION_PROTOCOL = "1.21";
 
 /**
+ * Protocol floor for the memory verbs ({@link JaatoClient.listMemories} and
+ * friends, #1232).  A missing VERB: an older daemon answers ``ErrorEvent(
+ * "Unknown request type")`` with no ``request_id`` and never the result the
+ * call waits on, so every memory call is refused below this version rather
+ * than left to time out.
+ */
+export const MIN_MEMORY_VERBS_PROTOCOL = "1.22";
+
+/**
  * Protocol floor for {@link JaatoClient.sendSessionMessage}.  Same rule as
  * {@link MIN_WORKSPACE_IGNORE_PROTOCOL}: an older daemon ignores
  * ``session.message`` silently, and a client that then reported the message
  * as delivered would be describing one nobody carried.  So the call is
  * refused below this version rather than sent blind.
  */
-export const MIN_SESSION_MESSAGE_PROTOCOL = "1.22";
+export const MIN_SESSION_MESSAGE_PROTOCOL = "1.23";
 
 /**
  * Size limits a daemon enforces, advertised in ``ConnectedEvent.server_info``.
@@ -378,6 +391,7 @@ export class JaatoClient {
   private _serverProtocolVersion: string | null = null;
   /** Monotonic part of each ``fetchWorkspaceFile`` request id. */
   private _fileFetchSeq = 0;
+  private _memorySeq = 0;
   /**
    * Requests waiting for an answer on the CURRENT connection, told when it
    * closes so they reject at once instead of waiting out their deadline.
@@ -1275,6 +1289,148 @@ export class JaatoClient {
       metadata_only: options.metadataOnly ?? false,
     } as WorkspaceFileFetchRequest);
     return answer;
+  }
+
+  /**
+   * Send one memory request and resolve with its correlated answer (#1232).
+   *
+   * Refuses a daemon below {@link MIN_MEMORY_VERBS_PROTOCOL}; rejects on
+   * timeout and on a closed connection -- never resolves with a fabricated
+   * empty answer, which for a list would read as "nothing remembered".
+   * The answer is matched on ``request_id`` AND on its result type, so a
+   * daemon echo of the request itself is not mistaken for the answer.
+   */
+  private async _memoryRequest<T>(
+    method: string,
+    request: Record<string, unknown>,
+    resultType: string,
+    timeoutMs: number,
+  ): Promise<T> {
+    if (
+      this._serverProtocolVersion === null ||
+      !isProtocolCompatible(this._serverProtocolVersion, MIN_MEMORY_VERBS_PROTOCOL)
+    ) {
+      throw new Error(
+        `${method}: this daemon speaks protocol ` +
+          `${this._serverProtocolVersion ?? "unknown"} and does not serve ` +
+          `the memory verbs (needs >= ${MIN_MEMORY_VERBS_PROTOCOL}).  ` +
+          `Upgrade the daemon, or use the "memory" command.`,
+      );
+    }
+    const requestId = `mem-${++this._memorySeq}-${Date.now().toString(36)}`;
+    const answer = new Promise<T>((resolve, reject) => {
+      const done = () => {
+        clearTimeout(timer);
+        unsub();
+        this._closeWaiters.delete(onClose);
+      };
+      const timer = setTimeout(() => {
+        done();
+        reject(new Error(`${method}: no answer after ${timeoutMs} ms`));
+      }, timeoutMs);
+      const onClose = (info: { code: number; reason: string }) => {
+        done();
+        reject(new RequestInterruptedError(method, info.code, info.reason));
+      };
+      this._closeWaiters.add(onClose);
+      const unsub = this.subscribeAll((raw) => {
+        const event = raw as { type?: string; request_id?: string };
+        if (event.type !== resultType) return;
+        if (event.request_id !== requestId) return;
+        done();
+        resolve(raw as unknown as T);
+      });
+    });
+    await this._sendEvent({ ...request, request_id: requestId } as unknown as JaatoEvent);
+    return answer;
+  }
+
+  /**
+   * List the attached session's memory store, quietly (protocol 1.22).
+   *
+   * Unlike the ``memory list`` command this writes nothing to the
+   * transcript.  ``ok === false`` (with ``error`` and ``category``) means
+   * the store could not be read, never "nothing remembered".  Rows carry
+   * ``tier`` (``workspace`` / ``global``), timestamps, usage, both
+   * provenance stamps and the two this-session flags -- not the content;
+   * see {@link getMemory}.  ``may_curate`` says whether this connection may
+   * change them.
+   */
+  async listMemories(options: { timeoutMs?: number } = {}): Promise<MemoryListEvent> {
+    return this._memoryRequest<MemoryListEvent>(
+      "listMemories",
+      { type: EventTypeValue.MEMORY_LIST_REQUEST },
+      EventTypeValue.MEMORY_LIST,
+      options.timeoutMs ?? 10_000,
+    );
+  }
+
+  /** Fetch one memory WITH its content and evidence (protocol 1.22). */
+  async getMemory(
+    memoryId: string,
+    options: { timeoutMs?: number } = {},
+  ): Promise<MemoryGetResultEvent> {
+    return this._memoryRequest<MemoryGetResultEvent>(
+      "getMemory",
+      { type: EventTypeValue.MEMORY_GET_REQUEST, memory_id: memoryId },
+      EventTypeValue.MEMORY_GET_RESULT,
+      options.timeoutMs ?? 10_000,
+    );
+  }
+
+  /**
+   * Edit a memory, or move its maturity (protocol 1.22).
+   *
+   * The structured replacement for ``memory edit`` (which opens
+   * ``$EDITOR`` on the runner's host).  An omitted field is left alone.  A
+   * maturity change is recorded in ``curated_by`` with this connection's
+   * authenticated identity.  Limited to the workspace owner: a refusal
+   * resolves with ``ok === false, category === "not_owner"``.
+   */
+  async updateMemory(
+    memoryId: string,
+    fields: { description?: string; content?: string; tags?: string[]; maturity?: string },
+    options: { timeoutMs?: number } = {},
+  ): Promise<MemoryUpdateResultEvent> {
+    const request: Record<string, unknown> = {
+      type: EventTypeValue.MEMORY_UPDATE_REQUEST,
+      memory_id: memoryId,
+    };
+    for (const key of ["description", "content", "tags", "maturity"] as const) {
+      if (fields[key] !== undefined) request[key] = fields[key];
+    }
+    return this._memoryRequest<MemoryUpdateResultEvent>(
+      "updateMemory",
+      request,
+      EventTypeValue.MEMORY_UPDATE_RESULT,
+      options.timeoutMs ?? 10_000,
+    );
+  }
+
+  /** Approve a memory: ``updateMemory(id, { maturity: "validated" })``. */
+  async approveMemory(memoryId: string, options: { timeoutMs?: number } = {}): Promise<MemoryUpdateResultEvent> {
+    return this.updateMemory(memoryId, { maturity: "validated" }, options);
+  }
+
+  /**
+   * Dismiss a memory: ``updateMemory(id, { maturity: "dismissed" })``.  The
+   * store keeps no dismissed trace, so it is gone from the next list.
+   */
+  async dismissMemory(memoryId: string, options: { timeoutMs?: number } = {}): Promise<MemoryUpdateResultEvent> {
+    return this.updateMemory(memoryId, { maturity: "dismissed" }, options);
+  }
+
+  /** Remove a memory through the plugin's own delete path (protocol 1.22). */
+  async deleteMemory(
+    memoryId: string,
+    options: { timeoutMs?: number } = {},
+  ): Promise<MemoryDeleteResultEvent> {
+    return this._memoryRequest<MemoryDeleteResultEvent>(
+      "deleteMemory",
+      { type: EventTypeValue.MEMORY_DELETE_REQUEST, memory_id: memoryId },
+      EventTypeValue.MEMORY_DELETE_RESULT,
+      options.timeoutMs ?? 10_000,
+    );
   }
 
   /**

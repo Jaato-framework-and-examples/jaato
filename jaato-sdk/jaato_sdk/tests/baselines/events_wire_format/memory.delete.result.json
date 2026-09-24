@@ -1,12 +1,11 @@
 {
-  "type": "memory.list",
+  "type": "memory.delete.result",
   "timestamp": "<TIMESTAMP>",
   "session_id": "",
-  "memories": [],
   "request_id": "",
+  "memory_id": "",
   "ok": true,
   "error": "",
   "category": "",
-  "source": "",
-  "may_curate": null
+  "source": ""
 }

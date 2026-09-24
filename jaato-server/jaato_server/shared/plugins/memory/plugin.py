@@ -140,6 +140,11 @@ class MemoryPlugin(RunnerForwardingMixin):
         # turn — at zero I/O.  Capped because the plugin deliberately
         # survives ``reset_for_next_session``, so nothing else bounds it.
         self._recent_stores: List[Memory] = []
+        # Which memory ids each session RETRIEVED (#1232), keyed by the
+        # executing session's own id -- what the rail highlights beside the
+        # ones a session wrote (``source_session``).  Bounded by
+        # ``RETRIEVED_SESSION_MEMORY``; see ``_note_retrieved``.
+        self._retrieved_by_session: Dict[str, Set[str]] = {}
 
     def _trace(self, msg: str) -> None:
         """Write trace message to log file for debugging."""
@@ -956,6 +961,14 @@ class MemoryPlugin(RunnerForwardingMixin):
     def get_memory_metadata(self) -> List[Dict[str, Any]]:
         """Return lightweight memory metadata for completion caches.
 
+        Workspace tier only, from THIS copy of the plugin.  No longer the
+        source of the ``MemoryListEvent`` the daemon pushes after a
+        ``memory`` command (#1232): that push is answered by the copy that
+        holds the store, through ``JaatoServer.memory_list_event``, because
+        on a runner-served session the daemon's copy is not it.  Kept as the
+        capability marker ``command_router`` reads (a plugin whose
+        completions are dynamic) and for in-process callers.
+
         Returns:
             List of dicts with id, description, tags, and lifecycle fields
             for each memory.
@@ -973,6 +986,199 @@ class MemoryPlugin(RunnerForwardingMixin):
             }
             for m in self._storage.load_all()
         ]
+
+    # ===== The memory rail (#1232) =====
+    #
+    # Read and curate the store for a HUMAN, through the daemon's memory
+    # verbs (``shared/plugins/memory/verbs.py``).  Every method below runs
+    # on the plugin copy that holds the store -- the runner's, on a
+    # runner-served session -- because the verbs are answered by a runner
+    # RPC and never by the daemon's own copy of this plugin.
+
+    #: How many sessions' retrieval sets are remembered.  The instance
+    #: survives ``reset_for_next_session`` on a pool slot, so nothing else
+    #: bounds the map; oldest-first eviction keeps the one a live rail asks
+    #: about.
+    RETRIEVED_SESSION_MEMORY = 64
+
+    def _tiers(self) -> List[Tuple[str, Any, Any]]:
+        """``(tier, storage, indexer)`` for each tier this plugin holds.
+
+        Workspace first: an id present in both (possible only by hand-edit)
+        resolves to the workspace copy, the precedence ``_execute_update``
+        and ``_execute_delete`` already use.  A tier whose storage is
+        ``None`` is absent here, not "empty".
+        """
+        tiers = []
+        if self._storage is not None:
+            tiers.append(("workspace", self._storage, self._indexer))
+        if self._global_storage is not None:
+            tiers.append(("global", self._global_storage, self._global_indexer))
+        return tiers
+
+    def _locate_memory(self, memory_id: str) -> Optional[Tuple[Memory, str, Any, Any]]:
+        """``(memory, tier, storage, indexer)`` for ``memory_id``, or ``None``."""
+        for tier, storage, indexer in self._tiers():
+            memory = storage.get_by_id(memory_id)
+            if memory is not None:
+                return memory, tier, storage, indexer
+        return None
+
+    def _note_retrieved(self, memories: List[Memory]) -> None:
+        """Remember which ids THIS session retrieved, for the rail's highlight.
+
+        Keyed by the executing session's own id (``_get_session_id``, the
+        per-sibling resolution ``source_session`` already uses), so a
+        subagent's retrievals are its own.  Bounded by
+        :attr:`RETRIEVED_SESSION_MEMORY` sessions.
+
+        Best-effort by construction: it runs inside the retrieval path, and a
+        highlight for a rail must never be able to fail a retrieval.
+        """
+        retrieved = getattr(self, "_retrieved_by_session", None)
+        if retrieved is None or not memories:
+            return
+        try:
+            sid = self._get_session_id()
+        except Exception:  # noqa: BLE001 -- a highlight never fails a retrieval
+            return
+        if not sid:
+            return
+        seen = retrieved.pop(sid, set())
+        seen.update(m.id for m in memories)
+        retrieved[sid] = seen
+        while len(retrieved) > self.RETRIEVED_SESSION_MEMORY:
+            retrieved.pop(next(iter(retrieved)))
+
+    def memory_row(
+        self, memory: Memory, tier: str, session_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """One memory as the rail lists it: every field but the content.
+
+        ``tier`` says which store it came from (``workspace`` / ``global``)
+        -- deliberately not ``scope``, which already means *how broadly the
+        memory applies* (``project`` / ``universal``).  Timestamps, usage
+        and both provenance stamps are the stored record's own, passed
+        through unchanged: ``curated_by`` is ``None`` on every raw memory,
+        and ``generated_by`` is ``None`` on a record predating #1123.
+        """
+        row: Dict[str, Any] = {
+            "id": memory.id,
+            "description": memory.description,
+            "tags": list(memory.tags),
+            "maturity": memory.maturity,
+            "confidence": memory.confidence,
+            "scope": memory.scope,
+            "tier": tier,
+            "timestamp": memory.timestamp,
+            "last_accessed": memory.last_accessed,
+            "usage_count": memory.usage_count,
+            "generated_by": memory.generated_by,
+            "curated_by": memory.curated_by,
+            "source_agent": memory.source_agent,
+            "source_session": memory.source_session,
+        }
+        if session_id:
+            row["written_this_session"] = memory.source_session == session_id
+            row["retrieved_this_session"] = (
+                memory.id in self._retrieved_by_session.get(session_id, ()))
+        return row
+
+    def memory_rows(self, session_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Every memory in both tiers, raw and curated, as rail rows.
+
+        The whole store, deliberately including RAW -- the curator's queue,
+        which prompt enrichment never surfaces.  Showing it to a person is
+        the point: an unvetted memory is the one somebody needs to look at.
+        """
+        rows: List[Dict[str, Any]] = []
+        for tier, storage, _indexer in self._tiers():
+            rows.extend(self.memory_row(m, tier, session_id)
+                        for m in storage.load_all())
+        return rows
+
+    def memory_record(self, memory_id: str) -> Optional[Dict[str, Any]]:
+        """One memory WITH its content and evidence, or ``None``."""
+        found = self._locate_memory(memory_id)
+        if found is None:
+            return None
+        memory, tier, _storage, _indexer = found
+        record = self.memory_row(memory, tier)
+        record["content"] = memory.content
+        record["evidence"] = memory.evidence
+        return record
+
+    def edit_memory_structured(
+        self,
+        memory_id: str,
+        *,
+        description: Optional[str] = None,
+        content: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        maturity: Optional[str] = None,
+        curator: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """The editor-free ``memory edit``: a structured edit, or a curation.
+
+        ``memory edit`` spawns ``$EDITOR`` in the process that holds this
+        plugin -- the runner, on the daemon's host -- which a browser cannot
+        drive.  This is the same edit as data.  ``None`` leaves a field as it
+        is.  The merged record is validated by :meth:`_validate_memory_schema`
+        -- the validator the editor path uses -- BEFORE anything is written,
+        so a refused edit changes nothing.
+
+        A ``maturity`` that differs from the current one moves through
+        :meth:`_stamp_curation`, the one helper that records ``curated_by``
+        (the AST guard on every ``maturity`` writer requires it): approve is
+        ``validated``, dismiss is ``dismissed``.  ``curator`` is the stamp's
+        identity -- the daemon passes the HUMAN the transport authenticated,
+        because a rail action has no model in context.
+
+        Returns ``{"ok": True, "memory": <row>}`` or ``{"ok": False,
+        "error", "category"}`` with ``category`` ``not_found`` / ``invalid``.
+        A memory DISMISSED out of the raw queue is unlinked by the storage
+        layer (it keeps no dismissed trace), so its answer carries the row
+        as it was written and the next list no longer shows it.
+        """
+        found = self._locate_memory(memory_id)
+        if found is None:
+            return {"ok": False, "category": "not_found",
+                    "error": f"Memory not found: {memory_id}"}
+        memory, tier, storage, indexer = found
+        draft = {
+            "description": memory.description if description is None else description,
+            "content": memory.content if content is None else content,
+            "tags": list(memory.tags) if tags is None else tags,
+            "maturity": memory.maturity if maturity is None else maturity,
+        }
+        err = self._validate_memory_schema(draft)
+        if err:
+            return {"ok": False, "category": "invalid", "error": err}
+        memory.description = draft["description"]
+        memory.content = draft["content"]
+        memory.tags = [t.strip() for t in draft["tags"]]
+        if draft["maturity"] != memory.maturity:
+            memory.maturity = draft["maturity"]
+            self._stamp_curation(memory, draft["maturity"], curator=curator)
+        storage.update(memory)
+        if indexer is not None:
+            indexer.clear()
+            indexer.build_index(storage.load_curated())
+        self._trace(
+            f"edit_memory_structured: id={memory_id} maturity={memory.maturity}")
+        return {"ok": True, "memory": self.memory_row(memory, tier)}
+
+    def remove_memory(self, memory_id: str) -> Dict[str, Any]:
+        """Remove a memory through the existing delete path (``delete_memory``).
+
+        Not a second deletion route: this is :meth:`_execute_delete`, the
+        tool's own executor, with its answer reshaped for the rail.
+        """
+        result = self._execute_delete({"id": memory_id})
+        if result.get("status") == "success":
+            return {"ok": True, "memory_id": memory_id}
+        return {"ok": False, "category": "not_found",
+                "error": str(result.get("error") or f"Memory not found: {memory_id}")}
 
     def _get_memory_id_completions(self, partial: str) -> List[CommandCompletion]:
         """Get memory ID completions matching partial input."""
@@ -1802,6 +2008,7 @@ class MemoryPlugin(RunnerForwardingMixin):
                 self._storage.record_usage(mem.id)
             if self._global_storage:
                 self._global_storage.record_usage(mem.id)
+        self._note_retrieved(memories)
 
     @staticmethod
     def _withheld_note(withheld: int) -> str:
@@ -2050,7 +2257,12 @@ class MemoryPlugin(RunnerForwardingMixin):
             "message": f"Memory updated: {memory.description}",
         }
 
-    def _stamp_curation(self, memory: Any, maturity: str) -> None:
+    def _stamp_curation(
+        self,
+        memory: Any,
+        maturity: str,
+        curator: Optional[Dict[str, Any]] = None,
+    ) -> None:
         """Record WHO approved a memory, at the moment of approval (#1123).
 
         ``curated_by`` is the second of the two provenance fields, and it
@@ -2077,11 +2289,23 @@ class MemoryPlugin(RunnerForwardingMixin):
         holds.  ``None`` when no session is in context: a promotion whose
         approver cannot be established still promotes, and records the
         approval without claiming an approver it did not observe.
+
+        ``curator`` (#1232) is an approver the CALLER observed -- the memory
+        rail's verb passes the person the daemon's transport authenticated
+        (``{"kind": "human", "via": "memory.update", "user": ...}``).  It
+        replaces the model provenance rather than joining it: a rail action
+        runs on an RPC thread with no session in context, and a person
+        clicking Approve is not the model.  The same helper either way, so
+        there is still exactly one writer of the stamp.
         """
         if maturity not in CURATED_MATURITIES:
             memory.curated_by = None
             return
         stamp: Dict[str, Any] = {"at": datetime.now(timezone.utc).isoformat()}
+        if curator:
+            stamp.update(curator)
+            memory.curated_by = stamp
+            return
         provenance = self._model_provenance()
         if provenance:
             stamp.update(provenance)
@@ -2106,12 +2330,18 @@ class MemoryPlugin(RunnerForwardingMixin):
         if not memory_id:
             return {"status": "error", "error": "'id' is required"}
 
-        # Try workspace store first, then global
+        # Try workspace store first, then global.  The deleted tier's index
+        # is rebuilt (#1232): a curated memory lives in it, and one left
+        # there would keep surfacing as an enrichment hint for an id the
+        # store no longer holds.
         deleted = False
-        if self._storage and self._storage.delete(memory_id):
-            deleted = True
-        elif self._global_storage and self._global_storage.delete(memory_id):
-            deleted = True
+        for _tier, storage, indexer in self._tiers():
+            if storage.delete(memory_id):
+                deleted = True
+                if indexer is not None:
+                    indexer.clear()
+                    indexer.build_index(storage.load_curated())
+                break
 
         if deleted:
             self._trace(f"delete_memory: id={memory_id}")

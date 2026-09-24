@@ -1,4 +1,4 @@
-"""``session.message`` on the command router (protocol 1.22).
+"""``session.message`` on the command router (protocol 1.23).
 
 The client-tier form of the ``courier`` plugin's ``send_to_session``.
 Pinned here:

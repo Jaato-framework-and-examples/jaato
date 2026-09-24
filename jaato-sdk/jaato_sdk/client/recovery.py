@@ -923,6 +923,62 @@ class IPCRecoveryClient:
         if self._client:
             await self._client.run_integration(name)
 
+    # ------------------------------------------------------------------
+    # The memory verbs (#1232, protocol 1.22)
+    #
+    # Each forwards to the inner client and returns its correlated answer.
+    # They are request/result pairs rather than fire-and-forget, so there is
+    # no "answer on the event stream" to fall back on: with no inner client
+    # the call raises ConnectionError instead of returning a fabricated
+    # empty answer, which for a list would read as "nothing remembered".
+    # ------------------------------------------------------------------
+
+    def _memory_client(self, method: str) -> IPCClient:
+        self._check_can_send()
+        if not self._client:
+            raise ConnectionError(f"{method}: not connected")
+        return self._client
+
+    async def list_memories(self, *, timeout: float = 10.0):
+        """See :meth:`IPCClient.list_memories`."""
+        return await self._memory_client("list_memories").list_memories(
+            timeout=timeout)
+
+    async def get_memory(self, memory_id: str, *, timeout: float = 10.0):
+        """See :meth:`IPCClient.get_memory`."""
+        return await self._memory_client("get_memory").get_memory(
+            memory_id, timeout=timeout)
+
+    async def update_memory(
+        self,
+        memory_id: str,
+        *,
+        description: Optional[str] = None,
+        content: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        maturity: Optional[str] = None,
+        timeout: float = 10.0,
+    ):
+        """See :meth:`IPCClient.update_memory`."""
+        return await self._memory_client("update_memory").update_memory(
+            memory_id, description=description, content=content,
+            tags=tags, maturity=maturity, timeout=timeout)
+
+    async def approve_memory(self, memory_id: str, *, timeout: float = 10.0):
+        """See :meth:`IPCClient.approve_memory`."""
+        return await self._memory_client("approve_memory").approve_memory(
+            memory_id, timeout=timeout)
+
+    async def dismiss_memory(self, memory_id: str, *, timeout: float = 10.0):
+        """See :meth:`IPCClient.dismiss_memory`."""
+        return await self._memory_client("dismiss_memory").dismiss_memory(
+            memory_id, timeout=timeout)
+
+    async def delete_memory(self, memory_id: str, *, timeout: float = 10.0):
+        """See :meth:`IPCClient.delete_memory`."""
+        return await self._memory_client("delete_memory").delete_memory(
+            memory_id, timeout=timeout)
+
     async def respond_to_post_auth_setup(
         self,
         request_id: str,

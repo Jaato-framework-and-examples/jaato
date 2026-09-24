@@ -2416,6 +2416,48 @@ class RunnerRPCClient:
             timeout=timeout,
         )
 
+    async def session_memory(
+        self,
+        op: str,
+        args: "Dict[str, Any]",
+        *,
+        timeout: Optional[float] = 5.0,
+    ) -> "Dict[str, Any]":
+        """Run one memory-rail verb on the runner's copy of the plugin (#1232).
+
+        ``memory`` is runner-tier: the store the model writes through is
+        held by the runner's plugin instance, and the daemon's own copy is
+        one no runner-served session touches.  A control-lane call, so a
+        rail refresh answers while a turn is in flight.
+
+        Returns:
+            The verb's answer dict, carrying its own ``ok`` / ``category``
+            (``not_found``, ``no_plugin``, ``invalid``...).
+
+        Raises:
+            RunnerCallError on transport failure or a runner-side refusal
+                (no_host / no_session / call).  Callers report it as
+                ``runner_unreachable`` and NEVER fall back to the daemon's
+                copy: an answer from the wrong store reads as "nothing
+                remembered".
+        """
+        return await self._call_named(
+            "session.memory", {"op": op, "args": dict(args or {})},
+            timeout=timeout,
+        )
+
+    def session_memory_threadsafe(
+        self,
+        op: str,
+        args: "Dict[str, Any]",
+        *,
+        timeout: Optional[float] = 5.0,
+    ) -> "Dict[str, Any]":
+        return self._run_threadsafe(
+            self.session_memory(op, args, timeout=timeout),
+            timeout=timeout,
+        )
+
     async def session_get_user_commands(
         self, *, timeout: Optional[float] = 10.0,
     ) -> "Dict[str, Any]":

@@ -1299,7 +1299,7 @@ class CommandRouter:
         self, client_id: str, args: list, payload: Optional[dict],
     ) -> None:
         """Handle ``session.message`` — a message from the CALLER'S session to
-        another session in a common group (protocol 1.22).
+        another session in a common group (protocol 1.23).
 
         The client-tier form of the ``courier`` plugin's ``send_to_session``:
         the same daemon method, ``SessionManager.deliver_group_message``, with

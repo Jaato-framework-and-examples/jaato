@@ -5195,6 +5195,78 @@ class JaatoServer:
             suspension_scope=status.get("suspension_scope"),
         )
 
+    def memory_op(
+        self,
+        op: str,
+        args: Optional[Dict[str, Any]] = None,
+        *,
+        timeout: float = 5.0,
+    ) -> Dict[str, Any]:
+        """Answer one memory verb from the plugin copy that HOLDS the store (#1232).
+
+        ``memory`` is ``PLUGIN_TIER = "runner"``.  On a runner-served
+        session -- the default -- the plugin the model writes through lives
+        in the runner process; the daemon's registry discovers a copy of its
+        own that nothing on that path writes to.  The ``memory`` command
+        used to run on the runner and then fill ``MemoryListEvent`` from the
+        DAEMON's copy -- on a split host, or wherever that copy had no
+        storage, an empty list, which reads as "nothing remembered".
+
+        So the runner is asked (``session.memory``, control lane), and **a
+        failed ask answers ``ok=False, category="runner_unreachable"`` --
+        never an empty list and never the daemon's copy**, which is the
+        stale store this exists to stop reading.  The daemon's plugin is
+        consulted only where there is no runner at all (the embedded
+        client, standalone WS), and there it IS the store.
+
+        Returns:
+            The verb's answer (``shared/plugins/memory/verbs.py``) plus
+            ``source`` -- ``runner`` or ``daemon`` -- naming which copy
+            answered.
+        """
+        from jaato_server.shared.plugins.memory.verbs import (
+            failure,
+            serve_memory_op,
+        )
+
+        rpc = getattr(self, "_runner_rpc", None)
+        if rpc is None:
+            registry = self._runtime.registry if self._runtime is not None else None
+            return {**serve_memory_op(registry, op, args or {}), "source": "daemon"}
+        try:
+            answer = rpc.session_memory_threadsafe(op, args or {}, timeout=timeout)
+        except Exception as exc:  # noqa: BLE001 -- reported, never swallowed into []
+            logger.warning(
+                "memory_op(%s): the runner holding the store did not answer "
+                "(%s) -- reporting that, not the daemon's copy", op, exc,
+            )
+            answer = failure(
+                "runner_unreachable",
+                f"the runner holding this session's memories did not answer: {exc}",
+            )
+        return {**answer, "source": "runner"}
+
+    def memory_list_event(self, timeout: float = 5.0) -> Optional[MemoryListEvent]:
+        """The unsolicited ``MemoryListEvent``: the completion-cache push.
+
+        Two callers: the push after a ``memory`` user command, and the
+        ``SessionInfoEvent.memories`` snapshot (the latter with a short
+        ``timeout``, because it is built on attach).  The TUI's completion
+        cache and the web rail both read it.  Answered by :meth:`memory_op`
+        -- the copy the command itself just ran on -- and **withheld**
+        (``None``) when that copy could not be read: the push carries no
+        ``request_id`` and the cache would read an empty list as "nothing
+        remembered", so reporting nothing keeps what the client last knew
+        instead of making a new, false claim.
+        """
+        answer = self.memory_op("list", {}, timeout=timeout)
+        if not answer.get("ok"):
+            return None
+        return MemoryListEvent(
+            memories=answer.get("memories") or [],
+            source=answer.get("source") or "",
+        )
+
     def emit_permission_status(self) -> None:
         """Broadcast the current permission status to every client."""
         event = self.permission_status_event()
@@ -7293,10 +7365,12 @@ class JaatoServer:
 
             # After memory commands, push updated memory list for completion cache
             # (must run before HelpLines early return so memory list/help also refresh)
+            # Read from the copy the command just ran on -- the runner's
+            # (#1232), never the daemon's own copy of the plugin.
             if command.lower() == "memory":
-                mem_plugin = self._find_plugin_for_command("memory")
-                if mem_plugin and hasattr(mem_plugin, 'get_memory_metadata'):
-                    self.emit(MemoryListEvent(memories=mem_plugin.get_memory_metadata()))
+                memory_list = self.memory_list_event()
+                if memory_list is not None:
+                    self.emit(memory_list)
 
             # After sandbox commands, push updated sandbox paths for @@ completion cache
             if command.lower() == "sandbox":

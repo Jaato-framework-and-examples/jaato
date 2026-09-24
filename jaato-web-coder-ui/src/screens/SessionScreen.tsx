@@ -3,7 +3,8 @@
  * header (brand, one tab per agent, workspace / model / context on the
  * right), the selected agent's output with pending prompts and the
  * composer under it, one persistent rail on the right whose Plan /
- * Budget / Files sections open and close, and the status bar.  On mount
+ * Budget / Files / Sessions / Memories sections open and close, and the
+ * status bar.  On mount
  * it asks the daemon for its command list and profiles, then creates (or
  * reattaches) a session.
  */
@@ -25,6 +26,8 @@ import { PlanPanel, planProgress } from "@/components/panels/PlanPanel";
 import { BudgetPanel } from "@/components/panels/BudgetPanel";
 import { WorkspacePanel, useVisibleWorkspaceFiles } from "@/components/panels/WorkspacePanel";
 import { SessionRow, SessionsPanel, notedSummary } from "@/components/panels/SessionsPanel";
+import { MemoriesPanel } from "@/components/panels/MemoriesPanel";
+import { memoriesSummary } from "@/app/memories";
 import { AgentTabs } from "@/components/panels/AgentTabs";
 import { StatusBar } from "@/components/layout/StatusBar";
 import { Plate } from "@/components/layout/Plate";
@@ -114,6 +117,7 @@ function Rail({ agentId }: { agentId: string }) {
   const isReset = useJaato((s) => s.workspaceReset !== null);
   const sessions = useJaato((s) => s.sessions);
   const notes = useJaato((s) => s.notes);
+  const memories = useJaato((s) => s.memories);
   const budget = ctx?.usage.cost_usd != null ? `$${Number(ctx.usage.cost_usd).toFixed(4)}` : ctx?.percentUsed != null ? `${ctx.percentUsed.toFixed(0)}%` : null;
 
   // Fixed order; each carries its ``ui.show*`` flag and its panel.  The open
@@ -125,6 +129,7 @@ function Rail({ agentId }: { agentId: string }) {
     { id: "budget", title: "Budget", value: budget, open: ui.showBudget, toggle: () => toggle("showBudget"), panel: <BudgetPanel agentId={agentId} /> },
     { id: "files", title: "Files", value: changed ? `${changed} ${isReset ? "since reset" : "changed"}` : isReset ? "reset" : null, open: ui.showWorkspace, toggle: () => toggle("showWorkspace"), panel: <WorkspacePanel /> },
     { id: "sessions", title: "Sessions", value: notedSummary(sessions, notes), open: ui.showSessions, toggle: () => toggle("showSessions"), panel: <SessionsPanel /> },
+    { id: "memories", title: "Memories", value: memoriesSummary(memories), open: ui.showMemories, toggle: () => toggle("showMemories"), panel: <MemoriesPanel /> },
   ];
   const openIds = sections.filter((s) => s.open).map((s) => s.id);
   const shares = sharesFor(ui.railSplits, openIds);
