@@ -383,7 +383,7 @@ speaks, and it is checked.
 
 | Phase | Delivers | New code, roughly |
 |---|---|---|
-| 1 | `session_groups.py`; index carries owner + name; `deliver_group_message` over the existing drive/queue/wake primitives (text + inline attachments, wake on cold, no spool); the `coordination` plugin (§11) holding `send_to_session`, `list_group_sessions` and the two sibling tools moved out of `subagent`; `session.message` + result event; `GROUP_DELIVERY` trace | one module, one method on `SessionManager`, one new plugin (four executors, two of them relocated), one router handler, one SDK method per SDK |
+| 1 | `session_groups.py`; index carries owner + name; `deliver_group_message` over the existing drive/queue/wake primitives (text + inline attachments, wake on cold, no spool); the `courier` plugin (§11) holding `send_to_session`, `list_group_sessions` and the two sibling tools moved out of `subagent`; `session.message` + result event; `GROUP_DELIVERY` trace | one module, one method on `SessionManager`, one new plugin (four executors, two of them relocated), one router handler, one SDK method per SDK |
 | 2 | the inbox: spool on busy/failed-revive, drain on load and turn end, watchdog retry; `_pending_wakes` folded into it; `inbox_pending` on the listing | inbox module + three drain hooks |
 | 3 | `file_refs` and `text_attachments`; cross-workspace copy through the staging write path; receipt file dispositions | envelope validation + copy helper |
 
@@ -418,15 +418,12 @@ rather than a receipt. Phase 3 is the payload width.
    only through their parent. Out of scope here: a group is a set of
    daemon sessions. An isolated sub-runner *does* have a record and joins
    its parent's groups by inheriting `created_by` (already true) and cid.
-6. **The plugin's name.** `coordination` is also a tool category that
-   already spans `todo`, `waypoint`, `subagent` and the event-bus
-   built-ins (§11), so a plugin of that name owns a small part of the
-   category it is named after. Proposed: keep `coordination` for the
-   plugin, since peer messaging is squarely inside the category's own
-   description and the profile key reads naturally. Alternative:
-   `peer_messaging`, which names exactly what the plugin holds and leaves
-   the category as the wider taxonomy it already is. Either way the four
-   tools stay stamped `category="coordination"`.
+6. **The plugin's name — decided: `courier`.** `coordination` is also a
+   tool category that already spans `todo`, `waypoint`, `subagent` and the
+   event-bus built-ins (§11), so a plugin of that name would own a small
+   part of the category it is named after. The candidates and the
+   reasoning are in §11.1. The four tools stay stamped
+   `category="coordination"`.
 
 ---
 
@@ -620,7 +617,7 @@ not that, which is why the proposed verb wraps.
 
 ---
 
-## 11. Where it lands: a `coordination` plugin
+## 11. Where it lands: the `courier` plugin
 
 There is no `coordination` plugin today. The word is the `category` the
 subagent plugin stamps on seven of its tool schemas (`list_siblings`,
@@ -628,8 +625,8 @@ subagent plugin stamps on seven of its tool schemas (`list_siblings`,
 `list_tools` uses to group them. A profile cannot gate on a category:
 exposure is decided by the plugin name in `plugins:`, narrowed by
 `plugin(tools:[…])`, and refused per tool name by the permission policy.
-So "where does it land" is a question about a plugin, and the answer is
-to make the category one.
+So "where does it land" is a question about a plugin, and the answer is a
+new one, `courier`, stamped into that category.
 
 **What the category already holds.** `coordination` is one of the eleven
 entries in `TOOL_CATEGORIES` (`jaato_sdk/plugins/model_provider/types.py`),
@@ -647,14 +644,12 @@ sources stamp tools into it today:
 
 Two things follow. The two sibling tools carry **no category at all** —
 their schemas set `traits` and nothing else — so the tools most obviously
-about coordination are the ones `list_tools` files under none; the new
-plugin stamps all four of its tools. And a plugin named `coordination`
-would own four of some twenty-eight tools in a category of that name,
-spread over four sources. Nothing in the tree keys on a plugin name and a
-category name together, so the collision costs nothing mechanically; what
-it costs is a reader of `explain plugins coordination` or of a `validate`
-message expecting the plugin to be the category. That is open decision 6
-in §6.
+about coordination are the ones `list_tools` files under none; `courier`
+stamps all four of its tools. And the plugin is deliberately **not** named
+after the category: a plugin called `coordination` would own four of some
+twenty-eight tools in a category of that name, spread over four sources,
+and a reader of `explain plugins coordination` would expect the plugin to
+be the category. The name and why it was chosen are in §11.1.
 
 **Where the peer tools live today.** `send_to_sibling` and
 `list_siblings` are declared by the `subagent` plugin (`PLUGIN_TIER =
@@ -667,7 +662,7 @@ half-forwarded runner-tier shape is the exception the
 not the pattern `shared/plugins/CLAUDE.md` prescribes for a plugin whose
 body runs daemon-side.
 
-**Proposed: `shared/plugins/coordination/`.**
+**Proposed: `shared/plugins/courier/`.**
 
 | Property | Value | Why |
 |---|---|---|
@@ -681,9 +676,9 @@ body runs daemon-side.
 
 ```yaml
 plugins:
-  - coordination                         # or coordination(tools:[list_group_sessions])
+  - courier                              # or courier(tools:[list_group_sessions])
 plugin_configs:
-  coordination:
+  courier:
     wake_cold: true                      # false: a cold peer answers `sibling_cold`
     max_message_bytes: 8192
     max_pending_per_target: 20
@@ -710,6 +705,35 @@ The client verb `session.message` is independent of the plugin, as
 `session.send` is of `subagent`: it lives in the command router and needs
 no plugin exposed on the target.
 
+### 11.1 Why `courier`
+
+Plugin names in the tree fall into two families: descriptive snake_case
+for what a plugin does (`file_edit`, `service_connector`,
+`output_marker`) and one evocative word for a mechanism (`telepathy`,
+`waypoint`, `memory`). This plugin has three facts to name — it is peer to
+peer within a group, it **wakes** a sleeping recipient, and it **carries a
+payload** (text, files, attachments, later a durable inbox) — and the
+candidates were weighed against them:
+
+| Name | Says | Against it |
+|---|---|---|
+| `coordination` | the category | owns 4 of ~28 tools in a category of that name; says nothing about wake or payload |
+| `peer_messaging` | exactly what it holds | flat, and `peer` is not a word the tree uses for sessions |
+| `session_messaging` | what it holds, in the tree's vocabulary | sits beside the `session` plugin, which is persistence |
+| `messaging` | short | reads as `message_queue` / `message_delivery`, the runner-side tiers |
+| `inbox` / `mailbox` | the durable store | names the Phase 2 half only |
+| `intercom` | any-to-any in one building, a buzz wakes you | implies live voice, no files, nothing stored |
+| `pager` | wakes someone asleep | says wake and nothing else |
+| `dispatch` | send with an address | reads as task dispatch, which is `spawn_subagent` |
+| `relay` | hand a message on | the wake ingress already calls the external signer a relay |
+| **`courier`** | carries a parcel to a named recipient wherever they are, and rings until they answer | a word the doc has to teach once |
+
+`courier` names all three facts, and it pairs with `telepathy` as the
+horizontal counterpart to a vertical channel: telepathy needs no carrier
+because parent and child share a process; a courier exists precisely
+because peers do not. A name that encodes wake-and-carry also answers "why
+did my message wake a session" before it is asked.
+
 **Why not the alternatives.**
 
 | Home | Cost |
@@ -719,7 +743,7 @@ no plugin exposed on the target.
 | session built-ins | the shape telepathy was extracted from: tools belong in plugins |
 
 **The sibling tools move too.** `send_to_sibling` and `list_siblings`
-leave the `subagent` plugin in the same change, so `coordination` holds
+leave the `subagent` plugin in the same change, so `courier` holds
 every peer tool and `subagent` holds the parent-child ones from the first
 release. `subagent` stops declaring the two schemas and executors, its
 `set_session_manager` hook and `DaemonForwardingMixin` go with them (the
@@ -728,9 +752,9 @@ wanted all along), and the daemon-side wiring is unchanged because the
 sweep hands the `SessionManager` to whichever exposed plugin declares the
 hook. Their contracts are unchanged: cid-scoped addressing, cold refusal,
 the §8 caps. A profile that listed `subagent` for the sibling tools adds
-`coordination`; `validate` reports `sibling_tools_moved` (**error**) on a
+`courier`; `validate` reports `sibling_tools_moved` (**error**) on a
 profile whose persona names `send_to_sibling` or `list_siblings` and whose
-`plugins:` carries no `coordination`, so the move fails loudly at
+`plugins:` carries no `courier`, so the move fails loudly at
 authoring time rather than as a model hunting for a tool through
 `list_tools`. Breaking existing profiles is accepted here; a plugin that
 carries half a feature for a release is the worse outcome.
