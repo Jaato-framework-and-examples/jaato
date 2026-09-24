@@ -77,6 +77,8 @@ from .record_retention import (
 )
 from .session_workspace_index import SessionWorkspaceIndex
 from .wake_binding_registry import WakeBindingRegistry, BindOutcome
+from . import session_inbox
+from .session_inbox import KIND_PEER, KIND_WAKE, InboxEntry
 
 
 class WakeOutcome(str, Enum):
@@ -262,28 +264,6 @@ class _GroupMember:
 
 
 @dataclass
-class _PendingWake:
-    """A wake deferred because the (cold-revived) session had no attached client.
-
-    Held in ``SessionManager._pending_wakes`` keyed by ``session_id``; the turn
-    is driven when a client re-attaches (``attach_session`` drains it).  Expires
-    with the wake binding so a permanently-detached bot's pending wake doesn't
-    linger forever."""
-    text: str
-    source: str
-    wake_ref: str
-    cascade_driver_id: Optional[str]
-    expires_at: float
-    #: Binary content the wake carried, in the canonical
-    #: ``{mime_type, data: base64-str, display_name, attachment_id}`` wire
-    #: shape.  Held here for the same reason ``text`` is: a deferred wake is
-    #: driven later, and a wake that arrived with an utterance and is replayed
-    #: without it drives a turn about nothing (#845).  Defaulted so every
-    #: pre-existing construction site is unchanged.
-    attachments: List[Dict[str, Any]] = field(default_factory=list)
-
-
-@dataclass
 class _SessionNewAnswer:
     """The bookkeeping that makes ONE ``session.new`` produce ONE answer.
 
@@ -383,6 +363,13 @@ class RuntimeSessionInfo:
     #: older client can ignore.  ``None`` means NOT MEASURED (an undated
     #: holder), never "just now".
     awaiting_since: Optional[str] = None
+    #: Messages spooled in this session's durable inbox and not yet handed
+    #: to a turn (session group messaging, phase 2).  Counted for cold and
+    #: loaded sessions alike -- a cold session with a pending message is
+    #: the one the watchdog is about to revive, and the listing is where an
+    #: operator sees why.  A diagnostic in the #812 shape: an additive key
+    #: on the listing row, no protocol bump.
+    inbox_pending: int = 0
 
 
 @dataclass
@@ -683,6 +670,11 @@ single message.  UTF-8 bytes, not characters -- a character count would let
 a multi-byte payload through at several times the intended size."""
 
 SIBLING_PENDING_CAP = 20
+
+#: Group-message outcomes that mean the TARGET HOLDS THE MESSAGE: the two
+#: delivered words of ``shared.message_delivery`` plus ``spooled`` (phase 2,
+#: written to the target's durable inbox).  What the receipt calls ``ok``.
+_GROUP_TAKEN = frozenset({"accepted", "queued", "spooled"})
 """Per-target backpressure: how many messages may pile up on a sibling that
 has been BUSY the whole time.
 
@@ -1228,11 +1220,28 @@ class SessionManager:
         # daemon boot; surfaced on bind_wake so a session can advertise it with
         # no bot-side URL config.  Empty until the daemon wires it.
         self._wake_public_url: str = ""
-        # Deferred wakes (Option 2): session_id → _PendingWake for a session
-        # revived COLD with no attached client.  Driven when a client
-        # re-attaches (attach_session drains it); re-emitted on observer
-        # (re)register.  Guarded by _lock.
-        self._pending_wakes: Dict[str, _PendingWake] = {}
+        # The durable inbox (session group messaging, phase 2).  A message
+        # accepted for delivery that cannot be handed to a running turn is
+        # spooled under the target's record directory
+        # (``server.session_inbox``) BEFORE the sender gets its receipt, and
+        # drained at the next point the target can take a turn.  A deferred
+        # ``session.wake`` (the former ``_pending_wakes`` single slot) is one
+        # kind of entry.  These two sets are the DRAIN SCHEDULE, not the
+        # inbox: the disk is authoritative, and both are re-derived from it.
+        # Guarded by _lock.
+        #
+        #: LOADED sessions whose inbox may hold something drivable -- checked
+        #: at turn end, on attach, and by the sweep.
+        self._inbox_dirty: Set[str] = set()
+        #: COLD sessions with a spooled message: session_id -> (next attempt,
+        #: the delay to apply after the NEXT failure).  Populated when a spool
+        #: happens for a target that is not loaded; the sweep revives and
+        #: drains, with backoff.  In memory only: after a daemon restart a
+        #: cold inbox waits for whatever next loads its session.
+        self._inbox_cold_retry: Dict[str, Tuple[float, float]] = {}
+        #: Sessions with a drain in flight, so two triggers cannot drive the
+        #: same entry twice.
+        self._inbox_draining: Set[str] = set()
 
         # Phase 1 cascade-as-client (server 0.6.154+): registry of
         # cascade-clients keyed by cascade_driver_id.  See
@@ -4866,17 +4875,31 @@ class SessionManager:
             self._reemit_pending_wakes_for_cid(cascade_driver_id)
 
     def _reemit_pending_wakes_for_cid(self, cascade_driver_id: str) -> None:
-        """Re-emit ``SessionWokenEvent`` for any not-yet-driven wake whose
-        session's cid matches — so an observer that (re)connects after the first
-        emit still learns it must re-attach."""
+        """Re-emit ``SessionWokenEvent`` for any not-yet-driven deferred wake
+        whose cid matches — so an observer that (re)connects after the first
+        emit still learns it must re-attach.
+
+        A deferred wake is an inbox entry (``kind=wake``,
+        ``defer_until_client``) on a LOADED session -- the revive that
+        deferred it registered the session -- so the candidates are the
+        loaded sessions tagged with this cid, and the entry's own stamp is
+        the deciding predicate.  One emit per session, however many wakes
+        it holds: the event says "re-attach", not "here is a message".
+        """
         now = time.time()
         with self._lock:
-            pending = [
-                (sid, p) for sid, p in self._pending_wakes.items()
-                if p.cascade_driver_id == cascade_driver_id and p.expires_at > now
-            ]
-        for sid, p in pending:
-            self._emit_session_woken(sid, p.wake_ref, p.source)
+            sids = [sid for sid, s in self._sessions.items()
+                    if getattr(s, "cascade_driver_id", None) == cascade_driver_id]
+        for sid in sids:
+            storage_dir = self._inbox_storage_dir(sid)
+            if storage_dir is None:
+                continue
+            for entry in session_inbox.pending(storage_dir, sid):
+                if (entry.kind == KIND_WAKE and entry.defer_until_client
+                        and entry.cascade_driver_id == cascade_driver_id
+                        and not entry.expired(now)):
+                    self._emit_session_woken(sid, entry.wake_ref, entry.source)
+                    break
 
     def unregister_cascade_client(
         self,
@@ -5546,6 +5569,13 @@ class SessionManager:
             except Exception:  # noqa: BLE001 — same rule, separate pass
                 logger.exception(
                     "app:// expiry sweep raised — the next pass re-derives "
+                    "its state",
+                )
+            try:
+                self._sweep_inbox()
+            except Exception:  # noqa: BLE001 — same rule, separate pass
+                logger.exception(
+                    "session-inbox sweep raised — the next pass re-derives "
                     "its state",
                 )
 
@@ -7466,6 +7496,33 @@ class SessionManager:
         except Exception as exc:  # noqa: BLE001
             logger.warning("cascade budget accumulation failed: %s", exc)
 
+    def _after_main_agent_done(self, session: Session) -> None:
+        """What a turn's end owes the session: clear the interrupted-turn
+        tracking, drain the inbox, and re-check the deferred unload.
+
+        THE ORDER IS THE POINT.  The inbox drain is scheduled BEFORE the
+        unload re-check so a spooled message is handed to a session that is
+        still loaded; it runs on its own thread because this method is
+        reached under ``_lock`` from ``_emit_to_session`` and a drive from
+        here would re-enter the manager.  The unload keeps its own gates
+        (a drive that starts first makes ``_model_running`` true, and one
+        that loses the race finds the session cold and hands it to the
+        sweep's cold-retry path), so neither waits on the other.
+        """
+        if session.interrupted_turn:
+            session.interrupted_turn = None
+            session.is_dirty = True
+            logger.debug(f"Cleared turn tracking for session {session.session_id} (agent done)")
+        with self._lock:
+            has_inbox = session.session_id in self._inbox_dirty
+        if has_inbox:
+            self._schedule_inbox_drain(session.session_id, trigger="turn_end")
+        # Re-check deferred unload: if all clients disconnected
+        # while the model was running, the session was kept alive.
+        # Now that the model is done, unload if still orphaned.
+        if not session.attached_clients:
+            self._maybe_unload_session(session.session_id)
+
     def _handle_turn_tracking_event(self, session: Session, event: Event) -> None:
         """Handle events for turn tracking (interrupted tool recovery).
 
@@ -7497,17 +7554,7 @@ class SessionManager:
                     session.is_dirty = True
                     logger.debug(f"Started turn tracking for session {session.session_id}")
             elif event.status == "done":
-                # Agent finished - clear tracking
-                if session.interrupted_turn:
-                    session.interrupted_turn = None
-                    session.is_dirty = True
-                    logger.debug(f"Cleared turn tracking for session {session.session_id} (agent done)")
-
-                # Re-check deferred unload: if all clients disconnected
-                # while the model was running, the session was kept alive.
-                # Now that the model is done, unload if still orphaned.
-                if not session.attached_clients:
-                    self._maybe_unload_session(session.session_id)
+                self._after_main_agent_done(session)
 
         # Track tool calls as they start
         elif isinstance(event, ToolCallStartEvent):
@@ -8477,7 +8524,17 @@ class SessionManager:
                             was DRIVEN on its own session.  ``woken`` says
                             whether it was revived to do so.
         ``queued``          the target was mid-turn; SIBLING is idle-only, so
-                            the message is collected when that turn ends.
+                            the message is collected when that turn ends.  A
+                            copy is SPOOLED in the target's inbox until then,
+                            so an unload between queue and drain loses
+                            nothing (phase 2, ``spooled: true``).
+        ``spooled``         the message could not be handed to a turn now --
+                            the target is mid-turn and the message carries
+                            bytes (which ride the drive branch only), or it
+                            is cold and did not revive -- and was written to
+                            the target's durable inbox instead.  It is driven
+                            at the target's next turn boundary, or when the
+                            lifetime watchdog revives it (with backoff).
         ``no_such_session`` nothing the sender may reach answers to *target*.
                             The SAME answer for an id that exists in another
                             group, so the verb is not an existence oracle.
@@ -8500,8 +8557,8 @@ class SessionManager:
             text: The message body.  May be empty when *attachments* carry
                 the content (#838).
             attachments: Binary content in the canonical wire shape; ride
-                the drive branch only (#845), so a busy target answers
-                ``refused`` with nothing enqueued rather than dropping them.
+                the drive branch only (#845), so a busy target's message is
+                SPOOLED whole rather than queued with its payload dropped.
             event_id: Idempotency key, deduplicated against the wake LRU.
             wake_cold: Whether a resting target is revived.
             max_bytes / pending_cap / exchange_cap: The caps, defaulting to
@@ -8538,24 +8595,30 @@ class SessionManager:
             return refusal
 
         wrapped = _wrap_untrusted_with_manifest(body, items, f"peer:{sender_addr}")
+        at_cap = pending >= pending_cap
         if status == "cold":
             branch, outcome, woken, error = self._drive_cold_group_member(
                 member, wrapped, items)
         else:
             branch, outcome, woken, error = self._deliver_loaded_group_member(
-                member, wrapped, items, sender_addr,
-                require_idle=pending >= pending_cap)
-        message_id = uuid.uuid4().hex
+                member, wrapped, items, sender_addr, require_idle=at_cap)
+        message_id = session_inbox.new_message_id()
+        # Phase 2: a message the target cannot take NOW is written to its
+        # inbox before the receipt goes back -- except when the refusal is
+        # BACKPRESSURE (``at_cap``), which a spool would defeat.
+        branch, outcome, spooled = self._spool_if_not_taken(
+            member, branch, outcome, at_cap, body, items, event_id,
+            sender_addr, message_id)
         # Daemon log, not the provider trace, for SIBLING_DELIVERY's reason:
         # a diagnostic nobody can read without an env var is read after the
         # run it was needed for.  Greppable token: GROUP_DELIVERY.
         logger.info(
             "GROUP_DELIVERY: from=%s to=%s target_session=%s group=%s branch=%s "
-            "outcome=%s woken=%s bytes=%d attachments=%d message_id=%s",
+            "outcome=%s woken=%s spooled=%s bytes=%d attachments=%d message_id=%s",
             sender_addr, target, target_id, sorted(member.common_keys)[0],
-            branch, outcome, woken, size, len(items), message_id,
+            branch, outcome, woken, spooled, size, len(items), message_id,
         )
-        if outcome not in DELIVERED:
+        if outcome not in _GROUP_TAKEN:
             self._release_event_id(event_id)
             return {"status": "refused", "target_session_id": target_id,
                     "error": error or self._group_delivery_failure(
@@ -8564,7 +8627,7 @@ class SessionManager:
         with self._lock:
             for k in member.common_keys:
                 self._group_exchanges[k] = self._group_exchanges.get(k, 0) + 1
-            if outcome == QUEUED:
+            if outcome in (QUEUED, "spooled"):
                 self._group_pending[target_id] = pending + 1
             else:
                 self._group_pending.pop(target_id, None)
@@ -8578,9 +8641,85 @@ class SessionManager:
             "woken": woken,
             "headless": bool(target_session is not None
                              and not target_session.attached_clients),
+            "spooled": spooled,
             "bytes": size,
             "attachments": len(items),
         }
+
+    def _spool_if_not_taken(
+        self, member: "_GroupMember", branch: str, outcome: str, at_cap: bool,
+        body: str, items: List[Dict[str, Any]], event_id: Optional[str],
+        sender_addr: str, message_id: str,
+    ) -> "Tuple[str, str, bool]":
+        """Settle a delivery outcome against the inbox: ``(branch, outcome,
+        spooled)``.  A backpressure refusal (*at_cap*) is never spooled -- a
+        spool would defeat the cap; a delivered outcome keeps its word and
+        gains a copy; an undelivered one that the inbox takes becomes
+        ``spooled``."""
+        if at_cap:
+            return branch, outcome, False
+        entry = self._spool_group_message(
+            member, outcome, body, items, event_id, sender_addr, message_id)
+        if entry is None:
+            return branch, outcome, False
+        if outcome in _GROUP_TAKEN:
+            return branch, outcome, True
+        return "spool", "spooled", True
+
+    def _spool_group_message(
+        self, member: "_GroupMember", outcome: str, body: str,
+        items: List[Dict[str, Any]], event_id: Optional[str],
+        sender_addr: str, message_id: str,
+    ) -> Optional[InboxEntry]:
+        """Write a group message to the target's inbox when the outcome
+        calls for it (phase 2, design §4.4).  ``None`` when it does not, or
+        when the inbox could not be written -- the caller then reports the
+        outcome it already had, so a spool that fails is a visible refusal
+        rather than a receipt for a message nobody holds.
+
+        ==================  ================================================
+        outcome             what is spooled
+        ==================  ================================================
+        ``queued``          a copy, ``runner_queued``: the running turn has
+                            the text; the copy survives an unload between
+                            queue and drain and is removed at turn end
+        ``busy``            the whole message -- it carried bytes, which
+                            ride the drive branch only, so it is driven at
+                            the next turn boundary instead
+        a failed revive /   the whole message; the watchdog revives the
+        drive of a cold     target with backoff (``_inbox_cold_retry``)
+        target
+        anything else       nothing: ``accepted`` needs no copy,
+                            ``terminated`` is never woken (§4.7), and
+                            ``not_confirmed`` may already have run
+        ==================  ================================================
+        """
+        from jaato_server.shared.message_delivery import (
+            BUSY, NO_SESSION, QUEUED, UNREACHABLE)
+        spool_on = (QUEUED, BUSY, NO_SESSION, UNREACHABLE,
+                    "revive_failed", "not_drivable")
+        if outcome not in spool_on:
+            return None
+        storage_dir = self._inbox_storage_dir(
+            member.session_id, workspace_hint=member.workspace_path)
+        if storage_dir is None:
+            return None
+        try:
+            entry = self._spool_inbox(
+                storage_dir, session_id=member.session_id, kind=KIND_PEER,
+                source=f"peer:{sender_addr}", source_id=sender_addr,
+                text=body, items=items, event_id=event_id,
+                message_id=message_id, runner_queued=(outcome == QUEUED))
+        except OSError as exc:
+            logger.warning(
+                "GROUP_DELIVERY: cannot spool message for %s under %s: %s",
+                member.session_id, storage_dir, exc)
+            return None
+        with self._lock:
+            loaded = member.session_id in self._sessions
+        if not loaded:
+            self._note_inbox_cold(member.session_id)
+        return entry
 
     def _group_admission(
         self, target: str, member: "_GroupMember", status: str,
@@ -8610,6 +8749,14 @@ class SessionManager:
                      "error": (f"send_to_session: {target!r} is resting (unloaded) "
                                f"and waking cold peers is disabled "
                                f"(courier.wake_cold: false).")}, pending)
+        # The durable half of the dedup: a redelivery after a daemon restart
+        # finds its still-spooled entry where the in-memory LRU is empty.
+        if event_id and self._inbox_holds_event_id(
+                target_id, member.workspace_path, event_id):
+            return ({"status": "duplicate", "target_session_id": target_id,
+                     "message_id": None,
+                     "detail": f"event_id {event_id!r} is spooled in the "
+                               f"target's inbox"}, pending)
         if not self._claim_event_id(event_id):
             return ({"status": "duplicate", "target_session_id": target_id,
                      "message_id": None,
@@ -10722,29 +10869,12 @@ class SessionManager:
         # the void (host tools have no client to dispatch to).  The event_id
         # claim is retained (a deferred wake is a success — a redelivery while
         # pending is a benign DUPLICATE, not a re-defer).
-        with self._lock:
-            session = self._sessions.get(session_id)
-            has_client = bool(session and session.attached_clients)
-        if cascade_driver_id and session is not None and not has_client:
-            with self._lock:
-                # Tag the revived session with its cid (under _lock — event
-                # routing + the sweep read cascade_driver_id concurrently) so
-                # _emit_to_session reaches the cid's observers and the
-                # durability sweep sees it active.
-                session.cascade_driver_id = cascade_driver_id
-                self._pending_wakes[session_id] = _PendingWake(
-                    text=text, source=source, wake_ref=wake_ref or "",
-                    cascade_driver_id=cascade_driver_id,
-                    expires_at=self._wake_pending_expiry(wake_ref),
-                    attachments=wake_attachments)
-            self._emit_session_woken(session_id, wake_ref or "", source)
-            logger.info(
-                "wake: session %s revived cold, no client — DEFERRED; "
-                "SessionWokenEvent emitted to cid=%s observers, turn pends re-attach",
-                session_id, cascade_driver_id)
-            return (WakeOutcome.DEFERRED,
-                    f"session {session_id!r} revived cold with no client; turn "
-                    f"deferred until re-attach (SessionWokenEvent emitted)")
+        deferred = self._defer_wake_if_clientless(
+            session_id, text, wake_attachments, source=source,
+            event_id=event_id, wake_ref=wake_ref or "",
+            cascade_driver_id=cascade_driver_id)
+        if deferred is not None:
+            return deferred
 
         # Warm (client attached) or no observer path: wrap + drive immediately.
         wrapped = _wrap_wake_content(text, wake_attachments, source)
@@ -10754,6 +10884,47 @@ class SessionManager:
             return (WakeOutcome.NOT_DRIVABLE,
                     f"session {session_id!r} not drivable after wake")
         return (WakeOutcome.OK, "woken")
+
+    def _defer_wake_if_clientless(
+        self, session_id: str, text: str, items: List[Dict[str, Any]], *,
+        source: str, event_id: Optional[str], wake_ref: str,
+        cascade_driver_id: Optional[str],
+    ) -> Optional[Tuple["WakeOutcome", str]]:
+        """The DEFERRED-TURN gate of :meth:`wake_session`: a loaded session
+        with NO attached client and a known cid gets its wake spooled and its
+        observers told, and the ``DEFERRED`` answer is returned.  ``None``
+        means drive now -- either the gate does not apply, or there is no
+        writable inbox to defer into (announced, then driven headless).
+        """
+        with self._lock:
+            session = self._sessions.get(session_id)
+            has_client = bool(session and session.attached_clients)
+        if not cascade_driver_id or session is None or has_client:
+            return None
+        with self._lock:
+            # Tag the revived session with its cid (under _lock — event
+            # routing + the sweep read cascade_driver_id concurrently) so
+            # _emit_to_session reaches the cid's observers and the
+            # durability sweep sees it active.
+            session.cascade_driver_id = cascade_driver_id
+        # The deferred wake is an INBOX entry (phase 2): it survives an
+        # unload or a daemon restart where the old in-memory slot did not,
+        # and ``drive_pending_wake`` drains it on re-attach.
+        if not self._spool_deferred_wake(
+                session_id, text, items, source=source, event_id=event_id,
+                wake_ref=wake_ref, cascade_driver_id=cascade_driver_id):
+            logger.warning(
+                "wake: session %s has no writable inbox to defer into; "
+                "driving headless instead", session_id)
+            return None
+        self._emit_session_woken(session_id, wake_ref, source)
+        logger.info(
+            "wake: session %s revived cold, no client — DEFERRED; "
+            "SessionWokenEvent emitted to cid=%s observers, turn pends "
+            "re-attach", session_id, cascade_driver_id)
+        return (WakeOutcome.DEFERRED,
+                f"session {session_id!r} revived cold with no client; turn "
+                f"deferred until re-attach (SessionWokenEvent emitted)")
 
     def _wake_pending_expiry(self, wake_ref: Optional[str]) -> float:
         """Expiry for a deferred wake — the wake binding's expiry if resolvable,
@@ -10780,31 +10951,343 @@ class SessionManager:
             logger.exception("failed to emit SessionWokenEvent for %s", session_id)
 
     def drive_pending_wake(self, session_id: str) -> bool:
-        """Drive a wake that was DEFERRED for ``session_id``, if one is pending
-        and not expired.  Called by :meth:`attach_session` after a client
-        attaches (a client is now present to serve host tools).  Returns True if
-        a pending wake was driven."""
+        """Drain ``session_id``'s inbox now that a client is attached.
+
+        Called by the transports after a client attaches AND its client
+        tools are wired (a client is now present to serve host tools).  The
+        name is the one the callers have used since the deferred wake was a
+        single in-memory slot; since phase 2 that slot is the inbox, so this
+        is :meth:`drain_session_inbox` with the ``attach`` trigger -- the
+        one trigger that may drive a ``defer_until_client`` entry.  Returns
+        True if an entry was driven.
+        """
+        return self.drain_session_inbox(session_id, trigger="attach")
+
+    # -- the durable inbox (phase 2) --------------------------------------
+
+    #: The lifetime watchdog's cold-retry backoff: the first attempt is the
+    #: next sweep, then this delay doubling after each failed revive, up to
+    #: the cap.  A workspace whose revive keeps failing is re-tried a few
+    #: times an hour rather than every 15 seconds for a day.
+    INBOX_COLD_RETRY_INITIAL_SECONDS = 30.0
+    INBOX_COLD_RETRY_MAX_SECONDS = 600.0
+
+    def _inbox_storage_dir(
+        self, session_id: str, workspace_hint: Optional[str] = None,
+    ) -> Optional[pathlib.Path]:
+        """The session storage directory the inbox of *session_id* lives
+        under, or ``None`` when no workspace can be resolved for it.
+
+        A LOADED session's workspace is on its ``Session``; a cold one's is
+        the daemon's index (never a caller's word -- the ``wake_session``
+        invariant).  *workspace_hint* is a value the caller already resolved
+        through that index (a ``_GroupMember``), consulted between the two.
+        """
         with self._lock:
-            pending = self._pending_wakes.pop(session_id, None)
-        if pending is None:
+            session = self._sessions.get(session_id)
+        workspace = getattr(session, "workspace_path", None) if session else None
+        if not workspace:
+            workspace = workspace_hint or self._session_workspace_index.resolve(session_id)
+        if not workspace:
+            return None
+        try:
+            return self._session_storage_dir(workspace)
+        except ValueError:
+            return None
+
+    def _inbox_holds_event_id(
+        self, session_id: str, workspace_hint: Optional[str],
+        event_id: Optional[str],
+    ) -> bool:
+        """Whether *session_id*'s inbox already carries *event_id*."""
+        storage_dir = self._inbox_storage_dir(session_id, workspace_hint=workspace_hint)
+        if storage_dir is None:
             return False
-        if pending.expires_at <= time.time():
-            logger.info("drive_pending_wake: dropping expired pending wake for %s",
-                        session_id)
+        return session_inbox.find_event_id(storage_dir, session_id, event_id) is not None
+
+    def _spool_inbox(
+        self, storage_dir: pathlib.Path, *, session_id: str, kind: str,
+        source: str, source_id: str, text: str, items: List[Dict[str, Any]],
+        event_id: Optional[str] = None, message_id: Optional[str] = None,
+        expires_at: Optional[float] = None, **flags: Any,
+    ) -> InboxEntry:
+        """Write one entry to *session_id*'s inbox and put the session on
+        the drain schedule.  Raises ``OSError`` when the inbox cannot be
+        written; the caller decides what that means for its receipt."""
+        now = time.time()
+        entry = InboxEntry(
+            message_id=message_id or session_inbox.new_message_id(),
+            session_id=session_id, kind=kind, source=source,
+            source_id=source_id, text=text or "", created_at=now,
+            expires_at=(expires_at if expires_at is not None
+                        else now + session_inbox.DEFAULT_INBOX_TTL_SECONDS),
+            event_id=event_id, **flags)
+        session_inbox.spool(storage_dir, entry, items)
+        with self._lock:
+            self._inbox_dirty.add(session_id)
+        logger.info(
+            "INBOX_SPOOL: session=%s message_id=%s kind=%s source=%s "
+            "attachments=%d runner_queued=%s defer_until_client=%s",
+            session_id, entry.message_id, kind, source, len(entry.attachments),
+            entry.runner_queued, entry.defer_until_client)
+        return entry
+
+    def _spool_deferred_wake(
+        self, session_id: str, text: str, items: List[Dict[str, Any]], *,
+        source: str, event_id: Optional[str], wake_ref: str,
+        cascade_driver_id: str,
+    ) -> bool:
+        """Spool a ``session.wake`` that must wait for a client
+        (``defer_until_client``).  False when there is no inbox to write."""
+        storage_dir = self._inbox_storage_dir(session_id)
+        if storage_dir is None:
             return False
-        wrapped = _wrap_wake_content(
-            pending.text, pending.attachments, pending.source)
-        driven = self.send_message_to_session(
-            session_id, wrapped, attachments=pending.attachments)
-        if driven:
-            logger.info(
-                "wake: drove DEFERRED turn for session %s on re-attach "
-                "(wake_ref=%s) — host tools now available", session_id,
-                pending.wake_ref)
-        else:
-            logger.warning("drive_pending_wake: %s not drivable on re-attach",
-                           session_id)
+        try:
+            self._spool_inbox(
+                storage_dir, session_id=session_id, kind=KIND_WAKE,
+                source=source, source_id=source, text=text, items=items,
+                event_id=event_id, expires_at=self._wake_pending_expiry(wake_ref),
+                defer_until_client=True, wake_ref=wake_ref,
+                cascade_driver_id=cascade_driver_id)
+        except OSError as exc:
+            logger.warning("wake: cannot spool deferred wake for %s under %s: %s",
+                           session_id, storage_dir, exc)
+            return False
+        return True
+
+    def _note_inbox_cold(self, session_id: str, now: Optional[float] = None) -> None:
+        """Put a COLD session with a spooled message on the sweep's retry
+        list -- the first attempt at the next sweep, backoff after that."""
+        stamp = time.time() if now is None else now
+        with self._lock:
+            self._inbox_dirty.discard(session_id)
+            self._inbox_cold_retry.setdefault(
+                session_id, (stamp, self.INBOX_COLD_RETRY_INITIAL_SECONDS))
+
+    def _schedule_inbox_drain(self, session_id: str, *, trigger: str) -> None:
+        """Run :meth:`drain_session_inbox` on its own thread.  The turn-end
+        hook reaches this under ``_lock`` and a drive re-enters the manager,
+        so the drain is deferred the way the unload is."""
+        threading.Thread(
+            target=self.drain_session_inbox, args=(session_id,),
+            kwargs={"trigger": trigger},
+            name=f"inbox-drain-{session_id}", daemon=True,
+        ).start()
+
+    def drain_session_inbox(self, session_id: str, *, trigger: str) -> bool:
+        """Hand the oldest drivable inbox entry of *session_id* to the
+        session, and return whether one was driven.
+
+        ONE entry per call, because a drive starts a TURN and the next
+        entry belongs at the next turn boundary -- which is itself a
+        trigger, so a backlog drains one turn at a time.  What is drivable
+        depends on *trigger*:
+
+        ====================  ================================================
+        entry                 driven by
+        ====================  ================================================
+        expired               nobody: removed, at INFO
+        ``runner_queued``     nobody: the running turn has the text.  The
+                              ``turn_end`` trigger REMOVES it (consumed); a
+                              load cleared the flag before this ever ran
+        ``defer_until_client``  ``attach`` -- or any trigger once a client
+                              is attached
+        anything else         any trigger, while the session is loaded
+        ====================  ================================================
+
+        A drive that fails keeps the entry with ``attempts`` bumped, so a
+        wedged session neither loses the message nor loops on it: the next
+        trigger tries again.  A session found cold is handed to the sweep's
+        cold-retry path.  Two triggers never drain one session at once.
+        """
+        with self._lock:
+            if session_id in self._inbox_draining:
+                return False
+            self._inbox_draining.add(session_id)
+        try:
+            return self._drain_session_inbox_impl(session_id, trigger)
+        finally:
+            with self._lock:
+                self._inbox_draining.discard(session_id)
+
+    def _drain_session_inbox_impl(self, session_id: str, trigger: str) -> bool:
+        storage_dir = self._inbox_storage_dir(session_id)
+        if storage_dir is None:
+            return False
+        entries = session_inbox.pending(storage_dir, session_id)
+        with self._lock:
+            session = self._sessions.get(session_id)
+            has_client = bool(session and session.attached_clients)
+        now = time.time()
+        driven = False
+        for entry in entries:
+            if entry.expired(now):
+                session_inbox.remove(storage_dir, entry)
+                logger.info("INBOX_DRAIN: session=%s message_id=%s dropped=expired",
+                            session_id, entry.message_id)
+                continue
+            if entry.runner_queued:
+                if trigger == "turn_end":
+                    session_inbox.remove(storage_dir, entry)
+                    logger.info("INBOX_DRAIN: session=%s message_id=%s "
+                                "removed=consumed_by_turn", session_id,
+                                entry.message_id)
+                continue
+            if entry.defer_until_client and not has_client:
+                continue
+            if session is None:
+                self._note_inbox_cold(session_id, now)
+                return False
+            driven = self._drive_inbox_entry(storage_dir, entry, trigger)
+            break
+        if session_inbox.count_pending(storage_dir, session_id) == 0:
+            with self._lock:
+                self._inbox_dirty.discard(session_id)
         return driven
+
+    def _drive_inbox_entry(
+        self, storage_dir: pathlib.Path, entry: InboxEntry, trigger: str,
+    ) -> bool:
+        """Deliver ONE entry by its kind -- a peer message on the idle-only
+        SIBLING tier, a deferred wake as a USER turn -- and settle the
+        envelope: removed when delivered (or when the target is
+        ``terminated``, which is never woken), kept with a bumped attempt
+        count otherwise."""
+        from jaato_server.shared.message_delivery import (
+            ACCEPTED, DELIVERED, TERMINATED)
+        from jaato_server.shared.message_queue import SourceType
+        sid = entry.session_id
+        items = session_inbox.load_attachments(storage_dir, entry)
+        try:
+            if entry.kind == KIND_WAKE:
+                wrapped = _wrap_wake_content(entry.text, items, entry.source)
+                ok = self.send_message_to_session(sid, wrapped, attachments=items)
+                outcome = ACCEPTED if ok else "not_drivable"
+            else:
+                wrapped = _wrap_untrusted_with_manifest(entry.text, items, entry.source)
+                outcome = self.deliver_prompt_to_session(
+                    sid, wrapped, source_id=entry.source_id,
+                    source_type=SourceType.SIBLING, require_idle=True,
+                    attachments=items or None)
+        except Exception as exc:  # noqa: BLE001 -- one bad drive must not lose the entry
+            logger.warning("INBOX_DRAIN: session=%s message_id=%s drive raised: %s",
+                           sid, entry.message_id, exc)
+            outcome = "error"
+        delivered = outcome in DELIVERED
+        if delivered or outcome == TERMINATED:
+            session_inbox.remove(storage_dir, entry)
+        else:
+            entry.attempts += 1
+            entry.last_error = str(outcome)
+            session_inbox.update(storage_dir, entry)
+        logger.info(
+            "INBOX_DRAIN: session=%s message_id=%s kind=%s trigger=%s outcome=%s "
+            "attempts=%d", sid, entry.message_id, entry.kind, trigger, outcome,
+            entry.attempts)
+        return delivered
+
+    def _prepare_inbox_after_load(self, session_id: str) -> int:
+        """Reconcile a just-loaded session's inbox with the fact that its
+        runner is new: a ``runner_queued`` copy names a turn that never
+        completed in this daemon's life (the flag is cleared so the entry is
+        driven), and a non-empty inbox puts the session on the drain
+        schedule.  Nothing is DRIVEN here -- whoever loaded the session is
+        about to drive its own turn, and the backlog follows at the turn
+        boundary.  Returns the number of pending entries.  Never raises: a
+        load must not fail on an inbox it cannot read."""
+        try:
+            storage_dir = self._inbox_storage_dir(session_id)
+            entries = (session_inbox.pending(storage_dir, session_id)
+                       if storage_dir is not None else [])
+        except Exception:  # noqa: BLE001
+            logger.warning("inbox reconcile after load of %s failed",
+                           session_id, exc_info=True)
+            return 0
+        for entry in entries:
+            if entry.runner_queued:
+                entry.runner_queued = False
+                session_inbox.update(storage_dir, entry)
+        with self._lock:
+            self._inbox_cold_retry.pop(session_id, None)
+            if entries:
+                self._inbox_dirty.add(session_id)
+        if entries:
+            logger.info("INBOX_LOAD: session=%s pending=%d", session_id, len(entries))
+        return len(entries)
+
+    def _sweep_inbox(self, now: Optional[float] = None) -> None:
+        """The level trigger (design §4.4): drain LOADED sessions whose
+        inbox holds something and which are not mid-turn, and revive COLD
+        sessions whose retry is due -- with backoff on a failed revive.
+
+        Runs on the #812 lifetime-watchdog thread beside the other sweeps,
+        so nothing has to be armed at a spool site and a spool site that
+        forgets is still swept.  *now* is a parameter so a test states the
+        instant it means (#996).
+        """
+        stamp = time.time() if now is None else now
+        with self._lock:
+            dirty = [(sid, self._sessions.get(sid)) for sid in self._inbox_dirty]
+            due = [sid for sid, (next_at, _delay) in self._inbox_cold_retry.items()
+                   if next_at <= stamp]
+        for sid, session in dirty:
+            if session is None:
+                self._note_inbox_cold(sid, stamp)
+                continue
+            if getattr(getattr(session, "server", None), "is_processing", False):
+                continue
+            self.drain_session_inbox(sid, trigger="sweep")
+        for sid in due:
+            self._retry_cold_inbox(sid, stamp)
+
+    def _retry_cold_inbox(self, session_id: str, stamp: float) -> None:
+        """One cold-retry attempt: drop what expired, revive the session
+        from the index's workspace, drain; on a failed revive, back off."""
+        with self._lock:
+            loaded = session_id in self._sessions
+            _next, delay = self._inbox_cold_retry.get(
+                session_id, (stamp, self.INBOX_COLD_RETRY_INITIAL_SECONDS))
+        storage_dir = self._inbox_storage_dir(session_id)
+        entries = (session_inbox.pending(storage_dir, session_id)
+                   if storage_dir is not None else [])
+        for entry in list(entries):
+            if entry.expired(stamp):
+                session_inbox.remove(storage_dir, entry)
+                entries.remove(entry)
+        if not entries:
+            with self._lock:
+                self._inbox_cold_retry.pop(session_id, None)
+            return
+        if not loaded:
+            workspace = self._session_workspace_index.resolve(session_id)
+            if workspace is None or self.resume_session(
+                    session_id, workspace_path=workspace) is None:
+                with self._lock:
+                    self._inbox_cold_retry[session_id] = (
+                        stamp + delay,
+                        min(delay * 2, self.INBOX_COLD_RETRY_MAX_SECONDS))
+                logger.warning(
+                    "INBOX_RETRY: session=%s revive failed (pending=%d); next "
+                    "attempt in %.0fs", session_id, len(entries), delay)
+                return
+            self._warn_if_woken_without_ceiling(session_id)
+        with self._lock:
+            self._inbox_cold_retry.pop(session_id, None)
+            self._inbox_dirty.add(session_id)
+        self.drain_session_inbox(session_id, trigger="sweep")
+
+    def _inbox_pending_count(
+        self, session_id: str, workspace_path: Optional[str],
+    ) -> int:
+        """How many entries *session_id*'s inbox holds, for the listing.
+        Zero when the workspace is unknown; never raises."""
+        if not workspace_path:
+            return 0
+        try:
+            return session_inbox.count_pending(
+                self._session_storage_dir(workspace_path), session_id)
+        except (ValueError, OSError):
+            return 0
 
     def bind_wake(
         self,
@@ -11634,6 +12117,9 @@ class SessionManager:
         with self._lock:
             self._sessions[session_id] = session
         self._run_session_hooks(server, session_id)
+        # Phase 2: a spooled message survives the unload; the load is what
+        # puts it back on the drain schedule.
+        self._prepare_inbox_after_load(session_id)
 
         logger.info(f"Loaded session from disk: {session_id}")
         return session
@@ -12853,6 +13339,9 @@ class SessionManager:
             # session rather than leaving it for the sweep's stale reap, so
             # a later session cannot inherit an already-elapsed grace (#1106).
             self._clientless_since.pop(session_id, None)
+            # The drain schedule is for LOADED sessions; what the inbox
+            # holds stays on disk and is re-derived by the next load.
+            self._inbox_dirty.discard(session_id)
             # Unload complete: signal any attach_session awaiting this teardown,
             # then drop the in-flight marker so a fresh attach takes the
             # disk-restore path (_load_session) and re-spawns the runner.
@@ -13235,9 +13724,14 @@ class SessionManager:
         if workspace_path is None:
             workspace_path = self._session_workspace_index.resolve(session_id)
 
-        # Delete from disk
+        # Delete from disk -- the record, and the inbox beside it.
         storage_dir = self._session_storage_dir(workspace_path) if workspace_path else None
         deleted = self._session_plugin.delete(session_id, storage_dir=storage_dir)
+        if storage_dir is not None:
+            session_inbox.remove_all(storage_dir, session_id)
+        with self._lock:
+            self._inbox_dirty.discard(session_id)
+            self._inbox_cold_retry.pop(session_id, None)
 
         # Release this session's daemon-side declarations so they don't outlive
         # it.  A wake binding is the session's "wake me" invitation; a deleted
@@ -13530,6 +14024,7 @@ class SessionManager:
                     client_count=0,
                     turn_count=info.turn_count,
                     workspace_path=info.workspace_path,
+                    inbox_pending=self._inbox_pending_count(info.session_id, wp),
                 )
 
         # Overlay in-memory sessions (have more current info)
@@ -13567,6 +14062,8 @@ class SessionManager:
                     ),
                     awaiting=awaiting,
                     awaiting_since=awaiting_since,
+                    inbox_pending=self._inbox_pending_count(
+                        session.session_id, session.workspace_path),
                 )
 
         # Sort by last activity

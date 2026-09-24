@@ -76,7 +76,8 @@ def _make_sm() -> SessionManager:
     sm._cascade_client_sweep_thread = None
     sm._cid_last_session_ts = {}
     sm._HEADLESS_CLIENT_ID = "_headless"
-    sm._pending_wakes = {}
+    sm._inbox_dirty, sm._inbox_cold_retry = set(), {}
+    sm._inbox_draining = set()
     # No wake bindings here, so the GC sweep's wake-durability exemption
     # is a no-op.  Without this the lazily-started sweep THREAD raises
     # AttributeError in the background — which pytest does not fail on,

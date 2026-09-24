@@ -171,7 +171,7 @@ BASELINE: Dict[str, int] = {
     "jaato-server/jaato_server/server/session_manager.py::SessionManager._cascade_teardown_isolated_subagents": 20,
     "jaato-server/jaato_server/server/session_manager.py::SessionManager._create_session_impl": 52,
     "jaato-server/jaato_server/server/session_manager.py::SessionManager._expand_prompt_references": 18,
-    "jaato-server/jaato_server/server/session_manager.py::SessionManager._handle_turn_tracking_event": 21,
+    "jaato-server/jaato_server/server/session_manager.py::SessionManager._handle_turn_tracking_event": 19,
     "jaato-server/jaato_server/server/session_manager.py::SessionManager._intercept_prompt_help_refs": 17,
     "jaato-server/jaato_server/server/session_manager.py::SessionManager._load_session_impl": 51,
     "jaato-server/jaato_server/server/session_manager.py::SessionManager._provision_ipc_apparmor_and_spawn_runner": 24,
@@ -189,7 +189,6 @@ BASELINE: Dict[str, int] = {
     # ``_handle_permission_remove``.  Same move as #812's and #1069's, and it
     # leaves the chain shorter than it was.
     "jaato-server/jaato_server/server/session_manager.py::SessionManager.handle_request": 80,
-    "jaato-server/jaato_server/server/session_manager.py::SessionManager.wake_session": 17,
     "jaato-server/jaato_server/server/test_client.py::format_event": 29,
     "jaato-server/jaato_server/server/tests/test_runner_cgroup_attach_7d.py::test_websocket_pre_init_hook_provisions_cgroup_before_spawn": 23,
     "jaato-server/jaato_server/server/tests/test_the_heal_path_says_what_it_did.py::test_both_notification_hooks_log_the_miss": 16,

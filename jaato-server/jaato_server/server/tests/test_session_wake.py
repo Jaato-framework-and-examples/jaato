@@ -14,7 +14,10 @@ from collections import OrderedDict
 
 import pytest
 
-from jaato_server.server.session_manager import SessionManager, WakeOutcome, _PendingWake
+from types import SimpleNamespace as NS
+
+from jaato_server.server import session_inbox
+from jaato_server.server.session_manager import SessionManager, WakeOutcome
 from jaato_server.server.session_workspace_index import SessionWorkspaceIndex
 from jaato_sdk.plugins.model_provider.types import UNTRUSTED_OPEN
 
@@ -42,7 +45,9 @@ def _make_manager(tmp_path, loaded_ids=(), attached=False):
     client = ["c1"] if attached else []
     m._sessions = {sid: _FakeSession(attached=client) for sid in loaded_ids}
     m._wake_seen_event_ids = OrderedDict()
-    m._pending_wakes = {}
+    m._inbox_dirty, m._inbox_cold_retry = set(), {}
+    m._inbox_draining = set()
+    m._session_config = NS(storage_path=".jaato/sessions")
     m._session_workspace_index = SessionWorkspaceIndex(path=tmp_path / "idx.json")
 
     calls = _Calls()
@@ -202,9 +207,13 @@ def test_outcome_success_partition():
 
 # ---- Option 2: deferred-turn (cold-revive with no client + a cid) -------------
 
+def _inbox(m, tmp_path, sid):
+    return session_inbox.pending(m._session_storage_dir(str(tmp_path / "ws")), sid)
+
+
 def test_cold_revive_no_client_with_cid_defers(tmp_path):
     m, calls = _make_manager(tmp_path)  # nothing loaded → revived cold
-    m._session_workspace_index.record("s_cold", "/ws")
+    m._session_workspace_index.record("s_cold", str(tmp_path / "ws"))
     emitted = []
     m._emit_session_woken = lambda sid, wr, src: emitted.append((sid, wr, src))
     m._wake_pending_expiry = lambda wr: 9e12
@@ -213,7 +222,10 @@ def test_cold_revive_no_client_with_cid_defers(tmp_path):
     assert outcome == WakeOutcome.DEFERRED
     assert calls.drive == []                         # NOT driven into the void
     assert emitted == [("s_cold", "pr#1", "gh")]     # SessionWokenEvent emitted
-    assert "s_cold" in m._pending_wakes              # held pending
+    # held pending -- as a DURABLE inbox entry (phase 2), not an in-memory slot
+    [entry] = _inbox(m, tmp_path, "s_cold")
+    assert entry.kind == "wake" and entry.defer_until_client is True
+    assert entry.text == "review" and entry.wake_ref == "pr#1"
     # revived session tagged with its cid (for observer routing + sweep-liveness)
     assert m._sessions["s_cold"].cascade_driver_id == "bot-cid"
 
@@ -235,14 +247,21 @@ def test_no_cid_drives_headless_not_defers(tmp_path):
     assert len(calls.drive) == 1
 
 
+def _defer(m, tmp_path, sid, *, cid="c", expires_at=9e12, wake_ref="pr#1"):
+    """Spool a deferred wake the way ``wake_session`` does."""
+    m._session_workspace_index.record(sid, str(tmp_path / "ws"))
+    m._spool_inbox(m._session_storage_dir(str(tmp_path / "ws")), session_id=sid,
+                   kind="wake", source="gh", source_id="gh", text="review",
+                   items=[], expires_at=expires_at, defer_until_client=True,
+                   wake_ref=wake_ref, cascade_driver_id=cid)
+
+
 def test_drive_pending_wake_on_attach_drains(tmp_path):
-    m, calls = _make_manager(tmp_path, loaded_ids=["s1"])
-    m._pending_wakes["s1"] = _PendingWake(
-        text="review", source="gh", wake_ref="pr#1",
-        cascade_driver_id="c", expires_at=9e12)
+    m, calls = _make_manager(tmp_path, loaded_ids=["s1"], attached=True)
+    _defer(m, tmp_path, "s1")
     assert m.drive_pending_wake("s1") is True
     assert len(calls.drive) == 1                     # driven on re-attach
-    assert "s1" not in m._pending_wakes              # drained
+    assert _inbox(m, tmp_path, "s1") == []           # drained
     # the driven text is the wrapped untrusted review
     assert calls.drive[0][1].startswith(UNTRUSTED_OPEN)
 
@@ -254,23 +273,34 @@ def test_drive_pending_wake_none_pending(tmp_path):
 
 
 def test_drive_pending_wake_expired_dropped(tmp_path):
-    m, calls = _make_manager(tmp_path, loaded_ids=["s1"])
-    m._pending_wakes["s1"] = _PendingWake(
-        text="review", source="gh", wake_ref="pr#1",
-        cascade_driver_id="c", expires_at=1.0)  # long expired
+    m, calls = _make_manager(tmp_path, loaded_ids=["s1"], attached=True)
+    _defer(m, tmp_path, "s1", expires_at=1.0)  # long expired
     assert m.drive_pending_wake("s1") is False
     assert calls.drive == []
-    assert "s1" not in m._pending_wakes
+    assert _inbox(m, tmp_path, "s1") == []
+
+
+def test_a_deferred_wake_waits_for_a_client(tmp_path):
+    """The one entry kind the sweep may not drive: the woken turn may need
+    the client's host tools, so only an attach drains it."""
+    m, calls = _make_manager(tmp_path, loaded_ids=["s1"])   # no client
+    _defer(m, tmp_path, "s1")
+    assert m.drain_session_inbox("s1", trigger="sweep") is False
+    assert m.drive_pending_wake("s1") is False
+    assert calls.drive == [] and len(_inbox(m, tmp_path, "s1")) == 1
 
 
 def test_reemit_pending_wakes_for_cid_scoped(tmp_path):
     # an observer (re)registering for a cid re-emits only THAT cid's pending
-    m, _ = _make_manager(tmp_path)
+    m, _ = _make_manager(tmp_path, loaded_ids=["sA", "sB", "sX"])
+    m._sessions["sA"].cascade_driver_id = "cid-A"
+    m._sessions["sB"].cascade_driver_id = "cid-B"
+    m._sessions["sX"].cascade_driver_id = "cid-A"
     emitted = []
     m._emit_session_woken = lambda sid, wr, src: emitted.append((sid, wr, src))
-    m._pending_wakes["sA"] = _PendingWake("t", "gh", "pr#A", "cid-A", 9e12)
-    m._pending_wakes["sB"] = _PendingWake("t", "gh", "pr#B", "cid-B", 9e12)
-    m._pending_wakes["sX"] = _PendingWake("t", "gh", "pr#X", "cid-A", 1.0)  # expired
+    _defer(m, tmp_path, "sA", cid="cid-A", wake_ref="pr#A")
+    _defer(m, tmp_path, "sB", cid="cid-B", wake_ref="pr#B")
+    _defer(m, tmp_path, "sX", cid="cid-A", wake_ref="pr#X", expires_at=1.0)  # expired
     m._reemit_pending_wakes_for_cid("cid-A")
     assert emitted == [("sA", "pr#A", "gh")]  # only cid-A, not-expired
 
@@ -301,6 +331,7 @@ def _make_delete_manager(tmp_path):
     m._sessions = {}
     m._client_to_session = {}
     m._session_workspace_index = _Idx(path=tmp_path / "idx.json")
+    m._inbox_dirty, m._inbox_cold_retry = set(), {}
     m._wake_binding_registry = WakeBindingRegistry(
         path=tmp_path / "wb.json", owner_exists=m._owner_session_record_exists)
     m._session_storage_dir = lambda wp: pathlib.Path(wp) / ".jaato" / "sessions"

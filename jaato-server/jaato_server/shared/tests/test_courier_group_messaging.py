@@ -14,8 +14,8 @@ The load-bearing claims, each pinned here:
 - A cold target IS woken (``resume_session`` then ``send_message_to_session``)
   and the receipt says so; ``wake_cold: false`` refuses instead.
 - A busy target is queued on the idle-only SIBLING tier; a busy target with
-  attachments is refused with nothing enqueued (#845), never silently
-  stripped.
+  attachments is SPOOLED whole into the target's durable inbox (phase 2),
+  never queued with its payload silently stripped (#845).
 - The daemon stamps the sender and wraps the body as untrusted content.
 - A name that matches several members of a user group is ``ambiguous`` with
   the candidates' ids, never delivered to the first match.
@@ -70,13 +70,20 @@ def _sm(tmp_path, *sessions, cold=()):
     claim untested.
     """
     sm = SessionManager.__new__(SessionManager)
+    # Workspaces are spelled ``/ws/<x>`` for brevity and live under
+    # ``tmp_path``: the inbox (phase 2) writes beside the session record.
+    for s in sessions:
+        s.workspace_path = _wsp(tmp_path, s.workspace_path)
     sm._sessions = {s.session_id: s for s in sessions}
     sm._lock = threading.RLock()
     sm._group_pending, sm._group_exchanges = {}, {}
+    sm._inbox_dirty, sm._inbox_cold_retry = set(), {}
+    sm._inbox_draining = set()
+    sm._session_config = NS(storage_path=".jaato/sessions")
     sm._wake_seen_event_ids = __import__("collections").OrderedDict()
     sm._session_workspace_index = SessionWorkspaceIndex(tmp_path / "index.json")
     for sid, ws, row in cold:
-        sm._session_workspace_index.record(sid, ws)
+        sm._session_workspace_index.record(sid, _wsp(tmp_path, ws))
         sm._session_workspace_index.record_membership(sid, **row)
     sm._get_persisted_sessions = lambda workspace_path=None: []
     # Both mechanisms into ONE ordered list: the choice between queue,
@@ -99,6 +106,15 @@ def _sm(tmp_path, *sessions, cold=()):
     for s in sessions:
         wire_offer(s, sm.delivered)
     return sm
+
+
+def _wsp(tmp_path, ws):
+    """``/ws/<x>`` -> ``<tmp_path>/ws/<x>`` (created), else as given."""
+    if not (ws or "").startswith("/ws/"):
+        return ws
+    p = tmp_path / ws[1:]
+    p.mkdir(parents=True, exist_ok=True)
+    return str(p)
 
 
 def _send(sm, sender="s-a", target="s-b", text="hello", **kw):
@@ -178,7 +194,7 @@ def test_a_cold_peer_is_woken_and_driven(tmp_path):
     r = _send(sm, target="s-cold")
     assert r["status"] == "accepted"
     assert r["woken"] is True
-    assert sm.revived == [("s-cold", "/ws/other")]
+    assert sm.revived == [("s-cold", _wsp(tmp_path, "/ws/other"))]
     sid, text, how, _att = sm.delivered[0]
     assert (sid, how) == ("s-cold", "driven")
     assert UNTRUSTED_OPEN in text and "peer:s-a" in text
@@ -218,15 +234,19 @@ def test_a_cold_peer_whose_workspace_is_unresolvable_is_refused(tmp_path):
     assert sm.revived == []
 
 
-def test_a_failed_revive_is_refused_not_accepted(tmp_path):
+def test_a_failed_revive_is_spooled_not_accepted(tmp_path):
+    """A revive that fails is not a delivery -- and since phase 2 not a
+    refusal either: the message waits in the target's inbox for the
+    watchdog's retry (``test_durable_inbox_phase2`` drives that)."""
     sm = _sm(tmp_path, _session("s-a", owner="app:alice"),
              cold=[("s-cold", "/ws/other",
                     dict(created_by="app:alice", cascade_driver_id=None,
                          sibling_name=None))])
     sm.resume_session = lambda sid, workspace_path=None: None
     r = _send(sm, target="s-cold")
-    assert r["status"] == "refused"
+    assert r["status"] == "spooled" and r["spooled"] is True
     assert sm.delivered == []
+    assert "s-cold" in sm._inbox_cold_retry
 
 
 # ----------------------------------------------------------------------
@@ -249,13 +269,14 @@ def test_a_busy_peer_is_queued_on_the_sibling_tier(tmp_path):
 
 
 def test_attachments_ride_the_drive_branch_only(tmp_path):
-    """A busy target with bytes is REFUSED with nothing enqueued, never
-    delivered with the payload stripped (#845)."""
+    """A busy target with bytes is never queued with the payload stripped
+    (#845): nothing reaches the runner-side queue.  Phase 2 spools the whole
+    message instead of refusing it."""
     att = [{"mime_type": "audio/wav", "data": "AAAA", "display_name": "n.wav"}]
     sm = _sm(tmp_path, _session("s-a", cid="c1"),
              _session("s-b", cid="c1", running=True))
     r = _send(sm, text="", attachments=att)
-    assert r["status"] == "refused"
+    assert r["status"] == "spooled"
     assert sm.delivered == []
     # ...and the same message reaches an idle peer WITH its bytes and the
     # manifest inside the wrapper.
@@ -298,14 +319,15 @@ def test_a_contentless_message_is_refused(tmp_path):
 # ----------------------------------------------------------------------
 
 def test_event_id_dedups_on_success_and_releases_on_failure(tmp_path):
-    sm = _sm(tmp_path, _session("s-a", cid="c1"), _session("s-b", cid="c1"))
-    assert _send(sm, event_id="e1")["status"] == "accepted"
+    busy = _session("s-b", cid="c1", running=True)
+    sm = _sm(tmp_path, _session("s-a", cid="c1"), busy)
+    assert _send(sm, event_id="e1")["status"] == "queued"
     assert _send(sm, event_id="e1")["status"] == "duplicate"
-    # A FAILED delivery must not burn the id: the retry goes through.
-    sm.send_message_to_session = lambda sid, text, attachments=None: False
-    assert _send(sm, event_id="e2")["status"] == "refused"
-    sm.send_message_to_session = lambda sid, text, attachments=None: True
-    assert _send(sm, event_id="e2")["status"] == "accepted"
+    # A FAILED delivery must not burn the id: the retry goes through.  The
+    # one failure phase 2 still refuses is backpressure (the pending cap).
+    assert _send(sm, event_id="e2", pending_cap=1)["status"] == "refused"
+    busy.server._model_running = False
+    assert _send(sm, event_id="e2", pending_cap=1)["status"] == "accepted"
 
 
 def test_the_size_cap_is_the_plugins_to_set(tmp_path):
@@ -353,7 +375,8 @@ def test_the_roster_is_live_union_cold_with_no_self_row(tmp_path):
     assert ids == ["s-b", "s-cold"], "no self row, no stranger, cold last"
     live, cold = roster["sessions"]
     assert live["group_keys"] == ["cid:c1", "user:app:alice"]
-    assert cold["status"] == "cold" and cold["workspace_path"] == "/ws/other"
+    assert cold["status"] == "cold"
+    assert cold["workspace_path"] == _wsp(tmp_path, "/ws/other")
     assert cold["group_keys"] == ["user:app:alice"]
 
 

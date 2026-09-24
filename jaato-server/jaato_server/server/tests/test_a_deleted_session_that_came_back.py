@@ -145,7 +145,7 @@ def _info(sid, workspace):
     return SimpleNamespace(
         session_id=sid, name=sid, description="", model_provider="", model_name="",
         is_loaded=False, client_count=0, turn_count=0, workspace_path=workspace,
-        created_by=None, orphaned=False, runner=None,
+        created_by=None, orphaned=False, runner=None, inbox_pending=0,
         awaiting=None, awaiting_since=None,
     )
 

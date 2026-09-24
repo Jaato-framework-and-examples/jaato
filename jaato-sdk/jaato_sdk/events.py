@@ -1967,6 +1967,15 @@ class SessionListEvent(Event):
         "waiting 4 min" instead of "waiting".  A separate key rather than
         a widening of ``awaiting``, which stays a scalar an older client
         can ignore.  Absent means NOT MEASURED, never "just now".
+
+    ``inbox_pending`` (session group messaging, phase 2)
+        How many messages wait in that session's durable inbox -- spooled
+        by ``send_to_session`` / ``session.message`` because the target was
+        mid-turn with a payload it could not queue, or cold and not yet
+        revived.  Counted for cold rows too: a cold session with a pending
+        message is the one the daemon's watchdog is about to revive.  A
+        diagnostic a human reads (the #812 shape), additive and unbumped;
+        absent on a daemon that predates it.
     """
     type: EventType = Field(default=EventType.SESSION_LIST)
     sessions: List[Dict[str, Any]] = Field(default_factory=list)
@@ -2446,14 +2455,24 @@ class SessionMessageResultEvent(Event):
         status: ``accepted`` (a turn was started on the target; ``woken``
             says whether it was revived to do so), ``queued`` (the target is
             mid-turn and collects the message when the turn ends),
-            ``no_such_session``, ``ambiguous`` (a name matching several
+            ``spooled`` (the target could not take the message now -- it is
+            mid-turn and the message carries attachments, or it is cold and
+            did not revive -- so the message waits in the target's durable
+            inbox and is driven at its next turn boundary or when the daemon
+            revives it), ``no_such_session``, ``ambiguous`` (a name matching several
             members; ``candidates`` lists their ids), ``session_cold``
             (waking is disabled), ``duplicate`` (``event_id`` already
             actioned -- a benign no-op), ``terminated`` (the target ended
             on an error or an exhausted budget and is never woken), or
             ``refused`` with ``error``.
-        ok: Whether the message was DELIVERED (``accepted`` / ``queued``) or
-            was a benign ``duplicate``.  Everything else is ``False``.
+        ok: Whether the target HOLDS the message (``accepted`` / ``queued``
+            / ``spooled``) or it was a benign ``duplicate``.  Everything else
+            is ``False``.
+        spooled: Whether a copy of the message is in the target's durable
+            inbox -- always for ``spooled``, and also for ``queued`` (the
+            copy survives an unload between the queue and the turn that
+            drains it).  Additive, default ``False``, so an older daemon's
+            receipt reads as it did.
         message_id: The daemon-minted id of the delivered message; ``""``
             when nothing was delivered.
         target_session_id: The resolved target, when one was resolved.
@@ -2475,6 +2494,7 @@ class SessionMessageResultEvent(Event):
     group_key: str = ""
     woken: bool = False
     headless: bool = False
+    spooled: bool = False
     candidates: List[str] = Field(default_factory=list)
     error: str = ""
 
