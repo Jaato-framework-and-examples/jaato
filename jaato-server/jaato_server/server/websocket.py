@@ -161,6 +161,26 @@ def _report_confined_spawn_failure(
     )
 
 
+def _hand_managed_root_to(session_manager: Any, workspace_root: Optional[str]) -> None:
+    """#1280: tell *session_manager* which workspaces this WS server manages.
+
+    The WS pre-init hook threads ``managed_workspace_root`` into its own
+    spawn, but a premium WUI ``session.new`` is spawned by
+    ``SessionManager._spawn_session_runner_unconditional``, which had no way
+    to learn the root: the daemon wires ``set_apparmor_dependencies`` before
+    it constructs this server.  Called from :meth:`JaatoWSServer.set_command_router`,
+    the seam that registers the pre-init hook, so both spawn paths see the
+    same root.
+
+    A session manager without ``set_managed_workspace_root`` (a test double,
+    an out-of-tree manager) is left alone.  Extracted so
+    ``set_command_router`` gains no branch.
+    """
+    setter = getattr(session_manager, "set_managed_workspace_root", None)
+    if callable(setter):
+        setter(workspace_root)
+
+
 # Default path for servers.json (contains TLS config)
 _SERVERS_JSON = Path.home() / ".jaato" / "servers.json"
 
@@ -906,7 +926,11 @@ class JaatoWSServer:
 
         Called by ``JaatoDaemon.start()`` after constructing the router.
         Registers a session hook to apply AppArmor confinement and set
-        ``sandbox_mode`` on each newly created session.
+        ``sandbox_mode`` on each newly created session, and hands this
+        server's ``workspace_root`` to the router's session manager
+        (``set_managed_workspace_root``, #1280) so the session manager's own
+        runner-spawn path treats the same workspaces as daemon-managed as
+        the pre-init hook does.
 
         Args:
             router: ``CommandRouter`` instance.
@@ -938,6 +962,9 @@ class JaatoWSServer:
         # execution time rather than registration time.
         ws_server = self
         sm = router._session_manager
+        # #1280: the session manager's own spawn path (the one a WUI
+        # ``session.new`` takes) needs this root as much as the hook below.
+        _hand_managed_root_to(sm, getattr(self, "_workspace_root", None))
 
         def _apparmor_pre_init_hook(
             server: JaatoServer,
