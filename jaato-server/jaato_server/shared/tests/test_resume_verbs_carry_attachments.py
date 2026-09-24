@@ -101,11 +101,10 @@ REVERSIONS = [
     ),
     Reversion(
         target="jaato-server/jaato_server/server/command_router.py",
-        find="""    raw = p.get("attachments")
-    attachments = (
-        [a for a in raw if isinstance(a, dict)] if isinstance(raw, list) else []
-    )""",
-        replace="""    attachments = []""",
+        find="""    event_id = p.get("event_id") or (args[3] if len(args) > 3 else None)
+    attachments = _mapping_attachments(p)""",
+        replace="""    event_id = p.get("event_id") or (args[3] if len(args) > 3 else None)
+    attachments = []""",
         test="test_the_handler_forwards_the_utterance",
         because="session.wake went back to being text-only on the wire, "
                 "which is the issue itself",

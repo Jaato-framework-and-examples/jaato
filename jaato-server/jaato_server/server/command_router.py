@@ -36,6 +36,20 @@ _SESSION_MESSAGING_VERBS = {
 }
 
 
+def _mapping_attachments(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The ``attachments`` a payload carries, mapping entries only.
+
+    Shared by the ``session.wake`` and ``session.message`` decoders so the
+    two verbs cannot disagree about what an attachment on the wire is.  A
+    path, a number or any other non-mapping entry is dropped here rather
+    than handed onward as something the multimodal path would have to
+    re-check (#845): the daemon cannot read a client's files, which is why
+    ``_normalize_attachments`` expands paths on the sending side.
+    """
+    raw = payload.get("attachments")
+    return [a for a in raw if isinstance(a, dict)] if isinstance(raw, list) else []
+
+
 def _decode_message_request(
     args: List[Any], payload: Optional[dict],
 ) -> "tuple[str, str, Optional[str], Optional[str], List[dict]]":
@@ -54,10 +68,7 @@ def _decode_message_request(
     target = p.get("target") or (args[0] if len(args) > 0 else None)
     text = p.get("text") or (" ".join(args[1:]) if len(args) > 1 else "")
     request_id = p.get("request_id")
-    raw = p.get("attachments")
-    attachments = (
-        [a for a in raw if isinstance(a, dict)] if isinstance(raw, list) else []
-    )
+    attachments = _mapping_attachments(p)
     return (
         str(target).strip() if target is not None else "",
         str(text or ""),
@@ -116,10 +127,7 @@ def _decode_wake_request(
     text = p.get("text") or (args[1] if len(args) > 1 else None)
     source = p.get("source") or (args[2] if len(args) > 2 else "user")
     event_id = p.get("event_id") or (args[3] if len(args) > 3 else None)
-    raw = p.get("attachments")
-    attachments = (
-        [a for a in raw if isinstance(a, dict)] if isinstance(raw, list) else []
-    )
+    attachments = _mapping_attachments(p)
     return session_id, text, source, event_id, attachments
 
 
