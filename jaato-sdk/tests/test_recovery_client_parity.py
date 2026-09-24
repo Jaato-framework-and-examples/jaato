@@ -107,6 +107,13 @@ INTENTIONALLY_ABSENT = {
         "protocol 1.24); the recovery wrapper forwards the METHOD and lets "
         "the inner client refuse a daemon that would deliver the text "
         "without the files -- same reasoning as MIN_SESSION_MESSAGE_PROTOCOL",
+    "MIN_DIAGNOSTICS_PROTOCOL":
+        "class constant on IPCClient gating get_diagnostics (#1294, "
+        "protocol 1.25); the recovery wrapper forwards the METHOD via "
+        "_memory_client('get_diagnostics').get_diagnostics(...) and the "
+        "inner client's own _require_diagnostics_protocol raises when the "
+        "daemon is too old to serve session.diagnostics -- same reasoning "
+        "as MIN_SESSION_STOP_PROTOCOL above",
 }
 
 
