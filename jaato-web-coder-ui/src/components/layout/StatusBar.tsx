@@ -1,11 +1,13 @@
 /**
  * The 26px foot of the session screen (design frame 04): what the daemon
- * reports about this connection in monospace on the left, the rail's
- * section toggles in the chrome face on the right, and ``exit``.  The
- * session's identity (workspace, model, context) lives in the header,
- * not here; what is left is the connection, the versions, the session id
- * and the permission default -- with a count of prompts waiting, since a
- * waiting prompt is the one thing worth reading off the foot of the page.
+ * reports about this connection in monospace on the left, the tool-call
+ * expand toggle and ``exit`` in the chrome face on the right.  The
+ * session's identity (workspace, model, context) lives in the header, and
+ * Plan/Files/Budget/Sessions/Memories/Diagnostics live behind the 56px
+ * icon rail (#1304 §5) rather than as duplicate buttons here -- what is
+ * left is the connection, the versions, the session id and the
+ * permission default -- with a count of prompts waiting, since a waiting
+ * prompt is the one thing worth reading off the foot of the page.
  */
 import { useRef, useState } from "react";
 import { requestExit } from "@/app/exitChoice";
@@ -18,7 +20,6 @@ export function StatusBar() {
   const sessionId = useJaato((s) => s.sessionId);
   const permStatus = useJaato((s) => s.permissionStatus);
   const waiting = useJaato((s) => s.permissions.length);
-  const toggle = useJaato((s) => s.toggleUi);
   const setToolsExpanded = useJaato((s) => s.setToolsExpanded);
   const ui = useJaato((s) => s.ui);
   const [perms, setPerms] = useState(false);
@@ -55,14 +56,6 @@ export function StatusBar() {
       )}
       {perms && <PermissionsPlate onClose={() => setPerms(false)} anchor={permsBtn} />}
       <span className="flex-1" />
-      <button type="button" onClick={() => toggle("showPlan")} className={tab(ui.showPlan)} title="Toggle plan (Ctrl+P)" aria-label="Toggle plan (Ctrl+P)">Plan</button>
-      <button type="button" onClick={() => toggle("showBudget")} className={tab(ui.showBudget)} title="Toggle budget (Ctrl+B)" aria-label="Toggle budget (Ctrl+B)">Budget</button>
-      <button type="button" onClick={() => toggle("showWorkspace")} className={tab(ui.showWorkspace)} title="Toggle workspace changes (Alt+W)" aria-label="Toggle workspace changes (Alt+W)">Files</button>
-      {/* No shortcut letter: Ctrl+P/T/R/F/G/W are spoken for, and the free
-          set should be checked rather than guessed. */}
-      <button type="button" onClick={() => toggle("showSessions")} className={tab(ui.showSessions)} title="Toggle your sessions and their notes" aria-label="Toggle your sessions and their notes">Sessions</button>
-      <button type="button" onClick={() => toggle("showMemories")} className={tab(ui.showMemories)} title="Toggle the session's memories" aria-label="Toggle the session's memories">Memories</button>
-      <button type="button" onClick={() => toggle("showDiagnostics")} className={tab(ui.showDiagnostics)} title="Toggle the session's confinement diagnostics" aria-label="Toggle the session's confinement diagnostics">Diagnostics</button>
       <button type="button" onClick={() => setToolsExpanded(!ui.showTools)} className={tab(ui.showTools)} title={ui.showTools ? "Tool call boxes expanded — click to collapse them (Ctrl+T)" : "Tool call boxes collapsed — click to expand them (Ctrl+T)"} aria-label="Toggle tool call boxes (Ctrl+T)">Tools</button>
       {/* The ``exit`` command as a button: asks what becomes of the session -- detach, end, or cancel the task -- before leaving. */}
       <button type="button" onClick={() => { requestExit().catch(() => undefined); }} className={`${tab(false)} hover:text-error`} title="Leave: detach from the session, or end it (the exit command)" aria-label="Exit (detach from or end the session)">Exit</button>

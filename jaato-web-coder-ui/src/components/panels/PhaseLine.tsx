@@ -8,14 +8,15 @@
  * carries an elapsed clock, because "Running cli_based_tool — 2:14" is the
  * difference between a session that is working and one that is wedged.
  *
- * The clock ticks in this component rather than in the store: a second
+ * The clock ticks via ``hooks/useTick`` rather than in the store: a second
  * hand is presentation, and putting it in the store would commit React
- * once a second for every subscriber of every slice.
+ * once a second for every subscriber of every slice.  ``AgentTabs`` and the
+ * stall banner share the same hook for the same reason.
  */
-import { useEffect, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 import { useJaato } from "@/store/store";
 import { agentPhase, phaseLabel, type AgentPhase } from "@/store/phase";
+import { useTick } from "@/hooks/useTick";
 
 /** ``m:ss`` past a minute, ``Ns`` below it — the shape a duration is read at. */
 export function formatElapsed(ms: number): string {
@@ -24,17 +25,6 @@ export function formatElapsed(ms: number): string {
   const m = Math.floor(total / 60);
   const s = total % 60;
   return `${m}:${String(s).padStart(2, "0")}`;
-}
-
-/** Re-render once a second while mounted; mounted only while the agent is busy. */
-function useTick(active: boolean): number {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    if (!active) return;
-    const t = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(t);
-  }, [active]);
-  return now;
 }
 
 const GLYPH: Record<AgentPhase["kind"], [string, string]> = {

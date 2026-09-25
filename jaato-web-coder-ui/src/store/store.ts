@@ -19,6 +19,8 @@ import { clampRailWidth, loadRailWidth, saveRailWidth } from "@/store/railWidth"
 import { loadRailSplits, sanitizeSplits, saveRailSplits, type RailSplits } from "@/store/railSplits";
 import { applyChanged, applySnapshot, markReset, type WorkspaceReset } from "@/store/workspaceView";
 import { toolIdMappings } from "@/protocol/toolIds";
+import { clampStallThreshold, DEFAULT_STALL_THRESHOLD_MS } from "@/store/phase";
+import type { RailPanelId } from "@/store/railSplits";
 import type { SessionNote } from "@/app/notes";
 
 /**
@@ -242,18 +244,48 @@ export interface JaatoState {
   memories: MemoriesState;
   /** The rail's Diagnostics section (#1294, ``app/diagnostics.ts``). */
   diagnostics: DiagnosticsState;
+  /**
+   * The last moment ANY event named this agent (#1304 §3): stamped
+   * generically in ``reduce`` for every agent-scoped event type, not per
+   * event handler, so a new one is covered without anyone remembering to
+   * wire it.  Read by ``store/phase.ts``'s ``stalled`` -- an agent that is
+   * ``thinking``/``sending`` with nothing heard from it past the threshold
+   * reads as stalled; a running tool or a pending prompt is not silence
+   * and never reads that way.
+   */
+  lastEventAt: Record<string, number>;
+  /**
+   * How long an agent may go silent while ``thinking``/``sending`` before
+   * it reads as stalled (#1304 §3).  A global setting, not per-session --
+   * it survives ``resetSessionState`` -- and deliberately not persisted to
+   * ``localStorage`` the way ``ui.railWidth`` is: there is no settings UI
+   * for it yet (the issue: "not necessarily UI-exposed unless cheap"), so
+   * persisting a value nothing lets you set back would be a knob a test or
+   * a stray ``setState`` could leave the wrong way for the next session.
+   * ``setStallThreshold`` clamps to the documented 30s-300s range; a raw
+   * ``useJaato.setState({stallThresholdMs: ...})`` (a test fixture) does
+   * not, which is deliberate -- see ``store/phase.ts``'s own clamp for why
+   * that is still safe.
+   */
+  stallThresholdMs: number;
 
   ui: {
-    showPlan: boolean;
-    showBudget: boolean;
-    showWorkspace: boolean;
     showTools: boolean;
-    /** The Sessions rail section: survey every session and note it without leaving this one. */
-    showSessions: boolean;
-    /** The Memories rail section (#1232): the session's memory store, and the owner's curation of it. */
-    showMemories: boolean;
-    /** The Diagnostics rail section (#1294): the session's own confinement/runtime self-check. */
-    showDiagnostics: boolean;
+    /**
+     * Which ONE rail panel the 56px icon rail is showing (#1304 §5) --
+     * ``null`` when none is.  Replaces the six independent ``show*``
+     * booleans the accordion used: only one panel is on screen at a time,
+     * selected by clicking its icon.
+     */
+    activePanel: RailPanelId | null;
+    /**
+     * Plan pinned open (#1304 §5): when true, Plan stays visible beside
+     * whichever OTHER panel ``activePanel`` names, sharing the rail's
+     * height with it via the same ``railSplits`` weights the old
+     * multi-open accordion used.  Selecting Plan itself as the active
+     * panel is unaffected by this flag either way.
+     */
+    pinnedPlan: boolean;
     theme: string;
     /** Tool call currently pinned in the live-output popup. */
     popupCallId?: string | null;
@@ -314,7 +346,13 @@ export interface JaatoState {
   dismissClarification: (requestId: string) => void;
   dismissReferenceSelection: (requestId: string) => void;
   dismissPostAuth: () => void;
-  toggleUi: (key: "showPlan" | "showBudget" | "showWorkspace" | "showTools" | "showSessions" | "showMemories" | "showDiagnostics") => void;
+  toggleUi: (key: "showTools") => void;
+  /** Select (or, given the panel already showing, close) the rail's one active panel. */
+  setActivePanel: (id: RailPanelId | null) => void;
+  /** Pin (or unpin) Plan open beside whichever panel is active. */
+  togglePinPlan: () => void;
+  /** Clamped to the documented 30s-300s range (#1304 §3). */
+  setStallThreshold: (ms: number) => void;
   /** Merge into the Memories section's state (``app/memories.ts`` is its one writer). */
   patchMemories: (patch: Partial<MemoriesState> | ((m: MemoriesState) => Partial<MemoriesState>)) => void;
   /** Merge into the Diagnostics section's state (``app/diagnostics.ts`` is its one writer). */
@@ -388,6 +426,7 @@ const emptySessionState = () => ({
   exitChoice: null as ExitChoice | null,
   memories: emptyMemories(),
   diagnostics: emptyDiagnostics(),
+  lastEventAt: {} as Record<string, number>,
 });
 
 /** The Memories section before anything was asked (and after a session change). */
@@ -499,11 +538,58 @@ function upsertPermission(s: JaatoState, ev: AnyEvent, inputMode: boolean): void
 }
 
 /**
+ * Event types that name ONE agent's activity (#1304 §3): the set
+ * ``lastEventAt`` stamps from, generically, rather than one stamp per
+ * ``case`` in the switch below -- a stall predicate reads silence as
+ * meaningful, so a handler added later that forgets to stamp would be a
+ * false stall, not a missed feature.  Deliberately excludes session- and
+ * workspace-scoped events (``SESSION_LIST``, ``WORKSPACE_*``,
+ * ``COMMAND_LIST``, ``CONFIG_*``, ``CONNECTED``, ``SESSION_PROFILES``) and
+ * the two the switch below routes to ``selectedAgentId`` as a fallback
+ * (``SESSION_TERMINATED`` / ``DISCONNECTED``) rather than to a named
+ * agent: none of those say anything about whether a PARTICULAR agent is
+ * still there.
+ */
+const AGENT_ACTIVITY_EVENT_TYPES = new Set<string>([
+  EventTypeValue.AGENT_OUTPUT,
+  EventTypeValue.AGENT_STATUS_CHANGED,
+  EventTypeValue.AGENT_COMPLETED,
+  EventTypeValue.AGENT_ERROR,
+  EventTypeValue.TOOL_CALL_START,
+  EventTypeValue.TOOL_CALL_END,
+  EventTypeValue.TOOL_OUTPUT,
+  EventTypeValue.PERMISSION_REQUESTED,
+  EventTypeValue.PERMISSION_INPUT_MODE,
+  EventTypeValue.PERMISSION_RESOLVED,
+  EventTypeValue.CLARIFICATION_BATCH,
+  EventTypeValue.CLARIFICATION_QUESTION,
+  EventTypeValue.CLARIFICATION_INPUT_MODE,
+  EventTypeValue.CLARIFICATION_RESOLVED,
+  EventTypeValue.REFERENCE_SELECTION_REQUESTED,
+  EventTypeValue.REFERENCE_SELECTION_RESOLVED,
+  EventTypeValue.PLAN_UPDATED,
+  EventTypeValue.PLAN_STEP_UPDATED,
+  EventTypeValue.PLAN_CLEARED,
+  EventTypeValue.CONTEXT_UPDATED,
+  EventTypeValue.INSTRUCTION_BUDGET_UPDATED,
+  EventTypeValue.TURN_COMPLETED,
+  EventTypeValue.GC_CONFIG,
+  EventTypeValue.GC,
+]);
+
+/**
  * Fold one event into a shallow copy of the state.  Returns the same
  * object it was handed (mutated) — callers spread it into ``set``.
  */
 export function reduce(s: JaatoState, raw: JaatoEvent): JaatoState {
   const ev = raw as AnyEvent;
+  // ``ev.type`` is optional on a couple of generated request/response
+  // shapes in the union (e.g. ``ReferenceSelectionResponseRequest``), so
+  // this reads as ``string | undefined`` at the type level even though
+  // every event actually delivered here carries one.
+  if (ev.type && AGENT_ACTIVITY_EVENT_TYPES.has(ev.type)) {
+    s.lastEventAt = { ...s.lastEventAt, [agentOf(ev)]: Date.now() };
+  }
   switch (ev.type) {
     case EventTypeValue.CONNECTED: {
       const info = (ev.server_info as Record<string, unknown> | undefined) ?? {};
@@ -1160,8 +1246,9 @@ export const useJaato = create<JaatoState>()((set, get) => ({
   historyMode: "listing",
   commands: mergeCommandSpecs([]),
   uploads: [],
+  stallThresholdMs: DEFAULT_STALL_THRESHOLD_MS,
   ...emptySessionState(),
-  ui: { showPlan: false, showBudget: false, showWorkspace: false, showTools: false, showSessions: false, showMemories: false, showDiagnostics: false, theme: "light", popupCallId: null, railWidth: loadRailWidth(), railSplits: loadRailSplits() },
+  ui: { showTools: false, activePanel: null, pinnedPlan: false, theme: "light", popupCallId: null, railWidth: loadRailWidth(), railSplits: loadRailSplits() },
 
   dispatch: (events) =>
     set((state) => {
@@ -1219,6 +1306,9 @@ export const useJaato = create<JaatoState>()((set, get) => ({
   dismissReferenceSelection: (requestId) => set((st) => ({ referenceSelections: st.referenceSelections.filter((r) => r.requestId !== requestId) })),
   dismissPostAuth: () => set({ postAuth: null }),
   toggleUi: (key) => set((st) => ({ ui: { ...st.ui, [key]: !st.ui[key] } })),
+  setActivePanel: (id) => set((st) => ({ ui: { ...st.ui, activePanel: st.ui.activePanel === id ? null : id } })),
+  togglePinPlan: () => set((st) => ({ ui: { ...st.ui, pinnedPlan: !st.ui.pinnedPlan } })),
+  setStallThreshold: (ms) => set({ stallThresholdMs: clampStallThreshold(ms) }),
   setToolsExpanded: (expanded) => set((st) => ({
     ui: { ...st.ui, showTools: expanded },
     blocks: Object.fromEntries(Object.entries(st.blocks).map(([agentId, list]) => [agentId, list.map((b) => (b.kind === "tool" ? { ...b, expanded } : b))])),
@@ -1274,3 +1364,13 @@ export const useJaato = create<JaatoState>()((set, get) => ({
 /** Selector helpers. */
 export const selectBlocks = (agentId: string) => (s: JaatoState) => s.blocks[agentId] ?? EMPTY_BLOCKS;
 const EMPTY_BLOCKS: OutputBlock[] = [];
+
+// Test/debug hook: the store instance itself, so a Playwright test can
+// drive state directly (a low ``stallThresholdMs`` for a stall to show up
+// in seconds rather than the real 30s floor, since there is no settings UI
+// yet to set it from) without a raw WS frame the daemon would never send.
+// Harmless in production -- it exposes the same actions any component
+// already calls, on an object nothing sensitive reaches through.
+if (typeof window !== "undefined") {
+  (window as unknown as { __jaatoStore?: typeof useJaato }).__jaatoStore = useJaato;
+}

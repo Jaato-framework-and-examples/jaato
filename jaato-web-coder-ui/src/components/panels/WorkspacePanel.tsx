@@ -21,9 +21,15 @@
  *   change (``store/workspaceView.ts``), and is dropped, with a notice, when
  *   it cannot be honoured.
  *
- * - **download**: a file's name is a button that downloads it through
- *   the daemon's ``workspace.file.fetch`` (protocol 1.20, ``app/downloads``).
- *   Deleted files, and every file against an older daemon, stay plain text.
+ * - **open** (#1304 §5): a file's name opens a CONTENT viewer in this panel
+ *   -- fetched through the daemon's ``workspace.file.fetch`` (protocol
+ *   1.20, ``app/downloads``), decoded as text where it is one.  Named a
+ *   content viewer rather than a "diff view" on purpose: the daemon serves
+ *   only the file's CURRENT bytes, there is no historical revision to
+ *   diff against, and calling it a diff would claim a comparison this
+ *   panel cannot draw.  A binary file, or one over the viewer's inline
+ *   size, falls back to Download inside the same viewer.  Deleted files,
+ *   and every file against an older daemon, stay plain (unclickable) text.
  * - **collapse** (TUI Left/Right): the arrow in front of a directory folds
  *   it to one line carrying how many files it holds.  Every directory
  *   starts expanded and a reset expands them all again, as in the TUI.
@@ -31,12 +37,24 @@
  * Entry ids match the TUI's: a directory is its path with a trailing ``/``,
  * a file is its workspace-relative path.  The section header (``Files``
  * and the count) is the rail's; this is the body.
+ *
+ * ``.jaato/`` is hidden BY DEFAULT (#1304 §5) -- a VIEW FILTER, exactly
+ * like the ``hide`` action above, never ``.gitignore``: it is the
+ * session's own metadata directory, noisy on every session, and "what
+ * changed" rarely means it.  It rides the same hidden/show-hidden
+ * machinery an explicit hide already has (``isDefaultHidden`` /
+ * ``effectiveHidden``), so "show hidden" reveals it too, dimmed with the
+ * same ``H`` marker -- and an entry under it can still be shown on its
+ * own via the same hide/unhide button, spelled as a ``!id`` exemption in
+ * the hidden set (the ``scrub_secret_env`` ``!NAME`` idiom), which is
+ * removed again by unhiding it a second time (back to default-hidden).
  */
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { useJaato } from "@/store/store";
 import { toggleWorkspaceIgnore } from "@/app/actions";
 import { visibleFiles } from "@/store/workspaceView";
 import { downloadFromPanel, servesDownloads } from "@/app/downloads";
+import { getClient } from "@/sdk/connection";
 
 interface Node { name: string; path: string; change?: string; children: Map<string, Node> }
 
@@ -65,6 +83,41 @@ export function isHidden(id: string, hidden: readonly string[]): boolean {
   return hidden.some((h) => h === id || (h.endsWith("/") && id.startsWith(h)));
 }
 
+/** The one directory hidden by default -- a view filter, never ``.gitignore``. */
+export const DEFAULT_HIDDEN_ROOT = ".jaato/";
+
+/** True for an entry the panel hides BY DEFAULT (#1304 §5). */
+export function isDefaultHidden(id: string): boolean {
+  return id === DEFAULT_HIDDEN_ROOT || id.startsWith(DEFAULT_HIDDEN_ROOT);
+}
+
+/**
+ * Whether ``id`` is hidden in the panel right now, folding the default
+ * filter into the same explicit hidden set: explicitly hidden, or
+ * default-hidden and not explicitly shown (a ``!id`` exemption in the
+ * hidden set -- see this file's docstring).
+ */
+export function effectiveHidden(id: string, hidden: readonly string[]): boolean {
+  if (hidden.includes(`!${id}`)) return false;
+  if (isHidden(id, hidden)) return true;
+  return isDefaultHidden(id);
+}
+
+/**
+ * The string ``toggleWorkspaceHidden`` should be given to flip ``id``
+ * between shown and hidden, given its CURRENT effective state.  An
+ * explicit hide/unhide toggles ``id`` itself; a default-hidden entry
+ * toggles its ``!id`` exemption instead, so unhiding it never writes a
+ * bare ``id`` that ``isHidden`` would then treat as an explicit hide the
+ * next time the default changes.
+ */
+export function hideToggleId(id: string, hidden: readonly string[]): string {
+  if (hidden.includes(`!${id}`)) return `!${id}`;
+  if (hidden.includes(id)) return id;
+  if (isDefaultHidden(id)) return `!${id}`;
+  return id;
+}
+
 /** Files under a directory node, however deep. */
 export function countFiles(n: Pick<Node, "children">): number {
   let total = 0;
@@ -72,14 +125,14 @@ export function countFiles(n: Pick<Node, "children">): number {
   return total;
 }
 
-/** Files (not directories) that the hide set removes from view. */
+/** Files (not directories) that the hide set (default + explicit) removes from view. */
 export function countHiddenFiles(files: Record<string, string>, hidden: readonly string[]): number {
-  return Object.keys(files).filter((p) => isHidden(p, hidden)).length;
+  return Object.keys(files).filter((p) => effectiveHidden(p, hidden)).length;
 }
 
 const CHANGE_CLS: Record<string, string> = { created: "text-success", added: "text-success", modified: "text-warning", deleted: "text-error" };
 
-function RowActions({ id, hidden, ignored }: { id: string; hidden: boolean; ignored: boolean | undefined }) {
+function RowActions({ id, hidden, hiddenSet, ignored, onView, viewable }: { id: string; hidden: boolean; hiddenSet: readonly string[]; ignored: boolean | undefined; onView?: () => void; viewable: boolean }) {
   const toggleHidden = useJaato((s) => s.toggleWorkspaceHidden);
   // Always drawn, dimmed until the row is hovered or a button focused: a
   // touch screen has no hover, so an action that only appears on hover is
@@ -88,7 +141,12 @@ function RowActions({ id, hidden, ignored }: { id: string; hidden: boolean; igno
   const cls = "font-heading uppercase tracking-[0.08em] text-[10px] px-1 text-text-muted hover:text-steel opacity-60 group-hover:opacity-100 focus:opacity-100";
   return (
     <span className="ml-auto shrink-0 flex gap-1">
-      <button type="button" className={cls} onClick={() => toggleHidden(id)} aria-label={`${hidden ? "Unhide" : "Hide"} ${id}`} title={hidden ? "Show this entry again" : "Hide this entry from the panel (this session only)"}>
+      {viewable && onView && (
+        <button type="button" className={cls} onClick={onView} aria-label={`View ${id}`} title="View this file's current content in the panel">
+          view
+        </button>
+      )}
+      <button type="button" className={cls} onClick={() => toggleHidden(hideToggleId(id, hiddenSet))} aria-label={`${hidden ? "Unhide" : "Hide"} ${id}`} title={hidden ? "Show this entry again" : "Hide this entry from the panel (this session only)"}>
         {hidden ? "unhide" : "hide"}
       </button>
       <button type="button" className={cls} onClick={() => { toggleWorkspaceIgnore(id).catch(() => undefined); }} aria-label={`${ignored ? "Remove" : "Add"} ${id} ${ignored ? "from" : "to"} .gitignore`} title={ignored ? "Remove this entry from the workspace .gitignore" : "Add this entry to the workspace .gitignore"}>
@@ -111,8 +169,12 @@ function DirToggle({ node, id, folded }: { node: Node; id: string; folded: boole
 
 /**
  * A file's row label.  A file that still exists is a button that
- * downloads it (protocol 1.20); a deleted one, or any file against a
- * daemon that cannot serve the download, is plain text.
+ * downloads it (protocol 1.20), unchanged; a deleted one, or any file
+ * against a daemon that cannot serve the download, is plain text.  The
+ * content viewer (#1304 §5) is the SEPARATE ``view`` action in
+ * ``RowActions`` -- keeping the name's own click as a download is what
+ * this file's earlier tests already relied on, and download and view
+ * answer different questions (take the bytes out, vs. read them here).
  */
 function FileLabel({ node }: { node: Node }) {
   const downloadable = useJaato((s) => s.connection.phase === "connected" && servesDownloads(s.connection.protocolVersion));
@@ -128,16 +190,17 @@ function FileLabel({ node }: { node: Node }) {
   );
 }
 
-function Tree({ node, depth, hidden, showHidden, ignored, collapsed }: TreeProps) {
+function Tree({ node, depth, hidden, showHidden, ignored, collapsed, onOpenFile }: TreeProps & { onOpenFile: (path: string) => void }) {
   const entries = [...node.children.values()].sort((a, b) => (a.children.size ? 0 : 1) - (b.children.size ? 0 : 1) || a.name.localeCompare(b.name));
   return (
     <ul className="list-none m-0 p-0">
       {entries.map((n) => {
         const id = entryId(n);
         const isDir = n.children.size > 0;
-        const hid = isHidden(id, hidden);
+        const hid = effectiveHidden(id, hidden);
         if (hid && !showHidden) return null;
         const folded = isDir && collapsed.includes(id);
+        const viewable = !isDir && n.change !== "deleted";
         const label = isDir
           ? <DirToggle node={n} id={id} folded={folded} />
           : <FileLabel node={n} />;
@@ -147,13 +210,41 @@ function Tree({ node, depth, hidden, showHidden, ignored, collapsed }: TreeProps
               {hid && <span className="text-text-muted" title="Hidden">H</span>}
               {label}
               {ignored[id] && <span className="text-text-muted text-[10px]" title="In .gitignore">i</span>}
-              <RowActions id={id} hidden={hid} ignored={ignored[id]} />
+              <RowActions id={id} hidden={hid} hiddenSet={hidden} ignored={ignored[id]} viewable={viewable} onView={viewable ? () => onOpenFile(n.path) : undefined} />
             </div>
-            {isDir && !folded && <Tree node={n} depth={depth + 1} hidden={hidden} showHidden={showHidden} ignored={ignored} collapsed={collapsed} />}
+            {isDir && !folded && <Tree node={n} depth={depth + 1} hidden={hidden} showHidden={showHidden} ignored={ignored} collapsed={collapsed} onOpenFile={onOpenFile} />}
           </li>
         );
       })}
     </ul>
+  );
+}
+
+const MAX_VIEWER_BYTES = 512 * 1024;
+
+interface ViewerState { path: string; status: "loading" | "text" | "binary" | "error"; text?: string; error?: string }
+
+/**
+ * The content viewer (#1304 §5) opened by clicking a file's name: the
+ * file's CURRENT bytes, decoded as text where it is one.  There is no
+ * historical revision on the daemon to diff against, so this is honestly
+ * a content viewer rather than a diff -- see this file's top docstring.
+ */
+function FileContentViewer({ state, onClose }: { state: ViewerState; onClose: () => void }) {
+  return (
+    <div className="mb-2.5 border hairline" data-testid="file-viewer">
+      <div className="flex items-center gap-2 px-2 py-1.5 border-b hairline">
+        <span className="font-mono text-[12px] truncate flex-1" title={state.path}>{state.path}</span>
+        <button type="button" className="link text-[11px]" onClick={() => { void downloadFromPanel(state.path); }}>download</button>
+        <button type="button" className="link text-[11px]" onClick={onClose} aria-label="Close file viewer">close</button>
+      </div>
+      {state.status === "loading" && <div className="px-2 py-2 text-[12px] text-text-muted italic">Loading…</div>}
+      {state.status === "error" && <div className="px-2 py-2 text-[12px] text-error" role="alert">{state.error}</div>}
+      {state.status === "binary" && <div className="px-2 py-2 text-[12px] text-text-muted italic">Binary or oversized -- use download.</div>}
+      {state.status === "text" && (
+        <pre className="m-0 px-2 py-2 text-[11.5px] font-mono whitespace-pre-wrap break-words max-h-64 overflow-auto">{state.text}</pre>
+      )}
+    </div>
   );
 }
 
@@ -183,6 +274,15 @@ function ResetBar({ total, isReset }: { total: number; isReset: boolean }) {
   );
 }
 
+function decodeAsText(data: Uint8Array): string | null {
+  const text = new TextDecoder("utf-8", { fatal: false }).decode(data);
+  // A crude but cheap binary heuristic: a lot of the Unicode replacement
+  // character means the bytes were not valid UTF-8 text.
+  const bad = (text.match(/�/g) ?? []).length;
+  if (data.length > 0 && bad / text.length > 0.02) return null;
+  return text;
+}
+
 export function WorkspacePanel() {
   const files = useVisibleWorkspaceFiles();
   const isReset = useJaato((s) => s.workspaceReset !== null);
@@ -195,16 +295,40 @@ export function WorkspacePanel() {
   const tree = useMemo(() => build(files), [files]);
   const total = Object.keys(files).length;
   const hiddenCount = useMemo(() => countHiddenFiles(files, hidden), [files, hidden]);
+  const [viewer, setViewer] = useState<ViewerState | null>(null);
+
+  const openFile = (path: string) => {
+    setViewer({ path, status: "loading" });
+    void (async () => {
+      try {
+        const { event, data } = await getClient().fetchWorkspaceFile(path);
+        if (!event.ok || !data) { setViewer({ path, status: "error", error: event.error || "could not fetch this file" }); return; }
+        if (data.byteLength > MAX_VIEWER_BYTES) { setViewer({ path, status: "binary" }); return; }
+        const text = decodeAsText(data);
+        setViewer(text == null ? { path, status: "binary" } : { path, status: "text", text });
+      } catch (err) {
+        setViewer({ path, status: "error", error: err instanceof Error ? err.message : String(err) });
+      }
+    })();
+  };
+
   return (
     <div className="px-3.5 py-3">
       {notice && (
         <div role="status" className={`text-[11px] mb-2 ${notice.error ? "text-error" : "text-text-muted"}`}>{notice.text}</div>
       )}
+      {viewer && <FileContentViewer state={viewer} onClose={() => setViewer(null)} />}
       <ResetBar total={total} isReset={isReset} />
-      {total === 0 ? <div className="text-xs text-text-muted italic">{isReset ? "No files changed since the reset." : "No files changed yet."}</div> : <Tree node={tree} depth={0} hidden={hidden} showHidden={showHidden} ignored={ignored} collapsed={collapsed} />}
+      {total === 0 ? (
+        <div className="text-xs text-text-muted italic">
+          {isReset ? "No files changed since the reset." : "No files changed yet."}
+        </div>
+      ) : (
+        <Tree node={tree} depth={0} hidden={hidden} showHidden={showHidden} ignored={ignored} collapsed={collapsed} onOpenFile={openFile} />
+      )}
       {hiddenCount > 0 && (
         <div className="mt-2 text-[11px] text-text-muted flex items-center gap-2">
-          <span>{hiddenCount} hidden</span>
+          <span>{hiddenCount} hidden{showHidden ? "" : ", including .jaato/"}</span>
           <button type="button" className="link" onClick={toggleShowHidden}>{showHidden ? "hide hidden" : "show hidden"}</button>
         </div>
       )}
