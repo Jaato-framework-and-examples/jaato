@@ -11,9 +11,9 @@ const ctx = (over: Partial<Parameters<typeof resolveLeaderKey>[1]> = {}) => ({
 
 describe("resolveLeaderKey: the rail toggles", () => {
   it("P/B/F map to the Plan/Budget/Files rail sections, case-insensitively", () => {
-    expect(resolveLeaderKey("p", ctx())).toEqual({ kind: "toggleUi", key: "showPlan" });
-    expect(resolveLeaderKey("B", ctx())).toEqual({ kind: "toggleUi", key: "showBudget" });
-    expect(resolveLeaderKey("f", ctx())).toEqual({ kind: "toggleUi", key: "showWorkspace" });
+    expect(resolveLeaderKey("p", ctx())).toEqual({ kind: "setActivePanel", id: "plan" });
+    expect(resolveLeaderKey("B", ctx())).toEqual({ kind: "setActivePanel", id: "budget" });
+    expect(resolveLeaderKey("f", ctx())).toEqual({ kind: "setActivePanel", id: "files" });
   });
   it("T toggles tool-call boxes", () => {
     expect(resolveLeaderKey("t", ctx())).toEqual({ kind: "toggleTools" });

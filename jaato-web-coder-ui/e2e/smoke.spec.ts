@@ -1336,7 +1336,11 @@ test("the command palette: Ctrl/⌘+K opens it, search filters, Enter runs, Esca
   await page.getByLabel("Search commands").fill("permissions status");
   await dialog.getByRole("option", { name: /permissions status/ }).click();
   await expect(dialog).toHaveCount(0);
-  await expect(page.getByText("mock: executed permissions status")).toBeVisible();
+  // ``permissions <anything>`` is handled by the mock's own dedicated
+  // branch (the one the permission-status plate's round trip depends on),
+  // which reports ``mock: permissions <args>`` rather than falling
+  // through to the generic ``mock: executed <cmd> <args>`` echo.
+  await expect(page.getByText("mock: permissions status")).toBeVisible();
 });
 
 test("§6: help opens the palette instead of dumping into the transcript", async ({ page }) => {
@@ -1382,7 +1386,9 @@ test("a session that fails to bootstrap turns the status bar red (#1304 §6)", a
   const dot = page.locator(".bg-error").first();
   await expect(page.getByText("no session")).toBeVisible();
   await expect(dot).toBeVisible();
-  await expect(page.getByText("no session")).toHaveAttribute(
+  // The tooltip is on the indicator's OUTER span (dot + text together, one
+  // hover target), not on the "no session" text node itself.
+  await expect(page.locator("span", { hasText: "no session" }).first()).toHaveAttribute(
     "title",
     /RunnerBootstrapFailed: Runner bootstrap failed/,
   );

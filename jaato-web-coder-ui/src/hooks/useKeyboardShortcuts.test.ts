@@ -66,10 +66,10 @@ describe("useKeyboardShortcuts: what replaced them", () => {
     expect(useJaato.getState().paletteOpen).toBe(true);
   });
 
-  it("Ctrl+Shift+W (or Alt+W) still toggles the workspace panel -- Ctrl+W alone is the browser's close-tab", () => {
+  it("Ctrl+Shift+W (or Alt+W) still opens the Files rail panel -- Ctrl+W alone is the browser's close-tab", () => {
     renderHook(() => useKeyboardShortcuts());
-    const before = useJaato.getState().ui.showWorkspace;
+    expect(useJaato.getState().ui.activePanel).toBeNull();
     press("w", { altKey: true });
-    expect(useJaato.getState().ui.showWorkspace).toBe(!before);
+    expect(useJaato.getState().ui.activePanel).toBe("files");
   });
 });

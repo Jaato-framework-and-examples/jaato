@@ -35,7 +35,7 @@ export function CommandPalette() {
   const blocks = useJaato((s) => s.blocks);
   const popupCallId = useJaato((s) => s.ui.popupCallId);
   const setPaletteOpen = useJaato((s) => s.setPaletteOpen);
-  const toggleUi = useJaato((s) => s.toggleUi);
+  const setActivePanel = useJaato((s) => s.setActivePanel);
   const setToolsExpanded = useJaato((s) => s.setToolsExpanded);
   const showTools = useJaato((s) => s.ui.showTools);
   const selectAgent = useJaato((s) => s.selectAgent);
@@ -60,7 +60,7 @@ export function CommandPalette() {
 
   const apply = (effect: LeaderEffect) => {
     switch (effect.kind) {
-      case "toggleUi": toggleUi(effect.key); break;
+      case "setActivePanel": setActivePanel(effect.id); break;
       case "toggleTools": setToolsExpanded(!showTools); break;
       case "selectAgent": selectAgent(effect.id); break;
       case "cyclePopup": setPopup(effect.callId); break;

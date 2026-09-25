@@ -37,7 +37,7 @@
  */
 
 export type LeaderEffect =
-  | { kind: "toggleUi"; key: "showPlan" | "showBudget" | "showWorkspace" }
+  | { kind: "setActivePanel"; id: "plan" | "budget" | "files" }
   | { kind: "toggleTools" }
   | { kind: "selectAgent"; id: string }
   | { kind: "cyclePopup"; callId: string };
@@ -56,10 +56,10 @@ export interface LeaderContext {
   popupCallId: string | null | undefined;
 }
 
-const UI_TOGGLE_KEYS: Record<string, "showPlan" | "showBudget" | "showWorkspace"> = {
-  p: "showPlan",
-  b: "showBudget",
-  f: "showWorkspace",
+const PANEL_KEYS: Record<string, "plan" | "budget" | "files"> = {
+  p: "plan",
+  b: "budget",
+  f: "files",
 };
 
 /** The tab ``[`` / ``]`` step to, wrapping -- or ``null`` with fewer than two tabs, where stepping means nothing. */
@@ -82,8 +82,8 @@ export function agentForDigit(order: string[], digit: number): string | null {
  */
 export function resolveLeaderKey(key: string, ctx: LeaderContext): LeaderEffect | null {
   const k = key.toLowerCase();
-  const uiKey = UI_TOGGLE_KEYS[k];
-  if (uiKey) return { kind: "toggleUi", key: uiKey };
+  const panel = PANEL_KEYS[k];
+  if (panel) return { kind: "setActivePanel", id: panel };
   if (k === "t") return { kind: "toggleTools" };
   if (k === "[" || k === "]") {
     const next = stepAgent(ctx.agentOrder, ctx.selectedAgentId, k === "]" ? 1 : -1);
