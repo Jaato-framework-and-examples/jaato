@@ -892,16 +892,22 @@ class FileEditPlugin(RunnerForwardingMixin):
             "is unique. Never add them pre-emptively or from memory — "
             "'prologue'+'old'+'epilogue' must be an exact substring of the file."
         )
+        instead_of_clause = (
+            " ALWAYS use this instead of `sed -i`, `echo >>`, or rewriting a "
+            "file via shell redirection."
+        )
         if self._allow_full_replace:
             update_desc = (
-                "Update an existing file. Two modes. (1) " + targeted_clause
+                "Update an existing file." + instead_of_clause
+                + " Two modes. (1) " + targeted_clause
                 + " (2) Full replacement: provide 'new_content' to replace the "
                 "entire file."
                 + span_hint
             )
         else:
             update_desc = (
-                "Update an existing file (targeted edit only). " + targeted_clause
+                "Update an existing file (targeted edit only)." + instead_of_clause
+                + " " + targeted_clause
                 + " (Whole-file replacement via 'new_content' is disabled for "
                 "this profile.)"
                 + span_hint
@@ -1015,6 +1021,8 @@ class FileEditPlugin(RunnerForwardingMixin):
             ToolSchema(
                 name="writeNewFile",
                 description="Create a new file with the specified content. "
+                           "ALWAYS use this instead of `touch`, `echo >`, or a "
+                           "shell heredoc (`cat > file <<EOF`) to create a file. "
                            "Fails if the file already exists. "
                            "NOTE: This tool is for NON-TEMPLATED files only. "
                            "If a matching template exists (check listAvailableTemplates), "
@@ -1052,7 +1060,8 @@ class FileEditPlugin(RunnerForwardingMixin):
             ),
             ToolSchema(
                 name="removeFile",
-                description="Delete a file. Creates a backup before deletion so it can be restored "
+                description="Delete a file. ALWAYS use this instead of `rm` CLI command. Creates "
+                           "a backup before deletion so it can be restored "
                            "with undoFileChange if needed.",
                 parameters={
                     "type": "object",
