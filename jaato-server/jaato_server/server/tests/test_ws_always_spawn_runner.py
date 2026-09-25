@@ -198,6 +198,14 @@ class _FakeRouter:
         self._session_manager = _FakeSM()
 
 
+class _FakeEventSinkAdapter:
+    """The real shape (#1299): the daemon loop lives HERE, never as a
+    bare ``_event_loop`` on the server itself."""
+
+    def __init__(self, loop: Any) -> None:
+        self._event_loop = loop
+
+
 def _make_ws_server(
     workspace_root: str,
     apparmor: Optional[_FakeAppArmor],
@@ -211,7 +219,9 @@ def _make_ws_server(
     ws._apparmor = apparmor
     ws._cgroups = None
     ws._workspace_root = workspace_root
-    ws._event_loop = daemon_loop
+    # #1299: the loop lives on _event_sink_adapter, not as a bare
+    # attribute on the server — see _FakeEventSinkAdapter above.
+    ws._event_sink_adapter = _FakeEventSinkAdapter(daemon_loop)
     return ws
 
 
