@@ -24,6 +24,7 @@ from jaato_sdk.plugins.model_provider.types import (
     TokenUsage,
     ToolResult,
     ToolSchema,
+    fold_exclusive_reasoning,
 )
 
 from jaato_server.shared.tool_id_map import id_to_name, name_to_id
@@ -281,12 +282,7 @@ def response_from_api(response_data: Dict[str, Any]) -> ProviderResponse:
 
     # Extract usage metadata
     usage_metadata = response_data.get("usageMetadata", {})
-    usage = TokenUsage(
-        prompt_tokens=usage_metadata.get("promptTokenCount", 0),
-        output_tokens=usage_metadata.get("candidatesTokenCount", 0),
-        total_tokens=usage_metadata.get("totalTokenCount", 0),
-        reasoning_tokens=usage_metadata.get("thoughtsTokenCount", 0),
-    )
+    usage = _usage_from_metadata(usage_metadata)
 
     # Build thinking string
     thinking = "\n".join(thinking_text) if thinking_text else None
@@ -499,12 +495,25 @@ def extract_usage_from_stream_chunk(chunk_data: Dict[str, Any]) -> Optional[Toke
     if not usage_metadata:
         return None
 
-    return TokenUsage(
+    return _usage_from_metadata(usage_metadata)
+
+
+def _usage_from_metadata(usage_metadata: Dict[str, Any]) -> TokenUsage:
+    """``TokenUsage`` from a Gemini-shaped ``usageMetadata`` dict.
+
+    ``thoughtsTokenCount`` is reported BESIDE ``candidatesTokenCount``, not
+    inside it, so it is folded into the output count
+    (:func:`fold_exclusive_reasoning`).  An ABSENT thoughts count stays
+    ``None`` -- the old ``.get(..., 0)`` reported every non-thinking model
+    as one that reasoned for zero tokens (#1047).
+    """
+    usage = TokenUsage(
         prompt_tokens=usage_metadata.get("promptTokenCount", 0),
         output_tokens=usage_metadata.get("candidatesTokenCount", 0),
         total_tokens=usage_metadata.get("totalTokenCount", 0),
-        reasoning_tokens=usage_metadata.get("thoughtsTokenCount", 0),
     )
+    return fold_exclusive_reasoning(
+        usage, usage_metadata.get("thoughtsTokenCount"))
 
 
 def extract_finish_reason_from_stream_chunk(

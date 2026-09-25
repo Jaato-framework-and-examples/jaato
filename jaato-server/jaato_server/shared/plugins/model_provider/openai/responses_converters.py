@@ -56,6 +56,7 @@ from jaato_sdk.plugins.model_provider.types import (
     parse_tool_call_arguments,
     render_result_for_model,
     reported_cache_count,
+    reported_reasoning_count,
 )
 
 from jaato_server.shared.tool_id_map import id_to_name, name_to_id
@@ -351,16 +352,24 @@ def usage_from_responses(usage: Any) -> TokenUsage:
 
     A reported zero is kept as ``0`` rather than folded into ``None`` —
     see :func:`reported_cache_count`.
+
+    Reasoning sits under ``output_tokens_details.reasoning_tokens`` and is
+    already INSIDE ``output_tokens`` — :class:`TokenUsage`'s output
+    convention, so it is recorded and nothing is added (#1047).
     """
     if usage is None:
         return TokenUsage(reported=False)   # nothing measured (#688)
     details = _get(usage, "input_tokens_details")
     cached = _get(details, "cached_tokens") if details is not None else None
+    out_details = _get(usage, "output_tokens_details")
+    reasoning = (_get(out_details, "reasoning_tokens")
+                 if out_details is not None else None)
     return normalize_inclusive_usage(TokenUsage(
         prompt_tokens=_get(usage, "input_tokens") or 0,
         output_tokens=_get(usage, "output_tokens") or 0,
         total_tokens=_get(usage, "total_tokens") or 0,
         cache_read_tokens=reported_cache_count(cached),
+        reasoning_tokens=reported_reasoning_count(reasoning),
     ))
 
 

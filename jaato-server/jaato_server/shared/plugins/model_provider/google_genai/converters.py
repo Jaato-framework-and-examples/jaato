@@ -29,6 +29,7 @@ from jaato_sdk.plugins.model_provider.types import (
     TokenUsage,
     ToolResult,
     ToolSchema,
+    fold_exclusive_reasoning,
     normalize_inclusive_usage,
     reported_cache_count,
 )
@@ -557,6 +558,10 @@ def extract_usage_from_response(response) -> TokenUsage:
     #758).  Google reports no cache-creation count on a response
     (explicit ``CachedContent`` is billed at creation time, on its own
     call), so there is nothing else to remove.
+
+    The OUTPUT side has the mirror-image quirk: ``thoughts_token_count``
+    is reported BESIDE ``candidates_token_count`` rather than inside it,
+    so :func:`fold_exclusive_reasoning` adds it in (issue #1047).
     """
     usage = TokenUsage(reported=False)
 
@@ -569,6 +574,11 @@ def extract_usage_from_response(response) -> TokenUsage:
         usage.prompt_tokens = getattr(metadata, 'prompt_token_count', 0) or 0
         usage.output_tokens = getattr(metadata, 'candidates_token_count', 0) or 0
         usage.total_tokens = getattr(metadata, 'total_token_count', 0) or 0
+        # ``candidates_token_count`` EXCLUDES the thoughts, which Google
+        # bills at the output rate; fold them in so ``output_tokens`` is
+        # everything generated and ``reasoning_tokens`` a subset (#1047).
+        fold_exclusive_reasoning(
+            usage, getattr(metadata, 'thoughts_token_count', None))
 
         # Extract cached content token count (context caching)
         # A reported zero is kept -- see the sibling site in provider.py.

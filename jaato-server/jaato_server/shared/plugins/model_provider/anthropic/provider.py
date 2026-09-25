@@ -1665,10 +1665,12 @@ class AnthropicProvider(ModalityCapabilityMixin):
         # Build thinking string
         thinking = ''.join(accumulated_thinking) if accumulated_thinking else None
 
-        # Estimate thinking tokens from accumulated text (streaming doesn't provide
-        # separate thinking token counts in message_delta)
-        if thinking and usage.thinking_tokens is None:
-            usage.thinking_tokens = max(1, len(thinking) // 4)
+        # Estimate reasoning tokens from accumulated text (streaming doesn't
+        # provide a separate thinking count in message_delta), and say it is
+        # an estimate (#1047).
+        if thinking and usage.reasoning_tokens is None:
+            usage.reasoning_tokens = max(1, len(thinking) // 4)
+            usage.reasoning_tokens_estimated = True
 
         # When cancelled, filter out function_call parts to prevent unpaired tool_use blocks
         # These would cause API errors on next call since there won't be tool_results

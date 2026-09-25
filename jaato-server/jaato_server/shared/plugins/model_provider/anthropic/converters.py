@@ -27,6 +27,7 @@ from jaato_sdk.plugins.model_provider.types import (
     ToolResult,
     ToolSchema,
     render_result_for_model,
+    reported_reasoning_count,
 )
 
 from jaato_server.shared.tool_id_map import id_to_name, name_to_id
@@ -542,14 +543,25 @@ def extract_usage_from_response(response: Any) -> TokenUsage:
 
 
 def _extract_thinking_tokens(resp_usage: Any, response: Any, usage: TokenUsage) -> None:
-    """Extract thinking token count from Anthropic response.
+    """Record the reasoning-token count of an Anthropic response.
 
-    Tries the SDK field first, then estimates from thinking text content.
+    The Messages API reports no separate thinking count today: thinking is
+    billed inside ``output_tokens`` (TokenUsage's convention, so nothing is
+    ever added).  A reported count is read first, from either spelling a
+    future SDK may carry (``usage.output_tokens_details.thinking_tokens`` or
+    a top-level ``usage.thinking_tokens``), and a reported ``0`` is kept.
+    Otherwise the count is ESTIMATED from the thinking blocks' text (~4
+    characters per token) and ``reasoning_tokens_estimated`` says so, so a
+    consumer can tell a guess from a measurement (#1047).
     """
-    # Try SDK field (forward-compatible)
-    thinking_tokens = getattr(resp_usage, "thinking_tokens", None)
-    if thinking_tokens is not None and thinking_tokens > 0:
-        usage.thinking_tokens = thinking_tokens
+    details = getattr(resp_usage, "output_tokens_details", None)
+    reported = reported_reasoning_count(
+        getattr(details, "thinking_tokens", None) if details is not None else None)
+    if reported is None:
+        reported = reported_reasoning_count(
+            getattr(resp_usage, "thinking_tokens", None))
+    if reported is not None:
+        usage.reasoning_tokens = reported
         return
 
     # Estimate from thinking content blocks if present
@@ -561,8 +573,8 @@ def _extract_thinking_tokens(resp_usage: Any, response: Any, usage: TokenUsage) 
                 if text:
                     thinking_text_len += len(text)
         if thinking_text_len > 0:
-            # Rough estimate: ~4 characters per token for English
-            usage.thinking_tokens = max(1, thinking_text_len // 4)
+            usage.reasoning_tokens = max(1, thinking_text_len // 4)
+            usage.reasoning_tokens_estimated = True
 
 
 def _block_as_dict(block: Any) -> Dict[str, Any]:
