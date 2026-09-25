@@ -107,6 +107,30 @@ def _env_flag(name: str) -> bool:
     return os.environ.get(name, "").lower() in ("1", "true", "yes")
 
 
+def _ws_daemon_loop(ws_server: "JaatoWSServer") -> Optional[asyncio.AbstractEventLoop]:
+    """The daemon's running event loop, or ``None`` if it isn't bound yet.
+
+    #1299: ``JaatoWSServer`` has no ``_event_loop`` of its own — the loop
+    is captured on ``self._event_sink_adapter`` (``WSEventSinkAdapter
+    .bind_loop()``, called from ``start()`` before any session can be
+    created). Two call sites read ``ws_server._event_loop`` directly
+    instead, an attribute that does not exist on this class at all: the
+    AppArmor pre-init hook (crashing with ``AttributeError`` on every WS
+    session, caught per-hook and logged rather than aborting, so
+    confinement and the runner spawn silently never ran — live evidence
+    in #1299) and ``_resolve_app_secret_over_bind_channel`` (whose own
+    docstring promises "never raises ... for a closed loop", a promise
+    this bug broke). One helper, so the two call sites cannot drift back
+    into reading two different wrong things.  A module function rather
+    than inlining the ternary at each site: the pre-init hook is already
+    over the complexity ceiling and baselined, and growing a baselined
+    function is a last resort this repository's own ratchet asks
+    contributors to avoid.
+    """
+    adapter = ws_server._event_sink_adapter
+    return adapter._event_loop if adapter is not None else None
+
+
 def _record_bootstrap_refusal(server: Any, reason: str) -> None:
     """#1253: record a bootstrap-outcome refusal on *server*.
 
@@ -1079,7 +1103,9 @@ class JaatoWSServer:
                 )
                 return  # IPC or user-CWD session — not WS-provisioned
 
-            daemon_loop = ws_server._event_loop
+            # #1299: see ``_ws_daemon_loop``'s docstring for why this must
+            # not read ``ws_server._event_loop`` directly.
+            daemon_loop = _ws_daemon_loop(ws_server)
             if daemon_loop is None:
                 logger.warning(
                     "AppArmor pre-init: ws_server has no daemon loop "
@@ -2490,7 +2516,11 @@ class JaatoWSServer:
                 status="unreachable",
                 detail=f"application {app_id!r} has no bind connection",
             )
-        loop = self._event_loop
+        # #1299: see ``_ws_daemon_loop``'s docstring — this docstring
+        # promises "never raises ... for a closed loop", which the bare
+        # ``self._event_loop`` read (an attribute this class does not
+        # have) broke unconditionally.
+        loop = _ws_daemon_loop(self)
         if loop is None:
             return AppSecretAnswer(
                 status="unreachable", detail="WS event loop not running",

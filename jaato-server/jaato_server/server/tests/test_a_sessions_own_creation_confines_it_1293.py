@@ -487,6 +487,14 @@ class _FakeRouterForHook:
         self._session_manager = _FakeSMForHook()
 
 
+class _FakeEventSinkAdapterForHook:
+    """The real shape (#1299): the daemon loop lives HERE, never as a
+    bare ``_event_loop`` on the server itself."""
+
+    def __init__(self, loop: Any) -> None:
+        self._event_loop = loop
+
+
 def _make_ws_server_for_hook(workspace_root: str):
     from jaato_server.server.websocket import JaatoWSServer
 
@@ -494,7 +502,9 @@ def _make_ws_server_for_hook(workspace_root: str):
     ws._apparmor = _FakeAppArmorForHook()
     ws._cgroups = None
     ws._workspace_root = workspace_root
-    ws._event_loop = "<loop>"
+    # #1299: the loop lives on _event_sink_adapter, not as a bare
+    # attribute on the server — see _FakeEventSinkAdapterForHook above.
+    ws._event_sink_adapter = _FakeEventSinkAdapterForHook("<loop>")
     return ws
 
 
