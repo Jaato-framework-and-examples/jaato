@@ -207,6 +207,7 @@ class ToolCallStartedPayload(TypedDict):
     tool_name: str
     tool_args: Dict[str, Any]
     call_id: NotRequired[Optional[str]]
+    tool_class: NotRequired[Optional[str]]
     # Which session this event is about (protocol 1.2+).  Mirrors the
     # base ``Event.session_id``, stamped centrally as the daemon routes;
     # NotRequired because a hand-built payload need not supply it.
@@ -230,6 +231,9 @@ class ToolCallCompletedPayload(TypedDict):
     continuation_id: NotRequired[Optional[str]]
     show_output: NotRequired[Optional[bool]]
     show_popup: NotRequired[Optional[bool]]
+    diff: NotRequired[Optional[str]]
+    diff_truncated: NotRequired[Optional[bool]]
+    path: NotRequired[Optional[str]]
     # Which session this event is about (protocol 1.2+).  Mirrors the
     # base ``Event.session_id``, stamped centrally as the daemon routes;
     # NotRequired because a hand-built payload need not supply it.
