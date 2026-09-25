@@ -17,7 +17,11 @@
  *
  *   "code"      → a streamed answer with a <j-code> block and a <j-table>
  *   "tool"      → a tool call with streamed output, then success
- *   "permit"    → a tool call that asks permission (diff prompt_lines + a warning)
+ *   "permit"    → a tool call that asks permission (diff prompt_lines + a
+ *                 warning, tool_class: "write"); an ALLOW answer's
+ *                 tool.call_end then carries the same diff again, on
+ *                 diff/diff_truncated/path (jaato/#1304 phase 3 -- the
+ *                 inline "Open diff" affordance's real-daemon shape)
  *   "permit-bare" → the same ASK from a tool whose plugin renders no display
  *                 info: no prompt_lines, no warning -- the card falls back to
  *                 the tool arguments
@@ -92,8 +96,11 @@ interface Client {
    *  segment is a control, so the readout has to follow what the plate
    *  just did.  The real daemon re-emits ``permission.status`` after a
    *  ``permissions`` command; this models that loop so the e2e can see
-   *  it. */
-  policy: { effective_default: string; suspension_scope: string | null };
+   *  it.  ``auto_allow_housekeeping`` is jaato/#1304 phase 3 -- a
+   *  reported ``false`` (the framework default) is distinguishable from
+   *  an older daemon's ``undefined``, which is what the store's
+   *  ``?? null`` fallback exists to preserve. */
+  policy: { effective_default: string; suspension_scope: string | null; auto_allow_housekeeping: boolean };
   /**
    * A ``workspace.files.stage_request`` in progress: the daemon reads one
    * BINARY frame per declared file, in order, before answering with
@@ -501,23 +508,61 @@ async function turn(c: Client, text: string, agentId = "main"): Promise<void> {
     const callId = randomUUID();
     const reqId = randomUUID();
     const toolArgs = { path: "src/app.py", content: "print('hi')\n" };
+    // The full DEFAULT_PERMISSION_OPTIONS vocabulary
+    // (jaato_server/shared/plugins/permission/channels.py) -- what a
+    // full-featured profile hands the client, and what
+    // PermissionPrompt's regroup (jaato/#1304 §2) sorts into Allow /
+    // "Allow for…" (t/i/a/all + the destructive never) / Deny / note
+    // (c/yc) / hidden (once).
     const options = [
       { key: "y", label: "yes", description: "allow this call" }, { key: "n", label: "no", description: "deny this call" },
-      { key: "a", label: "always", description: "allow for the rest of the session" }, { key: "t", label: "this turn", description: "allow until the model finishes responding" },
+      { key: "a", label: "always", description: "allow for the rest of the session" }, { key: "t", label: "turn", description: "allow until the model finishes responding" },
+      { key: "i", label: "idle", description: "allow until the session goes idle" },
+      { key: "once", label: "once", description: "allow this one time" },
+      { key: "never", label: "never", description: "deny for the rest of the session" },
+      { key: "all", label: "all", description: "allow every future request" },
+      { key: "c", label: "deny-comment", description: "deny, with feedback the model will see" },
+      { key: "yc", label: "allow-comment", description: "allow, with feedback the model will see" },
     ];
-    send(c, { type: "tool.call_start", agent_id: agentId, tool_name: "write_file", tool_args: toolArgs, call_id: callId });
+    // tool_class (jaato/#1304 phase 3): "write", from
+    // jaato_server.shared.tool_classification.classify_tool -- on both
+    // tool.call_start and permission.requested, the same coarse class.
+    send(c, { type: "tool.call_start", agent_id: agentId, tool_name: "write_file", tool_args: toolArgs, call_id: callId, tool_class: "write" });
     send(c, {
       type: "permission.requested", agent_id: agentId, request_id: reqId, tool_name: "write_file",
-      tool_args: toolArgs, response_options: options,
+      tool_args: toolArgs, response_options: options, tool_class: "write",
       prompt_lines: bare ? null : ["Update file: src/app.py", "--- a/src/app.py", "+++ b/src/app.py", "@@ -1,2 +1,2 @@", "-print('hello')", "+print('hi')", " # end"],
       format_hint: bare ? null : "diff",
       warnings: bare ? null : "The path is outside the sandbox allowlist.", warning_level: bare ? null : "warning",
     });
     send(c, { type: "permission.input_mode", agent_id: agentId, request_id: reqId, tool_name: "write_file", call_id: callId, response_options: options, tool_args: null, editable_metadata: null });
     const answer = String(await waitFor(c, `perm:${reqId}`));
-    const granted = ["y", "a", "t", "i", "once", "all", "yes"].includes(answer.toLowerCase());
+    // A comment-response is "c:<text>" / "yc:<text>" (colon-prefixed) --
+    // like the real channel, the key alone decides ALLOW vs DENY and the
+    // text is feedback carried separately.
+    const answerKey = (answer.includes(":") ? answer.slice(0, answer.indexOf(":")) : answer).toLowerCase();
+    const granted = ["y", "a", "t", "i", "once", "all", "yes", "yc"].includes(answerKey);
     send(c, { type: "permission.resolved", agent_id: agentId, request_id: reqId, tool_name: "write_file", granted, method: "user" });
-    send(c, { type: "tool.call_end", agent_id: agentId, tool_name: "write_file", call_id: callId, success: granted, duration_seconds: 0.21, error_message: granted ? null : "Permission denied by user", show_output: false });
+    // diff / diff_truncated / path (jaato/#1304 phase 3): the SAME
+    // capped unified diff the permission-ask card showed, reused rather
+    // than reimplemented, on tool.call_end -- present only when the write
+    // actually happened.
+    // Nine lines -- one past ``toolPreview.ts``'s own MAX_PREVIEW_LINES (6),
+    // so the client's "Open diff" affordance has something to expand.
+    // ``diff_truncated`` stays false: that flag names the SERVER's own cap
+    // (diff_utils.DEFAULT_MAX_LINES, far larger than this), never the
+    // client's preview length.
+    const toolRowDiff = [
+      "--- a/src/app.py", "+++ b/src/app.py", "@@ -1,5 +1,5 @@",
+      " import sys", "-print('hello')", "+print('hi')", " print('done')", " # end", " # trailer",
+    ].join("\n");
+    send(c, {
+      type: "tool.call_end", agent_id: agentId, tool_name: "write_file", call_id: callId, success: granted,
+      duration_seconds: 0.21, error_message: granted ? null : "Permission denied by user", show_output: false,
+      diff: granted ? toolRowDiff : null,
+      diff_truncated: granted ? false : null,
+      path: granted ? "src/app.py" : null,
+    });
     // WorkspaceFilesChangedEvent.changes carries {path, status} — the daemon's key.
     if (granted) emitWorkspaceChanges(c, [{ path: "src/app.py", status: "modified" }, { path: ".jaato/logs/session.log", status: "created" }]);
     await stream(c, agentId, granted ? `Written (you answered \`${answer}\`).` : "Understood, not writing the file.");
@@ -637,7 +682,7 @@ wss.on("connection", (ws, req) => {
   const c: Client = {
     ws, id: `client_${++clientSeq}`, sessionId: null, pending: new Map(), ignored: new Set(),
     selected: null, provisioned: false, staging: null, clientTools: new Set(),
-    policy: { effective_default: "ask", suspension_scope: null },
+    policy: { effective_default: "ask", suspension_scope: null, auto_allow_housekeeping: false },
     installedIntegrations: new Set(),
   };
   send(c, { type: "connected", protocol_version: "1.25", server_info: { server_version: "mock-0.0.1", client_id: randomUUID(), max_message_size: MAX_MESSAGE_SIZE, stage_per_file_limit: Math.min(STAGE_PER_FILE_LIMIT, MAX_MESSAGE_SIZE), stage_total_limit: STAGE_TOTAL_LIMIT } });
@@ -790,7 +835,7 @@ wss.on("connection", (ws, req) => {
           // which is what the daemon does and is why it differs from the
           // one a fresh session starts on.  Adopted as this connection's
           // policy so the plate goes on agreeing with the bar.
-          c.policy = { effective_default: "allow", suspension_scope: null };
+          c.policy = { effective_default: "allow", suspension_scope: null, auto_allow_housekeeping: false };
           send(c, { type: "permission.status", ...c.policy });
         } else if (cmd === "session.profiles") {
           // ``bootstrap-fail`` is a scenario profile (#1304 §6): picking it

@@ -105,6 +105,30 @@ describe("buildTranscript", () => {
     expect(group!.label).toContain("createPlan ×2");
   });
 
+  it("prefers a call's own server-reported tool_class over the client table (jaato/#1304 phase 3)", () => {
+    // "store_memory" has no opinion in the client table (classifyTool would
+    // answer "other") -- the daemon's answer is what must win, so this
+    // call folds into the housekeeping run rather than getting its own row.
+    const blocks: OutputBlock[] = [
+      tool("createPlan"),
+      tool("store_memory", "success", { toolClass: "housekeeping" }),
+    ];
+    const items = buildTranscript(blocks, {});
+    const groups = items.filter((i): i is ToolGroupItem => i.kind === "toolGroup");
+    expect(groups).toHaveLength(1);
+    expect(groups[0]!.mode).toBe("fold");
+    expect(groups[0]!.toolClass).toBe("housekeeping");
+    expect(groups[0]!.calls).toHaveLength(2);
+  });
+
+  it("falls back to the client table for a call the daemon reported no class for", () => {
+    const blocks: OutputBlock[] = [tool("store_memory")];
+    const items = buildTranscript(blocks, {});
+    const [group] = items.filter((i): i is ToolGroupItem => i.kind === "toolGroup");
+    expect(group!.mode).toBe("row");
+    expect(group!.toolClass).toBe("other");
+  });
+
   it("only pairs a failure with a LATER success of the SAME tool, not a different one", () => {
     const blocks: OutputBlock[] = [tool("readFile", "error"), tool("writeNewFile", "success"), tool("readFile", "success")];
     const items = buildTranscript(blocks, {});

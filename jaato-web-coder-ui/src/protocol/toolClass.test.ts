@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { classifyTool } from "./toolClass";
+import { classifyTool, resolveToolClass } from "./toolClass";
 
 describe("classifyTool", () => {
   it("classes the issue's own housekeeping list", () => {
@@ -34,5 +34,23 @@ describe("classifyTool", () => {
     expect(classifyTool("mcp__server__tool")).toBe("other");
     expect(classifyTool("store_memory")).toBe("other");
     expect(classifyTool("call_service")).toBe("other");
+  });
+});
+
+describe("resolveToolClass (jaato/#1304 phase 3)", () => {
+  it("prefers the daemon's own tool_class over the client table", () => {
+    // The daemon's answer for a name the client table does NOT have an
+    // opinion about -- proves the table is not consulted at all when the
+    // server reported something.
+    expect(resolveToolClass("store_memory", "write")).toBe("write");
+  });
+
+  it("falls back to the client table when the daemon reported nothing", () => {
+    expect(resolveToolClass("createPlan", null)).toBe("housekeeping");
+    expect(resolveToolClass("createPlan", undefined)).toBe("housekeeping");
+  });
+
+  it("falls back rather than trusting a value outside the closed vocabulary", () => {
+    expect(resolveToolClass("createPlan", "not-a-real-class")).toBe("housekeeping");
   });
 });

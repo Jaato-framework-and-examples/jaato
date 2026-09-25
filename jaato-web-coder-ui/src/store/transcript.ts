@@ -12,7 +12,7 @@
  * exception below) a plain ``Map`` the caller owns.
  */
 import type { OutputBlock, ToolBlock } from "./types";
-import { classifyTool, type ToolClass } from "@/protocol/toolClass";
+import { resolveToolClass, type ToolClass } from "@/protocol/toolClass";
 
 export interface UserMessageItem {
   kind: "userMessage";
@@ -152,7 +152,10 @@ function foldSummary(calls: readonly ToolBlock[], names: readonly string[]): str
  */
 function flushToolRun(run: ToolBlock[], names: string[], agentId: string): ToolGroupItem[] {
   if (run.length === 0) return [];
-  const classes = names.map(classifyTool);
+  // Prefer the daemon's own classification (jaato/#1304 phase 3) per call,
+  // falling back to the client table for a call an older daemon reported
+  // with no ``tool_class`` at all.
+  const classes = run.map((c, i) => resolveToolClass(names[i]!, c.toolClass));
   const recoveries = pairRecoveries(run, names);
   const failedIdx = new Set(recoveries.map(([f]) => f));
   const recoveredAt = new Map(recoveries.map(([f, r]) => [r, f]));

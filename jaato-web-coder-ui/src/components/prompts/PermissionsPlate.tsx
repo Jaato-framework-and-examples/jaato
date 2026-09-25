@@ -105,6 +105,17 @@ export function PermissionsPlate({ onClose, anchor }: {
               Prompting is suspended, so the default is not being consulted.
             </p>
           )}
+          {/* jaato/#1304 phase 3: `auto_allow_housekeeping` on
+              PermissionStatusEvent, via the existing session.get_permission_status
+              verb -- shown only when the daemon reports it TRUE. `false` and
+              `null` (older daemon, or the enforcer could not be reached) say
+              nothing extra here; the default line above is already accurate
+              for both. */}
+          {status?.autoAllowHousekeeping === true && (
+            <p className="m-0 mt-1.5 text-[11px] text-text-muted">
+              Read-only, low-risk tools are auto-approved regardless of the default above.
+            </p>
+          )}
         </div>
 
         <div className="px-3.5 py-2.5 border-b hairline">

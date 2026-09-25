@@ -301,6 +301,55 @@ test("the agent tab says what that agent is doing, including a prompt waiting on
   await expect(main).toHaveAttribute("title", /idle/);
 });
 
+test("the regrouped permission card: 'Allow for…' grants a scoped duration, and a granted write's diff shows inline with Open diff (jaato/#1304 §2, phase 3)", async ({ page }) => {
+  await openSession(page);
+  await composer(page).fill("permit");
+  await composer(page).press("Enter");
+  await expect(page.getByText("Permission requested for")).toBeVisible();
+  // The risk tag + plain question -- computed from the daemon's own
+  // tool_class ("write"), not the client's fallback table.
+  await expect(page.getByText("Changes a file")).toBeVisible();
+  await expect(page.getByText("Let the agent change this file?")).toBeVisible();
+  // Allow / Deny are unchanged -- and the durations are NOT top-level
+  // buttons, they live in the dropdown.
+  await expect(page.getByRole("button", { name: /^turn t$/ })).toHaveCount(0);
+  const dropdown = page.getByRole("button", { name: /Allow for/ });
+  await dropdown.click();
+  await expect(page.getByRole("menu", { name: /Allow for a scope/ })).toBeVisible();
+  await page.getByRole("menuitem", { name: /^turn t$/ }).click();
+  await expect(page.getByText("Written (you answered")).toBeVisible();
+  // The tool row's own diff (tool.call_end, phase 3) -- always shown for
+  // a write, not behind the row's own expand toggle -- with "Open diff"
+  // since the mock's diff runs past the client's 6-line preview cap.
+  const row = page.getByTestId("tool-block").filter({ hasText: "write_file" });
+  await expect(row.locator(".diff-add", { hasText: "print('hi')" })).toBeVisible();
+  const openDiff = row.getByRole("button", { name: "Open diff" });
+  await expect(openDiff).toBeVisible();
+  await expect(row.getByText("# trailer")).toHaveCount(0);
+  await openDiff.click();
+  await expect(row.getByRole("button", { name: "Collapse diff" })).toBeVisible();
+  await expect(row.getByText("# trailer")).toBeVisible();
+});
+
+test("the regrouped permission card: a note sent with Allow reaches the transcript as feedback, and hidden options are behind More…", async ({ page }) => {
+  await openSession(page);
+  await composer(page).fill("permit");
+  await composer(page).press("Enter");
+  await expect(page.getByText("Permission requested for")).toBeVisible();
+  // once/edit are hidden until "More…" is opened.
+  await expect(page.getByRole("button", { name: /^once once$/ })).toHaveCount(0);
+  await page.getByText("More…").click();
+  await expect(page.getByRole("button", { name: /^once once$/ })).toBeVisible();
+  await page.getByText("Fewer options").click();
+  await expect(page.getByRole("button", { name: /^once once$/ })).toHaveCount(0);
+  // A note turns Allow into "yc:<text>" -- feedback the model reads back,
+  // not the plain "y" key.
+  await page.getByText("+ Add a note").click();
+  await page.getByPlaceholder(/the model reads this back/).fill("looks fine, double check the perms");
+  await page.getByRole("button", { name: /^yes y$/ }).click();
+  await expect(page.getByText(/you answered.*yc:looks fine/)).toBeVisible();
+});
+
 test("batch clarification walks its questions and replies once", async ({ page }) => {
   await openSession(page);
   await composer(page).fill("ask");

@@ -19,6 +19,7 @@ import { clampRailWidth, loadRailWidth, saveRailWidth } from "@/store/railWidth"
 import { loadRailSplits, sanitizeSplits, saveRailSplits, type RailSplits } from "@/store/railSplits";
 import { applyChanged, applySnapshot, markReset, type WorkspaceReset } from "@/store/workspaceView";
 import { toolIdMappings } from "@/protocol/toolIds";
+import type { ToolClass } from "@/protocol/toolClass";
 import { faultFromError, type SessionFault } from "@/protocol/sessionFault";
 import { clampStallThreshold, DEFAULT_STALL_THRESHOLD_MS } from "@/store/phase";
 import type { RailPanelId } from "@/store/railSplits";
@@ -231,7 +232,7 @@ export interface JaatoState {
   /** Files attached from the browser, in the order they were picked (see ``StagedUpload``). */
   uploads: StagedUpload[];
   /** ``PermissionStatusEvent``: the effective default policy and, when suspended, the scope. */
-  permissionStatus?: { effectiveDefault: string; suspensionScope: string | null } | null;
+  permissionStatus?: { effectiveDefault: string; suspensionScope: string | null; autoAllowHousekeeping: boolean | null } | null;
   /**
    * When each agent became busy, for the phase indicator's elapsed clock.
    * Set the moment the daemon reports ``active`` (or the composer sends,
@@ -546,6 +547,7 @@ function upsertPermission(s: JaatoState, ev: AnyEvent, inputMode: boolean): void
     editableMetadata: (ev.editable_metadata as Record<string, unknown> | null | undefined) ?? existing?.editableMetadata ?? null,
     focus: existing?.focus ?? 0,
     inputMode: inputMode || (existing?.inputMode ?? false),
+    toolClass: (ev.tool_class as ToolClass | null | undefined) ?? existing?.toolClass ?? null,
   };
   s.permissions = existing
     ? s.permissions.map((p) => (p.requestId === requestId ? merged : p))
@@ -716,6 +718,7 @@ export function reduce(s: JaatoState, raw: JaatoEvent): JaatoState {
         output: "",
         media: [],
         expanded: s.ui.showTools,
+        toolClass: (ev.tool_class as ToolClass | null | undefined) ?? null,
       };
       setBlocks(s, agentId, [...(s.blocks[agentId] ?? []), block]);
       s.toolOwner = { ...s.toolOwner, [callId]: agentId };
@@ -736,6 +739,9 @@ export function reduce(s: JaatoState, raw: JaatoEvent): JaatoState {
         showOutput: ev.show_output === true,
         showPopup: ev.show_popup === true,
         expanded: t.expanded || ev.show_output === true || !ok,
+        diff: (ev.diff as string | null | undefined) ?? null,
+        diffTruncated: (ev.diff_truncated as boolean | null | undefined) ?? null,
+        path: (ev.path as string | null | undefined) ?? null,
       }));
       if (!found) {
         // End without a start (reconnect mid-call): synthesise a finished block.
@@ -812,10 +818,14 @@ export function reduce(s: JaatoState, raw: JaatoEvent): JaatoState {
     }
     case EventTypeValue.PERMISSION_STATUS:
       // PermissionStatusEvent carries effective_default ("allow" | "deny" |
-      // "ask") and suspension_scope ("turn" | "idle" | "session" | null).
+      // "ask"), suspension_scope ("turn" | "idle" | "session" | null) and
+      // auto_allow_housekeeping (jaato/#1304 phase 3) -- null there means
+      // "not reported" (an older daemon), never "off"; a measured false
+      // is what "off" looks like.
       s.permissionStatus = {
         effectiveDefault: String(ev.effective_default ?? "ask"),
         suspensionScope: (ev.suspension_scope as string | null | undefined) ?? null,
+        autoAllowHousekeeping: (ev.auto_allow_housekeeping as boolean | null | undefined) ?? null,
       };
       break;
     case EventTypeValue.SESSION_LIST: {

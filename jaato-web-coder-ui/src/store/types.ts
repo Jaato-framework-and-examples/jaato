@@ -6,6 +6,7 @@
  * clients present the same session the same way.
  */
 import type { ToolCallSummary } from "@/protocol/turnStats";
+import type { ToolClass } from "@/protocol/toolClass";
 
 export interface MediaItem {
   mimeType: string;
@@ -84,6 +85,31 @@ export interface ToolBlock {
   output: string;
   media: MediaItem[];
   expanded: boolean;
+  /**
+   * The daemon's own classification (``ToolCallStartEvent.tool_class``,
+   * jaato/#1304 phase 3), when this daemon sends one.  ``null`` means
+   * "not reported" -- an older daemon, or a call the table itself has no
+   * opinion about -- and every reader falls back to
+   * ``protocol/toolClass.classifyTool`` on the display name, never
+   * treating absence as ``"other"`` (that would collapse "the daemon
+   * said nothing" into "the daemon said unclassified").
+   */
+  toolClass?: ToolClass | null;
+  /**
+   * A capped unified diff for a file-writer call (``ToolCallEndEvent.diff``,
+   * jaato/#1304 phase 3) -- the SAME text ``generate_unified_diff`` /
+   * ``generate_new_file_diff`` compute server-side, so ``DiffLines`` can
+   * render it directly.  ``null`` when the daemon sent none (an older
+   * daemon, a tool that is not a file writer, or a best-effort read that
+   * failed server-side) -- never fabricated from the call's own
+   * arguments; that fallback lives in ``protocol/toolPreview.ts`` and is
+   * used only when this is absent.
+   */
+  diff?: string | null;
+  /** Whether ``diff`` was capped -- render a truncation note, never a fabricated line count. */
+  diffTruncated?: boolean | null;
+  /** The path ``diff`` is about, echoed from the tool's own result. */
+  path?: string | null;
 }
 
 export type OutputBlock = TextBlock | UserBlock | SystemBlock | ToolBlock;
@@ -116,6 +142,13 @@ export interface PendingPermission {
   /** Keyboard focus among ``options`` (Tab cycles, like the TUI). */
   focus: number;
   inputMode: boolean;
+  /**
+   * The daemon's classification of the tool being asked about
+   * (``PermissionRequestedEvent.tool_class``, jaato/#1304 phase 3) --
+   * what the card's risk tag reads.  ``null`` falls back to
+   * ``classifyTool(toolName)`` the same way ``ToolBlock.toolClass`` does.
+   */
+  toolClass?: ToolClass | null;
 }
 
 /**
