@@ -42,8 +42,8 @@ vi.mock("@/app/actions", () => ({
 }));
 vi.mock("@/app/exitChoice", () => ({ requestExit: () => Promise.resolve() }));
 
-function withStatus(effectiveDefault: string, suspensionScope: string | null = null) {
-  useJaato.setState({ permissionStatus: { effectiveDefault, suspensionScope } });
+function withStatus(effectiveDefault: string, suspensionScope: string | null = null, autoAllowHousekeeping: boolean | null = null) {
+  useJaato.setState({ permissionStatus: { effectiveDefault, suspensionScope, autoAllowHousekeeping } });
 }
 
 beforeEach(() => {
@@ -95,6 +95,20 @@ describe("the plate runs the command", () => {
     realClick(screen.getByTestId("permission-status"));
     fireEvent.click(screen.getByRole("button", { name: "This turn" }));
     expect(submitted).toEqual(["permissions suspend --turn"]);
+  });
+
+  it("names auto_allow_housekeeping (jaato/#1304 phase 3) only when the daemon reports it TRUE", () => {
+    withStatus("ask", null, true);
+    render(<StatusBar />);
+    realClick(screen.getByTestId("permission-status"));
+    expect(screen.getByText(/auto-approved/)).toBeTruthy();
+  });
+
+  it("says nothing extra when the daemon reports auto_allow_housekeeping false or omits it", () => {
+    withStatus("ask", null, false);
+    render(<StatusBar />);
+    realClick(screen.getByTestId("permission-status"));
+    expect(screen.queryByText(/auto-approved/)).toBeNull();
   });
 
   it("offers Resume instead once prompting IS suspended, and says the default is moot", () => {

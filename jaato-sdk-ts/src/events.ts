@@ -1672,6 +1672,7 @@ export type SessionId9 = string;
 export type AgentId7 = string;
 export type ToolName = string;
 export type CallId = string | null;
+export type ToolClass = string | null;
 /**
  * All event types in the protocol.
  */
@@ -1831,6 +1832,9 @@ export type Backgrounded = boolean;
 export type ContinuationId = string | null;
 export type ShowOutput = boolean | null;
 export type ShowPopup = boolean | null;
+export type Diff = string | null;
+export type DiffTruncated = boolean | null;
+export type Path = string | null;
 /**
  * All event types in the protocol.
  */
@@ -2146,6 +2150,7 @@ export type PromptLines = string[] | null;
 export type FormatHint = string | null;
 export type Warnings = string | null;
 export type WarningLevel = string | null;
+export type ToolClass1 = string | null;
 /**
  * All event types in the protocol.
  */
@@ -2610,6 +2615,7 @@ export type Timestamp15 = string;
 export type SessionId15 = string;
 export type EffectiveDefault = string;
 export type SuspensionScope = string | null;
+export type AutoAllowHousekeeping = boolean | null;
 /**
  * All event types in the protocol.
  */
@@ -13866,7 +13872,7 @@ export type EventType89 =
 export type Timestamp89 = string;
 export type SessionId89 = string;
 export type Name4 = string;
-export type Path = string;
+export type Path1 = string;
 /**
  * All event types in the protocol.
  */
@@ -15220,7 +15226,7 @@ export type EventType98 =
   | "gates.snapshot";
 export type Timestamp98 = string;
 export type SessionId98 = string;
-export type Path1 = string;
+export type Path2 = string;
 export type Ignored = boolean;
 export type Ok6 = boolean;
 export type Error14 = string;
@@ -16154,7 +16160,7 @@ export type EventType104 =
 export type Timestamp104 = string;
 export type SessionId104 = string;
 export type RequestId33 = string;
-export type Path2 = string;
+export type Path3 = string;
 export type MetadataOnly = boolean;
 /**
  * All event types in the protocol.
@@ -16305,7 +16311,7 @@ export type Timestamp105 = string;
 export type SessionId105 = string;
 export type RequestId34 = string;
 export type Ok10 = boolean;
-export type Path3 = string;
+export type Path4 = string;
 export type Name9 = string;
 export type Size1 = number;
 export type MimeType1 = string;
@@ -21751,6 +21757,7 @@ export interface ToolCallStartEvent {
   tool_name?: ToolName;
   tool_args?: ToolArgs;
   call_id?: CallId;
+  tool_class?: ToolClass;
 }
 export interface ToolArgs {
   [k: string]: unknown;
@@ -21774,6 +21781,9 @@ export interface ToolCallEndEvent {
   continuation_id?: ContinuationId;
   show_output?: ShowOutput;
   show_popup?: ShowPopup;
+  diff?: Diff;
+  diff_truncated?: DiffTruncated;
+  path?: Path;
 }
 /**
  * Live output chunk from a running tool (tail -f style).
@@ -21858,6 +21868,7 @@ export interface PermissionRequestedEvent {
   format_hint?: FormatHint;
   warnings?: Warnings;
   warning_level?: WarningLevel;
+  tool_class?: ToolClass1;
 }
 export interface ToolArgs1 {
   [k: string]: unknown;
@@ -21926,6 +21937,7 @@ export interface PermissionStatusEvent {
   session_id?: SessionId15;
   effective_default?: EffectiveDefault;
   suspension_scope?: SuspensionScope;
+  auto_allow_housekeeping?: AutoAllowHousekeeping;
 }
 /**
  * Clarification session has started.
@@ -23376,7 +23388,7 @@ export interface WorkspaceCreatedEvent {
   timestamp?: Timestamp89;
   session_id?: SessionId89;
   name?: Name4;
-  path?: Path;
+  path?: Path1;
   workspace?: Workspace;
 }
 export interface Workspace {
@@ -23533,7 +23545,7 @@ export interface WorkspaceIgnoreResultEvent {
   type?: EventType98;
   timestamp?: Timestamp98;
   session_id?: SessionId98;
-  path?: Path1;
+  path?: Path2;
   ignored?: Ignored;
   ok?: Ok6;
   error?: Error14;
@@ -23860,7 +23872,7 @@ export interface WorkspaceFileFetchRequest {
   timestamp?: Timestamp104;
   session_id?: SessionId104;
   request_id?: RequestId33;
-  path?: Path2;
+  path?: Path3;
   metadata_only?: MetadataOnly;
 }
 /**
@@ -23890,7 +23902,7 @@ export interface WorkspaceFileContentEvent {
   session_id?: SessionId105;
   request_id?: RequestId34;
   ok?: Ok10;
-  path?: Path3;
+  path?: Path4;
   name?: Name9;
   size?: Size1;
   mime_type?: MimeType1;

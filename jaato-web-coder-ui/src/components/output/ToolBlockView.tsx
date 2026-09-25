@@ -9,16 +9,19 @@
  * calls open by default; successful ones honour the server's
  * ``show_output`` hint.
  *
- * ``toolClass`` (jaato/#1304 §1) adds two class-specific extras, both
- * built from what the CLIENT already has -- the call's own arguments and
- * its accumulated output -- because neither a ``diff`` field on
- * ``tool.call_end`` nor a workspace diff viewer exists yet (see
- * ``protocol/toolPreview.ts``'s own docstring for that gap):
+ * ``toolClass`` (jaato/#1304 §1) adds two class-specific extras:
  *
  * - ``write``: an inline diff/content preview, always shown (not behind
  *   the expand toggle -- a write is exactly the row a reviewer wants to
- *   see without a click), with an "Open diff" action that downloads the
- *   current file until a real diff viewer exists.
+ *   see without a click).  ``updateFile`` / ``writeNewFile`` carry a REAL
+ *   server-computed ``diff`` on ``tool.call_end`` (phase 3) -- shown
+ *   capped to a few lines with an "Open diff" button that EXPANDS it
+ *   inline, since the daemon already sent the whole (capped) text.  A
+ *   write-shaped tool with no server diff (an older daemon, or one of
+ *   the handful this tree does not compute one for) falls back to a
+ *   preview built from the call's OWN arguments, whose "Open diff"
+ *   downloads the current file instead -- no workspace diff viewer
+ *   exists yet (see ``protocol/toolPreview.ts``'s own docstring).
  * - ``exec``: the command itself as the row's title (rather than a
  *   generic argument summary) and, while collapsed, a trailing-lines
  *   preview of its output with a "Copy output" action that copies the
@@ -42,8 +45,8 @@ import { MediaView } from "./MediaView";
 import { hasServerMarkup, JMarkup, DiffLines } from "./JMarkup";
 import { resolveToolArgs } from "@/protocol/toolIds";
 import { downloadWorkspaceFile, OFFER_DOWNLOAD_TOOL } from "@/app/downloads";
-import { classifyTool, type ToolClass } from "@/protocol/toolClass";
-import { diffPreviewForCall, execOutputPreview, execTitle } from "@/protocol/toolPreview";
+import { resolveToolClass, type ToolClass } from "@/protocol/toolClass";
+import { diffPreviewForCall, execOutputPreview, execTitle, splitServerDiff } from "@/protocol/toolPreview";
 
 export function summarizeArgs(args: Record<string, unknown>, max = 110): string {
   const parts: string[] = [];
@@ -93,14 +96,20 @@ export const ToolBlockView = memo(function ToolBlockView({ block, toolClass }: {
   // Hashed tool / category ids in the arguments, shown by name (protocol/toolIds.ts).
   const toolIdNames = useJaato((s) => s.toolIdNames);
   const setPopup = useJaato((s) => s.setPopup);
+  const [diffOpen, setDiffOpen] = useState(false);
   const displayName = toolIdNames[block.toolName] ?? block.toolName;
-  const cls = toolClass ?? classifyTool(displayName);
+  const cls = toolClass ?? resolveToolClass(displayName, block.toolClass);
   const resolvedArgs = resolveToolArgs(block.args, toolIdNames);
   const hasBody = block.output.length > 0 || block.media.length > 0 || !!block.errorMessage;
   const offered = displayName === OFFER_DOWNLOAD_TOOL && block.status === "success" && typeof block.args.path === "string" ? block.args.path : null;
   const running = block.status === "running";
 
-  const diff = cls === "write" ? diffPreviewForCall(displayName, resolvedArgs) : null;
+  // The REAL server diff (jaato/#1304 phase 3), when this call has one --
+  // preferred over the client-synthesized preview below, which stays as
+  // the fallback for an older daemon or a write-shaped tool with no
+  // server diff (see ``toolPreview.ts``'s own docstring).
+  const serverDiff = cls === "write" && block.diff ? splitServerDiff(block.diff) : null;
+  const diff = !serverDiff && cls === "write" ? diffPreviewForCall(displayName, resolvedArgs) : null;
   const hasDiffPreview = !!diff && (diff.diffLines !== null || diff.text !== null);
   const execTail = cls === "exec" && block.output && !block.expanded ? execOutputPreview(block.output) : null;
   const title = cls === "exec" ? execTitle(displayName, resolvedArgs) : null;
@@ -147,6 +156,27 @@ export const ToolBlockView = memo(function ToolBlockView({ block, toolClass }: {
           <span className="w-[52px]" />
         )}
       </button>
+      {serverDiff && (
+        <div className="ml-6 mr-1 mb-1.5">
+          <div className="flex items-center justify-between px-0.5 pb-0.5">
+            <span className="font-mono text-[10px] text-text-muted truncate">
+              {block.path ?? ""}
+              {block.diffTruncated ? " (capped by the server)" : ""}
+            </span>
+            {serverDiff.needsExpand && (
+              <button
+                type="button"
+                className="link text-[11px] shrink-0"
+                onClick={(e) => { e.stopPropagation(); setDiffOpen((v) => !v); }}
+                aria-expanded={diffOpen}
+              >
+                {diffOpen ? "Collapse diff" : "Open diff"}
+              </button>
+            )}
+          </div>
+          <DiffLines lines={diffOpen ? serverDiff.fullLines : serverDiff.previewLines} />
+        </div>
+      )}
       {hasDiffPreview && (
         <div className="ml-6 mr-1 mb-1.5">
           <div className="flex items-center justify-between px-0.5 pb-0.5">

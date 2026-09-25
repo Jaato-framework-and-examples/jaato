@@ -1,22 +1,26 @@
 /**
  * Best-effort previews for a tool row, from data the CLIENT already has
- * -- the call's own arguments and its accumulated output.  Two gaps this
- * intentionally does not paper over:
+ * -- the call's own arguments and its accumulated output.
  *
- * - jaato/#1304's own "Server changes needed" list still asks for a
- *   ``diff`` (unified, capped) field on ``tool.call_end`` for file
- *   writers, not shipped (Phase 3).  Until then there is no unified diff
- *   to show, only the arguments the model itself passed -- which, for a
- *   TARGETED edit (``updateFile`` with ``old``/``new``,
- *   ``findAndReplace``, one entry of ``multiFileEdit``), already ARE a
- *   before/after pair, so a small diff-shaped preview is honest to build
- *   from them.  A full rewrite (``writeNewFile``, or ``updateFile`` in
- *   its whole-file ``new_content`` mode) has no "before" the client
- *   holds, so the preview is the new content's head, unmarked as a diff.
- * - No diff VIEWER exists anywhere in this client yet (the Files panel's
- *   file names only download, ``docs/sdk-file-staging.md``). "Open diff"
- *   is therefore wired to the same download affordance until one is
- *   built -- see the PR description for this gap.
+ * ``updateFile`` / ``writeNewFile`` now carry a REAL server-computed
+ * ``diff`` on ``tool.call_end`` (jaato/#1304 phase 3,
+ * ``jaato_server.shared.plugins.file_edit.diff_utils``), and
+ * ``ToolBlockView`` prefers it -- ``diffPreviewForCall`` below is read
+ * only as the fallback for an older daemon, or for a write-shaped tool
+ * this codebase has no server diff for at all (``findAndReplace``,
+ * ``moveFile`` / ``renameFile``, ``restoreFile`` / ``undoFileChange``,
+ * ``removeFile``).  For a TARGETED edit (``updateFile`` with
+ * ``old``/``new``) the call's own arguments already ARE a before/after
+ * pair, so a small diff-shaped preview is honest to build from them.  A
+ * full rewrite (``writeNewFile``, or ``updateFile`` in its whole-file
+ * ``new_content`` mode) has no "before" the client holds, so the
+ * fallback preview is the new content's head, unmarked as a diff.
+ *
+ * No diff VIEWER exists anywhere in this client yet (the Files panel's
+ * file names only download, ``docs/sdk-file-staging.md``), so the
+ * fallback's "Open diff" stays wired to the download affordance;
+ * ``ToolBlockView``'s server-diff path instead EXPANDS the diff inline,
+ * since the daemon already sent the whole (capped) text.
  */
 
 const MAX_PREVIEW_LINES = 6;
@@ -28,6 +32,29 @@ function truncateLines(text: string, maxLines = MAX_PREVIEW_LINES): { text: stri
   let out = lines.slice(0, maxLines).join("\n");
   if (out.length > MAX_PREVIEW_CHARS) out = out.slice(0, MAX_PREVIEW_CHARS);
   return { text: out, truncated };
+}
+
+export interface ServerDiffPreview {
+  /** Every line of the server's diff, split for ``DiffLines``. */
+  fullLines: string[];
+  /** The first ``MAX_PREVIEW_LINES`` of ``fullLines`` -- what shows before "Open diff". */
+  previewLines: string[];
+  /** Whether ``previewLines`` is shorter than ``fullLines`` -- an "Open diff" affordance is needed. */
+  needsExpand: boolean;
+}
+
+/**
+ * Splits a server-computed unified diff (``ToolCallEndEvent.diff``) into a
+ * short preview and the full text, so a long diff shows a few lines
+ * before asking for a click rather than filling the transcript.  This is
+ * a CLIENT-side display cap on top of the server's own truncation
+ * (``ToolCallEndEvent.diff_truncated`` / ``DEFAULT_MAX_LINES``) -- the
+ * two are independent and both may fire on the same call.
+ */
+export function splitServerDiff(diff: string, maxPreviewLines = MAX_PREVIEW_LINES): ServerDiffPreview {
+  const fullLines = diff.replace(/\r\n/g, "\n").split("\n");
+  const needsExpand = fullLines.length > maxPreviewLines;
+  return { fullLines, previewLines: fullLines.slice(0, maxPreviewLines), needsExpand };
 }
 
 export interface DiffPreview {

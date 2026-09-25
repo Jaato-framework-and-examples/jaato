@@ -67,6 +67,40 @@ describe("reduce — tool lifecycle", () => {
     expect(speech.media).toHaveLength(2);
     expect(speech.status).toBe("success");
   });
+  it("reads tool_class (jaato/#1304 phase 3), absent means 'not reported' rather than 'other'", () => {
+    const d = useJaato.getState().dispatch;
+    d([ev({ type: "tool.call_start", agent_id: "main", tool_name: "createPlan", call_id: "c4", tool_class: "housekeeping" })]);
+    const withClass = useJaato.getState().blocks[MAIN_AGENT]!.find((b) => b.kind === "tool" && b.callId === "c4")!;
+    if (withClass.kind !== "tool") throw new Error();
+    expect(withClass.toolClass).toBe("housekeeping");
+    d([ev({ type: "tool.call_start", agent_id: "main", tool_name: "createPlan", call_id: "c5" })]);
+    const noClass = useJaato.getState().blocks[MAIN_AGENT]!.find((b) => b.kind === "tool" && b.callId === "c5")!;
+    if (noClass.kind !== "tool") throw new Error();
+    expect(noClass.toolClass).toBeNull();
+  });
+  it("reads diff / diff_truncated / path off tool.call_end (jaato/#1304 phase 3)", () => {
+    const d = useJaato.getState().dispatch;
+    d([ev({ type: "tool.call_start", agent_id: "main", tool_name: "updateFile", call_id: "c6" })]);
+    d([ev({
+      type: "tool.call_end", agent_id: "main", call_id: "c6", tool_name: "updateFile", success: true,
+      diff: "--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-a\n+b", diff_truncated: false, path: "x.py",
+    })]);
+    const t = useJaato.getState().blocks[MAIN_AGENT]!.find((b) => b.kind === "tool" && b.callId === "c6")!;
+    if (t.kind !== "tool") throw new Error();
+    expect(t.diff).toContain("-a\n+b");
+    expect(t.diffTruncated).toBe(false);
+    expect(t.path).toBe("x.py");
+  });
+  it("a call with no diff (a non-writer, or an older daemon) carries none", () => {
+    const d = useJaato.getState().dispatch;
+    d([ev({ type: "tool.call_start", agent_id: "main", tool_name: "readFile", call_id: "c7" })]);
+    d([ev({ type: "tool.call_end", agent_id: "main", call_id: "c7", tool_name: "readFile", success: true })]);
+    const t = useJaato.getState().blocks[MAIN_AGENT]!.find((b) => b.kind === "tool" && b.callId === "c7")!;
+    if (t.kind !== "tool") throw new Error();
+    expect(t.diff).toBeNull();
+    expect(t.diffTruncated).toBeNull();
+    expect(t.path).toBeNull();
+  });
   it("keeps the transcript that rides the final speech chunk, including a one-frame utterance", () => {
     const d = useJaato.getState().dispatch;
     d([ev({ type: "tool.output", agent_id: "main", call_id: "model-output", chunk: "", mime_type: "audio/pcm;rate=24000", data_b64: "AAAA", final: false })]);
@@ -97,6 +131,13 @@ describe("reduce — prompts", () => {
     expect(agentPhase(useJaato.getState(), MAIN_AGENT)).toMatchObject({ kind: "waiting", on: "permission", toolName: "write" });
     d([ev({ type: "permission.resolved", agent_id: "main", request_id: "r1", granted: true })]);
     expect(useJaato.getState().permissions).toHaveLength(0);
+  });
+  it("reads tool_class off permission.requested (jaato/#1304 phase 3)", () => {
+    const d = useJaato.getState().dispatch;
+    d([ev({ type: "permission.requested", agent_id: "main", request_id: "r2", tool_name: "writeNewFile", tool_class: "write" })]);
+    expect(useJaato.getState().permissions.find((p) => p.requestId === "r2")).toMatchObject({ toolClass: "write" });
+    d([ev({ type: "permission.requested", agent_id: "main", request_id: "r3", tool_name: "createPlan" })]);
+    expect(useJaato.getState().permissions.find((p) => p.requestId === "r3")).toMatchObject({ toolClass: null });
   });
   it("walks a batch_only clarification and reports completion", () => {
     const d = useJaato.getState().dispatch;
@@ -205,9 +246,19 @@ describe("reduce — permission status", () => {
   it("reads effective_default and suspension_scope, the daemon's keys", () => {
     const d = useJaato.getState().dispatch;
     d([ev({ type: "permission.status", effective_default: "deny", suspension_scope: null })]);
-    expect(useJaato.getState().permissionStatus).toEqual({ effectiveDefault: "deny", suspensionScope: null });
+    expect(useJaato.getState().permissionStatus).toEqual({ effectiveDefault: "deny", suspensionScope: null, autoAllowHousekeeping: null });
     d([ev({ type: "permission.status", effective_default: "ask", suspension_scope: "turn" })]);
-    expect(useJaato.getState().permissionStatus).toEqual({ effectiveDefault: "ask", suspensionScope: "turn" });
+    expect(useJaato.getState().permissionStatus).toEqual({ effectiveDefault: "ask", suspensionScope: "turn", autoAllowHousekeeping: null });
+  });
+
+  it("reads auto_allow_housekeeping (jaato/#1304 phase 3), distinguishing 'not reported' from a measured false", () => {
+    const d = useJaato.getState().dispatch;
+    d([ev({ type: "permission.status", effective_default: "ask", suspension_scope: null, auto_allow_housekeeping: true })]);
+    expect(useJaato.getState().permissionStatus?.autoAllowHousekeeping).toBe(true);
+    d([ev({ type: "permission.status", effective_default: "ask", suspension_scope: null, auto_allow_housekeeping: false })]);
+    expect(useJaato.getState().permissionStatus?.autoAllowHousekeeping).toBe(false);
+    d([ev({ type: "permission.status", effective_default: "ask", suspension_scope: null })]);
+    expect(useJaato.getState().permissionStatus?.autoAllowHousekeeping).toBeNull();
   });
 });
 

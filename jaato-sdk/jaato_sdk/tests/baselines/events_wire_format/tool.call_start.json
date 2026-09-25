@@ -5,5 +5,6 @@
   "agent_id": "",
   "tool_name": "",
   "tool_args": {},
-  "call_id": null
+  "call_id": null,
+  "tool_class": null
 }

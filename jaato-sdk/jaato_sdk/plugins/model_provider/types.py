@@ -736,6 +736,42 @@ def tool_result_status(result: Any) -> Optional[str]:
     return status if isinstance(status, str) else None
 
 
+def tool_result_diff_fields(result: Any) -> Dict[str, Any]:
+    """The ``diff`` / ``diff_truncated`` / ``path`` a file-writing tool's
+    result may carry, for ``tool.call_end`` (jaato/#1304 phase 3).
+
+    ``file_edit``'s ``updateFile`` / ``writeNewFile`` executors -- the
+    tools declaring :data:`TRAIT_FILE_WRITER` today -- compute a capped
+    unified diff with the SAME :func:`~jaato_server.shared.plugins.
+    file_edit.diff_utils.generate_unified_diff` /
+    ``generate_new_file_diff`` the permission-ask card already used, and
+    put it on their own result dict rather than the caller re-deriving
+    it: the executor is the one place that still holds the file's
+    "before" content, and re-reading it here (after the write) would
+    show the diff against itself.
+
+    Read generically off the payload rather than gated on the tool's
+    declared traits, so this needs no registry lookup at the event-build
+    call site: no OTHER tool in this tree puts a ``diff`` key on its
+    result, so the trait boundary the issue describes is a property of
+    which executors populate the field, not of a check made here.  A
+    dict with none of the three keys returns ``{}``, so callers can
+    unconditionally ``**tool_result_diff_fields(payload)`` a kwargs dict
+    without an ``if`` for the common (non-file-writer) case.
+    """
+    if not isinstance(result, dict):
+        return {}
+    fields: Dict[str, Any] = {}
+    if isinstance(result.get("diff"), str):
+        fields["diff"] = result["diff"]
+    if isinstance(result.get("diff_truncated"), bool):
+        fields["diff_truncated"] = result["diff_truncated"]
+    path = result.get("path")
+    if isinstance(path, str):
+        fields["path"] = path
+    return fields
+
+
 @dataclass
 class Part:
     """A part of a message content.

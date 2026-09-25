@@ -67,6 +67,7 @@ from jaato_server.shared.plugins.session import create_plugin as create_session_
 from jaato_sdk.plugins.base import parse_command_args, HelpLines
 from jaato_server.shared.plugins.gc import load_gc_from_file
 from jaato_server.shared.bootstrap_timing import BootstrapTimer
+from jaato_server.shared.tool_classification import classify_tool
 
 # Formatter pipeline for server-side output formatting
 from jaato_server.shared.plugins.formatter_pipeline import FormatterRegistry, create_registry
@@ -2726,6 +2727,7 @@ class JaatoServer:
                                 tool_name=fc.name,
                                 tool_args=fc.args or {},
                                 call_id=fc.id,
+                                tool_class=classify_tool(fc.name),
                             ))
                         # Then complete all tools
                         for fc in function_calls:
@@ -4455,12 +4457,14 @@ class JaatoServer:
                     tool_name=tool_name,
                     tool_args=tool_args,
                     call_id=call_id,
+                    tool_class=classify_tool(tool_name),
                 ))
 
             def on_tool_call_end(self, agent_id, tool_name, success, duration_seconds,
                                  error_message=None, call_id=None, backgrounded=False,
                                  continuation_id=None, show_output=None, show_popup=None,
-                                 is_error_result=False, result_status=None):
+                                 is_error_result=False, result_status=None,
+                                 diff=None, diff_truncated=None, path=None):
                 server.emit(ToolCallEndEvent(
                     agent_id=agent_id,
                     tool_name=tool_name,
@@ -4474,6 +4478,9 @@ class JaatoServer:
                     continuation_id=continuation_id,
                     show_output=show_output,
                     show_popup=show_popup,
+                    diff=diff,
+                    diff_truncated=diff_truncated,
+                    path=path,
                 ))
 
                 # After discover_service succeeds, refresh the client's
@@ -5197,6 +5204,9 @@ class JaatoServer:
                 return PermissionStatusEvent(
                     effective_default=status.get("effective_default", "ask"),
                     suspension_scope=status.get("suspension_scope"),
+                    auto_allow_housekeeping=status.get(
+                        "auto_allow_housekeeping"
+                    ),
                 )
         if not self.permission_plugin:
             return None
@@ -5204,6 +5214,7 @@ class JaatoServer:
         return PermissionStatusEvent(
             effective_default=status.get("effective_default", "ask"),
             suspension_scope=status.get("suspension_scope"),
+            auto_allow_housekeeping=status.get("auto_allow_housekeeping"),
         )
 
     def memory_op(
@@ -6259,6 +6270,9 @@ class JaatoServer:
                             show_popup=payload.get("show_popup"),
                             is_error_result=bool(payload.get("is_error_result", False)),
                             result_status=payload.get("result_status"),
+                            diff=payload.get("diff"),
+                            diff_truncated=payload.get("diff_truncated"),
+                            path=payload.get("path"),
                         )
                     return
 

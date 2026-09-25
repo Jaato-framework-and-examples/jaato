@@ -6,6 +6,7 @@ through blacklist/whitelist rules and interactive channel approval.
 
 import ast
 import fnmatch
+import logging
 import os
 import re
 import tempfile
@@ -17,6 +18,8 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from jaato_sdk.plugins.base import TRAIT_SESSION_PERSISTENT
 from jaato_sdk.plugins.model_provider.types import ToolSchema
+
+logger = logging.getLogger(__name__)
 
 from .policy import (
     PermissionPolicy,
@@ -42,6 +45,7 @@ from jaato_sdk.plugins.base import UserCommand, CommandCompletion, PermissionDis
 from ...ui_utils import format_permission_options, format_tool_args_summary
 from jaato_server.shared.plugins.runner_forwarding import RunnerForwardingMixin
 from jaato_server.shared.trace import trace as _trace_write
+from jaato_server.shared.tool_classification import HOUSEKEEPING_TOOLS
 
 # Import TYPE_CHECKING to avoid circular imports
 from typing import TYPE_CHECKING
@@ -231,6 +235,18 @@ class PermissionPlugin(RunnerForwardingMixin):
         # ``_registry`` and is simply re-populated every configure.
         self._framework_reserved: Set[str] = set()
         self._allow_all: bool = False  # When True, auto-approve all requests
+        # plugin_configs.permission.auto_allow_housekeeping (#1304 phase 3):
+        # whether the ROOT/runtime policy whitelists the housekeeping tool
+        # set.  Reported by get_permission_status() so a client can see it
+        # is in force; the whitelisting itself is applied directly onto
+        # whichever PermissionPolicy the declaring config belongs to (see
+        # ``initialize`` / ``set_scoped_policy``), never through
+        # ``add_whitelist_tools`` -- that helper is reserved for names the
+        # PLUGIN itself declares universally safe (lifecycle tools, a
+        # plugin's own get_auto_approved_tools()), and this is a per-
+        # profile opt-in a subagent's OWN restrictive policy must be able
+        # to decline.
+        self._auto_allow_housekeeping: bool = False
         # Suspension state flags for temporary permission bypasses
         self._turn_suspended: bool = False  # Allow all remaining tools this turn
         self._idle_suspended: bool = False  # Allow until session goes idle
@@ -528,6 +544,24 @@ class PermissionPlugin(RunnerForwardingMixin):
         else:
             self._policy = PermissionPolicy.from_config(self._config.to_policy_dict())
 
+        # plugin_configs.permission.auto_allow_housekeeping (#1304 phase 3).
+        # Off by default -- the same posture scrub_secret_env / allow_inline
+        # take for anything that loosens a security-relevant default: safe
+        # unless explicitly widened, and the widening is announced.  Applied
+        # directly to THIS policy's own whitelist rather than through
+        # ``add_whitelist_tools`` (see the field's own docstring for why).
+        self._auto_allow_housekeeping = bool(
+            config.get("auto_allow_housekeeping", False)
+        )
+        if self._auto_allow_housekeeping:
+            self._policy.whitelist_tools.update(HOUSEKEEPING_TOOLS)
+            logger.warning(
+                "permission: auto_allow_housekeeping=true -- housekeeping "
+                "tools (%s) are whitelisted for the root policy without a "
+                "prompt",
+                ", ".join(sorted(HOUSEKEEPING_TOOLS)),
+            )
+
         # Store workspace path for evaluator context
         if config.get("workspace_path"):
             self._workspace_path = config["workspace_path"]
@@ -578,6 +612,7 @@ class PermissionPlugin(RunnerForwardingMixin):
         self._allow_all = False
         self._turn_suspended = False
         self._idle_suspended = False
+        self._auto_allow_housekeeping = False
         # Phase 3 §3.7 deeper: drop the cached runner-RPC channel so a
         # subsequent ``initialize()`` re-resolves against the (possibly
         # different) registry's ``runner_rpc_client`` attribute.
@@ -686,6 +721,28 @@ class PermissionPlugin(RunnerForwardingMixin):
                         "Off by default: the DECISION trace line is the "
                         "default-on record, and an event per tool call is "
                         "real hot-path cost."
+                    ),
+                },
+                "auto_allow_housekeeping": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Whitelist the closed housekeeping tool set "
+                        "(createPlan, startPlan, setStepStatus, "
+                        "completePlan, list_tools, get_tool_schemas, "
+                        "listReferences, list_subagent_profiles, "
+                        "subscribeToEvents -- see "
+                        "jaato_server.shared.tool_classification) for THIS "
+                        "block's own policy, without a prompt.  Off by "
+                        "default -- every housekeeping call still asks "
+                        "unless a profile turns this on, and it is "
+                        "announced at WARNING when it does.  Applies to "
+                        "whichever policy this block belongs to (the root "
+                        "profile, or one subagent's own "
+                        "plugin_configs.permission) -- never inherited by "
+                        "a sibling that did not also set it.  Readable via "
+                        "get_permission_status() / session."
+                        "get_permission_status."
                     ),
                 },
                 "evaluators": {
@@ -931,6 +988,21 @@ class PermissionPlugin(RunnerForwardingMixin):
                 evaluator_config, workspace_path=self._workspace_path)
             if evaluators:
                 policy.set_evaluators(evaluators)
+        # auto_allow_housekeeping is per-block, not propagated through
+        # _auto_whitelisted (#1304 phase 3, see the field's own docstring):
+        # a subagent whose OWN block does not opt in must not inherit the
+        # root's opt-in, and a subagent whose block does must not have it
+        # leak back onto the root or a sibling.
+        scoped_auto_allow_housekeeping = bool(
+            config.get("auto_allow_housekeeping", False)
+        )
+        if scoped_auto_allow_housekeeping:
+            policy.whitelist_tools.update(HOUSEKEEPING_TOOLS)
+            logger.warning(
+                "permission: auto_allow_housekeeping=true for scope=%s -- "
+                "housekeeping tools are whitelisted for this session "
+                "without a prompt", scope,
+            )
         with self._policy_lock:
             policy.whitelist_tools.update(self._auto_whitelisted)
             self._scoped_policies[scope] = policy
@@ -1593,19 +1665,40 @@ class PermissionPlugin(RunnerForwardingMixin):
                 - effective_default: "allow", "deny", or "ask"
                 - suspension_scope: "turn", "idle", "session", or None
                 - is_suspended: bool
+                - auto_allow_housekeeping: whether the ROOT/runtime policy's
+                  ``plugin_configs.permission.auto_allow_housekeeping`` knob
+                  is on (#1304 phase 3).  Read off this plugin instance's
+                  own flag rather than the policy's whitelist contents, so
+                  it distinguishes the OPT-IN from an operator who happened
+                  to whitelist the same nine tool names by hand.
+                - whitelisted_tools: the runtime policy's effective
+                  whitelist, sorted -- the framework-declared
+                  auto-approved-tool names ``add_whitelist_tools`` recorded
+                  (each plugin's own ``get_auto_approved_tools()``, the
+                  lifecycle tools) plus whatever the profile's own
+                  ``policy.whitelist.tools`` / session ``always`` answers
+                  added, plus the housekeeping set when
+                  ``auto_allow_housekeeping`` is on.  One list, so a client
+                  need not separately ask "which plugin tools are
+                  auto-approved" and "what did the profile whitelist" and
+                  reconcile them itself.
         """
         # Determine effective default policy
         if self._policy:
             effective_default = (
                 self._policy.session_default_policy or self._policy.default_policy
             )
+            whitelisted_tools = sorted(self._policy.whitelist_tools)
         else:
             effective_default = "ask"
+            whitelisted_tools = []
 
         return {
             "effective_default": effective_default,
             "suspension_scope": self.suspension_scope,
             "is_suspended": self.is_suspended,
+            "auto_allow_housekeeping": self._auto_allow_housekeeping,
+            "whitelisted_tools": whitelisted_tools,
         }
 
     def _permissions_suspend(self, turn_only: bool = False) -> str:
@@ -2044,6 +2137,83 @@ class PermissionPlugin(RunnerForwardingMixin):
             'comment': comment,
         }
 
+    def _suspension_or_preapproval_shortcut(
+        self,
+        tool_name: str,
+        args: Dict[str, Any],
+        force_reescalation: bool,
+        *,
+        trace_context: Optional[str] = None,
+    ) -> Optional[Tuple[bool, Dict[str, Any]]]:
+        """Idle / turn / allow-all, checked in priority order.
+
+        Returns the ``(allowed, info)`` verdict when one of the three
+        session-wide grants applies, or ``None`` when the caller must
+        fall through to policy evaluation / the approval channel.
+
+        Called from TWO sites in :meth:`_check_permission_impl` — once
+        before the policy is even evaluated, and once again after
+        ``_channel_lock`` is acquired.  The second call exists for issue
+        #1304 phase 3: two ASK-requiring tool calls from one parallel
+        batch can both read these flags as False and both queue on the
+        lock, and without a re-check IN THE SAME PRIORITY ORDER after
+        acquiring it, the second call would show its own prompt even
+        though the first call's answer ("t" / "i" / "all") had already
+        set the flag by then (``_handle_channel_response`` sets it while
+        still holding ``_channel_lock``).  Extracted into one function
+        so the two sites cannot silently drift out of that shared order
+        — they did, once: only ``_allow_all`` used to be re-checked at
+        the second site.
+
+        ``trace_context`` turns on the explicit :meth:`_trace` calls the
+        post-lock site has always made ("... set while waiting,
+        auto-approving ...").  That diagnostic is specific to the
+        post-lock recheck; the pre-evaluation site stays silent because
+        :meth:`check_permission`'s wrapper already traces every exit.
+        """
+        if force_reescalation:
+            return None
+        if self._idle_suspended:
+            if trace_context:
+                self._trace(
+                    f"{trace_context}: idle_suspended set while waiting, "
+                    f"auto-approving {tool_name}"
+                )
+            self._log_decision(
+                tool_name, args, "allow", "Permission suspended until idle"
+            )
+            return True, {
+                'reason': 'Permission suspended until idle',
+                'method': 'idle_suspension',
+            }
+        if self._turn_suspended:
+            if trace_context:
+                self._trace(
+                    f"{trace_context}: turn_suspended set while waiting, "
+                    f"auto-approving {tool_name}"
+                )
+            self._log_decision(
+                tool_name, args, "allow", "Permission suspended for turn"
+            )
+            return True, {
+                'reason': 'Permission suspended for turn',
+                'method': 'turn_suspension',
+            }
+        if self._allow_all:
+            if trace_context:
+                self._trace(
+                    f"{trace_context}: allow_all set while waiting, "
+                    f"auto-approving {tool_name}"
+                )
+            self._log_decision(
+                tool_name, args, "allow", "Pre-approved all requests"
+            )
+            return True, {
+                'reason': 'Pre-approved all requests',
+                'method': 'allow_all',
+            }
+        return None
+
     def _check_permission_impl(
         self,
         tool_name: str,
@@ -2195,18 +2365,11 @@ class PermissionPlugin(RunnerForwardingMixin):
         # 1. idle suspension (most conservative - clears on idle)
         # 2. turn suspension (clears on turn end)
         # 3. allow_all (session-wide, persists until session ends)
-        if not force_reescalation and self._idle_suspended:
-            self._log_decision(tool_name, args, "allow", "Permission suspended until idle")
-            return True, {'reason': 'Permission suspended until idle', 'method': 'idle_suspension'}
-
-        if not force_reescalation and self._turn_suspended:
-            self._log_decision(tool_name, args, "allow", "Permission suspended for turn")
-            return True, {'reason': 'Permission suspended for turn', 'method': 'turn_suspension'}
-
-        # Check if user pre-approved all requests
-        if not force_reescalation and self._allow_all:
-            self._log_decision(tool_name, args, "allow", "Pre-approved all requests")
-            return True, {'reason': 'Pre-approved all requests', 'method': 'allow_all'}
+        shortcut = self._suspension_or_preapproval_shortcut(
+            tool_name, args, force_reescalation
+        )
+        if shortcut is not None:
+            return shortcut
 
         if not policy:
             # An ALLOW, and it used to leave no audit entry at all — so a
@@ -2394,12 +2557,26 @@ class PermissionPlugin(RunnerForwardingMixin):
                     # is shown at a time (important for parallel tool execution)
                     self._trace(f"check_permission: acquiring channel lock for {tool_name}")
                     with self._channel_lock:
-                        # Re-check _allow_all after acquiring lock - another thread may have
-                        # set it while we were waiting (e.g., user responded "all" to first prompt)
-                        if self._allow_all:
-                            self._trace(f"check_permission: allow_all set while waiting, auto-approving {tool_name}")
-                            self._log_decision(tool_name, args, "allow", "Pre-approved all requests")
-                            return True, {'reason': 'Pre-approved all requests', 'method': 'allow_all'}
+                        # Re-check suspension / pre-approval state after acquiring the
+                        # lock, in the SAME priority order as the top-of-function check
+                        # (idle > turn > allow_all).  Two tool calls that both need to
+                        # ASK can reach this point concurrently — the model issued them
+                        # in one parallel batch, both read the suspension flags as False
+                        # before either was answered, and both queued on the lock.  If
+                        # the FIRST call's answer was "t" (turn) / "i" (idle) / "all",
+                        # that already set the flag by the time this call gets the lock
+                        # (`_handle_channel_response` sets it while still holding
+                        # `_channel_lock`), and without this re-check the second call
+                        # would still show its own prompt — the exact "answering 't' for
+                        # one tool didn't cover the very next tool call of the same
+                        # turn" report (#1304 phase 3).  Only `_allow_all` used to be
+                        # re-checked here, which covered "all" but not "t"/"i".
+                        shortcut = self._suspension_or_preapproval_shortcut(
+                            tool_name, args, force_reescalation,
+                            trace_context="check_permission",
+                        )
+                        if shortcut is not None:
+                            return shortcut
 
                         # Get tool schema to check for editable content
                         tool_schema = self._get_tool_schema(tool_name)

@@ -1,12 +1,11 @@
 /**
  * Coarse classes for tool calls, so the transcript can decide how much
- * weight to give a row (jaato/#1304 §1).  Client-side table for now --
- * the issue's own server-changes list still asks for an optional
- * ``tool_class`` on ``tool.call_start`` / ``permission.requested``, which
- * is not built (Phase 3).  Until then this is the one place the mapping
- * lives, so the transcript view model and anything else that wants it
- * (a future permission-card regroup) read the same table rather than
- * growing a second opinion.
+ * weight to give a row (jaato/#1304 §1).  ``tool.call_start`` and
+ * ``permission.requested`` now carry an OPTIONAL server-computed
+ * ``tool_class`` (Phase 3, ``jaato_server.shared.tool_classification``), and
+ * ``resolveToolClass`` below prefers it -- but this table stays as the
+ * fallback for a daemon that predates the field, and as the one place
+ * the mapping lives client-side so nothing needs a second opinion.
  *
  * Classification is by the tool's DISPLAY name -- the caller resolves a
  * hashed ``t_xxxxxxxx`` id (``protocol/toolIds.ts``) before asking here,
@@ -97,4 +96,26 @@ const TABLE: Record<string, ToolClass> = Object.fromEntries([
  */
 export function classifyTool(displayName: string): ToolClass {
   return TABLE[displayName] ?? "other";
+}
+
+/** The closed vocabulary a server-computed ``tool_class`` may name -- the
+ * same set ``jaato_server.shared.tool_classification.TOOL_CLASSES`` declares. */
+const KNOWN_CLASSES: ReadonlySet<string> = new Set([
+  "housekeeping", "write", "exec", "read", "agent", "other",
+]);
+
+/**
+ * A tool's class, preferring the DAEMON's own answer over this table.
+ *
+ * ``serverClass`` is ``ToolCallStartEvent.tool_class`` /
+ * ``PermissionRequestedEvent.tool_class`` (jaato/#1304 phase 3) -- ``null``
+ * or ``undefined`` means "not reported" (an older daemon), in which case
+ * this falls back to ``classifyTool(displayName)`` exactly as before the
+ * field existed.  A value outside the closed vocabulary -- which should
+ * never happen, but a client must not trust the wire blindly -- is
+ * treated the same way: fall back rather than render an invented class.
+ */
+export function resolveToolClass(displayName: string, serverClass?: string | null): ToolClass {
+  if (serverClass && KNOWN_CLASSES.has(serverClass)) return serverClass as ToolClass;
+  return classifyTool(displayName);
 }

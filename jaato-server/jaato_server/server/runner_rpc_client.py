@@ -2388,7 +2388,9 @@ class RunnerRPCClient:
         Returns:
             The plugin's own status dict: ``effective_default``
             ("allow" | "deny" | "ask"), ``suspension_scope`` ("turn" |
-            "idle" | "session" | None) and ``is_suspended``.
+            "idle" | "session" | None), ``is_suspended``,
+            ``auto_allow_housekeeping`` (bool) and ``whitelisted_tools``
+            (sorted list) -- jaato/#1304 phase 3.
 
         Raises:
             RunnerCallError on transport failure or runner-side

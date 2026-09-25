@@ -3,5 +3,6 @@
   "timestamp": "<TIMESTAMP>",
   "session_id": "",
   "effective_default": "ask",
-  "suspension_scope": null
+  "suspension_scope": null,
+  "auto_allow_housekeeping": null
 }
