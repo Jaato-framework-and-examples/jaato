@@ -57,6 +57,9 @@
  *   "…diag refuse" → arms the owner-gate refusal for the NEXT
  *                 ``session.diagnostics`` check (#1294)
  *   "model this is broken" (verbatim test) → echoes the text back
+ *   ``--profile bootstrap-fail`` on ``session.new`` → a non-recoverable
+ *                 ``RunnerBootstrapFailed`` error instead of a session
+ *                 (#1304 §6, drives the StatusBar's red "no session" state)
  *   anything else → a short streamed markdown reply
  *
  * Run: ``npm run mock-daemon`` (port 8090 by default, MOCK_PORT overrides).
@@ -710,7 +713,13 @@ wss.on("connection", (ws, req) => {
       case "command.execute": {
         const cmd = String(ev.command);
         const args = (ev.args as string[] | undefined) ?? [];
-        if (cmd === "session.new") {
+        if (cmd === "session.new" && args.includes("--profile") && args[args.indexOf("--profile") + 1] === "bootstrap-fail") {
+          // #1304 §6: a RunnerBootstrapFailed-class error -- recoverable:
+          // false, so the StatusBar reads it as "this session never came
+          // up" (src/protocol/sessionFault.ts) rather than a transient
+          // per-turn error.  No session is created.
+          send(c, { type: "error", error: "Runner bootstrap failed for session mock: AppArmor confinement mismatch", error_type: "RunnerBootstrapFailed", recoverable: false });
+        } else if (cmd === "session.new") {
           c.sessionId = `sess-${randomUUID().slice(0, 8)}`;
           LIVE_SESSIONS.add(c.sessionId);
           // A client with no workspace gets one provisioned as part of
@@ -784,7 +793,10 @@ wss.on("connection", (ws, req) => {
           c.policy = { effective_default: "allow", suspension_scope: null };
           send(c, { type: "permission.status", ...c.policy });
         } else if (cmd === "session.profiles") {
-          send(c, { type: "session.profiles", profiles: [{ name: "researcher", description: "Deep research", provider: "anthropic", model: "claude-sonnet-4" }, { name: "coder", description: "Coding agent", provider: "openrouter", model: "openai/gpt-5" }] });
+          // ``bootstrap-fail`` is a scenario profile (#1304 §6): picking it
+          // exercises the RunnerBootstrapFailed path above instead of a
+          // real session, for the status bar's "no session" e2e case.
+          send(c, { type: "session.profiles", profiles: [{ name: "researcher", description: "Deep research", provider: "anthropic", model: "claude-sonnet-4" }, { name: "coder", description: "Coding agent", provider: "openrouter", model: "openai/gpt-5" }, { name: "bootstrap-fail", description: "Scenario: fails to bootstrap", provider: "mock", model: "mock-1" }] });
         } else if (cmd === "workspace.ignore") {
           // The daemon toggles one exact line in <workspace>/.gitignore and
           // answers with the entry's state AFTER the toggle (protocol 1.12).

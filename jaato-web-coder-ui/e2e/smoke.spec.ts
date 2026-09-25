@@ -113,9 +113,9 @@ test("tool calls stream into a collapsible block and update the plan panel", asy
   // The TUI's Ctrl+T: the status-bar toggle expands every tool block and
   // collapses them again, instead of flipping a flag nothing reads.
   const toolBlock = page.locator("[data-testid=tool-block] [aria-expanded]").first();
-  await page.getByRole("button", { name: "Toggle tool call boxes (Ctrl+T)" }).click();
+  await page.getByRole("button", { name: /Toggle tool call boxes/ }).click();
   await expect(toolBlock).toHaveAttribute("aria-expanded", "true");
-  await page.getByRole("button", { name: "Toggle tool call boxes (Ctrl+T)" }).click();
+  await page.getByRole("button", { name: /Toggle tool call boxes/ }).click();
   await expect(toolBlock).toHaveAttribute("aria-expanded", "false");
 });
 
@@ -1310,4 +1310,99 @@ test("diagnostics rail shows the record and a live re-check, distinctly, and can
   await composer(page).press("Enter");
   await panel.getByRole("button", { name: "Re-check now" }).click();
   await expect(page.getByRole("alert")).toContainText("Only the owner");
+});
+
+test("the command palette: Ctrl/⌘+K opens it, search filters, Enter runs, Escape closes (#1304 §6)", async ({ page }) => {
+  await openSession(page);
+  const dialog = page.getByRole("dialog", { name: "Command palette" });
+  await page.keyboard.press("Control+k");
+  await expect(dialog).toBeVisible();
+  const search = page.getByLabel("Search commands");
+  await expect(search).toBeFocused();
+
+  // Filters the same ``command.list`` the composer's own proposals
+  // complete from -- there is no second source of names.
+  await search.fill("permissions");
+  await expect(dialog.getByRole("option", { name: /permissions status/ })).toBeVisible();
+  await expect(dialog.getByRole("option", { name: /^model/ })).toHaveCount(0);
+
+  // Escape closes without running anything.
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+  await expect(page.getByText("mock: executed")).toHaveCount(0);
+
+  // Reopen, filter, run by clicking -- the same path Enter takes.
+  await page.keyboard.press("Control+k");
+  await page.getByLabel("Search commands").fill("permissions status");
+  await dialog.getByRole("option", { name: /permissions status/ }).click();
+  await expect(dialog).toHaveCount(0);
+  // ``permissions <anything>`` is handled by the mock's own dedicated
+  // branch (the one the permission-status plate's round trip depends on),
+  // which reports ``mock: permissions <args>`` rather than falling
+  // through to the generic ``mock: executed <cmd> <args>`` echo.
+  await expect(page.getByText("mock: permissions status")).toBeVisible();
+});
+
+test("§6: help opens the palette instead of dumping into the transcript", async ({ page }) => {
+  await openSession(page);
+  await composer(page).fill("help");
+  await composer(page).press("Enter");
+  await expect(page.getByRole("dialog", { name: "Command palette" })).toBeVisible();
+  // The old ~500-line dump is gone.
+  await expect(page.getByText(/Keys: Ctrl\+P/)).toHaveCount(0);
+});
+
+test("the leader chord replaces the direct Ctrl+P/B/T/A/O bindings (#1304 §7)", async ({ page }) => {
+  await openSession(page);
+  await composer(page).fill("tool");
+  await composer(page).press("Enter");
+  await expect(page.getByRole("button", { name: /run_command/ }).first()).toBeVisible();
+
+  // A bare Ctrl+P is not this app's -- it changes nothing here (it falls
+  // through to whatever the browser does with it; see
+  // ``useKeyboardShortcuts.test.ts`` for the assertion that it is never
+  // even ``preventDefault``ed).
+  await page.keyboard.press("Control+p");
+  await expect(page.getByText("Task plan")).toHaveCount(0);
+
+  // K then P: the leader opens the palette and, on the very first
+  // keystroke with the search box still empty, applies the quick action
+  // and closes -- no visible list in between.
+  await page.keyboard.press("Control+k");
+  await expect(page.getByRole("dialog", { name: "Command palette" })).toBeVisible();
+  await page.keyboard.press("p");
+  await expect(page.getByRole("dialog", { name: "Command palette" })).toHaveCount(0);
+  await expect(page.getByText("Task plan")).toBeVisible();
+  await expect(page.getByText("List the directory")).toBeVisible();
+});
+
+test("a session that fails to bootstrap turns the status bar red (#1304 §6)", async ({ page }) => {
+  await page.goto("/");
+  await page.getByPlaceholder("ws://host:8080").fill(WS);
+  await page.getByRole("button", { name: "Connect" }).click();
+  // A status bar exists even with no session yet -- ``fault`` is what
+  // turns it red, not ``sessionId``.
+  await page.getByRole("button", { name: /bootstrap-fail/ }).click();
+  const dot = page.locator(".bg-error").first();
+  await expect(page.getByText("no session")).toBeVisible();
+  await expect(dot).toBeVisible();
+  // The tooltip is on the indicator's OUTER span (dot + text together, one
+  // hover target), not on the "no session" text node itself.
+  await expect(page.locator("span", { hasText: "no session" }).first()).toHaveAttribute(
+    "title",
+    /RunnerBootstrapFailed: Runner bootstrap failed/,
+  );
+});
+
+test("at 375px the session screen does not overflow horizontally (#1304 §8)", async ({ page }) => {
+  await page.setViewportSize({ width: 375, height: 700 });
+  await openSession(page);
+  await composer(page).fill("code");
+  await composer(page).press("Enter");
+  await expect(page.locator("table.j-table th", { hasText: "Latency" })).toBeVisible();
+  const { docW, winW } = await page.evaluate(() => ({
+    docW: document.documentElement.scrollWidth,
+    winW: window.innerWidth,
+  }));
+  expect(docW).toBe(winW);
 });

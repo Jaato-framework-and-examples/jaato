@@ -18,17 +18,26 @@ import { useJaato } from "@/store/store";
 export function StatusBar() {
   const conn = useJaato((s) => s.connection);
   const sessionId = useJaato((s) => s.sessionId);
+  const fault = useJaato((s) => s.sessionFault);
   const permStatus = useJaato((s) => s.permissionStatus);
   const waiting = useJaato((s) => s.permissions.length);
   const setToolsExpanded = useJaato((s) => s.setToolsExpanded);
   const ui = useJaato((s) => s.ui);
   const [perms, setPerms] = useState(false);
   const permsBtn = useRef<HTMLButtonElement>(null);
-  const dotCls = conn.phase === "connected" ? "bg-success" : conn.phase === "reconnecting" || conn.phase === "connecting" ? "bg-warning pulse" : "bg-error";
+  // A non-recoverable ErrorEvent (RunnerBootstrapFailed among its causes,
+  // ``protocol/sessionFault.ts``) means the SESSION never came up, which
+  // the WebSocket transport's own phase has no way to say -- it stays
+  // "connected" throughout, correctly, and used to be the only thing this
+  // line read.  ``fault`` outranks the transport phase here on purpose.
+  const dotCls = fault ? "bg-error" : conn.phase === "connected" ? "bg-success" : conn.phase === "reconnecting" || conn.phase === "connecting" ? "bg-warning pulse" : "bg-error";
   const tab = (on: boolean) => `chrome-sm font-heading font-medium uppercase tracking-[0.12em] ${on ? "text-steel" : "text-text-muted hover:text-steel"}`;
   return (
     <div className="relative flex items-center gap-4 px-4 h-[26px] text-[11px] bg-surface border-t hairline font-mono text-text-muted select-none shrink-0">
-      <span className="flex items-center gap-1.5 text-text"><span className={`inline-block w-1.5 h-1.5 ${dotCls}`} />{conn.phase}{conn.attempt ? ` #${conn.attempt}` : ""}</span>
+      <span className="flex items-center gap-1.5 text-text" title={fault ? `${fault.errorType}: ${fault.message}` : undefined}>
+        <span className={`inline-block w-1.5 h-1.5 shrink-0 ${dotCls}`} />
+        {fault ? <span className="text-error">no session</span> : <>{conn.phase}{conn.attempt ? ` #${conn.attempt}` : ""}</>}
+      </span>
       <span title={buildLine()}>{conn.serverVersion ? `server ${conn.serverVersion} · ` : ""}ui {BUILD.ui}</span>
       {sessionId && <span title={sessionId}>session {sessionId.slice(0, 8)}</span>}
       {/* Reporting the policy and being able to change it used to be in
@@ -55,10 +64,18 @@ export function StatusBar() {
         </button>
       )}
       {perms && <PermissionsPlate onClose={() => setPerms(false)} anchor={permsBtn} />}
-      <span className="flex-1" />
-      <button type="button" onClick={() => setToolsExpanded(!ui.showTools)} className={tab(ui.showTools)} title={ui.showTools ? "Tool call boxes expanded — click to collapse them (Ctrl+T)" : "Tool call boxes collapsed — click to expand them (Ctrl+T)"} aria-label="Toggle tool call boxes (Ctrl+T)">Tools</button>
-      {/* The ``exit`` command as a button: asks what becomes of the session -- detach, end, or cancel the task -- before leaving. */}
-      <button type="button" onClick={() => { requestExit().catch(() => undefined); }} className={`${tab(false)} hover:text-error`} title="Leave: detach from the session, or end it (the exit command)" aria-label="Exit (detach from or end the session)">Exit</button>
+      <span className="flex-1 min-w-2" />
+      {/* A fixed cluster of buttons does not fit a 375px bar beside the
+          connection info, and this row is not allowed to wrap (the bar's
+          whole contract is one line).  ``min-w-0`` lets the CLUSTER shrink
+          below its own content width instead of forcing the bar -- and the
+          page under it -- wider than the viewport; ``overflow-x-auto`` is
+          where the difference goes instead of off the edge. */}
+      <div className="flex items-center gap-4 min-w-0 overflow-x-auto">
+        <button type="button" onClick={() => setToolsExpanded(!ui.showTools)} className={tab(ui.showTools)} title={ui.showTools ? "Tool call boxes expanded — click to collapse them (⌘/Ctrl+K then T)" : "Tool call boxes collapsed — click to expand them (⌘/Ctrl+K then T)"} aria-label="Toggle tool call boxes (⌘/Ctrl+K then T)">Tools</button>
+        {/* The ``exit`` command as a button: asks what becomes of the session -- detach, end, or cancel the task -- before leaving. */}
+        <button type="button" onClick={() => { requestExit().catch(() => undefined); }} className={`${tab(false)} hover:text-error shrink-0`} title="Leave: detach from the session, or end it (the exit command)" aria-label="Exit (detach from or end the session)">Exit</button>
+      </div>
     </div>
   );
 }

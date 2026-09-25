@@ -31,6 +31,7 @@ import { memoriesSummary } from "@/app/memories";
 import { DiagnosticsPanel } from "@/components/panels/DiagnosticsPanel";
 import { diagnosticsSummary } from "@/app/diagnostics";
 import { AgentTabs } from "@/components/panels/AgentTabs";
+import { CommandPalette } from "@/components/prompts/CommandPalette";
 import { AttentionBanners } from "@/components/panels/AttentionBanners";
 import { StatusBar } from "@/components/layout/StatusBar";
 import { Plate } from "@/components/layout/Plate";
@@ -354,6 +355,7 @@ export function SessionScreen() {
   const references = useJaato((s) => s.referenceSelections);
   const postAuth = useJaato((s) => s.postAuth);
   const wsConfig = useJaato((s) => s.workspace.config);
+  const paletteOpen = useJaato((s) => s.paletteOpen);
   const [picking, setPicking] = useState(true);
   const [creating, setCreating] = useState(false);
   const booted = useRef(false);
@@ -419,6 +421,7 @@ export function SessionScreen() {
       <div className="h-full flex flex-col">
         {postAuthCard}
         <div className="flex-1 min-h-0"><ProfilePicker onPick={startSession} onAttach={resumeSession} onAuth={runAuth} onSkip={() => setPicking(false)} /></div>
+        {paletteOpen && <CommandPalette />}
       </div>
     );
   }
@@ -453,6 +456,7 @@ export function SessionScreen() {
         <Rail agentId={selected} />
       </div>
       <StatusBar />
+      {paletteOpen && <CommandPalette />}
     </div>
   );
 }

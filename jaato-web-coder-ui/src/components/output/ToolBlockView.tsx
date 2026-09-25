@@ -118,7 +118,12 @@ export const ToolBlockView = memo(function ToolBlockView({ block, toolClass }: {
           <StatusGlyph status={block.status} />
         </span>
         <span className={`chrome w-[120px] shrink-0 truncate ${block.status === "error" ? "text-error" : ""}`}>{displayName}</span>
-        <span className="font-mono text-xs text-text-muted truncate flex-1">{title ?? summarizeArgs(resolvedArgs)}</span>
+        {/* ``truncate`` alone does nothing on a flex item: its default
+            ``min-width: auto`` keeps the item from shrinking below its own
+            text, so a long argument summary widened the row (and the tool
+            row's ancestors have no scroll of their own to absorb it) instead
+            of eliding. ``min-w-0`` is what lets ``flex-1`` actually win. */}
+        <span className="font-mono text-xs text-text-muted truncate flex-1 min-w-0">{title ?? summarizeArgs(resolvedArgs)}</span>
         {block.backgrounded && <span className="kicker kicker-muted text-[10px]">bg</span>}
         {cls === "exec" && block.output && (
           <span role="button" tabIndex={0} className="chrome-sm font-heading uppercase tracking-[0.08em] text-text-muted hover:text-steel shrink-0" onClick={copyOutput} onKeyDown={(e) => { if (e.key === "Enter") copyOutput(e as unknown as MouseEvent); }} title="Copy the whole output">

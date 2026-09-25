@@ -5,6 +5,13 @@
    built CSS carried only preflight + our rules).  "../" is src/. */
 @source "../";
 
+/* Tailwind has no built-in pointer-type variant (only ``motion-safe`` /
+   ``motion-reduce`` ship in core).  ``coarse:`` is what the composer's
+   hint line hides behind on a touch device -- the hint answers "what will
+   Enter do", which a touch keyboard's own Enter/Send affordance already
+   makes plain, and the space is worth more back to the message. */
+@custom-variant coarse (@media (pointer: coarse));
+
 /* The two faces of the redesign, self-hosted from npm so a deployment
    behind a corporate proxy needs no font CDN: Barlow for text, Barlow
    Condensed for chrome (labels, buttons, tab names).  Weights are the
@@ -273,3 +280,17 @@ table.j-table th { font-family: var(--font-heading); font-weight: 600; font-size
 .pulse { animation: pulse-dot 1.2s ease-in-out infinite; }
 
 kbd { font-family: var(--font-mono); font-size: 0.75rem; border: 1px solid var(--c-divider); border-bottom-width: 2px; padding: 0 0.3rem; color: var(--c-text-muted); }
+
+/* ── Command palette (#1304 §6) ──────────────────────────────────────
+   Ctrl/⌘+K's overlay: a short fade on the backdrop, a fade-plus-lift on
+   the panel.  The only two animated components this change introduces,
+   so the ``prefers-reduced-motion`` opt-out is scoped to them rather than
+   applied as a blanket rule that would also silence ``.pulse`` (a state
+   indicator, not decoration) and the workspace bar's sweep. */
+@keyframes palette-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes palette-in { from { opacity: 0; transform: translateY(-4px) scale(0.98); } to { opacity: 1; transform: translateY(0) scale(1); } }
+.palette-backdrop { animation: palette-fade 100ms ease-out; }
+.palette-panel { animation: palette-in 120ms ease-out; }
+@media (prefers-reduced-motion: reduce) {
+  .palette-backdrop, .palette-panel { animation: none; }
+}

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { useJaato, MAIN_AGENT, uploadScope } from "./store";
+import { useJaato, MAIN_AGENT, runningToolCallIds, uploadScope } from "./store";
 import { agentPhase, anyBusy, isBusy } from "./phase";
 import type { JaatoEvent } from "@jaato/sdk";
 
@@ -279,6 +279,38 @@ describe("reduce — errors", () => {
     expect(s.blocks[MAIN_AGENT]).toHaveLength(0);
     useJaato.getState().dispatch([ev({ type: "error", error: "boom", error_type: "ProviderError" })]);
     expect(useJaato.getState().blocks[MAIN_AGENT]![0]).toMatchObject({ kind: "system", style: "error", text: "[ProviderError] boom" });
+  });
+
+  it("a recoverable error (the default) still reaches the transcript and leaves sessionFault unset", () => {
+    useJaato.getState().dispatch([ev({ type: "error", error: "Session not found: x", error_type: "SessionError", recoverable: true })]);
+    expect(useJaato.getState().sessionFault).toBeNull();
+  });
+
+  it("recoverable: false sets sessionFault -- RunnerBootstrapFailed's own shape", () => {
+    useJaato.getState().dispatch([ev({ type: "error", error: "Runner bootstrap failed", error_type: "RunnerBootstrapFailed", recoverable: false })]);
+    expect(useJaato.getState().sessionFault).toEqual({ errorType: "RunnerBootstrapFailed", message: "Runner bootstrap failed" });
+  });
+
+  it("a session that comes up afterward clears the fault", () => {
+    useJaato.getState().dispatch([ev({ type: "error", error: "boom", error_type: "RunnerBootstrapFailed", recoverable: false })]);
+    expect(useJaato.getState().sessionFault).not.toBeNull();
+    useJaato.getState().dispatch([ev({ type: "session.info", session_id: "s-1" })]);
+    expect(useJaato.getState().sessionFault).toBeNull();
+  });
+
+  it("resetSessionState clears a standing fault too", () => {
+    useJaato.getState().dispatch([ev({ type: "error", error: "boom", error_type: "RunnerBootstrapFailed", recoverable: false })]);
+    useJaato.getState().resetSessionState();
+    expect(useJaato.getState().sessionFault).toBeNull();
+  });
+});
+
+describe("the command palette flag", () => {
+  it("setPaletteOpen toggles it, and resetSessionState closes it", () => {
+    useJaato.getState().setPaletteOpen(true);
+    expect(useJaato.getState().paletteOpen).toBe(true);
+    useJaato.getState().resetSessionState();
+    expect(useJaato.getState().paletteOpen).toBe(false);
   });
 });
 
@@ -560,6 +592,31 @@ describe("phase — what the agent is doing", () => {
     d()([ev({ type: "agent.completed", agent_id: "sub-1", success: true })]);
     expect(useJaato.getState().agents["sub-1"]!.status).toBe("done");
     expect(isBusy(useJaato.getState(), "sub-1")).toBe(false);
+  });
+});
+
+describe("runningToolCallIds: what the live-output popup and the leader's O both read", () => {
+  it("lists only running tools that have produced output, in block order", () => {
+    useJaato.getState().dispatch([
+      ev({ type: "tool.call_start", agent_id: "main", tool_name: "a", call_id: "c1" }),
+      ev({ type: "tool.call_start", agent_id: "main", tool_name: "b", call_id: "c2" }),
+      ev({ type: "tool.output", agent_id: "main", call_id: "c2", chunk: "x" }),
+      ev({ type: "tool.call_start", agent_id: "main", tool_name: "c", call_id: "c3" }),
+      ev({ type: "tool.output", agent_id: "main", call_id: "c3", chunk: "y" }),
+    ]);
+    // c1 has no output yet, and is left out; c2/c3 do, in the order started.
+    expect(runningToolCallIds(useJaato.getState(), MAIN_AGENT)).toEqual(["c2", "c3"]);
+  });
+  it("drops a call once it ends", () => {
+    useJaato.getState().dispatch([
+      ev({ type: "tool.call_start", agent_id: "main", tool_name: "a", call_id: "c1" }),
+      ev({ type: "tool.output", agent_id: "main", call_id: "c1", chunk: "x" }),
+      ev({ type: "tool.call_end", agent_id: "main", call_id: "c1", tool_name: "a", success: true }),
+    ]);
+    expect(runningToolCallIds(useJaato.getState(), MAIN_AGENT)).toEqual([]);
+  });
+  it("an agent with no blocks answers empty, not an error", () => {
+    expect(runningToolCallIds(useJaato.getState(), "nobody")).toEqual([]);
   });
 });
 

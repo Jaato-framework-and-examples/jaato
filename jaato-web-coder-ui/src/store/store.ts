@@ -19,6 +19,7 @@ import { clampRailWidth, loadRailWidth, saveRailWidth } from "@/store/railWidth"
 import { loadRailSplits, sanitizeSplits, saveRailSplits, type RailSplits } from "@/store/railSplits";
 import { applyChanged, applySnapshot, markReset, type WorkspaceReset } from "@/store/workspaceView";
 import { toolIdMappings } from "@/protocol/toolIds";
+import { faultFromError, type SessionFault } from "@/protocol/sessionFault";
 import { clampStallThreshold, DEFAULT_STALL_THRESHOLD_MS } from "@/store/phase";
 import type { RailPanelId } from "@/store/railSplits";
 import type { SessionNote } from "@/app/notes";
@@ -240,6 +241,19 @@ export interface JaatoState {
   busySince: Record<string, number>;
   /** The open exit confirmation, or ``null`` (``app/exitChoice.ts``). */
   exitChoice: ExitChoice | null;
+  /** The command palette (#1304 §6): Ctrl/⌘+K, and where ``help`` now lands instead of the transcript. */
+  paletteOpen: boolean;
+  /**
+   * A non-recoverable ``ErrorEvent`` (``recoverable: false`` --
+   * ``RunnerBootstrapFailed`` among them, see ``protocol/sessionFault.ts``)
+   * that means this session never came up.  The transport can be perfectly
+   * connected while this is set -- it is a fact about the SESSION, not the
+   * WebSocket -- which is what the status bar reads to show red "no
+   * session" instead of a green "connected" that was never wrong about the
+   * transport and always wrong about the session.  Cleared by a session
+   * that DOES come up (a fresh ``SESSION_INFO``) or by ``resetSessionState``.
+   */
+  sessionFault: SessionFault | null;
   /** The rail's Memories section (#1232, ``app/memories.ts``). */
   memories: MemoriesState;
   /** The rail's Diagnostics section (#1294, ``app/diagnostics.ts``). */
@@ -347,6 +361,8 @@ export interface JaatoState {
   dismissReferenceSelection: (requestId: string) => void;
   dismissPostAuth: () => void;
   toggleUi: (key: "showTools") => void;
+  /** Open or close the command palette (Ctrl/⌘+K, or the ``help`` command). */
+  setPaletteOpen: (open: boolean) => void;
   /** Select (or, given the panel already showing, close) the rail's one active panel. */
   setActivePanel: (id: RailPanelId | null) => void;
   /** Pin (or unpin) Plan open beside whichever panel is active. */
@@ -424,6 +440,8 @@ const emptySessionState = () => ({
   permissionStatus: null,
   busySince: {} as Record<string, number>,
   exitChoice: null as ExitChoice | null,
+  paletteOpen: false,
+  sessionFault: null as SessionFault | null,
   memories: emptyMemories(),
   diagnostics: emptyDiagnostics(),
   lastEventAt: {} as Record<string, number>,
@@ -1015,6 +1033,13 @@ export function reduce(s: JaatoState, raw: JaatoEvent): JaatoState {
       const id = agentOf(ev);
       ensureAgent(s, id);
       setBlocks(s, id, [...(s.blocks[id] ?? []), { id: nextId(), kind: "system", agentId: id, text: `${ev.error_type ? `[${String(ev.error_type)}] ` : ""}${String(ev.error ?? "error")}`, style: "error" }]);
+      // ``recoverable: false`` means this session never came up
+      // (``RunnerBootstrapFailed`` among its causes) -- a fact about the
+      // SESSION distinct from ``connection.phase``, which stays whatever
+      // the transport reports.  ``protocol/sessionFault.ts`` is the one
+      // predicate; the status bar reads this field, not the transcript.
+      const fault = faultFromError(ev.error_type, ev.error, ev.recoverable);
+      if (fault) s.sessionFault = fault;
       break;
     }
     case EventTypeValue.RETRY: {
@@ -1040,7 +1065,11 @@ export function reduce(s: JaatoState, raw: JaatoEvent): JaatoState {
           s.uploads = s.uploads.map((u) => (u.scope === "" ? { ...u, scope: adopted } : u));
         }
       }
-      if (sid) s.sessionId = sid;
+      // A session that comes up clears whatever fault a PRIOR attempt left
+      // (this connection's, or a stale one this browser had rendered
+      // before a reconnect) -- the bar's red "no session" is a claim about
+      // the current attempt, never a sticky one.
+      if (sid) { s.sessionId = sid; s.sessionFault = null; }
       if (Array.isArray(ev.sessions)) s.sessions = normalizeSessionList(ev.sessions);
       s.session = {
         ...s.session,
@@ -1306,6 +1335,7 @@ export const useJaato = create<JaatoState>()((set, get) => ({
   dismissReferenceSelection: (requestId) => set((st) => ({ referenceSelections: st.referenceSelections.filter((r) => r.requestId !== requestId) })),
   dismissPostAuth: () => set({ postAuth: null }),
   toggleUi: (key) => set((st) => ({ ui: { ...st.ui, [key]: !st.ui[key] } })),
+  setPaletteOpen: (open) => set({ paletteOpen: open }),
   setActivePanel: (id) => set((st) => ({ ui: { ...st.ui, activePanel: st.ui.activePanel === id ? null : id } })),
   togglePinPlan: () => set((st) => ({ ui: { ...st.ui, pinnedPlan: !st.ui.pinnedPlan } })),
   setStallThreshold: (ms) => set({ stallThresholdMs: clampStallThreshold(ms) }),
@@ -1364,6 +1394,22 @@ export const useJaato = create<JaatoState>()((set, get) => ({
 /** Selector helpers. */
 export const selectBlocks = (agentId: string) => (s: JaatoState) => s.blocks[agentId] ?? EMPTY_BLOCKS;
 const EMPTY_BLOCKS: OutputBlock[] = [];
+
+/**
+ * Running tool blocks with output for one agent, in block order -- the one
+ * definition of what the live-output popup's tab strip shows and what the
+ * leader's ``O`` steps through (``app/leaderKeys.ts``).  ``ToolOutputPopup``
+ * used to compute this itself with a local listener owning its OWN Ctrl+O
+ * binding; there is one leader now, not a leader plus a component keeping a
+ * direct one alive beside it.
+ */
+export function runningToolCallIds(s: Pick<JaatoState, "blocks">, agentId: string): string[] {
+  const out: string[] = [];
+  for (const b of s.blocks[agentId] ?? []) {
+    if (b.kind === "tool" && b.status === "running" && b.output.length > 0) out.push(b.callId);
+  }
+  return out;
+}
 
 // Test/debug hook: the store instance itself, so a Playwright test can
 // drive state directly (a low ``stallThresholdMs`` for a stall to show up

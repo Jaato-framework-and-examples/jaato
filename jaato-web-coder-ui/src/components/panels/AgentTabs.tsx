@@ -1,6 +1,8 @@
 /**
  * One tab per agent (main + subagents) as cells of the session header,
- * like the TUI's agent tab bar (Ctrl+A cycles).  A tab is a status glyph
+ * like the TUI's agent tab bar (⌘/Ctrl+K then [ / ] steps, 1-9 jumps
+ * straight to a tab -- #1304 §7's leader, replacing the direct Ctrl+A
+ * this bar used to cycle forward on).  A tab is a status glyph
  * and the agent's name in the chrome face; the selected one sits on the
  * surface with a steel rule under it -- a warning rule when that agent is
  * waiting on a permission, so the tab says what the status bar's count
@@ -97,7 +99,7 @@ function AgentTab({ id }: { id: string }) {
 export function AgentTabs() {
   const order = useJaato((s) => s.agentOrder);
   return (
-    <div role="tablist" className="flex items-stretch overflow-x-auto" title="Ctrl+A selects the next agent">
+    <div role="tablist" className="flex items-stretch overflow-x-auto" title="⌘/Ctrl+K then [ or ] steps to the previous/next agent, 1-9 jumps to a tab">
       {order.map((id) => <AgentTab key={id} id={id} />)}
     </div>
   );
