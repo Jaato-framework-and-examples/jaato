@@ -771,7 +771,11 @@ test("a hashed category id in a tool call is shown by its name", async ({ page }
   await composer(page).fill("please discover tools");
   await composer(page).press("Enter");
   await expect(page.getByText("I have a system category.")).toBeVisible();
-  const row = page.getByRole("button", { name: /list_tools/ });
+  // list_tools is a housekeeping call (#1304 phase 1) and folds into a
+  // one-line summary; expand it to reach the resolved call detail.
+  const fold = page.getByRole("button", { name: /list_tools/ });
+  await fold.click();
+  const row = page.locator("[data-testid=tool-block]").filter({ hasText: "list_tools" });
   // The mapping arrived after the call: the row resolves when it does.
   await expect(row).toContainText("category_id=system");
   await expect(row).not.toContainText("c_bbc5e661");

@@ -9,19 +9,41 @@
  * calls open by default; successful ones honour the server's
  * ``show_output`` hint.
  *
+ * ``toolClass`` (jaato/#1304 §1) adds two class-specific extras, both
+ * built from what the CLIENT already has -- the call's own arguments and
+ * its accumulated output -- because neither a ``diff`` field on
+ * ``tool.call_end`` nor a workspace diff viewer exists yet (see
+ * ``protocol/toolPreview.ts``'s own docstring for that gap):
+ *
+ * - ``write``: an inline diff/content preview, always shown (not behind
+ *   the expand toggle -- a write is exactly the row a reviewer wants to
+ *   see without a click), with an "Open diff" action that downloads the
+ *   current file until a real diff viewer exists.
+ * - ``exec``: the command itself as the row's title (rather than a
+ *   generic argument summary) and, while collapsed, a trailing-lines
+ *   preview of its output with a "Copy output" action that copies the
+ *   WHOLE accumulated output, not just the preview.
+ *
+ * The caller (``ToolGroupView``, for a ``"row"``-mode group) already
+ * knows the class from the resolved display name and passes it in;
+ * ``toolClass`` is re-derived here only as a fallback for a caller (a
+ * test, a future direct use) that does not.
+ *
  * A successful ``offer_download`` call (the host tool the model uses to
  * hand the user a file, ``app/downloads.ts``) also draws a download
  * button under its row, always visible: the button IS the tool's output,
  * so it cannot sit behind the expand toggle.
  */
-import { memo, useState } from "react";
+import { memo, useState, type MouseEvent } from "react";
 import type { ToolBlock } from "@/store/types";
 import { useJaato } from "@/store/store";
 import { Plate } from "@/components/layout/Plate";
 import { MediaView } from "./MediaView";
-import { hasServerMarkup, JMarkup } from "./JMarkup";
+import { hasServerMarkup, JMarkup, DiffLines } from "./JMarkup";
 import { resolveToolArgs } from "@/protocol/toolIds";
 import { downloadWorkspaceFile, OFFER_DOWNLOAD_TOOL } from "@/app/downloads";
+import { classifyTool, type ToolClass } from "@/protocol/toolClass";
+import { diffPreviewForCall, execOutputPreview, execTitle } from "@/protocol/toolPreview";
 
 export function summarizeArgs(args: Record<string, unknown>, max = 110): string {
   const parts: string[] = [];
@@ -66,14 +88,24 @@ export function DownloadChip({ path, label }: { path: string; label?: string }) 
   );
 }
 
-export const ToolBlockView = memo(function ToolBlockView({ block }: { block: ToolBlock }) {
+export const ToolBlockView = memo(function ToolBlockView({ block, toolClass }: { block: ToolBlock; toolClass?: ToolClass }) {
   const toggle = useJaato((s) => s.toggleTool);
   // Hashed tool / category ids in the arguments, shown by name (protocol/toolIds.ts).
   const toolIdNames = useJaato((s) => s.toolIdNames);
   const setPopup = useJaato((s) => s.setPopup);
+  const displayName = toolIdNames[block.toolName] ?? block.toolName;
+  const cls = toolClass ?? classifyTool(displayName);
+  const resolvedArgs = resolveToolArgs(block.args, toolIdNames);
   const hasBody = block.output.length > 0 || block.media.length > 0 || !!block.errorMessage;
-  const offered = (toolIdNames[block.toolName] ?? block.toolName) === OFFER_DOWNLOAD_TOOL && block.status === "success" && typeof block.args.path === "string" ? block.args.path : null;
+  const offered = displayName === OFFER_DOWNLOAD_TOOL && block.status === "success" && typeof block.args.path === "string" ? block.args.path : null;
   const running = block.status === "running";
+
+  const diff = cls === "write" ? diffPreviewForCall(displayName, resolvedArgs) : null;
+  const hasDiffPreview = !!diff && (diff.diffLines !== null || diff.text !== null);
+  const execTail = cls === "exec" && block.output && !block.expanded ? execOutputPreview(block.output) : null;
+  const title = cls === "exec" ? execTitle(displayName, resolvedArgs) : null;
+  const copyOutput = (e: MouseEvent) => { e.stopPropagation(); navigator.clipboard?.writeText(block.output).catch(() => undefined); };
+
   return (
     <div data-testid="tool-block" className="border-t hairline">
       <button
@@ -85,9 +117,14 @@ export const ToolBlockView = memo(function ToolBlockView({ block }: { block: Too
         <span className="w-3 shrink-0 text-center">
           <StatusGlyph status={block.status} />
         </span>
-        <span className={`chrome w-[120px] shrink-0 truncate ${block.status === "error" ? "text-error" : ""}`}>{block.toolName}</span>
-        <span className="font-mono text-xs text-text-muted truncate flex-1">{summarizeArgs(resolveToolArgs(block.args, toolIdNames))}</span>
+        <span className={`chrome w-[120px] shrink-0 truncate ${block.status === "error" ? "text-error" : ""}`}>{displayName}</span>
+        <span className="font-mono text-xs text-text-muted truncate flex-1">{title ?? summarizeArgs(resolvedArgs)}</span>
         {block.backgrounded && <span className="kicker kicker-muted text-[10px]">bg</span>}
+        {cls === "exec" && block.output && (
+          <span role="button" tabIndex={0} className="chrome-sm font-heading uppercase tracking-[0.08em] text-text-muted hover:text-steel shrink-0" onClick={copyOutput} onKeyDown={(e) => { if (e.key === "Enter") copyOutput(e as unknown as MouseEvent); }} title="Copy the whole output">
+            copy
+          </span>
+        )}
         {running && block.output ? (
           <span
             role="button"
@@ -105,6 +142,22 @@ export const ToolBlockView = memo(function ToolBlockView({ block }: { block: Too
           <span className="w-[52px]" />
         )}
       </button>
+      {hasDiffPreview && (
+        <div className="ml-6 mr-1 mb-1.5">
+          <div className="flex items-center justify-between px-0.5 pb-0.5">
+            <span className="font-mono text-[10px] text-text-muted truncate">{diff!.path ?? ""}{diff!.truncated ? " (truncated)" : ""}</span>
+            {diff!.path && (
+              <button type="button" className="link text-[11px] shrink-0" onClick={(e) => { e.stopPropagation(); void downloadWorkspaceFile(diff!.path!); }} title="No diff viewer exists yet -- this downloads the current file">
+                Open diff
+              </button>
+            )}
+          </div>
+          {diff!.diffLines ? <DiffLines lines={diff!.diffLines} /> : <pre className="code-block whitespace-pre-wrap break-words px-2 py-1.5">{diff!.text}</pre>}
+        </div>
+      )}
+      {execTail && (
+        <pre className="ml-6 mr-1 mb-1.5 code-block whitespace-pre-wrap break-words px-2 py-1.5 text-text-muted">{execTail.text}</pre>
+      )}
       {offered && <DownloadChip path={offered} label={typeof block.args.label === "string" ? block.args.label : undefined} />}
       {block.expanded && hasBody && (
         <Plate ground corners="two" edge={block.status === "error" ? "error" : "hairline"} className="ml-6 mt-0.5 mb-2.5">
