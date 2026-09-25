@@ -122,6 +122,66 @@ export function anyBusy(s: JaatoState): boolean {
   return s.agentOrder.some((id) => isBusy(s, id));
 }
 
+/**
+ * Stall detection (#1304 §3): an agent is STALLED when it is
+ * ``thinking``/``sending`` -- generating, or waiting for the daemon's
+ * first word about a send -- and nothing has been heard from it for the
+ * configured threshold.  Deliberately does NOT apply to ``tool`` (a
+ * running tool call is known activity, not silence) or ``waiting`` (that
+ * is already the "needs you" state, and outranks stalled).
+ *
+ * ``DEFAULT_STALL_THRESHOLD_MS`` is the issue's default (60s); the knob is
+ * a store field (``stallThresholdMs``) clamped to the issue's declared
+ * range (30s-300s) by the SETTER (``setStallThreshold`` in ``store.ts``) --
+ * this module clamps too, defensively, so a value written some other way
+ * (a test, a stale ``localStorage`` entry) cannot produce a threshold
+ * outside the documented range.
+ */
+export const DEFAULT_STALL_THRESHOLD_MS = 60_000;
+export const MIN_STALL_THRESHOLD_MS = 30_000;
+export const MAX_STALL_THRESHOLD_MS = 300_000;
+
+export function clampStallThreshold(ms: number): number {
+  if (!Number.isFinite(ms)) return DEFAULT_STALL_THRESHOLD_MS;
+  return Math.min(MAX_STALL_THRESHOLD_MS, Math.max(MIN_STALL_THRESHOLD_MS, ms));
+}
+
+export interface StallInfo {
+  /** How long since the last event this agent was heard from. */
+  silentForMs: number;
+  /** The threshold that was crossed, after clamping. */
+  thresholdMs: number;
+}
+
+/**
+ * The pure predicate: given a phase already computed (``agentPhase``), the
+ * agent's ``lastEventAt`` stamp (``undefined`` if nothing has been heard at
+ * all, in which case the phase's own ``since`` is the fallback -- the
+ * moment it started being busy), the configured threshold and the current
+ * clock, decide whether this reads as a stall.
+ *
+ * Framework-free on purpose: ``AgentTabs`` and the parent-transcript banner
+ * both need this against a live-ticking ``now`` they own themselves (see
+ * ``hooks/useTick``), so it takes exactly the values it needs rather than
+ * the whole store -- a ``useJaato`` selector re-run every tick would work,
+ * but coupling the predicate to ``JaatoState`` makes it untestable without
+ * one.
+ */
+export function stalled(phase: AgentPhase, lastEventAt: number | undefined, thresholdMs: number, now: number): StallInfo | null {
+  if (phase.kind !== "thinking" && phase.kind !== "sending") return null;
+  const threshold = clampStallThreshold(thresholdMs);
+  const last = lastEventAt ?? phase.since;
+  const silentForMs = now - last;
+  return silentForMs >= threshold ? { silentForMs, thresholdMs: threshold } : null;
+}
+
+/** ``stalled`` computed straight off a ``JaatoState``, for a caller (a test,
+ *  a non-React helper) that already has one and does not want to derive the
+ *  phase itself. */
+export function stallInfo(s: JaatoState, agentId: string, now: number = Date.now()): StallInfo | null {
+  return stalled(agentPhase(s, agentId), s.lastEventAt[agentId], s.stallThresholdMs, now);
+}
+
 /** One line of chrome copy for a phase: what is happening, without the elapsed time. */
 export function phaseLabel(p: AgentPhase): string {
   switch (p.kind) {

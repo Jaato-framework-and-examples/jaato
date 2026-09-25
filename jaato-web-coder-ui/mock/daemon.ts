@@ -41,7 +41,16 @@
  *                 client registered (protocol 1.20): the daemon sends
  *                 ``tool.execute_request``, waits for the client's
  *                 ``tool.execute_result``, and the call lands as a tool row
- *   "subagent"  → spawns a subagent that streams in its own tab
+ *   "subagent"  → spawns a subagent that streams in its own tab, and
+ *                 mentions its raw id in the PARENT's own text (#1304
+ *                 §4's "one name everywhere" case)
+ *   "stall subagent" → spawns a subagent, marks it active, then sends it
+ *                 NOTHING further -- no ``agent.output``, no terminal
+ *                 status -- until ``session.stop`` names that agent's id.
+ *                 The client's own stall threshold (lowered via
+ *                 ``window.__jaatoStore`` in a test) is what notices the
+ *                 silence (#1304 §3); the mock supplies the silence, not
+ *                 the detection.
  *   "…remember <text>" → a ``store_memory`` call that succeeds and adds a
  *                 RAW memory written in this session to the store the
  *                 memory verbs (protocol 1.22) answer from
@@ -452,10 +461,28 @@ async function turn(c: Client, text: string, agentId = "main"): Promise<void> {
       send(c, { type: "tool.call_end", agent_id: agentId, tool_name: "offer_download", call_id: callId, success: ok, error_message: ok ? null : result.error, is_error_result: !ok, duration_seconds: 0.02, show_output: false });
       await stream(c, agentId, ok ? "Here it is -- use the button above." : `I could not offer it: ${result.error}`);
     }
+  } else if (lower.includes("stall subagent")) {
+    // A subagent that goes quiet mid-turn, backgrounded: the MAIN turn
+    // completes normally (the common tail below still runs), while the
+    // subagent's own hang is DETACHED -- not awaited here -- so a
+    // background agent going silent never blocks the composer, exactly
+    // as a real backgrounded subagent outlives its parent's own turn.
+    // No further event for the subagent's agent_id until session.stop
+    // names it; the client's own lastEventAt/stalled() is what has to
+    // notice the silence, not the mock.
+    const subId = `sub-${randomUUID().slice(0, 6)}`;
+    send(c, { type: "agent.created", agent_id: subId, agent_name: "STALLED-WORKER", agent_type: "subagent", parent_agent_id: agentId, profile_name: "worker" });
+    send(c, { type: "agent.status_changed", agent_id: subId, status: "active" });
+    await stream(c, agentId, `Delegated to a background worker (id: ${subId}); it keeps going even if I go quiet.`);
+    void new Promise<void>((r) => c.pending.set(`hang:${subId}`, () => r())).then(() => {
+      send(c, { type: "agent.status_changed", agent_id: subId, status: "cancelled" });
+    });
   } else if (lower.includes("subagent")) {
     const subId = `sub-${randomUUID().slice(0, 6)}`;
     send(c, { type: "agent.created", agent_id: subId, agent_name: "researcher", agent_type: "subagent", parent_agent_id: agentId, profile_name: "researcher" });
-    await stream(c, agentId, "Delegating to a researcher subagent…\n");
+    // The parent's own text names the raw id -- exactly what #1304 §4's
+    // "one name everywhere" resolves to the tab's display name.
+    await stream(c, agentId, `Delegating to a researcher subagent (id: ${subId})…\n`);
     await stream(c, subId, "# Research notes\n\nLooking into the question. Found **three** relevant sources.\n");
     send(c, { type: "agent.completed", agent_id: subId, summary: "done" });
     await stream(c, agentId, "\nThe subagent finished; see its tab.");
@@ -845,11 +872,18 @@ wss.on("connection", (ws, req) => {
           { name: "waypoint list", description: "List waypoints" }, { name: "permissions status", description: "Show permission status" },
         ] });
         break;
-      case "session.stop":
-        send(c, { type: "system.message", message: "Stopped.", style: "warning" });
-        c.pending.get("hang")?.(undefined);
-        c.pending.delete("hang");
+      case "session.stop": {
+        // ``client.stop(agentId)`` (jaato-sdk-ts) carries the target
+        // agent; a per-agent pending key is what lets Cancel on the
+        // stall banner reach exactly the stalled SUBAGENT rather than
+        // whatever the shared "hang" key would resolve.
+        const targetAgent = ev.agent_id ? String(ev.agent_id) : null;
+        send(c, { type: "system.message", message: targetAgent ? `Stopped ${targetAgent}.` : "Stopped.", style: "warning" });
+        const key = targetAgent ? `hang:${targetAgent}` : "hang";
+        c.pending.get(key)?.(undefined);
+        c.pending.delete(key);
         break;
+      }
       case "history.request": {
         const history = (c.sessionId && HISTORIES[c.sessionId]) || [];
         send(c, { type: "history", agent_id: "main", history, turn_accounting: history.length ? [{ prompt: 120, output: 40, total: 160 }] : [] });
