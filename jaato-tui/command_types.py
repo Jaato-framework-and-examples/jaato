@@ -262,6 +262,9 @@ class AgentUIHooks(Protocol):
         show_popup: Optional[bool] = None,
         is_error_result: bool = False,
         result_status: Optional[str] = None,
+        diff: Optional[str] = None,
+        diff_truncated: Optional[bool] = None,
+        path: Optional[str] = None,
     ) -> None: ...
 
     def on_tool_output(

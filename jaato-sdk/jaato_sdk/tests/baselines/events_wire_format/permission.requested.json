@@ -10,5 +10,6 @@
   "prompt_lines": null,
   "format_hint": null,
   "warnings": null,
-  "warning_level": null
+  "warning_level": null,
+  "tool_class": null
 }

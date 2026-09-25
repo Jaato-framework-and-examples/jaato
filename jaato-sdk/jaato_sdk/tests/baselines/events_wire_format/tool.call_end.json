@@ -13,5 +13,8 @@
   "backgrounded": false,
   "continuation_id": null,
   "show_output": null,
-  "show_popup": null
+  "show_popup": null,
+  "diff": null,
+  "diff_truncated": null,
+  "path": null
 }

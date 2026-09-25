@@ -1797,6 +1797,64 @@ Backups are automatically created for file modifications."""
             file_path, validate=self._sandbox_validator("read")
         )
 
+    def _read_diff_old_content(
+        self,
+        file_path: Path,
+        current_content: Optional[str],
+        content_loaded: bool,
+    ) -> Optional[str]:
+        """The "before" text for the ``tool.call_end`` diff (#1304 phase 3).
+
+        Reuses the targeted-mode read when the caller already has it
+        (``content_loaded``); full-replacement mode never reads the old
+        content on its own, since it does not need it to compute the
+        new content, so this reads it once more, just for the diff.
+
+        Best-effort: a failed read here must not fail a write that
+        would otherwise have succeeded — it only means the result
+        carries no diff, which the caller (via
+        :meth:`_attach_update_diff`) treats as "nothing to attach"
+        rather than as an error.
+        """
+        if content_loaded:
+            return current_content
+        try:
+            content, _ = self._line_endings.load(
+                file_path, validate=self._sandbox_validator("read")
+            )
+            return content
+        except OSError:
+            return None
+
+    def _attach_update_diff(
+        self,
+        result: Dict[str, Any],
+        diff_old_content: Optional[str],
+        new_content: str,
+        path: str,
+    ) -> None:
+        """Attach a capped unified diff to an ``updateFile`` result, IN PLACE.
+
+        The same ``generate_unified_diff()`` the permission-ask card
+        already uses (``diff_utils.py``), computed here rather than
+        reused from the ask because a write reaching this executor did
+        not necessarily go through an ASK at all (whitelist, allow_all,
+        turn/idle suspension, ``auto_allow_housekeeping`` never call the
+        ``_format_update_file`` preview).  A ``None`` ``diff_old_content``
+        (the "before" read failed) attaches nothing — the write already
+        succeeded and must not be reported as a failure over a diff
+        nobody strictly needs.
+        """
+        if diff_old_content is None:
+            return
+        diff_text, diff_truncated, diff_total_lines = generate_unified_diff(
+            diff_old_content, new_content, path, max_lines=DEFAULT_MAX_LINES
+        )
+        result["diff"] = diff_text
+        result["diff_truncated"] = diff_truncated
+        if diff_truncated:
+            result["diff_total_lines"] = diff_total_lines
+
     def _execute_update_file(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute updateFile tool.
 
@@ -1832,6 +1890,7 @@ Backups are automatically created for file modifications."""
         # mistake "file has no line endings" for "not read yet".
         existing_eol: Optional[str] = None
         content_loaded = False
+        current_content: Optional[str] = None
         if old_text is not None:
             # Targeted mode
             new_text = args.get("new")
@@ -1896,6 +1955,16 @@ Backups are automatically created for file modifications."""
             self._write_line_ending(file_path, existing_eol, content_loaded),
         )
 
+        # ``current_content`` is only populated by the targeted-mode branch
+        # (``content_loaded``); full-replacement mode never reads the old
+        # content, since it does not need it to compute ``new_content``.
+        # The diff attached to ``tool.call_end`` (#1304 phase 3) needs it
+        # either way — see ``_read_diff_old_content``'s own docstring for
+        # why the read is repeated rather than reused unconditionally.
+        diff_old_content = self._read_diff_old_content(
+            file_path, current_content, content_loaded
+        )
+
         # Create backup before modification
         backup_path = None
         if self._backup_manager:
@@ -1918,6 +1987,15 @@ Backups are automatically created for file modifications."""
             }
             if backup_path:
                 result["backup"] = normalize_result_path(str(backup_path))
+            # tool.call_end diff preview (#1304 phase 3): the SAME
+            # generate_unified_diff() the permission-ask card already
+            # uses (diff_utils.py), computed here rather than reused from
+            # the ask because a write reaching this executor did not
+            # necessarily go through an ASK at all (whitelist, allow_all,
+            # turn/idle suspension, auto_allow_housekeeping never call
+            # _format_update_file).  See ``_attach_update_diff`` for the
+            # best-effort contract.
+            self._attach_update_diff(result, diff_old_content, new_content, path)
             # _telemetry: Convention-based telemetry
             result['_telemetry'] = {
                 'jaato.file.operation': 'update',
@@ -1965,7 +2043,7 @@ Backups are automatically created for file modifications."""
                 exclusive=True,
                 newline="",
             )
-            return {
+            result = {
                 "success": True,
                 "path": normalize_result_path(path),
                 "size": len(content),
@@ -1978,6 +2056,18 @@ Backups are automatically created for file modifications."""
                     "jaato.file.lines": len(content.splitlines()),
                 },
             }
+            # tool.call_end diff preview (#1304 phase 3) -- the same
+            # generate_new_file_diff() the permission-ask card uses, run
+            # here so a write that never went through an ASK (whitelist,
+            # allow_all, turn/idle suspension) still carries one.
+            diff_text, diff_truncated, diff_total_lines = generate_new_file_diff(
+                content, path, max_lines=DEFAULT_MAX_LINES
+            )
+            result["diff"] = diff_text
+            result["diff_truncated"] = diff_truncated
+            if diff_truncated:
+                result["diff_total_lines"] = diff_total_lines
+            return result
         except OSError as e:
             return {"error": f"Failed to create file: {e}"}
 

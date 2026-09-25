@@ -370,6 +370,9 @@ class AgentUIHooks(Protocol):
         show_popup: Optional[bool] = None,
         is_error_result: bool = False,
         result_status: Optional[str] = None,
+        diff: Optional[str] = None,
+        diff_truncated: Optional[bool] = None,
+        path: Optional[str] = None,
     ) -> None:
         """Called when a tool finishes executing.
 
@@ -401,6 +404,17 @@ class AgentUIHooks(Protocol):
             show_popup: Whether to track/update the tool output popup.
                 None means use default (True). False prevents this tool from
                 becoming the tracked popup tool or updating popup content.
+            diff: A capped unified diff of what the tool changed on disk
+                (jaato/#1304 phase 3), read off the tool's own result dict
+                via ``tool_result_diff_fields()``.  ``None`` for every tool
+                that is not a file writer -- today, ``updateFile`` /
+                ``writeNewFile``.
+            diff_truncated: Whether ``diff`` was capped (see
+                ``diff_utils.DEFAULT_MAX_LINES``).  ``None`` when ``diff``
+                is also ``None``.
+            path: The written file's path, copied from the result dict
+                (the same value ``TRAIT_FILE_WRITER``'s contract already
+                requires there) so a consumer need not parse the result.
         """
         ...
 

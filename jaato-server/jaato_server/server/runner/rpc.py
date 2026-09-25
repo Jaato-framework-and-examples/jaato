@@ -5385,7 +5385,8 @@ class RunnerRPC:
             ``(True, {"status": {...}})`` with the plugin's own
             ``get_permission_status()`` dict --
             ``effective_default`` / ``suspension_scope`` /
-            ``is_suspended``.
+            ``is_suspended`` / ``auto_allow_housekeeping`` /
+            ``whitelisted_tools`` (jaato/#1304 phase 3).
 
             ``(False, {"error": ..., "stage": ...})`` on
             ``no_host`` / ``no_session`` / ``no_plugin`` / ``call``.
@@ -6411,6 +6412,9 @@ class _AgentUIHooksNotificationShim:
         show_popup: Optional[bool] = None,
         is_error_result: bool = False,
         result_status: Optional[str] = None,
+        diff: Optional[str] = None,
+        diff_truncated: Optional[bool] = None,
+        path: Optional[str] = None,
     ) -> None:
         try:
             self._rpc.emit_notification(
@@ -6429,6 +6433,9 @@ class _AgentUIHooksNotificationShim:
                     "continuation_id": continuation_id,
                     "show_output": show_output,
                     "show_popup": show_popup,
+                    "diff": diff,
+                    "diff_truncated": diff_truncated,
+                    "path": path,
                 },
             )
         except Exception:  # noqa: BLE001

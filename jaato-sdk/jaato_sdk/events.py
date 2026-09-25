@@ -1145,6 +1145,16 @@ class ToolCallStartEvent(Event):
     tool_name: str = ""
     tool_args: Dict[str, Any] = Field(default_factory=dict)
     call_id: Optional[str] = None
+    # Coarse class from jaato_server.shared.tool_classification.classify_tool
+    # (jaato/#1304 phase 3): "housekeeping" | "write" | "exec" | "read" |
+    # "agent" | "other".  Additive, no protocol bump — an older client
+    # ignores the field via `extra='ignore'` and a newer one falls back to
+    # its own client-side table (jaato-web-coder-ui's toolClass.ts) when
+    # it is absent, exactly the #823/"Three Rows the Web Client Drew That
+    # Nobody Sent" lesson this field is declared to avoid repeating: a
+    # daemon-emitted key an SDK model does not declare is silently dropped
+    # on ingest rather than reaching the client.
+    tool_class: Optional[str] = None
 
 
 class ToolCallEndEvent(Event):
@@ -1167,6 +1177,24 @@ class ToolCallEndEvent(Event):
     continuation_id: Optional[str] = None  # Session ID for continuation grouping (e.g., interactive shell)
     show_output: Optional[bool] = None  # Whether to render output_lines in the main panel (None = default True)
     show_popup: Optional[bool] = None  # Whether to track/update the tool output popup (None = default True)
+    # Inline diff preview for a TRAIT_FILE_WRITER tool (jaato/#1304 phase 3):
+    # a capped unified diff computed by the executor from the SAME
+    # generate_unified_diff()/generate_new_file_diff() the permission-ask
+    # card already used (jaato_server/shared/plugins/file_edit/diff_utils.py),
+    # so the transcript can show a write's effect without a round trip.
+    # `diff` / `diff_truncated` are populated together, from
+    # `tool_result_diff_fields()` reading the tool's own result dict --
+    # absent for every tool that isn't a file writer.  `diff_truncated`
+    # True means the diff was capped at diff_utils.DEFAULT_MAX_LINES lines;
+    # the client's "Open diff" affordance is what a truncated preview is
+    # for.  Additive, no protocol bump.
+    diff: Optional[str] = None
+    diff_truncated: Optional[bool] = None
+    # The written file's path, copied onto the event so a client does not
+    # have to reach into the result dict for it (TRAIT_FILE_WRITER's own
+    # contract already requires the result to carry `path` / `files_modified`
+    # / `changes[].file` -- this is the first of those, when present).
+    path: Optional[str] = None
 
 
 #: Reserved ``ToolOutputEvent.call_id`` for media the MODEL produced, as
@@ -1311,6 +1339,11 @@ class PermissionRequestedEvent(Event):
     format_hint: Optional[str] = None  # "diff" for colored diff display
     warnings: Optional[str] = None  # Security/analysis warnings to display separately
     warning_level: Optional[str] = None  # "info", "warning", "error"
+    # Same coarse class as ToolCallStartEvent.tool_class (jaato/#1304 phase
+    # 3), from jaato_server.shared.tool_classification.classify_tool.  Lets a
+    # permission card show a risk tag without its own name table.  Additive,
+    # no protocol bump.
+    tool_class: Optional[str] = None
 
 
 class PermissionInputModeEvent(Event):
@@ -1377,6 +1410,11 @@ class PermissionStatusEvent(Event):
     type: EventType = Field(default=EventType.PERMISSION_STATUS)
     effective_default: str = "ask"  # "allow", "deny", or "ask"
     suspension_scope: Optional[str] = None  # "turn", "idle", "session", or None
+    auto_allow_housekeeping: Optional[bool] = None  # jaato/#1304: whether the
+    # profile opted into the auto_allow_housekeeping policy (read-only,
+    # low-risk tools resolve without asking).  ``None`` means "not reported"
+    # (an older daemon, or the enforcer could not be reached), never "off" --
+    # distinct from ``False``, which is a measured answer.
 
 
 class ClarificationRequestedEvent(Event):

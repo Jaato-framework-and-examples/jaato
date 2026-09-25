@@ -41,6 +41,7 @@ from jaato_sdk.events import PermissionInputModeEvent, PermissionRequestedEvent
 
 from jaato_server.server.awaiting import oldest
 from jaato_server.shared.plugins.permission.types import PromptPayload, PromptResponse
+from jaato_server.shared.tool_classification import classify_tool
 
 
 logger = logging.getLogger(__name__)
@@ -186,6 +187,7 @@ class PromptOperatorHandler:
             format_hint=payload.format_hint,
             warnings=payload.warnings,
             warning_level=payload.warning_level,
+            tool_class=classify_tool(payload.tool_name),
         )
         # Path J (cycle 12) Layer 10: companion control event that
         # switches the TUI's input mode to "answer the prompt".
