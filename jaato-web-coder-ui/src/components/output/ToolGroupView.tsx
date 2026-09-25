@@ -23,7 +23,9 @@ function FoldedRow({ group, glyph, glyphLabel, glyphClass = "" }: { group: ToolG
         aria-expanded={expanded}
       >
         <span className={`w-3 shrink-0 text-center ${glyphClass}`} aria-label={glyphLabel}>{glyph}</span>
-        <span className="font-mono text-xs italic truncate flex-1">{group.label}</span>
+        {/* ``min-w-0``: a flex item's default ``min-width: auto`` beats
+            ``truncate`` until it is overridden (see ``ToolBlockView``). */}
+        <span className="font-mono text-xs italic truncate flex-1 min-w-0">{group.label}</span>
         <span className="text-[10px] w-[52px] text-right">{expanded ? "▾" : "▸"}</span>
       </button>
       {expanded && (

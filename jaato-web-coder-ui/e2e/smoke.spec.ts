@@ -107,15 +107,17 @@ test("tool calls stream into a collapsible block and update the plan panel", asy
   const block = page.getByRole("button", { name: /run_command/ }).first();
   await expect(block).toBeVisible();
   await expect(page.getByText("README.md")).toBeVisible();
-  await page.getByRole("button", { name: "Toggle plan (Ctrl+P)" }).click();
+  // #1304 §7: the status bar's own toggles carry the leader wording now
+  // (direct Ctrl+P/T are gone -- the browser owns them).
+  await page.getByRole("button", { name: /Toggle plan/ }).click();
   await expect(page.getByText("Task plan")).toBeVisible();
   await expect(page.getByText("List the directory")).toBeVisible();
   // The TUI's Ctrl+T: the status-bar toggle expands every tool block and
   // collapses them again, instead of flipping a flag nothing reads.
   const toolBlock = page.locator("[data-testid=tool-block] [aria-expanded]").first();
-  await page.getByRole("button", { name: "Toggle tool call boxes (Ctrl+T)" }).click();
+  await page.getByRole("button", { name: /Toggle tool call boxes/ }).click();
   await expect(toolBlock).toHaveAttribute("aria-expanded", "true");
-  await page.getByRole("button", { name: "Toggle tool call boxes (Ctrl+T)" }).click();
+  await page.getByRole("button", { name: /Toggle tool call boxes/ }).click();
   await expect(toolBlock).toHaveAttribute("aria-expanded", "false");
 });
 
@@ -212,7 +214,7 @@ test("permission prompt shows the diff and the typed key answers it", async ({ p
   await composer(page).fill("y");
   await composer(page).press("Enter");
   await expect(page.getByText("Written (you answered")).toBeVisible();
-  await page.getByRole("button", { name: "Toggle workspace changes (Alt+W)" }).click();
+  await page.getByRole("button", { name: "Toggle workspace changes (⌘/Ctrl+K then F)" }).click();
   await expect(page.getByText("~ app.py")).toBeVisible();
   // The daemon's key is ``status``: a created file renders as ``+``.
   await expect(page.getByText("+ session.log")).toBeVisible();
@@ -226,7 +228,7 @@ test("files panel: hide drops an entry from the view, show-hidden brings it back
   await composer(page).fill("y");
   await composer(page).press("Enter");
   await expect(page.getByText("Written (you answered")).toBeVisible();
-  await page.getByRole("button", { name: "Toggle workspace changes (Alt+W)" }).click();
+  await page.getByRole("button", { name: "Toggle workspace changes (⌘/Ctrl+K then F)" }).click();
   const panel = page.getByRole("region", { name: "Files" });
   await expect(panel.getByText("~ app.py")).toBeVisible();
 
@@ -738,7 +740,7 @@ test("the Files panel's reset shows only later changes, and survives a reconnect
   await composer(page).fill("please touch old.py kept.py");
   await composer(page).press("Enter");
   await expect(page.getByText("Touched old.py, kept.py.")).toBeVisible();
-  await page.getByRole("button", { name: "Toggle workspace changes (Alt+W)" }).click();
+  await page.getByRole("button", { name: "Toggle workspace changes (⌘/Ctrl+K then F)" }).click();
   const panel = page.getByRole("region", { name: "Files" });
   await expect(panel.getByText("~ old.py")).toBeVisible();
 
@@ -916,7 +918,7 @@ test("files attached in the composer are staged into the workspace, listed in Fi
   await expect(strip.locator("li[data-status=staged]")).toHaveCount(2);
   await expect(page.getByText("Staged into the workspace: notes.md, data.bin")).toBeVisible();
   // The daemon's file monitor reports them, so the Files panel lists them.
-  await page.getByRole("button", { name: "Toggle workspace changes (Alt+W)" }).click();
+  await page.getByRole("button", { name: "Toggle workspace changes (⌘/Ctrl+K then F)" }).click();
   const panel = page.getByRole("region", { name: "Files" });
   await expect(panel.getByText("+ notes.md")).toBeVisible();
   await expect(panel.getByText("+ data.bin")).toBeVisible();
@@ -966,7 +968,7 @@ test("files attached on the session picker are in the workspace when the session
   await page.getByRole("button", { name: /default/ }).click();
   await expect(page.getByText("Connected to the mock daemon")).toBeVisible();
   await expect(page.getByText("Staged into the workspace: brief.txt")).toBeVisible();
-  await page.getByRole("button", { name: "Toggle workspace changes (Alt+W)" }).click();
+  await page.getByRole("button", { name: "Toggle workspace changes (⌘/Ctrl+K then F)" }).click();
   await expect(page.getByRole("region", { name: "Files" }).getByText("+ brief.txt")).toBeVisible();
 });
 
@@ -1101,7 +1103,7 @@ test("a file in the Files panel downloads when its name is clicked (protocol 1.2
   await composer(page).fill("please touch out/report.txt");
   await composer(page).press("Enter");
   await expect(page.getByText("Touched out/report.txt.")).toBeVisible();
-  await page.getByRole("button", { name: "Toggle workspace changes (Alt+W)" }).click();
+  await page.getByRole("button", { name: "Toggle workspace changes (⌘/Ctrl+K then F)" }).click();
   const panel = page.getByRole("region", { name: "Files" });
   const downloading = page.waitForEvent("download");
   await panel.getByRole("button", { name: "Download out/report.txt", exact: true }).click();
@@ -1136,7 +1138,7 @@ test("the jaato-sdk skill is bootstrapped into the workspace on session start (#
   // files, so the Files panel lists ``.claude/skills/jaato-sdk/SKILL.md``
   // and the notice names the version the copy was stamped with.
   await openSession(page);
-  await page.getByRole("button", { name: "Toggle workspace changes (Alt+W)" }).click();
+  await page.getByRole("button", { name: "Toggle workspace changes (⌘/Ctrl+K then F)" }).click();
   const panel = page.getByRole("region", { name: "Files" });
   await expect(
     panel.getByRole("button", { name: "Download .claude/skills/jaato-sdk/SKILL.md", exact: true }),
@@ -1217,4 +1219,93 @@ test("diagnostics rail shows the record and a live re-check, distinctly, and can
   await composer(page).press("Enter");
   await panel.getByRole("button", { name: "Re-check now" }).click();
   await expect(page.getByRole("alert")).toContainText("Only the owner");
+});
+
+test("the command palette: Ctrl/⌘+K opens it, search filters, Enter runs, Escape closes (#1304 §6)", async ({ page }) => {
+  await openSession(page);
+  const dialog = page.getByRole("dialog", { name: "Command palette" });
+  await page.keyboard.press("Control+k");
+  await expect(dialog).toBeVisible();
+  const search = page.getByLabel("Search commands");
+  await expect(search).toBeFocused();
+
+  // Filters the same ``command.list`` the composer's own proposals
+  // complete from -- there is no second source of names.
+  await search.fill("permissions");
+  await expect(dialog.getByRole("option", { name: /permissions status/ })).toBeVisible();
+  await expect(dialog.getByRole("option", { name: /^model/ })).toHaveCount(0);
+
+  // Escape closes without running anything.
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+  await expect(page.getByText("mock: executed")).toHaveCount(0);
+
+  // Reopen, filter, run by clicking -- the same path Enter takes.
+  await page.keyboard.press("Control+k");
+  await page.getByLabel("Search commands").fill("permissions status");
+  await dialog.getByRole("option", { name: /permissions status/ }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(page.getByText("mock: executed permissions status")).toBeVisible();
+});
+
+test("§6: help opens the palette instead of dumping into the transcript", async ({ page }) => {
+  await openSession(page);
+  await composer(page).fill("help");
+  await composer(page).press("Enter");
+  await expect(page.getByRole("dialog", { name: "Command palette" })).toBeVisible();
+  // The old ~500-line dump is gone.
+  await expect(page.getByText(/Keys: Ctrl\+P/)).toHaveCount(0);
+});
+
+test("the leader chord replaces the direct Ctrl+P/B/T/A/O bindings (#1304 §7)", async ({ page }) => {
+  await openSession(page);
+  await composer(page).fill("tool");
+  await composer(page).press("Enter");
+  await expect(page.getByRole("button", { name: /run_command/ }).first()).toBeVisible();
+
+  // A bare Ctrl+P is not this app's -- it changes nothing here (it falls
+  // through to whatever the browser does with it; see
+  // ``useKeyboardShortcuts.test.ts`` for the assertion that it is never
+  // even ``preventDefault``ed).
+  await page.keyboard.press("Control+p");
+  await expect(page.getByText("Task plan")).toHaveCount(0);
+
+  // K then P: the leader opens the palette and, on the very first
+  // keystroke with the search box still empty, applies the quick action
+  // and closes -- no visible list in between.
+  await page.keyboard.press("Control+k");
+  await expect(page.getByRole("dialog", { name: "Command palette" })).toBeVisible();
+  await page.keyboard.press("p");
+  await expect(page.getByRole("dialog", { name: "Command palette" })).toHaveCount(0);
+  await expect(page.getByText("Task plan")).toBeVisible();
+  await expect(page.getByText("List the directory")).toBeVisible();
+});
+
+test("a session that fails to bootstrap turns the status bar red (#1304 §6)", async ({ page }) => {
+  await page.goto("/");
+  await page.getByPlaceholder("ws://host:8080").fill(WS);
+  await page.getByRole("button", { name: "Connect" }).click();
+  // A status bar exists even with no session yet -- ``fault`` is what
+  // turns it red, not ``sessionId``.
+  await page.getByRole("button", { name: /bootstrap-fail/ }).click();
+  const dot = page.locator(".bg-error").first();
+  await expect(page.getByText("no session")).toBeVisible();
+  await expect(dot).toBeVisible();
+  await expect(page.getByText("no session")).toHaveAttribute(
+    "title",
+    /RunnerBootstrapFailed: Runner bootstrap failed/,
+  );
+});
+
+test("at 375px the session screen does not overflow horizontally (#1304 §8)", async ({ page }) => {
+  await page.setViewportSize({ width: 375, height: 700 });
+  await openSession(page);
+  await composer(page).fill("code");
+  await composer(page).press("Enter");
+  await expect(page.locator("table.j-table th", { hasText: "Latency" })).toBeVisible();
+  const { docW, winW } = await page.evaluate(() => ({
+    docW: document.documentElement.scrollWidth,
+    winW: window.innerWidth,
+  }));
+  expect(docW).toBe(winW);
 });

@@ -7,9 +7,16 @@
  * Drawn as a steel-edged ground plate over the composer (design frame
  * 04): ``Live · <tool>`` for the pinned one, the other running tools as
  * quiet kickers beside it.
+ *
+ * Stepping to the next running tool used to be a direct Ctrl+O listener
+ * owned by this component; it is now the leader's ``O``
+ * (``app/leaderKeys.ts``, struck through the command palette), and the
+ * running set it steps over is ``store.runningToolCallIds`` -- the ONE
+ * definition, so the popup and the leader cannot disagree about which
+ * tools are running or in what order.
  */
 import { useEffect, useMemo, useRef } from "react";
-import { useJaato } from "@/store/store";
+import { runningToolCallIds, useJaato } from "@/store/store";
 import type { ToolBlock } from "@/store/types";
 import { Plate } from "@/components/layout/Plate";
 
@@ -17,7 +24,11 @@ export function ToolOutputPopup({ agentId }: { agentId: string }) {
   const blocks = useJaato((s) => s.blocks[agentId]);
   const popupCallId = useJaato((s) => s.ui.popupCallId);
   const setPopup = useJaato((s) => s.setPopup);
-  const running = useMemo(() => (blocks ?? []).filter((b): b is ToolBlock => b.kind === "tool" && b.status === "running" && b.output.length > 0), [blocks]);
+  const runningIds = useMemo(() => runningToolCallIds({ blocks: { [agentId]: blocks ?? [] } }, agentId), [blocks, agentId]);
+  const running = useMemo(
+    () => runningIds.map((id) => (blocks ?? []).find((b): b is ToolBlock => b.kind === "tool" && b.callId === id)).filter((b): b is ToolBlock => b != null),
+    [runningIds, blocks],
+  );
   const pinned = running.find((b) => b.callId === popupCallId) ?? null;
   const preRef = useRef<HTMLPreElement>(null);
 
@@ -25,18 +36,6 @@ export function ToolOutputPopup({ agentId }: { agentId: string }) {
     const el = preRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [pinned?.output.length]);
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.ctrlKey && e.key.toLowerCase() === "o" && running.length) {
-        e.preventDefault();
-        const i = running.findIndex((b) => b.callId === popupCallId);
-        setPopup(running[(i + 1) % running.length]!.callId);
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [running, popupCallId, setPopup]);
 
   if (!pinned) return null;
   return (
@@ -53,7 +52,7 @@ export function ToolOutputPopup({ agentId }: { agentId: string }) {
           </button>
         ))}
         <span className="flex-1" />
-        <span className="font-mono text-[10px] text-text-muted hidden md:inline">Ctrl+O next</span>
+        <span className="font-mono text-[10px] text-text-muted hidden md:inline">⌘/Ctrl+K then O — next</span>
         <button type="button" className="text-text-muted hover:text-text" onClick={() => setPopup(null)} aria-label="Close">✕</button>
       </div>
       <pre ref={preRef} className="code-block whitespace-pre-wrap break-words px-3 py-2.5 overflow-auto flex-1">{pinned.output}</pre>

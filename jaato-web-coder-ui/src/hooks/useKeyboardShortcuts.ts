@@ -2,6 +2,15 @@
  * Global shortcuts, kept to the TUI's defaults where a browser allows
  * them (Ctrl+W closes a tab in most browsers, so the workspace panel
  * also answers to Alt+W).
+ *
+ * Ctrl+P / Ctrl+B / Ctrl+T / Ctrl+A / Ctrl+O used to be bound directly
+ * here and are gone (#1304 §7): each is a browser shortcut first (print,
+ * bookmarks, a new tab Chrome will not let a page intercept, select-all,
+ * open-file), so a bare Ctrl+P now reaches Chrome's own Print exactly as
+ * it should. What replaced them is one binding, Ctrl/⌘+K, which opens the
+ * command palette -- also the leader ``app/leaderKeys.ts`` documents, so
+ * "K then P" still opens Plan, from inside the palette rather than from a
+ * direct listener here.
  */
 import { useEffect } from "react";
 import { useJaato } from "@/store/store";
@@ -14,21 +23,9 @@ export function useKeyboardShortcuts(): void {
       const k = e.key.toLowerCase();
       const mod = e.ctrlKey || e.metaKey;
       const st = useJaato.getState();
-      if (mod && k === "p") { e.preventDefault(); st.toggleUi("showPlan"); }
-      else if (mod && k === "b") { e.preventDefault(); st.toggleUi("showBudget"); }
-      else if ((mod || e.altKey) && k === "w" && (e.altKey || e.shiftKey)) { e.preventDefault(); st.toggleUi("showWorkspace"); }
-      else if (mod && k === "t") {
-        e.preventDefault();
-        // The TUI's Ctrl+T: every tool block in the chat expands or
-        // collapses at once, and new blocks follow the setting.
-        st.setToolsExpanded(!st.ui.showTools);
-      }
-      else if (mod && k === "a" && !(e.target as HTMLElement | null)?.matches?.("textarea,input")) {
-        e.preventDefault();
-        const i = st.agentOrder.indexOf(st.selectedAgentId);
-        st.selectAgent(st.agentOrder[(i + 1) % st.agentOrder.length] ?? st.selectedAgentId);
-      }
-      else if (mod && k === "c" && !(e.target as HTMLElement | null)?.matches?.("textarea,input") && !window.getSelection()?.toString()) {
+      if (mod && k === "k") { e.preventDefault(); st.setPaletteOpen(true); return; }
+      if ((mod || e.altKey) && k === "w" && (e.altKey || e.shiftKey)) { e.preventDefault(); st.toggleUi("showWorkspace"); return; }
+      if (mod && k === "c" && !(e.target as HTMLElement | null)?.matches?.("textarea,input") && !window.getSelection()?.toString()) {
         // Ctrl+C with nothing selected = stop, like the TUI (copy still works with a selection).
         if (isConnected() && isBusy(st, st.selectedAgentId)) { e.preventDefault(); getClient().stop().catch(() => undefined); }
       }

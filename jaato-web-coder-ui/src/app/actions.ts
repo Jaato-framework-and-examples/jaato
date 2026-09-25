@@ -98,20 +98,6 @@ export async function respondReference(requestId: string, value: string): Promis
   await getClient().respondToReferenceSelection(requestId, value);
 }
 
-function helpText(): string {
-  const st = useJaato.getState();
-  const rows = st.commands.map((c) => `  ${c.name.padEnd(28)} ${c.description ?? ""}`.trimEnd());
-  return [
-    "Commands are typed as plain words (no / prefix). The composer proposes matches as you type;",
-    "press Esc on the proposal to send the word verbatim instead.",
-    "",
-    ...rows,
-    "",
-    "References: @path (file)  @@path (sandbox)  %name (prompt library)  /name (.jaato/commands)",
-    "Keys: Ctrl+P plan · Ctrl+B budget · Alt+W files · Ctrl+T tools · Ctrl+A next agent · Ctrl+O next running tool",
-  ].join("\n");
-}
-
 function contextText(agentId: string): string {
   const ctx = useJaato.getState().context[agentId];
   if (!ctx) return "No usage reported yet.";
@@ -252,7 +238,10 @@ export async function submitInput(text: string, verbatim: boolean): Promise<void
       st.clearOutput(agentId);
       return;
     case "help":
-      st.addSystemBlock(agentId, helpText(), "help");
+      // #1304 §6: the ~500-line dump into the transcript is gone; ``help``
+      // opens the searchable, grouped command palette instead (same
+      // ``st.commands`` the composer's own proposals complete from).
+      st.setPaletteOpen(true);
       return;
     case "context":
       st.addSystemBlock(agentId, contextText(agentId), "help");

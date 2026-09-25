@@ -266,7 +266,11 @@ export function Composer({ commands, disabled, captureMode, history, onSubmit, o
           {captureMode ? "Answer" : "Send"} ⏎
         </button>
       </div>
-      <div className={`mt-1.5 pl-2.5 border-l-2 text-[13px] text-text-muted flex items-center gap-3 min-h-5 ${captureMode ? "border-warning" : "border-steel"}`}>
+      {/* One context-aware hint line, and only that one -- ``coarse:hidden``
+          drops it on a touch device, where the on-screen keyboard's own
+          Send/Return affordance already says what submitting will do, and
+          the row is better spent on the message (#1304 §6). */}
+      <div className={`mt-1.5 pl-2.5 border-l-2 text-[13px] text-text-muted flex items-center gap-3 min-h-5 coarse:hidden ${captureMode ? "border-warning" : "border-steel"}`}>
         {captureMode && captureMode.suggestions?.length ? (
           <span>A key answers the prompt — {captureMode.suggestions.map((s) => <kbd key={s} className="mx-0.5">{s}</kbd>)} · anything longer is sent to the agent as a reply</span>
         ) : captureMode ? (
