@@ -135,3 +135,38 @@ export function githubApi(githubUrl: string, fetchImpl: typeof fetch = fetch): G
 export function describeAccount(a: GitHubAccount): string {
   return a.isDefault ? `@${a.login} (default)` : `@${a.login}`;
 }
+
+/**
+ * Bind the signed-in user's DEFAULT connected GitHub account to a freshly
+ * created workspace, so someone who has already connected GitHub does not
+ * have to open "Configure" and pick it from the dropdown for every
+ * workspace they make.
+ *
+ * ``workspacePath`` must be the workspace's ABSOLUTE path -- the identifier
+ * the daemon resolves ``app://`` references against at spawn time
+ * (``SecretResolveContext.workspace_path``); it is never the bare workspace
+ * NAME the create form takes, because ``secret.resolve`` requests always
+ * carry the absolute path and a binding recorded under the name would sit
+ * in the backend's store and never be found.  It is a parameter rather than
+ * something this function resolves itself because the caller is the one
+ * that knows which value that is (see ``sdk/connection.ts``'s
+ * ``createWorkspace``, which now returns it).
+ *
+ * A no-op, never an error surfaced as a workspace-creation failure: no
+ * connected account leaves nothing to bind, and the workspace was created
+ * either way -- the caller decides how loudly to report a bind call that
+ * itself failed (a rate limit, a race), since the account can still be
+ * bound by hand from Configure.  Returns the bound account's login and the
+ * backend's bind result on success, ``null`` when there was nothing to
+ * bind.
+ */
+export async function autoBindDefaultGitHubAccount(
+  api: GitHubApi,
+  workspacePath: string,
+): Promise<{ login: string; result: BindResult } | null> {
+  const accounts = await api.listAccounts();
+  const account = accounts.find((a) => a.isDefault) ?? accounts[0];
+  if (!account) return null;
+  const result = await api.bind(workspacePath, account.id);
+  return { login: account.login, result };
+}
