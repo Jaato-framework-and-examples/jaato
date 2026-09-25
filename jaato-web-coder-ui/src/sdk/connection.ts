@@ -21,6 +21,7 @@
  */
 import { EventTypeValue, JaatoClient, type ConnectionStatus, type JaatoEvent, type TokenProvider } from "@jaato/sdk";
 import { useJaato } from "@/store/store";
+import type { WorkspaceInfo } from "@/store/types";
 import { wireDownloadTool } from "@/app/downloads";
 import { wireMemoryRail } from "@/app/memories";
 
@@ -224,8 +225,59 @@ export async function selectWorkspace(name: string): Promise<void> {
   await getClient().sendRawEvent({ type: EventTypeValue.WORKSPACE_SELECT_REQUEST, name });
 }
 
-export async function createWorkspace(name: string): Promise<void> {
-  await getClient().sendRawEvent({ type: EventTypeValue.WORKSPACE_CREATE_REQUEST, name });
+/**
+ * A ``workspace.created`` reply's row, mirroring the store's own
+ * ``WORKSPACE_CREATED`` extraction (``store.ts``'s dispatcher) exactly so
+ * the two cannot disagree about what the daemon sent: the row lives under
+ * ``workspace``, with ``name`` / ``path`` repeated beside it as a fallback
+ * for an older daemon.  Exported so the shape can be pinned in a test
+ * without a live client.
+ */
+export function parseWorkspaceCreatedEvent(ev: unknown): WorkspaceInfo | null {
+  const body = ev as { workspace?: Partial<WorkspaceInfo>; name?: string; path?: string };
+  const raw = body.workspace ?? {};
+  const name = String(raw.name ?? body.name ?? "");
+  if (!name) return null; // a reply naming nothing is not a row (see store.ts)
+  const path = (raw.path as string | null | undefined) ?? body.path ?? null;
+  return { name, configured: raw.configured === true, path };
+}
+
+/**
+ * ``workspace.create``, awaiting the daemon's ``workspace.created`` reply so
+ * the caller has the new workspace's row -- name AND absolute ``path`` --
+ * before doing anything that needs to identify it precisely.  Binding a
+ * GitHub account is exactly that: the daemon resolves ``app://`` references
+ * against the ABSOLUTE path (``SecretResolveContext.workspace_path``),
+ * never the bare name this form takes, so a caller that only had the name
+ * to hand would record a binding ``secret.resolve`` can never find (see
+ * ``autoBindDefaultGitHubAccount`` in ``app/github.ts``).
+ *
+ * Resolves with the created ``WorkspaceInfo``, or ``null`` on a timeout or
+ * an ``ErrorEvent`` -- never rejects, so a caller that only wants
+ * fire-and-forget can await it and ignore the result exactly as before.
+ * Filtered by name because a reply for a DIFFERENT create (another tab on
+ * this connection, in principle) must not resolve this one.
+ */
+export async function createWorkspace(name: string, timeoutMs = 8000): Promise<WorkspaceInfo | null> {
+  const c = getClient();
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (info: WorkspaceInfo | null) => {
+      if (done) return;
+      done = true;
+      unsubCreated();
+      unsubErr();
+      clearTimeout(timer);
+      resolve(info);
+    };
+    const unsubCreated = c.subscribe(EventTypeValue.WORKSPACE_CREATED, (ev) => {
+      const parsed = parseWorkspaceCreatedEvent(ev);
+      if (parsed && parsed.name === name) finish(parsed); // ignore a different create's reply
+    });
+    const unsubErr = c.subscribe(EventTypeValue.ERROR, () => finish(null));
+    const timer = setTimeout(() => finish(null), timeoutMs);
+    c.sendRawEvent({ type: EventTypeValue.WORKSPACE_CREATE_REQUEST, name }).catch(() => finish(null));
+  });
 }
 
 /** ``workspace.delete`` (protocol 1.13): the daemon answers with ``workspace.deleted``. */

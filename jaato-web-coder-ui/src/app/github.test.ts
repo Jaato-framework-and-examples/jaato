@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { describeAccount, githubApi, type GitHubAccount } from "./github";
+import { describe, expect, it, vi } from "vitest";
+import { autoBindDefaultGitHubAccount, describeAccount, githubApi, type BindResult, type GitHubAccount, type GitHubApi } from "./github";
 import { SignInRequiredError } from "./tickets";
 
 function response(status: number, body: unknown = {}): Response {
@@ -86,5 +86,66 @@ describe("github client", () => {
   it("describeAccount marks the default", () => {
     expect(describeAccount(ACC({ id: "a", login: "alice", isDefault: true }))).toBe("@alice (default)");
     expect(describeAccount(ACC({ id: "b", login: "bob" }))).toBe("@bob");
+  });
+});
+
+const BIND_OK: BindResult = { binding: "set", envWritten: true, gitconfigSeeded: true, reloaded: 0 };
+
+function fakeApi(accounts: GitHubAccount[], bindResult: BindResult = BIND_OK): { api: GitHubApi; bindCalls: Array<[string, string | null]> } {
+  const bindCalls: Array<[string, string | null]> = [];
+  const api: GitHubApi = {
+    listAccounts: async () => accounts,
+    listBindings: async () => [],
+    setDefault: async () => accounts,
+    disconnect: async () => ({ disconnected: "", accounts }),
+    bind: async (workspace, accountId) => { bindCalls.push([workspace, accountId]); return bindResult; },
+  };
+  return { api, bindCalls };
+}
+
+describe("autoBindDefaultGitHubAccount", () => {
+  it("binds the DEFAULT account to the workspace's absolute path", async () => {
+    const { api, bindCalls } = fakeApi([
+      ACC({ id: "a", login: "alice" }),
+      ACC({ id: "b", login: "alice-work", isDefault: true }),
+    ]);
+    const result = await autoBindDefaultGitHubAccount(api, "/ws-root/proj");
+    expect(result).toEqual({ login: "alice-work", result: BIND_OK });
+    expect(bindCalls).toEqual([["/ws-root/proj", "b"]]);
+  });
+
+  it("falls back to the first account when none is marked default", async () => {
+    const { api, bindCalls } = fakeApi([ACC({ id: "a", login: "alice" })]);
+    const result = await autoBindDefaultGitHubAccount(api, "/ws-root/proj");
+    expect(result?.login).toBe("alice");
+    expect(bindCalls).toEqual([["/ws-root/proj", "a"]]);
+  });
+
+  it("is a no-op with no connected accounts, and never calls bind", async () => {
+    const { api, bindCalls } = fakeApi([]);
+    const result = await autoBindDefaultGitHubAccount(api, "/ws-root/proj");
+    expect(result).toBeNull();
+    expect(bindCalls).toEqual([]);
+  });
+
+  it("surfaces the backend's note verbatim (e.g. a workspace it could not write .env into)", async () => {
+    const { api } = fakeApi(
+      [ACC({ id: "a", login: "alice", isDefault: true })],
+      { binding: "set", envWritten: false, gitconfigSeeded: false, reloaded: 0, note: "workspace is outside the configured workspace_root or does not exist" },
+    );
+    const result = await autoBindDefaultGitHubAccount(api, "/elsewhere/proj");
+    expect(result?.result.note).toMatch(/workspace_root/);
+  });
+
+  it("propagates a bind failure to the caller rather than swallowing it", async () => {
+    const accounts = [ACC({ id: "a", login: "alice", isDefault: true })];
+    const api: GitHubApi = {
+      listAccounts: async () => accounts,
+      listBindings: async () => [],
+      setDefault: async () => accounts,
+      disconnect: async () => ({ disconnected: "", accounts }),
+      bind: vi.fn(async () => { throw new Error("boom"); }),
+    };
+    await expect(autoBindDefaultGitHubAccount(api, "/ws-root/proj")).rejects.toThrow("boom");
   });
 });

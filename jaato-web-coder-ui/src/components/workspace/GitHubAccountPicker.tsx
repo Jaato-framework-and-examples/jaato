@@ -15,6 +15,15 @@
  * daemon's ``config.update`` at all, so folding it into the form's Save would
  * be a second, weaker expression of an action that stands on its own.
  *
+ * ``workspace`` MUST be the workspace's ABSOLUTE path, never its bare name.
+ * The daemon resolves ``app://`` references (what a bound account's
+ * ``GH_TOKEN`` reference expands to) against
+ * ``SecretResolveContext.workspace_path`` -- always the absolute path -- so
+ * a binding recorded under the name the workspace-select verb was called
+ * with would sit in the backend's store and ``secret.resolve`` would never
+ * find it: the token silently never resolves, and every later run reads
+ * "not_bound" as though the picker had never been used.
+ *
  * Served without a ``github:`` block, ``githubUrl`` is ``null`` and the whole
  * control is absent -- the form shows what it always did.  With a block but
  * no connected account, it points at the "Connect GitHub" entry rather than

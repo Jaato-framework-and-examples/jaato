@@ -22,6 +22,7 @@
 import { useEffect, useState } from "react";
 import { exitToConnect } from "@/app/actions";
 import { credentialsApi } from "@/app/credentials";
+import { autoBindDefaultGitHubAccount, githubApi } from "@/app/github";
 import { Plate } from "@/components/layout/Plate";
 import { CredentialPicker, type KeyChoice } from "@/components/workspace/CredentialPicker";
 import { GitHubAccountPicker } from "@/components/workspace/GitHubAccountPicker";
@@ -85,7 +86,29 @@ export function WorkspaceScreen() {
     setBusy(true);
     try { await deleteWorkspace(name); } finally { setBusy(false); setConfirming(null); }
   };
-  const create = async (e: React.FormEvent) => { e.preventDefault(); if (!newName.trim()) return; await createWorkspace(newName.trim()); setNewName(""); };
+  const create = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newName.trim()) return;
+    const name = newName.trim();
+    setNewName("");
+    const created = await createWorkspace(name);
+    // Auto-bind: a user who already connected GitHub should not have to
+    // open Configure and pick their account from the dropdown for every
+    // workspace they make. Best-effort -- the workspace exists either way,
+    // and a bind that fails (or a daemon too old to send `path`) leaves the
+    // manual picker in Configure exactly as capable as before.
+    if (githubUrl && created?.path) {
+      try {
+        const bound = await autoBindDefaultGitHubAccount(githubApi(githubUrl), created.path);
+        if (bound) {
+          setGithubReload((v) => v + 1);
+          setWorkspaceNotice({ text: bound.result.note ?? `Bound GitHub account @${bound.login} to ${name}.` });
+        }
+      } catch (err) {
+        setWorkspaceNotice({ text: `Workspace created, but binding your GitHub account failed: ${err instanceof Error ? err.message : String(err)}`, error: true });
+      }
+    }
+  };
   // The key reaches the daemon the one way it always has -- as ``api_key``
   // on ``config.update`` -- whether it was typed now or picked from the
   // store; the daemon knows nothing of the store.
@@ -241,11 +264,16 @@ export function WorkspaceScreen() {
                 <label className="block"><span className="field-label">Model</span><input value={model} onChange={(e) => setModel(e.target.value)} className="input input-mono" /></label>
                 <CredentialPicker credentialsUrl={credentialsUrl} provider={provider} value={keyChoice} onChange={setKeyChoice} reloadKey={keyListVersion} onError={(text) => setWorkspaceNotice({ text, error: true })} />
                 {/* Binds a connected GitHub account to this workspace (BFF state,
-                    not config.update); absent unless the backend has a github: block. */}
+                    not config.update); absent unless the backend has a github: block.
+                    The picker keys the binding on the workspace's ABSOLUTE path (the
+                    identifier secret.resolve looks up at spawn time), not `cfg.workspace`
+                    -- that field is the bare NAME the workspace-select verb was called
+                    with, and a binding recorded under it would never be found. Falls
+                    back to the name only against a daemon too old to send `path`. */}
                 {githubUrl && (
                   <GitHubAccountPicker
                     githubUrl={githubUrl}
-                    workspace={cfg.workspace}
+                    workspace={ws.list.find((w) => w.name === cfg.workspace)?.path ?? cfg.workspace}
                     reloadKey={githubReload}
                     onError={(text) => setWorkspaceNotice({ text, error: true })}
                     onNotice={(text) => setWorkspaceNotice({ text })}
