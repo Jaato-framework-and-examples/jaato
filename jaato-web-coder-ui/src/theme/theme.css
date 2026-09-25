@@ -246,7 +246,21 @@ button, input, select, textarea { border-radius: 0; font-family: inherit; }
 .nb-label { font-family: var(--font-mono); font-size: 12px; color: var(--c-text-muted); text-align: right; white-space: nowrap; padding-top: 0.55rem; }
 .nb-out { font-family: var(--font-mono); font-size: 12.5px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; margin: 0.35rem 0; }
 .nb-row-failed .nb-label, .nb-row-failed .nb-out { color: var(--c-error); }
-.code-block .ln { user-select: none; color: var(--c-muted); text-align: right; padding-right: 0.9rem; min-width: 2.5rem; display: inline-block; }
+/* A numbered code line's number (JMarkup.tsx's ``CodeLines``): CSS-generated
+   ``::before`` content, never a text node, so it cannot be part of what a
+   copy of the block picks up (jaato/#1304) -- ``user-select: none`` alone is
+   kept too, as the same claim made a second way, since it costs nothing. */
+.code-block .cl-n { counter-reset: cl var(--cl-n); }
+.code-block .cl-n::before {
+  counter-increment: cl;
+  content: counter(cl);
+  user-select: none;
+  color: var(--c-muted);
+  text-align: right;
+  padding-right: 0.9rem;
+  min-width: 2.5rem;
+  display: inline-block;
+}
 
 table.j-table { border-collapse: collapse; margin: 0.4rem 0; font-size: 13px; }
 table.j-table th, table.j-table td { border: 1px solid var(--c-divider); padding: 0.2rem 0.6rem; text-align: left; vertical-align: top; }

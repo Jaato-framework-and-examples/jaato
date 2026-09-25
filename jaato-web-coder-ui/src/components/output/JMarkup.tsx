@@ -20,7 +20,7 @@
  * emphasis and reflow its indentation -- the TUI prints it verbatim too.
  */
 import { Plate } from "@/components/layout/Plate";
-import { memo, useMemo } from "react";
+import { memo, useMemo, type CSSProperties } from "react";
 import { parseJMarkup, type CodeLine, type Segment } from "@/protocol/jmarkup";
 import { containsNbMarkup, isFailureRow, parseNbMarkup, type NotebookRow, type NotebookSegment } from "@/protocol/nbmarkup";
 import { parseMarkdown, type Block, type Inline } from "@/protocol/markdown";
@@ -65,13 +65,30 @@ function MarkdownBlocks({ blocks }: { blocks: Block[] }) {
   );
 }
 
+/**
+ * A code line's number is CSS, never a text node -- jaato/#1304's
+ * acceptance criterion is that copying stdout yields exactly the
+ * stdout, and a literal ``<span>{n}</span>`` ahead of the tokens is one
+ * more text node a selection spanning the block picks up if a browser's
+ * ``user-select: none`` handling of a PROGRAMMATIC copy ever disagrees
+ * with a mouse-drag one (a real, documented cross-browser
+ * inconsistency, not a hypothetical one).  A ``::before`` pseudo-
+ * element's ``content`` is never part of the DOM text a selection can
+ * contain, in any engine, so there is nothing to leak.  ``l.n`` need not
+ * start at 1 (an excerpt from mid-file), so each numbered line resets
+ * the CSS counter to ``n - 1`` on ITSELF via ``--cl-n`` and increments
+ * once (``.cl-n``'s rule in theme.css) -- a counter set and read on the
+ * same element needs no running total shared across lines.
+ */
 function CodeLines({ lines }: { lines: CodeLine[] }) {
-  const numbered = lines.some((l) => l.n !== null);
   return (
     <pre className="code-block overflow-x-auto whitespace-pre p-2">
       {lines.map((l, i) => (
-        <div key={i}>
-          {numbered && <span className="ln">{l.n ?? ""}</span>}
+        <div
+          key={i}
+          className={l.n !== null ? "cl-n" : undefined}
+          style={l.n !== null ? ({ "--cl-n": (l.n as number) - 1 } as CSSProperties) : undefined}
+        >
           {l.tokens.map((t, j) => (t.t ? <span key={j} className={tokenClass(t.t)}>{t.text}</span> : <span key={j}>{t.text}</span>))}
           {l.tokens.length === 0 && " "}
         </div>

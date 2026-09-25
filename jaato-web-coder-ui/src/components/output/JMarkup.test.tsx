@@ -87,6 +87,41 @@ describe("JMarkup renders notebook cells", () => {
   });
 });
 
+describe("numbered code lines never become copyable text (jaato/#1304)", () => {
+  // Two ``<j-line n="...">`` entries starting mid-file (line 5), so the
+  // reported bug -- copying stdout yields the line numbers mixed in with
+  // it -- has something to catch: if the number were still a text node,
+  // "5" and "6" would show up in ``textContent`` right next to content
+  // that itself contains none.
+  const CODE = '<j-code language="python">\n<j-line n="5">print(0)</j-line>\n<j-line n="6">print(1)</j-line>\n</j-code>';
+
+  it("puts the number nowhere DOM text (and so a copy) can reach it", () => {
+    const { container } = render(<JMarkup text={CODE} />);
+    expect(container.textContent).toContain("print(0)");
+    expect(container.textContent).toContain("print(1)");
+    // jsdom does not render ::before content into textContent at all --
+    // which is the point: there is no text node for a copy to pick up.
+    expect(container.textContent).not.toContain("5");
+    expect(container.textContent).not.toContain("6");
+  });
+
+  it("still carries the exact number, as a CSS counter reset on the line itself", () => {
+    const { container } = render(<JMarkup text={CODE} />);
+    const lines = [...container.querySelectorAll(".code-block > div")];
+    expect(lines).toHaveLength(2);
+    expect(lines.every((l) => l.classList.contains("cl-n"))).toBe(true);
+    // n=5 -> counter-reset to 4, so one increment (the CSS rule) reads 5.
+    expect((lines[0] as HTMLElement).style.getPropertyValue("--cl-n")).toBe("4");
+    expect((lines[1] as HTMLElement).style.getPropertyValue("--cl-n")).toBe("5");
+  });
+
+  it("an unnumbered code line gets no counter at all", () => {
+    const { container } = render(<JMarkup text={'<j-code language="text">\n<j-line>no number here</j-line>\n</j-code>'} />);
+    expect(container.querySelector("pre.code-block")?.textContent).toContain("no number here");
+    expect(container.querySelector(".cl-n")).toBeNull();
+  });
+});
+
 describe("hasServerMarkup -- what sends tool output here rather than to a raw <pre>", () => {
   it("claims a notebook cell that holds no <j-*> block at all", () => {
     // `print(42)`: the whole output is one stdout row.  The old gate asked
