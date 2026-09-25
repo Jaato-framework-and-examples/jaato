@@ -9,15 +9,25 @@
  * it says.
  */
 import { memo, useState } from "react";
+import { useShallow } from "zustand/react/shallow";
+import { useJaato } from "@/store/store";
 import type { AssistantTextItem, BannerItem, SystemNoteItem, ThinkingItem, TranscriptItem, UserMessageItem } from "@/store/transcript";
 import { firstSentence, thinkingElapsedSeconds } from "@/store/transcript";
+import { agentNameMap, resolveAgentIdsInText } from "@/protocol/agentNames";
 import { JMarkup } from "./JMarkup";
 import { ToolGroupView } from "./ToolGroupView";
 
+/**
+ * "One name everywhere" (#1304 §4): a subagent's raw id, mentioned in the
+ * PARENT's own prose ("Subagent spawned (id: subagent_1)"), is resolved to
+ * the display name the tab already shows -- at render time, off the same
+ * ``s.agents`` map the tab reads, so the two cannot disagree.
+ */
 const AssistantTextView = memo(function AssistantTextView({ item }: { item: AssistantTextItem }) {
+  const names = useJaato(useShallow((s) => agentNameMap(s.agents)));
   return (
     <div className="py-1.5">
-      <JMarkup text={item.text} />
+      <JMarkup text={resolveAgentIdsInText(item.text, names)} />
     </div>
   );
 });
@@ -92,12 +102,13 @@ function styleClass(style: string): string {
 }
 
 const SystemNoteView = memo(function SystemNoteView({ item }: { item: SystemNoteItem }) {
+  const names = useJaato(useShallow((s) => agentNameMap(s.agents)));
   return (
     <div className={`py-0.5 text-[13px] whitespace-pre-wrap ${styleClass(item.style)}`}>
       {item.source && item.source !== "system" && (
         <div className="kicker kicker-muted text-[10px]">{item.source}</div>
       )}
-      {item.text}
+      {resolveAgentIdsInText(item.text, names)}
     </div>
   );
 });

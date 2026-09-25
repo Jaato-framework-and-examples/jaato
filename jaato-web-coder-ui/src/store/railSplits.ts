@@ -20,6 +20,15 @@
 export const RAIL_SECTION_IDS = ["plan", "budget", "files", "sessions", "memories", "diagnostics"] as const;
 export type RailSectionId = (typeof RAIL_SECTION_IDS)[number];
 
+/**
+ * The same six ids, as the 56px icon rail names them (#1304 §5).  A
+ * separate alias rather than a rename: this module is about how OPEN
+ * sections share height, which still applies -- Plan pinned beside
+ * whichever panel the icon rail selected -- while ``RailPanelId`` is read
+ * at the icon-rail/single-panel-selection layer in ``SessionScreen``.
+ */
+export type RailPanelId = RailSectionId;
+
 /** Weight per section id.  Absent = the default weight; a section not open is
  *  simply left out of ``sharesFor``'s open set (its remembered weight stays). */
 export type RailSplits = Partial<Record<RailSectionId, number>>;

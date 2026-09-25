@@ -619,3 +619,63 @@ describe("runningToolCallIds: what the live-output popup and the leader's O both
     expect(runningToolCallIds(useJaato.getState(), "nobody")).toEqual([]);
   });
 });
+
+describe("lastEventAt -- #1304 §3 stall tracking", () => {
+  it("stamps the agent for an activity event", () => {
+    const before = Date.now();
+    useJaato.getState().dispatch([ev({ type: "agent.output", agent_id: "main", text: "hi", mode: "write" })]);
+    expect(useJaato.getState().lastEventAt[MAIN_AGENT]).toBeGreaterThanOrEqual(before);
+  });
+  it("stamps a subagent's own id, creating its tab as a side effect", () => {
+    useJaato.getState().dispatch([ev({ type: "tool.call_start", agent_id: "sub-3", tool_name: "run", call_id: "c1" })]);
+    expect(useJaato.getState().lastEventAt["sub-3"]).toBeDefined();
+    expect(useJaato.getState().agentOrder).toContain("sub-3");
+  });
+  it("does not stamp for a session/workspace-scoped event with no agent of its own", () => {
+    useJaato.getState().dispatch([ev({ type: "workspace.files_changed", changes: [] })]);
+    expect(useJaato.getState().lastEventAt[MAIN_AGENT]).toBeUndefined();
+  });
+  it("does not stamp for SESSION_TERMINATED -- it says nothing about a PARTICULAR agent still being there", () => {
+    useJaato.setState({ selectedAgentId: "sub-4" });
+    useJaato.getState().dispatch([ev({ type: "session.terminated", reason: "natural" })]);
+    expect(useJaato.getState().lastEventAt["sub-4"]).toBeUndefined();
+  });
+});
+
+describe("stallThresholdMs -- #1304 §3", () => {
+  it("defaults to 60s and clamps a set value to the 30s-300s range", () => {
+    expect(useJaato.getState().stallThresholdMs).toBe(60_000);
+    useJaato.getState().setStallThreshold(5_000);
+    expect(useJaato.getState().stallThresholdMs).toBe(30_000);
+    useJaato.getState().setStallThreshold(10_000_000);
+    expect(useJaato.getState().stallThresholdMs).toBe(300_000);
+  });
+  it("survives resetSessionState -- it is a client setting, not per-session state", () => {
+    useJaato.getState().setStallThreshold(90_000);
+    useJaato.getState().resetSessionState();
+    expect(useJaato.getState().stallThresholdMs).toBe(90_000);
+    useJaato.getState().setStallThreshold(60_000);
+  });
+});
+
+describe("the icon rail's panel state -- #1304 §5", () => {
+  it("setActivePanel opens a panel, and opening the same one again closes it", () => {
+    expect(useJaato.getState().ui.activePanel).toBeNull();
+    useJaato.getState().setActivePanel("plan");
+    expect(useJaato.getState().ui.activePanel).toBe("plan");
+    useJaato.getState().setActivePanel("plan");
+    expect(useJaato.getState().ui.activePanel).toBeNull();
+  });
+  it("switching to a different panel replaces the active one, not toggles it off", () => {
+    useJaato.getState().setActivePanel("plan");
+    useJaato.getState().setActivePanel("files");
+    expect(useJaato.getState().ui.activePanel).toBe("files");
+  });
+  it("togglePinPlan flips pinnedPlan independently of the active panel", () => {
+    expect(useJaato.getState().ui.pinnedPlan).toBe(false);
+    useJaato.getState().togglePinPlan();
+    expect(useJaato.getState().ui.pinnedPlan).toBe(true);
+    useJaato.getState().togglePinPlan();
+    expect(useJaato.getState().ui.pinnedPlan).toBe(false);
+  });
+});

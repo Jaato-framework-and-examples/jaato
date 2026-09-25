@@ -136,7 +136,7 @@ export function DiagnosticsPanel() {
               <Row label="notebook boundary" value={d.notebookBoundaryKind ?? "(no notebook plugin)"} />
               <Row label="protocol" value={d.protocolVersion} />
               <Row label="server" value={d.serverVersion} />
-              {d.consumption && <Row label="spend" value={consumptionLine(d.consumption)} />}
+              {d.consumption && <SpendRow consumption={d.consumption} />}
             </div>
           </section>
           <section aria-label="Live confinement check" className="border hairline p-2">
@@ -162,8 +162,31 @@ function runnerLine(identity: Record<string, unknown> | null): string {
   return `pid ${pid ?? "?"}, ${pool}${cascade}${stale}`;
 }
 
-function consumptionLine(consumption: Record<string, unknown> | null): string {
-  if (!consumption) return "";
+function consumptionUsd(consumption: Record<string, unknown> | null): number | null {
+  if (!consumption) return null;
   const usd = consumption["usd"] ?? (consumption["totals"] as Record<string, unknown> | undefined)?.["usd"];
-  return usd != null ? `$${Number(usd).toFixed(4)}` : JSON.stringify(consumption).slice(0, 80);
+  return usd != null ? Number(usd) : null;
+}
+
+/**
+ * The "spend" row.  When the aspect names a plain ``usd`` figure that is
+ * the whole answer, exactly as before.  When it does not (an older daemon,
+ * a differently-shaped aspect), the raw dict used to be dumped straight
+ * into the row as ``JSON.stringify(...).slice(0, 80)`` -- a plain-language
+ * line is above the fold instead, and the JSON sits behind a
+ * ``<details>`` disclosure for whoever wants it (#1304 §5: raw JSON goes
+ * behind a disclosure, not into the row itself).
+ */
+function SpendRow({ consumption }: { consumption: Record<string, unknown> }) {
+  const usd = consumptionUsd(consumption);
+  if (usd != null) return <Row label="spend" value={`$${usd.toFixed(4)}`} />;
+  return (
+    <div className="flex gap-2 text-[12px]">
+      <span className="w-[104px] shrink-0 text-text-muted">spend</span>
+      <details className="min-w-0">
+        <summary className="cursor-pointer text-text-muted">reported in a shape this panel does not summarise</summary>
+        <pre className="mt-1 whitespace-pre-wrap break-words font-mono text-[11px] text-text-muted">{JSON.stringify(consumption, null, 2)}</pre>
+      </details>
+    </div>
+  );
 }

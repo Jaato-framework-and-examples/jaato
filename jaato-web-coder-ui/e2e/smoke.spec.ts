@@ -107,9 +107,7 @@ test("tool calls stream into a collapsible block and update the plan panel", asy
   const block = page.getByRole("button", { name: /run_command/ }).first();
   await expect(block).toBeVisible();
   await expect(page.getByText("README.md")).toBeVisible();
-  // #1304 §7: the status bar's own toggles carry the leader wording now
-  // (direct Ctrl+P/T are gone -- the browser owns them).
-  await page.getByRole("button", { name: /Toggle plan/ }).click();
+  await page.getByRole("button", { name: "Open Plan" }).click();
   await expect(page.getByText("Task plan")).toBeVisible();
   await expect(page.getByText("List the directory")).toBeVisible();
   // The TUI's Ctrl+T: the status-bar toggle expands every tool block and
@@ -214,8 +212,12 @@ test("permission prompt shows the diff and the typed key answers it", async ({ p
   await composer(page).fill("y");
   await composer(page).press("Enter");
   await expect(page.getByText("Written (you answered")).toBeVisible();
-  await page.getByRole("button", { name: "Toggle workspace changes (⌘/Ctrl+K then F)" }).click();
+  await page.getByRole("button", { name: "Open Files" }).click();
   await expect(page.getByText("~ app.py")).toBeVisible();
+  // ``.jaato/`` is hidden BY DEFAULT (#1304 §5, a view filter): the panel's
+  // own metadata directory does not show without asking for it.
+  await expect(page.getByText("+ session.log")).toHaveCount(0);
+  await page.getByRole("region", { name: "Files" }).getByRole("button", { name: "show hidden" }).click();
   // The daemon's key is ``status``: a created file renders as ``+``.
   await expect(page.getByText("+ session.log")).toBeVisible();
 });
@@ -228,26 +230,31 @@ test("files panel: hide drops an entry from the view, show-hidden brings it back
   await composer(page).fill("y");
   await composer(page).press("Enter");
   await expect(page.getByText("Written (you answered")).toBeVisible();
-  await page.getByRole("button", { name: "Toggle workspace changes (⌘/Ctrl+K then F)" }).click();
+  await page.getByRole("button", { name: "Open Files" }).click();
   const panel = page.getByRole("region", { name: "Files" });
   await expect(panel.getByText("~ app.py")).toBeVisible();
+  // ``.jaato/`` is hidden BY DEFAULT (#1304 §5) -- a view filter, not
+  // ``.gitignore``: it counts toward "hidden" and its row does not even
+  // render before "show hidden", with no click needed to get there.
+  await expect(panel.getByText("+ session.log")).toHaveCount(0);
+  await expect(panel.getByText("1 hidden")).toBeVisible();
 
-  // hide (the TUI's ``h``): client-side, the entry leaves the view.
+  // hide (the TUI's ``h``): client-side, the entry leaves the view -- ON
+  // TOP of the default hide, so the count is now two.
   await panel.getByRole("button", { name: "Hide src/app.py", exact: true }).click();
   await expect(panel.getByText("~ app.py")).toHaveCount(0);
-  await expect(panel.getByText("1 hidden")).toBeVisible();
-  // a whole directory hides everything under it
-  await panel.getByRole("button", { name: "Hide .jaato/", exact: true }).click();
-  await expect(panel.getByText("+ session.log")).toHaveCount(0);
   await expect(panel.getByText("2 hidden")).toBeVisible();
 
-  // show hidden: back, dimmed, with the H marker, and unhide works.
+  // show hidden: both come back, dimmed, with the H marker, and unhide
+  // works for the explicit one.
   await panel.getByRole("button", { name: "show hidden" }).click();
   await expect(panel.getByText("~ app.py")).toBeVisible();
+  await expect(panel.getByText("+ session.log")).toBeVisible();
   await expect(panel.locator("[data-hidden]")).toHaveCount(4); // .jaato/, logs/, session.log, app.py
   await panel.getByRole("button", { name: "Unhide src/app.py", exact: true }).click();
   await panel.getByRole("button", { name: "hide hidden" }).click();
   await expect(panel.getByText("~ app.py")).toBeVisible();
+  await expect(panel.getByText("+ session.log")).toHaveCount(0);
 
   // collapse (the TUI's Left/Right): the arrow folds a directory to one
   // line that says how many files it holds, and unfolds it again.
@@ -339,7 +346,7 @@ test("long clarification choices wrap inside the plate, not off its edge (#1245)
   }
 });
 
-test("subagents get their own tab", async ({ page }) => {
+test("subagents get their own tab, named by the daemon's agent_name", async ({ page }) => {
   await openSession(page);
   await composer(page).fill("subagent");
   await composer(page).press("Enter");
@@ -347,6 +354,83 @@ test("subagents get their own tab", async ({ page }) => {
   await expect(tab).toBeVisible();
   await tab.click();
   await expect(page.getByRole("heading", { name: "Research notes" })).toBeVisible();
+});
+
+test("one name everywhere (#1304 §4): the parent's own text resolves the raw subagent id to its display name", async ({ page }) => {
+  await openSession(page);
+  await composer(page).fill("subagent");
+  await composer(page).press("Enter");
+  // The mock's parent text literally says "(id: sub-XXXXXX)"; the client
+  // resolves it, at render time, to the name the tab already carries.
+  await expect(page.getByText(/Delegating to a researcher subagent \(id: researcher\)/)).toBeVisible();
+  await expect(page.getByText(/sub-[0-9a-f]{6}/)).toHaveCount(0);
+});
+
+test("a stalled agent shows amber on its tab and a parent-transcript banner; Cancel stops exactly that agent (#1304 §3, §4)", async ({ page }) => {
+  // The real 30s-300s range (``store/phase.ts``) is re-enforced INSIDE
+  // ``stalled()`` itself, defensively, so a test cannot shortcut it by
+  // writing a smaller value to the store -- the documented default
+  // (60s) is exercised for real by fast-forwarding Playwright's clock
+  // past it, rather than by fabricating a threshold nothing configures.
+  //
+  // Installed BEFORE ``openSession``, deliberately: ``AttentionBanners``
+  // mounts as soon as the session view does, and its own ``useTick``
+  // interval is a plain ``window.setInterval`` created at that mount.  A
+  // clock installed only after ``openSession`` leaves that one interval
+  // on the REAL, pre-install timer (Playwright's fake-timer swap affects
+  // calls made after install, not ones already scheduled) -- so a later
+  // ``fastForward`` would advance every OTHER component's tick (each
+  // agent tab's own ``useTick`` mounts later, once the subagent exists)
+  // while this one keeps waiting on real wall-clock seconds that never
+  // arrive inside the test's assertion window.  Installing first means
+  // every interval the session view creates is fake-clock-driven alike.
+  await page.clock.install();
+  await openSession(page);
+  await composer(page).fill("stall subagent");
+  await composer(page).press("Enter");
+  await expect(page.getByText(/Delegated to a background worker/)).toBeVisible();
+
+  const tab = page.getByTestId(/^agent-tab-sub-/);
+  await expect(tab).toBeVisible();
+  await expect(tab).not.toHaveAttribute("data-stalled");
+  await page.clock.fastForward("01:01");
+  await expect(tab).toHaveAttribute("data-stalled", "true");
+  await expect(tab.getByTestId("agent-tab-stall-clock")).toBeVisible();
+
+  const banner = page.locator('[data-testid^="attention-banner-sub-"]');
+  await expect(banner).toBeVisible();
+  await expect(banner).toContainText("stalled");
+  // Nudge can only ever reach the main agent (see AttentionBanners.tsx's
+  // docstring for the finding) -- for a subagent row it is disabled, not
+  // silently wired to the wrong target.
+  await expect(banner.getByRole("button", { name: "Nudge" })).toBeDisabled();
+
+  await banner.getByRole("button", { name: "Cancel" }).click();
+  // The stalled SUBAGENT stops -- not the whole session, and not the
+  // main agent, which never took a turn here.
+  await expect(page.getByText(/Stopped sub-/)).toBeVisible();
+  await expect(tab).not.toHaveAttribute("data-stalled");
+  await expect(banner).toHaveCount(0);
+  await expect(composer(page)).toBeEnabled();
+});
+
+test("the icon rail replaces the accordion: one panel is open at a time, and Plan may be pinned beside it (#1304 §5)", async ({ page }) => {
+  await openSession(page);
+  await expect(page.getByRole("region", { name: "Plan" })).toHaveCount(0);
+  await page.getByRole("button", { name: "Open Plan" }).click();
+  await expect(page.getByRole("region", { name: "Plan" })).toBeVisible();
+  // Switching to a different badge replaces the panel -- unlike the old
+  // accordion, where any number of sections could be open at once.
+  await page.getByRole("button", { name: "Open Files" }).click();
+  await expect(page.getByRole("region", { name: "Plan" })).toHaveCount(0);
+  await expect(page.getByRole("region", { name: "Files" })).toBeVisible();
+  // Pinning Plan is the one way to see two panels together.
+  await page.getByRole("button", { name: "Open Plan" }).click();
+  await page.getByRole("button", { name: "pin", exact: true }).click();
+  await page.getByRole("button", { name: "Open Sessions" }).click();
+  await expect(page.getByRole("region", { name: "Plan" })).toBeVisible();
+  await expect(page.getByRole("region", { name: "Sessions" })).toBeVisible();
+  await expect(page.getByRole("region", { name: "Files" })).toHaveCount(0);
 });
 
 test("a launcher config.json pre-fills the form and connects on its own", async ({ page }) => {
@@ -740,7 +824,7 @@ test("the Files panel's reset shows only later changes, and survives a reconnect
   await composer(page).fill("please touch old.py kept.py");
   await composer(page).press("Enter");
   await expect(page.getByText("Touched old.py, kept.py.")).toBeVisible();
-  await page.getByRole("button", { name: "Toggle workspace changes (⌘/Ctrl+K then F)" }).click();
+  await page.getByRole("button", { name: "Open Files" }).click();
   const panel = page.getByRole("region", { name: "Files" });
   await expect(panel.getByText("~ old.py")).toBeVisible();
 
@@ -861,7 +945,10 @@ test("the rail's drag handle resizes it, by pointer and by keyboard", async ({ p
 test("dragging the boundary between two rail sections moves height between them, and survives a reload (#1244)", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 900 });
   await openSession(page);
+  // The icon rail shows ONE panel at a time (#1304 §5) except Plan, which
+  // may be pinned open beside whichever other panel is active.
   await page.getByRole("button", { name: "Open Plan" }).click();
+  await page.getByRole("button", { name: "pin", exact: true }).click();
   await page.getByRole("button", { name: "Open Sessions" }).click();
 
   const plan = page.getByRole("region", { name: "Plan" });
@@ -899,7 +986,11 @@ test("dragging the boundary between two rail sections moves height between them,
   await page.getByRole("button", { name: "Connect" }).click();
   await page.getByRole("button", { name: /default/ }).click();
   await expect(page.getByText("Connected to the mock daemon")).toBeVisible();
+  // Pin state is per session-screen mount, not remembered across a reload
+  // -- only the SPLIT ratio (``ui.railSplits``) is, which is what this
+  // test is actually pinning down below.
   await page.getByRole("button", { name: "Open Plan" }).click();
+  await page.getByRole("button", { name: "pin", exact: true }).click();
   await page.getByRole("button", { name: "Open Sessions" }).click();
   const planReload = (await page.getByRole("region", { name: "Plan" }).boundingBox())!;
   const sessionsReload = (await page.getByRole("region", { name: "Sessions" }).boundingBox())!;
@@ -918,7 +1009,7 @@ test("files attached in the composer are staged into the workspace, listed in Fi
   await expect(strip.locator("li[data-status=staged]")).toHaveCount(2);
   await expect(page.getByText("Staged into the workspace: notes.md, data.bin")).toBeVisible();
   // The daemon's file monitor reports them, so the Files panel lists them.
-  await page.getByRole("button", { name: "Toggle workspace changes (⌘/Ctrl+K then F)" }).click();
+  await page.getByRole("button", { name: "Open Files" }).click();
   const panel = page.getByRole("region", { name: "Files" });
   await expect(panel.getByText("+ notes.md")).toBeVisible();
   await expect(panel.getByText("+ data.bin")).toBeVisible();
@@ -968,7 +1059,7 @@ test("files attached on the session picker are in the workspace when the session
   await page.getByRole("button", { name: /default/ }).click();
   await expect(page.getByText("Connected to the mock daemon")).toBeVisible();
   await expect(page.getByText("Staged into the workspace: brief.txt")).toBeVisible();
-  await page.getByRole("button", { name: "Toggle workspace changes (⌘/Ctrl+K then F)" }).click();
+  await page.getByRole("button", { name: "Open Files" }).click();
   await expect(page.getByRole("region", { name: "Files" }).getByText("+ brief.txt")).toBeVisible();
 });
 
@@ -1009,7 +1100,7 @@ test("a note written on the exit plate survives Escape, is kept, and is the rail
   await expect(plate).toHaveCount(0);
 
   // Same note, read from the rail -- one store, four mount points.
-  await page.getByRole("button", { name: "Toggle your sessions and their notes" }).click();
+  await page.getByRole("button", { name: "Open Sessions" }).click();
   const rail = page.getByRole("region", { name: "Sessions" });
   await expect(rail.getByLabel("This session")).toHaveValue(/grace period/);
   await expect(rail.getByText("Notes are kept in this browser only", { exact: false })).toBeVisible();
@@ -1020,7 +1111,7 @@ test("a session blocked on a person says so in the rail, from another session", 
   // events reach only that session's attached clients, so working in one
   // session is exactly when you cannot otherwise learn another wants you.
   await openSession(page);
-  await page.getByRole("button", { name: "Toggle your sessions and their notes" }).click();
+  await page.getByRole("button", { name: "Open Sessions" }).click();
   const rail = page.getByRole("region", { name: "Sessions" });
   await expect(rail.getByText(/waiting 4 min: permission/)).toBeVisible();
   // And the header counts what needs a person ahead of what carries a note.
@@ -1032,7 +1123,7 @@ test("deleting a session forgets the note written about it", async ({ page }) =>
   // had deleted.  A note is keyed by session id and stored where the daemon
   // cannot see it, so nothing removed one when its session went away.
   await openSession(page);
-  await page.getByRole("button", { name: "Toggle your sessions and their notes" }).click();
+  await page.getByRole("button", { name: "Open Sessions" }).click();
   const rail = page.getByRole("region", { name: "Sessions" });
 
   const row = rail.getByRole("button", { name: "Edit your note about session 20260915_170000" });
@@ -1103,7 +1194,7 @@ test("a file in the Files panel downloads when its name is clicked (protocol 1.2
   await composer(page).fill("please touch out/report.txt");
   await composer(page).press("Enter");
   await expect(page.getByText("Touched out/report.txt.")).toBeVisible();
-  await page.getByRole("button", { name: "Toggle workspace changes (⌘/Ctrl+K then F)" }).click();
+  await page.getByRole("button", { name: "Open Files" }).click();
   const panel = page.getByRole("region", { name: "Files" });
   const downloading = page.waitForEvent("download");
   await panel.getByRole("button", { name: "Download out/report.txt", exact: true }).click();
@@ -1138,7 +1229,7 @@ test("the jaato-sdk skill is bootstrapped into the workspace on session start (#
   // files, so the Files panel lists ``.claude/skills/jaato-sdk/SKILL.md``
   // and the notice names the version the copy was stamped with.
   await openSession(page);
-  await page.getByRole("button", { name: "Toggle workspace changes (⌘/Ctrl+K then F)" }).click();
+  await page.getByRole("button", { name: "Open Files" }).click();
   const panel = page.getByRole("region", { name: "Files" });
   await expect(
     panel.getByRole("button", { name: "Download .claude/skills/jaato-sdk/SKILL.md", exact: true }),
@@ -1148,7 +1239,7 @@ test("the jaato-sdk skill is bootstrapped into the workspace on session start (#
 
 test("memories rail lists the store, re-lists on a store_memory, and approves and removes (#1232)", async ({ page }) => {
   await openSession(page);
-  await page.getByRole("button", { name: "Toggle the session's memories" }).click();
+  await page.getByRole("button", { name: "Open Memories" }).click();
   const panel = page.getByRole("region", { name: "Memories" });
 
   // The seeded store: one raw (unvetted), two approved, one of them global.
@@ -1192,7 +1283,7 @@ test("memories rail lists the store, re-lists on a store_memory, and approves an
 
 test("diagnostics rail shows the record and a live re-check, distinctly, and can be refused (#1294)", async ({ page }) => {
   await openSession(page);
-  await page.getByRole("button", { name: "Toggle the session's confinement diagnostics" }).click();
+  await page.getByRole("button", { name: "Open Diagnostics" }).click();
   const panel = page.getByRole("region", { name: "Diagnostics" });
 
   // Opening the section asks once, with no prompt typed -- the live-view
