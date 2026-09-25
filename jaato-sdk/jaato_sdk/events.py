@@ -1667,10 +1667,13 @@ class UsageBreakdown(BaseModel):
     # Prompt-cache token counts (None when provider does not support caching)
     cache_read_tokens: Optional[int] = None
     cache_creation_tokens: Optional[int] = None
-    # Reasoning tokens (OpenAI o-series) — billed as output
+    # Output tokens spent reasoning, whatever the vendor calls them — a
+    # SUBSET of ``output_tokens`` and billed inside it, so never add the two
+    # (#1047).  ``None`` = not reported; a reported 0 is a measurement.
     reasoning_tokens: Optional[int] = None
-    # Thinking tokens (Anthropic / Gemini extended thinking)
-    # Subset of output_tokens; useful for UI breakdowns
+    # DEPRECATED: the same quantity as ``reasoning_tokens`` (the daemon
+    # fills both with one value), kept for clients that read this name.
+    # Never sum it with ``reasoning_tokens``.
     thinking_tokens: Optional[int] = None
     # Cost in USD; None when neither provider nor pricing table knows
     cost_usd: Optional[float] = None

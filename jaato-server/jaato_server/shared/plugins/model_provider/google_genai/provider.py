@@ -62,6 +62,7 @@ from jaato_sdk.plugins.model_provider.types import (
     TokenUsage,
     TurnResult,
     Part,
+    fold_exclusive_reasoning,
     normalize_inclusive_usage,
     reported_cache_count,
     require_terminated_stream,
@@ -1215,6 +1216,10 @@ class GoogleGenAIProvider(ModalityCapabilityMixin):
                         output_tokens=getattr(metadata, 'candidates_token_count', 0) or 0,
                         total_tokens=getattr(metadata, 'total_token_count', 0) or 0,
                     )
+                    # Thoughts are reported BESIDE the candidates; see
+                    # extract_usage_from_response (#1047).
+                    fold_exclusive_reasoning(
+                        usage, getattr(metadata, 'thoughts_token_count', None))
                     # A reported zero is kept -- Gemini saying "no cached
                     # content served this call" is a measurement, and folding
                     # it into None makes it indistinguishable from a model

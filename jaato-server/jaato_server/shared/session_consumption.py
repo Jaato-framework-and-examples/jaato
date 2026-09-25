@@ -40,7 +40,7 @@ invites it to add the same tokens twice.  :meth:`BindingUsage.as_dict`
 publishes the derived ``input_tokens_total`` so nobody has to.
 
 ABSENT IS NOT ZERO.  ``cache_read_tokens``, ``cache_creation_tokens``,
-``thinking_tokens`` and ``cost_usd`` stay ``None`` until something reports
+``reasoning_tokens`` and ``cost_usd`` stay ``None`` until something reports
 one.  A provider with no prompt cache must not read as a provider whose
 cache never hits, and a session with no pricing table must not read as
 free.  ``cost_source`` says which source supplied a cost, so a consumer
@@ -74,10 +74,27 @@ COST_SOURCE_PROVIDER = "provider"
 #: ``cost_usd`` was computed from ``.jaato/pricing.json`` — an estimate.
 COST_SOURCE_PRICING_TABLE = "pricing_table"
 
+#: ``reasoning_tokens`` was reported by the upstream — a measurement.
+REASONING_SOURCE_PROVIDER = "provider"
+#: ``reasoning_tokens`` was estimated from the reasoning text by the
+#: provider seam (Anthropic, Bedrock report no count).
+REASONING_SOURCE_ESTIMATE = "estimate"
+
 #: Accepted ``detail`` levels for a consumption report.
 DETAIL_SUMMARY = "summary"
 DETAIL_FULL = "full"
 VALID_DETAIL_LEVELS = (DETAIL_SUMMARY, DETAIL_FULL)
+
+
+def _merge_source(current: Optional[str], incoming: str) -> str:
+    """Combine two provenance labels: equal stays, different is ``"mixed"``.
+
+    One number fed by two sources says so, rather than letting the first
+    source speak for the whole -- the rule ``cost_source`` follows.
+    """
+    if current is None or current == incoming:
+        return incoming
+    return "mixed"
 
 
 def _add_optional(current: Optional[int], delta: Optional[int]) -> Optional[int]:
@@ -209,8 +226,20 @@ class BindingUsage:
         output_tokens: Generated tokens, cache-independent.
         cache_read_tokens: Input served from cache, or ``None``.
         cache_creation_tokens: Input written to cache, or ``None``.
-        thinking_tokens: Reasoning tokens, a SUBSET of ``output_tokens``,
-            or ``None`` when the provider reports none.
+        reasoning_tokens: Output tokens spent reasoning — a SUBSET of
+            ``output_tokens``, never beside it (the ``TokenUsage``
+            output-token convention, #1047) — or ``None`` when the
+            provider reported none.  A reported ``0`` is kept.
+        reasoning_source: :data:`REASONING_SOURCE_PROVIDER`,
+            :data:`REASONING_SOURCE_ESTIMATE`, or ``"mixed"`` — the
+            ``cost_source`` idea applied to reasoning, because an estimate
+            from text beside a row of measurements has to say so.
+        reasoning_responses: How many responses contributed a reasoning
+            count.  When it equals ``responses`` the whole of
+            ``output_tokens`` is covered and ``answer_tokens`` is
+            published; otherwise some output's reasoning is unknown and
+            the derived figure is withheld (the cache-basis argument,
+            one bucket over).
         total_tokens: The provider's own ``total_tokens``, summed.  Kept
             as reported rather than recomputed, matching
             :class:`~jaato_sdk.plugins.model_provider.types.TokenUsage`.
@@ -240,7 +269,9 @@ class BindingUsage:
     output_tokens: int = 0
     cache_read_tokens: Optional[int] = None
     cache_creation_tokens: Optional[int] = None
-    thinking_tokens: Optional[int] = None
+    reasoning_tokens: Optional[int] = None
+    reasoning_source: Optional[str] = None
+    reasoning_responses: int = 0
     total_tokens: int = 0
     cost_usd: Optional[float] = None
     cost_source: Optional[str] = None
@@ -265,6 +296,22 @@ class BindingUsage:
             + (self.cache_read_tokens or 0)
             + (self.cache_creation_tokens or 0)
         )
+
+    @property
+    def answer_tokens(self) -> Optional[int]:
+        """Output that was ANSWER rather than reasoning, or ``None``.
+
+        ``output_tokens - reasoning_tokens`` — subtraction, because
+        reasoning is a subset of output.  Withheld unless every response
+        reported a reasoning count: a response that reported none may
+        still have reasoned, and subtracting nothing for it would pass its
+        reasoning off as answer.
+        """
+        if self.reasoning_tokens is None:
+            return None
+        if self.reasoning_responses < self.responses:
+            return None
+        return max(0, self.output_tokens - self.reasoning_tokens)
 
     @property
     def cache_hit_percent(self) -> Optional[float]:
@@ -304,7 +351,8 @@ class BindingUsage:
         total_tokens: int,
         cache_read_tokens: Optional[int] = None,
         cache_creation_tokens: Optional[int] = None,
-        thinking_tokens: Optional[int] = None,
+        reasoning_tokens: Optional[int] = None,
+        reasoning_source: Optional[str] = None,
         cost_usd: Optional[float] = None,
         cost_source: Optional[str] = None,
         finish_reason: Optional[str] = None,
@@ -327,8 +375,13 @@ class BindingUsage:
             self.cache_read_tokens, cache_read_tokens)
         self.cache_creation_tokens = _add_optional(
             self.cache_creation_tokens, cache_creation_tokens)
-        self.thinking_tokens = _add_optional(
-            self.thinking_tokens, thinking_tokens)
+        self.reasoning_tokens = _add_optional(
+            self.reasoning_tokens, reasoning_tokens)
+        if reasoning_tokens is not None:
+            self.reasoning_responses += 1
+            self.reasoning_source = _merge_source(
+                self.reasoning_source,
+                reasoning_source or REASONING_SOURCE_PROVIDER)
 
         if cost_usd is not None:
             self.cost_usd = (self.cost_usd or 0.0) + cost_usd
@@ -385,8 +438,12 @@ class BindingUsage:
             # a pool where nothing was measured ``cache_read_tokens`` is
             # already absent, which reads correctly on its own.
             out["cache_hit_basis"] = self.cache_basis.as_dict()
-        if self.thinking_tokens is not None:
-            out["thinking_tokens"] = self.thinking_tokens
+        if self.reasoning_tokens is not None:
+            out["reasoning_tokens"] = self.reasoning_tokens
+            out["reasoning_source"] = self.reasoning_source
+            answer = self.answer_tokens
+            if answer is not None:
+                out["answer_tokens"] = answer
         if self.cost_usd is not None:
             out["cost_usd"] = round(self.cost_usd, 6)
             out["cost_source"] = self.cost_source
@@ -502,8 +559,12 @@ class ConsumptionLedger:
                 total.cache_read_tokens, binding.cache_read_tokens)
             total.cache_creation_tokens = _add_optional(
                 total.cache_creation_tokens, binding.cache_creation_tokens)
-            total.thinking_tokens = _add_optional(
-                total.thinking_tokens, binding.thinking_tokens)
+            total.reasoning_tokens = _add_optional(
+                total.reasoning_tokens, binding.reasoning_tokens)
+            total.reasoning_responses += binding.reasoning_responses
+            if binding.reasoning_source is not None:
+                total.reasoning_source = _merge_source(
+                    total.reasoning_source, binding.reasoning_source)
             if binding.cost_usd is not None:
                 total.cost_usd = (total.cost_usd or 0.0) + binding.cost_usd
                 if total.cost_source is None:

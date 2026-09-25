@@ -809,8 +809,11 @@ class BedrockProvider(ModalityCapabilityMixin):
         if state.was_cancelled:
             state.parts = [p for p in state.parts if p.function_call is None]
         thinking = "".join(state.reasoning) or None
-        if thinking and state.usage.thinking_tokens is None:
-            state.usage.thinking_tokens = max(1, len(thinking) // 4)
+        if thinking and state.usage.reasoning_tokens is None:
+            # Converse reports no reasoning count; an estimate, labelled
+            # as one (#1047).
+            state.usage.reasoning_tokens = max(1, len(thinking) // 4)
+            state.usage.reasoning_tokens_estimated = True
 
         finish_reason = resolve_tool_use_finish(
             state.finish_reason,

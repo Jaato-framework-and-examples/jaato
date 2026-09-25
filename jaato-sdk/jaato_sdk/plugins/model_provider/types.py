@@ -11,7 +11,7 @@ import json
 import re
 import threading
 import uuid
-from dataclasses import dataclass, field, replace
+from dataclasses import InitVar, dataclass, field, replace
 from enum import Enum
 from typing import (
     Any, Callable, Dict, FrozenSet, List, Optional, Tuple, Union,
@@ -856,6 +856,32 @@ class TokenUsage:
     hypothetical: it shipped, and it capped the reported cache-hit rate
     at a structural 50% (issue #758).
 
+    THE OUTPUT-TOKEN CONVENTION (issue #1047).  ``output_tokens`` is
+    EVERYTHING the model generated and was billed for as output — the
+    answer AND the reasoning — and ``reasoning_tokens`` is the part of it
+    spent reasoning.  Subset, not bucket: the answer is
+    ``output_tokens - reasoning_tokens``, and nothing downstream ever adds
+    the two.  One field, one convention, because the vendors disagree:
+
+    ======================  ===================================  ==========
+    Vendor                  Field                                Inclusive?
+    ======================  ===================================  ==========
+    OpenAI / compat wires   ``completion_tokens_details.
+                            reasoning_tokens``                   yes
+    OpenAI Responses        ``output_tokens_details.
+                            reasoning_tokens``                   yes
+    Google Gemini           ``thoughts_token_count``             **no**
+    Anthropic               none reported — estimated from the
+                            thinking text                        yes
+    ======================  ===================================  ==========
+
+    Gemini's ``candidates_token_count`` EXCLUDES the thoughts, which are
+    billed at the output rate all the same, so a Gemini seam calls
+    :func:`fold_exclusive_reasoning` — without it ``output_tokens`` is the
+    answer alone and every cost computed from it omits the reasoning.
+    That is the #758 lesson one bucket over: convert at the seam, and
+    every consumer reads one convention.
+
     Attributes:
         prompt_tokens: NEW (uncached) input tokens — see the convention
             above.  NOT the size of the prompt on the wire when caching
@@ -875,11 +901,21 @@ class TokenUsage:
             Anthropic charges 1.25x for 5-min cache, 2x for 1-hour cache.
             Also reported by OpenRouter as
             ``prompt_tokens_details.cache_write_tokens``.
-        reasoning_tokens: Tokens used for reasoning/thinking (OpenAI o-series).
-            For Anthropic/Gemini, thinking tokens are included in output_tokens.
-        thinking_tokens: Tokens used for extended thinking (Anthropic/Gemini).
-            Subset of output_tokens spent on thinking content.
-            Extracted from API when available, otherwise estimated from text.
+        reasoning_tokens: Output tokens the model spent REASONING rather
+            than answering — a SUBSET of ``output_tokens``, never beside
+            it (see "The output-token convention" below).  ``None`` means
+            "provider reported nothing"; a reported ``0`` is a
+            measurement and is kept (:func:`reported_reasoning_count`).
+        reasoning_tokens_estimated: ``True`` when ``reasoning_tokens`` was
+            NOT reported by the upstream but estimated from the reasoning
+            text (~4 characters per token).  An estimate beside a row of
+            measurements has to say so, the way ``cost_source`` does for
+            a cost.
+        thinking_tokens: DEPRECATED alias of ``reasoning_tokens`` — the
+            same quantity under another vendor's name.  Accepted by the
+            constructor and readable/writable as an attribute, both of
+            which go to ``reasoning_tokens``; it is not a field of its own
+            (issue #1047).
         reported: Whether the provider actually reported usage for this
             call.  ``False`` means NOTHING was measured — which is not
             the same fact as a measured zero, and is what stops an
@@ -892,10 +928,13 @@ class TokenUsage:
     # Cache tokens (prompt caching)
     cache_read_tokens: Optional[int] = None
     cache_creation_tokens: Optional[int] = None
-    # Reasoning tokens (OpenAI o-series models)
+    # Output tokens spent reasoning: a SUBSET of output_tokens (#1047).
     reasoning_tokens: Optional[int] = None
-    # Thinking tokens (Anthropic/Gemini extended thinking)
-    thinking_tokens: Optional[int] = None
+    # Deprecated alias of ``reasoning_tokens``, kept at this position so a
+    # positional caller is unaffected.  An ``InitVar`` rather than a field:
+    # two fields for one quantity is how a consumer ends up adding it to
+    # itself.  Replaced by a property after the class body, below.
+    thinking_tokens: InitVar[Optional[int]] = None
     # Provider-reported cost in USD.  Set when the provider's wire
     # protocol gives us a number (e.g. ``claude_cli`` reads
     # ``total_cost_usd`` from the underlying CLI output).  When the
@@ -933,6 +972,30 @@ class TokenUsage:
     # ``cache_read_tokens`` — ``None`` there means "provider reported
     # nothing" and is documented as distinct from a reported zero.
     reported: bool = True
+    # Whether ``reasoning_tokens`` is an ESTIMATE from the reasoning text
+    # rather than a count the upstream reported (#1047).  Defaults
+    # ``False`` because a reported count is the normal case; the seams that
+    # estimate (Anthropic, Bedrock) set it.
+    reasoning_tokens_estimated: bool = False
+
+    def __post_init__(self, thinking_tokens: Optional[int]) -> None:
+        if thinking_tokens is not None and self.reasoning_tokens is None:
+            self.reasoning_tokens = thinking_tokens
+
+
+def _get_thinking_tokens(self: TokenUsage) -> Optional[int]:
+    return self.reasoning_tokens
+
+
+def _set_thinking_tokens(self: TokenUsage, value: Optional[int]) -> None:
+    self.reasoning_tokens = value
+
+
+# After the dataclass has built ``__init__`` (which still accepts
+# ``thinking_tokens=``), the class attribute becomes the alias.
+TokenUsage.thinking_tokens = property(  # type: ignore[assignment]
+    _get_thinking_tokens, _set_thinking_tokens,
+    doc="Deprecated alias of ``reasoning_tokens`` (#1047).")
 
 
 def uncached_prompt_tokens(
@@ -1023,6 +1086,58 @@ def reported_cache_count(value: Any) -> Optional[int]:
     if isinstance(value, bool) or not isinstance(value, int):
         return None
     return value if value >= 0 else None
+
+
+def reported_reasoning_count(value: Any) -> Optional[int]:
+    """A reasoning-token count exactly as the upstream reported it, ZERO included.
+
+    The same rule as :func:`reported_cache_count`, for the same reason: a
+    model that reasoned for zero tokens on this call is a measurement, and
+    must not read as a model that reports no reasoning at all.  The old
+    OpenAI-compatible seam gated on ``count and ...`` and folded every
+    reported ``0`` into ``None`` (#1047).
+
+    Args:
+        value: Whatever the wire's reasoning field held.
+
+    Returns:
+        The count, ``0`` included, or ``None`` when nothing usable was
+        reported (absent, a ``bool``, a non-integer, a negative).
+    """
+    return reported_cache_count(value)
+
+
+def fold_exclusive_reasoning(usage: TokenUsage, reasoning: Any) -> TokenUsage:
+    """Record a reasoning count reported BESIDE the output, and return ``usage``.
+
+    For a wire whose output count EXCLUDES the reasoning (Gemini's
+    ``candidates_token_count`` beside ``thoughts_token_count``): the
+    reasoning is added INTO ``output_tokens`` and recorded as
+    ``reasoning_tokens``, so :class:`TokenUsage`'s output-token convention
+    holds — ``reasoning_tokens`` is a subset of ``output_tokens`` — and a
+    cost computed from ``output_tokens`` includes reasoning the vendor
+    bills at the output rate.
+
+    ``total_tokens`` is left alone: on these wires it already counts the
+    reasoning.
+
+    NOT idempotent — arithmetic, like :func:`normalize_inclusive_usage`.
+    Call it once, at the seam, on a freshly built ``usage``.
+
+    Args:
+        usage: The usage to rewrite in place.
+        reasoning: The wire's reasoning count, any shape; an unusable value
+            leaves ``usage`` untouched and ``reasoning_tokens`` ``None``.
+
+    Returns:
+        ``usage``, for call chaining.
+    """
+    count = reported_reasoning_count(reasoning)
+    if count is None:
+        return usage
+    usage.output_tokens = (usage.output_tokens or 0) + count
+    usage.reasoning_tokens = count
+    return usage
 
 
 def normalize_inclusive_usage(usage: TokenUsage) -> TokenUsage:

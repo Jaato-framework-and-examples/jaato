@@ -2170,7 +2170,16 @@ class JaatoServer:
         2. ``self._pricing`` table lookup — operator-loaded
            ``.jaato/pricing.json``; computed from rates and counts.
         3. ``None`` — no source knew, consumer must not assume zero.
+
+        ``reasoning_tokens`` and ``thinking_tokens`` are ONE quantity under
+        two vendors' names (#1047): whichever the caller supplied becomes
+        ``reasoning_tokens``, and ``thinking_tokens`` carries the same
+        value only as a deprecated mirror for clients that read that name.
+        Neither is priced separately — every vendor here bills reasoning
+        at the output rate, and it is already inside ``output_tokens``.
         """
+        if reasoning_tokens is None:
+            reasoning_tokens = thinking_tokens
         # Lazy-load pricing on first call so we don't read the JSON
         # for sessions that never check cost.
         if not self._pricing_loaded:
@@ -2198,7 +2207,7 @@ class JaatoServer:
             cache_read_tokens=cache_read_tokens,
             cache_creation_tokens=cache_creation_tokens,
             reasoning_tokens=reasoning_tokens,
-            thinking_tokens=thinking_tokens,
+            thinking_tokens=reasoning_tokens,
             cost_usd=cost,
             spend_total_tokens=spend_total_tokens,
             spend_prompt_tokens=spend_prompt_tokens,

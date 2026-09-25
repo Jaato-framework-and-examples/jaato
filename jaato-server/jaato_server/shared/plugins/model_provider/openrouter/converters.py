@@ -29,6 +29,7 @@ from jaato_sdk.plugins.model_provider.types import (
     parse_tool_call_arguments,
     render_result_for_model,
     reported_cache_count,
+    reported_reasoning_count,
     ToolSchema,
 )
 
@@ -640,6 +641,17 @@ def apply_cache_usage(raw_usage: Any, usage: TokenUsage) -> None:
         creation = _read_usage_extra(raw_usage, "cache_creation_input_tokens")
     if isinstance(creation, int) and creation > 0:
         usage.cache_creation_tokens = creation
+
+    # Reasoning tokens sit in ``completion_tokens_details``, INSIDE
+    # ``completion_tokens`` -- TokenUsage's output convention, so nothing is
+    # added.  Read here because this is the one helper all three OpenRouter
+    # paths share; before #1047 none of them read it, so a reasoning model
+    # behind the gateway reported one undifferentiated output figure.
+    reasoning = reported_reasoning_count(_read_details(
+        getattr(raw_usage, "completion_tokens_details", None),
+        "reasoning_tokens"))
+    if reasoning is not None:
+        usage.reasoning_tokens = reasoning
 
     # OpenRouter exposes cost telemetry via ``cost`` (USD) and a derived
     # ``cache_discount`` (negative number = savings).  We forward ``cost``

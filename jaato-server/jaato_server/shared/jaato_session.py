@@ -114,6 +114,8 @@ from .session_consumption import (
     COST_SOURCE_PROVIDER,
     DETAIL_FULL,
     DETAIL_SUMMARY,
+    REASONING_SOURCE_ESTIMATE,
+    REASONING_SOURCE_PROVIDER,
     VALID_DETAIL_LEVELS,
 )
 from .plugins.session import SessionPlugin, SessionConfig, SessionState, SessionInfo
@@ -504,6 +506,22 @@ def _resolve_cost_and_source(
         session._trace(f"LLM_TELEMETRY: pricing-table cost lookup failed: {e}")
         return None, None
 
+
+
+def _reasoning_count(usage: Any) -> Optional[int]:
+    """The reasoning-token count of a usage object, or ``None``.
+
+    ``TokenUsage`` carries one field (``thinking_tokens`` is its deprecated
+    alias, #1047); a duck-typed usage built before the rename may carry
+    only the old name, so it is asked second.  Anything that is not a plain
+    non-negative ``int`` is "not reported".
+    """
+    value = getattr(usage, 'reasoning_tokens', None)
+    if value is None:
+        value = getattr(usage, 'thinking_tokens', None)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
 
 class JaatoSession:
     """Per-agent conversation session.
@@ -11252,10 +11270,15 @@ NOTES
                 turn_tokens.get('spend_cache_creation', 0)
                 + response.usage.cache_creation_tokens)
 
-        # Accumulate thinking tokens (these are summed, not replaced)
-        if response.usage.thinking_tokens:
-            turn_tokens['thinking'] = turn_tokens.get('thinking', 0) + response.usage.thinking_tokens
-            self._update_thinking_budget(response.usage.thinking_tokens)
+        # Accumulate reasoning tokens (summed, not replaced).  One field
+        # whatever the vendor calls it -- ``thinking_tokens`` is a deprecated
+        # alias of ``reasoning_tokens`` -- so an OpenAI-shaped reasoning
+        # count now reaches the turn and the THINKING budget entry too, where
+        # before #1047 only an Anthropic/Bedrock count did.
+        reasoning = _reasoning_count(response.usage)
+        if reasoning:
+            turn_tokens['thinking'] = turn_tokens.get('thinking', 0) + reasoning
+            self._update_thinking_budget(reasoning)
 
         # Attribute the same response to the (provider, model, tier) that
         # served it.  Here rather than in the turn's ``finally`` because a
@@ -11319,7 +11342,11 @@ NOTES
                 total_tokens=int(usage.total_tokens or 0),
                 cache_read_tokens=usage.cache_read_tokens,
                 cache_creation_tokens=usage.cache_creation_tokens,
-                thinking_tokens=usage.thinking_tokens,
+                reasoning_tokens=_reasoning_count(usage),
+                reasoning_source=(
+                    REASONING_SOURCE_ESTIMATE
+                    if getattr(usage, 'reasoning_tokens_estimated', False)
+                    else REASONING_SOURCE_PROVIDER),
                 cost_usd=cost,
                 cost_source=cost_source,
                 finish_reason=(

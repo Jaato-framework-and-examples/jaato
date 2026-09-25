@@ -3253,6 +3253,51 @@ is passed: `all` is the eager default a model reaches for when it wants the
 OS name, and the result enters the history of the very session it measures.
 Asking what you have spent is itself spending.
 
+### Reasoning Is Inside the Output (#1047)
+
+`TokenUsage` had two reasoning fields, `reasoning_tokens` ("OpenAI") and
+`thinking_tokens` ("Anthropic/Gemini"), for one quantity under two vendors'
+names, and nothing read them as one. The OpenAI-compatible seam filled
+`reasoning_tokens` and no consumer read it. The consumption report and the
+THINKING budget entry read `thinking_tokens` only. Gemini's
+`thoughts_token_count` was never read at all.
+
+There is now one field and one convention: **`reasoning_tokens` is a SUBSET
+of `output_tokens`**. The answer is `output_tokens - reasoning_tokens`, and
+nothing adds the two.
+
+| Wire | Field | Inside the output? | Seam |
+|---|---|---|---|
+| OpenAI chat / compat, OpenRouter | `completion_tokens_details.reasoning_tokens` | yes | recorded |
+| OpenAI Responses | `output_tokens_details.reasoning_tokens` | yes | recorded |
+| Gemini, antigravity | `thoughts_token_count` / `thoughtsTokenCount` | **no** | `fold_exclusive_reasoning` adds it in |
+| Anthropic, Bedrock | none reported | yes | estimated from the text, `reasoning_tokens_estimated=True` |
+
+The Gemini row is a pricing fix as well. `candidates_token_count` excludes
+the thoughts, so `output_tokens` used to count the answer alone. Any cost
+computed from it left out reasoning that Google bills at the output rate.
+
+- **`thinking_tokens` is a deprecated alias, not a field.** It is an
+  `InitVar` plus a property, so `TokenUsage(thinking_tokens=n)` and
+  `usage.thinking_tokens = n` both write `reasoning_tokens`, and
+  `dataclasses.fields` lists one field. On the wire, `UsageBreakdown`
+  still carries both names, filled with the **same** value. Never sum them.
+- **A reported zero is a measurement.** `reported_reasoning_count` follows
+  `reported_cache_count`'s rule. The OpenAI seam used to fold `0` into
+  `None`, and antigravity used to record an absent count as `0`.
+- **The consumption report** (`get_environment(aspect="consumption")`)
+  shows `reasoning_tokens`, `reasoning_source` (`provider` / `estimate` /
+  `mixed`, the `cost_source` idea) and `answer_tokens`. `answer_tokens` is
+  shown only when every response of the row reported a reasoning count.
+  The report key was `thinking_tokens` before.
+- **Not priced separately.** Every vendor here bills reasoning at the
+  output rate, and it is already inside `output_tokens`, so
+  `PricingTable.cost_for_usage` covers it. A separate reasoning rate would
+  need a table change, and no vendor needs one today.
+
+Guard: `jaato_server/shared/tests/test_reasoning_is_a_subset_of_output_1047.py`,
+eight reversions.
+
 ### Tool Traits
 
 Tools can declare semantic **traits** on their `ToolSchema` via the `traits` field (a `FrozenSet[str]`). Traits drive cross-cutting behavior without hardcoding tool names in session or plugin code.

@@ -64,6 +64,7 @@ from jaato_sdk.plugins.model_provider.types import (
     normalize_inclusive_usage,
     parse_tool_call_arguments,
     reported_cache_count,
+    reported_reasoning_count,
     require_terminated_stream,
     resolve_tool_use_finish,
 )
@@ -547,10 +548,20 @@ class OpenAICompatProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
     @staticmethod
     def _extract_reasoning_tokens(usage: Any) -> Optional[int]:
         """OpenAI-shaped reasoning-token count
-        (``usage.completion_tokens_details.reasoning_tokens``), or None."""
+        (``usage.completion_tokens_details.reasoning_tokens``), or None.
+
+        A reported ``0`` is kept: it is a measurement, and folding it into
+        ``None`` made a model that reasoned for nothing indistinguishable
+        from one that reports no reasoning (#1047).  The count is already
+        INSIDE ``completion_tokens`` on this wire, which is
+        :class:`TokenUsage`'s convention, so nothing is added."""
         details = getattr(usage, "completion_tokens_details", None)
-        count = getattr(details, "reasoning_tokens", None) if details is not None else None
-        return count if isinstance(count, int) and count else None
+        if details is None:
+            return None
+        count = getattr(details, "reasoning_tokens", None)
+        if count is None and isinstance(details, dict):
+            count = details.get("reasoning_tokens")
+        return reported_reasoning_count(count)
 
     def _finish_batch_response(self, provider_response: ProviderResponse, response: Any) -> None:
         """Post-process a batch (non-streaming) response in place.
@@ -892,7 +903,7 @@ class OpenAICompatProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
                             output_tokens=chunk.usage.completion_tokens or 0,
                             total_tokens=chunk.usage.total_tokens or 0,
                             cache_read_tokens=self._extract_cache_tokens(chunk.usage),
-                            reasoning_tokens=self._extract_reasoning_tokens(chunk.usage),
+                        reasoning_tokens=self._extract_reasoning_tokens(chunk.usage),
                         ))
                         self._trace(f"{trace_prefix}_USAGE prompt={usage.prompt_tokens} output={usage.output_tokens}")
                         if on_usage_update and usage.total_tokens > 0:
@@ -976,7 +987,7 @@ class OpenAICompatProvider(OpenAIMediaOutputMixin, ModalityCapabilityMixin):
                         output_tokens=chunk.usage.completion_tokens or 0,
                         total_tokens=chunk.usage.total_tokens or 0,
                         cache_read_tokens=self._extract_cache_tokens(chunk.usage),
-                            reasoning_tokens=self._extract_reasoning_tokens(chunk.usage),
+                        reasoning_tokens=self._extract_reasoning_tokens(chunk.usage),
                     ))
                     if on_usage_update and usage.total_tokens > 0:
                         on_usage_update(usage)
