@@ -577,7 +577,21 @@ class AppArmorManager:
     #       and a stage that wants git over https names it in a fragment.
     #       The isolated sub-runner grants no in-PATH exec at all, so it
     #       gains nothing either.
-    _TEMPLATE_VERSION = 36
+    #   v37 (#1323): the notebook kernel runs in ``//child``, and ``//child``
+    #       may READ its own ``attr/current``.  The kernel used to inherit
+    #       the base profile, which keeps ``change_profile -> unconfined``
+    #       and ``attr/current`` write access for the framework's own use:
+    #       a cell could write ``changeprofile unconfined`` and leave
+    #       confinement, in every confined session.  The notebook plugin
+    #       now takes the same ``//child`` callback ``cli`` does.  The
+    #       kernel reads its own label to decide which containment tier it
+    #       is in; without the read it would fall back to the audit hook,
+    #       which is safe but refuses ``import ctypes`` (and so numpy).
+    #       ``owner`` + ``r`` only: the write that performs a transition
+    #       stays absent from ``//child``.  The notebook plugin also
+    #       contributes an ``ix`` grant on the resolved interpreter, so a
+    #       fragment-scoped ``//child`` can start the kernel at all.
+    _TEMPLATE_VERSION = 37
 
     # AppArmor profile template.  Placeholders are filled per-session by
     # ``_render_profile()``.
@@ -3198,6 +3212,12 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     # kernel rejects writes to /proc/self/attr/current with EACCES.
     # No transition out of //child is possible for the subprocess's
     # lifetime.
+    #
+    # v37 (#1323): READ-only access to its own label, so the notebook
+    # kernel (which runs here) can see it is confined.  ``owner`` and no
+    # ``w``: the transition-performing write stays absent.
+    owner /proc/*/attr/current       r,
+    owner /proc/*/task/*/attr/current r,
 
     # ---- per-session reference fragments (mirrors tool_hat) ----
     include if exists "{refs_include_glob}"

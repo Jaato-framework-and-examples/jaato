@@ -281,6 +281,40 @@ def apparmor_enforced_profile() -> Optional[str]:
     return label.profile if label.enforced else None
 
 
+def profile_can_leave_itself(profile: Optional[str]) -> bool:
+    """Whether code running under ``profile`` can unconfine itself (#1323).
+
+    A jaato session's BASE profile (``jaato-ws-<id>``) and its ``tool_hat``
+    sub-profile keep ``change_profile -> unconfined`` plus write access to
+    ``/proc/self/attr/current``: the framework needs them to restore its own
+    threads.  Any code running under either can therefore write
+    ``changeprofile unconfined`` and leave confinement, so neither bounds a
+    notebook cell.  ``//child`` (where ``cli`` subprocesses and, since
+    #1323, the notebook kernel run) and the flat isolated sub-runner profile
+    (``jaato-ws-<id>__sub_<n>``) drop those rules.
+
+    Read from the label because that is all a process can see of its own
+    profile.  A profile that is not a jaato one is taken at its word: this
+    answers a question about jaato's template, not about profiles in general.
+    """
+    if not profile or not profile.startswith("jaato-ws-"):
+        return False
+    if profile.endswith("//tool_hat"):
+        return True
+    return "//" not in profile and "__sub_" not in profile
+
+
+def cell_boundary_profile() -> Optional[str]:
+    """The enforced profile, iff it bounds code this process runs (#1323).
+
+    :func:`apparmor_enforced_profile`, minus the profiles a cell can leave by
+    itself (see :func:`profile_can_leave_itself`).  ``None`` when there is no
+    such boundary, so the caller falls through to the next tier.
+    """
+    profile = apparmor_enforced_profile()
+    return None if profile_can_leave_itself(profile) else profile
+
+
 def env_truthy(name: str) -> bool:
     """Return True when env var ``name`` holds a truthy value."""
     return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
@@ -794,9 +828,19 @@ def establish_containment(
         that, because this function's job is to establish a boundary, not to
         decide policy about its absence.
     """
-    profile = apparmor_enforced_profile()
+    profile = cell_boundary_profile()
     if profile:
         return BOUNDARY_APPARMOR, f"AppArmor-enforced profile {profile}"
+    escapable = apparmor_enforced_profile()
+    if escapable:
+        # The kernel was not moved into //child (#1323).  Its profile keeps
+        # the rules that let a cell unconfine itself, so it is not trusted
+        # as the boundary; the audit hook below is.
+        logger.warning(
+            "Notebook kernel: running under %s, which a cell could leave by "
+            "writing changeprofile unconfined; containing cells with the "
+            "audit hook instead.  The kernel should have been started in "
+            "//child.", escapable)
     if opt_out:
         logger.warning(
             "Notebook kernel: running cells with NO filesystem boundary "

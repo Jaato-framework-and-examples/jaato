@@ -54,6 +54,7 @@ from ..kernel_sandbox import (
     UNCONTAINED_OPT_IN_ENV,
     apparmor_enforced_profile,
     env_truthy,
+    profile_can_leave_itself,
 )
 from ..types import (
     BackendCapabilities, CellOutput, ExecutionResult, ExecutionStatus,
@@ -107,6 +108,24 @@ def _set_pdeathsig() -> None:
     fork-safety fix).  ``_LIBC`` is loaded at module import above."""
     if _LIBC is not None:
         _LIBC.prctl(_PR_SET_PDEATHSIG, int(signal.SIGKILL), 0, 0, 0)
+
+
+def _popen_or_close(argv, close_on_failure=(), **popen_kwargs) -> subprocess.Popen:
+    """``subprocess.Popen``, closing ``close_on_failure`` if the spawn fails.
+
+    A kernel spawn can fail on purpose: a refused ``//child`` transition
+    raises in the forked child and fails ``Popen`` (#1323).  The pipes
+    opened for that kernel would otherwise leak.
+    """
+    try:
+        return subprocess.Popen(argv, **popen_kwargs)
+    except BaseException:
+        for fd in close_on_failure:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        raise
 
 
 class _Kernel:
@@ -291,6 +310,12 @@ class SubprocessKernelBackend(NotebookBackend):
         # every cell, so an authorization granted after a kernel spawned takes
         # effect on the next cell rather than the next kernel.
         self._sandbox_paths_fn: Optional[Callable[[], Dict[str, List[str]]]] = None
+        # AppArmor //child transition for the kernel (#1323).  Installed by
+        # ``NotebookPlugin.set_apparmor_child_transition_callback``, the same
+        # callable ``cli`` runs in its preexec_fn.  ``None`` when the runner
+        # is not confined.  Without it a confined runner's kernel would stay
+        # in the base profile, which a cell can leave by itself.
+        self._apparmor_child_transition: Optional[Callable[[], None]] = None
 
     def set_tool_executor(
         self, executor_fn: Callable[[str, Dict], Tuple[bool, object]]
@@ -313,6 +338,38 @@ class SubprocessKernelBackend(NotebookBackend):
                 workspace alone.
         """
         self._sandbox_paths_fn = paths_fn
+
+    def set_apparmor_child_transition(
+        self, callback: Optional[Callable[[], None]],
+    ) -> None:
+        """Wire the AppArmor ``//child`` transition kernels are spawned with (#1323).
+
+        Args:
+            callback: The zero-arg ``preexec_fn``-style callable built by
+                ``server.apparmor.make_child_transition_callback``, or
+                ``None`` to unwire it.  Applies to kernels spawned after the
+                call; a live kernel keeps the profile it started in.
+        """
+        self._apparmor_child_transition = callback
+
+    def _kernel_preexec(self) -> Callable[[], None]:
+        """The ``preexec_fn`` a kernel is spawned with.
+
+        The ``//child`` transition first, when one is wired, then the
+        parent-death signal.  A transition that fails raises in the forked
+        child, so ``Popen`` fails and no kernel starts: the fail-closed
+        posture ``cli`` takes, because a kernel left in the base profile can
+        unconfine itself.
+        """
+        transition = self._apparmor_child_transition
+        if transition is None:
+            return _set_pdeathsig
+
+        def _preexec() -> None:
+            transition()
+            _set_pdeathsig()
+
+        return _preexec
 
     def _sandbox_allow_block(self) -> Optional[Dict[str, List[str]]]:
         """The ``allow`` block to attach to an ``execute`` frame, or ``None``.
@@ -393,7 +450,13 @@ class SubprocessKernelBackend(NotebookBackend):
             workspace to contain to, which is what
             :meth:`execution_boundary` turns into a refusal.
         """
-        if apparmor_enforced_profile():
+        # The kernel runs in //child when the transition is wired, and
+        # inherits the runner's profile otherwise.  The base profile is not a
+        # boundary for a cell (it can unconfine itself), so without the
+        # transition the kernel falls through to the audit hook (#1323).
+        profile = apparmor_enforced_profile()
+        if profile and (self._apparmor_child_transition is not None
+                        or not profile_can_leave_itself(profile)):
             return BOUNDARY_APPARMOR
         if self._allow_uncontained:
             return BOUNDARY_OPT_OUT
@@ -421,6 +484,10 @@ class SubprocessKernelBackend(NotebookBackend):
         kind = self.boundary_kind()
         if kind == BOUNDARY_APPARMOR:
             profile = apparmor_enforced_profile()
+            if self._apparmor_child_transition is not None:
+                return True, (
+                    f"AppArmor-enforced profile {profile}//child (the kernel "
+                    "is started in the //child sub-profile)")
             return True, (
                 f"AppArmor-enforced profile {profile} (inherited by the kernel)")
         if kind == BOUNDARY_OPT_OUT:
@@ -808,7 +875,7 @@ class SubprocessKernelBackend(NotebookBackend):
             containment_args += ["--allow-write", str(venv_path)]
         if self._allow_uncontained:
             containment_args.append("--uncontained")
-        proc = subprocess.Popen(
+        proc = _popen_or_close(
             [*_kernel_argv(kernel_python, import_dirs),
              "--workspace-root", workspace,
              "--read-fd", str(r2k_r), "--write-fd", str(k2r_w),
@@ -816,13 +883,14 @@ class SubprocessKernelBackend(NotebookBackend):
             pass_fds=(r2k_r, k2r_w),
             cwd=workspace,
             env=kernel_env,
-            preexec_fn=_set_pdeathsig,
+            preexec_fn=self._kernel_preexec(),
             # Capture the kernel's OWN stderr into a bounded ring so a death is
             # diagnosable after the fact (#1275).  Cell stdout/stderr does NOT
             # come this way — it is framed over the k2r pipe as ``stream``
             # frames — so this carries only harness-level crash evidence
             # (a native fault line, an uncaught traceback), never cell output.
             stderr=subprocess.PIPE,
+            close_on_failure=(r2k_r, r2k_w, k2r_r, k2r_w),
         )
         os.close(r2k_r)
         os.close(k2r_w)

@@ -14,6 +14,7 @@ import contextvars
 import io
 import os
 import queue
+import sys
 import tempfile
 import threading
 import types
@@ -73,6 +74,26 @@ DEFAULT_BACKEND = "local"
 MAX_OUTPUT_LENGTH = 10000
 
 
+
+def kernel_interpreter_apparmor_rules() -> List[str]:
+    """Let ``//child`` exec the notebook kernel's interpreter (#1323).
+
+    The kernel is started in ``//child``, so the exec of its interpreter is
+    judged by ``//child``'s rules.  An unscoped ``//child`` already grants
+    ``/usr/bin/** ix``; a fragment-scoped one grants only what the fragments
+    name, so the kernel could not start there without this.  AppArmor judges
+    an exec by the RESOLVED path, and a venv's ``bin/python`` is a symlink,
+    so the grant is on the real interpreter the runner (and so the
+    tool-venv built from it) resolves to.
+
+    Stated cost: in a fragment-scoped stage that loads ``notebook``, ``cli``
+    can exec that interpreter too.  That adds nothing a notebook cell can't
+    already do.
+    """
+    paths = {os.path.realpath(sys.executable),
+             os.path.realpath(getattr(sys, "_base_executable", sys.executable))}
+    return [f'"{p}" ix,' for p in sorted(paths) if p]
+
 class NotebookPlugin(StreamingCapable, RunnerForwardingMixin):
     """Plugin for Python notebook execution with GPU support.
 
@@ -104,6 +125,9 @@ class NotebookPlugin(StreamingCapable, RunnerForwardingMixin):
 
     def __init__(self):
         self._backends: Dict[str, NotebookBackend] = {}
+        # The //child transition for subprocess kernels (#1323); kept here so
+        # a re-initialize, which rebuilds the backends, re-applies it.
+        self._apparmor_child_transition: Optional[Callable[[], None]] = None
         self._active_backend_name: str = DEFAULT_BACKEND
         self._current_notebook_id: Optional[str] = None
         self._max_output_length: int = MAX_OUTPUT_LENGTH
@@ -216,6 +240,8 @@ class NotebookPlugin(StreamingCapable, RunnerForwardingMixin):
         subprocess_backend = SubprocessKernelBackend()
         subprocess_backend.initialize(config)
         self._backends["subprocess"] = subprocess_backend
+        subprocess_backend.set_apparmor_child_transition(
+            self._apparmor_child_transition)
 
         # Kaggle backend is initialized lazily when first requested (gpu=true)
         # This avoids stalling during plugin init if kaggle auth is missing/slow
@@ -310,8 +336,8 @@ class NotebookPlugin(StreamingCapable, RunnerForwardingMixin):
                         "Default execution backend. 'subprocess' runs each "
                         "notebook in its own workspace-contained kernel "
                         "process; 'local' is the in-process backend, which "
-                        "runs cells in the host interpreter and is gated on "
-                        "AppArmor or allow_inprocess_exec"
+                        "runs cells in the host interpreter and needs "
+                        "allow_inprocess_exec"
                     ),
                     "enum": ["subprocess", "local", "kaggle"],
                 },
@@ -336,9 +362,10 @@ class NotebookPlugin(StreamingCapable, RunnerForwardingMixin):
                     "default": False,
                     "description": (
                         "Permit the 'local' backend to run model-authored "
-                        "cells IN-PROCESS on a host with no kernel-enforced "
-                        "AppArmor profile. Cell code can then reach this "
-                        "process's memory and state. Env sibling: "
+                        "cells IN-PROCESS. Required under AppArmor too: the "
+                        "runner's profile does not bound an in-process cell. "
+                        "Cell code can reach this process's memory and "
+                        "state. Env sibling: "
                         "JAATO_NOTEBOOK_ALLOW_INPROCESS_EXEC"
                     ),
                 },
@@ -412,7 +439,28 @@ class NotebookPlugin(StreamingCapable, RunnerForwardingMixin):
         """
         return pip_apparmor_rules(plugin_config.get("workspace_venv"), workspace_path) + (
             home_exec_apparmor_rules(plugin_config.get("workspace_home"), workspace_path)
-        )
+        ) + kernel_interpreter_apparmor_rules()
+
+    def set_apparmor_child_transition_callback(
+        self, callback: Optional[Callable[[], None]],
+    ) -> None:
+        """Start notebook kernels in the per-session ``//child`` sub-profile (#1323).
+
+        Forwarded by ``ToolExecutor.set_apparmor_child_transition_callback``
+        at runner bootstrap, the same call ``cli`` and ``interactive_shell``
+        receive.  Without it the kernel inherited the runner's base profile,
+        which keeps ``change_profile -> unconfined`` for the framework's own
+        use, so a cell could write ``changeprofile unconfined`` and leave
+        confinement.  ``//child`` drops that rule.
+
+        Only the subprocess backend spawns a process; the in-process
+        ``local`` backend runs cells in the runner itself and is gated on an
+        explicit opt-in instead (see ``LocalJupyterBackend``).
+        """
+        self._apparmor_child_transition = callback
+        sub = self._backends.get("subprocess")
+        if sub is not None:
+            sub.set_apparmor_child_transition(callback)
 
     def set_workspace_path(self, path: str) -> None:
         """Set workspace root path (auto-wired by PluginRegistry).

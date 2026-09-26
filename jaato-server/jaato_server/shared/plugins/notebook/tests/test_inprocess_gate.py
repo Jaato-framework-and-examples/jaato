@@ -79,18 +79,37 @@ class TestConfigOptIn:
         assert any(o.content == "14" for o in result.outputs)
 
 
-class TestApparmorConfinementAllows:
-    def test_enforced_profile_allows_without_opt_in(self, monkeypatch):
+class TestApparmorAloneDoesNotAllow:
+    """#1323: the runner wears its BASE profile, which keeps
+    ``change_profile -> unconfined``, so an in-process cell could leave it.
+    An enforced profile no longer substitutes for the opt-in."""
+
+    def test_enforced_profile_without_opt_in_is_refused(self, monkeypatch):
         monkeypatch.setattr(
             "jaato_server.shared.plugins.notebook.backends.local._apparmor_enforced_profile",
-            lambda: "jaato-ws-abc//child",
+            lambda: "jaato-ws-abc",
         )
         backend = LocalJupyterBackend()
         backend.initialize()  # no opt-in
         nb = _notebook(backend)
 
         result = backend.execute(nb, "1 + 1")
-        assert result.status == ExecutionStatus.COMPLETED
+        assert result.status == ExecutionStatus.FAILED
+        assert result.error_name == "InProcessExecutionRefused"
+
+    def test_enforced_profile_with_opt_in_reports_opt_out(self, monkeypatch):
+        monkeypatch.setattr(
+            "jaato_server.shared.plugins.notebook.backends.local._apparmor_enforced_profile",
+            lambda: "jaato-ws-abc",
+        )
+        backend = LocalJupyterBackend()
+        backend.initialize({"allow_inprocess_exec": True})
+        nb = _notebook(backend)
+
+        assert backend.execute(nb, "1 + 1").status == ExecutionStatus.COMPLETED
+        # The tier is the operator's opt-in, not AppArmor: the profile does
+        # not bound a cell that can unconfine itself.
+        assert backend.boundary_kind() == "opt-out"
 
 
 class TestApparmorProfileParsing:

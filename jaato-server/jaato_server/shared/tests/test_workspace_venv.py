@@ -152,9 +152,15 @@ def test_pip_tools_contribute_rules_others_dont():
     from jaato_server.shared.plugins.notebook.plugin import create_plugin as mk_nb
     from jaato_server.shared.plugins.interactive_shell.plugin import create_plugin as mk_sh
 
+    from jaato_server.shared.plugins.notebook.plugin import kernel_interpreter_apparmor_rules
+
     kw = dict(workspace_path="/ws", session_id="s", config_root=None, plugin_config={})
-    for mk in (mk_cli, mk_nb, mk_sh):
+    for mk in (mk_cli, mk_sh):
         assert mk().get_apparmor_rules(**kw) == list(PIP_APPARMOR_RULES)
+    # notebook also grants exec on its kernel's interpreter, so a
+    # fragment-scoped //child can start the kernel (#1323).
+    assert mk_nb().get_apparmor_rules(**kw) == (
+        list(PIP_APPARMOR_RULES) + kernel_interpreter_apparmor_rules())
 
 
 def test_resolver_dedups_identical_tool_contributions():

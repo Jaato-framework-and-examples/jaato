@@ -16,7 +16,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .base import NotebookBackend
 from ..kernel_sandbox import (
-    BOUNDARY_APPARMOR,
     BOUNDARY_NONE,
     BOUNDARY_OPT_OUT,
     apparmor_enforced_profile,
@@ -33,8 +32,9 @@ from ..types import (
 
 logger = logging.getLogger(__name__)
 
-# Opt-in env var to permit in-process execution of model-authored cells
-# when the process is NOT under kernel-enforced AppArmor confinement.
+# Opt-in env var to permit in-process execution of model-authored cells.
+# Required under AppArmor too since #1323: the runner's profile does not
+# bound an in-process cell, which can unconfine itself.
 INPROCESS_OPT_IN_ENV = "JAATO_NOTEBOOK_ALLOW_INPROCESS_EXEC"
 
 # Both helpers live in ``kernel_sandbox`` so the in-process gate here and the
@@ -91,8 +91,8 @@ class LocalJupyterBackend(NotebookBackend):
 
         Resolves the in-process execution opt-in from the backend config
         (``allow_inprocess_exec``) or the ``JAATO_NOTEBOOK_ALLOW_INPROCESS_EXEC``
-        env var. The opt-in only matters when the process is not under
-        kernel-enforced AppArmor confinement (see ``_inprocess_exec_allowed``).
+        env var.  Without it no cell runs here (see
+        ``_inprocess_exec_allowed``).
         """
         config = config or {}
         self._allow_inprocess_opt_in = (
@@ -107,52 +107,46 @@ class LocalJupyterBackend(NotebookBackend):
         Executing model-authored Python via ``exec``/``eval`` (and the
         ``!shell`` path) runs in the host interpreter: the cell can reach
         any object the process holds (the runtime, the tool executor, other
-        plugins' in-memory state) — a far weaker boundary than a separate
-        subprocess. We therefore permit it only when one of the following
-        holds, and refuse (fail closed) otherwise:
+        plugins' in-memory state, ``session_env`` secrets).  It is permitted
+        only with an explicit operator opt-in (``allow_inprocess_exec`` /
+        ``JAATO_NOTEBOOK_ALLOW_INPROCESS_EXEC``), and refused otherwise.
 
-        1. A kernel-enforced AppArmor profile is active — the cell's
-           syscalls are bounded to the session workspace regardless of what
-           the Python code attempts (the production confined-runner path).
-        2. The operator explicitly opted in via ``allow_inprocess_exec`` /
-           ``JAATO_NOTEBOOK_ALLOW_INPROCESS_EXEC`` (e.g. trusted single-user
-           dev, or a deployment that accepts the risk).
-
-        **Scope (important):** this gate only fail-closes the *unconfined*
-        path. It does NOT reduce the confined-path risk: AppArmor bounds
-        syscalls, not in-process Python memory, so under an enforced
-        profile a cell can still reach this process's objects and state
-        (including ``session_env`` secrets held by the runner). Closing
-        that requires the deferred subprocess-kernel + tool-RPC redesign
-        (or not exposing an in-process backend for untrusted use), not this
-        gate. The gate is a stopgap that removes the silent unconfined hole.
+        **AppArmor is not enough on its own (#1323).**  This used to allow
+        execution whenever the process wore an enforced profile.  But the
+        runner's profile is the session's BASE profile, which keeps
+        ``change_profile -> unconfined`` and write access to
+        ``/proc/self/attr/current`` for the framework's own use, so a cell
+        could write ``changeprofile unconfined`` and leave confinement.  The
+        subprocess backend (the default) starts its kernel in ``//child``,
+        which drops those rules; an in-process cell cannot be moved there.
 
         Returns:
             ``(allowed, reason)`` — ``reason`` is a human-readable
             explanation, used as the refusal message when not allowed.
         """
-        profile = _apparmor_enforced_profile()
-        if profile:
-            return True, f"AppArmor-enforced confinement ({profile})"
         if self._allow_inprocess_opt_in:
             if not self._opt_in_warning_logged:
+                profile = _apparmor_enforced_profile()
                 logger.warning(
                     "Notebook local backend: executing model-authored cells "
-                    "IN-PROCESS without kernel-enforced confinement (enabled "
-                    "via %s / allow_inprocess_exec). Cell code can reach this "
-                    "process's memory and state. Prefer an AppArmor-confined "
-                    "runner for untrusted use.",
+                    "IN-PROCESS (enabled via %s / allow_inprocess_exec). Cell "
+                    "code can reach this process's memory and state%s. Prefer "
+                    "the default subprocess backend for untrusted use.",
                     INPROCESS_OPT_IN_ENV,
+                    (f", and can leave the AppArmor profile {profile}, which "
+                     "keeps change_profile -> unconfined for the framework"
+                     if profile else ""),
                 )
                 self._opt_in_warning_logged = True
             return True, "explicit opt-in (config/env)"
         return False, (
-            "Notebook execution refused: cells run model-authored Python in "
-            "the host process, which is only permitted under kernel-enforced "
-            "AppArmor confinement or with an explicit opt-in. Run under an "
-            f"AppArmor-confined runner, or set {INPROCESS_OPT_IN_ENV}=1 (or "
-            "the notebook plugin config allow_inprocess_exec=true) to accept "
-            "in-process execution."
+            "Notebook execution refused: the local backend runs model-authored "
+            "Python in the host process, which is permitted only with an "
+            "explicit opt-in (an AppArmor profile does not bound it: the "
+            "runner's profile lets code in it unconfine itself). Use the "
+            "default subprocess backend (notebook plugin config "
+            f"default_backend=subprocess), or set {INPROCESS_OPT_IN_ENV}=1 "
+            "(or allow_inprocess_exec=true) to accept in-process execution."
         )
 
     def execution_boundary(self) -> Tuple[bool, str]:
@@ -167,25 +161,22 @@ class LocalJupyterBackend(NotebookBackend):
 
         Note what this backend does NOT bound: a cell that IS permitted here
         runs in the host interpreter with no filesystem containment of its
-        own.  Under AppArmor the kernel supplies that; under the opt-in the
-        operator has accepted its absence.
+        own, and an AppArmor profile the process wears does not supply one
+        (the cell can leave it, #1323).  Under the opt-in the operator has
+        accepted that.
         """
         return self._inprocess_exec_allowed()
 
     def boundary_kind(self) -> str:
         """The tier a cell would run under here (issue #1012).
 
-        Three of the four tiers are reachable and the missing one is the
-        informative part: this backend **never** installs an audit hook, so
-        it is never :data:`BOUNDARY_AUDIT` and a cell here never meets #1011's
-        ``import ctypes`` refusal. Under AppArmor the kernel bounds it; under
-        the opt-in nothing bounds its filesystem reach at all, which is what
-        :data:`BOUNDARY_OPT_OUT` says — and is the honest answer, since this
-        backend's gate gained the operator a PROCESS decision and never a
-        filesystem one.
+        Never :data:`BOUNDARY_AUDIT` (this backend installs no audit hook,
+        so a cell here never meets #1011's ``import ctypes`` refusal), and
+        never :data:`BOUNDARY_APPARMOR` since #1323: the profile the runner
+        wears is its base profile, which a cell can leave.  So the answer is
+        :data:`BOUNDARY_OPT_OUT` when the operator opted in and
+        :data:`BOUNDARY_NONE` (refused) otherwise.
         """
-        if apparmor_enforced_profile():
-            return BOUNDARY_APPARMOR
         allowed, _ = self._inprocess_exec_allowed()
         return BOUNDARY_OPT_OUT if allowed else BOUNDARY_NONE
 
