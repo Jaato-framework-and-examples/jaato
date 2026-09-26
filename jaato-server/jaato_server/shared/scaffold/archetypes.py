@@ -616,7 +616,14 @@ ARCHETYPES: Dict[str, ArchetypeDoc] = {
              "REQUIRED — one _base_<agent>.yaml and one <set>/<agent>.yaml per "
              "name; this is the only thing that decides how many files land"),
             ("--set NAME", "REQUIRED — the tier-2 directory name and the "
-                           "JAATO_PROFILE_SET value written into .env"),
+                           "JAATO_PROFILE_SET value written into .env.  Name it "
+                           "for what varies BETWEEN sets — in practice the "
+                           "provider/model binding (e.g. openrouter_gpt5mini) "
+                           "— never for the cascade, client script or task "
+                           "that SELECTS between sets: that thing is commonly "
+                           "run under several different sets, so its name is "
+                           "the one property every sibling set shares and "
+                           "therefore carries no differentiating information"),
             ("--secrets env (default)",
              'api_key: "${<PROVIDER_KEY_ENV>}" in each set profile, the var '
              "surfaced as a blank in .env, and .env git-ignored — runs on a "

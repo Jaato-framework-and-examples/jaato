@@ -14,6 +14,12 @@ Keep the base inheritable: binding a provider or model in it breaks
 set-selection. `new profile-set` generates the layering; `explain sets`
 enumerates what a workspace already has.
 
+Name `<set>` for what it binds — the provider/model, e.g.
+`openrouter_gpt5mini` — never for the cascade or client script that
+selects between sets: that driver commonly runs under several different
+sets, so its name is the one thing every sibling set shares and carries no
+differentiating information.
+
 ## The inheritance rules that bite
 
 - `plugins` is a **union** — a child cannot remove what a parent added, and
