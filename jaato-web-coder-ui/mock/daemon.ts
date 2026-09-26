@@ -292,6 +292,12 @@ function sendWorkspaceSnapshot(c: Client): void {
   send(c, { type: "workspace.files_snapshot", files, total: files.length, seq: m.seq, epoch: m.epoch, seqs });
 }
 
+/** Markdown documents the ``write markdown docs`` scenario creates, by path. */
+const MOCK_DOCS: Record<string, string> = {
+  "docs/README.md": "# Project guide\n\nSee [the setup steps](SETUP.md) and [our site](https://example.com).\n\n| key | value |\n|-----|-------|\n| a | 1 |\n\n<script>window.__pwned = true</script>\n",
+  "docs/SETUP.md": "## Setup\n\n- [x] install\n- [ ] configure\n",
+};
+
 /**
  * ``workspace.file.fetch`` (protocol 1.20), with the daemon's rules
  * (``server/workspace_download.py``): a path that climbs out is
@@ -311,7 +317,7 @@ function answerFileFetch(c: Client, ev: Record<string, unknown>): void {
   if (name === ".env") { answer({ ok: false, path, category: "credential", error: `${path} holds credentials and cannot be downloaded` }); return; }
   const status = monitorFor(c).files.get(path)?.status;
   if (!status || status === "deleted") { answer({ ok: false, path, category: "not_found", error: `no file at ${path}` }); return; }
-  const data = Buffer.from(`mock content of ${path}\n`);
+  const data = Buffer.from(MOCK_DOCS[path] ?? `mock content of ${path}\n`);
   answer({ ok: true, path, name, size: data.length, mime_type: name.endsWith(".txt") ? "text/plain" : "application/octet-stream" });
   if (!metadataOnly && c.ws.readyState === c.ws.OPEN) c.ws.send(data);
 }
@@ -430,6 +436,11 @@ async function turn(c: Client, text: string, agentId = "main"): Promise<void> {
     memoriesFor(c).push({ id: `mem_${callId.slice(0, 8)}`, description: body, content: body, tags: ["mock", "note"], maturity: "raw", tier: "workspace", scope: "project", timestamp: ts(), usage_count: 0, source_session: c.sessionId, curated_by: null, retrieved: false });
     send(c, { type: "tool.call_end", agent_id: agentId, tool_name: "store_memory", call_id: callId, success: true, duration_seconds: 0.01, error_message: null });
     await stream(c, agentId, "Noted.");
+  } else if (lower.includes("write markdown docs")) {
+    // Two linked markdown documents, for the Files panel's markdown view.
+    // Their content is ``MOCK_DOCS`` below (``answerFileFetch``).
+    emitWorkspaceChanges(c, Object.keys(MOCK_DOCS).map((path) => ({ path, status: "created" })));
+    await stream(c, agentId, "Wrote the docs.");
   } else if (lower.includes("diag refuse")) {
     // Arms the owner-gate refusal for the NEXT ``session.diagnostics``
     // check, so the panel's refusal rendering is exercised against the

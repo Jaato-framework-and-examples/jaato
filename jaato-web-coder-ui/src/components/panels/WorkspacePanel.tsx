@@ -30,6 +30,10 @@
  *   panel cannot draw.  A binary file, or one over the viewer's inline
  *   size, falls back to Download inside the same viewer.  Deleted files,
  *   and every file against an older daemon, stay plain (unclickable) text.
+ *   A markdown file is RENDERED (``MarkdownView``, lazily loaded) with a
+ *   ``raw`` toggle; its relative links open the linked file in the same
+ *   viewer, with ``back`` to return, and its relative images are fetched
+ *   through the same daemon verb.
  * - **collapse** (TUI Left/Right): the arrow in front of a directory folds
  *   it to one line carrying how many files it holds.  Every directory
  *   starts expanded and a reset expands them all again, as in the TUI.
@@ -49,12 +53,13 @@
  * the hidden set (the ``scrub_secret_env`` ``!NAME`` idiom), which is
  * removed again by unhiding it a second time (back to default-hidden).
  */
-import { useMemo, useState } from "react";
+import { lazy, Suspense, useMemo, useState } from "react";
 import { useJaato } from "@/store/store";
 import { toggleWorkspaceIgnore } from "@/app/actions";
 import { visibleFiles } from "@/store/workspaceView";
 import { downloadFromPanel, servesDownloads } from "@/app/downloads";
 import { getClient } from "@/sdk/connection";
+import { isMarkdownPath } from "@/protocol/workspacePaths";
 
 interface Node { name: string; path: string; change?: string; children: Map<string, Node> }
 
@@ -222,27 +227,72 @@ function Tree({ node, depth, hidden, showHidden, ignored, collapsed, onOpenFile 
 
 const MAX_VIEWER_BYTES = 512 * 1024;
 
-interface ViewerState { path: string; status: "loading" | "text" | "binary" | "error"; text?: string; error?: string }
+const MarkdownView = lazy(() => import("./MarkdownView"));
 
 /**
- * The content viewer (#1304 §5) opened by clicking a file's name: the
+ * What the content viewer is showing.  ``back`` is the trail of files the
+ * user left by following a link in a rendered markdown document, most
+ * recent last; opening a file from the tree starts a fresh trail.
+ */
+interface ViewerState { path: string; status: "loading" | "text" | "binary" | "error"; text?: string; error?: string; back: string[] }
+
+/** Fetch a workspace file's bytes for the markdown view's images; ``null`` when refused. */
+async function fetchWorkspaceBytes(path: string): Promise<Uint8Array | null> {
+  const { event, data } = await getClient().fetchWorkspaceFile(path);
+  return event.ok && data ? data : null;
+}
+
+const VIEW_BTN = "link text-[11px]";
+
+/**
+ * The content viewer (#1304 §5) opened by the ``view`` action: the
  * file's CURRENT bytes, decoded as text where it is one.  There is no
  * historical revision on the daemon to diff against, so this is honestly
  * a content viewer rather than a diff -- see this file's top docstring.
+ *
+ * A markdown file (``isMarkdownPath``) is RENDERED by default, through the
+ * lazily-loaded ``MarkdownView``; ``raw`` switches to the text as written
+ * and back.  A relative link in the rendered document opens that file in
+ * this same viewer (``onOpen``), and ``back`` returns along the trail.
+ * ``expand`` lifts the rail-sized height cap, since a document is read,
+ * not glanced at.
  */
-function FileContentViewer({ state, onClose }: { state: ViewerState; onClose: () => void }) {
+function FileContentViewer({ state, onClose, onOpen, onBack }: { state: ViewerState; onClose: () => void; onOpen: (path: string) => void; onBack: () => void }) {
+  const markdown = isMarkdownPath(state.path);
+  const [raw, setRaw] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  const height = expanded ? "max-h-[75vh]" : "max-h-64";
+  const rendered = markdown && !raw && state.status === "text";
   return (
     <div className="mb-2.5 border hairline" data-testid="file-viewer">
       <div className="flex items-center gap-2 px-2 py-1.5 border-b hairline">
+        {state.back.length > 0 && (
+          <button type="button" className={VIEW_BTN} onClick={onBack} aria-label={`Back to ${state.back[state.back.length - 1]}`}>back</button>
+        )}
         <span className="font-mono text-[12px] truncate flex-1" title={state.path}>{state.path}</span>
-        <button type="button" className="link text-[11px]" onClick={() => { void downloadFromPanel(state.path); }}>download</button>
-        <button type="button" className="link text-[11px]" onClick={onClose} aria-label="Close file viewer">close</button>
+        {markdown && state.status === "text" && (
+          <button type="button" className={VIEW_BTN} onClick={() => setRaw((r) => !r)} aria-pressed={raw} title={raw ? "Show the rendered document" : "Show the markdown as written"}>
+            {raw ? "rendered" : "raw"}
+          </button>
+        )}
+        {state.status === "text" && (
+          <button type="button" className={VIEW_BTN} onClick={() => setExpanded((e) => !e)} aria-pressed={expanded}>{expanded ? "shrink" : "expand"}</button>
+        )}
+        <button type="button" className={VIEW_BTN} onClick={() => { void downloadFromPanel(state.path); }}>download</button>
+        <button type="button" className={VIEW_BTN} onClick={onClose} aria-label="Close file viewer">close</button>
       </div>
       {state.status === "loading" && <div className="px-2 py-2 text-[12px] text-text-muted italic">Loading…</div>}
       {state.status === "error" && <div className="px-2 py-2 text-[12px] text-error" role="alert">{state.error}</div>}
       {state.status === "binary" && <div className="px-2 py-2 text-[12px] text-text-muted italic">Binary or oversized -- use download.</div>}
-      {state.status === "text" && (
-        <pre className="m-0 px-2 py-2 text-[11.5px] font-mono whitespace-pre-wrap break-words max-h-64 overflow-auto">{state.text}</pre>
+      {rendered && (
+        <div className={`px-3 py-2 ${height} overflow-auto`}>
+          <Suspense fallback={<div className="text-[12px] text-text-muted italic">Rendering…</div>}>
+            <MarkdownView source={state.text ?? ""} path={state.path} fetchFile={fetchWorkspaceBytes} onOpen={onOpen} />
+          </Suspense>
+        </div>
+      )}
+      {state.status === "text" && !rendered && (
+        <pre className={`m-0 px-2 py-2 text-[11.5px] font-mono whitespace-pre-wrap break-words ${height} overflow-auto`}>{state.text}</pre>
       )}
     </div>
   );
@@ -297,19 +347,26 @@ export function WorkspacePanel() {
   const hiddenCount = useMemo(() => countHiddenFiles(files, hidden), [files, hidden]);
   const [viewer, setViewer] = useState<ViewerState | null>(null);
 
-  const openFile = (path: string) => {
-    setViewer({ path, status: "loading" });
+  const openFile = (path: string, back: string[] = []) => {
+    setViewer({ path, status: "loading", back });
     void (async () => {
       try {
         const { event, data } = await getClient().fetchWorkspaceFile(path);
-        if (!event.ok || !data) { setViewer({ path, status: "error", error: event.error || "could not fetch this file" }); return; }
-        if (data.byteLength > MAX_VIEWER_BYTES) { setViewer({ path, status: "binary" }); return; }
+        if (!event.ok || !data) { setViewer({ path, status: "error", error: event.error || "could not fetch this file", back }); return; }
+        if (data.byteLength > MAX_VIEWER_BYTES) { setViewer({ path, status: "binary", back }); return; }
         const text = decodeAsText(data);
-        setViewer(text == null ? { path, status: "binary" } : { path, status: "text", text });
+        setViewer(text == null ? { path, status: "binary", back } : { path, status: "text", text, back });
       } catch (err) {
-        setViewer({ path, status: "error", error: err instanceof Error ? err.message : String(err) });
+        setViewer({ path, status: "error", error: err instanceof Error ? err.message : String(err), back });
       }
     })();
+  };
+  // A link followed inside a rendered document keeps the trail; the tree's
+  // own ``view`` starts a new one.
+  const followLink = (path: string) => { if (viewer) openFile(path, [...viewer.back, viewer.path]); };
+  const goBack = () => {
+    if (!viewer?.back.length) return;
+    openFile(viewer.back[viewer.back.length - 1]!, viewer.back.slice(0, -1));
   };
 
   return (
@@ -317,14 +374,14 @@ export function WorkspacePanel() {
       {notice && (
         <div role="status" className={`text-[11px] mb-2 ${notice.error ? "text-error" : "text-text-muted"}`}>{notice.text}</div>
       )}
-      {viewer && <FileContentViewer state={viewer} onClose={() => setViewer(null)} />}
+      {viewer && <FileContentViewer state={viewer} onClose={() => setViewer(null)} onOpen={followLink} onBack={goBack} />}
       <ResetBar total={total} isReset={isReset} />
       {total === 0 ? (
         <div className="text-xs text-text-muted italic">
           {isReset ? "No files changed since the reset." : "No files changed yet."}
         </div>
       ) : (
-        <Tree node={tree} depth={0} hidden={hidden} showHidden={showHidden} ignored={ignored} collapsed={collapsed} onOpenFile={openFile} />
+        <Tree node={tree} depth={0} hidden={hidden} showHidden={showHidden} ignored={ignored} collapsed={collapsed} onOpenFile={(p) => openFile(p)} />
       )}
       {hiddenCount > 0 && (
         <div className="mt-2 text-[11px] text-text-muted flex items-center gap-2">
