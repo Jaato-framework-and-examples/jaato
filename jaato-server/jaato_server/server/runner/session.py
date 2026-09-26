@@ -640,10 +640,17 @@ def _apply_envelope_session_env(envelope: SessionInitEnvelope) -> Dict[str, str]
     # The snapshot is taken ONCE, before the first session's env is applied,
     # so it is the slot's pristine inherited environment -- not session A's.
     # Taking it per-session would snapshot A's leak and faithfully restore it.
-    return apply_session_env(envelope.session_env)
+    # getattr: an envelope-shaped object without the field (older callers,
+    # test doubles) grants nothing, exactly as a wire dict without it does.
+    return apply_session_env(
+        envelope.session_env, getattr(envelope, "granted_env_names", None),
+    )
 
 
-def apply_session_env(session_env: Optional[Dict[str, str]]) -> Dict[str, str]:
+def apply_session_env(
+    session_env: Optional[Dict[str, str]],
+    granted_env_names: Optional[List[str]] = None,
+) -> Dict[str, str]:
     """Restore the slot's pristine environment, then lay *session_env* over it.
 
     The one writer of the runner's session-scoped environment, shared by
@@ -654,14 +661,25 @@ def apply_session_env(session_env: Optional[Dict[str, str]]) -> Dict[str, str]:
     does not is gone afterwards, which is what lets a reload retract a
     credential as well as supply one.
 
+    The secret-scrub grant is replaced in the same call, for the same
+    reason: it describes this env and must not outlive it.  Only names
+    that are keys of *session_env* are granted, so a grant can never reach
+    a variable the slot inherited rather than one this session was given.
+
     Args:
         session_env: The daemon-resolved dict (workspace ``.env`` + profile
             ``env:`` + overrides, secret URIs already decoded).  ``None`` or
             empty restores the pristine environment and applies nothing.
+        granted_env_names: The names in *session_env* the daemon resolved
+            from ``app://`` (``JaatoServer.granted_env_names``).  ``cli``
+            and ``interactive_shell`` keep these through the secret scrub.
+            ``None`` grants nothing.
 
     Returns:
         A copy of what was applied (empty when nothing was).
     """
+    from jaato_server.shared.secret_scrub import set_granted_env_names
+
     global _PRISTINE_ENVIRON
     if _PRISTINE_ENVIRON is None:
         _PRISTINE_ENVIRON = dict(os.environ)
@@ -673,9 +691,10 @@ def apply_session_env(session_env: Optional[Dict[str, str]]) -> Dict[str, str]:
         os.environ.clear()
         os.environ.update(_PRISTINE_ENVIRON)
 
-    if not session_env:
-        return {}
-    applied: Dict[str, str] = dict(session_env)
+    applied: Dict[str, str] = dict(session_env or {})
+    set_granted_env_names(
+        n for n in (granted_env_names or ()) if applied.get(n) is not None
+    )
     for key, value in applied.items():
         if value is not None:
             os.environ[key] = value

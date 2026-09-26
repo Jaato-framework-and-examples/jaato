@@ -5495,6 +5495,24 @@ Rules the implementation holds to:
   passes reaches that process; only the *inherited* `os.environ` is
   filtered.  A profile's `env:` map is **not** a grant — it is where the
   provider key usually lives.
+- **A name the daemon resolved from `app://` is granted (#1228).**  A
+  web-coder workspace has no profile to write `!GH_TOKEN` in, so
+  `GH_TOKEN=app://github` would otherwise be stripped before `gh` ran.
+  `JaatoServer` records the names it resolved in this pass
+  (`granted_env_names()`), and they travel beside the session env:
+  `SessionInitEnvelope.granted_env_names` at bootstrap, and the
+  `session.reload_env` payload on every reload, so a bind or unbind reaches
+  a live session's next command.  The runner's `apply_session_env` records
+  only names present in the env it applied
+  (`secret_scrub.set_granted_env_names`), and `cli` / `interactive_shell`
+  pass them as `scrub_env(..., keep=...)`.  The keep set is matched
+  **exactly and case-sensitively**, never as a glob, so a model that edits
+  `.env` cannot turn a grant for `anthropic_api_key` into one for
+  `ANTHROPIC_API_KEY`.  `mcp` is never granted.  A literal token gets no
+  grant and still needs the exemption.  No envelope version bump: an absent
+  field grants nothing, which is the pre-#1228 behaviour.  The value is
+  still in the subprocess environment; keeping it out of the runner is the
+  broker in #505.
 - **The primitives stay policy-free.**  `run_command(scrub_env=None)`,
   `ShellSession(scrub_env=None)` and `ServerConfig.scrub_secret_env=()`
   still mean "scrub nothing"; the default lives in the three plugins

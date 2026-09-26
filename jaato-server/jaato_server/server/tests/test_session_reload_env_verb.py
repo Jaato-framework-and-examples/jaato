@@ -189,7 +189,8 @@ class TestJaatoServerReload:
 
         assert calls == [False], "the flag must be dropped before re-resolving"
         rpc.session_reload_env_threadsafe.assert_called_once_with(
-            {"JAATO_ZHIPUAI_API_KEY": "fresh", "MODEL_NAME": "glm-5"}, timeout=90.0)
+            {"JAATO_ZHIPUAI_API_KEY": "fresh", "MODEL_NAME": "glm-5"},
+            granted_env_names=[], timeout=90.0)
         assert result == {"applied": 2}
 
     def test_without_a_runner_it_only_re_resolves(self):

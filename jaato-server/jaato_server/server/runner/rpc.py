@@ -1941,8 +1941,10 @@ class RunnerRPC:
         re-resolves and ships the FULL dict here, exactly as bootstrap did;
         the runner does not read the ``.env`` itself.
 
-        ``args = {"session_env": {name: value, ...}}``.  Two orderings are
-        the contract:
+        ``args = {"session_env": {name: value, ...}, "granted_env_names":
+        [name, ...]}``; the second is the list of names the daemon resolved
+        from ``app://`` and replaces the secret-scrub grant.  Two orderings
+        are the contract:
 
         - the environment is applied BEFORE the provider is rebuilt, and is
           left applied when the rebuild fails -- the answer then names the
@@ -1958,6 +1960,8 @@ class RunnerRPC:
             with ``stage`` in ``no_host`` / ``no_session`` / ``busy`` /
             ``provider`` otherwise.
         """
+        from jaato_server.shared.session_envelope import env_name_list
+
         from .session import apply_session_env
 
         ready, err, session = self._require_ready_session()
@@ -1972,7 +1976,11 @@ class RunnerRPC:
                 "stage": "busy",
             }
         session_env = args.get("session_env") or {}
-        applied = apply_session_env(dict(session_env))
+        # The scrub grant travels with the env it describes and is replaced
+        # with it; an older daemon sends none, which grants nothing.
+        applied = apply_session_env(
+            dict(session_env), env_name_list(args.get("granted_env_names")),
+        )
         try:
             session._session_env = dict(applied)
         except Exception:  # noqa: BLE001 -- best-effort attribute set

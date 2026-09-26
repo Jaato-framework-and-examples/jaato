@@ -59,14 +59,14 @@ the content of the shipped instruction file.
 
 | # | Rule | Rationale / epic backing |
 |---|------|--------------------------|
-| 6 | **Always use `gh`** for GitHub operations (issues, PRs, reviews, releases), and `gh api` for anything without a command. No `curl` with the token, no MCP server for GitHub. | The scrub exemption keeps `GH_TOKEN` for `cli`/`interactive_shell` only; MCP keeps the `default` scrub, so an MCP server gets no token anyway (#1228 profile). |
+| 6 | **Always use `gh`** for GitHub operations (issues, PRs, reviews, releases), and `gh api` for anything without a command. No `curl` with the token, no MCP server for GitHub. | The daemon's `app://` grant keeps `GH_TOKEN` for `cli`/`interactive_shell` only; MCP is never granted, so an MCP server gets no token anyway (#1228). |
 | 7 | **Use `git` over HTTPS**; `gh` supplies the credential. No SSH keys, no remote URLs with the token in them. | `<ws>/.home/.gitconfig` seeds `helper = !gh auth git-credential` at bind (**verified**, `renderGitConfig` in `src/github.ts`), so `git` over HTTPS picks the token up with no URL rewriting. |
 
 ### The credential
 
 | # | Rule | Rationale / epic backing |
 |---|------|--------------------------|
-| 8 | **Never print, echo or log the token.** No `env`, no `echo $GH_TOKEN`, never in a URL or a command's output. | The scrub exemption deliberately keeps `GH_TOKEN` **in** the `cli` subprocess environment, so `echo $GH_TOKEN` genuinely reveals it — the `/proc/environ` denials (#712) do not cover the model asking a subprocess to print its own env. This prose rule is the last line, and is load-bearing. |
+| 8 | **Never print, echo or log the token.** No `env`, no `echo $GH_TOKEN`, never in a URL or a command's output. | The `app://` grant deliberately keeps `GH_TOKEN` **in** the `cli` subprocess environment, so `echo $GH_TOKEN` genuinely reveals it — the `/proc/environ` denials (#712) do not cover the model asking a subprocess to print its own env. This prose rule is the last line, and is load-bearing. |
 | 9 | **On a 401, report it and stop.** No `gh auth login`. | The token is delivered per spawn by the platform; nothing on disk can fix it. `GH_PROMPT_DISABLED=1` / `GIT_TERMINAL_PROMPT=0` (the shipped profile) make a missing credential an error the model reads rather than a prompt nobody answers. |
 
 ### Acting on the user's behalf — outward-facing, often irreversible
@@ -87,13 +87,13 @@ the credential helper for rule 7) are verified present.
 | File | Purpose | Core? |
 |------|---------|-------|
 | `.jaato/instructions/40-github.md` | the rules above | **core** |
-| `.jaato/profiles/gh-worker.yaml` (or an `inherits` fragment) | the scrub exemption `[default, "!GH_TOKEN"]` per surface, `GH_PROMPT_DISABLED=1` / `GIT_TERMINAL_PROMPT=0`, and the force-push permission blacklist | optional |
+| `.jaato/profiles/gh-worker.yaml` (or an `inherits` fragment) | `GH_PROMPT_DISABLED=1` / `GIT_TERMINAL_PROMPT=0`, and the force-push permission blacklist | optional |
 | `.jaato/bin/gh-worktree` | a shell helper the model runs through `cli` to open/close its worktree with the agreed layout and branch name — rules 1–5 as one command instead of prose | optional |
 
 The split is not cosmetic. The **instruction file reaches every non-suppressing
 session in the workspace** regardless of which profile it runs under (it is the
 disk instruction layer). The **profile pieces reach only sessions that run under
-that profile** — the scrub exemption, the non-interactive env and the blacklist
+that profile** — the non-interactive env and the blacklist
 are profile config, and the application cannot force them into a profile the
 user picked. So the instruction file is the one piece that is always correct to
 ship; the profile is an opt-in the deployment (or the `gh` example) selects.
@@ -229,7 +229,7 @@ GitLab is a data addition rather than a re-architecture.** The shared,
 expensive-to-retrofit part is thin: (a) a managed-file writer with the
 header + version + user-override logic (§5), and (b) the bind-time hook. Build
 that generically. Everything else — the 13 rules, the `gh` helper, the
-`GH_TOKEN` scrub exemption, the force-push blacklist — is GitHub-specific
+force-push blacklist — is GitHub-specific
 content and should not be abstracted (a forge differs in MR vs PR, `glab` vs
 `gh`). When GitLab lands (`app://gitlab`, `GL_TOKEN`), it registers its own
 instruction file and profile fragment through the same mechanism. Trade-off:
@@ -267,10 +267,9 @@ A follow-up issue/PR can execute this; no code is written here.
 - Ship `.jaato/bin/gh-worktree` (open/close) and the force-push blacklist +
   `ask` entries in the optional `gh-worker` profile (evolving
   `examples/gh/.jaato/profiles/gh-worker.yaml`).
-- `jaato-scaffold validate` already reports `gh_token_scrubbed_inert` (#1228)
-  when the scrub exemption is missing; no new finding is required, but a
-  follow-up could warn when `40-github.md` is present and no profile carries the
-  exemption.
+- No scrub exemption is needed: the daemon grants the names it resolved from
+  `app://` to `cli` and `interactive_shell` (#1228), so `GH_TOKEN=app://github`
+  reaches `gh` in a profile-less workspace.
 
 ## 9. Honesty — what was verified, and what a reviewer should check
 
@@ -292,8 +291,8 @@ A follow-up issue/PR can execute this; no code is written here.
   per batch, serialised. `.jaato/`-relative paths are within that contract. —
   `app/staging.ts`, `protocol/attachments.ts`.
 - The `gh-worker` profile + persona exist and reach a session only by hand-copy
-  (its README says so), and the scrub exemption / `gh_token_scrubbed_inert`
-  validate finding are as described. — `examples/gh/`.
+  (its README says so). An `app://` GH_TOKEN needs no scrub exemption there,
+  because the daemon grants the names it resolved. — `examples/gh/`.
 
 **Assumptions a reviewer should confirm before implementing:**
 

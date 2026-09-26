@@ -31,7 +31,9 @@ from ..workspace_venv import (
 from jaato_server.shared.ai_tool_runner import get_current_tool_output_callback, get_current_cancel_token
 from jaato_sdk.plugins.model_provider.types import CancelledException
 from jaato_server.shared.subprocess_runner import run_command, requires_shell, RunResult
-from jaato_server.shared.secret_scrub import DEFAULT_SECRET_ENV_PATTERNS, resolve_scrub_patterns
+from jaato_server.shared.secret_scrub import (
+    DEFAULT_SECRET_ENV_PATTERNS, granted_env_names, resolve_scrub_patterns,
+)
 from jaato_server.shared.cli_path_policy import (
     CLI_EXE_NOT_FOUND_HINT,
     precheck_cli_args,
@@ -1153,7 +1155,9 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
 
         if self._scrub_secret_env:
             from jaato_server.shared.secret_scrub import scrub_env as _scrub_secret_env
-            env = _scrub_secret_env(env, self._scrub_secret_env)
+            env = _scrub_secret_env(
+                env, self._scrub_secret_env, keep=granted_env_names(),
+            )
         return env, venv_path
 
     def _requires_shell(self, command: str) -> bool:
@@ -1568,6 +1572,10 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
                 check_cancel=True,
                 preexec_fn=self._build_subprocess_preexec_fn(),
                 scrub_env=self._scrub_secret_env or None,
+                # The daemon's app:// grants (#1228), read per command so a
+                # session.reload_env that binds or unbinds an account takes
+                # effect on the next one.  mcp does not do this.
+                scrub_keep=granted_env_names(),
             )
 
             # Executable-not-found is surfaced as an error dict so the

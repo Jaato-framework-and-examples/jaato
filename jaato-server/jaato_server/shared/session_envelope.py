@@ -149,6 +149,19 @@ def _optional_limits_dict(value: Any) -> Optional[Dict[str, Any]]:
     return dict(value)
 
 
+def env_name_list(value: Any) -> List[str]:
+    """A wire list of env-var names, keeping only non-empty strings.
+
+    Used for ``granted_env_names`` on the envelope and on the
+    ``session.reload_env`` payload.  Lenient in the v6 style: anything that
+    is not a list of strings grants nothing rather than refusing the
+    bootstrap, because granting nothing is the safe reading.
+    """
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [str(v) for v in value if isinstance(v, str) and v]
+
+
 @dataclass
 class SessionInitEnvelope:
     """Daemon → runner session-bootstrap payload.
@@ -425,6 +438,16 @@ class SessionInitEnvelope:
     # genuinely-unconfined session — behaving exactly as before; same-build
     # daemon+runner so no schema_version bump.
     confinement_required: bool = False
+    # The ``session_env`` names whose value the DAEMON resolved from an
+    # ``app://`` reference in this pass (``JaatoServer.granted_env_names``).
+    # The runner lets exactly these through the cli / interactive_shell
+    # secret scrub: the workspace owner granted the credential by binding
+    # it, so it is an explicit grant, and the scrub never removes those.
+    # The list comes from the resolution, never from a value the workspace
+    # can write, so a ``.env`` cannot mark a provider key exempt.  Empty
+    # default = grant nothing, which is what an older daemon's envelope
+    # means; same-build daemon+runner so no schema_version bump.
+    granted_env_names: List[str] = field(default_factory=list)
     schema_version: int = SESSION_ENVELOPE_VERSION
 
     def __post_init__(self) -> None:
@@ -504,6 +527,7 @@ class SessionInitEnvelope:
             "runtime_limits": self.runtime_limits,
             # #1253: the confinement invariant, carried to the runner gate.
             "confinement_required": self.confinement_required,
+            "granted_env_names": list(self.granted_env_names),
         }
 
     @classmethod
@@ -584,6 +608,7 @@ class SessionInitEnvelope:
             # genuinely-unconfined session — reaches ``_maybe_self_confine``
             # with the gate inert, exactly as before this field existed.
             confinement_required=bool(d.get("confinement_required", False)),
+            granted_env_names=env_name_list(d.get("granted_env_names")),
         )
 
 

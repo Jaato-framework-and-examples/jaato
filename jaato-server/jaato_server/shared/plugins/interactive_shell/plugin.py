@@ -54,7 +54,9 @@ from .ansi import strip_ansi
 from jaato_server.shared.ai_tool_runner import get_current_tool_output_callback
 from jaato_server.shared.apparmor_label import COMPLAIN_ENV_VAR, read_thread_label
 from jaato_server.shared.plugins.runner_forwarding import RunnerForwardingMixin
-from jaato_server.shared.secret_scrub import DEFAULT_SECRET_ENV_PATTERNS, resolve_scrub_patterns
+from jaato_server.shared.secret_scrub import (
+    DEFAULT_SECRET_ENV_PATTERNS, granted_env_names, resolve_scrub_patterns,
+)
 from jaato_server.shared.command_analysis import UnanalyzableCommand
 from ..command_containment import first_denied_path
 from ..workspace_home import resolve_home_path, home_exec_apparmor_rules
@@ -1137,6 +1139,10 @@ IMPORTANT NOTES:
                 workspace_venv=venv_path,
                 workspace_home=home_path,
                 scrub_env=self._scrub_secret_env or None,
+                # The daemon's app:// grants (#1228), read per spawn so a
+                # session.reload_env that binds or unbinds an account takes
+                # effect on the next shell.  mcp does not do this.
+                scrub_keep=granted_env_names(),
                 # Same value as cwd, passed as the boundary rather than
                 # assumed from it (#503): ShellSession verifies one
                 # against the other, so the invariant survives a future

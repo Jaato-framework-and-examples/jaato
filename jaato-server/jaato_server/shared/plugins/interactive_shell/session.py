@@ -19,7 +19,7 @@ import os
 import sys
 import time
 import threading
-from typing import Callable, Optional, Dict, Any, Sequence
+from typing import Callable, Optional, Dict, Any, Iterable, Sequence
 
 from .ansi import strip_ansi
 from ..workspace_venv import apply_venv_to_env
@@ -306,6 +306,7 @@ class ShellSession:
         workspace_home: Optional[str] = None,
         scrub_env: Optional[Sequence[str]] = None,
         workspace_root: Optional[str] = None,
+        scrub_keep: Optional[Iterable[str]] = None,
     ):
         """Spawn an interactive process and prepare idle-based I/O.
 
@@ -356,6 +357,9 @@ class ShellSession:
                 Both sides are resolved (``realpath``) before comparison,
                 so a symlinked *cwd* pointing out of the workspace is
                 refused rather than admitted for where the link lives.
+            scrub_keep: Exact, case-sensitive names that survive *scrub_env*
+                (the daemon's ``app://`` grants).  ``None`` = keep nothing;
+                the plugin decides, the session only applies it.
 
         Raises:
             ImportError: If no backend is available (``_spawn is None``).
@@ -378,7 +382,9 @@ class ShellSession:
         # is scrubbed FIRST (secrets-broker, #503/#863); the caller's
         # explicit ``env`` is overlaid afterwards and never scrubbed, the
         # same grant rule the MCP spawn applies to a server's own ``env``.
-        spawn_env = _scrub_secret_env(os.environ, scrub_env or ())
+        spawn_env = _scrub_secret_env(
+            os.environ, scrub_env or (), keep=scrub_keep,
+        )
         # Disable pager programs that would block
         spawn_env['PAGER'] = 'cat'
         spawn_env['GIT_PAGER'] = 'cat'
