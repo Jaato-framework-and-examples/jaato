@@ -2414,6 +2414,29 @@ is also the limit of what was checked. `JAATO_APPARMOR_COMPLAIN` stays a
 `host`-scoped env var with no typed profile key; it is a whole-daemon
 diagnostic, not a per-session knob.
 
+### What a Profile Granted, Shown to Its Owner (#1326)
+
+The web Diagnostics panel (#1294) said whether a session was confined and
+never what the confinement allowed. When a confined command fails, the
+question is which fragment, plugin or reference granted a rule, or why none
+did; the answer lived in one daemon log line and in the rendered profile on
+the host.
+
+| Piece | Where |
+|---|---|
+| the record | `AppArmorManager._record_grants`, after a SUCCESSFUL load, keyed by the profile name the runner identity carries. Daemon-wide (`apparmor.record_grants` / `recorded_grants`), because the WS server and the IPC session manager each hold their own manager. In memory: after a daemon restart a boundary reads `recorded: false` until it is provisioned again |
+| what it holds | exec scope (`scoped` = `//child` may exec only what the fragments name, `unscoped` = the broad in-PATH set), each fragment's tier, file, rule lines and the lower tiers it shadows, fragments requested and not found or unreadable, rules per contributing plugin (`resolve_plugin_apparmor_rules` returns a `PluginRules` list carrying `by_plugin`), the template version |
+| the live part | reference grants `selectReferences` adds mid-session, listed from the boundary's refs directory when asked |
+| who declared the fragments | `SubagentProfile.apparmor_fragments_source`, a DERIVED field set by `_merge_apparmor_fragments` and persisted in the snapshot. `None` when no profile declared the list, `""` when a snapshot predates the field |
+| the wire | `DiagnosticsResultEvent.apparmor_grants`, protocol **1.26**, additive, returned only past the existing owner gate |
+| the panel | a collapsed `AppArmor grants` line in the RECORD block (`exec: scoped — N fragments (declared by X)`), contributors and rule text a click further, a missing fragment in the warning tone |
+
+It records rather than re-derives because the fragment files may have
+changed since the profile was loaded; the panel shows what the kernel was
+handed. Not covered: the flat isolated sub-runner profile, and where a
+walker-generated cache-tier fragment came from (jaato sees only the file).
+Guard: `jaato_server/shared/tests/test_diagnostics_show_apparmor_grants_1326.py`.
+
 ### Binary Media Chunks (delivery)
 
 Binary content (audio, images, PDFs) moves in three directions, and they are

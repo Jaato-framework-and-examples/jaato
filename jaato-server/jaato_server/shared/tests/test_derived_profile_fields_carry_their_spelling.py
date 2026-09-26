@@ -48,6 +48,9 @@ WINDOW = 6
 SPELLINGS = {
     "tool_scopes": "tools:[",
     "preloaded_plugins": "(preload)",
+    # Not settable at all: it names the profile in the ``inherits:`` chain
+    # that declared ``apparmor_fragments`` (#1326).
+    "apparmor_fragments_source": "inherits:",
 }
 
 _FIELD_CASES = [pytest.param(t, s, id=t) for t, s in sorted(SPELLINGS.items())]

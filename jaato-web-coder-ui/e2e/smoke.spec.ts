@@ -1344,6 +1344,15 @@ test("diagnostics rail shows the record and a live re-check, distinctly, and can
   await expect(record).toContainText("apparmor");
   await expect(live).toContainText("Enforced");
 
+  // The AppArmor grants (#1326): collapsed to one line in the RECORD
+  // block, the contributors and the missing fragment one click away.
+  const grants = record.getByRole("group", { name: "AppArmor grants" });
+  await expect(grants).toContainText("exec: scoped — 1 fragment, 1 missing (declared by builder)");
+  await expect(grants.getByText(/Requested and not found/)).toBeHidden();
+  await grants.locator("summary").first().click();
+  await expect(grants.getByText(/Requested and not found/)).toContainText("curl");
+  await expect(grants).toContainText("workspace · /ws/.jaato/apparmor-fragments/java.rules");
+
   // Nothing is printed into the transcript: the verb is quiet.
   await expect(page.getByText("mock: executed session.diagnostics")).toHaveCount(0);
 

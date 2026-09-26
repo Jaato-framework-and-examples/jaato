@@ -488,7 +488,15 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 # on an older daemon degrades to the 1.7 rule: the SDK refuses below
 # ``MIN_DIAGNOSTICS_PROTOCOL`` rather than waiting out a request an old
 # daemon answers "Unknown request type" to.
-PROTOCOL_VERSION = "1.25"
+# 1.26 -- ``DiagnosticsResultEvent.apparmor_grants`` (#1326): what the
+# session's AppArmor profile was provisioned with -- exec scope, the
+# extension fragments inlined (tier, path, rules), fragments requested and
+# not found, rules per contributing plugin, the reference grants added
+# since, and which profile declared ``apparmor_fragments``.  Additive: an
+# older client ignores the key, an older daemon omits it and the client
+# reads that as "not recorded".  No SDK minimum, because nothing a client
+# sends changes.
+PROTOCOL_VERSION = "1.26"
 
 
 # =============================================================================
@@ -2206,6 +2214,22 @@ class DiagnosticsResultEvent(Event):
             or ``None`` when no notebook plugin is loaded.
         ``protocol_version`` / ``server_version``: what this daemon
             speaks and runs.
+        ``apparmor_grants`` (1.26, #1326): what the session's AppArmor
+            profile was provisioned with, recorded when it was loaded --
+            ``{recorded, template_version, profile_name, exec_scope,
+            requested_fragments, declared_by, fragments, missing_fragments,
+            unreadable_fragments, plugin_rules, references}``.
+            ``exec_scope`` is ``"scoped"`` (``//child`` may exec only what
+            the fragments name) or ``"unscoped"`` (the broad in-PATH set).
+            Each ``fragments`` row is ``{name, tier, path, rules, shadows}``;
+            ``plugin_rules`` rows are ``{plugin, rules}``; ``references``
+            (listed live, since ``selectReferences`` adds them mid-session)
+            are ``{ref_id, rules}``.  ``declared_by`` names the profile in the
+            ``inherits:`` chain that set ``apparmor_fragments`` (``None``
+            when none did, ``""`` when a restored session did not record
+            it).  ``recorded: False`` when the profile was loaded before
+            this daemon started or was never loaded here.  ``None`` (the
+            whole field) when the session is not AppArmor-confined.
 
     **Live** (measured fresh, at the moment of this call, on the runner --
     never a cached value):
@@ -2245,6 +2269,7 @@ class DiagnosticsResultEvent(Event):
     protocol_version: str = ""
     server_version: str = ""
     probe: Optional[Dict[str, Any]] = None
+    apparmor_grants: Optional[Dict[str, Any]] = None
 
 
 class SandboxPathsEvent(Event):

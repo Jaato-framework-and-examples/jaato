@@ -2347,6 +2347,17 @@ class SubagentProfile:
         "+ the .cache/ layer). None = compose ALL fragments; [] = none "
         "(maximally locked-down)."})
 
+    # Which profile in the ``inherits:`` chain supplied
+    # ``apparmor_fragments`` (#1326).  Derived, never written in a file:
+    # the child-replaces-parent merge keeps the list and used to discard
+    # where it came from, so the diagnostics panel could show that a
+    # stage's exec was scoped but not which profile scoped it.  ``None``
+    # when no profile declared the field; ``""`` when a profile restored
+    # from an older snapshot carried the list and not its source.
+    apparmor_fragments_source: Optional[str] = field(default=None, metadata={
+        "description": "The profile that declared apparmor_fragments, "
+        "resolved through inherits:. Derived, not settable."})
+
     def __post_init__(self) -> None:
         """Normalize ``suppress_base_instructions`` to its canonical form.
 
@@ -2360,6 +2371,10 @@ class SubagentProfile:
         self.suppress_base_instructions = normalize_suppression(
             self.suppress_base_instructions
         )
+        # A profile that declares the list itself is its own source; the
+        # merge and the snapshot restore pass it explicitly (#1326).
+        if self.apparmor_fragments is not None and self.apparmor_fragments_source is None:
+            self.apparmor_fragments_source = self.name
 
 
 def _normalize_inherits(value: Any) -> Optional[List[str]]:
@@ -3599,6 +3614,8 @@ def profile_to_snapshot(profile: 'SubagentProfile') -> Dict[str, Any]:
             if getattr(profile, "apparmor_fragments", None) is not None
             else None
         ),
+        "apparmor_fragments_source": getattr(
+            profile, "apparmor_fragments_source", None),
         "quirks": dict(getattr(profile, "quirks", None) or {}),
         # Raw, as authored (str or list) -- the plugin normalises it.
         "scrub_secret_env": getattr(profile, "scrub_secret_env", None),
@@ -3735,6 +3752,9 @@ def profile_from_snapshot(data: Dict[str, Any]) -> 'SubagentProfile':
         apparmor_fragments=_normalize_apparmor_fragments(
             data.get("apparmor_fragments")
         ),
+        # An older snapshot carries the list and not its source: "" says
+        # "unknown" rather than letting __post_init__ claim this profile.
+        apparmor_fragments_source=data.get("apparmor_fragments_source", ""),
         quirks=dict(data.get("quirks") or {}),
         scrub_secret_env=data.get("scrub_secret_env"),
     )
@@ -4218,6 +4238,29 @@ def _merge_max_completion_nudges(child, parents) -> Optional[int]:
     return min(declared) if declared else None
 
 
+def _merge_apparmor_fragments(
+    child: 'SubagentProfile', parents: List['SubagentProfile'],
+) -> Tuple[Optional[List[str]], Optional[str]]:
+    """``apparmor_fragments`` through ``inherits:``, and who declared it.
+
+    Child-replaces-parent (see :func:`_merge_profiles`): the child's list
+    wins when it declares one, else the nearest parent's.  The second value
+    names the profile that declared the winning list (#1326), which the
+    diagnostics panel shows; ``None`` when no profile in the chain did.
+    """
+    child_fragments = getattr(child, 'apparmor_fragments', None)
+    if child_fragments is not None:
+        return list(child_fragments), child.name
+    for p in parents:
+        parent_fragments = getattr(p, 'apparmor_fragments', None)
+        if parent_fragments is not None:
+            # A resolved parent already names the ancestor that
+            # declared it (#1326).
+            return list(parent_fragments), (
+                getattr(p, 'apparmor_fragments_source', None) or p.name)
+    return None, None
+
+
 def _merge_profiles(
     child_name: str,
     parents: List['SubagentProfile'],
@@ -4504,16 +4547,8 @@ def _merge_profiles(
     # (workspace-default "compose all fragments" applies at render
     # time).  See ``project_backlog_per_profile_apparmor_fragments``
     # for the cascade footgun this design closes.
-    merged_apparmor_fragments: Optional[List[str]] = None
-    child_fragments = getattr(child, 'apparmor_fragments', None)
-    if child_fragments is not None:
-        merged_apparmor_fragments = list(child_fragments)
-    else:
-        for p in parents:
-            parent_fragments = getattr(p, 'apparmor_fragments', None)
-            if parent_fragments is not None:
-                merged_apparmor_fragments = list(parent_fragments)
-                break
+    merged_apparmor_fragments, merged_apparmor_fragments_source = (
+        _merge_apparmor_fragments(child, parents))
 
     # quirks: dict-union with child-wins-on-key-collision.  Same shape
     # as plugin_configs / env merging — parent keys flow through, child
@@ -4558,6 +4593,7 @@ def _merge_profiles(
         model_tiers=merged_model_tiers,
         apparmor=merged_apparmor,
         apparmor_fragments=merged_apparmor_fragments,
+        apparmor_fragments_source=merged_apparmor_fragments_source,
         quirks=merged_quirks,
         scrub_secret_env=merged_scrub_secret_env,
         regulatory=merged_regulatory,
@@ -4716,6 +4752,9 @@ PROFILE_FILE_KEYS = frozenset({
 PROFILE_DERIVED_FIELDS = {
     'preloaded_plugins': "derived from plugins: — write `todo(preload)`",
     'tool_scopes': "derived from plugins: — write `memory(tools:[a,b])`",
+    'apparmor_fragments_source': (
+        "derived from which profile in the inherits: chain declared "
+        "`apparmor_fragments`"),
 }
 
 #: Keys a profile file may still CARRY and that the loader no longer reads,

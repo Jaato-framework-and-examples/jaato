@@ -476,7 +476,7 @@ export function emptyDiagnostics(): DiagnosticsState {
   return {
     status: "idle", error: null, category: null, runnerIdentity: null, confinementId: "",
     sandboxMode: null, consumption: null, notebookBoundaryKind: null, protocolVersion: "",
-    serverVersion: "", probe: null, checkedAt: null,
+    serverVersion: "", probe: null, apparmorGrants: null, checkedAt: null,
   };
 }
 

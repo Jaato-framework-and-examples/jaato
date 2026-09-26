@@ -260,8 +260,18 @@ function answerDiagnosticsRequest(c: Client, ev: Record<string, unknown>): void 
     sandbox_mode: "apparmor",
     consumption: { totals: { usd: 0.0142, tokens: 18234 } },
     notebook_boundary_kind: "apparmor",
-    protocol_version: "1.25",
+    protocol_version: "1.26",
     server_version: "mock",
+    // #1326: what the profile was provisioned with, in the shape
+    // ``apparmor.record_grants`` stores and ``recorded_grants`` returns.
+    apparmor_grants: {
+      recorded: true, template_version: 37, profile_name: `jaato-ws-mock-${c.sessionId.slice(0, 8)}`,
+      exec_scope: "scoped", requested_fragments: ["java", "curl"], declared_by: "builder",
+      fragments: [{ name: "java", tier: "workspace", path: "/ws/.jaato/apparmor-fragments/java.rules", rules: ["/usr/bin/java ix,", "/usr/bin/mvn ix,"], shadows: [] }],
+      missing_fragments: ["curl"], unreadable_fragments: [],
+      plugin_rules: [{ plugin: "cli", rules: ["/etc/os-release      r,"] }],
+      references: [],
+    },
     probe: {
       ok: true, error: "", expected_profile: `jaato-ws-mock-${c.sessionId.slice(0, 8)}`,
       current_profile: `jaato-ws-mock-${c.sessionId.slice(0, 8)}`, current_mode: "enforce",

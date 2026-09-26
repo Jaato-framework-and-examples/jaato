@@ -34,7 +34,7 @@
 import { MIN_DIAGNOSTICS_PROTOCOL, isProtocolCompatible } from "@jaato/sdk";
 import { useJaato } from "@/store/store";
 import { getClient, isConnected } from "@/sdk/connection";
-import type { DiagnosticsProbe } from "@/store/types";
+import type { DiagnosticsGrants, DiagnosticsProbe } from "@/store/types";
 
 type Patch = Parameters<ReturnType<typeof useJaato.getState>["patchDiagnostics"]>[0];
 const patch = (p: Patch) => useJaato.getState().patchDiagnostics(p);
@@ -69,6 +69,28 @@ export function diagnosticsSummary(d: Pick<
   if (!p.ok) return "could not check";
   if (p.scan && p.scan.divergent > 0) return `${p.scan.divergent} divergent`;
   return p.enforced ? "enforced" : p.confined ? "complain mode" : "not confined";
+}
+
+/**
+ * The collapsed "AppArmor grants" line (#1326): what ``//child`` may exec,
+ * and who decided.  ``scoped`` means only what the fragments name;
+ * ``unscoped`` means every in-PATH binary.  ``not recorded`` is its own
+ * answer, never read as either.
+ */
+export function grantsSummary(g: DiagnosticsGrants): string {
+  const declared = g.declared_by === ""
+    ? " (declared by: unknown)"
+    : g.declared_by ? ` (declared by ${g.declared_by})` : "";
+  if (!g.recorded) {
+    const req = g.requested_fragments;
+    const scope = req == null ? "unscoped" : `scoped — ${req.length} requested`;
+    return `exec: ${scope}${declared} · not recorded`;
+  }
+  const n = g.fragments?.length ?? 0;
+  const frags = `${n} fragment${n === 1 ? "" : "s"}`;
+  const missing = g.missing_fragments?.length ? `, ${g.missing_fragments.length} missing` : "";
+  if (g.exec_scope === "scoped") return `exec: scoped — ${frags}${missing}${declared}`;
+  return `exec: unscoped (all PATH binaries) — ${frags}${missing}`;
 }
 
 let generation = 0;
@@ -113,6 +135,7 @@ export async function refreshDiagnostics(): Promise<void> {
       protocolVersion: answer.protocol_version ?? "",
       serverVersion: answer.server_version ?? "",
       probe: (answer.probe as unknown as DiagnosticsProbe | null) ?? null,
+      apparmorGrants: (answer.apparmor_grants as unknown as DiagnosticsGrants | null) ?? null,
       checkedAt: Date.now(),
     });
   } catch (err) {
