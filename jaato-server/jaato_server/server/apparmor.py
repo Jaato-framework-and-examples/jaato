@@ -552,7 +552,32 @@ class AppArmorManager:
     #       anything that needs quoting, so there is no conditional to get
     #       wrong and no behavioural difference for the overwhelming
     #       majority of workspaces whose names contain no such characters.
-    _TEMPLATE_VERSION = 35
+    #  36 — (2026-09-26) git's helper directory is executable wherever
+    #       the in-PATH set is: ``/usr/lib/git-core/* ix`` and
+    #       ``/usr/libexec/git-core/* ix`` beside ``/usr/bin/** ix`` in the
+    #       base body, ``tool_hat`` and the non-scoped ``//child`` (#1321).
+    #
+    #       ``git`` does not speak HTTPS itself: clone, fetch, pull and
+    #       push over an https remote exec ``git-remote-https`` from
+    #       git's exec path (``/usr/lib/git-core`` on Debian/Ubuntu,
+    #       ``/usr/libexec/git-core`` on Fedora/RHEL).  Those directories
+    #       were covered only by ``/usr/lib/** rm`` — read and map, which
+    #       loads a shared library but cannot exec — so every https git
+    #       operation in a confined session failed with ``fatal: cannot
+    #       exec 'remote-https': Permission denied``.  It became urgent
+    #       with #1228 / #1319, which made a bound GitHub token reach
+    #       ``gh`` and ``git``: ``gh`` worked and ``git push`` could not.
+    #
+    #       Only git's helper directory, never ``/usr/lib/**``: a
+    #       blanket ``ix`` there would reach every package-private binary
+    #       on the host.  ``ix`` keeps the helpers in the caller's
+    #       profile, so they get no file access ``git`` did not already
+    #       have.  A SCOPED ``//child`` (``apparmor_fragments`` declared)
+    #       is unchanged — its exec authority stays fragment-only (v18),
+    #       and a stage that wants git over https names it in a fragment.
+    #       The isolated sub-runner grants no in-PATH exec at all, so it
+    #       gains nothing either.
+    _TEMPLATE_VERSION = 36
 
     # AppArmor profile template.  Placeholders are filled per-session by
     # ``_render_profile()``.
@@ -729,6 +754,10 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
   /usr/bin/**          ix,
   /usr/local/bin/**    ix,
   /bin/**              ix,
+  # git's own helpers (v36, #1321): git-remote-https & co. live on git's
+  # exec path, not on PATH, and ``/usr/lib/**`` below is ``rm`` only.
+  /usr/lib/git-core/*      ix,
+  /usr/libexec/git-core/*  ix,
   /usr/lib/**          rm,
   /lib/**              rm,
   /etc/ld.so.cache     r,
@@ -2859,6 +2888,8 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     /usr/bin/**          ix,
     /usr/local/bin/**    ix,
     /bin/**              ix,
+    /usr/lib/git-core/*      ix,
+    /usr/libexec/git-core/*  ix,
     /usr/lib/**          rm,
     /lib/**              rm,
     /etc/ld.so.cache     r,
@@ -2998,7 +3029,9 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
                 "    # block — its exec authority stays fragment-only per v18.\n"
                 "    /usr/bin/**          ix,\n"
                 "    /usr/local/bin/**    ix,\n"
-                "    /bin/**              ix,"
+                "    /bin/**              ix,\n"
+                "    /usr/lib/git-core/*      ix,\n"
+                "    /usr/libexec/git-core/*  ix,"
             )
         else:
             child_system_exec = (
