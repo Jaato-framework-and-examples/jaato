@@ -21,27 +21,35 @@ symmetric half of the in-process host-tool import contract (the client
 prepends the SAME site-packages to its own ``sys.path`` so a host tool imports
 the dep the runner installed).
 
-Importing jaato's own code from the tool-venv (the runner-import bridge)
-------------------------------------------------------------------------
-The notebook kernel is *jaato's own* module (``shared.plugins.notebook.
-kernel_main``) run under the tool-venv interpreter, so that interpreter must
-be able to ``import shared.*`` (and ``jaato_sdk``, which the kernel's
-``tool_stubs`` needs).  ``--system-site-packages`` can NOT provide this: a venv
-created from the runner venv resolves its base to the system prefix (``/usr``),
-not the runner venv where jaato is installed; and for an **editable** install
-``shared`` is wired through a meta-path finder registered by a ``.pth`` that
-only runs when its dir is processed as a *site* dir (never for ``PYTHONPATH``).
-The deployment-agnostic, least-privilege fix is ``_write_runner_bridge``: a
-``.pth`` of **plain directory lines** (appended to ``sys.path`` verbatim,
-without executing any ``.pth`` finder) listing the base site-packages
-(installed third-party deps) plus the explicit jaato source roots
-(``jaato_source_dirs`` → ``shared`` + ``jaato_sdk``).  This surfaces exactly
-those packages — NOT the whole base venv's other editable installs (which a
-naive ``addsitedir`` would drag in, leaking unrelated src dirs the model could
-target with ``pip install --target``).  Runner-side only; ``cli`` /
-``interactive_shell`` run the *model's* commands (which need only the
-tool-venv), but the bridge is harmless there and keeps a single ``ensure``
-path.
+What the tool-venv can import from the runner (#1322)
+----------------------------------------------------
+Exactly one thing: ``pip``.  The venv is created ``--without-pip`` (venv
+creation runs ``ensurepip``, which the confined runner could not), so the
+``bin/pip`` shim runs the RUNNER's pip.  ``_write_pip_bridge`` makes that
+possible with a ``.pth`` naming one directory inside the venv that holds one
+symlink, ``pip`` -> the runner's pip package.  pip vendors its dependencies,
+so nothing else comes with it.
+
+It used to list the runner's whole site-packages plus jaato's source roots,
+for the notebook kernel's sake.  That was not harmless on ``cli`` /
+``interactive_shell``, which run the MODEL's commands:
+
+- a session developing jaato imported the daemon's installed ``jaato_server``
+  instead of the checkout it was editing, and ``pip install -e <checkout>``
+  lost too (an editable install's finder is consulted after the path search);
+- pip in the tool-venv saw the daemon's packages as installed.
+
+The notebook kernel is the one process that needs jaato: it IS jaato's own
+module (``kernel_main``) run under the tool-venv interpreter.  It now gets
+:func:`kernel_import_dirs` at its own launch, in argv rather than
+``PYTHONPATH``, so a cell's ``!python -m pytest`` starts as clean as a
+``cli`` command does.  See ``SubprocessKernelBackend._kernel_argv``.
+
+Why those dirs are plain paths and not ``site.addsitedir``: a tool-venv
+created from the runner venv resolves its base to the system prefix, so
+``--system-site-packages`` never reaches jaato; and ``addsitedir`` would run
+every editable ``.pth`` finder in the base dir, dragging unrelated src dirs
+(jaato_premium, a client's own package) in with it.
 
 Contract
 --------
@@ -58,14 +66,16 @@ Contract
   and an explicit per-surface value is never overwritten.  Folded daemon-side
   by :func:`inject_workspace_venv`, both into the envelope and into the
   AppArmor rule resolution, so the ``ix`` grant follows the venv.
-- Create-if-absent is idempotent, but the runner-import bridge is refreshed on
-  every ``ensure`` (so a venv created elsewhere without it is fixed up).
+- Create-if-absent is idempotent, but the pip bridge is refreshed on every
+  ``ensure`` (so a venv created elsewhere, or by a release that bridged the
+  whole runner, is brought to spec).
 - Relative paths resolve against the session workspace root; a relative path
   with no workspace root is a configuration error (raised, not defaulted).
 """
 
 import glob
 import importlib
+import importlib.util
 import logging
 import os
 import site
@@ -76,7 +86,16 @@ from typing import List, MutableMapping, Optional
 logger = logging.getLogger(__name__)
 
 
+# The ``.pth`` that makes the runner's pip importable in the tool-venv.  The
+# name predates #1322, when it bridged the runner's whole site-packages; it is
+# kept so the next ``ensure`` overwrites that file in an existing venv rather
+# than leaving it beside a new one.
 _BRIDGE_PTH = "_jaato_runner_bridge.pth"
+
+# Directory inside the venv holding the single ``pip`` symlink the ``.pth``
+# names.  Not under site-packages, so pip never treats it as an installed
+# distribution.
+_PIP_BRIDGE_DIR = "jaato-pip"
 
 # The venv daemon-managed workspaces get when nothing says otherwise (#1274).
 # Under ``.jaato/`` so the scaffolded ``.gitignore`` block (``.jaato/*`` plus
@@ -165,9 +184,8 @@ def runner_site_dirs() -> List[str]:
 
     These are the dirs where jaato itself is installed — either as a normal
     package (wheel install) or via a PEP 660 editable ``.pth`` that registers
-    an import finder.  Bridging them into a tool-venv (see
-    ``ensure_workspace_venv``) is what lets the tool-venv interpreter import
-    ``shared.*`` regardless of install style.
+    an import finder.  Handed to the notebook kernel's launch (see
+    :func:`kernel_import_dirs`) and to nothing else in the tool-venv.
     """
     dirs: List[str] = list(site.getsitepackages())
     user = site.getusersitepackages()
@@ -205,10 +223,12 @@ def jaato_source_dirs() -> List[str]:
     return dirs
 
 
-def _bridge_dirs() -> List[str]:
-    """Dirs to append to the tool-venv ``sys.path`` (order-preserving, existing).
+def kernel_import_dirs() -> List[str]:
+    """Dirs the notebook kernel appends to ``sys.path`` (order-preserving, existing).
 
-    Base site-packages (installed third-party deps) + the jaato source roots.
+    The runner's site-packages (``pydantic`` and the other deps the kernel's
+    ``tool_stubs`` import) plus the jaato source roots.  Used ONLY for the
+    kernel's launch, never for the tool-venv as a whole (#1322).
     """
     seen = set()
     out: List[str] = []
@@ -219,40 +239,62 @@ def _bridge_dirs() -> List[str]:
     return out
 
 
-def _write_runner_bridge(venv_path: str) -> None:
-    """(Re)write the ``.pth`` that lets the tool-venv import jaato's own code.
+def runner_pip_dir() -> Optional[str]:
+    """The runner's ``pip`` package directory, or ``None`` if it has none.
 
-    A tool-venv created *from* the runner venv resolves its ``base`` to the
-    system prefix (``/usr``), NOT the runner venv — so ``--system-site-packages``
-    can never surface jaato's packages.  And for an **editable** install
-    ``shared.*`` is wired through a meta-path finder registered by a ``.pth``
-    that runs only when its dir is processed as a *site* dir (never for
-    ``PYTHONPATH``).
+    Located without importing pip.  A runner venv built without pip (``uv``
+    creates them that way) has none, and then neither does the tool-venv.
+    """
+    spec = importlib.util.find_spec("pip")
+    locations = list(spec.submodule_search_locations or []) if spec else []
+    return locations[0] if locations and os.path.isdir(locations[0]) else None
 
-    Rather than ``site.addsitedir(<base site-packages>)`` — which runs ALL of
-    the base dir's editable ``.pth`` finders and so drags UNRELATED editable
-    src dirs (jaato_premium, a client's own package) onto the tool-venv
-    ``sys.path`` (least-privilege leak + a path the model can wrongly target
-    with ``pip install --target``) — the bridge writes **plain directory
-    lines**: a ``.pth`` line that is not an ``import`` statement is appended to
-    ``sys.path`` verbatim, WITHOUT executing any ``.pth`` finder.  It lists the
-    base site-packages (installed third-party deps like ``pydantic``) plus the
-    explicit jaato source roots (``jaato_source_dirs``).  So the tool-venv can
-    import exactly ``shared`` + ``jaato_sdk`` + installed deps — nothing else.
 
-    Written into the tool-venv's own site-packages and refreshed on every
-    ``ensure`` (so a venv created elsewhere is fixed up).  Entries are appended
-    AFTER the tool-venv's own site-packages, so the model's ``pip install``
-    there keeps priority for any shared package name.
+def _write_pip_bridge(venv_path: str) -> None:
+    """(Re)write the ``.pth`` that makes the runner's pip importable, and only it.
+
+    ``<venv>/jaato-pip/pip`` is a symlink to the runner's pip package and the
+    ``.pth`` names ``<venv>/jaato-pip``.  A ``.pth`` line that is not an
+    ``import`` is appended to ``sys.path`` verbatim, after the venv's own
+    site-packages, so a pip the model installs into the venv takes priority.
+    A symlink rather than a copy keeps it tracking the runner's pip.
+
+    Refreshed on every ``ensure``.  That is also what migrates a venv written
+    before #1322, whose ``.pth`` under the same name listed the runner's whole
+    site-packages.
     """
     site_dir = venv_site_packages(venv_path)
     if site_dir is None:
         raise RuntimeError(
             f"workspace venv at {venv_path} has no site-packages directory; "
-            "cannot bridge runner imports")
-    body = "\n".join(_bridge_dirs())
+            "cannot bridge the runner's pip")
+    bridge_dir = os.path.join(venv_path, _PIP_BRIDGE_DIR)
+    os.makedirs(bridge_dir, exist_ok=True)
+    link = os.path.join(bridge_dir, "pip")
+    pip_dir = runner_pip_dir()
+    lines: List[str] = []
+    try:
+        if pip_dir is None:
+            if os.path.lexists(link):
+                os.unlink(link)
+            logger.warning(
+                "workspace_venv: the runner has no pip, so the tool-venv at "
+                "%s has none either; `pip` there will fail", venv_path)
+        else:
+            if not (os.path.islink(link) and os.readlink(link) == pip_dir):
+                tmp = f"{link}.tmp-{os.getpid()}"
+                if os.path.lexists(tmp):
+                    os.unlink(tmp)
+                os.symlink(pip_dir, tmp)
+                os.replace(tmp, link)
+            lines.append(bridge_dir)
+    except OSError as exc:
+        logger.warning(
+            "workspace_venv: could not link the runner's pip into %s (%s); "
+            "`pip` there will fail", venv_path, exc)
+        lines = []
     with open(os.path.join(site_dir, _BRIDGE_PTH), "w", encoding="utf-8") as f:
-        f.write(body + "\n")
+        f.write("".join(f"{ln}\n" for ln in lines))
 
 
 def _venv_pip(venv_path: str) -> str:
@@ -269,12 +311,13 @@ def _ensure_venv_pip(venv_path: str) -> None:
     by us — see ``ensure_workspace_venv``) makes a bare ``pip`` resolve to the
     SYSTEM pip on ``PATH``, which the confined runner denies.
 
-    NOT ``ensurepip``: (1) the runner-import bridge makes ``import pip`` succeed,
+    NOT ``ensurepip``: (1) the pip bridge makes ``import pip`` succeed,
     so ensurepip no-ops ("already satisfied") and never writes ``bin/pip``;
     (2) ensurepip extracts its wheel to ``/tmp`` (denied under confinement) and
     would pin an OLD bundled pip.  Instead the shim is a 2-line ``sh`` wrapper
-    that execs ``<venv>/bin/python -m pip "$@"`` — running the BRIDGED pip (a
-    real, current pip) and installing into the tool-venv (``sys.prefix``=venv),
+    that execs ``<venv>/bin/python -m pip "$@"`` — running the BRIDGED pip (the
+    runner's, see ``_write_pip_bridge``) and installing into the tool-venv
+    (``sys.prefix``=venv),
     the exact path proven to work under confinement.  The interpreter path is an
     ``exec`` argument (no shebang-length limit).
 
@@ -343,15 +386,15 @@ def pip_apparmor_rules(
 
 
 def ensure_workspace_venv(venv_path: str, base_python: Optional[str] = None) -> str:
-    """Create the workspace venv if absent + materialize pip + bridge imports.
+    """Create the workspace venv if absent + materialize pip.
 
     Creation is idempotent (an existing ``pyvenv.cfg`` short-circuits it), but
     two fix-ups run **every** call so a venv created by another party is brought
     up to spec: (1) ``_ensure_venv_pip`` writes the ``<venv>/bin/pip`` shim if
     missing (so a bare ``pip`` / ``!pip`` uses the tool-venv, not system pip —
     also needs the AppArmor ``ix`` grant, see ``workspace_venv_bin_exec_rule``);
-    (2) the runner-import bridge (see ``_write_runner_bridge``) is (re)written,
-    tracking the runner's current site dirs.
+    (2) the pip bridge (see ``_write_pip_bridge``) is (re)written, tracking
+    the runner's current pip.
 
     Args:
         venv_path: Absolute path where the venv lives (see ``resolve_venv_path``).
@@ -369,8 +412,8 @@ def ensure_workspace_venv(venv_path: str, base_python: Optional[str] = None) -> 
         subprocess.run(
             # --without-pip: venv creation runs ensurepip internally, which
             # extracts a wheel to /tmp — denied in the confined runner.  We
-            # provide pip via the bridge (import) + a `bin/pip` shim instead
-            # (_ensure_venv_pip), so the venv needs no pip of its own.
+            # provide pip via the pip bridge (import) + a `bin/pip` shim
+            # instead (_ensure_venv_pip), so the venv needs no pip of its own.
             [base_python or sys.executable, "-m", "venv",
              "--system-site-packages", "--without-pip", venv_path],
             check=True,
@@ -378,7 +421,7 @@ def ensure_workspace_venv(venv_path: str, base_python: Optional[str] = None) -> 
             stderr=subprocess.PIPE,
         )
     _ensure_venv_pip(venv_path)
-    _write_runner_bridge(venv_path)
+    _write_pip_bridge(venv_path)
     return venv_path
 
 

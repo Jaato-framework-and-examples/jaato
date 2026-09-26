@@ -103,15 +103,15 @@ def test_ensure_creates_real_venv_and_resolves(tmp_path):
     assert os.path.exists(venv_python(venv))
     site = venv_site_packages(venv)
     assert site and os.path.isdir(site)
-    # Bridge .pth written into the venv: plain path lines for the base
-    # site-packages + the explicit jaato source roots (no addsitedir, so no
-    # editable-finder execution / unrelated-src leak).
+    # Bridge .pth written into the venv: one plain path line, the dir holding
+    # the runner's pip -- never the runner's site-packages or jaato's source
+    # roots, which shadowed a checkout the session was editing (#1322).
     bridge = os.path.join(site, _BRIDGE_PTH)
     assert os.path.exists(bridge)
     body = open(bridge).read()
     assert "addsitedir" not in body
     for d in runner_site_dirs() + jaato_source_dirs():
-        assert d in body
+        assert d not in body.split()
     # Second call is idempotent (create short-circuits; bridge refreshed).
     assert ensure_workspace_venv(venv) == venv
     # An activated env prepends the resolved site-packages.
@@ -120,18 +120,22 @@ def test_ensure_creates_real_venv_and_resolves(tmp_path):
     assert env["PYTHONPATH"].split(os.pathsep)[0] == site
 
 
-def test_bridged_venv_python_can_import_shared(tmp_path):
-    # The authoritative e2e (mirrors the peer's notebook failure): a tool-venv
-    # created from the runner venv, once bridged, lets its OWN interpreter
-    # import jaato's `shared` — for the editable install this repo uses.
+def test_bridged_venv_python_imports_pip_and_not_jaato(tmp_path):
+    # The venv is created --without-pip, so the bridge's one job is pip.  jaato
+    # itself reaches only the notebook kernel, at its launch (#1322); the
+    # kernel side is covered in test_tool_venv_does_not_shadow_the_checkout_1322.
     venv = str(tmp_path / "tool-venv")
     ensure_workspace_venv(venv)
     out = subprocess.run(
-        [venv_python(venv), "-c", "import jaato_server; print(jaato_server.__file__)"],
-        capture_output=True, text=True,
+        [venv_python(venv), "-c", "import pip; print(pip.__file__)"],
+        capture_output=True, text=True, cwd=str(tmp_path),
     )
-    assert out.returncode == 0, f"import jaato_server failed: {out.stderr}"
-    assert "jaato_server" in out.stdout
+    assert out.returncode == 0, f"import pip failed: {out.stderr}"
+    out = subprocess.run(
+        [venv_python(venv), "-c", "import jaato_server"],
+        capture_output=True, text=True, cwd=str(tmp_path),
+    )
+    assert out.returncode != 0
 
 
 # ---- pip AppArmor contribution (least-privilege, per-tool) ------------------
@@ -217,17 +221,29 @@ def test_jaato_source_dirs_are_shared_and_sdk_roots():
 
 
 def test_bridge_does_not_leak_unrelated_editable_src(tmp_path):
-    # The scoped bridge must NOT surface an unrelated editable install's src
-    # dir on the tool-venv sys.path (the over-share the peer hit: the client's
-    # own package). Structural guarantee: no addsitedir -> no .pth finder runs,
-    # and only base-site-packages + jaato source roots are listed.
+    # The bridge must NOT surface anything of the runner's beyond pip: not an
+    # unrelated editable install's src dir (the over-share the peer hit), and
+    # since #1322 not jaato's own packages either.  Structural guarantee: no
+    # addsitedir -> no .pth finder runs, and the one line is the pip dir.
     venv = str(tmp_path / "tool-venv")
     ensure_workspace_venv(venv)
     body = open(os.path.join(venv_site_packages(venv), _BRIDGE_PTH)).read()
     lines = [ln for ln in body.splitlines() if ln.strip()]
-    allowed = set(runner_site_dirs() + jaato_source_dirs())
-    assert set(lines) == allowed          # nothing beyond the scoped set
+    assert lines == [os.path.join(venv, "jaato-pip")]
+    assert os.listdir(lines[0]) == ["pip"]
     assert "addsitedir" not in body       # no finder execution
+
+
+def test_ensure_migrates_a_venv_bridged_before_1322(tmp_path):
+    # A venv written by an older release carries the SAME .pth name listing
+    # the runner's site-packages; the next ensure must replace it.
+    venv = str(tmp_path / "tool-venv")
+    ensure_workspace_venv(venv)
+    bridge = os.path.join(venv_site_packages(venv), _BRIDGE_PTH)
+    with open(bridge, "w") as f:
+        f.write("\n".join(runner_site_dirs() + jaato_source_dirs()) + "\n")
+    ensure_workspace_venv(venv)
+    assert open(bridge).read().split() == [os.path.join(venv, "jaato-pip")]
 
 
 # ---- pip shim + venv-bin exec grant (bare `!pip` / `pip` -> tool-venv) -------
