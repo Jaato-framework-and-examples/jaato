@@ -197,3 +197,81 @@ class TestExposeToolInjectsFrameworkValues:
         assert r._session_id == "sess-1"
         r.set_session_id(None)
         assert r._session_id is None
+
+
+# ---------------------------------------------------------------------------
+# scrub_secret_env workspace-file fallback (#1305 follow-up)
+#
+# A bare web-coder workspace (``.env`` only, no profile) never reaches
+# ``inject_scrub_secret_env`` — there is no profile object to call it with —
+# so a GH_TOKEN=app://github binding had nowhere to declare the ``!GH_TOKEN``
+# exemption ``jaato-scaffold validate``'s ``gh_token_scrubbed_inert`` finding
+# asks for.  ``.jaato/scrub_secret_env.json`` closes that gap, injected here
+# the same way ``workspace_path`` etc. are, for the three SCRUB_SURFACES only.
+# ---------------------------------------------------------------------------
+
+
+class TestAugmentPluginConfigScrubSurfaceFallback:
+    def _registry_with_stub(self, name: str = "cli") -> tuple:
+        r = PluginRegistry()
+        stub = _StubPlugin()
+        r._plugins[name] = stub
+        return r, stub
+
+    def _write_scrub_config(self, workspace, value) -> None:
+        import json
+        import os
+
+        path = os.path.join(str(workspace), ".jaato", "scrub_secret_env.json")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
+            json.dump({"scrub_secret_env": value}, handle)
+
+    def test_workspace_file_value_injected_for_a_scrub_surface(self, tmp_path):
+        self._write_scrub_config(tmp_path, ["default", "!GH_TOKEN"])
+        r = PluginRegistry()
+        r.set_workspace_path(str(tmp_path))
+        assert r._augment_plugin_config({}, "cli") == {
+            "workspace_path": str(tmp_path),
+            "scrub_secret_env": ["default", "!GH_TOKEN"],
+        }
+
+    def test_end_to_end_via_expose_tool(self, tmp_path):
+        self._write_scrub_config(tmp_path, ["default", "!GH_TOKEN"])
+        r, stub = self._registry_with_stub("cli")
+        r.set_workspace_path(str(tmp_path))
+        r.expose_tool("cli")
+        assert stub.received_config["scrub_secret_env"] == ["default", "!GH_TOKEN"]
+
+    def test_not_injected_for_a_non_scrub_surface(self, tmp_path):
+        self._write_scrub_config(tmp_path, ["default", "!GH_TOKEN"])
+        r = PluginRegistry()
+        r.set_workspace_path(str(tmp_path))
+        out = r._augment_plugin_config({}, "todo")
+        assert "scrub_secret_env" not in out
+
+    def test_not_injected_with_no_plugin_name(self, tmp_path):
+        """Pre-existing callers passing no name at all see no change."""
+        self._write_scrub_config(tmp_path, ["default", "!GH_TOKEN"])
+        r = PluginRegistry()
+        r.set_workspace_path(str(tmp_path))
+        out = r._augment_plugin_config({})
+        assert "scrub_secret_env" not in out
+
+    def test_explicit_plugin_config_wins_over_workspace_file(self, tmp_path):
+        self._write_scrub_config(tmp_path, ["default", "!GH_TOKEN"])
+        r = PluginRegistry()
+        r.set_workspace_path(str(tmp_path))
+        out = r._augment_plugin_config({"scrub_secret_env": "none"}, "cli")
+        assert out["scrub_secret_env"] == "none"
+
+    def test_no_file_no_injection(self, tmp_path):
+        r = PluginRegistry()
+        r.set_workspace_path(str(tmp_path))
+        out = r._augment_plugin_config({}, "cli")
+        assert "scrub_secret_env" not in out
+
+    def test_no_workspace_path_no_injection(self):
+        r = PluginRegistry()
+        out = r._augment_plugin_config({}, "cli")
+        assert out == {}

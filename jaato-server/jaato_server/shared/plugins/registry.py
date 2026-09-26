@@ -44,6 +44,10 @@ from .enrichment_formatter import (
     format_enrichment_notifications,
 )
 from jaato_server.shared.trace import trace as _trace_write
+from jaato_server.shared.secret_scrub import (
+    SCRUB_SURFACES as _SCRUB_SURFACES,
+    load_workspace_scrub_override as _load_workspace_scrub_override,
+)
 
 # Config keys that name WHO is exposing a plugin rather than HOW it
 # should behave.  Every in-process subagent spawn stamps ``agent_name``
@@ -1533,7 +1537,7 @@ class PluginRegistry:
                 # (workspace_path, config_root, session_id,
                 # agent_name) injected into config via setdefault.
                 # See :meth:`_augment_plugin_config` for the contract.
-                effective_config = self._augment_plugin_config(config)
+                effective_config = self._augment_plugin_config(config, name)
                 plugin.initialize(effective_config)
                 plugin._initialized = True
                 if effective_config:
@@ -1555,7 +1559,7 @@ class PluginRegistry:
             # Server 0.6.129+: inject framework-known values into the
             # plugin's config before initialize.  See
             # :meth:`_augment_plugin_config`.
-            effective_config = self._augment_plugin_config(config)
+            effective_config = self._augment_plugin_config(config, name)
             t0 = time.perf_counter()
             try:
                 plugin.initialize(effective_config)
@@ -1610,7 +1614,7 @@ class PluginRegistry:
                     name, exc, exc_info=True,
                 )
             # Server 0.6.129+: framework-key injection for re-init too.
-            effective_config = self._augment_plugin_config(config)
+            effective_config = self._augment_plugin_config(config, name)
             try:
                 plugin.initialize(effective_config)
             except Exception as exc:
@@ -1807,7 +1811,7 @@ class PluginRegistry:
                 # Server 0.6.129+: framework-key injection also for
                 # parallel-init path (PARALLEL_INIT plugins like MCP).
                 # See :meth:`_augment_plugin_config`.
-                cfg = self._augment_plugin_config(config.get(name))
+                cfg = self._augment_plugin_config(config.get(name), name)
                 _trace(f"Starting parallel init for plugin '{name}'")
                 futures[name] = executor.submit(plugin.initialize, cfg)
             executor.shutdown(wait=False)
@@ -2231,7 +2235,7 @@ class PluginRegistry:
         return False
 
     def _augment_plugin_config(
-        self, config: Optional[Dict[str, Any]],
+        self, config: Optional[Dict[str, Any]], plugin_name: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """Pre-populate plugin config with framework-known values.
 
@@ -2259,6 +2263,17 @@ class PluginRegistry:
         explicit ``plugin_configs.<plugin>.workspace_path`` in a
         profile YAML overrides the framework-known value.
 
+        ``plugin_name`` is additionally used, for the three
+        :data:`~jaato_server.shared.secret_scrub.SCRUB_SURFACES`, to fall
+        back a ``scrub_secret_env`` declared in the workspace's own
+        ``.jaato/scrub_secret_env.json`` (#1305 follow-up) — the one
+        session shape (bare ``.env``, no profile) that
+        ``inject_scrub_secret_env`` can never reach, because there is no
+        profile object to call it with.  ``setdefault`` here means an
+        explicit ``plugin_configs.<surface>.scrub_secret_env`` (or a
+        profile-level one, already folded in by the time this runs)
+        still wins outright.
+
         Returns the augmented config dict, or the original
         ``config`` if no framework values are set yet (preserving
         the pre-fix behavior when callers bypass the setters).
@@ -2272,6 +2287,14 @@ class PluginRegistry:
             framework_keys["session_id"] = self._session_id
         if self._agent_name is not None:
             framework_keys["agent_name"] = self._agent_name
+        if (
+            plugin_name in _SCRUB_SURFACES
+            and self._workspace_path is not None
+            and not (config and "scrub_secret_env" in config)
+        ):
+            override = _load_workspace_scrub_override(self._workspace_path)
+            if override is not None:
+                framework_keys["scrub_secret_env"] = override
 
         if not framework_keys:
             return config
