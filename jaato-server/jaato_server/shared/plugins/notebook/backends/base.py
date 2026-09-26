@@ -57,10 +57,11 @@ class NotebookBackend(ABC):
         close.  Implementations today:
 
         - ``LocalJupyterBackend`` — the in-process gate
-          (``_inprocess_exec_allowed``): AppArmor, or an explicit opt-in.
-        - ``SubprocessKernelBackend`` — AppArmor inherited by the kernel
-          subprocess, else the kernel's audit-hook workspace containment, else
-          an explicit opt-out.
+          (``_inprocess_exec_allowed``): an explicit opt-in only; AppArmor
+          does not bound an in-process cell (#1323).
+        - ``SubprocessKernelBackend`` — the kernel started in AppArmor's
+          ``//child`` sub-profile, else the kernel's audit-hook workspace
+          containment, else an explicit opt-out.
         - ``KaggleBackend`` — the code never touches this host.
 
         Returns:

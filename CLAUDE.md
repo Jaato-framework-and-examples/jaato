@@ -8049,8 +8049,8 @@ not isolation.
 **The in-process gate is a different question, and it stays.**
 `_inprocess_exec_allowed` (`backends/local.py`) asks *may model-authored code
 run in the host interpreter at all* — where a cell can reach the runtime, the
-tool executor and other plugins' memory — and fails closed without AppArmor or
-`allow_inprocess_exec`. It bounds the PROCESS. It never bounded the
+tool executor and other plugins' memory — and fails closed without
+`allow_inprocess_exec` (AppArmor alone stopped counting in #1323, below). It bounds the PROCESS. It never bounded the
 FILESYSTEM, and it is on the `local` backend while `subprocess` is the default,
 so `CLAUDE.md` describing notebook execution as failing closed described one
 backend of it. Both halves exist now, and neither replaces the other.
@@ -8059,7 +8059,7 @@ backend of it. Both halves exist now, and neither replaces the other.
 
 | Tier | What bounds the cell |
 |------|----------------------|
-| AppArmor | the runner's per-session profile, inherited by the kernel through the profile's `ix` exec rule. A real kernel boundary; nothing else is installed on this path |
+| AppArmor | the per-session `//child` sub-profile the kernel is started in (#1323). A real kernel boundary; nothing else is installed on this path. A kernel that finds itself in the base or `tool_hat` profile (one it could leave) does not count it, and falls to the audit hook |
 | audit hook | `kernel_sandbox` installs a PEP 578 hook applying the same containment `cli` applies — to `open`, the `os.*` mutators, `listdir`/`scandir`, every spawn, and `ctypes.dlopen` |
 | nothing | the kernel answers every cell with a refusal naming the knob, and stays up so the refusal reads as a cell error rather than a dead kernel |
 
@@ -8112,6 +8112,36 @@ Not addressed here: an AppArmor child profile for the kernel on an unconfined
 host (there is no profile to transition from), and the in-process backend's
 memory-reach, which #710's grooming correctly separates and which the deferred
 kernel + tool-RPC redesign owns.
+
+#### The kernel ran in a profile a cell could leave (#1323)
+
+`cli` and `interactive_shell` move every child process into the session's
+`//child` sub-profile before it runs: `ToolExecutor` forwards a `preexec_fn`
+callback that writes `changeprofile <profile>//child`. The notebook plugin
+never took it, so the kernel inherited the runner's **base** profile. That
+profile keeps `change_profile -> unconfined` and write access to
+`/proc/self/attr/current`, because the framework restores its own threads with
+them, and `//child` exists precisely to drop them. On the AppArmor tier the
+kernel installs no hook of its own, so a cell could write
+`changeprofile unconfined` and leave confinement, in every confined session.
+Read from the template and the tree, not reproduced on an enforcing kernel.
+
+| Piece | Change |
+|---|---|
+| `NotebookPlugin.set_apparmor_child_transition_callback` | the same callback `cli` gets, passed to the subprocess backend and re-applied on re-initialize |
+| `SubprocessKernelBackend._kernel_preexec` | the transition first, then the parent-death signal; a failed transition fails the spawn, as for `cli` |
+| `kernel_sandbox.cell_boundary_profile` | the kernel counts AppArmor as its boundary only when its own profile cannot unconfine itself (`//child`, the flat isolated sub-runner). In the base or `tool_hat` profile it installs the audit hook instead, with a WARNING |
+| template **v37** | `//child` may READ its own `attr/current` (`owner`, no `w`), so the kernel can tell it is confined; without it the kernel would fall back to the audit tier, which refuses `import ctypes` |
+| `kernel_interpreter_apparmor_rules` | `ix` on the resolved interpreter, contributed by the notebook plugin, so a fragment-scoped `//child` can start the kernel |
+| `LocalJupyterBackend` | AppArmor no longer allows in-process cells; only `allow_inprocess_exec` does. Its `boundary_kind` is `opt_out` or `none`, never `apparmor` |
+
+Costs, stated: in a fragment-scoped stage, cells can no longer run binaries the
+stage did not declare (the stage's intended behaviour, and a regression for
+anything relying on the gap); in such a stage that loads `notebook`, `cli` can
+also exec the interpreter, which adds nothing a cell cannot already do; and a
+confined deployment that chose `backend: local` without the opt-in now has its
+cells refused. Guard:
+`jaato_server/shared/tests/test_notebook_kernel_runs_in_child_1323.py`.
 
 #### The audit tier cannot import `ctypes`, and so cannot import numpy (#1011)
 
@@ -10264,7 +10294,7 @@ covers it, where one exists. `jaato-scaffold explain env` renders the tags;
 | `JAATO_SESSION_LOG_DIR` | Per-session log directory, relative to workspace (default: `.jaato/logs`) |
 | `JAATO_CGROUPS_ROOT` | Parent cgroup v2 directory for the WS server's per-session cgroup tree (default: `/sys/fs/cgroup/jaato`). Override when the host has subtree_control delegated under a different path. Must already exist with `memory`, `pids`, `cpu` in `cgroup.subtree_control`. |
 | `JAATO_REQUIRE_APPARMOR` | Require kernel-enforced AppArmor confinement (`1`/`true`/`yes`). Promotes the WS server's auto-detect mode to *required*: if confinement is unavailable the server refuses to start instead of silently degrading to directory-sandbox-only isolation. Equivalent to the WS `--apparmor` flag; combining it with `--no-apparmor` is a contradiction the server rejects at startup. When unset (auto), unavailability is logged at WARNING with the specific failing precondition and the server degrades. |
-| `JAATO_NOTEBOOK_ALLOW_INPROCESS_EXEC` | Opt into in-process execution of model-authored notebook cells (`1`/`true`/`yes`). The `notebook` plugin's `local` backend runs cells via `exec`/`eval` in the host interpreter, so by default it **fails closed** unless a kernel-enforced AppArmor profile is active (the production confined-runner path). Set this (or notebook plugin config `allow_inprocess_exec: true`) to accept in-process execution on unconfined hosts (e.g. trusted single-user dev). Logs a one-time WARNING when execution runs unconfined via this opt-in. Bounds the PROCESS, not the filesystem — see the row below and [A Boundary the Notebook Did Not Have](#a-boundary-the-notebook-did-not-have-710). |
+| `JAATO_NOTEBOOK_ALLOW_INPROCESS_EXEC` | Opt into in-process execution of model-authored notebook cells (`1`/`true`/`yes`). The `notebook` plugin's `local` backend runs cells via `exec`/`eval` in the host interpreter, so it **fails closed** without this opt-in, AppArmor or not: since #1323 an enforced profile no longer counts, because the runner's base profile lets an in-process cell unconfine itself. Set this (or notebook plugin config `allow_inprocess_exec: true`) to accept in-process execution (e.g. trusted single-user dev). Logs a one-time WARNING when it is used. Bounds the PROCESS, not the filesystem — see the row below and [A Boundary the Notebook Did Not Have](#a-boundary-the-notebook-did-not-have-710). |
 | `JAATO_NOTEBOOK_ALLOW_UNCONTAINED_EXEC` | Opt into notebook cells reaching **outside the workspace** (`1`/`true`/`yes`; profile key `plugin_configs.notebook.allow_uncontained_exec`). Cells are otherwise contained to the workspace and `/tmp` — the same boundary `cli` applies — by an AppArmor profile where one is enforced and by the kernel's own audit hook otherwise (#710). Announced at WARNING on every kernel that takes it. `plugin_configs.notebook.allow_read_paths` and the operator's `sandbox add` are the narrow alternatives. |
 | `JAATO_PLUGIN_ENTRY_POINT_ALLOWLIST` | Comma-separated distribution names allowed to contribute plugins through the `jaato.*` entry-point groups. Unset (the default) means every installed distribution participates. When set, an entry point from any other distribution is refused **before** `ep.load()` — so its module is never imported — with a WARNING naming it. The built-in package is always honoured and never needs listing. See [Entry-point plugin trust](#entry-point-plugin-trust). |
 | `JAATO_REVIVE_PROFILE` | Where a REVIVED session's profile comes from: `persisted` (default — the resolved recipe the session froze at creation) or `disk` (re-resolve `profile_name` against the profile files as they stand now). Set `disk` to interrogate a finished session under a different contract, where a `JAATO_PROFILE_SET` switch must actually take effect. |
