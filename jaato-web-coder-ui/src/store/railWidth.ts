@@ -6,7 +6,7 @@
  * be absent or throw (a private window, cleared site data), and the rail
  * must still render at its default.
  */
-export const RAIL_WIDTH_DEFAULT = 300;
+export const RAIL_WIDTH_DEFAULT = 400;
 export const RAIL_WIDTH_MIN = 220;
 export const RAIL_WIDTH_MAX = 720;
 const STORAGE_KEY = "jaato.railWidth";

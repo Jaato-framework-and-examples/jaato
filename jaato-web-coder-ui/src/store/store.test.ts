@@ -459,7 +459,7 @@ describe("reduce — the daemon's prompt echo", () => {
 
 describe("rail width", () => {
   it("is clamped to the rail's bounds and starts at the default", () => {
-    expect(useJaato.getState().ui.railWidth).toBe(300);
+    expect(useJaato.getState().ui.railWidth).toBe(400);
     useJaato.getState().setRailWidth(420);
     expect(useJaato.getState().ui.railWidth).toBe(420);
     useJaato.getState().setRailWidth(10);
@@ -467,7 +467,7 @@ describe("rail width", () => {
     useJaato.getState().setRailWidth(5000);
     expect(useJaato.getState().ui.railWidth).toBe(720);
     useJaato.getState().setRailWidth(Number.NaN);
-    expect(useJaato.getState().ui.railWidth).toBe(300);
+    expect(useJaato.getState().ui.railWidth).toBe(400);
   });
 });
 

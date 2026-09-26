@@ -1,5 +1,5 @@
 /**
- * The 26px foot of the session screen (design frame 04): what the daemon
+ * The 30px foot of the session screen (design frame 04): what the daemon
  * reports about this connection in monospace on the left, the tool-call
  * expand toggle and ``exit`` in the chrome face on the right.  The
  * session's identity (workspace, model, context) lives in the header, and
@@ -33,7 +33,7 @@ export function StatusBar() {
   const dotCls = fault ? "bg-error" : conn.phase === "connected" ? "bg-success" : conn.phase === "reconnecting" || conn.phase === "connecting" ? "bg-warning pulse" : "bg-error";
   const tab = (on: boolean) => `chrome-sm font-heading font-medium uppercase tracking-[0.12em] ${on ? "text-steel" : "text-text-muted hover:text-steel"}`;
   return (
-    <div className="relative flex items-center gap-4 px-4 h-[26px] text-[11px] bg-surface border-t hairline font-mono text-text-muted select-none shrink-0">
+    <div className="relative flex items-center gap-4 px-4 h-[30px] text-[11px] bg-surface border-t hairline font-mono text-text-muted select-none shrink-0">
       <span className="flex items-center gap-1.5 text-text" title={fault ? `${fault.errorType}: ${fault.message}` : undefined}>
         <span className={`inline-block w-1.5 h-1.5 shrink-0 ${dotCls}`} />
         {fault ? <span className="text-error">no session</span> : <>{conn.phase}{conn.attempt ? ` #${conn.attempt}` : ""}</>}

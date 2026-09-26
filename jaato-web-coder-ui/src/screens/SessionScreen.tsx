@@ -1,5 +1,5 @@
 /**
- * The main view (design frame 04): the session's identity in a 46px
+ * The main view (design frame 04): the session's identity in a 52px
  * header (brand, one tab per agent, workspace / model / context on the
  * right), the selected agent's output with pending prompts and the
  * composer under it, one persistent rail on the right whose Plan /
@@ -57,7 +57,7 @@ function SessionHeader() {
   const pct = ctx?.percentUsed;
   const model = [session.provider, session.model].filter(Boolean).join(" / ");
   return (
-    <header className="flex items-stretch h-[46px] border-b hairline shrink-0">
+    <header className="flex items-stretch h-[52px] border-b hairline shrink-0">
       <div className="flex items-center px-4 border-r hairline"><span className="display text-[18px] tracking-[0.02em]">jaato</span></div>
       <AgentTabs />
       <span className="flex-1" />
@@ -74,6 +74,88 @@ function SessionHeader() {
         )}
       </div>
     </header>
+  );
+}
+
+/**
+ * The rail badges' icons: hand-drawn stroke SVGs (18x18 viewBox,
+ * ``stroke="currentColor" strokeWidth={2}``, no fill) rather than the
+ * Unicode glyphs the rail shipped with (``▤``/``⌗``/``$``/``☰``/``◆``/``⚙``
+ * — mismatched with each other in visual weight, and with the #1304 board's
+ * own custom icon set).  Kept together, one function per icon, so all six
+ * share exactly one viewBox and stroke width and cannot drift apart.
+ */
+const RAIL_ICON_PROPS = {
+  viewBox: "0 0 18 18",
+  width: 15,
+  height: 15,
+  fill: "none",
+  stroke: "currentColor",
+  strokeWidth: 2,
+  strokeLinecap: "round" as const,
+  strokeLinejoin: "round" as const,
+} satisfies React.SVGProps<SVGSVGElement>;
+
+/** Plan: a checklist. */
+function PlanBadgeIcon() {
+  return (
+    <svg {...RAIL_ICON_PROPS}>
+      <rect x="2" y="2.25" width="3" height="3" rx="0.5" />
+      <path d="M8.5 3.75h7.5" />
+      <rect x="2" y="7.5" width="3" height="3" rx="0.5" />
+      <path d="M8.5 9h7.5" />
+      <rect x="2" y="12.75" width="3" height="3" rx="0.5" />
+      <path d="M8.5 14.25h7.5" />
+    </svg>
+  );
+}
+
+/** Files: a document with a folded corner. */
+function FilesBadgeIcon() {
+  return (
+    <svg {...RAIL_ICON_PROPS}>
+      <path d="M4.5 2h5l4 4v9.5a1 1 0 0 1-1 1h-8a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1Z" />
+      <path d="M9.5 2v4h4" />
+    </svg>
+  );
+}
+
+/** Budget: a clock face. */
+function BudgetBadgeIcon() {
+  return (
+    <svg {...RAIL_ICON_PROPS}>
+      <circle cx="9" cy="9" r="7" />
+      <path d="M9 5.25v3.75l2.75 1.75" />
+    </svg>
+  );
+}
+
+/** Sessions: two stacked windows. */
+function SessionsBadgeIcon() {
+  return (
+    <svg {...RAIL_ICON_PROPS}>
+      <rect x="2.25" y="2.25" width="9.5" height="7.5" rx="1" />
+      <path d="M5.75 15.75h9.5a1 1 0 0 0 1-1v-6.5a1 1 0 0 0-1-1h-2.5" />
+    </svg>
+  );
+}
+
+/** Memories: a bookmark. */
+function MemoriesBadgeIcon() {
+  return (
+    <svg {...RAIL_ICON_PROPS}>
+      <path d="M4.75 2.5h8.5v13l-4.25-3.25L4.75 15.5Z" />
+    </svg>
+  );
+}
+
+/** Diagnostics: a shield with a checkmark. */
+function DiagnosticsBadgeIcon() {
+  return (
+    <svg {...RAIL_ICON_PROPS}>
+      <path d="M9 1.75 15 4v4.25c0 4-2.6 6.5-6 7.5-3.4-1-6-3.5-6-7.5V4Z" />
+      <path d="M6.25 9 8.25 11 11.75 6.75" />
+    </svg>
   );
 }
 
@@ -96,13 +178,13 @@ function SessionHeader() {
  * there is exactly one such pair now (Plan + whichever panel is active),
  * so the reuse is a straight application of existing, tested code.
  */
-const RAIL_BADGES: { id: RailPanelId; title: string; glyph: string }[] = [
-  { id: "plan", title: "Plan", glyph: "▤" },
-  { id: "files", title: "Files", glyph: "⌗" },
-  { id: "budget", title: "Budget", glyph: "$" },
-  { id: "sessions", title: "Sessions", glyph: "☰" },
-  { id: "memories", title: "Memories", glyph: "◆" },
-  { id: "diagnostics", title: "Diagnostics", glyph: "⚙" },
+const RAIL_BADGES: { id: RailPanelId; title: string; Icon: () => React.ReactElement }[] = [
+  { id: "plan", title: "Plan", Icon: PlanBadgeIcon },
+  { id: "files", title: "Files", Icon: FilesBadgeIcon },
+  { id: "budget", title: "Budget", Icon: BudgetBadgeIcon },
+  { id: "sessions", title: "Sessions", Icon: SessionsBadgeIcon },
+  { id: "memories", title: "Memories", Icon: MemoriesBadgeIcon },
+  { id: "diagnostics", title: "Diagnostics", Icon: DiagnosticsBadgeIcon },
 ];
 
 function RailPanelSection({ id, title, share, showHeader, children }: { id: RailPanelId; title: string; share?: number; showHeader: boolean; children: React.ReactNode }) {
@@ -209,7 +291,7 @@ function Rail({ agentId }: { agentId: string }) {
               title={b.title}
               className={`flex flex-col items-center justify-center gap-0.5 py-2 border-b hairline hover:bg-tint/60 ${open || isPinnedPlan ? "bg-tint text-steel" : "text-text-muted"}`}
             >
-              <span className="text-[15px] leading-none" aria-hidden="true">{b.glyph}</span>
+              <span className="leading-none" aria-hidden="true"><b.Icon /></span>
               <span className="chrome-xs uppercase tracking-[0.06em] leading-none">{b.title.slice(0, 4)}</span>
               {values[b.id] && <span className="font-mono text-[9px] leading-none text-text-muted">{values[b.id]}</span>}
             </button>

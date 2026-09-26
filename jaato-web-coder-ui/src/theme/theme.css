@@ -41,7 +41,7 @@
   --c-surface: #ffffff;
   --c-text: #1d1f20;
   --c-text-muted: #5d5d60;
-  --c-steel: #5980a6;
+  --c-steel: #3F6690;
   /* Hairlines are ink at 16%, so they read on both grounds without a second definition. */
   --c-divider: color-mix(in srgb, var(--c-text) 16%, transparent);
   /* A quiet tint on the ground: user turns, table stripes, hover. */

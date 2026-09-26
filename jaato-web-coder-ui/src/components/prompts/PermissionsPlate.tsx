@@ -80,7 +80,7 @@ export function PermissionsPlate({ onClose, anchor }: {
   const current = status?.effectiveDefault ?? "";
 
   return (
-    <div ref={ref} className="absolute bottom-[26px] left-0 z-30 w-[22rem] max-w-[calc(100vw-2rem)]">
+    <div ref={ref} className="absolute bottom-[30px] left-0 z-30 w-[22rem] max-w-[calc(100vw-2rem)]">
       <Plate edge="steel" className="bg-surface shadow-lg" role="dialog" aria-label="Session permissions">
         <PlateHeader label="Permissions" value={suspended ? `suspended (${status?.suspensionScope})` : current} />
 
