@@ -502,6 +502,11 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 # 1.7 rule (an older daemon answers "Unknown message type", never the
 # result).  ``stop_sessions`` on an older daemon is ignored and the delete
 # is REFUSED for the loaded sessions -- the safe direction.
+# ``ConfigUpdateRequest.key_only`` (also 1.26) writes ONLY the provider's
+# API-key variable to the workspace ``.env`` -- no ``JAATO_PROVIDER`` /
+# ``MODEL_NAME``, no server bootstrap -- so the session picker can hand a
+# key to the session it is about to start.  An older daemon ignores the
+# field and rewrites the provider binding, so a client gates it on 1.26.
 PROTOCOL_VERSION = "1.26"
 
 
@@ -3857,6 +3862,12 @@ class ConfigUpdateRequest(Event):
     provider: str = ""  # Provider name (anthropic, google, github, etc.)
     model: Optional[str] = None  # Model name (optional, uses provider default)
     api_key: Optional[str] = None  # API key (optional, for non-OAuth providers)
+    # 1.26: write ONLY the provider's API-key variable (``api_key`` required);
+    # the .env's JAATO_PROVIDER / MODEL_NAME are left alone and no server is
+    # bootstrapped.  The session picker's key choice, applied before
+    # ``session.new``.  Answered by ``config.updated`` carrying the binding the
+    # .env still holds (not the key's provider), or an ``ErrorEvent``.
+    key_only: bool = False
 
 
 class StagedFileSpec(BaseModel):

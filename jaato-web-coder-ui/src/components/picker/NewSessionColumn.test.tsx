@@ -46,7 +46,7 @@ describe("NewSessionColumn", () => {
     expect(screen.getByRole("button", { name: "Inherit" })).toHaveAttribute("aria-pressed", "true");
     expect(start()).toBeEnabled();
     fireEvent.click(start());
-    expect(onStart).toHaveBeenCalledWith("validator", undefined, []);
+    expect(onStart).toHaveBeenCalledWith("validator", undefined, [], undefined);
   });
 
   it("a profile with no model is enabled only once provider and model are both chosen", () => {
@@ -61,7 +61,7 @@ describe("NewSessionColumn", () => {
     fireEvent.change(screen.getByRole("combobox", { name: "Model" }), { target: { value: "claude-sonnet" } });
     expect(start()).toBeEnabled();
     fireEvent.click(start());
-    expect(onStart).toHaveBeenCalledWith("analyst", { provider: "anthropic", model: "claude-sonnet" }, []);
+    expect(onStart).toHaveBeenCalledWith("analyst", { provider: "anthropic", model: "claude-sonnet" }, [], undefined);
   });
 
   it("stages nothing until Start, then each file under its own folder", () => {
@@ -75,5 +75,35 @@ describe("NewSessionColumn", () => {
     const drafts = [{ id: "d", file, name: "spec.md", size: 1, dir: "docs" }];
     stageDrafts(drafts);
     expect(attachFiles).toHaveBeenCalledWith([file], "docs");
+  });
+
+  it("offers the API key list box for the session's provider and hands the choice to Start", () => {
+    const onStart = vi.fn();
+    useJaato.setState((s) => ({
+      credentialsUrl: null,
+      connection: { ...s.connection, phase: "connected", protocolVersion: "1.26" },
+      workspace: { ...s.workspace, selected: "w", config: { workspace: "w", configured: false, availableProviders: ["anthropic"], missingFields: [] } },
+    }));
+    render(<NewSessionColumn onStart={onStart} />);
+    expect(screen.queryByTestId("api-key-section")).toBeNull(); // no provider yet
+    fireEvent.click(screen.getByRole("button", { name: "2 more base profiles" }));
+    fireEvent.click(screen.getByRole("button", { name: "Use base profile validator" }));
+    // No key store: the plain field, for the inherited provider.
+    const key = screen.getByLabelText("API key");
+    expect(screen.getByTestId("api-key-section")).toHaveTextContent("minimax");
+    fireEvent.change(key, { target: { value: "sk-typed" } });
+    fireEvent.click(start());
+    expect(onStart).toHaveBeenCalledWith("validator", undefined, [], { provider: "minimax", choice: { kind: "new", secret: "sk-typed", label: "" } });
+  });
+
+  it("does not offer a key against a daemon that would rewrite the provider binding", () => {
+    useJaato.setState((s) => ({
+      connection: { ...s.connection, phase: "connected", protocolVersion: "1.25" },
+      workspace: { ...s.workspace, selected: "w" },
+    }));
+    render(<NewSessionColumn onStart={vi.fn()} />);
+    fireEvent.click(screen.getByRole("button", { name: "2 more base profiles" }));
+    fireEvent.click(screen.getByRole("button", { name: "Use base profile validator" }));
+    expect(screen.queryByTestId("api-key-section")).toBeNull();
   });
 });

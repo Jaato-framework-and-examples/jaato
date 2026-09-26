@@ -132,3 +132,23 @@ def test_no_provider_sdk_is_imported_to_build_the_catalog() -> None:
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
                          cwd=str(Path(wm.__file__).resolve().parents[1]), check=True)
     assert out.stdout.strip() == "[]", out.stdout
+
+
+def test_a_key_only_update_writes_the_key_and_leaves_the_binding(manager: WorkspaceManager, tmp_path: Path) -> None:
+    """The session picker's key choice (protocol 1.26): the key lands where the
+    provider reads it, and the workspace's ``default`` binding is untouched."""
+    manager.select_workspace("proj")
+    manager.update_config("anthropic", model="claude-sonnet-4", api_key="sk-ant-old")
+    result = manager.update_config("openrouter", model="ignored", api_key="sk-or-new", key_only=True)
+    env = (tmp_path / "ws" / "proj" / ".env").read_text()
+    assert "JAATO_OPENROUTER_API_KEY=sk-or-new" in env
+    assert "JAATO_PROVIDER=anthropic" in env
+    assert "MODEL_NAME=claude-sonnet-4" in env
+    # The answer reports the binding the .env still holds, not the key's provider.
+    assert (result["provider"], result["model"]) == ("anthropic", "claude-sonnet-4")
+
+
+def test_a_key_only_update_needs_a_key(manager: WorkspaceManager) -> None:
+    manager.select_workspace("proj")
+    with pytest.raises(ValueError, match="needs an api_key"):
+        manager.update_config("openrouter", key_only=True)

@@ -15636,6 +15636,7 @@ export type SessionId98 = string;
 export type Provider3 = string;
 export type Model3 = string | null;
 export type ApiKey = string | null;
+export type KeyOnly = boolean;
 /**
  * All event types in the protocol.
  */
@@ -24741,6 +24742,7 @@ export interface ConfigUpdateRequest {
   provider?: Provider3;
   model?: Model3;
   api_key?: ApiKey;
+  key_only?: KeyOnly;
 }
 /**
  * Response to config.update - configuration was updated.

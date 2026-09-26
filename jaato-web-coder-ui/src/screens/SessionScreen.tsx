@@ -26,7 +26,8 @@ import { BudgetPanel } from "@/components/panels/BudgetPanel";
 import { WorkspacePanel, useVisibleWorkspaceFiles } from "@/components/panels/WorkspacePanel";
 import { SessionsPanel, notedSummary } from "@/components/panels/SessionsPanel";
 import { SessionBoard } from "@/components/picker/SessionBoard";
-import { NewSessionColumn, stageDrafts, type StagedDraft } from "@/components/picker/NewSessionColumn";
+import { NewSessionColumn, stageDrafts, type SessionKey, type StagedDraft } from "@/components/picker/NewSessionColumn";
+import { applySessionKey, resolveKeyChoice } from "@/app/sessionKey";
 import type { ModelChoice } from "@/app/newSession";
 import { MemoriesPanel } from "@/components/panels/MemoriesPanel";
 import { memoriesSummary } from "@/app/memories";
@@ -329,7 +330,7 @@ function authCommands(commands: { name: string; description?: string }[]): { nam
  * session, as in the TUI.
  */
 function ProfilePicker({ onStart, onAttach, onAuth, onSkip }: {
-  onStart: (profile: string | null, model: ModelChoice | undefined, files: StagedDraft[]) => void;
+  onStart: (profile: string | null, model: ModelChoice | undefined, files: StagedDraft[], key?: SessionKey) => void;
   onAttach: (sessionId: string) => void;
   onAuth: (command: string) => void;
   onSkip: () => void;
@@ -365,6 +366,7 @@ function ProfilePicker({ onStart, onAttach, onAuth, onSkip }: {
           </div>
           <button type="button" onClick={onSkip} className="link text-[13px]">Open workspace with no session <span aria-hidden="true">→</span></button>
         </div>
+        {ws.notice?.error && <div role="alert" className="px-5 py-2 border-b hairline tint-error text-[13px] text-error">{ws.notice.text}</div>}
         <div className="grid grid-cols-1 min-[900px]:grid-cols-[repeat(4,minmax(0,1fr))] min-[900px]:min-h-[460px]">
           <SessionBoard sessions={existing} onAttach={onAttach} />
           <NewSessionColumn onStart={onStart} />
@@ -410,7 +412,20 @@ export function SessionScreen() {
     return unsub;
   }, []);
 
-  const startSession = async (profile: string | null, model?: ModelChoice, files: StagedDraft[] = []) => {
+  const startSession = async (profile: string | null, model?: ModelChoice, files: StagedDraft[] = [], key?: SessionKey) => {
+    // The key first, while the picker is still on screen: a key that does
+    // not land must not be discovered as the new session's first 401.
+    if (key) {
+      useJaato.getState().setWorkspaceListNotice(undefined);
+      try {
+        const st = useJaato.getState();
+        const { apiKey } = await resolveKeyChoice(st.credentialsUrl, key.provider, key.choice, (text) => st.addSystemBlock(selected, text, "warning"));
+        if (apiKey) await applySessionKey(key.provider, apiKey);
+      } catch (err) {
+        useJaato.getState().setWorkspaceListNotice({ text: `The API key was not applied: ${err instanceof Error ? err.message : String(err)}`, error: true });
+        return;
+      }
+    }
     setPicking(false);
     setCreating(true);
     try {
@@ -473,7 +488,7 @@ export function SessionScreen() {
     return (
       <div className="h-full flex flex-col">
         {postAuthCard}
-        <div className="flex-1 min-h-0"><ProfilePicker onStart={(p, m, f) => { void startSession(p, m, f); }} onAttach={resumeSession} onAuth={runAuth} onSkip={() => setPicking(false)} /></div>
+        <div className="flex-1 min-h-0"><ProfilePicker onStart={(p, m, f, k) => { void startSession(p, m, f, k); }} onAttach={resumeSession} onAuth={runAuth} onSkip={() => setPicking(false)} /></div>
         {paletteOpen && <CommandPalette />}
       </div>
     );

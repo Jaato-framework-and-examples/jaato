@@ -2852,6 +2852,7 @@ class JaatoWSServer:
         elif isinstance(event, ConfigUpdateRequest):
             await self._handle_config_update(
                 client_id, event.provider, event.model, event.api_key,
+                key_only=event.key_only,
             )
 
     async def _handle_stage_files_request(self, client_id: str, event) -> None:
@@ -4058,6 +4059,7 @@ class JaatoWSServer:
         provider: str,
         model: Optional[str],
         api_key: Optional[str],
+        key_only: bool = False,
     ) -> None:
         """Handle workspace configuration update request.
 
@@ -4065,6 +4067,12 @@ class JaatoWSServer:
         ``JaatoServer`` for the workspace so the client can start sending
         messages.  If auto-provisioning is active, the workspace is
         provisioned first and AppArmor confinement is applied.
+
+        ``key_only`` (protocol 1.26) writes only the provider's API-key
+        variable and bootstraps nothing: it is the session picker handing a
+        key to the session it is about to create with ``session.new``,
+        which must neither rebind the workspace's provider nor start a
+        second server beside that session.
         """
         if not self._workspace_manager:
             await self._send_error(client_id, "Workspace mode not enabled")
@@ -4081,6 +4089,7 @@ class JaatoWSServer:
                 model=model,
                 api_key=api_key,
                 name=selected.name,
+                key_only=key_only,
             )
 
             await self._send_to_client(
@@ -4094,7 +4103,7 @@ class JaatoWSServer:
             )
 
             # Initialize JaatoServer now that the workspace is configured
-            if result["success"]:
+            if result["success"] and not key_only:
                 await self._initialize_server_for_workspace(client_id, selected)
 
         except ValueError as e:

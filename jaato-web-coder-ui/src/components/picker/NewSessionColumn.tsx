@@ -30,6 +30,14 @@ import {
   resolveModel, startRequest, startSummary, type BaseProfile, type ModelChoice, type ModelMode,
 } from "@/app/newSession";
 import { ColumnHeader } from "./SessionBoard";
+import { CredentialPicker, type KeyChoice } from "@/components/workspace/CredentialPicker";
+import { servesKeyOnly } from "@/app/sessionKey";
+
+/** The API key Start applies for the session's provider, when one was chosen. */
+export interface SessionKey {
+  provider: string;
+  choice: KeyChoice;
+}
 
 export interface StagedDraft {
   id: string;
@@ -176,7 +184,17 @@ function StagedFiles({ drafts, setDrafts, add }: { drafts: StagedDraft[]; setDra
   );
 }
 
-export function NewSessionColumn({ onStart }: { onStart: (profile: string | null, model: ModelChoice | undefined, files: StagedDraft[]) => void }) {
+/**
+ * The provider whose API key the session will need: the inherited binding's,
+ * or the picked one's.  ``""`` while no provider is known (and for the
+ * daemon's .env fallback, whose key is already wherever the .env put it).
+ */
+export function keyProvider(base: BaseProfile, mode: ModelMode, pick: ModelChoice): string {
+  if (definesModel(base) && mode === "inherit") return base.provider;
+  return pick.provider;
+}
+
+export function NewSessionColumn({ onStart }: { onStart: (profile: string | null, model: ModelChoice | undefined, files: StagedDraft[], key?: SessionKey) => void }) {
   const profiles = useJaato((s) => s.profiles);
   const sessions = useJaato((s) => s.sessions);
   const cfg = useJaato((s) => (s.workspace.config && s.workspace.config.workspace === s.workspace.selected ? s.workspace.config : undefined));
@@ -196,6 +214,15 @@ export function NewSessionColumn({ onStart }: { onStart: (profile: string | null
     prefilled.current = true;
     setPick((cur) => (cur.provider ? cur : { provider: cfg.provider ?? "", model: cfg.model ?? "" }));
   }, [cfg]);
+  // The API key list box -- the configure form's control, kept by the
+  // redesign.  A key is written to the selected workspace's .env
+  // (``config.update`` key_only, 1.26), so it is offered only where there is
+  // a workspace to write to and a daemon that writes nothing else.
+  const credentialsUrl = useJaato((s) => s.credentialsUrl);
+  const selectedWs = useJaato((s) => s.workspace.selected);
+  const protocol = useJaato((s) => (s.connection.phase === "connected" ? s.connection.protocolVersion : null));
+  const [keyChoice, setKeyChoice] = useState<KeyChoice>({ kind: "none" });
+  const [keyError, setKeyError] = useState("");
   const [drafts, setDrafts] = useState<StagedDraft[]>([]);
   const addDrafts = (files: File[]) => { if (files.length) setDrafts((cur) => [...cur, ...draftsFor(files)]); };
   const [dragging, setDragging] = useState(false);
@@ -213,6 +240,11 @@ export function NewSessionColumn({ onStart }: { onStart: (profile: string | null
   const request = startRequest(base, mode, pick);
   const others = bases.filter((b) => b.name !== base.name);
   const badDraft = drafts.some((d) => draftTarget(d) === null);
+  const provider = keyProvider(base, mode, pick);
+  const offersKey = Boolean(selectedWs && servesKeyOnly(protocol) && provider);
+  // A new provider is a new list: the picker preselects its newest stored key.
+  useEffect(() => { setKeyChoice({ kind: "none" }); setKeyError(""); }, [provider]);
+  const keyIncomplete = keyChoice.kind === "new" && !keyChoice.secret.trim();
 
   const choose = (name: string) => {
     setBaseName(name);
@@ -290,13 +322,25 @@ export function NewSessionColumn({ onStart }: { onStart: (profile: string | null
           )}
         </div>
 
+        {offersKey && (
+          <div className="flex flex-col gap-1.5" data-testid="api-key-section">
+            <CredentialPicker credentialsUrl={credentialsUrl} provider={provider} value={keyChoice} onChange={setKeyChoice} onError={setKeyError} />
+            <span className="text-[12px] text-text-muted">
+              {keyChoice.kind === "none"
+                ? `Uses the ${provider} key the workspace already has, if any.`
+                : `Written to this workspace's .env for ${provider} when you press Start.`}
+            </span>
+            {keyError && <span className="text-[12px] text-error">{keyError}</span>}
+          </div>
+        )}
+
         <StagedFiles drafts={drafts} setDrafts={setDrafts} add={addDrafts} />
 
         <div className="flex flex-col gap-1.5">
           <button
             type="button"
-            disabled={!request || badDraft}
-            onClick={() => request && onStart(request.profile, request.model, drafts)}
+            disabled={!request || badDraft || (offersKey && keyIncomplete)}
+            onClick={() => request && onStart(request.profile, request.model, drafts, offersKey && keyChoice.kind !== "none" ? { provider, choice: keyChoice } : undefined)}
             className="btn btn-primary w-full justify-between"
           >
             <span>Start session</span><span aria-hidden="true">→</span>

@@ -23,7 +23,7 @@
  */
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { exitToConnect } from "@/app/actions";
-import { credentialsApi } from "@/app/credentials";
+import { resolveKeyChoice } from "@/app/sessionKey";
 import { Plate } from "@/components/layout/Plate";
 import { CredentialPicker, type KeyChoice } from "@/components/workspace/CredentialPicker";
 import { GitHubAccountPicker } from "@/components/workspace/GitHubAccountPicker";
@@ -66,27 +66,13 @@ function CredentialsForm({ workspace }: { workspace: string }) {
   const [busy, setBusy] = useState(false);
   useEffect(() => { if (cfg) { setProvider(cfg.provider ?? ""); setModel(cfg.model ?? ""); } }, [cfg]);
   if (!cfg) return <div className="text-[13px] text-text-muted">Loading the workspace configuration…</div>;
-  // The key reaches the daemon the one way it always has -- as ``api_key``
-  // on ``config.update`` -- whether typed now or picked from the store.
-  const resolveApiKey = async (): Promise<{ apiKey?: string; storedId?: string }> => {
-    const api = credentialsUrl ? credentialsApi(credentialsUrl) : null;
-    if (keyChoice.kind === "stored") return { apiKey: api ? await api.reveal(keyChoice.id) : undefined };
-    if (keyChoice.kind === "new" && keyChoice.secret.trim()) {
-      const secret = keyChoice.secret.trim();
-      let storedId: string | undefined;
-      if (api && provider) {
-        try { storedId = (await api.add(provider, secret, keyChoice.label.trim() || undefined)).id; }
-        catch (err) { setWorkspaceNotice({ text: `Key applied, but not stored for later: ${err instanceof Error ? err.message : String(err)}`, error: true }); }
-      }
-      return { apiKey: secret, storedId };
-    }
-    return {};
-  };
   const save = async (e: React.FormEvent) => {
     e.preventDefault();
     setBusy(true);
     try {
-      const { apiKey, storedId } = await resolveApiKey();
+      // The key reaches the daemon the one way it always has -- as ``api_key``
+      // on ``config.update`` -- whether typed now or picked from the store.
+      const { apiKey, storedId } = await resolveKeyChoice(credentialsUrl, provider, keyChoice, (text) => setWorkspaceNotice({ text, error: true }));
       await updateConfig({ provider: provider || undefined, model: model || undefined, api_key: apiKey });
       if (keyChoice.kind === "new") {
         setKeyChoice(storedId ? { kind: "stored", id: storedId } : { kind: "none" });

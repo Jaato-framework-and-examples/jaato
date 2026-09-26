@@ -863,7 +863,14 @@ wss.on("connection", (ws, req) => {
       }
       case "config.update":
         // The daemon's ``ConfigUpdatedEvent`` carries what was written and
-        // no status field; the UI derives the status from it.
+        // no status field; the UI derives the status from it.  A ``key_only``
+        // write (1.26) changes only the key, so the answer reports the
+        // binding the workspace still holds.
+        if (ev.key_only === true) {
+          const a = c.selected === "project-a";
+          send(c, { type: "config.updated", workspace: c.selected ?? "", provider: a ? "anthropic" : "", model: a ? "claude-sonnet-4" : null, success: true });
+          break;
+        }
         send(c, { type: "config.updated", workspace: "project-b", provider: ev.provider, model: ev.model ?? null, success: true });
         break;
       case "command.execute": {

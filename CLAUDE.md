@@ -6649,6 +6649,14 @@ where a base profile's model is inherited or overridden for that session via
 workspace mode it may fall back to the daemon's `.env`. Staged files stay in
 the browser until Start. There is no model catalog verb, so the model field
 is free text with suggestions from profiles, sessions and the `.env`.
+The API-key list box (`CredentialPicker`: stored keys for the provider, or
+"New key…") sits under the model, for the provider the session will use;
+on Start the choice is revealed / stored and written with
+`config.update` **`key_only`** (1.26) — only the provider's key variable,
+no `JAATO_PROVIDER` / `MODEL_NAME`, no server bootstrap, and a
+`config.updated` reporting the binding the `.env` still holds — before
+`session.new`. Offered only with a selected workspace on a 1.26 daemon: an
+older one would rewrite the provider binding instead.
 
 ### A Session You Deleted, and a Listing That Was Not Yours
 

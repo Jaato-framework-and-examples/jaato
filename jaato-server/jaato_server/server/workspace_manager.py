@@ -999,6 +999,7 @@ class WorkspaceManager:
         model: Optional[str] = None,
         api_key: Optional[str] = None,
         name: Optional[str] = None,
+        key_only: bool = False,
     ) -> Dict[str, Any]:
         """Update workspace configuration.
 
@@ -1009,6 +1010,10 @@ class WorkspaceManager:
             model: Model name (optional).
             api_key: API key (optional, for non-OAuth providers).
             name: Workspace name, or None for selected workspace.
+            key_only: Protocol 1.26 -- write ONLY the provider's API-key
+                variable (``api_key`` then required); ``JAATO_PROVIDER`` /
+                ``MODEL_NAME`` are left as they are.  The session picker's
+                key choice, which must not change what ``default`` means.
 
         Returns:
             Dictionary with update result.
@@ -1039,11 +1044,14 @@ class WorkspaceManager:
         if env_file.exists():
             existing = dict(dotenv_values(env_file))
 
-        # Update with new values
-        existing["JAATO_PROVIDER"] = provider
+        if key_only and not api_key:
+            raise ValueError("config.update key_only needs an api_key")
 
-        if model:
-            existing["MODEL_NAME"] = model
+        # Update with new values.  A key-only write leaves the binding alone.
+        if not key_only:
+            existing["JAATO_PROVIDER"] = provider
+            if model:
+                existing["MODEL_NAME"] = model
 
         if api_key:
             # Written under the FIRST env step of the provider's own
@@ -1067,8 +1075,18 @@ class WorkspaceManager:
         self._workspaces[target] = ws_info
         self._save_registry()
 
-        logger.info(f"Updated config for workspace {target}: provider={provider}, model={model}")
+        logger.info(f"Updated config for workspace {target}: provider={provider}, model={model}, key_only={key_only}")
 
+        # A key-only write reports the binding the .env HOLDS (unchanged), so
+        # a client reducing ``config.updated`` into its status does not read
+        # the key's provider as the workspace's new one.
+        if key_only:
+            return {
+                "workspace": target,
+                "provider": existing.get("JAATO_PROVIDER") or "",
+                "model": existing.get("MODEL_NAME") or None,
+                "success": True,
+            }
         return {
             "workspace": target,
             "provider": provider,

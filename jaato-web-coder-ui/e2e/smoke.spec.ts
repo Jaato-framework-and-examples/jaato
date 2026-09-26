@@ -873,6 +873,30 @@ test("a new key is stored under a label before it is applied, and a stored one c
   await expect(form.getByLabel("API key")).toHaveValue("new-1");
 });
 
+test("the session picker offers the stored API keys for the session's provider and applies the chosen one before session.new", async ({ page }) => {
+  const calls = await backendWithKeyStore(page, [{ id: "k1", provider: "anthropic", label: "work", hint: "mnop" }]);
+  const sent: Record<string, unknown>[] = [];
+  page.on("websocket", (ws) => ws.on("framesent", (f) => { try { sent.push(JSON.parse(String(f.payload))); } catch { /* binary */ } }));
+  await page.goto("/");
+  await page.getByRole("button", { name: "Open workspace project-a" }).click();
+  const col = page.getByRole("region", { name: "New session" });
+  // project-a's .env binds anthropic, so the model is prefilled and the
+  // list box offers that provider's stored keys, newest preselected.
+  const key = col.getByLabel("API key", { exact: true });
+  await expect(key).toHaveValue("k1");
+  await expect(col.getByRole("option", { name: "work (…mnop)" })).toHaveCount(1);
+  expect(calls.some((c) => c.url.includes("/reveal"))).toBe(false);
+  await col.getByRole("button", { name: /Start session/ }).click();
+  await expect(page.getByText("Connected to the mock daemon")).toBeVisible();
+  expect(calls.filter((c) => c.url === "/api/credentials/k1/reveal")).toHaveLength(1);
+  const keyAt = sent.findIndex((e) => e.type === "config.update" && e.key_only === true && e.provider === "anthropic" && e.api_key === "sk-revealed-0000mnop");
+  const newAt = sent.findIndex((e) => e.type === "command.execute" && e.command === "session.new");
+  expect(keyAt).toBeGreaterThan(-1);
+  expect(keyAt).toBeLessThan(newAt);
+  // The binding is unchanged: the key write did not rebind the workspace.
+  expect(sent[keyAt]!.model).toBeUndefined();
+});
+
 test("without a key store the configure form keeps its plain key field", async ({ page }) => {
   await page.goto("/");
   await page.getByPlaceholder("ws://host:8080").fill(WS_WORKSPACES);
