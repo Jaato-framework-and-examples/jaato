@@ -53,7 +53,7 @@ export const THEMES: Record<string, ThemeFile> = Object.fromEntries(files.map((t
 export const THEME_NAMES = Object.keys(THEMES);
 
 /** The interface accent per ground (see the module docstring). */
-export const STEEL = { light: "#5980a6", dark: "#94bce3" } as const;
+export const STEEL = { light: "#3F6690", dark: "#94bce3" } as const;
 
 /** Web-only departures from the theme files; see the module docstring. */
 const WEB_OVERRIDES: Record<string, Partial<ThemeColors>> = {
