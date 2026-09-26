@@ -513,7 +513,46 @@ class AppArmorManager:
     #       unchanged, and the three escape-vector lines stay dropped.  A
     #       session that DECLARES ``apparmor_fragments`` (a list, incl.
     #       ``[]``) keeps v18's fragment-sole authority verbatim.
-    _TEMPLATE_VERSION = 34
+    #  35 — (2026-09-26) every rule interpolating ``{workspace_path}`` (and
+    #       the isolated sub-runner's ``{ws_root}``) is now double-quoted
+    #       — the workspace grant, all thirteen ``.jaato/<subpath>``
+    #       write-denies and the eight tool_hat/child/isolated read-denies,
+    #       across the base body, ``tool_hat``, ``//child`` and the
+    #       isolated sub-runner (#1305).
+    #
+    #       A workspace named with a space (e.g. a web-client workspace
+    #       created as ``Claude UX Review``) rendered
+    #       ``/root/.jaato/workspaces/Claude UX Review/** rwkl,`` — an
+    #       UNQUOTED AppArmor path expression containing whitespace.
+    #       ``apparmor_parser`` cannot parse that: a path expression with
+    #       embedded whitespace must be double-quoted, exactly as
+    #       ``_fragment_content()`` already does for reference-plugin path
+    #       grants (search its own docstring: "wrapped in double quotes so
+    #       spaces and other shell-special characters in the path don't
+    #       confuse the parser").  The workspace grant — present in every
+    #       profile variant and the single most load-bearing rule in each
+    #       — never got the same treatment, so `apparmor_parser -r` failed
+    #       outright and every session in such a workspace hit
+    #       ``RunnerBootstrapFailed: AppArmor confinement required but
+    #       profile provisioning failed``, refusing to spawn an unconfined
+    #       runner (correct fail-closed behaviour for a broken render —
+    #       the workspace name was the defect, not the refusal).
+    #
+    #       The confinement ID / profile NAME derivation
+    #       (``confinement_id.workspace_slug``) was already correct — it
+    #       collapses anything outside ``[A-Za-z0-9._-]`` to ``-``, so the
+    #       *name* ``jaato-ws-Claude-UX-Review-<digest>`` parses fine.  The
+    #       defect was one layer down, in the RULE BODIES that grant
+    #       access to the real, unsanitised filesystem path — sanitising
+    #       the name and quoting the path are two different fixes for two
+    #       different strings, and only the first had been done.
+    #
+    #       Always-quote rather than quote-only-when-necessary: a quoted
+    #       path is valid AppArmor syntax whether or not it contains
+    #       anything that needs quoting, so there is no conditional to get
+    #       wrong and no behavioural difference for the overwhelming
+    #       majority of workspaces whose names contain no such characters.
+    _TEMPLATE_VERSION = 35
 
     # AppArmor profile template.  Placeholders are filled per-session by
     # ``_render_profile()``.
@@ -553,22 +592,22 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
   #   bypassing the write deny
   # - ``k`` (file lock): otherwise a confined process could grab a
   #   lock that blocks daemon-side reads of the same file
-  {workspace_path}/   rw,
-  {workspace_path}/** rwkl,
-  audit deny {workspace_path}/.jaato/agents/**             wlk,
-  audit deny {workspace_path}/.jaato/profiles/**           wlk,
+  "{workspace_path}/"   rw,
+  "{workspace_path}/**" rwkl,
+  audit deny "{workspace_path}/.jaato/agents/**"             wlk,
+  audit deny "{workspace_path}/.jaato/profiles/**"           wlk,
   # .jaato/prompts/ intentionally OMITTED from the write-denies: prompt_library's
   # savePrompt/deletePrompt run in the confined runner and need write/unlink
   # (unlink is granted by 'w' — classic AppArmor has no standalone 'd' mode).
   # Accepted posture tradeoff: a confined agent may author/rewrite prompts (whose
   # content is later executed). agents/profiles/scripts/schemas stay protected.
-  audit deny {workspace_path}/.jaato/scripts/**            wlk,
-  audit deny {workspace_path}/.jaato/services/*/           wlk,
-  audit deny {workspace_path}/.jaato/reactors.json         wlk,
-  audit deny {workspace_path}/.jaato/completion_schemas/** wlk,
-  audit deny {workspace_path}/.jaato/spawn_schemas/**      wlk,
-  audit deny {workspace_path}/.jaato/instructions/**       wlk,
-  audit deny {workspace_path}/.jaato/references/**         wlk,
+  audit deny "{workspace_path}/.jaato/scripts/**"            wlk,
+  audit deny "{workspace_path}/.jaato/services/*/"           wlk,
+  audit deny "{workspace_path}/.jaato/reactors.json"         wlk,
+  audit deny "{workspace_path}/.jaato/completion_schemas/**" wlk,
+  audit deny "{workspace_path}/.jaato/spawn_schemas/**"      wlk,
+  audit deny "{workspace_path}/.jaato/instructions/**"       wlk,
+  audit deny "{workspace_path}/.jaato/references/**"         wlk,
   # Template catalog (#893) — a template is not inert data: it is
   # authored content that BECOMES code at render time, and in a
   # KB-driven pipeline it is where a governed rule is *prevented*
@@ -583,27 +622,27 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
   # left out of every deny — not a carve-out under this one, because
   # a more-specific allow does not override a less-specific deny
   # (see v13 above).
-  audit deny {workspace_path}/.jaato/templates/**          wlk,
+  audit deny "{workspace_path}/.jaato/templates/**"          wlk,
   # The routing table that decides WHERE a rendered template lands
   # (``_apply_path_routing``).  Same class as the catalog itself: the
   # plugin only reads it, and an agent that could rewrite it would
   # redirect generated files out from under the rule the routing
   # encodes.
-  audit deny {workspace_path}/.jaato/template_routing.yaml wlk,
+  audit deny "{workspace_path}/.jaato/template_routing.yaml" wlk,
   # Predefined plans (#1195) — a profile's
   # ``plugin_configs.todo.initial_plan_name`` loads one as the
   # session's active plan.  Authored, like the profile naming it:
   # an agent that could rewrite the plan would rewrite the task it
   # was given.  The todo plugin only READS it; progress is kept by
   # its storage backend, never under this directory.
-  audit deny {workspace_path}/.jaato/plans/**              wlk,
+  audit deny "{workspace_path}/.jaato/plans/**"              wlk,
   # Workspace-tier AppArmor fragments — read by _render_profile on
   # the NEXT session spawn.  A confined runner that could write a
   # fragment here would be authoring its own future-session rules
   # (privilege escalation: confined now, broader-confined-or-
   # unconfined next).  Same wlk pattern as the other user-authored
   # config subpaths.
-  audit deny {workspace_path}/.jaato/apparmor-fragments/** wlk,
+  audit deny "{workspace_path}/.jaato/apparmor-fragments/**" wlk,
 
   # ---- shared read-only resources ----
   {venv_path}/           r,
@@ -1768,57 +1807,57 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
   #include <abstractions/python>
 
   # ---- workspace (inherited from parent per §4.3 invariant) ----
-  {ws_root}/   {ws_dir_perm}
-  {ws_root}/** {ws_file_perm}
+  "{ws_root}/"   {ws_dir_perm}
+  "{ws_root}/**" {ws_file_perm}
 
   # ---- integrity-protected write-denies (mirror parent base) ----
-  audit deny {workspace_path}/.jaato/agents/**             wlk,
-  audit deny {workspace_path}/.jaato/profiles/**           wlk,
+  audit deny "{workspace_path}/.jaato/agents/**"             wlk,
+  audit deny "{workspace_path}/.jaato/profiles/**"           wlk,
   # .jaato/prompts/ intentionally OMITTED from the write-denies: prompt_library's
   # savePrompt/deletePrompt run in the confined runner and need write/unlink
   # (unlink is granted by 'w' — classic AppArmor has no standalone 'd' mode).
   # Accepted posture tradeoff: a confined agent may author/rewrite prompts (whose
   # content is later executed). agents/profiles/scripts/schemas stay protected.
-  audit deny {workspace_path}/.jaato/scripts/**            wlk,
-  audit deny {workspace_path}/.jaato/services/*/           wlk,
-  audit deny {workspace_path}/.jaato/reactors.json         wlk,
-  audit deny {workspace_path}/.jaato/completion_schemas/** wlk,
-  audit deny {workspace_path}/.jaato/spawn_schemas/**      wlk,
-  audit deny {workspace_path}/.jaato/instructions/**       wlk,
-  audit deny {workspace_path}/.jaato/references/**         wlk,
+  audit deny "{workspace_path}/.jaato/scripts/**"            wlk,
+  audit deny "{workspace_path}/.jaato/services/*/"           wlk,
+  audit deny "{workspace_path}/.jaato/reactors.json"         wlk,
+  audit deny "{workspace_path}/.jaato/completion_schemas/**" wlk,
+  audit deny "{workspace_path}/.jaato/spawn_schemas/**"      wlk,
+  audit deny "{workspace_path}/.jaato/instructions/**"       wlk,
+  audit deny "{workspace_path}/.jaato/references/**"         wlk,
   # Template catalog — governed content that becomes code at render
   # time (mirrors base, #893).  Runtime extraction writes to the
   # sibling ``.jaato/template_extracts/``, which is under no deny.
-  audit deny {workspace_path}/.jaato/templates/**          wlk,
+  audit deny "{workspace_path}/.jaato/templates/**"          wlk,
   # The routing table that decides WHERE a rendered template lands
   # (``_apply_path_routing``).  Same class as the catalog itself: the
   # plugin only reads it, and an agent that could rewrite it would
   # redirect generated files out from under the rule the routing
   # encodes.
-  audit deny {workspace_path}/.jaato/template_routing.yaml wlk,
+  audit deny "{workspace_path}/.jaato/template_routing.yaml" wlk,
   # Predefined plans (#1195) — a profile's
   # ``plugin_configs.todo.initial_plan_name`` loads one as the
   # session's active plan.  Authored, like the profile naming it:
   # an agent that could rewrite the plan would rewrite the task it
   # was given.  The todo plugin only READS it; progress is kept by
   # its storage backend, never under this directory.
-  audit deny {workspace_path}/.jaato/plans/**              wlk,
+  audit deny "{workspace_path}/.jaato/plans/**"              wlk,
   # Workspace-tier AppArmor fragments — privilege-escalation guard
   # (mirrors base; isolated sub-runner could otherwise plant rules
   # for the next session's profile).
-  audit deny {workspace_path}/.jaato/apparmor-fragments/** wlk,
+  audit deny "{workspace_path}/.jaato/apparmor-fragments/**" wlk,
 
   # ---- read-denies on user-authored config ----
   # Information-isolation between agents in a cascade — same as
   # the parent's tool_hat, applied at the sub-profile level here.
-  audit deny {workspace_path}/.jaato/agents/**             r,
-  audit deny {workspace_path}/.jaato/profiles/**           r,
-  audit deny {workspace_path}/.jaato/prompts/**            r,
-  audit deny {workspace_path}/.jaato/scripts/**            r,
-  audit deny {workspace_path}/.jaato/completion_schemas/** r,
-  audit deny {workspace_path}/.jaato/spawn_schemas/**      r,
-  audit deny {workspace_path}/.jaato/instructions/**       r,
-  audit deny {workspace_path}/.jaato/reactors.json         r,
+  audit deny "{workspace_path}/.jaato/agents/**"             r,
+  audit deny "{workspace_path}/.jaato/profiles/**"           r,
+  audit deny "{workspace_path}/.jaato/prompts/**"            r,
+  audit deny "{workspace_path}/.jaato/scripts/**"            r,
+  audit deny "{workspace_path}/.jaato/completion_schemas/**" r,
+  audit deny "{workspace_path}/.jaato/spawn_schemas/**"      r,
+  audit deny "{workspace_path}/.jaato/instructions/**"       r,
+  audit deny "{workspace_path}/.jaato/reactors.json"         r,
 
   # ---- shared read-only resources ----
   {self._venv_path}/           r,
@@ -2749,37 +2788,37 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     #include <abstractions/python>
 
     # ---- workspace + integrity write-denies (mirrors base) ----
-    {workspace_path}/   rw,
-    {workspace_path}/** rwkl,
-    audit deny {workspace_path}/.jaato/agents/**             wlk,
-    audit deny {workspace_path}/.jaato/profiles/**           wlk,
+    "{workspace_path}/"   rw,
+    "{workspace_path}/**" rwkl,
+    audit deny "{workspace_path}/.jaato/agents/**"             wlk,
+    audit deny "{workspace_path}/.jaato/profiles/**"           wlk,
     # .jaato/prompts/ intentionally OMITTED from the write-denies (see base): the
     # confined runner needs write/unlink for savePrompt/deletePrompt. Accepted
     # posture tradeoff. agents/profiles/scripts/schemas stay protected.
-    audit deny {workspace_path}/.jaato/scripts/**            wlk,
-    audit deny {workspace_path}/.jaato/services/*/           wlk,
-    audit deny {workspace_path}/.jaato/reactors.json         wlk,
-    audit deny {workspace_path}/.jaato/completion_schemas/** wlk,
-    audit deny {workspace_path}/.jaato/spawn_schemas/**      wlk,
-    audit deny {workspace_path}/.jaato/instructions/**       wlk,
-    audit deny {workspace_path}/.jaato/references/**         wlk,
+    audit deny "{workspace_path}/.jaato/scripts/**"            wlk,
+    audit deny "{workspace_path}/.jaato/services/*/"           wlk,
+    audit deny "{workspace_path}/.jaato/reactors.json"         wlk,
+    audit deny "{workspace_path}/.jaato/completion_schemas/**" wlk,
+    audit deny "{workspace_path}/.jaato/spawn_schemas/**"      wlk,
+    audit deny "{workspace_path}/.jaato/instructions/**"       wlk,
+    audit deny "{workspace_path}/.jaato/references/**"         wlk,
     # Template catalog — governed content that becomes code at render
     # time (mirrors base, #893).  Runtime extraction writes to the
     # sibling ``.jaato/template_extracts/``, which is under no deny.
-    audit deny {workspace_path}/.jaato/templates/**          wlk,
+    audit deny "{workspace_path}/.jaato/templates/**"          wlk,
     # Routing table for rendered output (mirrors base, #893).
-    audit deny {workspace_path}/.jaato/template_routing.yaml wlk,
+    audit deny "{workspace_path}/.jaato/template_routing.yaml" wlk,
     # Predefined plans (#1195) — a profile's
     # ``plugin_configs.todo.initial_plan_name`` loads one as the
     # session's active plan.  Authored, like the profile naming it:
     # an agent that could rewrite the plan would rewrite the task it
     # was given.  The todo plugin only READS it; progress is kept by
     # its storage backend, never under this directory.
-    audit deny {workspace_path}/.jaato/plans/**              wlk,
+    audit deny "{workspace_path}/.jaato/plans/**"              wlk,
     # Workspace-tier AppArmor fragments — privilege-escalation guard
     # (mirrors base; a tool execution under tool_hat could otherwise
     # plant rules for the next session's profile).
-    audit deny {workspace_path}/.jaato/apparmor-fragments/** wlk,
+    audit deny "{workspace_path}/.jaato/apparmor-fragments/**" wlk,
 
     # ---- tool_hat-specific read-denies on user-authored config ----
     # The whole point of the sub-profile: tool execution can't read
@@ -2787,14 +2826,14 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     # instructions, scripts, or reactors.json.  Information-isolation
     # between agents in a cascade.  Framework loading (which needs
     # these reads) happens in the BASE profile, not in the hat.
-    audit deny {workspace_path}/.jaato/agents/**             r,
-    audit deny {workspace_path}/.jaato/profiles/**           r,
-    audit deny {workspace_path}/.jaato/prompts/**            r,
-    audit deny {workspace_path}/.jaato/scripts/**            r,
-    audit deny {workspace_path}/.jaato/completion_schemas/** r,
-    audit deny {workspace_path}/.jaato/spawn_schemas/**      r,
-    audit deny {workspace_path}/.jaato/instructions/**       r,
-    audit deny {workspace_path}/.jaato/reactors.json         r,
+    audit deny "{workspace_path}/.jaato/agents/**"             r,
+    audit deny "{workspace_path}/.jaato/profiles/**"           r,
+    audit deny "{workspace_path}/.jaato/prompts/**"            r,
+    audit deny "{workspace_path}/.jaato/scripts/**"            r,
+    audit deny "{workspace_path}/.jaato/completion_schemas/**" r,
+    audit deny "{workspace_path}/.jaato/spawn_schemas/**"      r,
+    audit deny "{workspace_path}/.jaato/instructions/**"       r,
+    audit deny "{workspace_path}/.jaato/reactors.json"         r,
 
     # ---- shared read-only resources (mirrors base) ----
     {self._venv_path}/           r,
@@ -2978,50 +3017,50 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     #include <abstractions/python>
 
     # ---- workspace + integrity write-denies (mirrors tool_hat) ----
-    {workspace_path}/   rw,
-    {workspace_path}/** rwkl,
-    audit deny {workspace_path}/.jaato/agents/**             wlk,
-    audit deny {workspace_path}/.jaato/profiles/**           wlk,
+    "{workspace_path}/"   rw,
+    "{workspace_path}/**" rwkl,
+    audit deny "{workspace_path}/.jaato/agents/**"             wlk,
+    audit deny "{workspace_path}/.jaato/profiles/**"           wlk,
     # .jaato/prompts/ intentionally OMITTED from the write-denies (see base): the
     # confined runner needs write/unlink for savePrompt/deletePrompt. Accepted
     # posture tradeoff. agents/profiles/scripts/schemas stay protected.
-    audit deny {workspace_path}/.jaato/scripts/**            wlk,
-    audit deny {workspace_path}/.jaato/services/*/           wlk,
-    audit deny {workspace_path}/.jaato/reactors.json         wlk,
-    audit deny {workspace_path}/.jaato/completion_schemas/** wlk,
-    audit deny {workspace_path}/.jaato/spawn_schemas/**      wlk,
-    audit deny {workspace_path}/.jaato/instructions/**       wlk,
-    audit deny {workspace_path}/.jaato/references/**         wlk,
+    audit deny "{workspace_path}/.jaato/scripts/**"            wlk,
+    audit deny "{workspace_path}/.jaato/services/*/"           wlk,
+    audit deny "{workspace_path}/.jaato/reactors.json"         wlk,
+    audit deny "{workspace_path}/.jaato/completion_schemas/**" wlk,
+    audit deny "{workspace_path}/.jaato/spawn_schemas/**"      wlk,
+    audit deny "{workspace_path}/.jaato/instructions/**"       wlk,
+    audit deny "{workspace_path}/.jaato/references/**"         wlk,
     # Template catalog — governed content that becomes code at render
     # time (mirrors base, #893).  Runtime extraction writes to the
     # sibling ``.jaato/template_extracts/``, which is under no deny.
-    audit deny {workspace_path}/.jaato/templates/**          wlk,
+    audit deny "{workspace_path}/.jaato/templates/**"          wlk,
     # Routing table for rendered output (mirrors base, #893).
-    audit deny {workspace_path}/.jaato/template_routing.yaml wlk,
+    audit deny "{workspace_path}/.jaato/template_routing.yaml" wlk,
     # Predefined plans (#1195) — a profile's
     # ``plugin_configs.todo.initial_plan_name`` loads one as the
     # session's active plan.  Authored, like the profile naming it:
     # an agent that could rewrite the plan would rewrite the task it
     # was given.  The todo plugin only READS it; progress is kept by
     # its storage backend, never under this directory.
-    audit deny {workspace_path}/.jaato/plans/**              wlk,
+    audit deny "{workspace_path}/.jaato/plans/**"              wlk,
     # Workspace-tier AppArmor fragments — privilege-escalation guard
     # (mirrors base; a //child subprocess could otherwise plant
     # rules for the next session's profile).
-    audit deny {workspace_path}/.jaato/apparmor-fragments/** wlk,
+    audit deny "{workspace_path}/.jaato/apparmor-fragments/**" wlk,
 
     # ---- tool_hat-style read-denies (mirrors tool_hat) ----
     # Same information-isolation as the in-process tool_hat: a
     # subprocess can't read other agents' personas, profile JSON,
     # prompts, schemas, instructions, scripts, or reactors.json.
-    audit deny {workspace_path}/.jaato/agents/**             r,
-    audit deny {workspace_path}/.jaato/profiles/**           r,
-    audit deny {workspace_path}/.jaato/prompts/**            r,
-    audit deny {workspace_path}/.jaato/scripts/**            r,
-    audit deny {workspace_path}/.jaato/completion_schemas/** r,
-    audit deny {workspace_path}/.jaato/spawn_schemas/**      r,
-    audit deny {workspace_path}/.jaato/instructions/**       r,
-    audit deny {workspace_path}/.jaato/reactors.json         r,
+    audit deny "{workspace_path}/.jaato/agents/**"             r,
+    audit deny "{workspace_path}/.jaato/profiles/**"           r,
+    audit deny "{workspace_path}/.jaato/prompts/**"            r,
+    audit deny "{workspace_path}/.jaato/scripts/**"            r,
+    audit deny "{workspace_path}/.jaato/completion_schemas/**" r,
+    audit deny "{workspace_path}/.jaato/spawn_schemas/**"      r,
+    audit deny "{workspace_path}/.jaato/instructions/**"       r,
+    audit deny "{workspace_path}/.jaato/reactors.json"         r,
 
     # ---- shared read-only resources (mirrors tool_hat) ----
     {self._venv_path}/           r,
