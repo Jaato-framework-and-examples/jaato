@@ -16,6 +16,15 @@
  * refusal is what actually bounds a fetch.
  */
 
+/**
+ * True for a path the Files panel viewer RENDERS rather than shows as
+ * text: a markdown document or an image.  What the tool row's ``view``
+ * button is offered for (``viewablePathsForCall``).
+ */
+export function isRenderedPath(path: string): boolean {
+  return isMarkdownPath(path) || imageMimeFor(path) !== null;
+}
+
 /** File extensions the viewer renders as markdown. */
 const MARKDOWN_EXT = /\.(md|markdown|mdown|mkd|mdx)$/i;
 

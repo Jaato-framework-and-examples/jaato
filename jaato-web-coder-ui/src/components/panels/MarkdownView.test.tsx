@@ -13,6 +13,18 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import MarkdownView from "./MarkdownView";
 
+// mermaid needs a real layout engine (jsdom has no getBBox); the e2e suite
+// draws a real diagram.  Here the module is replaced so the test sees what
+// the view hands it and what it does with the answer.
+const mermaidMock = vi.hoisted(() => ({
+  initialize: vi.fn(),
+  render: vi.fn(async (_id: string, src: string) => {
+    if (src.includes("bogus")) throw new Error("Parse error on line 1");
+    return { svg: `<svg xmlns="http://www.w3.org/2000/svg"><text>${src}</text></svg>` };
+  }),
+}));
+vi.mock("mermaid", () => ({ default: mermaidMock }));
+
 afterEach(cleanup);
 
 const noFetch = () => Promise.resolve(null);
@@ -76,11 +88,15 @@ describe("MarkdownView refuses what a document should not do", () => {
     expect(a.getAttribute("rel")).toContain("noopener");
   });
 
-  it("does not load a remote image, and offers it as a link instead", () => {
+  it("does not load a remote image until asked, then loads every one without a referrer", () => {
     const fetchFile = vi.fn(noFetch);
-    const { container } = view("![logo](https://tracker.example/p.png)", { fetchFile });
+    const { container } = view("![logo](https://tracker.example/p.png)\n\n![badge](https://ci.example/b.svg)", { fetchFile });
     expect(container.querySelector("img")).toBeNull();
-    expect(screen.getByRole("link", { name: /remote image: logo/ })).toHaveAttribute("href", "https://tracker.example/p.png");
+    expect(screen.getByText(/remote image: logo · tracker\.example/)).toBeInTheDocument();
+    fireEvent.click(screen.getAllByRole("button", { name: "load remote images" })[0]!);
+    const imgs = screen.getAllByRole("img");
+    expect(imgs.map((i) => i.getAttribute("src"))).toEqual(["https://tracker.example/p.png", "https://ci.example/b.svg"]);
+    for (const i of imgs) expect(i).toHaveAttribute("referrerpolicy", "no-referrer");
     expect(fetchFile).not.toHaveBeenCalled();
   });
 });
@@ -105,9 +121,64 @@ describe("MarkdownView resolves workspace references through the daemon", () => 
     expect(revokeObjectURL).toHaveBeenCalledWith("blob:fake");
   });
 
+  it("clicking a relative image opens it in the viewer", async () => {
+    Object.assign(URL, { createObjectURL: vi.fn(() => "blob:fake"), revokeObjectURL: vi.fn() });
+    const onOpen = vi.fn();
+    view("![diagram](img/arch.png)", { onOpen, fetchFile: () => Promise.resolve(new Uint8Array([1])) });
+    fireEvent.click(await screen.findByRole("button", { name: "Open diagram in the image viewer" }));
+    expect(onOpen).toHaveBeenCalledWith("docs/img/arch.png");
+  });
+
   it("a relative image the daemon refuses is named, not shown broken", async () => {
     view("![secret](../../etc/x.png) ![gone](missing.png)");
     expect(await screen.findByText("[image: gone]")).toBeInTheDocument();
     expect(screen.getByText("[image: secret]")).toBeInTheDocument();
+  });
+});
+
+describe("MarkdownView draws mermaid fences", () => {
+  it("renders a mermaid fence as an image, with mermaid's strict security level", async () => {
+    Object.assign(URL, { createObjectURL: vi.fn(() => "blob:diagram"), revokeObjectURL: vi.fn() });
+    const { container } = view("```mermaid\ngraph TD; A-->B\n```");
+    const img = await screen.findByRole("img", { name: "Mermaid diagram" });
+    expect(img).toHaveAttribute("src", "blob:diagram");
+    // The SVG is never inserted as markup: no <svg> in the document.
+    expect(container.querySelector("svg")).toBeNull();
+    expect(mermaidMock.initialize).toHaveBeenCalledWith(expect.objectContaining({ securityLevel: "strict", htmlLabels: false }));
+    expect(mermaidMock.render).toHaveBeenCalledWith(expect.any(String), "graph TD; A-->B\n");
+  });
+
+  it("hands the drawn SVG to the viewer when the diagram is clicked", async () => {
+    Object.assign(URL, { createObjectURL: vi.fn(() => "blob:diagram"), revokeObjectURL: vi.fn() });
+    const onOpenDiagram = vi.fn();
+    view("```mermaid\ngraph TD; A-->B\n```", { onOpenDiagram });
+    fireEvent.click(await screen.findByRole("button", { name: "Open the diagram in the image viewer" }));
+    const [label, data, mime] = onOpenDiagram.mock.calls[0]!;
+    expect(label).toBe("diagram in docs/index.md");
+    expect(mime).toBe("image/svg+xml");
+    expect(new TextDecoder().decode(data as Uint8Array)).toContain("graph TD; A-->B");
+  });
+
+  it("shows the error and the source when the diagram does not parse", async () => {
+    view("```mermaid\nbogus diagram\n```");
+    expect(await screen.findByRole("alert")).toHaveTextContent("Parse error on line 1");
+    expect(screen.getByText("bogus diagram")).toBeInTheDocument();
+  });
+});
+
+describe("sizedSvg", () => {
+  it("gives the diagram the size mermaid drew it at, keeping the viewBox ratio", async () => {
+    const { sizedSvg } = await import("./MermaidDiagram");
+    const out = sizedSvg('<svg id="m" width="100%" style="max-width: 130px;" viewBox="0 0 130 260"><g/></svg>');
+    expect(out).toBe('<svg id="m" style="max-width: 130px;" viewBox="0 0 130 260" width="130" height="260"><g/></svg>');
+    expect(sizedSvg("<svg><g/></svg>")).toBe("<svg><g/></svg>");
+  });
+});
+
+describe("naturalWidthOf", () => {
+  it("reads the width mermaid drew at, and nothing from an SVG that states none", async () => {
+    const { naturalWidthOf } = await import("./MermaidDiagram");
+    expect(naturalWidthOf('<svg width="100%" style="max-width: 130.5px;" viewBox="0 0 130 300">')).toBe(131);
+    expect(naturalWidthOf("<svg viewBox='0 0 1 1'>")).toBeNull();
   });
 });
