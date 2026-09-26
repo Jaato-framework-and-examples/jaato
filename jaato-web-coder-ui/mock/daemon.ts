@@ -296,6 +296,7 @@ function sendWorkspaceSnapshot(c: Client): void {
 const MOCK_DOCS: Record<string, string> = {
   "docs/README.md": "# Project guide\n\nSee [the setup steps](SETUP.md) and [our site](https://example.com).\n\n| key | value |\n|-----|-------|\n| a | 1 |\n\n<script>window.__pwned = true</script>\n",
   "docs/SETUP.md": "## Setup\n\n- [x] install\n- [ ] configure\n",
+  "docs/ARCH.md": "# Architecture\n\n```mermaid\ngraph TD\n  Client --> Daemon\n  Daemon --> Runner\n```\n\n![build badge](https://img.example/badge.svg)\n",
 };
 
 /**
@@ -439,6 +440,12 @@ async function turn(c: Client, text: string, agentId = "main"): Promise<void> {
   } else if (lower.includes("write markdown docs")) {
     // Two linked markdown documents, for the Files panel's markdown view.
     // Their content is ``MOCK_DOCS`` below (``answerFileFetch``).
+    // The last one is also written through a ``writeNewFile`` call, so the
+    // tool row offers its ``view`` button.
+    const callId = randomUUID();
+    const content = MOCK_DOCS["docs/ARCH.md"]!;
+    send(c, { type: "tool.call_start", agent_id: agentId, tool_name: "writeNewFile", tool_args: { path: "docs/ARCH.md", content }, call_id: callId });
+    send(c, { type: "tool.call_end", agent_id: agentId, tool_name: "writeNewFile", call_id: callId, success: true, duration_seconds: 0.02, show_output: false, path: "docs/ARCH.md" });
     emitWorkspaceChanges(c, Object.keys(MOCK_DOCS).map((path) => ({ path, status: "created" })));
     await stream(c, agentId, "Wrote the docs.");
   } else if (lower.includes("diag refuse")) {

@@ -23,6 +23,8 @@
  * since the daemon already sent the whole (capped) text.
  */
 
+import { isMarkdownPath, resolveWorkspacePath } from "./workspacePaths";
+
 const MAX_PREVIEW_LINES = 6;
 const MAX_PREVIEW_CHARS = 480;
 
@@ -146,4 +148,65 @@ export function execTitle(toolName: string, args: Record<string, unknown>): stri
   const text = args.text;
   if (typeof text === "string" && text.trim()) return text;
   return toolName;
+}
+
+/**
+ * The markdown files a successful ``file_edit`` call left on disk, for the
+ * tool row's ``view`` button (the Files panel's rendered markdown viewer).
+ *
+ * Read from the call's own arguments, plus ``serverPath`` -- the path the
+ * daemon reported on ``tool.call_end`` -- when there is one:
+ *
+ * - ``writeNewFile`` / ``updateFile`` / ``restoreFile`` / ``undoFileChange``: ``path``.
+ * - ``moveFile`` / ``renameFile``: ``destination_path`` (the source is gone).
+ * - ``multiFileEdit``: every ``edit`` / ``create`` operation's ``path`` and
+ *   every ``rename``'s ``to``; a ``delete`` leaves nothing to view.
+ *
+ * An absolute path counts when it lies under ``workspaceRoot`` (the
+ * session's ``workspace_path``) and is made relative to it.
+ *
+ * ``removeFile`` yields nothing, and so does any other tool.  Order is
+ * first-seen, normalised (``./a.md`` is ``a.md``), duplicates dropped; an
+ * absolute path or one that climbs out of the workspace is not offered.
+ */
+export function markdownPathsForCall(toolName: string, args: Record<string, unknown>, serverPath?: string | null, workspaceRoot?: string | null): string[] {
+  const out: string[] = [];
+  const root = workspaceRoot ? workspaceRoot.replace(/\/+$/, "") + "/" : null;
+  const add = (p: unknown) => {
+    if (typeof p !== "string" || !isMarkdownPath(p)) return;
+    let rel = p;
+    if (rel.startsWith("/")) {
+      // An absolute path is offered only when it lies under the session's
+      // own workspace; anything else is not a workspace-relative file.
+      if (!root || !rel.startsWith(root)) return;
+      rel = rel.slice(root.length);
+    }
+    const norm = resolveWorkspacePath(rel, ""); // ``./a.md`` and ``a.md`` are one file
+    if (norm && !out.includes(norm)) out.push(norm);
+  };
+  switch (toolName) {
+    case "writeNewFile":
+    case "updateFile":
+    case "restoreFile":
+    case "undoFileChange":
+      add(serverPath);
+      add(args.path);
+      break;
+    case "moveFile":
+    case "renameFile":
+      add(args.destination_path);
+      break;
+    case "multiFileEdit":
+      if (Array.isArray(args.operations)) {
+        for (const op of args.operations as Record<string, unknown>[]) {
+          if (!op || typeof op !== "object") continue;
+          if (op.action === "rename") add(op.to);
+          else if (op.action === "edit" || op.action === "create") add(op.path);
+        }
+      }
+      break;
+    default:
+      break;
+  }
+  return out;
 }

@@ -33,7 +33,8 @@
  *   A markdown file is RENDERED (``MarkdownView``, lazily loaded) with a
  *   ``raw`` toggle; its relative links open the linked file in the same
  *   viewer, with ``back`` to return, and its relative images are fetched
- *   through the same daemon verb.
+ *   through the same daemon verb.  A tool row that wrote a markdown file
+ *   opens it here too (``viewWorkspaceFile`` → ``workspaceViewRequest``).
  * - **collapse** (TUI Left/Right): the arrow in front of a directory folds
  *   it to one line carrying how many files it holds.  Every directory
  *   starts expanded and a reset expands them all again, as in the TUI.
@@ -53,7 +54,7 @@
  * the hidden set (the ``scrub_secret_env`` ``!NAME`` idiom), which is
  * removed again by unhiding it a second time (back to default-hidden).
  */
-import { lazy, Suspense, useMemo, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useState } from "react";
 import { useJaato } from "@/store/store";
 import { toggleWorkspaceIgnore } from "@/app/actions";
 import { visibleFiles } from "@/store/workspaceView";
@@ -287,7 +288,7 @@ function FileContentViewer({ state, onClose, onOpen, onBack }: { state: ViewerSt
       {rendered && (
         <div className={`px-3 py-2 ${height} overflow-auto`}>
           <Suspense fallback={<div className="text-[12px] text-text-muted italic">Rendering…</div>}>
-            <MarkdownView source={state.text ?? ""} path={state.path} fetchFile={fetchWorkspaceBytes} onOpen={onOpen} />
+            <MarkdownView key={state.path} source={state.text ?? ""} path={state.path} fetchFile={fetchWorkspaceBytes} onOpen={onOpen} />
           </Suspense>
         </div>
       )}
@@ -361,6 +362,17 @@ export function WorkspacePanel() {
       }
     })();
   };
+  // A tool row's ``view`` (``viewWorkspaceFile``) asks from outside the
+  // panel; the request waits in the store if the panel was closed.
+  const viewRequest = useJaato((s) => s.workspaceViewRequest);
+  const clearViewRequest = useJaato((s) => s.clearWorkspaceViewRequest);
+  useEffect(() => {
+    if (!viewRequest) return;
+    clearViewRequest();
+    openFile(viewRequest.path);
+    // ``openFile`` is recreated every render and reads nothing stale.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [viewRequest, clearViewRequest]);
   // A link followed inside a rendered document keeps the trail; the tree's
   // own ``view`` starts a new one.
   const followLink = (path: string) => { if (viewer) openFile(path, [...viewer.back, viewer.path]); };

@@ -229,6 +229,16 @@ export interface JaatoState {
   workspaceIgnored: Record<string, boolean>;
   /** One-line outcome of the last ``.gitignore`` toggle, shown in the panel. */
   workspaceNotice: { text: string; error?: boolean } | null;
+  /**
+   * A request, from outside the Files panel, to open ``path`` in its
+   * content viewer -- set by ``viewWorkspaceFile`` (a tool row's ``view``
+   * button) and cleared by the panel once it has opened the file.  Kept in
+   * the store rather than handed to the panel because the panel is mounted
+   * only while it is the rail's active section: a request made while it is
+   * closed is picked up when it mounts.  ``nonce`` makes a second request
+   * for the same path a new request.
+   */
+  workspaceViewRequest: { path: string; nonce: number } | null;
   /** Files attached from the browser, in the order they were picked (see ``StagedUpload``). */
   uploads: StagedUpload[];
   /** ``PermissionStatusEvent``: the effective default policy and, when suspended, the scope. */
@@ -389,6 +399,10 @@ export interface JaatoState {
   /** Drop the reset point and show every file the session changed. */
   showAllWorkspace: () => void;
   setWorkspaceNotice: (n: JaatoState["workspaceNotice"]) => void;
+  /** Open the rail's Files panel (not a toggle) and show ``path`` in its content viewer. */
+  viewWorkspaceFile: (path: string) => void;
+  /** The Files panel acknowledges ``workspaceViewRequest``. */
+  clearWorkspaceViewRequest: () => void;
   /** The workspace SCREEN's status line (``workspace.notice``), as opposed to the Files panel's above. */
   setWorkspaceListNotice: (n: JaatoState["workspace"]["notice"]) => void;
   setTheme: (t: string) => void;
@@ -438,6 +452,7 @@ const emptySessionState = () => ({
   workspaceCollapsed: [] as string[],
   workspaceIgnored: {} as Record<string, boolean>,
   workspaceNotice: null as { text: string; error?: boolean } | null,
+  workspaceViewRequest: null as { path: string; nonce: number } | null,
   permissionStatus: null,
   busySince: {} as Record<string, number>,
   exitChoice: null as ExitChoice | null,
@@ -1374,6 +1389,11 @@ export const useJaato = create<JaatoState>()((set, get) => ({
   resetWorkspaceView: () => set((st) => ({ workspaceReset: markReset({ epoch: st.workspaceEpoch, seq: st.workspaceSeq }), workspaceCollapsed: [], workspaceNotice: null })),
   showAllWorkspace: () => set(() => ({ workspaceReset: null, workspaceNotice: null })),
   setWorkspaceNotice: (n) => set(() => ({ workspaceNotice: n })),
+  viewWorkspaceFile: (path) => set((st) => ({
+    ui: { ...st.ui, activePanel: "files" },
+    workspaceViewRequest: { path, nonce: (st.workspaceViewRequest?.nonce ?? 0) + 1 },
+  })),
+  clearWorkspaceViewRequest: () => set(() => ({ workspaceViewRequest: null })),
   setWorkspaceListNotice: (n) => set((st) => ({ workspace: { ...st.workspace, notice: n } })),
   setTheme: (theme) => set((st) => ({ ui: { ...st.ui, theme } })),
   setPopup: (callId) => set((st) => ({ ui: { ...st.ui, popupCallId: callId } })),

@@ -11,6 +11,10 @@
  * file the agent wrote cannot inject markup into the page; the viewer's
  * raw mode still shows it as text.
  *
+ * A ```` ```mermaid ```` fence is drawn as a diagram by ``MermaidDiagram``
+ * (which loads mermaid itself, on the first diagram, and shows the result
+ * as an image).
+ *
  * **Every URL goes through ``classifyReference``** (``protocol/workspacePaths``):
  *
  * - ``http(s):`` / ``mailto:`` links open in a new tab, ``noopener``.
@@ -22,9 +26,14 @@
  * - A relative IMAGE is fetched through ``fetchFile`` -- the daemon's
  *   ``workspace.file.fetch``, which applies containment and the credential
  *   rule -- and shown from a blob URL that is revoked when the image
- *   unmounts.  A REMOTE image is not loaded: fetching it would tell a third
- *   party that this document was opened (the tracking-pixel shape), so it
- *   renders as a link the user may choose to follow.
+ *   unmounts.  A REMOTE image is not loaded by default: fetching it would
+ *   tell a third party that this document was opened (the tracking-pixel
+ *   shape), so it renders as a placeholder naming its host, with a
+ *   ``load remote images`` button.  That button is PER DOCUMENT and lasts
+ *   while the document is on screen (``key`` it by path to reset it); once
+ *   pressed, every remote image in the document loads, with
+ *   ``referrerPolicy="no-referrer"`` so the host is not told which page
+ *   asked.
  * - Every other scheme (``javascript:``, ``data:``, ``file:``, ...) renders
  *   as plain text.
  */
@@ -32,7 +41,9 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import Markdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeSlug from "rehype-slug";
+import type { Element } from "hast";
 import rehypeFenceHighlight from "./rehypeFenceHighlight";
+import { MermaidDiagram } from "./MermaidDiagram";
 import { classifyReference, imageMimeFor } from "@/protocol/workspacePaths";
 
 /** Prefix on every heading id this view generates. */
@@ -47,6 +58,35 @@ export interface MarkdownViewProps {
   fetchFile: (path: string) => Promise<Uint8Array | null>;
   /** Open another workspace file in the viewer (a relative link was clicked). */
   onOpen: (path: string) => void;
+}
+
+/**
+ * The source of a ```` ```mermaid ```` fence, when ``pre`` is one, else
+ * ``null``.  Read off the hast node rather than the rendered children:
+ * ``rehypeFenceHighlight`` leaves an unregistered language's text alone,
+ * so the code element's children are the fence's text verbatim.
+ */
+function mermaidSource(pre: Element | undefined): string | null {
+  const code = pre?.children.find((c): c is Element => c.type === "element" && c.tagName === "code");
+  const cls: unknown = code?.properties?.className;
+  if (!code || !Array.isArray(cls) || !cls.includes("language-mermaid")) return null;
+  return code.children.map((c) => (c.type === "text" ? c.value : "")).join("");
+}
+
+function hostOf(href: string): string {
+  try { return new URL(href).host; } catch { return href; }
+}
+
+function RemoteImage({ href, alt, allowed, onAllow }: { href: string; alt: string; allowed: boolean; onAllow: () => void }) {
+  if (allowed) return <img src={href} alt={alt} title={href} className="md-img" referrerPolicy="no-referrer" loading="lazy" />;
+  return (
+    <span className="md-img-missing">
+      [remote image: {alt || href} · {hostOf(href)}]{" "}
+      <button type="button" className="link not-italic text-[11px]" onClick={onAllow} title="Fetch every remote image in this document from its host">
+        load remote images
+      </button>
+    </span>
+  );
 }
 
 function WorkspaceImage({ path, alt, fetchFile }: { path: string; alt: string; fetchFile: MarkdownViewProps["fetchFile"] }) {
@@ -74,6 +114,7 @@ function WorkspaceImage({ path, alt, fetchFile }: { path: string; alt: string; f
 
 export default function MarkdownView({ source, path, fetchFile, onOpen }: MarkdownViewProps) {
   const root = useRef<HTMLDivElement>(null);
+  const [remoteAllowed, setRemoteAllowed] = useState(false);
 
   const scrollToAnchor = (fragment: string) => {
     let id = fragment;
@@ -103,15 +144,17 @@ export default function MarkdownView({ source, path, fetchFile, onOpen }: Markdo
     img({ src, alt }) {
       const ref = classifyReference(typeof src === "string" ? src : "", path);
       if (ref.kind === "workspace") return <WorkspaceImage path={ref.path} alt={alt ?? ""} fetchFile={fetchFile} />;
-      if (ref.kind === "external") {
-        return <a href={ref.href} target="_blank" rel="noopener noreferrer" className="md-img-missing" title="Remote images are not loaded automatically">[remote image: {alt || ref.href}]</a>;
+      if (ref.kind === "external" && !ref.href.toLowerCase().startsWith("mailto:")) {
+        return <RemoteImage href={ref.href} alt={alt ?? ""} allowed={remoteAllowed} onAllow={() => setRemoteAllowed(true)} />;
       }
       return <span className="md-img-missing">[image: {alt || "blocked"}]</span>;
     },
     table({ children }): ReactNode {
       return <div className="overflow-x-auto"><table className="j-table">{children}</table></div>;
     },
-    pre({ children }) {
+    pre({ node, children }) {
+      const mermaid = mermaidSource(node);
+      if (mermaid !== null) return <MermaidDiagram source={mermaid} />;
       return <pre className="code-block plate plate-ground p-2.5 my-1.5 overflow-x-auto whitespace-pre">{children}</pre>;
     },
     code({ className, children }) {

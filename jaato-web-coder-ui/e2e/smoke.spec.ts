@@ -1484,3 +1484,33 @@ test("files panel: a markdown file is rendered, raw on request, and its relative
   await viewer.getByRole("button", { name: "Back to docs/README.md" }).click();
   await expect(viewer.getByRole("heading", { name: "Project guide" })).toBeVisible();
 });
+
+test("markdown extras: a tool row opens the written file, mermaid is drawn, remote images wait to be asked", async ({ page }) => {
+  let remoteHits = 0;
+  await page.route("https://img.example/**", (route) => {
+    remoteHits += 1;
+    return route.fulfill({ contentType: "image/svg+xml", body: '<svg xmlns="http://www.w3.org/2000/svg" width="40" height="10"/>' });
+  });
+  await openSession(page);
+  await composer(page).fill("write markdown docs");
+  await composer(page).press("Enter");
+  await expect(page.getByText("Wrote the docs.")).toBeVisible();
+
+  // The writeNewFile row offers the rendered view; it opens the Files panel on it.
+  await page.getByRole("button", { name: "View docs/ARCH.md rendered" }).click();
+  const viewer = page.getByRole("region", { name: "Files" }).getByTestId("file-viewer");
+  await expect(viewer.getByRole("heading", { name: "Architecture" })).toBeVisible();
+
+  // The mermaid fence is drawn (a real mermaid render in Chromium) as an image.
+  const diagram = viewer.getByRole("img", { name: "Mermaid diagram" });
+  await expect(diagram).toBeVisible({ timeout: 15_000 });
+  expect(await diagram.evaluate((img: HTMLImageElement) => img.naturalWidth)).toBeGreaterThan(0);
+  expect(await viewer.locator("svg").count()).toBe(0);
+
+  // The remote image is not fetched until asked.
+  await expect(viewer.getByText(/remote image: build badge · img\.example/)).toBeVisible();
+  expect(remoteHits).toBe(0);
+  await viewer.getByRole("button", { name: "load remote images" }).click();
+  await expect(viewer.getByRole("img", { name: "build badge" })).toBeVisible();
+  expect(remoteHits).toBe(1);
+});
