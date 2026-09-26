@@ -245,6 +245,31 @@ button, input, select, textarea { border-radius: 0; font-family: inherit; }
 
 .code-block { font-family: var(--font-mono); font-size: 12.5px; line-height: 1.5; }
 
+/* A rendered workspace markdown file (panels/MarkdownView.tsx) rides the
+   transcript's .prose-j rules, sized down for the rail, plus the pieces
+   only a whole document has: images, task lists, fenced code highlighted
+   by rehype-highlight (hljs-* classes, mapped onto the tok-* palette). */
+.md-doc { font-size: 13px; max-width: none; }
+.md-doc h1 { font-size: 1.35rem; } .md-doc h2 { font-size: 1.18rem; } .md-doc h3 { font-size: 1.05rem; }
+.md-doc h1, .md-doc h2 { border-bottom: 1px solid var(--c-divider); padding-bottom: 0.15rem; }
+.md-doc pre code.inline { border: 0; padding: 0; font-size: inherit; }
+.md-doc .md-img { max-width: 100%; height: auto; margin: 0.4rem 0; }
+.md-doc .md-img-missing { color: var(--c-text-muted); font-style: italic; }
+.md-doc .md-link-blocked { color: var(--c-text-muted); text-decoration: line-through; }
+.md-doc ul.contains-task-list { list-style: none; margin-left: 0.4rem; }
+.md-doc li.task-list-item input { margin-right: 0.4rem; vertical-align: middle; }
+.md-doc del { color: var(--c-text-muted); }
+.hljs-keyword, .hljs-selector-tag, .hljs-literal { color: var(--c-steel); font-weight: 600; }
+.hljs-string, .hljs-regexp, .hljs-addition, .hljs-attribute { color: var(--c-success); }
+.hljs-number, .hljs-symbol, .hljs-variable, .hljs-template-variable { color: var(--c-warning); }
+.hljs-title, .hljs-title.function_, .hljs-section { color: var(--c-success); }
+.hljs-built_in, .hljs-type, .hljs-title.class_, .hljs-meta { color: var(--c-accent); }
+.hljs-comment, .hljs-quote { color: var(--c-muted); font-style: italic; }
+.hljs-deletion { color: var(--c-error); }
+.hljs-tag, .hljs-name { color: var(--c-steel); }
+.hljs-attr, .hljs-property { color: var(--c-text); }
+.hljs-punctuation, .hljs-operator { color: var(--c-text-muted); }
+
 /* Notebook cells (<nb-row>, #1193): one grid per cell so the In/Out/Err
    labels line up in one column, as the TUI draws them.  A row is
    ``display: contents`` so its label and body are the grid's own items. */

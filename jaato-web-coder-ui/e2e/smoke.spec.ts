@@ -1455,3 +1455,32 @@ test("at 375px the session screen does not overflow horizontally (#1304 §8)", a
   }));
   expect(docW).toBe(winW);
 });
+
+test("files panel: a markdown file is rendered, raw on request, and its relative links open in the viewer", async ({ page }) => {
+  await openSession(page);
+  await composer(page).fill("write markdown docs");
+  await composer(page).press("Enter");
+  await expect(page.getByText("Wrote the docs.")).toBeVisible();
+  await page.getByRole("button", { name: "Open Files" }).click();
+  const panel = page.getByRole("region", { name: "Files" });
+  await panel.getByRole("button", { name: "View docs/README.md", exact: true }).click();
+
+  const viewer = panel.getByTestId("file-viewer");
+  await expect(viewer.getByRole("heading", { name: "Project guide" })).toBeVisible();
+  await expect(viewer.getByRole("table")).toBeVisible();
+  await expect(viewer.getByRole("link", { name: "our site" })).toHaveAttribute("target", "_blank");
+  // The document's raw <script> is dropped, never executed.
+  expect(await page.evaluate(() => (window as unknown as { __pwned?: boolean }).__pwned)).toBeUndefined();
+
+  // raw shows the markdown as written; rendered goes back.
+  await viewer.getByRole("button", { name: "raw" }).click();
+  await expect(viewer.getByText("# Project guide", { exact: false })).toBeVisible();
+  await viewer.getByRole("button", { name: "rendered" }).click();
+
+  // A relative link opens the linked file in the same viewer; back returns.
+  await viewer.getByRole("link", { name: "the setup steps" }).click();
+  await expect(viewer.getByRole("heading", { name: "Setup" })).toBeVisible();
+  await expect(viewer.getByRole("checkbox")).toHaveCount(2);
+  await viewer.getByRole("button", { name: "Back to docs/README.md" }).click();
+  await expect(viewer.getByRole("heading", { name: "Project guide" })).toBeVisible();
+});
