@@ -319,7 +319,8 @@ Details:
   privilege dropping is the #1168 follow-up.
 - **Other forges.** Nothing here is GitHub-specific in the daemon: `app://<name>`
   resolves whatever the application answers for `<name>`. GitLab or a package
-  registry token is a BFF-side addition.
+  registry token is a BFF-side addition. [Forge Plugins for the Web Coder](forge-plugins.md)
+  proposes how.
 
 ## 10. Open questions
 
