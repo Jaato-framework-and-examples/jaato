@@ -341,8 +341,8 @@ class TestRenderSubProfile:
             subagent_id="agent-1",
             workspace_path="/workspace",
         )
-        assert "/workspace/   rw," in body
-        assert "/workspace/** rwkl," in body
+        assert '"/workspace/"   rw,' in body
+        assert '"/workspace/**" rwkl,' in body
 
     def test_integrity_denies_present(self, manager):
         body = manager._render_sub_profile(
@@ -351,9 +351,9 @@ class TestRenderSubProfile:
             workspace_path="/workspace",
         )
         # Mirror parent base — write-denies on .jaato/agents/**, etc.
-        assert "audit deny /workspace/.jaato/agents/**" in body
-        assert "audit deny /workspace/.jaato/profiles/**" in body
-        assert "audit deny /workspace/.jaato/reactors.json" in body
+        assert 'audit deny "/workspace/.jaato/agents/**"' in body
+        assert 'audit deny "/workspace/.jaato/profiles/**"' in body
+        assert 'audit deny "/workspace/.jaato/reactors.json"' in body
 
     def test_read_denies_present(self, manager):
         """Read-denies mirror parent's tool_hat — information-isolation
@@ -363,8 +363,8 @@ class TestRenderSubProfile:
             subagent_id="agent-1",
             workspace_path="/workspace",
         )
-        assert "audit deny /workspace/.jaato/agents/**             r," in body
-        assert "audit deny /workspace/.jaato/profiles/**           r," in body
+        assert 'audit deny "/workspace/.jaato/agents/**"             r,' in body
+        assert 'audit deny "/workspace/.jaato/profiles/**"           r,' in body
 
     def test_no_tool_hat_subprofile_nested(self, manager):
         """Audit 6: flat profile — no further nesting."""
@@ -464,11 +464,11 @@ class TestSubProfileTighteningsRender:
             tightenings={"isolated_workspace_subpath": "scratch"},
         )
         # New scoped allow MUST be present.
-        assert "/workspace/scratch/   rw," in body
-        assert "/workspace/scratch/** rwkl," in body
+        assert '"/workspace/scratch/"   rw,' in body
+        assert '"/workspace/scratch/**" rwkl,' in body
         # Default broader allow MUST be absent.
-        assert "/workspace/   rw," not in body
-        assert "/workspace/** rwkl," not in body
+        assert '"/workspace/"   rw,' not in body
+        assert '"/workspace/**" rwkl,' not in body
 
     def test_workspace_subpath_with_nested_dir(self, manager):
         """Pin: subpath with internal ``/`` is rendered
@@ -482,8 +482,8 @@ class TestSubProfileTighteningsRender:
                 "isolated_workspace_subpath": "scratch/agent-1",
             },
         )
-        assert "/workspace/scratch/agent-1/   rw," in body
-        assert "/workspace/scratch/agent-1/** rwkl," in body
+        assert '"/workspace/scratch/agent-1/"   rw,' in body
+        assert '"/workspace/scratch/agent-1/**" rwkl,' in body
 
     def test_read_only_workspace_downgrades_perms(self, manager):
         """Pin: ``isolated_read_only_workspace: True`` downgrades
@@ -497,11 +497,11 @@ class TestSubProfileTighteningsRender:
             tightenings={"isolated_read_only_workspace": True},
         )
         # Workspace allow rules — read-only forms present.
-        assert "/workspace/   r," in body
-        assert "/workspace/** r," in body
+        assert '"/workspace/"   r,' in body
+        assert '"/workspace/**" r,' in body
         # Default write forms absent.
-        assert "/workspace/   rw," not in body
-        assert "/workspace/** rwkl," not in body
+        assert '"/workspace/"   rw,' not in body
+        assert '"/workspace/**" rwkl,' not in body
 
     def test_combined_subpath_plus_read_only(self, manager):
         """Pin: subpath + read-only compose — read-only allow
@@ -516,12 +516,12 @@ class TestSubProfileTighteningsRender:
                 "isolated_read_only_workspace": True,
             },
         )
-        assert "/workspace/scratch/   r," in body
-        assert "/workspace/scratch/** r," in body
+        assert '"/workspace/scratch/"   r,' in body
+        assert '"/workspace/scratch/**" r,' in body
         # No other workspace allows at all.
-        assert "/workspace/   rw," not in body
-        assert "/workspace/   r,\n" not in body  # bare workspace
-        assert "/workspace/** rwkl," not in body
+        assert '"/workspace/"   rw,' not in body
+        assert '"/workspace/"   r,\n' not in body  # bare workspace
+        assert '"/workspace/**" rwkl,' not in body
 
     def test_tightenings_do_not_erode_integrity_denies(self, manager):
         """Pin: integrity-deny block on ``.jaato/**`` is
@@ -538,9 +538,9 @@ class TestSubProfileTighteningsRender:
                 "isolated_read_only_workspace": True,
             },
         )
-        assert "audit deny /workspace/.jaato/agents/**" in body
-        assert "audit deny /workspace/.jaato/profiles/**" in body
-        assert "audit deny /workspace/.jaato/reactors.json" in body
+        assert 'audit deny "/workspace/.jaato/agents/**"' in body
+        assert 'audit deny "/workspace/.jaato/profiles/**"' in body
+        assert 'audit deny "/workspace/.jaato/reactors.json"' in body
 
     def test_tightenings_do_not_erode_drop_invariants(self, manager):
         """Pin: §4.3.4 + v15 + §5.10e DROP invariants stay
@@ -610,10 +610,10 @@ class TestProvisionSubProfileWithTightenings:
 
         # The tightening reached the rendered body: narrowed
         # allow + no default broader allow.
-        assert "/workspace/scratch/   rw," in content
-        assert "/workspace/scratch/** rwkl," in content
-        assert "/workspace/   rw," not in content
-        assert "/workspace/** rwkl," not in content
+        assert '"/workspace/scratch/"   rw,' in content
+        assert '"/workspace/scratch/**" rwkl,' in content
+        assert '"/workspace/"   rw,' not in content
+        assert '"/workspace/**" rwkl,' not in content
 
     def test_provision_default_tightenings_render_unchanged(
         self, manager, profile_dir,
@@ -634,5 +634,5 @@ class TestProvisionSubProfileWithTightenings:
 
         sub_path = profile_dir / "jaato-ws-sess-A__sub_agent-1"
         content = sub_path.read_text()
-        assert "/workspace/   rw," in content
-        assert "/workspace/** rwkl," in content
+        assert '"/workspace/"   rw,' in content
+        assert '"/workspace/**" rwkl,' in content

@@ -127,7 +127,7 @@ class TestRenderProfile:
         # No explicit deny on sessions_root — implicit deny is sufficient
         assert f"deny {sessions_root}" not in profile
         # Only the session's own workspace is allowed
-        assert "/workspace/** rwkl" in profile
+        assert '"/workspace/**" rwkl' in profile
 
     def test_profile_name_in_output(self, manager):
         profile = manager._render_profile("test_session", "/workspace")
@@ -391,7 +391,7 @@ class TestRenderProfile:
 
         # File-access denies untouched by the exec grant.
         for deny in (
-            "audit deny /workspace/.jaato/agents/**             wlk,",
+            'audit deny "/workspace/.jaato/agents/**"             wlk,',
             "audit deny /proc/*/environ            r,",
         ):
             assert deny in child_body, (
@@ -719,7 +719,7 @@ class TestRenderProfile:
         lock)."""
         # Base profile
         profile = manager._render_profile("s1", "/workspace")
-        assert "audit deny /workspace/.jaato/apparmor-fragments/** wlk" in profile, (
+        assert 'audit deny "/workspace/.jaato/apparmor-fragments/**" wlk' in profile, (
             "base profile missing apparmor-fragments write-deny"
         )
 
@@ -729,7 +729,7 @@ class TestRenderProfile:
             subagent_id="agent-B",
             workspace_path="/workspace",
         )
-        assert "audit deny /workspace/.jaato/apparmor-fragments/** wlk" in sub, (
+        assert 'audit deny "/workspace/.jaato/apparmor-fragments/**" wlk' in sub, (
             "isolated sub-profile missing apparmor-fragments write-deny"
         )
 
@@ -739,7 +739,7 @@ class TestRenderProfile:
                 profile, "profile tool_hat",
             )
             assert (
-                "audit deny /workspace/.jaato/apparmor-fragments/** wlk"
+                'audit deny "/workspace/.jaato/apparmor-fragments/**" wlk'
                 in tool_hat_body
             ), "tool_hat body missing apparmor-fragments write-deny"
 
@@ -749,7 +749,7 @@ class TestRenderProfile:
                 profile, "profile child",
             )
             assert (
-                "audit deny /workspace/.jaato/apparmor-fragments/** wlk"
+                'audit deny "/workspace/.jaato/apparmor-fragments/**" wlk'
                 in child_body
             ), "//child body missing apparmor-fragments write-deny"
 
@@ -770,7 +770,7 @@ class TestRenderProfile:
         """
         # Column-aligned in the template, so match the padding loosely.
         deny = re.compile(
-            r"audit deny /workspace/\.jaato/templates/\*\*\s+wlk,"
+            r'audit deny "/workspace/\.jaato/templates/\*\*"\s+wlk,'
         )
 
         # Base profile
@@ -820,7 +820,7 @@ class TestRenderProfile:
         shape.
         """
         deny = re.compile(
-            r"audit deny /workspace/\.jaato/template_routing\.yaml\s+wlk,"
+            r'audit deny "/workspace/\.jaato/template_routing\.yaml"\s+wlk,'
         )
         profile = manager._render_profile("s1", "/workspace")
         assert deny.search(profile), "base profile missing routing write-deny"
@@ -909,19 +909,19 @@ class TestRenderProfile:
         """
         profile = manager._render_profile("s1", "/workspace")
         # Workspace rw stays open
-        assert "/workspace/   rw" in profile
-        assert "/workspace/** rwkl" in profile
+        assert '"/workspace/"   rw' in profile
+        assert '"/workspace/**" rwkl' in profile
         # Narrow user-authored config denies (each gets w,l,k combined):
-        assert "audit deny /workspace/.jaato/agents/**" in profile
-        assert "audit deny /workspace/.jaato/profiles/**" in profile
-        assert "audit deny /workspace/.jaato/prompts/**" in profile
-        assert "audit deny /workspace/.jaato/scripts/**" in profile
-        assert "audit deny /workspace/.jaato/services/*/" in profile
-        assert "audit deny /workspace/.jaato/reactors.json" in profile
-        assert "audit deny /workspace/.jaato/completion_schemas/**" in profile
-        assert "audit deny /workspace/.jaato/spawn_schemas/**" in profile
-        assert "audit deny /workspace/.jaato/instructions/**" in profile
-        assert "audit deny /workspace/.jaato/references/**" in profile
+        assert 'audit deny "/workspace/.jaato/agents/**"' in profile
+        assert 'audit deny "/workspace/.jaato/profiles/**"' in profile
+        assert 'audit deny "/workspace/.jaato/prompts/**"' in profile
+        assert 'audit deny "/workspace/.jaato/scripts/**"' in profile
+        assert 'audit deny "/workspace/.jaato/services/*/"' in profile
+        assert 'audit deny "/workspace/.jaato/reactors.json"' in profile
+        assert 'audit deny "/workspace/.jaato/completion_schemas/**"' in profile
+        assert 'audit deny "/workspace/.jaato/spawn_schemas/**"' in profile
+        assert 'audit deny "/workspace/.jaato/instructions/**"' in profile
+        assert 'audit deny "/workspace/.jaato/references/**"' in profile
         # NO broad deny anymore — that's what was breaking carve-outs.
         assert "audit deny /workspace/.jaato/**  w" not in profile
 
@@ -940,10 +940,10 @@ class TestRenderProfile:
         base_body = profile.split("profile tool_hat")[0]
         # Base must NOT deny reads on user-authored config — reactor
         # dispatch, prefetch, and session-init all need them.
-        assert "audit deny /workspace/.jaato/agents/**             r" not in base_body
-        assert "audit deny /workspace/.jaato/profiles/**           r" not in base_body
+        assert 'audit deny "/workspace/.jaato/agents/**"             r' not in base_body
+        assert 'audit deny "/workspace/.jaato/profiles/**"           r' not in base_body
         # Reads flow through workspace rwkl.
-        assert "/workspace/** rwkl" in base_body
+        assert '"/workspace/**" rwkl' in base_body
 
     def test_template_version_bumped_to_13(self, manager):
         """v13 template ships the narrow per-subpath denies + tool_hat
@@ -1007,8 +1007,8 @@ class TestRenderProfile:
         # Sub-profile redeclares workspace allow (sub-profiles don't
         # inherit base rules).
         tool_hat_body = profile.split("profile tool_hat")[1]
-        assert "/workspace/   rw," in tool_hat_body
-        assert "/workspace/** rwkl," in tool_hat_body
+        assert '"/workspace/"   rw,' in tool_hat_body
+        assert '"/workspace/**" rwkl,' in tool_hat_body
 
     def test_tool_hat_adds_read_denies_on_user_authored_config(self, manager):
         """The whole point of the sub-profile: tool execution can't
@@ -1033,11 +1033,11 @@ class TestRenderProfile:
             "/workspace/.jaato/instructions/**",
             "/workspace/.jaato/reactors.json",
         ):
-            # Match ``audit deny <path>  ... r,`` with arbitrary
+            # Match ``audit deny "<path>"  ... r,`` with arbitrary
             # whitespace before the permission flag.
             pattern = (
                 r"audit\s+deny\s+"
-                + re.escape(path)
+                + re.escape(f'"{path}"')
                 + r"\s+r,"
             )
             assert re.search(pattern, tool_hat_body), (
@@ -1070,8 +1070,8 @@ class TestRenderProfile:
         assert "profile child" in profile
         child_body = profile.split("profile child")[1]
         # Mirrors tool_hat workspace allow.
-        assert "/workspace/   rw," in child_body
-        assert "/workspace/** rwkl," in child_body
+        assert '"/workspace/"   rw,' in child_body
+        assert '"/workspace/**" rwkl,' in child_body
 
     def test_child_subprofile_drops_escape_rules(self, manager):
         """The whole point of //child: the three escape-vector rules
@@ -1131,7 +1131,7 @@ class TestRenderProfile:
         ):
             pattern = (
                 r"audit\s+deny\s+"
-                + re.escape(path)
+                + re.escape(f'"{path}"')
                 + r"\s+r,"
             )
             assert re.search(pattern, child_body), (
@@ -2723,13 +2723,13 @@ class TestPromptLibraryPluginApparmorRules:
         """
         rendered = manager._render_profile("s1", "/workspace")
         # prompts is NO LONGER write-denied (the deliberate carve-out)...
-        assert "audit deny /workspace/.jaato/prompts/**            wlk," not in rendered
+        assert 'audit deny "/workspace/.jaato/prompts/**"            wlk,' not in rendered
         # ...but the sibling user-authored config dirs STILL are.
-        assert "audit deny /workspace/.jaato/agents/**             wlk," in rendered
-        assert "audit deny /workspace/.jaato/profiles/**           wlk," in rendered
-        assert "audit deny /workspace/.jaato/scripts/**            wlk," in rendered
+        assert 'audit deny "/workspace/.jaato/agents/**"             wlk,' in rendered
+        assert 'audit deny "/workspace/.jaato/profiles/**"           wlk,' in rendered
+        assert 'audit deny "/workspace/.jaato/scripts/**"            wlk,' in rendered
         # And the tool_hat READ-isolation deny on prompts is untouched.
-        assert "audit deny /workspace/.jaato/prompts/**            r," in rendered
+        assert 'audit deny "/workspace/.jaato/prompts/**"            r,' in rendered
 
     def test_rendered_profile_with_prompt_rules_compiles(self, manager, tmp_path):
         """The whole point of the fix: the profile carrying prompt_library's
@@ -2849,6 +2849,44 @@ class TestRenderedProfileCompiles:
         )
         profile = manager._render_profile("s1", "/workspace", plugin_rules=rules)
         self._assert_compiles(profile, tmp_path)
+
+    def test_workspace_path_with_space_compiles(self, manager, tmp_path):
+        """Regression pin for #1305: a workspace named with a space (as the
+        web client's create form accepts, e.g. "Claude UX Review") rendered
+        an UNQUOTED AppArmor path expression containing whitespace —
+        ``/root/.jaato/workspaces/Claude UX Review/** rwkl,`` — which
+        ``apparmor_parser`` cannot parse.  Every session in such a
+        workspace hit ``RunnerBootstrapFailed: AppArmor confinement
+        required but profile provisioning failed``.
+
+        The confinement ID (profile NAME) was already sanitised via
+        ``confinement_id.workspace_slug`` — this pins the OTHER string,
+        the real filesystem path embedded in the rule BODIES, which is
+        what actually broke.  Covers the base body, ``tool_hat`` and
+        ``//child`` in one compile, since ``_render_profile`` embeds all
+        three in its one returned string.
+
+        The path lives under ``tmp_path``, not ``/root``: rendering stats
+        ``<workspace>/.jaato/apparmor-fragments``, and a non-root runner
+        (CI) gets ``PermissionError`` on anything under ``/root``.
+        """
+        profile = manager._render_profile(
+            "s1", str(tmp_path / "workspaces" / "Claude UX Review"),
+        )
+        self._assert_compiles(profile, tmp_path)
+
+    def test_isolated_sub_profile_workspace_path_with_space_compiles(
+        self, manager, tmp_path,
+    ):
+        """Same regression as above, for the isolated sub-runner profile
+        (#1305) — a standalone profile parsed from its own file, so it
+        needs its own compile pin rather than riding the base test."""
+        sub = manager._render_sub_profile(
+            parent_session_id="parent-A",
+            subagent_id="agent-B",
+            workspace_path=str(tmp_path / "workspaces" / "Claude UX Review"),
+        )
+        self._assert_compiles(sub, tmp_path)
 
     def test_standalone_d_mode_is_rejected_by_parser(self, tmp_path):
         """Direct pin of the invalid token, independent of any plugin: the

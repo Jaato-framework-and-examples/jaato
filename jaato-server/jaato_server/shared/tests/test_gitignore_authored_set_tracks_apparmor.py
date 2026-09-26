@@ -46,7 +46,7 @@ REVERSIONS = [
     ),
 ]
 
-_DENY = re.compile(r"audit deny \{workspace_path\}/\.jaato/(\S+?)\s+wlk,")
+_DENY = re.compile(r'audit deny "?\{workspace_path\}/\.jaato/(\S+?)"?\s+wlk,')
 
 
 def _template_authored() -> set:
