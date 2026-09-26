@@ -29,6 +29,17 @@
  *   installation list kept beside the grant for display, and the noreply
  *   email seeded into the workspace ``.gitconfig``.
  *
+ * - ``listInstallationRepos`` — ``GET {api}/user/installations/{id}/repositories``
+ *   (paginated) under the user's access token: the repositories one App
+ *   installation lets this user reach, for the *New workspace* picker.
+ * - ``listBranches`` — ``GET {api}/repos/{owner}/{repo}/branches`` (paginated),
+ *   for the branch chooser beside each picked repository.
+ *
+ * The two listing calls follow ``Link: rel="next"`` only while it stays on the
+ * configured API origin (the bearer token is never sent anywhere else), and
+ * stop at a caller-supplied cap so one huge organisation cannot turn a picker
+ * refresh into hundreds of requests.
+ *
  * The secret NEVER travels to the browser through here: these are all
  * server-to-GitHub calls, driven by ``src/github.ts``, which hands only an
  * access token onward to the daemon over the authenticated bind channel.
@@ -71,6 +82,16 @@ export interface GitHubIdentity {
   installations: GitHubInstallation[];
 }
 
+/** One repository an installation lets the user reach (non-secret, for display). */
+export interface GitHubRepo {
+  /** ``owner/name``. */
+  fullName: string;
+  private: boolean;
+  defaultBranch: string;
+  /** ISO-8601 time of the last push, when GitHub reports one. */
+  pushedAt?: string;
+}
+
 export interface GitHubApi {
   /** The authorize URL the browser is redirected to (App user-to-server). */
   authorizeUrl(state: string, redirectUri: string): string;
@@ -80,6 +101,15 @@ export interface GitHubApi {
   /** Revoke the user's whole grant at GitHub (best-effort; a already-dead grant is not an error to the caller). */
   revokeGrant(accessToken: string): Promise<void>;
   fetchIdentity(accessToken: string): Promise<GitHubIdentity>;
+  /**
+   * Every repository installation ``installationId`` lets the token's user
+   * reach, following pagination up to ``maxItems``.  A 404 / 403 (an
+   * installation that was removed, or one this user no longer sees) is a
+   * {@link GitHubApiError}; a 401 is {@link GitHubGrantRevoked}.
+   */
+  listInstallationRepos(accessToken: string, installationId: number, maxItems: number): Promise<GitHubRepo[]>;
+  /** Branch names of ``owner/repo``, following pagination up to ``maxItems``. */
+  listBranches(accessToken: string, owner: string, repo: string, maxItems: number): Promise<string[]>;
   /** The git host to seed into ``.gitconfig`` (``github.com`` or the GHE host). */
   readonly gitHost: string;
 }
@@ -230,4 +260,74 @@ export class HttpGitHubApi implements GitHubApi {
     }
     return { login, id, name, noreplyEmail, installations };
   }
+
+  /**
+   * GET every page of a list endpoint, following ``Link: rel="next"`` while it
+   * stays on the configured API origin, until ``maxItems`` are collected.
+   * ``extract`` pulls the items out of one page's body.
+   */
+  private async _getPaged<T>(accessToken: string, path: string, maxItems: number, extract: (body: unknown) => T[]): Promise<T[]> {
+    const out: T[] = [];
+    const apiOrigin = new URL(this._api).origin;
+    let url: string | null = `${this._api}${path}`;
+    // A hard page bound as well as the item bound: a server that answers
+    // empty pages with a next link must not loop forever.
+    for (let page = 0; url && out.length < maxItems && page < 100; page += 1) {
+      let resp: Response;
+      try {
+        resp = await this._fetch(url, {
+          headers: { Accept: "application/vnd.github+json", Authorization: `Bearer ${accessToken}`, "X-GitHub-Api-Version": "2022-11-28" },
+        });
+      } catch (e) {
+        throw new GitHubApiError(`GitHub ${path} unreachable: ${(e as Error).message}`);
+      }
+      if (resp.status === 401) throw new GitHubGrantRevoked(`GitHub ${path} returned 401`);
+      if (!resp.ok) throw new GitHubApiError(`GitHub ${path} returned ${resp.status}`);
+      out.push(...extract(await resp.json()));
+      const next = nextLink(resp.headers.get("link"));
+      url = next && safeOrigin(next) === apiOrigin ? next : null;
+    }
+    return out.slice(0, maxItems);
+  }
+
+  listInstallationRepos(accessToken: string, installationId: number, maxItems: number): Promise<GitHubRepo[]> {
+    const path = `/user/installations/${encodeURIComponent(String(installationId))}/repositories?per_page=100`;
+    return this._getPaged(accessToken, path, maxItems, (body) => {
+      const arr = Array.isArray((body as Record<string, unknown>)?.repositories) ? (body as { repositories: unknown[] }).repositories : [];
+      return arr
+        .map((raw): GitHubRepo | null => {
+          const r = raw as Record<string, unknown>;
+          if (typeof r.full_name !== "string" || !r.full_name) return null;
+          return {
+            fullName: r.full_name,
+            private: r.private === true,
+            defaultBranch: typeof r.default_branch === "string" && r.default_branch ? r.default_branch : "main",
+            pushedAt: typeof r.pushed_at === "string" && r.pushed_at ? r.pushed_at : undefined,
+          };
+        })
+        .filter((x): x is GitHubRepo => x !== null);
+    });
+  }
+
+  listBranches(accessToken: string, owner: string, repo: string, maxItems: number): Promise<string[]> {
+    const path = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/branches?per_page=100`;
+    return this._getPaged(accessToken, path, maxItems, (body) =>
+      (Array.isArray(body) ? body : [])
+        .map((raw) => (raw as Record<string, unknown>).name)
+        .filter((n): n is string => typeof n === "string" && n.length > 0));
+  }
+}
+
+/** The ``rel="next"`` URL of a GitHub ``Link`` header, or ``null``. */
+export function nextLink(header: string | null): string | null {
+  if (!header) return null;
+  for (const part of header.split(",")) {
+    const m = /<([^>]+)>\s*;\s*rel="?next"?/.exec(part.trim());
+    if (m) return m[1]!;
+  }
+  return null;
+}
+
+function safeOrigin(u: string): string | null {
+  try { return new URL(u).origin; } catch { return null; }
 }

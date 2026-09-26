@@ -1,0 +1,14 @@
+{
+  "type": "workspace.clone_progress",
+  "timestamp": "<TIMESTAMP>",
+  "session_id": "",
+  "name": "",
+  "request_id": "",
+  "repo": "",
+  "branch": "",
+  "state": "queued",
+  "percent": 0,
+  "error": "",
+  "done": 0,
+  "total": 0
+}

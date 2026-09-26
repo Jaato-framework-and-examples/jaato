@@ -116,6 +116,8 @@ interface Client {
    *  ``scaffold.integration`` (#1263), so a re-refresh reports ``current`` /
    *  ``changed:false`` the way the daemon's ``--refresh`` does. */
   installedIntegrations: Set<string>;
+  /** Workspaces this connection deleted (a deletion must not leak into the next test). */
+  deletedWorkspaces: Set<string>;
 }
 const STAGE_PER_FILE_LIMIT = 10 * 1024 * 1024;
 const STAGE_TOTAL_LIMIT = 50 * 1024 * 1024;
@@ -404,8 +406,10 @@ function sessionListing(c: Client): Record<string, unknown>[] {
     // working in session A learns that B is blocked on a person.  Sent here
     // in the daemon's own spelling, because a mock that speaks the client's
     // vocabulary certifies a reading no real daemon produces.
-    { id: "20260916_090000", name: "", description: "fix the budget panel", model_provider: "anthropic", model_name: "claude-sonnet-4", is_loaded: true, is_current: c.sessionId === "20260916_090000", client_count: 1, turn_count: 3, workspace_path: "/srv/workspaces/project-a", awaiting: "permission", awaiting_since: new Date(Date.now() - 4 * 60_000).toISOString() },
-    { id: "20260915_170000", name: "old notes", description: "", model_provider: "", model_name: "", is_loaded: false, is_current: false, client_count: 0, turn_count: 1, workspace_path: "/srv/workspaces/project-b" },
+    { id: "20260916_090000", name: "", description: "fix the budget panel", model_provider: "anthropic", model_name: "claude-sonnet-4", is_loaded: true, is_current: c.sessionId === "20260916_090000", client_count: 1, turn_count: 3, workspace_path: "/srv/workspaces/project-a", awaiting: "permission", awaiting_since: new Date(Date.now() - 4 * 60_000).toISOString(), profile: "researcher", last_activity: ts(), is_processing: true },
+    // Protocol 1.27 adds ``profile`` / ``last_activity`` / ``is_processing``.
+    { id: "20260914_080000", name: "", description: "idle helper", model_provider: "anthropic", model_name: "claude-sonnet-4", is_loaded: true, is_current: false, client_count: 0, turn_count: 7, workspace_path: "/srv/workspaces/project-a", profile: "", last_activity: new Date(Date.now() - 60 * 60_000).toISOString(), is_processing: false },
+    { id: "20260915_170000", name: "old notes", description: "", model_provider: "", model_name: "", is_loaded: false, is_current: false, client_count: 0, turn_count: 1, workspace_path: "/srv/workspaces/project-b", profile: "", last_activity: "2026-09-15T17:00:00Z" },
     ...(c.sessionId && !c.sessionId.startsWith("2026") ? [{ id: c.sessionId, name: "mock session", description: "", model_provider: "mock", model_name: "mock-1", is_loaded: true, is_current: true, client_count: 1, turn_count: 0, workspace_path: "/work" }] : []),
   ] as Record<string, unknown>[]).filter((s) => !deletedSessions.has(String(s.id)));
 }
@@ -738,6 +742,8 @@ async function turn(c: Client, text: string, agentId = "main"): Promise<void> {
 }
 
 let clientSeq = 0;
+const CREATED_WORKSPACES = new Set<string>();
+const FAILED_ONCE = new Set<string>();
 // Sessions the mock has created, by id.  A daemon keeps its sessions across
 // connections, so a client that reconnects can attach to the one it had.
 const LIVE_SESSIONS = new Set<string>();
@@ -753,8 +759,9 @@ wss.on("connection", (ws, req) => {
     selected: null, provisioned: false, staging: null, clientTools: new Set(),
     policy: { effective_default: "ask", suspension_scope: null, auto_allow_housekeeping: false },
     installedIntegrations: new Set(),
+    deletedWorkspaces: new Set(),
   };
-  send(c, { type: "connected", protocol_version: "1.25", server_info: { server_version: "mock-0.0.1", client_id: randomUUID(), max_message_size: MAX_MESSAGE_SIZE, stage_per_file_limit: Math.min(STAGE_PER_FILE_LIMIT, MAX_MESSAGE_SIZE), stage_total_limit: STAGE_TOTAL_LIMIT } });
+  send(c, { type: "connected", protocol_version: "1.27", server_info: { server_version: "mock-0.0.1", client_id: randomUUID(), max_message_size: MAX_MESSAGE_SIZE, stage_per_file_limit: Math.min(STAGE_PER_FILE_LIMIT, MAX_MESSAGE_SIZE), stage_total_limit: STAGE_TOTAL_LIMIT } });
 
   ws.on("message", async (raw, isBinary) => {
     if (c.staging) {
@@ -802,26 +809,78 @@ wss.on("connection", (ws, req) => {
       case "workspace.list":
         if (!WORKSPACES) send(c, { type: "error", error: "Workspace mode not enabled", error_type: "WorkspaceModeDisabled", recoverable: true });
         else send(c, { type: "workspace.list_response", root: "/srv/workspaces", workspaces: [
-          { name: "project-a", path: "/srv/workspaces/project-a", owner: "mock:tester", configured: true, provider: "anthropic", model: "claude-sonnet-4", last_accessed: ts() },
-          { name: "project-b", path: "/srv/workspaces/project-b", configured: false },
-        ] });
+          { name: "project-a", path: "/srv/workspaces/project-a", owner: "mock:tester", configured: true, provider: "anthropic", model: "claude-sonnet-4", last_accessed: ts(), sources: [{ forge: "github", repo: "acme/claims-service", branch: "main", path: "claims-service" }, { forge: "github", repo: "acme/email-templates", branch: "develop", path: "email-templates" }] },
+          { name: "project-b", path: "/srv/workspaces/project-b", configured: false, sources: [] },
+          ...[...CREATED_WORKSPACES].map((n) => ({ name: n, path: `/srv/workspaces/${n}`, configured: false, owner: "mock:tester", last_accessed: ts(), sources: [] })),
+        ].filter((w) => !c.deletedWorkspaces.has(w.name)) });
         break;
       case "workspace.select":
         c.selected = String(ev.name);
         send(c, { type: "config.status", workspace: String(ev.name), configured: ev.name === "project-a", provider: ev.name === "project-a" ? "anthropic" : null, model: ev.name === "project-a" ? "claude-sonnet-4" : null, available_providers: ["anthropic", "google_genai", "openrouter"], missing_fields: ev.name === "project-a" ? [] : ["provider", "api_key"] });
         break;
       case "workspace.create":
+        CREATED_WORKSPACES.add(String(ev.name));
+        c.deletedWorkspaces.delete(String(ev.name));
         // The daemon's shape: name/path beside the whole row.
         send(c, { type: "workspace.created", name: String(ev.name), path: `/srv/workspaces/${String(ev.name)}`, workspace: { name: String(ev.name), path: `/srv/workspaces/${String(ev.name)}`, configured: false, owner: "mock:tester", last_accessed: ts() } });
         break;
       case "workspace.delete":
-        // The daemon refuses a workspace with loaded sessions; project-a has one.
-        if (ev.name === "project-a") send(c, { type: "workspace.deleted", name: "project-a", ok: false, error: "Workspace 'project-a' has 1 loaded session(s): 20260916_090000 -- stop them first" });
-        else send(c, { type: "workspace.deleted", name: String(ev.name), ok: true });
+        // The daemon refuses a workspace with loaded sessions -- project-a
+        // has two -- unless ``stop_sessions`` (1.27) asks it to stop them.
+        if (ev.name === "project-a" && ev.stop_sessions !== true) send(c, { type: "workspace.deleted", name: "project-a", ok: false, error: "Workspace 'project-a' has 2 loaded session(s): 20260916_090000, 20260914_080000 -- stop them first" });
+        else {
+          // Per connection: a deletion is this test's, not the next one's.
+          c.deletedWorkspaces.add(String(ev.name));
+          send(c, { type: "workspace.deleted", name: String(ev.name), ok: true });
+        }
         break;
+      case "workspace.inspect": {
+        // Protocol 1.27: what deleting would lose.
+        const name = String(ev.name);
+        const full = name === "project-a";
+        send(c, {
+          type: "workspace.inspected", name, request_id: ev.request_id, ok: true, path: `/srv/workspaces/${name}`,
+          size_bytes: full ? 412 * 1024 * 1024 : 4096,
+          sessions: full ? { total: 2, waiting: 1, awake: 1, sleeping: 0 } : { total: 0, waiting: 0, awake: 0, sleeping: 0 },
+          repos: full ? [
+            { forge: "github", repo: "acme/claims-service", branch: "main", path: "claims-service", uncommitted: 5, unpushed: 1, error: "" },
+            { forge: "github", repo: "acme/email-templates", branch: "develop", path: "email-templates", uncommitted: 0, unpushed: 0, error: "" },
+          ] : [],
+        });
+        break;
+      }
+      case "workspace.clone": {
+        // Protocol 1.27: one repository after another, queued -> cloning N%
+        // -> checkout -> done.  A repository named ``*/fails`` fails at 56%
+        // the first time (authentication), and succeeds on a retry.
+        const repos = (ev.repos as { repo: string; branch: string }[] | undefined) ?? [];
+        const base = { type: "workspace.clone_progress", name: ev.name, request_id: ev.request_id, total: repos.length };
+        let done = 0;
+        for (const r of repos) send(c, { ...base, repo: r.repo, branch: r.branch, state: "queued", percent: 0, done });
+        for (const r of repos) {
+          for (const pct of [12, 56]) { await sleep(40); send(c, { ...base, repo: r.repo, branch: r.branch, state: "cloning", percent: pct, done }); }
+          if (r.repo.endsWith("/fails") && !FAILED_ONCE.has(r.repo)) {
+            FAILED_ONCE.add(r.repo);
+            send(c, { ...base, repo: r.repo, branch: r.branch, state: "failed", percent: 56, error: `authentication rejected for ${r.repo}`, done });
+            continue;
+          }
+          await sleep(40);
+          send(c, { ...base, repo: r.repo, branch: r.branch, state: "checkout", percent: 100, done });
+          done += 1;
+          send(c, { ...base, repo: r.repo, branch: r.branch, state: "done", percent: 100, done });
+        }
+        break;
+      }
       case "config.update":
         // The daemon's ``ConfigUpdatedEvent`` carries what was written and
-        // no status field; the UI derives the status from it.
+        // no status field; the UI derives the status from it.  A ``key_only``
+        // write (1.27) changes only the key, so the answer reports the
+        // binding the workspace still holds.
+        if (ev.key_only === true) {
+          const a = c.selected === "project-a";
+          send(c, { type: "config.updated", workspace: c.selected ?? "", provider: a ? "anthropic" : "", model: a ? "claude-sonnet-4" : null, success: true });
+          break;
+        }
         send(c, { type: "config.updated", workspace: "project-b", provider: ev.provider, model: ev.model ?? null, success: true });
         break;
       case "command.execute": {
@@ -843,7 +902,9 @@ wss.on("connection", (ws, req) => {
           await sleep(120);
           send(c, { type: "init.progress", step: "provider", status: "complete", message: "Ready", step_number: 2, total_steps: 2 });
           send(c, { type: "agent.created", agent_id: "main", agent_name: "main", agent_type: "main", profile_name: args.includes("--profile") ? args[args.indexOf("--profile") + 1] : null });
-          send(c, { type: "session.info", session_name: "mock session", model_provider: "mock", model_name: "mock-1", profile_name: args.includes("--profile") ? args[args.indexOf("--profile") + 1] : null, models: ["mock-1", "mock-2"], sessions: sessionListing(c) });
+          // ``--model`` / ``--provider`` (1.27) override the binding for this session.
+          const flag = (f: string) => (args.includes(f) ? args[args.indexOf(f) + 1] : undefined);
+          send(c, { type: "session.info", session_name: "mock session", model_provider: flag("--provider") ?? "mock", model_name: flag("--model") ?? "mock-1", profile_name: flag("--profile") ?? null, models: ["mock-1", "mock-2"], sessions: sessionListing(c) });
           // PermissionStatusEvent, emitted by the daemon at init: effective_default + suspension_scope.
           send(c, { type: "permission.status", ...c.policy });
           send(c, { type: "gc.config", agent_id: "main", ...MOCK_GC_POLICY });
@@ -910,7 +971,7 @@ wss.on("connection", (ws, req) => {
           // ``bootstrap-fail`` is a scenario profile (#1304 §6): picking it
           // exercises the RunnerBootstrapFailed path above instead of a
           // real session, for the status bar's "no session" e2e case.
-          send(c, { type: "session.profiles", profiles: [{ name: "researcher", description: "Deep research", provider: "anthropic", model: "claude-sonnet-4" }, { name: "coder", description: "Coding agent", provider: "openrouter", model: "openai/gpt-5" }, { name: "bootstrap-fail", description: "Scenario: fails to bootstrap", provider: "mock", model: "mock-1" }] });
+          send(c, { type: "session.profiles", profiles: [{ name: "researcher", description: "Deep research", provider: "anthropic", model: "claude-sonnet-4" }, { name: "coder", description: "Coding agent", provider: "openrouter", model: "openai/gpt-5" }, { name: "bootstrap-fail", description: "Scenario: fails to bootstrap", provider: "mock", model: "mock-1" }, { name: "analyst", description: "Reads code; defines no model" }] });
         } else if (cmd === "workspace.ignore") {
           // The daemon toggles one exact line in <workspace>/.gitignore and
           // answers with the entry's state AFTER the toggle (protocol 1.12).

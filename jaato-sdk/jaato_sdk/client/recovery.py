@@ -566,6 +566,8 @@ class IPCRecoveryClient:
         cascade_driver_id: Optional[str] = None,
         sibling_name: Optional[str] = None,
         timeout: float = 60.0,
+        model: Optional[str] = None,
+        provider: Optional[str] = None,
     ) -> Optional[str]:
         """Create a new session.
 
@@ -588,6 +590,9 @@ class IPCRecoveryClient:
             cascade_driver_id: Phase 2 cascade-sharing tenant ID; see
                 ``IPCClient.create_session`` for the contract.  Pass
                 the same opaque ID across every session of one cascade.
+            model: Model override (``--model``, protocol 1.27); see
+                ``IPCClient.create_session``.
+            provider: Provider override, only with ``model``.
             timeout: Seconds to wait for the ``SessionInfoEvent`` — mirrors
                 ``IPCClient.create_session`` so a plain→recovery swap is
                 drop-in (forwarded to the underlying client).  The recovery
@@ -629,6 +634,8 @@ class IPCRecoveryClient:
             cascade_driver_id=cascade_driver_id,
             sibling_name=sibling_name,
             timeout=timeout,
+            model=model,
+            provider=provider,
         )
         self._session_id = session_id
         return session_id

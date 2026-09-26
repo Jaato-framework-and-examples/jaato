@@ -4,8 +4,8 @@
  * observable), and a fake ``SessionReloader`` that records the users it was
  * asked to reload.  Neither touches the network or a registered App.
  */
-import type { GitHubApi, GitHubIdentity, GitHubTokenSet } from "../src/github-api.js";
-import { GitHubGrantRevoked } from "../src/github-api.js";
+import type { GitHubApi, GitHubIdentity, GitHubRepo, GitHubTokenSet } from "../src/github-api.js";
+import { GitHubApiError, GitHubGrantRevoked } from "../src/github-api.js";
 import type { SessionReloader } from "../src/github.js";
 
 export class FakeGitHubApi implements GitHubApi {
@@ -46,6 +46,28 @@ export class FakeGitHubApi implements GitHubApi {
 
   async fetchIdentity(_accessToken: string): Promise<GitHubIdentity> {
     return this.identity;
+  }
+
+  /** installation id -> the repositories it reaches; an id absent here answers 404. */
+  installationRepos = new Map<number, GitHubRepo[]>();
+  /** ``owner/name`` -> branch names. */
+  branches = new Map<string, string[]>();
+  /** Every listing call, with the token it carried (to assert the token was used, not echoed). */
+  repoCalls: Array<{ token: string; installationId: number }> = [];
+  branchCalls: Array<{ token: string; repo: string }> = [];
+
+  async listInstallationRepos(accessToken: string, installationId: number, maxItems: number): Promise<GitHubRepo[]> {
+    this.repoCalls.push({ token: accessToken, installationId });
+    const repos = this.installationRepos.get(installationId);
+    if (!repos) throw new GitHubApiError(`GitHub /user/installations/${installationId}/repositories returned 404`);
+    return repos.slice(0, maxItems);
+  }
+
+  async listBranches(accessToken: string, owner: string, repo: string, maxItems: number): Promise<string[]> {
+    this.branchCalls.push({ token: accessToken, repo: `${owner}/${repo}` });
+    const b = this.branches.get(`${owner}/${repo}`);
+    if (!b) throw new GitHubApiError(`GitHub /repos/${owner}/${repo}/branches returned 404`);
+    return b.slice(0, maxItems);
   }
 }
 

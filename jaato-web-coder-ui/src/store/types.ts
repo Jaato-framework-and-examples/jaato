@@ -353,6 +353,8 @@ export interface WorkspaceInfo {
   path?: string | null;
   /** The authenticated user who created it; unset for a pre-existing or unowned workspace. */
   owner?: string | null;
+  /** The git checkouts found in it (protocol 1.27), raw; read through ``normalizeSources``. */
+  sources?: unknown;
 }
 
 export interface ConfigStatus {

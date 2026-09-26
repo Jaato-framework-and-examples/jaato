@@ -37,6 +37,12 @@ export interface SessionSummary {
   awaiting?: string;
   /** When that prompt was raised, ISO-8601 UTC.  Absent means NOT MEASURED, never "just now". */
   awaitingSince?: string;
+  /** The profile the session was created from (protocol 1.27), "" when none or not reported. */
+  profile: string;
+  /** Last activity, ISO-8601; "" when the daemon did not send it. */
+  lastActivity: string;
+  /** A turn is running right now (loaded sessions only). */
+  isProcessing: boolean;
 }
 
 export function normalizeSessionSummary(raw: unknown): SessionSummary | null {
@@ -58,6 +64,9 @@ export function normalizeSessionSummary(raw: unknown): SessionSummary | null {
     createdBy: o.created_by ? String(o.created_by) : undefined,
     awaiting: typeof o.awaiting === "string" && o.awaiting ? o.awaiting : undefined,
     awaitingSince: typeof o.awaiting_since === "string" && o.awaiting_since ? o.awaiting_since : undefined,
+    profile: typeof o.profile === "string" ? o.profile : "",
+    lastActivity: typeof o.last_activity === "string" ? o.last_activity : "",
+    isProcessing: o.is_processing === true,
   };
 }
 
@@ -149,4 +158,40 @@ export function sessionsInWorkspace(
     const tail = s.workspacePath.replace(/\/+$/, "").split("/").pop();
     return tail === workspace.name;
   });
+}
+
+/**
+ * The session picker's three columns of existing sessions (design 2a).
+ *
+ * ``waiting`` — a prompt is open (the daemon's ``awaiting``, protocol 1.17);
+ * ``awake`` — loaded in the daemon; ``sleeping`` — saved on disk only,
+ * where attaching wakes it.  A session waiting on a person is loaded by
+ * construction, so the waiting test comes first.
+ */
+export type SessionColumn = "waiting" | "awake" | "sleeping";
+
+export function sessionColumn(s: SessionSummary): SessionColumn {
+  if (s.awaiting) return "waiting";
+  return s.isLoaded ? "awake" : "sleeping";
+}
+
+function time(iso: string | undefined): number {
+  const t = iso ? Date.parse(iso) : NaN;
+  return Number.isFinite(t) ? t : 0;
+}
+
+/**
+ * Sessions grouped by column, ordered the way each column is read:
+ * longest waiting first (an unmeasured wait sorts last, since nothing says
+ * it is old), then most recent activity first.  Ids break ties -- they are
+ * timestamps, so the fallback is still recency.
+ */
+export function sessionBoard(sessions: SessionSummary[]): Record<SessionColumn, SessionSummary[]> {
+  const out: Record<SessionColumn, SessionSummary[]> = { waiting: [], awake: [], sleeping: [] };
+  for (const s of sessions) out[sessionColumn(s)].push(s);
+  out.waiting.sort((a, b) => (time(a.awaitingSince) || Infinity) - (time(b.awaitingSince) || Infinity) || b.id.localeCompare(a.id));
+  const recent = (a: SessionSummary, b: SessionSummary) => time(b.lastActivity) - time(a.lastActivity) || b.id.localeCompare(a.id);
+  out.awake.sort(recent);
+  out.sleeping.sort(recent);
+  return out;
 }

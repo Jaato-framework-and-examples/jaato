@@ -30,7 +30,7 @@ describe("github client", () => {
   it("has no reveal: there is no way to fetch a secret value", () => {
     const api = githubApi("./api/github", async () => response(200));
     expect((api as unknown as Record<string, unknown>).reveal).toBeUndefined();
-    expect(Object.keys(api).sort()).toEqual(["bind", "disconnect", "listAccounts", "listBindings", "setDefault"]);
+    expect(Object.keys(api).sort()).toEqual(["bind", "disconnect", "listAccounts", "listBindings", "listBranches", "listRepos", "setDefault"]);
   });
 
   it("lists bindings under /bindings and filters malformed rows", async () => {
@@ -97,7 +97,7 @@ function fakeApi(accounts: GitHubAccount[], bindResult: BindResult = BIND_OK): {
     listAccounts: async () => accounts,
     listBindings: async () => [],
     setDefault: async () => accounts,
-    disconnect: async () => ({ disconnected: "", accounts }),
+    listRepos: async () => ({ account: { id: "", login: "" }, repos: [] }), listBranches: async (repo: string) => ({ repo, branches: [] }), disconnect: async () => ({ disconnected: "", accounts }),
     bind: async (workspace, accountId) => { bindCalls.push([workspace, accountId]); return bindResult; },
   };
   return { api, bindCalls };
@@ -143,7 +143,7 @@ describe("autoBindDefaultGitHubAccount", () => {
       listAccounts: async () => accounts,
       listBindings: async () => [],
       setDefault: async () => accounts,
-      disconnect: async () => ({ disconnected: "", accounts }),
+      listRepos: async () => ({ account: { id: "", login: "" }, repos: [] }), listBranches: async (repo: string) => ({ repo, branches: [] }), disconnect: async () => ({ disconnected: "", accounts }),
       bind: vi.fn(async () => { throw new Error("boom"); }),
     };
     await expect(autoBindDefaultGitHubAccount(api, "/ws-root/proj")).rejects.toThrow("boom");

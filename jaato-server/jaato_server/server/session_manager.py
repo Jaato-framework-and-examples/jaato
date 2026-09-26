@@ -584,6 +584,29 @@ class RuntimeSessionInfo:
     #: operator sees why.  A diagnostic in the #812 shape: an additive key
     #: on the listing row, no protocol bump.
     inbox_pending: int = 0
+    #: Name of the profile this session runs under -- the loaded server's
+    #: ``profile_name``, or the persisted record's for a cold row.  ``None``
+    #: for a profile-less session (and records written before 2.3).
+    profile_name: Optional[str] = None
+
+
+def session_picker_fields(info: Any) -> Dict[str, Any]:
+    """The session-picker keys every client-facing session row carries.
+
+    One definition shared by ``session.list`` and the ``SessionInfoEvent``
+    snapshot (protocol 1.27), so the two listings cannot disagree about what
+    a row says.  Additive keys on a free-form dict: an older client ignores
+    them.  ``profile`` is ``""`` for a profile-less session, never ``None``.
+
+    Reads through ``getattr`` so a duck-typed row (a test double, an
+    out-of-tree listing) contributes defaults rather than raising.
+    """
+    return {
+        "profile": getattr(info, "profile_name", None) or "",
+        "last_activity": getattr(info, "last_activity", ""),
+        "is_processing": bool(getattr(info, "is_processing", False)),
+        "created_at": getattr(info, "created_at", ""),
+    }
 
 
 @dataclass
@@ -632,6 +655,11 @@ class Session:
     user_inputs: List[str] = field(default_factory=list)  # Command history for prompt restoration
     interrupted_turn: Optional[Dict[str, Any]] = None  # Turn interruption state for recovery
     provisioned: bool = False  # True if workspace was auto-provisioned by server
+    #: ``MODEL_NAME`` / ``JAATO_PROVIDER`` from a ``session.new --model``
+    #: override on a PROFILE-LESS session (protocol 1.27).  Persisted in the
+    #: record's metadata so a revive re-applies it; ``None`` otherwise (a
+    #: profiled session's override lives in its profile snapshot).
+    model_override_env: Optional[Dict[str, str]] = None
     created_by: Optional[str] = None  # Authenticated user who created the session
     #: Workspace-sandboxing posture, PERSISTED in the session record.
     #: ``"apparmor"`` (a profile the kernel is ENFORCING), ``"apparmor-complain"``
@@ -1246,6 +1274,65 @@ def initialize_or_refuse(server: JaatoServer, session_id: str) -> bool:
         recoverable=False,
     ))
     return False
+
+
+def _apply_model_override(
+    profile: Any,
+    inline_spec: Optional[Dict[str, Any]],
+    env_overrides: Optional[Dict[str, str]],
+    model: Optional[str],
+    provider: Optional[str],
+) -> Tuple[Any, Optional[Dict[str, Any]], Optional[Dict[str, str]], Optional[Dict[str, str]]]:
+    """Apply a ``session.new --model/--provider`` override (protocol 1.27).
+
+    Runs AFTER the profile is resolved (named, inline, or an agent's
+    ``default_profile``) so the override wins over all three.
+
+    * With a profile, a COPY gets the new ``model`` (and ``provider`` when
+      given) -- ``dataclasses.replace``, never a mutation, because a resolved
+      profile may be cached or shared.  The copy is what the session's
+      revive snapshot freezes, so a revived session keeps the model.  An
+      inline spec is rewritten the same way, since an inline session revives
+      from its persisted spec rather than from the snapshot.
+    * With no profile, ``MODEL_NAME`` / ``JAATO_PROVIDER`` are merged into
+      ``env_overrides`` (override wins) -- the channel the no-profile path
+      reads its binding from, as the post-auth wizard's values do.  That
+      dict is also returned separately so the create path can persist it
+      (an env override is otherwise not part of the session record).
+
+    Caveat: a profile declaring ``model_tiers`` binds its initial tier's
+    model inside the session, so there the override sets the flat
+    ``model`` the envelope carries but the tier binding still applies.
+
+    Returns:
+        ``(profile, inline_spec, env_overrides, persisted_env)`` where
+        ``persisted_env`` is the no-profile override dict, else ``None``.
+    """
+    if not model:
+        return profile, inline_spec, env_overrides, None
+    changes: Dict[str, str] = {"model": model}
+    if provider:
+        changes["provider"] = provider
+    if profile is not None:
+        import dataclasses
+        profile = dataclasses.replace(profile, **changes)
+        if inline_spec is not None:
+            inline_spec = {**inline_spec, **changes}
+        return profile, inline_spec, env_overrides, None
+    extra = {"MODEL_NAME": model}
+    if provider:
+        extra["JAATO_PROVIDER"] = provider
+    return profile, inline_spec, {**(env_overrides or {}), **extra}, extra
+
+
+def _model_override_metadata(session: Any) -> Dict[str, Any]:
+    """The session-record metadata that carries a no-profile model override.
+
+    Empty unless :func:`_apply_model_override` had no profile to rewrite;
+    read back on revive into the restore envelope's ``env_overrides``.
+    """
+    env = getattr(session, "model_override_env", None)
+    return {"model_override_env": dict(env)} if env else {}
 
 
 def _agent_for_session(
@@ -7846,6 +7933,15 @@ class SessionManager:
         )
         self._session_new_answer.record = record
         try:
+            if kwargs.get("provider_override") and not kwargs.get("model_override"):
+                # A provider with no model names nothing to run: refuse it as
+                # the other malformed-spec answers are, before allocating.
+                self._answer_session_new(record.client_id, ErrorEvent(
+                    error="session.new: --provider requires --model",
+                    error_type="InvalidSessionSpec",
+                    recoverable=True,
+                ))
+                return ""
             return run_in_fresh_session_context(
                 self._create_session_impl, *args, **kwargs,
             )
@@ -9432,6 +9528,8 @@ class SessionManager:
         budget_usage: Optional[Dict[str, float]] = None,
         sibling_name: Optional[str] = None,
         request_id: Optional[str] = None,
+        model_override: Optional[str] = None,
+        provider_override: Optional[str] = None,
     ) -> str:
         """Implementation of session creation, called via ``Context().run()``.
 
@@ -9495,6 +9593,11 @@ class SessionManager:
                 silent fallback) so caller intent is explicit.  The
                 helper ``shared.plugins.subagent.config.build_inline_profile``
                 does the parsing.
+            model_override: ``session.new --model`` (protocol 1.27): the
+                model this session runs, applied after the profile resolves
+                -- see :func:`_apply_model_override`.
+            provider_override: ``--provider``, only with ``model_override``
+                (:meth:`create_session` refuses it alone).
 
         Returns:
             The session ID (empty string on failure).
@@ -9724,6 +9827,16 @@ class SessionManager:
                     system_instructions=agent_instructions,
                 )
 
+        # ``session.new --model/--provider`` (1.27): wins over whatever the
+        # profile (or its absence) bound.  Unconditional call so this
+        # ratcheted function gains no branch.
+        profile, inline_profile_data, env_overrides, override_env = (
+            _apply_model_override(
+                profile, inline_profile_data, env_overrides,
+                model_override, provider_override,
+            )
+        )
+
         # ── Spawn-payload schema validation ──────────────────────────
         # Symmetric to the subagent plugin's check at the function-call
         # boundary: when the resolved profile declares
@@ -9869,6 +9982,7 @@ class SessionManager:
             return ""
 
         logger.info(f"Server initialized successfully for session {session_id}")
+        session.model_override_env = override_env
 
         # ---------------------------------------------------------------
         # NEVER HAND BACK A HANDLE TO A SESSION THAT CANNOT RUN.
@@ -12275,6 +12389,9 @@ class SessionManager:
             agent_params=dict(getattr(state, "agent_params", None) or {}),
             restore_state={"loaded_state": state},
             env_file=session_env_file,
+            # A no-profile ``session.new --model`` override (1.27), which
+            # lives in no profile snapshot and must be re-applied here.
+            env_overrides=state.metadata.get('model_override_env'),
             instruction_token_cache=self._instruction_token_cache,
             on_event_during_init=init_callback,
         )
@@ -12494,6 +12611,7 @@ class SessionManager:
             workspace_path=state.workspace_path,
             user_inputs=state.user_inputs or [],  # Command history for prompt restoration
             provisioned=state.metadata.get('provisioned', False),
+            model_override_env=state.metadata.get('model_override_env'),
             created_by=getattr(state, "created_by", None),  # 2.9+ (#859)
             # 2.10+ (#812): the LAST KNOWN runner, restored as STALE.  After
             # a reload the pid named belonged to a previous process
@@ -13045,6 +13163,7 @@ class SessionManager:
                 # know their workspace is server-managed.
                 if session.provisioned:
                     subagent_metadata['provisioned'] = True
+                subagent_metadata.update(_model_override_metadata(session))
 
                 # #812: refresh which process is executing this session
                 # before the record is written, and take the serialised form
@@ -14471,6 +14590,7 @@ class SessionManager:
                     turn_count=info.turn_count,
                     workspace_path=info.workspace_path,
                     inbox_pending=self._inbox_pending_count(info.session_id, wp),
+                    profile_name=getattr(info, "profile_name", None),
                 )
 
         # Overlay in-memory sessions (have more current info)
@@ -14510,6 +14630,7 @@ class SessionManager:
                     awaiting_since=awaiting_since,
                     inbox_pending=self._inbox_pending_count(
                         session.session_id, session.workspace_path),
+                    profile_name=getattr(session.server, "profile_name", None),
                 )
 
         # Sort by last activity
@@ -14552,6 +14673,7 @@ class SessionManager:
                 "client_count": s.client_count,
                 "turn_count": s.turn_count,
                 "workspace_path": s.workspace_path or "",
+                **session_picker_fields(s),
             }
             sess = session_lookup.get(s.session_id)
             if sess and sess.sandbox_mode:

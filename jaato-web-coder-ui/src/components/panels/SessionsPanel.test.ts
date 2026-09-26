@@ -14,7 +14,7 @@ import type { SessionSummary } from "@/protocol/sessions";
 const sess = (over: Partial<SessionSummary>): SessionSummary => ({
   id: "s1", name: "", description: "", provider: "", model: "",
   isLoaded: true, isCurrent: false, clientCount: 0, turnCount: 0,
-  workspacePath: "/ws/one", ...over,
+  workspacePath: "/ws/one", profile: "", lastActivity: "", isProcessing: false, ...over,
 });
 
 describe("awaitingLabel", () => {

@@ -4,5 +4,6 @@
   "session_id": "",
   "provider": "",
   "model": null,
-  "api_key": null
+  "api_key": null,
+  "key_only": false
 }

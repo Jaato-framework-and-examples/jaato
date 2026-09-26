@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatSessionList, normalizeSessionList, sessionIdCompletions, sessionsInWorkspace, wantsSessionIds } from "./sessions";
+import { formatSessionList, normalizeSessionList, sessionBoard, sessionIdCompletions, sessionsInWorkspace, wantsSessionIds } from "./sessions";
 
 const RAW = [
   { id: "20260916_1", description: "fix the panel", model_provider: "anthropic", model_name: "claude", is_loaded: true, is_current: true, client_count: 1, turn_count: 4, workspace_path: "/srv/ws/project-a" },
@@ -46,5 +46,24 @@ describe("sessions of a workspace", () => {
     expect(sessionsInWorkspace(sessions, { name: "project-a", path: "/srv/ws/project-a/" }).map((s) => s.id)).toEqual(["20260916_1"]);
     expect(sessionsInWorkspace(sessions, { name: "project-b" }).map((s) => s.id)).toEqual(["20260915_9"]);
     expect(sessionsInWorkspace(sessions, undefined)).toEqual([]);
+  });
+});
+
+describe("sessionBoard", () => {
+  const base = { name: "", description: "", provider: "", model: "", isCurrent: false, clientCount: 0, turnCount: 0, workspacePath: "/w", profile: "", isProcessing: false };
+  it("sorts waiting longest-first and the rest most-recent-first", () => {
+    const now = "2026-09-26T12:00:00Z";
+    const b = sessionBoard([
+      { ...base, id: "w-new", isLoaded: true, awaiting: "permission", awaitingSince: "2026-09-26T11:58:00Z", lastActivity: now },
+      { ...base, id: "w-old", isLoaded: true, awaiting: "clarification", awaitingSince: "2026-09-26T11:40:00Z", lastActivity: now },
+      { ...base, id: "w-undated", isLoaded: true, awaiting: "permission", lastActivity: now },
+      { ...base, id: "a1", isLoaded: true, lastActivity: "2026-09-26T09:00:00Z" },
+      { ...base, id: "a2", isLoaded: true, lastActivity: "2026-09-26T10:00:00Z" },
+      { ...base, id: "s1", isLoaded: false, lastActivity: "2026-09-24T10:00:00Z" },
+      { ...base, id: "s2", isLoaded: false, lastActivity: "2026-09-25T10:00:00Z" },
+    ]);
+    expect(b.waiting.map((s) => s.id)).toEqual(["w-old", "w-new", "w-undated"]);
+    expect(b.awake.map((s) => s.id)).toEqual(["a2", "a1"]);
+    expect(b.sleeping.map((s) => s.id)).toEqual(["s2", "s1"]);
   });
 });

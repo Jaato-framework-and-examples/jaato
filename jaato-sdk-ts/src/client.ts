@@ -72,6 +72,7 @@ import {
   type MemoryUpdateResultEvent,
   type MemoryDeleteResultEvent,
   type DiagnosticsResultEvent,
+  type WorkspaceInspectEvent,
 } from "./events.js";
 import type {
   CatchallEventHandler,
@@ -201,6 +202,17 @@ export const MIN_SESSION_MESSAGE_FILES_PROTOCOL = "1.24";
  * refused below this version rather than left to time out.
  */
 export const MIN_DIAGNOSTICS_PROTOCOL = "1.25";
+
+/**
+ * Protocol floor for the workspace/session pickers (1.27):
+ * {@link JaatoClient.inspectWorkspace}, {@link JaatoClient.cloneIntoWorkspace},
+ * ``WorkspaceDeleteRequest.stop_sessions`` and the ``model`` / ``provider``
+ * override on {@link JaatoClient.createSession}.  Below it a new verb is
+ * answered "Unknown message type" and never the result, and an older
+ * ``session.new`` parser would read ``--model`` as the session NAME -- so
+ * each is refused client-side rather than silently degraded.
+ */
+export const MIN_WORKSPACE_PICKER_PROTOCOL = "1.27";
 
 /**
  * Size limits a daemon enforces, advertised in ``ConnectedEvent.server_info``.
@@ -897,6 +909,18 @@ export class JaatoClient {
      * mirroring Python ``IPCClient.create_session(cascade_driver_id=...)``.
      */
     cascadeDriverId?: string;
+    /**
+     * Override the model the resolved profile (or, with no profile, the
+     * workspace ``.env``) binds.  Sent as ``--model`` on ``session.new``
+     * (protocol 1.27).  The daemon applies it to a COPY of the profile, and
+     * a revived session keeps it.
+     */
+    model?: string;
+    /**
+     * Override the provider too (``--provider``).  Only with ``model``:
+     * passing it alone throws here, and the daemon refuses it as well.
+     */
+    provider?: string;
   } = {}): Promise<void> {
     const args: string[] = options.name ? [options.name] : [];
     let payload: Record<string, unknown> | undefined;
@@ -926,6 +950,26 @@ export class JaatoClient {
     }
     if (options.cascadeDriverId) {
       args.push("--cascade-driver-id", options.cascadeDriverId);
+    }
+    if (options.provider && !options.model) {
+      throw new TypeError("createSession: 'provider' requires 'model'");
+    }
+    if (
+      options.model &&
+      (this._serverProtocolVersion === null ||
+        !isProtocolCompatible(this._serverProtocolVersion, MIN_WORKSPACE_PICKER_PROTOCOL))
+    ) {
+      throw new Error(
+        `createSession: this daemon speaks protocol ` +
+          `${this._serverProtocolVersion ?? "unknown"} and would read --model ` +
+          `as the session name (needs >= ${MIN_WORKSPACE_PICKER_PROTOCOL}).`,
+      );
+    }
+    if (options.model) {
+      args.push("--model", options.model);
+    }
+    if (options.provider) {
+      args.push("--provider", options.provider);
     }
     await this._sendEvent({
       type: EventTypeValue.COMMAND,
@@ -1410,6 +1454,65 @@ export class JaatoClient {
     });
     await this._sendEvent({ ...request, request_id: requestId } as unknown as JaatoEvent);
     return answer;
+  }
+
+  /**
+   * Inspect a workspace (protocol 1.27, WS only): path, size, session counts
+   * by state (``total`` / ``waiting`` / ``awake`` / ``sleeping``) and, per
+   * git checkout, uncommitted / unpushed counts.  ``ok === false`` (with
+   * ``error``) when the daemon refused -- another user's workspace, a name
+   * that left the root, or no such workspace.
+   */
+  async inspectWorkspace(
+    name: string,
+    options: { timeoutMs?: number } = {},
+  ): Promise<WorkspaceInspectEvent> {
+    return this._quietRequest<WorkspaceInspectEvent>(
+      "inspectWorkspace",
+      { type: EventTypeValue.WORKSPACE_INSPECT_REQUEST, name },
+      EventTypeValue.WORKSPACE_INSPECTED,
+      options.timeoutMs ?? 30_000,
+      MIN_WORKSPACE_PICKER_PROTOCOL,
+      "workspace.inspect",
+      "wsi",
+    );
+  }
+
+  /**
+   * Clone repositories into a workspace (protocol 1.27, WS only).
+   *
+   * Sends one ``workspace.clone`` and returns its ``request_id``; progress
+   * arrives as ``workspace.clone_progress`` events carrying that id (every
+   * repo ``queued`` first, then one at a time to ``done`` / ``failed``,
+   * with ``done === total`` on the last).  Subscribe BEFORE calling.  A
+   * retry is a new call naming the one repo.
+   */
+  async cloneIntoWorkspace(
+    name: string,
+    repos: Array<{ repo: string; branch: string; forge?: string }>,
+  ): Promise<string> {
+    if (
+      this._serverProtocolVersion === null ||
+      !isProtocolCompatible(this._serverProtocolVersion, MIN_WORKSPACE_PICKER_PROTOCOL)
+    ) {
+      throw new Error(
+        `cloneIntoWorkspace: this daemon speaks protocol ` +
+          `${this._serverProtocolVersion ?? "unknown"} and does not serve ` +
+          `workspace.clone (needs >= ${MIN_WORKSPACE_PICKER_PROTOCOL}).`,
+      );
+    }
+    const requestId = `wsc-${++this._memorySeq}-${Date.now().toString(36)}`;
+    await this._sendEvent({
+      type: EventTypeValue.WORKSPACE_CLONE_REQUEST,
+      name,
+      request_id: requestId,
+      repos: repos.map((r) => ({
+        repo: r.repo,
+        branch: r.branch,
+        forge: r.forge ?? "github",
+      })),
+    } as unknown as JaatoEvent);
+    return requestId;
   }
 
   /**

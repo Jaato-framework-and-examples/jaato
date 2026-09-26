@@ -156,4 +156,76 @@ describe("github routes", () => {
     assert.equal(r.status, 404);
     await new Promise<void>((r) => srv.close(() => r()));
   });
+
+  test("repos lists across two installations, de-duplicated and sorted, with no token in the body", async () => {
+    api.identity = { ...api.identity, installations: [{ id: 7, account: "acme" }, { id: 8, account: "alice" }] };
+    api.installationRepos.set(7, [
+      { fullName: "acme/api", private: true, defaultBranch: "main", pushedAt: "2026-09-01T00:00:00Z" },
+      { fullName: "acme/shared", private: false, defaultBranch: "trunk", pushedAt: "2026-09-20T00:00:00Z" },
+    ]);
+    api.installationRepos.set(8, [
+      { fullName: "acme/shared", private: false, defaultBranch: "trunk", pushedAt: "2026-09-20T00:00:00Z" },
+      { fullName: "alice/dots", private: false, defaultBranch: "master" },
+      { fullName: "alice/blog", private: false, defaultBranch: "main", pushedAt: "2026-09-10T00:00:00Z" },
+    ]);
+    try {
+      const cookie = await signIn("frank");
+      await connectGitHub(cookie);
+      const before = api.repoCalls.length;
+      const r = await fetch(`${base}/api/github/repos`, { headers: { cookie } });
+      assert.equal(r.status, 200);
+      const raw = await r.text();
+      const body = JSON.parse(raw) as { account: { id: string; login: string }; repos: Array<{ fullName: string; private: boolean; defaultBranch: string; pushedAt?: string }> };
+      assert.equal(body.account.login, "alice");
+      assert.deepEqual(body.repos.map((x) => x.fullName), ["acme/shared", "alice/blog", "acme/api", "alice/dots"]);
+      assert.equal(body.repos.find((x) => x.fullName === "acme/api")!.private, true);
+      assert.equal(api.repoCalls.length - before, 2, "one listing per installation");
+      assert.ok(api.repoCalls.slice(before).every((c) => c.token.startsWith("access-")), "listed with the user's token");
+      assert.ok(!raw.includes("access-") && !raw.includes("refresh-"), "no token in the response");
+      // Cached: a second read inside the window does not reach GitHub.
+      const again = await fetch(`${base}/api/github/repos?account=${encodeURIComponent(body.account.id)}`, { headers: { cookie } });
+      assert.equal(again.status, 200);
+      assert.equal(api.repoCalls.length - before, 2, "served from the cache");
+      // Branches: default branch taken from the cached listing; still no token.
+      api.branches.set("acme/shared", ["trunk", "feature/x"]);
+      const b = await fetch(`${base}/api/github/branches?repo=acme/shared`, { headers: { cookie } });
+      assert.equal(b.status, 200);
+      const braw = await b.text();
+      assert.deepEqual(JSON.parse(braw), { repo: "acme/shared", defaultBranch: "trunk", branches: ["trunk", "feature/x"] });
+      assert.ok(!braw.includes("access-") && !braw.includes("refresh-"), "no token in the branches response");
+    } finally {
+      api.identity = { ...api.identity, installations: [{ id: 7, account: "acme" }] };
+      api.installationRepos.clear();
+      api.branches.clear();
+    }
+  });
+
+  test("repos and branches answer 404 when no GitHub account is connected, and 401 when not signed in", async () => {
+    const cookie = await signIn("gina");
+    const r = await fetch(`${base}/api/github/repos`, { headers: { cookie } });
+    assert.equal(r.status, 404);
+    assert.deepEqual(await r.json(), { error: "no GitHub account connected" });
+    const b = await fetch(`${base}/api/github/branches?repo=a/b`, { headers: { cookie } });
+    assert.equal(b.status, 404);
+    assert.equal((await fetch(`${base}/api/github/repos`)).status, 401);
+    assert.equal((await fetch(`${base}/api/github/branches?repo=a/b`)).status, 401);
+  });
+
+  test("repos refuses an account that is not the user's own", async () => {
+    const cookie = await signIn("hank");
+    await connectGitHub(cookie);
+    const r = await fetch(`${base}/api/github/repos?account=not-mine`, { headers: { cookie } });
+    assert.equal(r.status, 404);
+  });
+
+  test("branches validates repo before reaching GitHub", async () => {
+    const cookie = await signIn("ivy");
+    await connectGitHub(cookie);
+    const before = api.branchCalls.length;
+    for (const bad of ["", "noslash", "a/b/c", "../etc", "a/..", "a b/c", "owner/na%2Fme", "owner/"]) {
+      const r = await fetch(`${base}/api/github/branches?repo=${encodeURIComponent(bad)}`, { headers: { cookie } });
+      assert.equal(r.status, 400, `refused ${JSON.stringify(bad)}`);
+    }
+    assert.equal(api.branchCalls.length, before, "no GitHub call for an invalid repo");
+  });
 });

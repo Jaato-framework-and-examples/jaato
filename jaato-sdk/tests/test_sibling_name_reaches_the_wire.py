@@ -113,6 +113,9 @@ def test_every_create_session_kwarg_the_server_takes_is_reachable():
         # caller-chosen correlation id could collide with another call's and
         # reintroduce exactly the mis-attribution it exists to prevent.
         "request_id",
+        # Reachable under the client's own names: create_session(model=,
+        # provider=) sends --model / --provider (protocol 1.27).
+        "model_override", "provider_override",
     }
     unreachable = server_params - client_params - NOT_CLIENT_SETTABLE
     assert not unreachable, (

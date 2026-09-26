@@ -280,9 +280,92 @@ export async function createWorkspace(name: string, timeoutMs = 8000): Promise<W
   });
 }
 
-/** ``workspace.delete`` (protocol 1.13): the daemon answers with ``workspace.deleted``. */
-export async function deleteWorkspace(name: string): Promise<void> {
-  await getClient().sendRawEvent({ type: EventTypeValue.WORKSPACE_DELETE_REQUEST, name });
+/**
+ * ``workspace.delete`` (protocol 1.13): the daemon answers with
+ * ``workspace.deleted``, which the store also reduces.  ``stopSessions``
+ * (1.27) asks the daemon to stop and delete the workspace's LOADED
+ * sessions first instead of refusing -- what the delete panel's typed
+ * confirmation has just told the person will happen.
+ *
+ * Resolves with the answer (``ok`` + ``error``), or ``null`` when the
+ * daemon did not answer inside ``timeoutMs``.
+ */
+export function deleteWorkspace(name: string, opts: { stopSessions?: boolean; timeoutMs?: number } = {}): Promise<{ ok: boolean; error: string } | null> {
+  const c = getClient();
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (v: { ok: boolean; error: string } | null) => {
+      if (done) return;
+      done = true;
+      unsub();
+      clearTimeout(timer);
+      resolve(v);
+    };
+    const unsub = c.subscribe(EventTypeValue.WORKSPACE_DELETED, (ev) => {
+      const e = ev as unknown as { name?: string; ok?: boolean; error?: string };
+      if (String(e.name ?? "") === name) finish({ ok: e.ok !== false, error: String(e.error ?? "") });
+    });
+    const timer = setTimeout(() => finish(null), opts.timeoutMs ?? 30_000);
+    c.sendRawEvent({ type: EventTypeValue.WORKSPACE_DELETE_REQUEST, name, ...(opts.stopSessions ? { stop_sessions: true } : {}) }).catch(() => finish(null));
+  });
+}
+
+let wsRequestSeq = 0;
+function nextRequestId(prefix: string): string {
+  return `${prefix}-${Date.now().toString(36)}-${++wsRequestSeq}`;
+}
+
+/**
+ * ``workspace.inspect`` (protocol 1.27): what deleting ``name`` would
+ * lose.  Resolves with the raw ``workspace.inspected`` dict, or ``null``
+ * on a timeout (an older daemon answers with an ``ErrorEvent`` nobody
+ * correlates, so the timeout is what ends the wait there).
+ */
+export function inspectWorkspace(name: string, timeoutMs = 20_000): Promise<Record<string, unknown> | null> {
+  const c = getClient();
+  const requestId = nextRequestId("inspect");
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (v: Record<string, unknown> | null) => {
+      if (done) return;
+      done = true;
+      unsub();
+      clearTimeout(timer);
+      resolve(v);
+    };
+    const unsub = c.subscribe("workspace.inspected" as never, (ev) => {
+      const e = ev as unknown as Record<string, unknown>;
+      if (e.request_id === requestId || (!e.request_id && e.name === name)) finish(e);
+    });
+    const timer = setTimeout(() => finish(null), timeoutMs);
+    c.sendRawEvent({ type: "workspace.inspect", name, request_id: requestId } as never).catch(() => finish(null));
+  });
+}
+
+/**
+ * ``workspace.clone`` (protocol 1.27): clone ``repos`` into workspace
+ * ``name``, one after another.  Every ``workspace.clone_progress`` for this
+ * request is handed to ``onProgress``; the returned function stops
+ * listening.  Retrying a repository is a new call naming only it.
+ */
+export function cloneIntoWorkspace(
+  name: string,
+  repos: { repo: string; branch: string; forge?: string }[],
+  onProgress: (ev: Record<string, unknown>) => void,
+): () => void {
+  const c = getClient();
+  const requestId = nextRequestId("clone");
+  const unsub = c.subscribe("workspace.clone_progress" as never, (ev) => {
+    const e = ev as unknown as Record<string, unknown>;
+    if (e.request_id === requestId) onProgress(e);
+  });
+  c.sendRawEvent({
+    type: "workspace.clone",
+    name,
+    request_id: requestId,
+    repos: repos.map((r) => ({ repo: r.repo, branch: r.branch, forge: r.forge ?? "github" })),
+  } as never).catch((err) => onProgress({ request_id: requestId, repo: "", state: "failed", error: err instanceof Error ? err.message : String(err) }));
+  return unsub;
 }
 
 export async function updateConfig(cfg: { provider?: string; model?: string; api_key?: string }): Promise<void> {

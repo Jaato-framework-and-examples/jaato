@@ -579,6 +579,7 @@ await client.create_session(profile="researcher")
 - `session.reload_env [id]` — re-resolve a LIVE session's `.env` and credentials and rebuild its provider (see [A Credential Stored After the Runner Booted](#a-credential-stored-after-the-runner-booted))
 - `workspace.ignore <path>` — toggle one exact entry in the caller's workspace `.gitignore` (→ `WorkspaceIgnoreResultEvent`; protocol 1.12, see [A Key the Web Files Panel Did Not Have](#a-key-the-web-files-panel-did-not-have))
 - `scaffold.explain [topic] [name]` — render one `jaato-scaffold explain` topic **on the daemon**, so a CLI whose own virtualenv lacks the extension contributing it can still be told (→ `ScaffoldExplainEvent`; protocol 1.18, see [A Topic the CLI Could Not Answer and the Daemon Could](#a-topic-the-cli-could-not-answer-and-the-daemon-could))
+- `workspace.inspect` / `workspace.clone` (WS only) — a workspace's details, and cloning GitHub repos into it (→ `WorkspaceInspectEvent` / `WorkspaceCloneProgressEvent`; protocol 1.27, see [What a Picker Needs to Know About a Workspace](#what-a-picker-needs-to-know-about-a-workspace-protocol-127))
 - `workspace.delete` (a `WorkspaceDeleteRequest`, WS only) — delete a workspace the caller may see: its directory, its sessions, its registry row (→ `WorkspaceDeletedEvent`; protocol 1.13, see [A Workspace Everyone Could See](#a-workspace-everyone-could-see))
 - `workspace.file.fetch` (a `WorkspaceFileFetchRequest`, WS only) — download one file from the caller's workspace (→ `WorkspaceFileContentEvent` + one binary frame; protocol 1.20, see [A File That Could Go In and Not Come Out](#a-file-that-could-go-in-and-not-come-out))
 
@@ -6617,6 +6618,68 @@ confirms inline before sending.
 
 Stated cost, unchanged in kind: the session still runs as the daemon's uid,
 so this is an entitlement boundary at the verbs, not a filesystem one.
+
+### What a Picker Needs to Know About a Workspace (protocol 1.27)
+
+The workspace and session pickers asked for facts the daemon held and no
+verb returned. Four additions, each reusing a rule already here rather than
+growing a second one:
+
+| Surface | What it answers |
+|---|---|
+| `WorkspaceInfo.sources` | the git checkouts in a workspace — the root (`path: "."`) and each immediate child holding `.git` — as `{forge, repo, branch, path}`. **Derived** on every listing from `.git/HEAD` / `.git/config` read as files (`server/workspace_sources.py`, no git process), never declared, never written to the registry. A credential in a remote URL is never echoed: only host and path survive |
+| `workspace.inspect` → `WorkspaceInspectEvent` | path, `size_bytes` (a bounded walk: `None` past 200k entries or 5 s, never 0), `sessions` counted `total` / `waiting` (loaded, `awaiting` set) / `awake` / `sleeping` (persisted only), and per checkout `uncommitted` / `unpushed` from `git status --porcelain` and `rev-list --count @{upstream}..HEAD` — local refs only, no network, 10 s per call, `unpushed: None` with no upstream, both `None` plus `error` when git failed |
+| `workspace.clone` → a stream of `WorkspaceCloneProgressEvent` | every repo `queued` first, then one at a time `cloning` (percent from `--progress`, ≤5 events/s) → `checkout` → `done` / `failed`, with `done` / `total` counters. GitHub only; target `<workspace>/<name>`, refused if it exists; a failed clone removes its partial directory; a retry is a new request naming one repo |
+| `WorkspaceDeleteRequest.stop_sessions` | delete the workspace's LOADED sessions first instead of refusing — only after `check_deletable` confirms every other refusal (owner, another client's selection, retention) would pass, so a refused delete never stops a session |
+
+**Inspect and clone refuse exactly what `select` and `delete` refuse**, through
+the one `WorkspaceManager.resolve_visible` (containment before existence, the
+naming rule, ownership); both run as background tasks so a slow git or a long
+clone never stalls the connection's receive loop.
+
+**The clone's credential is the workspace's own `GH_TOKEN`**, resolved the way
+a session spawned there resolves it — `app://github` through the WS server's
+`AppSecretResolver` for the workspace OWNER (`server/workspace_clone.py`). It
+never reaches argv or a URL: it rides `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_n`
+as an `http.https://github.com/.extraheader`, `credential.helper` is reset so
+the daemon account's own helper is never consulted, prompting is off, and
+error text is scrubbed of the token and its base64 form. No token means an
+anonymous clone: a public repo works, a private one fails with git's own error.
+
+**`session.new --model <m> [--provider <p>]`** overrides the resolved binding:
+applied to a COPY of the profile (`dataclasses.replace`, which the revive
+snapshot then freezes; an inline spec is rewritten too), or with no profile as
+`MODEL_NAME` / `JAATO_PROVIDER` env overrides persisted in the record's
+metadata so a revive re-applies them. `--provider` alone is `InvalidSessionSpec`.
+Session rows (`session.list` and the `SessionInfoEvent` snapshot, from one
+`session_picker_fields`) gain `profile`, `last_activity`, `is_processing`,
+`created_at`. Both SDKs refuse a model override below 1.27 — an older parser
+reads `--model` as the session NAME.
+
+**The web client's two screens are built on these** (design handoff
+"session picker redesign"). The Workspaces table shows `sources`, not a
+provider/model and no session counts; Delete opens an inline impact panel
+from `workspace.inspect` and requires the name typed whenever anything would
+be lost (and whenever the inspection failed), then sends `stop_sessions`.
+New workspace creates, binds the default GitHub account (which writes
+`GH_TOKEN=app://github`), THEN asks for the clone — so a private repo gets a
+credential — and opens the session picker only once every repo is checked
+out; the repo search is the BFF's `/api/github/repos` + `/branches`. The
+session picker is a board: Waiting on you / Awake / Sleeping cards
+(Attach, note, inline Discard via `session.delete`) and a New session column
+where a base profile's model is inherited or overridden for that session via
+`--model`. `default` requires a pick in workspace mode; on a daemon with no
+workspace mode it may fall back to the daemon's `.env`. Staged files stay in
+the browser until Start. There is no model catalog verb, so the model field
+is free text with suggestions from profiles, sessions and the `.env`.
+The API-key list box (`CredentialPicker`: stored keys for the provider, or
+"New key…") sits under the model, for the provider the session will use;
+on Start the choice is revealed / stored and written with
+`config.update` **`key_only`** (1.27) — only the provider's key variable,
+no `JAATO_PROVIDER` / `MODEL_NAME`, no server bootstrap, and a
+`config.updated` reporting the binding the `.env` still holds — before
+`session.new`. Offered only with a selected workspace on a 1.27 daemon: an
+older one would rewrite the provider binding instead.
 
 ### A Session You Deleted, and a Listing That Was Not Yours
 

@@ -75,6 +75,10 @@ from jaato_sdk.events import (
     WorkspaceSelectRequest,
     WorkspaceDeleteRequest,
     WorkspaceDeletedEvent,
+    WorkspaceInspectRequest,
+    WorkspaceInspectEvent,
+    WorkspaceCloneRequest,
+    WorkspaceCloneProgressEvent,
     ConfigStatusEvent,
     ConfigUpdateRequest,
     ConfigUpdatedEvent,
@@ -2607,6 +2611,8 @@ class JaatoWSServer:
             WorkspaceCreateRequest,
             WorkspaceSelectRequest,
             WorkspaceDeleteRequest,
+            WorkspaceInspectRequest,
+            WorkspaceCloneRequest,
             ConfigUpdateRequest,
         ))
         if is_workspace_request:
@@ -2829,7 +2835,12 @@ class JaatoWSServer:
         elif isinstance(event, WorkspaceCreateRequest):
             await self._handle_workspace_create(client_id, event.name)
         elif isinstance(event, WorkspaceDeleteRequest):
-            await self._handle_workspace_delete(client_id, event.name)
+            await self._handle_workspace_delete(
+                client_id, event.name, stop_sessions=event.stop_sessions)
+        elif isinstance(event, WorkspaceInspectRequest):
+            await self._handle_workspace_inspect(client_id, event)
+        elif isinstance(event, WorkspaceCloneRequest):
+            await self._handle_workspace_clone(client_id, event)
         elif isinstance(event, WorkspaceSelectRequest):
             await self._handle_workspace_select(client_id, event.name)
             # Bridge selected workspace path to the event sink adapter
@@ -2841,6 +2852,7 @@ class JaatoWSServer:
         elif isinstance(event, ConfigUpdateRequest):
             await self._handle_config_update(
                 client_id, event.provider, event.model, event.api_key,
+                key_only=event.key_only,
             )
 
     async def _handle_stage_files_request(self, client_id: str, event) -> None:
@@ -3730,25 +3742,37 @@ class JaatoWSServer:
         except ValueError as e:
             await self._send_error(client_id, str(e))
 
-    async def _handle_workspace_delete(self, client_id: str, name: str) -> None:
-        """Handle ``workspace.delete`` (protocol 1.13).
+    async def _handle_workspace_delete(
+        self, client_id: str, name: str, stop_sessions: bool = False,
+    ) -> None:
+        """Handle ``workspace.delete`` (protocol 1.13; ``stop_sessions`` 1.27).
 
         Answers with one ``WorkspaceDeletedEvent`` whatever happened.  The
         manager refuses containment, ownership and other clients' selections;
         the loaded-session check needs the session manager, which lives
         behind the command router, so it is resolved here and handed in.
+
+        With ``stop_sessions`` the LOADED sessions in the workspace are
+        deleted (stopped and shut down) first instead of refusing -- but only
+        after :meth:`WorkspaceManager.check_deletable` has confirmed every
+        OTHER refusal would pass, so a delete that is going to be refused
+        anyway (another user's workspace, another client's selection,
+        retention) never stops a session.
         """
         if not self._workspace_manager:
             await self._send_error(client_id, "Workspace mode not enabled")
             return
+        user = self.get_client_user(client_id)
         try:
             path = self._workspace_manager.get_workspace_path(name)
             in_use = self._sessions_loaded_in(str(path)) if path else []
+            if stop_sessions and in_use:
+                self._workspace_manager.check_deletable(
+                    name, user=user, client_id=client_id)
+                await asyncio.to_thread(self._delete_sessions, in_use)
+                in_use = self._sessions_loaded_in(str(path))
             self._workspace_manager.delete_workspace(
-                name,
-                user=self.get_client_user(client_id),
-                in_use_by=in_use,
-                client_id=client_id,
+                name, user=user, in_use_by=in_use, client_id=client_id,
             )
         except ValueError as e:
             await self._send_to_client(
@@ -3758,6 +3782,127 @@ class JaatoWSServer:
             if self._event_sink_adapter.get_client_workspace(client_id) == str(path):
                 self._event_sink_adapter.clear_client_workspace(client_id)
         await self._send_to_client(client_id, WorkspaceDeletedEvent(name=name, ok=True))
+
+    def _delete_sessions(self, session_ids: List[str]) -> None:
+        """Delete (stop + shut down + remove) each session; blocking.
+
+        Runs off the event loop: ``SessionManager.delete_session`` blocks its
+        thread until the daemon loop has run the runner teardown, so calling
+        it ON the loop would deadlock.
+        """
+        if not self._command_router:
+            return
+        sm = self._command_router._session_manager
+        for session_id in session_ids:
+            logger.info("workspace.delete: stopping session %s", session_id)
+            sm.delete_session(session_id)
+
+    def _session_rows(self) -> List[Any]:
+        """``SessionManager.list_sessions()``, or ``[]`` without a router."""
+        if not self._command_router:
+            return []
+        return self._command_router._session_manager.list_sessions()
+
+    async def _handle_workspace_inspect(
+        self, client_id: str, event: "WorkspaceInspectRequest",
+    ) -> None:
+        """Handle ``workspace.inspect`` (protocol 1.27).
+
+        One ``WorkspaceInspectEvent`` whatever happened, echoing
+        ``request_id``.  The workspace is resolved through
+        :meth:`WorkspaceManager.resolve_visible` -- the refusals ``select``
+        and ``delete`` give -- and the inspection (git, a bounded tree walk)
+        runs in a worker thread so the loop is never blocked on it.
+        """
+        name, request_id = event.name, event.request_id
+        if not self._workspace_manager:
+            await self._send_error(client_id, "Workspace mode not enabled")
+            return
+        from .workspace_inspect import inspect_workspace
+        try:
+            path, _ = self._workspace_manager.resolve_visible(
+                name, self.get_client_user(client_id))
+        except ValueError as e:
+            await self._send_to_client(client_id, WorkspaceInspectEvent(
+                name=name, request_id=request_id, ok=False, error=str(e)))
+            return
+        rows = self._session_rows()
+
+        async def run() -> None:
+            try:
+                fields = await asyncio.to_thread(inspect_workspace, path, rows)
+            except Exception as exc:  # noqa: BLE001 -- the caller must get an answer
+                logger.warning("workspace.inspect %s failed: %s", name, exc, exc_info=True)
+                await self._send_to_client(client_id, WorkspaceInspectEvent(
+                    name=name, request_id=request_id, ok=False, error=str(exc)))
+                return
+            await self._send_to_client(client_id, WorkspaceInspectEvent(
+                name=name, request_id=request_id, ok=True, **fields))
+
+        # Background, like a clone: git and the tree walk can take seconds,
+        # and the connection's receive loop must keep reading meanwhile.
+        self._spawn_background(run(), f"workspace.inspect {name}")
+
+    async def _handle_workspace_clone(
+        self, client_id: str, event: "WorkspaceCloneRequest",
+    ) -> None:
+        """Handle ``workspace.clone`` (protocol 1.27).
+
+        Answered by a stream of ``WorkspaceCloneProgressEvent`` echoing
+        ``request_id``.  A workspace the caller may not see (or a name that
+        leaves the root) is ONE ``failed`` event with ``repo == ""``.  The
+        credential is the workspace's own ``GH_TOKEN``, resolved as a session
+        spawned there would resolve it (``app://`` through this server's
+        resolver, for the workspace's owner) -- see
+        :mod:`server.workspace_clone` for how it is kept off argv and out of
+        error text.
+        """
+        name, request_id = event.name, event.request_id
+
+        async def emit(fields: Dict[str, Any]) -> None:
+            await self._send_to_client(client_id, WorkspaceCloneProgressEvent(
+                name=name, request_id=request_id, **fields))
+
+        if not self._workspace_manager:
+            await emit({"state": "failed", "error": "Workspace mode not enabled"})
+            return
+        from .workspace_clone import clone_repos, resolve_workspace_token
+        try:
+            path, _ = self._workspace_manager.resolve_visible(
+                name, self.get_client_user(client_id))
+        except ValueError as e:
+            await emit({"state": "failed", "error": str(e)})
+            return
+        repos = list(event.repos)
+
+        async def run() -> None:
+            try:
+                token = await asyncio.to_thread(
+                    resolve_workspace_token, path, self._app_secret_resolver)
+            except Exception as exc:  # noqa: BLE001 -- clone anonymously
+                logger.warning("workspace.clone %s: token lookup failed: %s", name, exc)
+                token = None
+            await clone_repos(path, repos, token, emit)
+
+        # A clone runs for minutes; awaiting it here would stall this
+        # connection's receive loop (no other message from the client would
+        # be read until it finished).  So it is a background task, held in a
+        # set so it is not garbage-collected mid-run.
+        self._spawn_background(run(), f"workspace.clone {name}")
+
+    def _spawn_background(self, coro: Any, label: str) -> None:
+        """Run *coro* as a task this server keeps alive; failures are logged."""
+        tasks = self.__dict__.setdefault("_background_tasks", set())
+        task = asyncio.create_task(coro)
+        tasks.add(task)
+
+        def _done(t: "asyncio.Task") -> None:
+            tasks.discard(t)
+            if not t.cancelled() and t.exception() is not None:
+                logger.error("%s failed: %s", label, t.exception(),
+                             exc_info=t.exception())
+
+        task.add_done_callback(_done)
 
     async def _handle_workspace_select(self, client_id: str, name: str) -> None:
         """Handle workspace selection request.
@@ -3914,6 +4059,7 @@ class JaatoWSServer:
         provider: str,
         model: Optional[str],
         api_key: Optional[str],
+        key_only: bool = False,
     ) -> None:
         """Handle workspace configuration update request.
 
@@ -3921,6 +4067,12 @@ class JaatoWSServer:
         ``JaatoServer`` for the workspace so the client can start sending
         messages.  If auto-provisioning is active, the workspace is
         provisioned first and AppArmor confinement is applied.
+
+        ``key_only`` (protocol 1.27) writes only the provider's API-key
+        variable and bootstraps nothing: it is the session picker handing a
+        key to the session it is about to create with ``session.new``,
+        which must neither rebind the workspace's provider nor start a
+        second server beside that session.
         """
         if not self._workspace_manager:
             await self._send_error(client_id, "Workspace mode not enabled")
@@ -3937,6 +4089,7 @@ class JaatoWSServer:
                 model=model,
                 api_key=api_key,
                 name=selected.name,
+                key_only=key_only,
             )
 
             await self._send_to_client(
@@ -3950,7 +4103,7 @@ class JaatoWSServer:
             )
 
             # Initialize JaatoServer now that the workspace is configured
-            if result["success"]:
+            if result["success"] and not key_only:
                 await self._initialize_server_for_workspace(client_id, selected)
 
         except ValueError as e:
