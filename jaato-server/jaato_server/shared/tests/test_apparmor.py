@@ -2865,9 +2865,13 @@ class TestRenderedProfileCompiles:
         what actually broke.  Covers the base body, ``tool_hat`` and
         ``//child`` in one compile, since ``_render_profile`` embeds all
         three in its one returned string.
+
+        The path lives under ``tmp_path``, not ``/root``: rendering stats
+        ``<workspace>/.jaato/apparmor-fragments``, and a non-root runner
+        (CI) gets ``PermissionError`` on anything under ``/root``.
         """
         profile = manager._render_profile(
-            "s1", "/root/.jaato/workspaces/Claude UX Review",
+            "s1", str(tmp_path / "workspaces" / "Claude UX Review"),
         )
         self._assert_compiles(profile, tmp_path)
 
@@ -2880,7 +2884,7 @@ class TestRenderedProfileCompiles:
         sub = manager._render_sub_profile(
             parent_session_id="parent-A",
             subagent_id="agent-B",
-            workspace_path="/root/.jaato/workspaces/Claude UX Review",
+            workspace_path=str(tmp_path / "workspaces" / "Claude UX Review"),
         )
         self._assert_compiles(sub, tmp_path)
 
