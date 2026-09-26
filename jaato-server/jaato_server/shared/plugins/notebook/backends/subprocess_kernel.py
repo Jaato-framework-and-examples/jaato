@@ -40,6 +40,7 @@ from typing import Callable, Deque, Dict, List, Optional, Tuple
 from jaato_server.shared.session_context import get_workspace_root
 from ...workspace_venv import (
     resolve_venv_path, ensure_workspace_venv, apply_venv_to_env, venv_python,
+    kernel_import_dirs,
 )
 from ...workspace_home import resolve_home_path, apply_home_to_env
 from ...jaato_tools_path import append_path_entry, jaato_tools_dir
@@ -219,6 +220,38 @@ class _Kernel:
                 s.close()
             except Exception:
                 pass
+
+
+_KERNEL_MODULE = "jaato_server.shared.plugins.notebook.kernel_main"
+
+
+def _kernel_argv(kernel_python: str, import_dirs: List[str]) -> List[str]:
+    """The command that starts the kernel, before its own arguments.
+
+    With no ``import_dirs`` (the runner's own interpreter, which already
+    imports jaato) this is ``python -m kernel_main``.
+
+    Under a workspace venv it is a ``-c`` bootstrap that appends
+    ``import_dirs`` to ``sys.path`` and then runs the same module.  A venv
+    interpreter cannot import jaato by itself: that was deliberately taken
+    away from every tool-venv interpreter, because it made the daemon's
+    installed ``jaato_server`` shadow the checkout a session was editing
+    (#1322).  The kernel is the one process that needs it.
+
+    The dirs travel in argv, not ``PYTHONPATH``, so a process a cell starts
+    (``!python -m pytest``) inherits nothing from them.  Appended, not
+    prepended, so a package the model installs into the venv still wins
+    inside the kernel.
+    """
+    if not import_dirs:
+        return [kernel_python, "-m", _KERNEL_MODULE]
+    bootstrap = (
+        "import runpy, sys; "
+        f"sys.path.extend({list(import_dirs)!r}); "
+        f"runpy.run_module({_KERNEL_MODULE!r}, run_name='__main__', "
+        "alter_sys=True)"
+    )
+    return [kernel_python, "-c", bootstrap]
 
 
 class SubprocessKernelBackend(NotebookBackend):
@@ -727,20 +760,19 @@ class SubprocessKernelBackend(NotebookBackend):
                 "(session_context ContextVar and plugin config both unset)")
         # Kernel interpreter: the runner base python by default, or the
         # workspace venv's python when configured (so the model's in-notebook
-        # pip installs persist and later imports resolve).  ensure_workspace_venv
-        # drops a runner-import bridge (.pth -> site.addsitedir) into the venv,
-        # so the venv python can still import ``shared.plugins.notebook.
-        # kernel_main`` from the runner env — for BOTH editable and wheel
-        # installs (see shared/plugins/workspace_venv.py; --system-site-packages
-        # alone can't, since a venv-from-venv resolves its base to /usr).
+        # pip installs persist and later imports resolve).  The tool-venv
+        # cannot import jaato on its own (#1322), so a venv kernel is handed
+        # jaato's import dirs at launch -- see ``_kernel_argv``.
         kernel_python = sys.executable
         kernel_env: Optional[Dict[str, str]] = None
+        import_dirs: List[str] = []
         venv_path = resolve_venv_path(self._workspace_venv, workspace)
         if venv_path:
             ensure_workspace_venv(venv_path)
             kernel_python = venv_python(venv_path)
             kernel_env = os.environ.copy()
             apply_venv_to_env(kernel_env, venv_path)
+            import_dirs = kernel_import_dirs()
 
         # Workspace HOME (#1225): point HOME + XDG at ``<ws>/<home>`` so a
         # cell's ~ writes land per-workspace.  The daemon created the
@@ -777,7 +809,7 @@ class SubprocessKernelBackend(NotebookBackend):
         if self._allow_uncontained:
             containment_args.append("--uncontained")
         proc = subprocess.Popen(
-            [kernel_python, "-m", "jaato_server.shared.plugins.notebook.kernel_main",
+            [*_kernel_argv(kernel_python, import_dirs),
              "--workspace-root", workspace,
              "--read-fd", str(r2k_r), "--write-fd", str(k2r_w),
              *containment_args],

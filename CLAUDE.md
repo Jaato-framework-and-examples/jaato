@@ -8833,6 +8833,26 @@ would be refused. The directory is rebuilt if the session tmpdir is reaped.
 this way sees the workspace venv's site-packages on `PYTHONPATH`, and a
 conflicting package installed there could shadow one of jaato's dependencies.
 
+**The tool-venv imports nothing of the daemon's but pip (#1322).** The venv is
+created `--without-pip`, so a `.pth` in it makes the runner's `pip` importable
+(a symlink under `<venv>/jaato-pip/`) and nothing else. It used to list the
+runner's whole site-packages plus jaato's source roots, for the notebook
+kernel's sake, and every interpreter the model started got them too: a session
+developing jaato imported the daemon's installed `jaato_server` instead of its
+checkout, `pip install -e <checkout>` lost to it (an editable finder is asked
+after the path search), and pip reported the daemon's packages as installed.
+The kernel, the one process that IS jaato, gets those dirs in its own launch
+argv (a `-c` bootstrap, `SubprocessKernelBackend._kernel_argv`), not in
+`PYTHONPATH`, so a cell's `!python -m pytest` starts as clean as a `cli`
+command. The `.pth` keeps its old name, so an existing venv is migrated on the
+next `ensure`. `--system-site-packages` was the other door: when the runner is
+installed into a BASE interpreter (a container's system Python, a CI image),
+that interpreter's own site-packages hold jaato, so the flag is passed only
+when the runner is itself a venv, and an existing venv has it switched off in
+`pyvenv.cfg` (only ever off). What still sees the daemon's jaato: code a notebook cell runs
+in-process, because the kernel imports it. Guard:
+`jaato_server/shared/tests/test_tool_venv_does_not_shadow_the_checkout_1322.py`.
+
 **The managed venv (#1274) is the #1225 rule applied to `workspace_venv`.**
 Every workspace the web client creates is profile-less (a bare `.env`), so no
 `plugin_configs` channel reached it. Without a venv, `pip install` ran the
