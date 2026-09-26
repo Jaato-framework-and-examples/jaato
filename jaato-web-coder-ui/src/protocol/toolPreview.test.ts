@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { diffPreviewForCall, execOutputPreview, execTitle, markdownPathsForCall, splitServerDiff } from "./toolPreview";
+import { diffPreviewForCall, execOutputPreview, execTitle, viewablePathsForCall, splitServerDiff } from "./toolPreview";
 
 describe("diffPreviewForCall", () => {
   it("builds a before/after diff from updateFile's targeted old/new args", () => {
@@ -82,18 +82,18 @@ describe("splitServerDiff (jaato/#1304 phase 3)", () => {
   });
 });
 
-describe("markdownPathsForCall (the tool row's markdown view button)", () => {
+describe("viewablePathsForCall (the tool row's view button)", () => {
   it("offers the markdown file a write left on disk, preferring the server's path", () => {
-    expect(markdownPathsForCall("writeNewFile", { path: "docs/a.md", content: "#" })).toEqual(["docs/a.md"]);
-    expect(markdownPathsForCall("updateFile", { path: "./README.md" }, "README.md")).toEqual(["README.md"]);
-    expect(markdownPathsForCall("updateFile", { path: "src/app.py" })).toEqual([]);
+    expect(viewablePathsForCall("writeNewFile", { path: "docs/a.md", content: "#" })).toEqual(["docs/a.md"]);
+    expect(viewablePathsForCall("updateFile", { path: "./README.md" }, "README.md")).toEqual(["README.md"]);
+    expect(viewablePathsForCall("updateFile", { path: "src/app.py" })).toEqual([]);
   });
   it("follows a move to its destination and offers nothing for a removal", () => {
-    expect(markdownPathsForCall("moveFile", { source_path: "a.md", destination_path: "b/a.md" })).toEqual(["b/a.md"]);
-    expect(markdownPathsForCall("removeFile", { path: "a.md" })).toEqual([]);
+    expect(viewablePathsForCall("moveFile", { source_path: "a.md", destination_path: "b/a.md" })).toEqual(["b/a.md"]);
+    expect(viewablePathsForCall("removeFile", { path: "a.md" })).toEqual([]);
   });
   it("collects every edited, created or renamed-to markdown file of a multiFileEdit, once", () => {
-    expect(markdownPathsForCall("multiFileEdit", { operations: [
+    expect(viewablePathsForCall("multiFileEdit", { operations: [
       { action: "edit", path: "a.md" },
       { action: "create", path: "b.markdown" },
       { action: "delete", path: "c.md" },
@@ -104,12 +104,16 @@ describe("markdownPathsForCall (the tool row's markdown view button)", () => {
     ] })).toEqual(["a.md", "b.markdown", "e.md"]);
   });
   it("makes an absolute path relative to the workspace, and drops one outside it", () => {
-    expect(markdownPathsForCall("writeNewFile", { path: "/work/space/docs/a.md" }, null, "/work/space/")).toEqual(["docs/a.md"]);
-    expect(markdownPathsForCall("writeNewFile", { path: "/etc/motd.md" }, null, "/work/space")).toEqual([]);
-    expect(markdownPathsForCall("writeNewFile", { path: "/work/space/a.md" })).toEqual([]);
-    expect(markdownPathsForCall("writeNewFile", { path: "../up.md" })).toEqual([]);
+    expect(viewablePathsForCall("writeNewFile", { path: "/work/space/docs/a.md" }, null, "/work/space/")).toEqual(["docs/a.md"]);
+    expect(viewablePathsForCall("writeNewFile", { path: "/etc/motd.md" }, null, "/work/space")).toEqual([]);
+    expect(viewablePathsForCall("writeNewFile", { path: "/work/space/a.md" })).toEqual([]);
+    expect(viewablePathsForCall("writeNewFile", { path: "../up.md" })).toEqual([]);
+  });
+  it("offers an image file too, and nothing else that is not rendered", () => {
+    expect(viewablePathsForCall("writeNewFile", { path: "out/chart.PNG" })).toEqual(["out/chart.PNG"]);
+    expect(viewablePathsForCall("writeNewFile", { path: "out/data.csv" })).toEqual([]);
   });
   it("ignores tools that are not file writes", () => {
-    expect(markdownPathsForCall("readFile", { path: "a.md" })).toEqual([]);
+    expect(viewablePathsForCall("readFile", { path: "a.md" })).toEqual([]);
   });
 });

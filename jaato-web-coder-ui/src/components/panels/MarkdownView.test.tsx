@@ -121,6 +121,14 @@ describe("MarkdownView resolves workspace references through the daemon", () => 
     expect(revokeObjectURL).toHaveBeenCalledWith("blob:fake");
   });
 
+  it("clicking a relative image opens it in the viewer", async () => {
+    Object.assign(URL, { createObjectURL: vi.fn(() => "blob:fake"), revokeObjectURL: vi.fn() });
+    const onOpen = vi.fn();
+    view("![diagram](img/arch.png)", { onOpen, fetchFile: () => Promise.resolve(new Uint8Array([1])) });
+    fireEvent.click(await screen.findByRole("button", { name: "Open diagram in the image viewer" }));
+    expect(onOpen).toHaveBeenCalledWith("docs/img/arch.png");
+  });
+
   it("a relative image the daemon refuses is named, not shown broken", async () => {
     view("![secret](../../etc/x.png) ![gone](missing.png)");
     expect(await screen.findByText("[image: gone]")).toBeInTheDocument();
@@ -140,10 +148,30 @@ describe("MarkdownView draws mermaid fences", () => {
     expect(mermaidMock.render).toHaveBeenCalledWith(expect.any(String), "graph TD; A-->B\n");
   });
 
+  it("hands the drawn SVG to the viewer when the diagram is clicked", async () => {
+    Object.assign(URL, { createObjectURL: vi.fn(() => "blob:diagram"), revokeObjectURL: vi.fn() });
+    const onOpenDiagram = vi.fn();
+    view("```mermaid\ngraph TD; A-->B\n```", { onOpenDiagram });
+    fireEvent.click(await screen.findByRole("button", { name: "Open the diagram in the image viewer" }));
+    const [label, data, mime] = onOpenDiagram.mock.calls[0]!;
+    expect(label).toBe("diagram in docs/index.md");
+    expect(mime).toBe("image/svg+xml");
+    expect(new TextDecoder().decode(data as Uint8Array)).toContain("graph TD; A-->B");
+  });
+
   it("shows the error and the source when the diagram does not parse", async () => {
     view("```mermaid\nbogus diagram\n```");
     expect(await screen.findByRole("alert")).toHaveTextContent("Parse error on line 1");
     expect(screen.getByText("bogus diagram")).toBeInTheDocument();
+  });
+});
+
+describe("sizedSvg", () => {
+  it("gives the diagram the size mermaid drew it at, keeping the viewBox ratio", async () => {
+    const { sizedSvg } = await import("./MermaidDiagram");
+    const out = sizedSvg('<svg id="m" width="100%" style="max-width: 130px;" viewBox="0 0 130 260"><g/></svg>');
+    expect(out).toBe('<svg id="m" style="max-width: 130px;" viewBox="0 0 130 260" width="130" height="260"><g/></svg>');
+    expect(sizedSvg("<svg><g/></svg>")).toBe("<svg><g/></svg>");
   });
 });
 

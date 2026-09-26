@@ -33,8 +33,9 @@
  *   A markdown file is RENDERED (``MarkdownView``, lazily loaded) with a
  *   ``raw`` toggle; its relative links open the linked file in the same
  *   viewer, with ``back`` to return, and its relative images are fetched
- *   through the same daemon verb.  A tool row that wrote a markdown file
- *   opens it here too (``viewWorkspaceFile`` → ``workspaceViewRequest``).
+ *   through the same daemon verb.  An image file is shown zoomable
+ *   (``ImageView``). A tool row that wrote a markdown or image file opens
+ *   it here too (``viewWorkspaceFile`` → ``workspaceViewRequest``).
  * - **collapse** (TUI Left/Right): the arrow in front of a directory folds
  *   it to one line carrying how many files it holds.  Every directory
  *   starts expanded and a reset expands them all again, as in the TUI.
@@ -60,7 +61,7 @@ import { toggleWorkspaceIgnore } from "@/app/actions";
 import { visibleFiles } from "@/store/workspaceView";
 import { downloadFromPanel, servesDownloads } from "@/app/downloads";
 import { getClient } from "@/sdk/connection";
-import { isMarkdownPath } from "@/protocol/workspacePaths";
+import { imageMimeFor, isMarkdownPath } from "@/protocol/workspacePaths";
 
 interface Node { name: string; path: string; change?: string; children: Map<string, Node> }
 
@@ -227,15 +228,36 @@ function Tree({ node, depth, hidden, showHidden, ignored, collapsed, onOpenFile 
 }
 
 const MAX_VIEWER_BYTES = 512 * 1024;
+/**
+ * Images get their own, larger cap: the text cap would send most
+ * screenshots to "use download".  Below the daemon's 50 MB fetch cap; the
+ * bytes are held in memory and decoded by the browser.
+ */
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 
 const MarkdownView = lazy(() => import("./MarkdownView"));
+const ImageView = lazy(() => import("./ImageView"));
 
 /**
  * What the content viewer is showing.  ``back`` is the trail of files the
  * user left by following a link in a rendered markdown document, most
  * recent last; opening a file from the tree starts a fresh trail.
+ *
+ * ``status: "image"`` carries the bytes and their mime.  ``synthetic``
+ * marks an image that is not a workspace file -- a diagram the markdown
+ * view drew and handed over (``openDiagram``) -- so ``path`` is only a
+ * label and there is nothing to download.
  */
-interface ViewerState { path: string; status: "loading" | "text" | "binary" | "error"; text?: string; error?: string; back: string[] }
+interface ViewerState {
+  path: string;
+  status: "loading" | "text" | "binary" | "error" | "image";
+  text?: string;
+  error?: string;
+  data?: Uint8Array;
+  mime?: string;
+  synthetic?: boolean;
+  back: string[];
+}
 
 /** Fetch a workspace file's bytes for the markdown view's images; ``null`` when refused. */
 async function fetchWorkspaceBytes(path: string): Promise<Uint8Array | null> {
@@ -257,8 +279,13 @@ const VIEW_BTN = "link text-[11px]";
  * this same viewer (``onOpen``), and ``back`` returns along the trail.
  * ``expand`` lifts the rail-sized height cap, since a document is read,
  * not glanced at.
+ *
+ * An image (``status: "image"``) is shown by the lazily-loaded
+ * ``ImageView``, zoomable, with ``expand`` giving it the taller area.  A
+ * relative image in a markdown document, and a mermaid diagram, open here
+ * as images too, with ``back`` to the document.
  */
-function FileContentViewer({ state, onClose, onOpen, onBack }: { state: ViewerState; onClose: () => void; onOpen: (path: string) => void; onBack: () => void }) {
+function FileContentViewer({ state, onClose, onOpen, onBack, onOpenDiagram }: { state: ViewerState; onClose: () => void; onOpen: (path: string) => void; onBack: () => void; onOpenDiagram: (label: string, data: Uint8Array, mime: string) => void }) {
   const markdown = isMarkdownPath(state.path);
   const [raw, setRaw] = useState(false);
   const [expanded, setExpanded] = useState(false);
@@ -276,10 +303,10 @@ function FileContentViewer({ state, onClose, onOpen, onBack }: { state: ViewerSt
             {raw ? "rendered" : "raw"}
           </button>
         )}
-        {state.status === "text" && (
+        {(state.status === "text" || state.status === "image") && (
           <button type="button" className={VIEW_BTN} onClick={() => setExpanded((e) => !e)} aria-pressed={expanded}>{expanded ? "shrink" : "expand"}</button>
         )}
-        <button type="button" className={VIEW_BTN} onClick={() => { void downloadFromPanel(state.path); }}>download</button>
+        {!state.synthetic && <button type="button" className={VIEW_BTN} onClick={() => { void downloadFromPanel(state.path); }}>download</button>}
         <button type="button" className={VIEW_BTN} onClick={onClose} aria-label="Close file viewer">close</button>
       </div>
       {state.status === "loading" && <div className="px-2 py-2 text-[12px] text-text-muted italic">Loading…</div>}
@@ -288,9 +315,14 @@ function FileContentViewer({ state, onClose, onOpen, onBack }: { state: ViewerSt
       {rendered && (
         <div className={`px-3 py-2 ${height} overflow-auto`}>
           <Suspense fallback={<div className="text-[12px] text-text-muted italic">Rendering…</div>}>
-            <MarkdownView key={state.path} source={state.text ?? ""} path={state.path} fetchFile={fetchWorkspaceBytes} onOpen={onOpen} />
+            <MarkdownView key={state.path} source={state.text ?? ""} path={state.path} fetchFile={fetchWorkspaceBytes} onOpen={onOpen} onOpenDiagram={onOpenDiagram} />
           </Suspense>
         </div>
+      )}
+      {state.status === "image" && state.data && (
+        <Suspense fallback={<div className="px-2 py-2 text-[12px] text-text-muted italic">Loading viewer…</div>}>
+          <ImageView key={state.path} data={state.data} mime={state.mime ?? "application/octet-stream"} label={state.path} heightClass={expanded ? "!h-[75vh]" : "!h-64"} />
+        </Suspense>
       )}
       {state.status === "text" && !rendered && (
         <pre className={`m-0 px-2 py-2 text-[11.5px] font-mono whitespace-pre-wrap break-words ${height} overflow-auto`}>{state.text}</pre>
@@ -354,6 +386,11 @@ export function WorkspacePanel() {
       try {
         const { event, data } = await getClient().fetchWorkspaceFile(path);
         if (!event.ok || !data) { setViewer({ path, status: "error", error: event.error || "could not fetch this file", back }); return; }
+        const mime = imageMimeFor(path);
+        if (mime) {
+          setViewer(data.byteLength > MAX_IMAGE_BYTES ? { path, status: "binary", back } : { path, status: "image", data, mime, back });
+          return;
+        }
         if (data.byteLength > MAX_VIEWER_BYTES) { setViewer({ path, status: "binary", back }); return; }
         const text = decodeAsText(data);
         setViewer(text == null ? { path, status: "binary", back } : { path, status: "text", text, back });
@@ -376,6 +413,11 @@ export function WorkspacePanel() {
   // A link followed inside a rendered document keeps the trail; the tree's
   // own ``view`` starts a new one.
   const followLink = (path: string) => { if (viewer) openFile(path, [...viewer.back, viewer.path]); };
+  // A diagram handed over by the markdown view: shown as an image, with
+  // ``back`` to the document it came from.
+  const openDiagram = (label: string, data: Uint8Array, mime: string) => {
+    if (viewer) setViewer({ path: label, status: "image", data, mime, synthetic: true, back: [...viewer.back, viewer.path] });
+  };
   const goBack = () => {
     if (!viewer?.back.length) return;
     openFile(viewer.back[viewer.back.length - 1]!, viewer.back.slice(0, -1));
@@ -386,7 +428,7 @@ export function WorkspacePanel() {
       {notice && (
         <div role="status" className={`text-[11px] mb-2 ${notice.error ? "text-error" : "text-text-muted"}`}>{notice.text}</div>
       )}
-      {viewer && <FileContentViewer state={viewer} onClose={() => setViewer(null)} onOpen={followLink} onBack={goBack} />}
+      {viewer && <FileContentViewer state={viewer} onClose={() => setViewer(null)} onOpen={followLink} onBack={goBack} onOpenDiagram={openDiagram} />}
       <ResetBar total={total} isReset={isReset} />
       {total === 0 ? (
         <div className="text-xs text-text-muted italic">

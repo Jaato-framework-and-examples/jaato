@@ -254,6 +254,14 @@ button, input, select, textarea { border-radius: 0; font-family: inherit; }
 .md-doc h1, .md-doc h2 { border-bottom: 1px solid var(--c-divider); padding-bottom: 0.15rem; }
 .md-doc pre code.inline { border: 0; padding: 0; font-size: inherit; }
 .md-doc .md-img { max-width: 100%; height: auto; margin: 0.4rem 0; }
+.md-doc .md-img-open { display: inline-block; padding: 0; border: 0; background: none; cursor: zoom-in; max-width: 100%; }
+/* The image viewer's ground (panels/ImageView.tsx): a checkerboard, so a
+   transparent pixel is not mistaken for a white one. */
+.img-checker {
+  background-color: var(--c-surface);
+  background-image: conic-gradient(color-mix(in srgb, var(--c-muted) 18%, transparent) 25%, transparent 0 50%, color-mix(in srgb, var(--c-muted) 18%, transparent) 0 75%, transparent 0);
+  background-size: 16px 16px;
+}
 .md-doc .md-img-missing { color: var(--c-text-muted); font-style: italic; }
 .md-doc .md-link-blocked { color: var(--c-text-muted); text-decoration: line-through; }
 .md-doc ul.contains-task-list { list-style: none; margin-left: 0.4rem; }

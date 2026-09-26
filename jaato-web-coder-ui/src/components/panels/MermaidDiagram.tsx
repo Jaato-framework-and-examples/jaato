@@ -41,7 +41,7 @@ function loadMermaid(): Promise<Mermaid> {
 
 let counter = 0;
 
-type State = { status: "rendering" } | { status: "ok"; url: string; width: number | null } | { status: "error"; error: string };
+type State = { status: "rendering" } | { status: "ok"; url: string; width: number | null; svg: string } | { status: "error"; error: string };
 
 /**
  * The width mermaid drew the diagram at.  Its SVG says ``width="100%"``
@@ -55,7 +55,32 @@ export function naturalWidthOf(svg: string): number | null {
   return Number.isFinite(n) && n > 0 ? Math.ceil(n) : null;
 }
 
-export function MermaidDiagram({ source }: { source: string }) {
+/**
+ * ``onOpen``, when given, makes the diagram a button that hands its SVG to
+ * the viewer's image mode, where it can be zoomed -- a large diagram is
+ * unreadable at the panel's width.
+ */
+/**
+ * The SVG with an explicit size, for the image viewer.  Mermaid writes
+ * ``width="100%"`` on the root, which leaves an image with no natural
+ * size -- it is then laid out to whatever box holds it, and the viewer's
+ * ``1:1`` and zoom readout have nothing to measure against.  The width is
+ * the one mermaid drew at (``naturalWidthOf``) and the height follows the
+ * ``viewBox``'s ratio.  Returned unchanged when either is missing.
+ */
+export function sizedSvg(svg: string): string {
+  const width = naturalWidthOf(svg);
+  const vb = /viewBox="\s*[-\d.]+[\s,]+[-\d.]+[\s,]+([\d.]+)[\s,]+([\d.]+)\s*"/.exec(svg);
+  if (!width || !vb) return svg;
+  const height = Math.ceil((width * Number(vb[2])) / Number(vb[1]));
+  if (!Number.isFinite(height) || height <= 0) return svg;
+  return svg.replace(/<svg\b([^>]*)>/, (_m, attrs: string) => {
+    const rest = attrs.replace(/\s(width|height)="[^"]*"/g, "");
+    return `<svg${rest} width="${width}" height="${height}">`;
+  });
+}
+
+export function MermaidDiagram({ source, onOpen }: { source: string; onOpen?: (svg: string) => void }) {
   const dark = useJaato((s) => isDarkTheme(s.ui.theme));
   const [state, setState] = useState<State>({ status: "rendering" });
 
@@ -70,7 +95,7 @@ export function MermaidDiagram({ source }: { source: string }) {
         const { svg } = await mermaid.render(`jaato-mermaid-${++counter}`, source);
         if (cancelled) return;
         url = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml" }));
-        setState({ status: "ok", url, width: naturalWidthOf(svg) });
+        setState({ status: "ok", url, width: naturalWidthOf(svg), svg });
       } catch (err) {
         if (!cancelled) setState({ status: "error", error: err instanceof Error ? err.message : String(err) });
       }
@@ -81,7 +106,13 @@ export function MermaidDiagram({ source }: { source: string }) {
   if (state.status === "ok") {
     return (
       <figure className="md-mermaid my-2" data-testid="mermaid-diagram">
-        <img src={state.url} alt="Mermaid diagram" className="max-w-full h-auto" width={state.width ?? undefined} />
+        {onOpen ? (
+          <button type="button" className="md-img-open" onClick={() => onOpen(sizedSvg(state.svg))} aria-label="Open the diagram in the image viewer" title="Open in the image viewer to zoom">
+            <img src={state.url} alt="Mermaid diagram" className="max-w-full h-auto" width={state.width ?? undefined} />
+          </button>
+        ) : (
+          <img src={state.url} alt="Mermaid diagram" className="max-w-full h-auto" width={state.width ?? undefined} />
+        )}
       </figure>
     );
   }

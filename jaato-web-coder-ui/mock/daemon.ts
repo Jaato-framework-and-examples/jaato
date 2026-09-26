@@ -70,6 +70,7 @@
  */
 import { WebSocketServer, type WebSocket } from "ws";
 import { randomUUID } from "node:crypto";
+import { deflateSync } from "node:zlib";
 
 const PORT = Number(process.env.MOCK_PORT ?? 8090);
 const HOST = process.env.MOCK_HOST ?? "127.0.0.1";
@@ -292,11 +293,48 @@ function sendWorkspaceSnapshot(c: Client): void {
   send(c, { type: "workspace.files_snapshot", files, total: files.length, seq: m.seq, epoch: m.epoch, seqs });
 }
 
+/**
+ * A real PNG, ``width`` x ``height``, in two colours, so a browser decodes
+ * it and the image viewer has a natural size to report.  Built with zlib
+ * rather than committed as a binary fixture.
+ */
+function mockPng(width: number, height: number): Buffer {
+  const crcTable = Array.from({ length: 256 }, (_, n) => {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    return c >>> 0;
+  });
+  const crc = (buf: Buffer) => { let c = 0xffffffff; for (const b of buf) c = crcTable[(c ^ b) & 0xff]! ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
+  const chunk = (type: string, data: Buffer) => {
+    const len = Buffer.alloc(4); len.writeUInt32BE(data.length);
+    const body = Buffer.concat([Buffer.from(type, "ascii"), data]);
+    const sum = Buffer.alloc(4); sum.writeUInt32BE(crc(body));
+    return Buffer.concat([len, body, sum]);
+  };
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0); ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8; ihdr[9] = 2; // 8-bit RGB
+  const rows: number[] = [];
+  for (let y = 0; y < height; y++) {
+    rows.push(0);
+    for (let x = 0; x < width; x++) rows.push(...(x < width / 2 ? [0x3b, 0x6e, 0xa8] : [0xe8, 0xa0, 0x3c]));
+  }
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk("IHDR", ihdr),
+    chunk("IDAT", deflateSync(Buffer.from(rows))),
+    chunk("IEND", Buffer.alloc(0)),
+  ]);
+}
+
+/** Binary files the ``write markdown docs`` scenario creates, by path. */
+const MOCK_BINARY: Record<string, Buffer> = { "docs/chart.png": mockPng(40, 20) };
+
 /** Markdown documents the ``write markdown docs`` scenario creates, by path. */
 const MOCK_DOCS: Record<string, string> = {
   "docs/README.md": "# Project guide\n\nSee [the setup steps](SETUP.md) and [our site](https://example.com).\n\n| key | value |\n|-----|-------|\n| a | 1 |\n\n<script>window.__pwned = true</script>\n",
   "docs/SETUP.md": "## Setup\n\n- [x] install\n- [ ] configure\n",
-  "docs/ARCH.md": "# Architecture\n\n```mermaid\ngraph TD\n  Client --> Daemon\n  Daemon --> Runner\n```\n\n![build badge](https://img.example/badge.svg)\n",
+  "docs/ARCH.md": "# Architecture\n\n![the chart](chart.png)\n\n```mermaid\ngraph TD\n  Client --> Daemon\n  Daemon --> Runner\n```\n\n![build badge](https://img.example/badge.svg)\n",
 };
 
 /**
@@ -318,7 +356,7 @@ function answerFileFetch(c: Client, ev: Record<string, unknown>): void {
   if (name === ".env") { answer({ ok: false, path, category: "credential", error: `${path} holds credentials and cannot be downloaded` }); return; }
   const status = monitorFor(c).files.get(path)?.status;
   if (!status || status === "deleted") { answer({ ok: false, path, category: "not_found", error: `no file at ${path}` }); return; }
-  const data = Buffer.from(MOCK_DOCS[path] ?? `mock content of ${path}\n`);
+  const data = MOCK_BINARY[path] ?? Buffer.from(MOCK_DOCS[path] ?? `mock content of ${path}\n`);
   answer({ ok: true, path, name, size: data.length, mime_type: name.endsWith(".txt") ? "text/plain" : "application/octet-stream" });
   if (!metadataOnly && c.ws.readyState === c.ws.OPEN) c.ws.send(data);
 }
@@ -446,7 +484,10 @@ async function turn(c: Client, text: string, agentId = "main"): Promise<void> {
     const content = MOCK_DOCS["docs/ARCH.md"]!;
     send(c, { type: "tool.call_start", agent_id: agentId, tool_name: "writeNewFile", tool_args: { path: "docs/ARCH.md", content }, call_id: callId });
     send(c, { type: "tool.call_end", agent_id: agentId, tool_name: "writeNewFile", call_id: callId, success: true, duration_seconds: 0.02, show_output: false, path: "docs/ARCH.md" });
-    emitWorkspaceChanges(c, Object.keys(MOCK_DOCS).map((path) => ({ path, status: "created" })));
+    const chartId = randomUUID();
+    send(c, { type: "tool.call_start", agent_id: agentId, tool_name: "writeNewFile", tool_args: { path: "docs/chart.png", content: "(binary)" }, call_id: chartId });
+    send(c, { type: "tool.call_end", agent_id: agentId, tool_name: "writeNewFile", call_id: chartId, success: true, duration_seconds: 0.02, show_output: false, path: "docs/chart.png" });
+    emitWorkspaceChanges(c, [...Object.keys(MOCK_DOCS), ...Object.keys(MOCK_BINARY)].map((path) => ({ path, status: "created" })));
     await stream(c, agentId, "Wrote the docs.");
   } else if (lower.includes("diag refuse")) {
     // Arms the owner-gate refusal for the NEXT ``session.diagnostics``

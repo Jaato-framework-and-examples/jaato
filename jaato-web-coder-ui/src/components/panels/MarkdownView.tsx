@@ -13,7 +13,8 @@
  *
  * A ```` ```mermaid ```` fence is drawn as a diagram by ``MermaidDiagram``
  * (which loads mermaid itself, on the first diagram, and shows the result
- * as an image).
+ * as an image); clicking one opens it in the viewer's image mode, zoomable
+ * (``onOpenDiagram``).
  *
  * **Every URL goes through ``classifyReference``** (``protocol/workspacePaths``):
  *
@@ -26,7 +27,8 @@
  * - A relative IMAGE is fetched through ``fetchFile`` -- the daemon's
  *   ``workspace.file.fetch``, which applies containment and the credential
  *   rule -- and shown from a blob URL that is revoked when the image
- *   unmounts.  A REMOTE image is not loaded by default: fetching it would
+ *   unmounts.  Clicking it opens the image file in the viewer (``onOpen``),
+ *   zoomable.  A REMOTE image is not loaded by default: fetching it would
  *   tell a third party that this document was opened (the tracking-pixel
  *   shape), so it renders as a placeholder naming its host, with a
  *   ``load remote images`` button.  That button is PER DOCUMENT and lasts
@@ -56,8 +58,13 @@ export interface MarkdownViewProps {
   path: string;
   /** Fetch a workspace file's bytes, or ``null`` when it cannot be fetched. */
   fetchFile: (path: string) => Promise<Uint8Array | null>;
-  /** Open another workspace file in the viewer (a relative link was clicked). */
+  /** Open another workspace file in the viewer (a relative link or image was clicked). */
   onOpen: (path: string) => void;
+  /**
+   * Show a drawn diagram in the viewer's image mode, zoomable, with ``back``
+   * to this document.  Optional: without it a diagram is not clickable.
+   */
+  onOpenDiagram?: (label: string, data: Uint8Array, mime: string) => void;
 }
 
 /**
@@ -89,7 +96,7 @@ function RemoteImage({ href, alt, allowed, onAllow }: { href: string; alt: strin
   );
 }
 
-function WorkspaceImage({ path, alt, fetchFile }: { path: string; alt: string; fetchFile: MarkdownViewProps["fetchFile"] }) {
+function WorkspaceImage({ path, alt, fetchFile, onOpen }: { path: string; alt: string; fetchFile: MarkdownViewProps["fetchFile"]; onOpen: (path: string) => void }) {
   const [state, setState] = useState<{ url?: string; failed?: boolean }>({});
   const mime = imageMimeFor(path);
   useEffect(() => {
@@ -109,10 +116,14 @@ function WorkspaceImage({ path, alt, fetchFile }: { path: string; alt: string; f
   }, [path, mime, fetchFile]);
   if (!mime || state.failed) return <span className="md-img-missing" title={path}>[image: {alt || path}]</span>;
   if (!state.url) return <span className="md-img-missing" title={path}>[loading {alt || path}…]</span>;
-  return <img src={state.url} alt={alt} title={path} className="md-img" />;
+  return (
+    <button type="button" className="md-img-open" onClick={() => onOpen(path)} title={`${path} -- open in the image viewer`} aria-label={`Open ${alt || path} in the image viewer`}>
+      <img src={state.url} alt={alt} className="md-img" />
+    </button>
+  );
 }
 
-export default function MarkdownView({ source, path, fetchFile, onOpen }: MarkdownViewProps) {
+export default function MarkdownView({ source, path, fetchFile, onOpen, onOpenDiagram }: MarkdownViewProps) {
   const root = useRef<HTMLDivElement>(null);
   const [remoteAllowed, setRemoteAllowed] = useState(false);
 
@@ -143,7 +154,7 @@ export default function MarkdownView({ source, path, fetchFile, onOpen }: Markdo
     },
     img({ src, alt }) {
       const ref = classifyReference(typeof src === "string" ? src : "", path);
-      if (ref.kind === "workspace") return <WorkspaceImage path={ref.path} alt={alt ?? ""} fetchFile={fetchFile} />;
+      if (ref.kind === "workspace") return <WorkspaceImage path={ref.path} alt={alt ?? ""} fetchFile={fetchFile} onOpen={onOpen} />;
       if (ref.kind === "external" && !ref.href.toLowerCase().startsWith("mailto:")) {
         return <RemoteImage href={ref.href} alt={alt ?? ""} allowed={remoteAllowed} onAllow={() => setRemoteAllowed(true)} />;
       }
@@ -154,7 +165,9 @@ export default function MarkdownView({ source, path, fetchFile, onOpen }: Markdo
     },
     pre({ node, children }) {
       const mermaid = mermaidSource(node);
-      if (mermaid !== null) return <MermaidDiagram source={mermaid} />;
+      if (mermaid !== null) {
+        return <MermaidDiagram source={mermaid} onOpen={onOpenDiagram ? (svg) => onOpenDiagram(`diagram in ${path}`, new TextEncoder().encode(svg), "image/svg+xml") : undefined} />;
+      }
       return <pre className="code-block plate plate-ground p-2.5 my-1.5 overflow-x-auto whitespace-pre">{children}</pre>;
     },
     code({ className, children }) {

@@ -23,7 +23,7 @@
  * since the daemon already sent the whole (capped) text.
  */
 
-import { isMarkdownPath, resolveWorkspacePath } from "./workspacePaths";
+import { isRenderedPath, resolveWorkspacePath } from "./workspacePaths";
 
 const MAX_PREVIEW_LINES = 6;
 const MAX_PREVIEW_CHARS = 480;
@@ -151,8 +151,9 @@ export function execTitle(toolName: string, args: Record<string, unknown>): stri
 }
 
 /**
- * The markdown files a successful ``file_edit`` call left on disk, for the
- * tool row's ``view`` button (the Files panel's rendered markdown viewer).
+ * The markdown and image files a successful ``file_edit`` call left on
+ * disk (``isRenderedPath``), for the tool row's ``view`` button, which opens
+ * them rendered in the Files panel's viewer.
  *
  * Read from the call's own arguments, plus ``serverPath`` -- the path the
  * daemon reported on ``tool.call_end`` -- when there is one:
@@ -169,11 +170,11 @@ export function execTitle(toolName: string, args: Record<string, unknown>): stri
  * first-seen, normalised (``./a.md`` is ``a.md``), duplicates dropped; an
  * absolute path or one that climbs out of the workspace is not offered.
  */
-export function markdownPathsForCall(toolName: string, args: Record<string, unknown>, serverPath?: string | null, workspaceRoot?: string | null): string[] {
+export function viewablePathsForCall(toolName: string, args: Record<string, unknown>, serverPath?: string | null, workspaceRoot?: string | null): string[] {
   const out: string[] = [];
   const root = workspaceRoot ? workspaceRoot.replace(/\/+$/, "") + "/" : null;
   const add = (p: unknown) => {
-    if (typeof p !== "string" || !isMarkdownPath(p)) return;
+    if (typeof p !== "string" || !isRenderedPath(p)) return;
     let rel = p;
     if (rel.startsWith("/")) {
       // An absolute path is offered only when it lies under the session's

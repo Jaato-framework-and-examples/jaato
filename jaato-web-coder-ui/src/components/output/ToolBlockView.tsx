@@ -37,9 +37,9 @@
  * button under its row, always visible: the button IS the tool's output,
  * so it cannot sit behind the expand toggle.
  *
- * A successful ``file_edit`` call that left a markdown file on disk draws
- * a ``view`` button per file (``ViewMarkdownChips``), which opens the
- * Files panel's rendered markdown viewer on it.  Hidden below the ``md``
+ * A successful ``file_edit`` call that left a markdown or image file on
+ * disk draws a ``view`` button per file (``ViewFileChips``), which opens
+ * the Files panel's viewer on it, rendered.  Hidden below the ``md``
  * breakpoint, where the rail -- and so the viewer -- is not shown.
  */
 import { memo, useState, type MouseEvent } from "react";
@@ -51,7 +51,7 @@ import { hasServerMarkup, JMarkup, DiffLines } from "./JMarkup";
 import { resolveToolArgs } from "@/protocol/toolIds";
 import { downloadWorkspaceFile, OFFER_DOWNLOAD_TOOL, servesDownloads } from "@/app/downloads";
 import { resolveToolClass, type ToolClass } from "@/protocol/toolClass";
-import { diffPreviewForCall, execOutputPreview, execTitle, markdownPathsForCall, splitServerDiff } from "@/protocol/toolPreview";
+import { diffPreviewForCall, execOutputPreview, execTitle, viewablePathsForCall, splitServerDiff } from "@/protocol/toolPreview";
 
 export function summarizeArgs(args: Record<string, unknown>, max = 110): string {
   const parts: string[] = [];
@@ -97,16 +97,16 @@ export function DownloadChip({ path, label }: { path: string; label?: string }) 
 }
 
 /**
- * ``view`` buttons for the markdown files a write left behind
- * (``markdownPathsForCall``).  Each opens the rail's Files panel with the
+ * ``view`` buttons for the markdown and image files a write left behind
+ * (``viewablePathsForCall``).  Each opens the rail's Files panel with the
  * file in its content viewer (``viewWorkspaceFile``), which renders it.
  */
-export function ViewMarkdownChips({ paths }: { paths: string[] }) {
+export function ViewFileChips({ paths }: { paths: string[] }) {
   const view = useJaato((s) => s.viewWorkspaceFile);
   return (
     <div className="hidden md:flex ml-6 mt-0.5 mb-1.5 items-center gap-3 flex-wrap">
       {paths.map((p) => (
-        <button key={p} type="button" className="link text-[11px]" onClick={() => view(p)} aria-label={`View ${p} rendered`} title={`Open ${p} in the Files panel's markdown viewer`}>
+        <button key={p} type="button" className="link text-[11px]" onClick={() => view(p)} aria-label={`View ${p} rendered`} title={`Open ${p} in the Files panel's viewer`}>
           view {p.split("/").pop()}
         </button>
       ))}
@@ -128,7 +128,7 @@ export const ToolBlockView = memo(function ToolBlockView({ block, toolClass }: {
   const running = block.status === "running";
   const canFetch = useJaato((s) => s.connection.phase === "connected" && servesDownloads(s.connection.protocolVersion));
   const workspaceRoot = useJaato((s) => s.sessions.find((x) => x.id === s.sessionId)?.workspacePath ?? null);
-  const markdownPaths = block.status === "success" && canFetch ? markdownPathsForCall(displayName, resolvedArgs, block.path, workspaceRoot) : [];
+  const viewPaths = block.status === "success" && canFetch ? viewablePathsForCall(displayName, resolvedArgs, block.path, workspaceRoot) : [];
 
   // The REAL server diff (jaato/#1304 phase 3), when this call has one --
   // preferred over the client-synthesized preview below, which stays as
@@ -219,7 +219,7 @@ export const ToolBlockView = memo(function ToolBlockView({ block, toolClass }: {
       {execTail && (
         <pre className="ml-6 mr-1 mb-1.5 code-block whitespace-pre-wrap break-words px-2 py-1.5 text-text-muted">{execTail.text}</pre>
       )}
-      {markdownPaths.length > 0 && <ViewMarkdownChips paths={markdownPaths} />}
+      {viewPaths.length > 0 && <ViewFileChips paths={viewPaths} />}
       {offered && <DownloadChip path={offered} label={typeof block.args.label === "string" ? block.args.label : undefined} />}
       {block.expanded && hasBody && (
         <Plate ground corners="two" edge={block.status === "error" ? "error" : "hairline"} className="ml-6 mt-0.5 mb-2.5">
