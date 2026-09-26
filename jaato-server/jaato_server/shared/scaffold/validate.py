@@ -481,7 +481,6 @@ def validate_profile(
     plugins: Dict[str, introspect.PluginInfo],
     gc_names: List[str],
     env_keys: Optional[set] = None,
-    env_values: Optional[Dict[str, str]] = None,
 ) -> List[Diagnostic]:
     """Validate one RESOLVED profile against the introspected framework.
 
@@ -496,10 +495,6 @@ def validate_profile(
             undefined; omitted (a single-file validation, which has no
             workspace) it degrades to the framework context vars plus the
             validator's own environment.
-        env_values: The workspace ``.env`` as a ``KEY: VALUE`` dict, read by
-            the ``gh_token_scrubbed_inert`` check (a value, not just a name,
-            is needed to see ``GH_TOKEN=app://…``).  Omitted for a single-file
-            validation; the profile's own ``env:`` map is still consulted.
     """
     name = getattr(profile, "name", "?")
     out: List[Diagnostic] = []
@@ -669,8 +664,8 @@ def validate_profile(
         _check_quirks(prof_quirks, pinfo, provider_name, add,
                       where_prefix="quirks")
 
-    # --- secret env scrub (#863) + GH_TOKEN scrub-inert (#1228) ----------
-    _check_secret_scrub(profile, add, env_values=env_values)
+    # --- secret env scrub (#863) -----------------------------------------
+    _check_secret_scrub(profile, add)
 
     # --- gc strategy -----------------------------------------------------
     gc = getattr(profile, "gc", None)
@@ -1860,35 +1855,7 @@ def _check_trace_paths(profile, env_keys, add) -> None:
                 where=f"env.{var}")
 
 
-#: The surfaces the ``gh_token_scrubbed_inert`` check covers — the two that
-#: run the model's own ``gh`` / ``git``.  MCP is deliberately EXCLUDED: an MCP
-#: server gets no GitHub token (the design keeps ``default`` there, #1228), so
-#: a scrub that strips ``GH_TOKEN`` from an MCP spawn is correct, not inert.
-_GH_SHELL_SURFACES = ("cli", "interactive_shell")
-
-
-def _gh_token_app_source(profile, env_values):
-    """Where ``GH_TOKEN`` is declared as an ``app://`` reference, or ``None``.
-
-    Since #1226 a workspace ``.env`` or a profile's ``env:`` map can carry
-    ``GH_TOKEN=app://github`` and have the daemon resolve the real token per
-    spawn (docs/design/per-user-github-credentials.md §6).  Only that shape is
-    reported — a literal token is a different, non-inert case.  The profile's
-    own ``env:`` is checked first (the field an author reading the profile
-    sees), then the workspace ``.env`` values; returns the ``where`` of
-    whichever declared it, for the finding's message.
-    """
-    prof_env = getattr(profile, "env", None) or {}
-    val = prof_env.get("GH_TOKEN")
-    if isinstance(val, str) and val.strip().lower().startswith("app://"):
-        return "the profile's env.GH_TOKEN"
-    val = (env_values or {}).get("GH_TOKEN")
-    if isinstance(val, str) and val.strip().lower().startswith("app://"):
-        return "the workspace .env GH_TOKEN"
-    return None
-
-
-def _check_secret_scrub(profile, add, env_values=None):
+def _check_secret_scrub(profile, add):
     """Flag a subprocess surface that runs with the runner's full environment.
 
     The scrub is ON by default (#863), so a profile that says nothing is
@@ -1899,21 +1866,14 @@ def _check_secret_scrub(profile, add, env_values=None):
     fails CLOSED on, so the author's intent is silently replaced by the
     default set) and a profile-level key with no surface to apply to.
 
-    It also surfaces the opposite mistake (#1228): a ``GH_TOKEN=app://…``
-    delivered to a session (since #1226) that a ``cli`` / ``interactive_shell``
-    surface still SCRUBS — a valid but INERT configuration, because the token
-    is stripped before ``gh`` / ``git`` ever see it.  ``GH_TOKEN`` is in the
-    default scrub set, so this needs the ``!GH_TOKEN`` exemption.
-
-    Args:
-        env_values: The workspace ``.env`` as a ``KEY: VALUE`` dict, so the
-            ``GH_TOKEN=app://…`` declaration can be seen (``None`` for a
-            single-file validation, which has no workspace — the profile's own
-            ``env:`` map is still read).
+    Not reported: a ``GH_TOKEN=app://…`` reference under a scrub that
+    matches ``GH_TOKEN``.  The daemon grants the names it resolved from
+    ``app://`` to ``cli`` / ``interactive_shell`` whatever the patterns say
+    (#1228), so that token reaches ``gh`` / ``git`` and there is nothing
+    inert to warn about.
     """
     from jaato_server.shared.secret_scrub import (
-        SCRUB_HINT, SCRUB_SURFACES, is_scrub_disabled, matches_secret,
-        normalize_scrub_patterns,
+        SCRUB_HINT, SCRUB_SURFACES, is_scrub_disabled, normalize_scrub_patterns,
     )
     enabled = [s for s in SCRUB_SURFACES
                if s in (getattr(profile, "plugins", None) or [])]
@@ -1923,7 +1883,6 @@ def _check_secret_scrub(profile, add, env_values=None):
             "scrub_secret_env is set but the profile enables none of the "
             f"plugins it applies to ({', '.join(SCRUB_SURFACES)}) — it "
             "changes nothing here", where="scrub_secret_env")
-    gh_source = _gh_token_app_source(profile, env_values)
     for surface in enabled:
         value, where = _effective_scrub_value(profile, surface)
         try:
@@ -1940,20 +1899,6 @@ def _check_secret_scrub(profile, add, env_values=None):
                 "runner's FULL environment — every provider API key and token "
                 "the daemon holds is readable by any command the model runs "
                 f"(`env`, `echo $GITHUB_TOKEN`).  {SCRUB_HINT}.",
-                where=where)
-            # A disabled scrub strips nothing, so GH_TOKEN reaches gh already —
-            # the inert-scrub finding below cannot apply.
-            continue
-        # GH_TOKEN=app://… is delivered but this shell surface still scrubs it:
-        # valid config, but gh/git see no token (#1228).  matches_secret honours
-        # a `!GH_TOKEN` exemption, so a profile that added one clears this.
-        if (gh_source and surface in _GH_SHELL_SURFACES
-                and matches_secret("GH_TOKEN", patterns)):
-            add("warn", "gh_token_scrubbed_inert",
-                f"GH_TOKEN is delivered as an app:// reference ({gh_source}) but "
-                f"plugin '{surface}' scrubs it before the subprocess runs, so "
-                "`gh` / `git` see no token — the credential is inert here. Exempt "
-                f"it on this surface: `scrub_secret_env: [default, \"!GH_TOKEN\"]`",
                 where=where)
 
 
@@ -3065,9 +3010,8 @@ def validate_workspace(
     # reported as an undefined ${VAR}.  Read here rather than per profile —
     # every profile in the workspace resolves against the same file.
     env_path = ws / ".env"
-    ws_env_values = (_parse_env(env_path.read_text(encoding="utf-8", errors="replace"))
-                     if env_path.is_file() else {})
-    ws_env_keys = set(ws_env_values)
+    ws_env_keys = set(_parse_env(env_path.read_text(encoding="utf-8", errors="replace"))
+                      ) if env_path.is_file() else set()
 
     items = result.profiles.items()
     for pname, profile in sorted(items):
@@ -3076,7 +3020,7 @@ def validate_workspace(
         tier = _tier(pname)
         for d in validate_profile(
             profile, providers=providers, plugins=plugins, gc_names=gc_names,
-            env_keys=ws_env_keys, env_values=ws_env_values,
+            env_keys=ws_env_keys,
         ):
             d.tier = tier
             out.append(d)

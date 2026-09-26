@@ -777,6 +777,13 @@ class JaatoServer:
         # schedule a pre-expiry ``session.reload_env`` (§6.3).  Rebuilt on every
         # _resolve_session_env pass, so a reload re-derives it afresh.
         self._app_secret_expiries: Dict[str, str] = {}
+        # Names whose value THIS daemon resolved from an ``app://`` reference
+        # in the current pass.  Shipped to the runner beside the env so cli /
+        # interactive_shell let exactly these through the secret scrub: the
+        # owner granted the credential by binding it, and the list comes from
+        # the resolution itself, never from anything the workspace can write.
+        # Rebuilt on every _resolve_session_env pass, like the expiries.
+        self._app_secret_names: Set[str] = set()
         self._provider = provider
         self._profile = profile
         self._system_instruction_override = system_instruction_override
@@ -1837,11 +1844,14 @@ class JaatoServer:
         naming the reference and the reason; the strict form ``?required``
         turns a failure into an :class:`AppSecretResolutionError` the bootstrap
         surfaces.  ``expires_at`` answers are recorded on
-        ``self._app_secret_expiries`` for the pre-expiry reload (§6.3).
+        ``self._app_secret_expiries`` for the pre-expiry reload (§6.3), and
+        every name that resolved is recorded on ``self._app_secret_names``
+        (see :meth:`granted_env_names`).
 
-        Idempotent per call: the expiry map is rebuilt from scratch so a reload
-        re-derives it, and once a value has been resolved to its plaintext it
-        no longer parses as ``app://`` and is left alone on a second pass.
+        Idempotent per call: the expiry map and the name set are rebuilt from
+        scratch so a reload re-derives them, and once a value has been
+        resolved to its plaintext it no longer parses as ``app://`` and is
+        left alone on a second pass.
         """
         from jaato_server.shared.plugins.subagent.config import (
             SecretResolveContext,
@@ -1849,6 +1859,7 @@ class JaatoServer:
         )
 
         self._app_secret_expiries = {}
+        self._app_secret_names = set()
         # Find references first so we do not mutate the dict while iterating.
         refs = [
             (key, ref)
@@ -1897,6 +1908,7 @@ class JaatoServer:
         answer = resolver.resolve_reference(ref, context)
         if answer.ok:
             self._session_env[key] = answer.value  # type: ignore[assignment]
+            self._app_secret_names.add(key)
             if answer.expires_at:
                 self._app_secret_expiries[key] = answer.expires_at
             logger.info(
@@ -1932,6 +1944,16 @@ class JaatoServer:
             key, reference, key, reason,
         )
 
+    def granted_env_names(self) -> List[str]:
+        """Env names this daemon resolved from ``app://`` in the current pass.
+
+        The runner lets exactly these through the ``cli`` /
+        ``interactive_shell`` secret scrub (``mcp`` keeps the full scrub).
+        Sorted so the envelope is stable.  ``getattr`` because a server
+        built with ``__new__`` (tests) never ran ``__init__``.
+        """
+        return sorted(getattr(self, "_app_secret_names", None) or ())
+
     def reload_session_env(self) -> Dict[str, Any]:
         """Re-resolve this session's environment and push it to its runner.
 
@@ -1951,7 +1973,10 @@ class JaatoServer:
         ``trace:``, post-auth overrides -- secret URIs decoded here, where
         ``pass`` / ``vault`` can be exec'd), and hands the WHOLE dict to
         the runner's ``session.reload_env``, which replaces its session env
-        and rebuilds the provider.  The daemon-side per-turn overlay
+        and rebuilds the provider.  The names resolved from ``app://`` in
+        this pass travel with it (:meth:`granted_env_names`), so a GitHub
+        account bound while the session is open reaches ``gh`` on the next
+        command, and one unbound stops being exempt.  The daemon-side per-turn overlay
         (:meth:`_with_session_env`) reads ``self._session_env`` and so picks
         the new values up on the next turn with no further step.
 
@@ -1974,7 +1999,11 @@ class JaatoServer:
         reload = getattr(rpc, "session_reload_env_threadsafe", None)
         if not callable(reload):
             return {"applied": len(self._session_env), "runner": False}
-        return reload(dict(self._session_env), timeout=90.0)
+        return reload(
+            dict(self._session_env),
+            granted_env_names=self.granted_env_names(),
+            timeout=90.0,
+        )
 
     @contextlib.contextmanager
     def _with_session_env(self):

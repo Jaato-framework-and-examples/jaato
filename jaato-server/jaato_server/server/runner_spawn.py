@@ -1242,7 +1242,30 @@ def build_session_envelope(
         # empty ``profile_name`` with this True is the silent-bypass case
         # ``_maybe_self_confine`` must refuse rather than run unconfined.
         confinement_required=confinement_required,
+        # The names in ``session_env`` the daemon resolved from ``app://``;
+        # the runner exempts exactly these from the cli / interactive_shell
+        # scrub.  ``getattr`` because a test server may carry no accessor.
+        granted_env_names=_granted_env_names_of(server),
     )
+
+
+def _granted_env_names_of(server: Any) -> List[str]:
+    """``server.granted_env_names()``, or ``[]`` for a server without it.
+
+    A helper rather than an inline conditional because
+    ``build_session_envelope`` sits on the complexity baseline.
+    """
+    accessor = getattr(server, "granted_env_names", None)
+    if not callable(accessor):
+        return []
+    try:
+        return list(accessor())
+    except Exception:  # noqa: BLE001 -- granting nothing is the safe answer
+        logger.warning(
+            "could not read the app:// granted names; granting none",
+            exc_info=True,
+        )
+        return []
 
 
 def dispatch_bootstrap_envelope(

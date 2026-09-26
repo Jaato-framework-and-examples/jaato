@@ -27,7 +27,7 @@ import shutil
 import subprocess
 import threading
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Sequence
+from typing import Callable, Dict, Iterable, List, Optional, Sequence
 
 from jaato_server.shared.ai_tool_runner import get_current_cancel_token
 from jaato_sdk.plugins.model_provider.types import CancelledException
@@ -131,6 +131,7 @@ def run_command(
     check_cancel: bool = True,
     preexec_fn: Optional[Callable[[], None]] = None,
     scrub_env: Optional[Sequence[str]] = None,
+    scrub_keep: Optional[Iterable[str]] = None,
 ) -> RunResult:
     """Execute *command* and return a :class:`RunResult`.
 
@@ -160,6 +161,11 @@ def run_command(
                     the new program starts.  ``None`` means no
                     preexec.  POSIX-only (ignored on Windows by
                     ``subprocess`` itself).
+        scrub_env: Secret env-var name globs removed from the child's env
+                   (see :mod:`shared.secret_scrub`).  ``None`` = no scrub.
+        scrub_keep: Exact, case-sensitive names that survive *scrub_env*
+                    (the daemon's ``app://`` grants).  ``None`` = keep
+                    nothing; the caller decides, not this runner.
 
     Returns:
         A :class:`RunResult` with captured output and status flags.
@@ -178,7 +184,7 @@ def run_command(
     # raw credentials the runner itself legitimately holds.  No-op when unset.
     if scrub_env:
         from jaato_server.shared.secret_scrub import scrub_env as _scrub_secret_env
-        env = _scrub_secret_env(env, scrub_env)
+        env = _scrub_secret_env(env, scrub_env, keep=scrub_keep)
 
     # ---- shell vs argv ----
     use_shell = requires_shell(command)

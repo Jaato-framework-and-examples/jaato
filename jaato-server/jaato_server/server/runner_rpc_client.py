@@ -2096,7 +2096,9 @@ class RunnerRPCClient:
         )
 
     async def session_reload_env(
-        self, session_env: Dict[str, str], *, timeout: Optional[float] = 90.0,
+        self, session_env: Dict[str, str], *,
+        granted_env_names: Optional[List[str]] = None,
+        timeout: Optional[float] = 90.0,
     ) -> Dict[str, Any]:
         """Push a freshly resolved session env and have the runner rebuild its provider.
 
@@ -2107,21 +2109,34 @@ class RunnerRPCClient:
         credential now on disk.  Refused by the runner while a turn is
         running (``stage="busy"``).
 
+        ``granted_env_names`` are the names the daemon resolved from
+        ``app://`` in this pass; the runner replaces its scrub grants with
+        them, so they are as current as the env they describe.
+
         90s: the rebuild is a provider ``initialize()``, which for some
         providers is a network handshake (~9s on zhipuai), plus the model
         connect.
         """
         return await self._call_named(
-            "session.reload_env", {"session_env": dict(session_env)},
+            "session.reload_env",
+            {
+                "session_env": dict(session_env),
+                "granted_env_names": list(granted_env_names or ()),
+            },
             timeout=timeout,
         )
 
     def session_reload_env_threadsafe(
-        self, session_env: Dict[str, str], *, timeout: Optional[float] = 90.0,
+        self, session_env: Dict[str, str], *,
+        granted_env_names: Optional[List[str]] = None,
+        timeout: Optional[float] = 90.0,
     ) -> Dict[str, Any]:
         """Synchronous wrapper for :meth:`session_reload_env` from worker threads."""
         return self._run_threadsafe(
-            self.session_reload_env(session_env, timeout=timeout),
+            self.session_reload_env(
+                session_env, granted_env_names=granted_env_names,
+                timeout=timeout,
+            ),
             timeout=timeout,
         )
 

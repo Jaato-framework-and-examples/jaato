@@ -217,8 +217,21 @@ session from holding a dead token.
 The session env reaches the runner's `os.environ`; the model-driven subprocess
 surfaces then need three things:
 
-- **The scrub exemption.** `GH_TOKEN` is in the default `scrub_secret_env` set
-  (#863). A profile that wants `gh` declares, per surface:
+- **Getting past the scrub.** `GH_TOKEN` is in the default `scrub_secret_env`
+  set (#863), and a web-coder workspace usually has no profile in which to
+  declare an exemption. So the daemon records which names it resolved from
+  `app://` in this resolution pass and sends them with the session env, on the
+  bootstrap envelope (`granted_env_names`) and on every `session.reload_env`.
+  The runner keeps exactly those names through the scrub on `cli` and
+  `interactive_shell`, whatever the patterns say. MCP servers never receive the
+  grant.
+
+  The match is exact and case-sensitive, and only names that were actually
+  resolved are granted. A model that edits `.env` gains nothing: a name it
+  writes as `app://…` either resolves through the owning application (which
+  is the delegation working as designed) or is dropped, and a grant for
+  `anthropic_api_key` does not keep `ANTHROPIC_API_KEY`. A literal `GH_TOKEN`
+  gets no grant and still needs the explicit exemption:
 
   ```yaml
   plugin_configs:
@@ -226,8 +239,14 @@ surfaces then need three things:
       scrub_secret_env: [default, "!GH_TOKEN"]
     interactive_shell:
       scrub_secret_env: [default, "!GH_TOKEN"]
-  # mcp keeps `default`: MCP servers get no GitHub token
   ```
+
+  Because the grant rides `session.reload_env`, a bind or unbind reaches the
+  next command of a live session, not only the next spawn.
+
+  The token is still in the subprocess environment, so a model that wants it
+  can print it. Keeping it out of the runner entirely is the credential-broker
+  work in #505.
 
 - **Non-interactive defaults:** `GH_PROMPT_DISABLED=1`, `GIT_TERMINAL_PROMPT=0`,
   so a missing credential is an error the model reads rather than a prompt

@@ -60,18 +60,39 @@ beyond the default" would otherwise select the leaky posture #863 exists to
 eliminate.  Rejecting them costs nothing — the author who really wants the
 scrub off types ``none`` — and removes the ambiguity.
 
+**A credential the daemon resolved from ``app://`` is kept (#1228).**  An
+explicit grant is never scrubbed, and a workspace owner who binds a GitHub
+account in the web coder has granted it: the workspace ``.env`` holds
+``GH_TOKEN=app://github`` and the daemon resolves it at every spawn.  Web
+coder workspaces have no profile, so without this there was nowhere to write
+``!GH_TOKEN`` and ``gh`` (and git, whose credential helper is ``gh``) saw
+nothing.  The daemon ships the names it resolved beside the env; the runner
+records them with :func:`set_granted_env_names`; ``cli`` and
+``interactive_shell`` pass :func:`granted_env_names` as ``keep`` to
+:func:`scrub_env`.  ``mcp`` does not, so MCP servers still get no GitHub token.
+
+Two properties keep this from widening anything:
+
+* **The names come from the resolution**, never from a value the workspace
+  can write.  A model that edits ``.env`` can only make the daemon ask the
+  owning application for a credential the owner already bound.
+* **``keep`` is exact and case-sensitive**, never a glob and never folded to
+  upper case the way the patterns are.  A grant named ``anthropic_api_key``
+  keeps only that variable, not the real ``ANTHROPIC_API_KEY``; routing a
+  grant through an ``!NAME`` exemption would have kept both.
+
 Pairs with the egress proxy (feature #1): egress limits *where* a subprocess can
 connect; this limits *what secrets* it can read to send.  The eventual
 TLS-terminating broker (#505) moves credential handling out of the runner env
 entirely (placeholders resolved proxy-side); until then this is the in-process
-scrub.
+scrub, and a granted credential is readable by the model it is granted to.
 """
 
 from __future__ import annotations
 
 import fnmatch
 import logging
-from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -148,15 +169,51 @@ def matches_secret(name: str, patterns: Sequence[str]) -> bool:
 
 def scrub_env(
     env: Mapping[str, str], patterns: Sequence[str],
+    keep: Optional[Iterable[str]] = (),
 ) -> Dict[str, str]:
     """Return a copy of ``env`` with keys matching any ``patterns`` removed.
 
     Empty/None ``patterns`` returns a plain copy (no-op), as does a list of
     exemptions with no scrub glob.  Never mutates the input mapping.
+
+    ``keep`` names variables that survive whatever the patterns say.  It is
+    an EXACT, case-sensitive name match on purpose (see the module docstring):
+    it carries grants, and a grant must never reach a variable it does not
+    name exactly.
     """
     if not patterns:
         return dict(env)
-    return {k: v for k, v in env.items() if not matches_secret(k, patterns)}
+    kept = frozenset(keep or ())
+    return {
+        k: v for k, v in env.items()
+        if k in kept or not matches_secret(k, patterns)
+    }
+
+
+#: The env names this process was told the daemon resolved from ``app://``
+#: (see the module docstring).  Process-wide because the environment it
+#: describes is process-wide: a runner serves one session at a time and
+#: :func:`~jaato_server.server.runner.session.apply_session_env` replaces both
+#: together.  A process that never received one (the daemon, the embedded
+#: client) grants nothing.
+_GRANTED_ENV_NAMES: frozenset = frozenset()
+
+
+def set_granted_env_names(names: Iterable[str]) -> None:
+    """Replace the granted names.  Only non-empty strings are kept.
+
+    Called by the runner when it applies a session env, never by anything
+    the workspace can influence.  An empty iterable clears the grant.
+    """
+    global _GRANTED_ENV_NAMES
+    _GRANTED_ENV_NAMES = frozenset(
+        n for n in (names or ()) if isinstance(n, str) and n
+    )
+
+
+def granted_env_names() -> frozenset:
+    """The names to pass as ``keep`` on the ``cli`` / ``interactive_shell`` scrub."""
+    return _GRANTED_ENV_NAMES
 
 
 def is_scrub_disabled(patterns: Sequence[str]) -> bool:
