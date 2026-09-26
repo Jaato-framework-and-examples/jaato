@@ -204,7 +204,7 @@ export const MIN_SESSION_MESSAGE_FILES_PROTOCOL = "1.24";
 export const MIN_DIAGNOSTICS_PROTOCOL = "1.25";
 
 /**
- * Protocol floor for the workspace/session pickers (1.26):
+ * Protocol floor for the workspace/session pickers (1.27):
  * {@link JaatoClient.inspectWorkspace}, {@link JaatoClient.cloneIntoWorkspace},
  * ``WorkspaceDeleteRequest.stop_sessions`` and the ``model`` / ``provider``
  * override on {@link JaatoClient.createSession}.  Below it a new verb is
@@ -212,7 +212,7 @@ export const MIN_DIAGNOSTICS_PROTOCOL = "1.25";
  * ``session.new`` parser would read ``--model`` as the session NAME -- so
  * each is refused client-side rather than silently degraded.
  */
-export const MIN_WORKSPACE_PICKER_PROTOCOL = "1.26";
+export const MIN_WORKSPACE_PICKER_PROTOCOL = "1.27";
 
 /**
  * Size limits a daemon enforces, advertised in ``ConnectedEvent.server_info``.
@@ -912,7 +912,7 @@ export class JaatoClient {
     /**
      * Override the model the resolved profile (or, with no profile, the
      * workspace ``.env``) binds.  Sent as ``--model`` on ``session.new``
-     * (protocol 1.26).  The daemon applies it to a COPY of the profile, and
+     * (protocol 1.27).  The daemon applies it to a COPY of the profile, and
      * a revived session keeps it.
      */
     model?: string;
@@ -1457,7 +1457,7 @@ export class JaatoClient {
   }
 
   /**
-   * Inspect a workspace (protocol 1.26, WS only): path, size, session counts
+   * Inspect a workspace (protocol 1.27, WS only): path, size, session counts
    * by state (``total`` / ``waiting`` / ``awake`` / ``sleeping``) and, per
    * git checkout, uncommitted / unpushed counts.  ``ok === false`` (with
    * ``error``) when the daemon refused -- another user's workspace, a name
@@ -1479,7 +1479,7 @@ export class JaatoClient {
   }
 
   /**
-   * Clone repositories into a workspace (protocol 1.26, WS only).
+   * Clone repositories into a workspace (protocol 1.27, WS only).
    *
    * Sends one ``workspace.clone`` and returns its ``request_id``; progress
    * arrives as ``workspace.clone_progress`` events carrying that id (every

@@ -594,7 +594,7 @@ def session_picker_fields(info: Any) -> Dict[str, Any]:
     """The session-picker keys every client-facing session row carries.
 
     One definition shared by ``session.list`` and the ``SessionInfoEvent``
-    snapshot (protocol 1.26), so the two listings cannot disagree about what
+    snapshot (protocol 1.27), so the two listings cannot disagree about what
     a row says.  Additive keys on a free-form dict: an older client ignores
     them.  ``profile`` is ``""`` for a profile-less session, never ``None``.
 
@@ -656,7 +656,7 @@ class Session:
     interrupted_turn: Optional[Dict[str, Any]] = None  # Turn interruption state for recovery
     provisioned: bool = False  # True if workspace was auto-provisioned by server
     #: ``MODEL_NAME`` / ``JAATO_PROVIDER`` from a ``session.new --model``
-    #: override on a PROFILE-LESS session (protocol 1.26).  Persisted in the
+    #: override on a PROFILE-LESS session (protocol 1.27).  Persisted in the
     #: record's metadata so a revive re-applies it; ``None`` otherwise (a
     #: profiled session's override lives in its profile snapshot).
     model_override_env: Optional[Dict[str, str]] = None
@@ -1283,7 +1283,7 @@ def _apply_model_override(
     model: Optional[str],
     provider: Optional[str],
 ) -> Tuple[Any, Optional[Dict[str, Any]], Optional[Dict[str, str]], Optional[Dict[str, str]]]:
-    """Apply a ``session.new --model/--provider`` override (protocol 1.26).
+    """Apply a ``session.new --model/--provider`` override (protocol 1.27).
 
     Runs AFTER the profile is resolved (named, inline, or an agent's
     ``default_profile``) so the override wins over all three.
@@ -9593,7 +9593,7 @@ class SessionManager:
                 silent fallback) so caller intent is explicit.  The
                 helper ``shared.plugins.subagent.config.build_inline_profile``
                 does the parsing.
-            model_override: ``session.new --model`` (protocol 1.26): the
+            model_override: ``session.new --model`` (protocol 1.27): the
                 model this session runs, applied after the profile resolves
                 -- see :func:`_apply_model_override`.
             provider_override: ``--provider``, only with ``model_override``
@@ -9827,7 +9827,7 @@ class SessionManager:
                     system_instructions=agent_instructions,
                 )
 
-        # ``session.new --model/--provider`` (1.26): wins over whatever the
+        # ``session.new --model/--provider`` (1.27): wins over whatever the
         # profile (or its absence) bound.  Unconditional call so this
         # ratcheted function gains no branch.
         profile, inline_profile_data, env_overrides, override_env = (
@@ -12389,7 +12389,7 @@ class SessionManager:
             agent_params=dict(getattr(state, "agent_params", None) or {}),
             restore_state={"loaded_state": state},
             env_file=session_env_file,
-            # A no-profile ``session.new --model`` override (1.26), which
+            # A no-profile ``session.new --model`` override (1.27), which
             # lives in no profile snapshot and must be re-applied here.
             env_overrides=state.metadata.get('model_override_env'),
             instruction_token_cache=self._instruction_token_cache,

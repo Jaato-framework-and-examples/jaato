@@ -149,7 +149,7 @@ export async function ensureSessions(): Promise<void> {
 export async function createSession(profile: string | null, model?: { provider: string; model: string }): Promise<void> {
   const st = useJaato.getState();
   st.resetSessionState();
-  // ``model`` is the picker's per-session binding (protocol 1.26
+  // ``model`` is the picker's per-session binding (protocol 1.27
   // ``session.new --model/--provider``): applied to a copy of the base
   // profile daemon-side, so the profile file is never changed.
   const opts: { profile?: string; model?: string; provider?: string } = {};

@@ -1,4 +1,4 @@
-"""``workspace.clone``: clone GitHub repositories into a workspace (1.26).
+"""``workspace.clone``: clone GitHub repositories into a workspace (1.27).
 
 The WS handler resolves the caller's workspace (the same visibility and
 containment rules as ``select`` / ``delete``) and the workspace's own

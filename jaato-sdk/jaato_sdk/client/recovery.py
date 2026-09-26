@@ -590,7 +590,7 @@ class IPCRecoveryClient:
             cascade_driver_id: Phase 2 cascade-sharing tenant ID; see
                 ``IPCClient.create_session`` for the contract.  Pass
                 the same opaque ID across every session of one cascade.
-            model: Model override (``--model``, protocol 1.26); see
+            model: Model override (``--model``, protocol 1.27); see
                 ``IPCClient.create_session``.
             provider: Provider override, only with ``model``.
             timeout: Seconds to wait for the ``SessionInfoEvent`` — mirrors

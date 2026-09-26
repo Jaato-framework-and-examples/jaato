@@ -1,5 +1,5 @@
 /**
- * The workspace verbs of protocol 1.26, as the web client reads them.
+ * The workspace verbs of protocol 1.27, as the web client reads them.
  *
  * - ``WorkspaceInfo.sources`` -- the git checkouts in a workspace, derived
  *   by the daemon from ``.git`` on disk (not declared anywhere), so the

@@ -436,7 +436,7 @@ export function SessionScreen() {
       stageDrafts(files);
       // ``default`` with the workspace .env's own binding is no override:
       // the daemon resolves exactly that from the .env.  Dropping it keeps
-      // the common case working against a daemon below 1.26, which has no
+      // the common case working against a daemon below 1.27, which has no
       // ``--model`` flag.
       const cfg = useJaato.getState().workspace.config;
       if (!profile && model && cfg?.provider === model.provider && cfg?.model === model.model) model = undefined;

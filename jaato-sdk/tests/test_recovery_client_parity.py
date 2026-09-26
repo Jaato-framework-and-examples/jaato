@@ -116,7 +116,7 @@ INTENTIONALLY_ABSENT = {
         "as MIN_SESSION_STOP_PROTOCOL above",
     "MIN_MODEL_OVERRIDE_PROTOCOL":
         "class constant on IPCClient gating create_session(model=...) "
-        "(protocol 1.26); the recovery wrapper forwards model/provider to "
+        "(protocol 1.27); the recovery wrapper forwards model/provider to "
         "the inner client, whose _require_model_override_protocol refuses a "
         "daemon that would read --model as the session name",
 }

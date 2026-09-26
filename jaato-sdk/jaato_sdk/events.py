@@ -488,7 +488,15 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 # on an older daemon degrades to the 1.7 rule: the SDK refuses below
 # ``MIN_DIAGNOSTICS_PROTOCOL`` rather than waiting out a request an old
 # daemon answers "Unknown request type" to.
-# 1.26 -- the workspace and session pickers.  ``workspace.inspect`` +
+# 1.26 -- ``DiagnosticsResultEvent.apparmor_grants`` (#1326): what the
+# session's AppArmor profile was provisioned with -- exec scope, the
+# extension fragments inlined (tier, path, rules), fragments requested and
+# not found, rules per contributing plugin, the reference grants added
+# since, and which profile declared ``apparmor_fragments``.  Additive: an
+# older client ignores the key, an older daemon omits it and the client
+# reads that as "not recorded".  No SDK minimum, because nothing a client
+# sends changes.
+# 1.27 -- the workspace and session pickers.  ``workspace.inspect`` +
 # ``WorkspaceInspectEvent`` (path, size, session counts by state, and per
 # git checkout its uncommitted / unpushed counts), ``workspace.clone`` +
 # ``WorkspaceCloneProgressEvent`` (sequential ``git clone`` of GitHub repos
@@ -498,16 +506,16 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 # and the session rows' ``profile`` / ``last_activity`` / ``is_processing``
 # / ``created_at`` keys are additive.  ``session.new`` accepts ``--model``
 # / ``--provider``, which an older daemon would read as the session NAME --
-# so a client gates the override on 1.26, and the two new verbs follow the
+# so a client gates the override on 1.27, and the two new verbs follow the
 # 1.7 rule (an older daemon answers "Unknown message type", never the
 # result).  ``stop_sessions`` on an older daemon is ignored and the delete
 # is REFUSED for the loaded sessions -- the safe direction.
-# ``ConfigUpdateRequest.key_only`` (also 1.26) writes ONLY the provider's
+# ``ConfigUpdateRequest.key_only`` (also 1.27) writes ONLY the provider's
 # API-key variable to the workspace ``.env`` -- no ``JAATO_PROVIDER`` /
 # ``MODEL_NAME``, no server bootstrap -- so the session picker can hand a
 # key to the session it is about to start.  An older daemon ignores the
-# field and rewrites the provider binding, so a client gates it on 1.26.
-PROTOCOL_VERSION = "1.26"
+# field and rewrites the provider binding, so a client gates it on 1.27.
+PROTOCOL_VERSION = "1.27"
 
 
 # =============================================================================
@@ -2229,6 +2237,22 @@ class DiagnosticsResultEvent(Event):
             or ``None`` when no notebook plugin is loaded.
         ``protocol_version`` / ``server_version``: what this daemon
             speaks and runs.
+        ``apparmor_grants`` (1.26, #1326): what the session's AppArmor
+            profile was provisioned with, recorded when it was loaded --
+            ``{recorded, template_version, profile_name, exec_scope,
+            requested_fragments, declared_by, fragments, missing_fragments,
+            unreadable_fragments, plugin_rules, references}``.
+            ``exec_scope`` is ``"scoped"`` (``//child`` may exec only what
+            the fragments name) or ``"unscoped"`` (the broad in-PATH set).
+            Each ``fragments`` row is ``{name, tier, path, rules, shadows}``;
+            ``plugin_rules`` rows are ``{plugin, rules}``; ``references``
+            (listed live, since ``selectReferences`` adds them mid-session)
+            are ``{ref_id, rules}``.  ``declared_by`` names the profile in the
+            ``inherits:`` chain that set ``apparmor_fragments`` (``None``
+            when none did, ``""`` when a restored session did not record
+            it).  ``recorded: False`` when the profile was loaded before
+            this daemon started or was never loaded here.  ``None`` (the
+            whole field) when the session is not AppArmor-confined.
 
     **Live** (measured fresh, at the moment of this call, on the runner --
     never a cached value):
@@ -2268,6 +2292,7 @@ class DiagnosticsResultEvent(Event):
     protocol_version: str = ""
     server_version: str = ""
     probe: Optional[Dict[str, Any]] = None
+    apparmor_grants: Optional[Dict[str, Any]] = None
 
 
 class SandboxPathsEvent(Event):

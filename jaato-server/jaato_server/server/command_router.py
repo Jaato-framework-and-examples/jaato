@@ -1044,7 +1044,7 @@ class CommandRouter:
                                         session into a small context window.
             --model <name>              Override the model the resolved
                                         profile (or workspace .env) binds
-                                        (protocol 1.26).  Applied to a COPY
+                                        (protocol 1.27).  Applied to a COPY
                                         of the profile.
             --provider <name>           Override the provider too; only
                                         with --model.
@@ -1078,7 +1078,7 @@ class CommandRouter:
         # ADDRESS for sibling messaging (design §4), validated server-side;
         # ``--cascade-driver-id`` is the opaque cascade tenant id
         # (docs/design/runner-cascade-sharing.md); ``--model`` /
-        # ``--provider`` (protocol 1.26) override the resolved binding.
+        # ``--provider`` (protocol 1.27) override the resolved binding.
         opts: Dict[str, Optional[str]] = {}
         args_iter = iter(args)
         for arg in args_iter:
@@ -1631,7 +1631,7 @@ class CommandRouter:
             # (additive, no bump): a cold session with a pending message is
             # the one the watchdog is about to revive.
             "inbox_pending": s.inbox_pending,
-            # Session picker (protocol 1.26): profile, activity and whether
+            # Session picker (protocol 1.27): profile, activity and whether
             # the session is working, from the one shared definition.
             **session_picker_fields(s),
         } for s in sessions]

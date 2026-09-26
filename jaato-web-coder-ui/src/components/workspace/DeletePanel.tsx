@@ -3,7 +3,7 @@
  * directly under the workspace being deleted, saying what is lost before
  * anything is.
  *
- * On open it asks the daemon (``workspace.inspect``, protocol 1.26) for the
+ * On open it asks the daemon (``workspace.inspect``, protocol 1.27) for the
  * impact -- sessions by state, each repository's uncommitted files and
  * unpushed commits, size on disk -- and renders it in three cells.  Then:
  *

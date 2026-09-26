@@ -81,7 +81,7 @@ describe("NewSessionColumn", () => {
     const onStart = vi.fn();
     useJaato.setState((s) => ({
       credentialsUrl: null,
-      connection: { ...s.connection, phase: "connected", protocolVersion: "1.26" },
+      connection: { ...s.connection, phase: "connected", protocolVersion: "1.27" },
       workspace: { ...s.workspace, selected: "w", config: { workspace: "w", configured: false, availableProviders: ["anthropic"], missingFields: [] } },
     }));
     render(<NewSessionColumn onStart={onStart} />);

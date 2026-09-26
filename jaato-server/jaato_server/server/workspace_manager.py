@@ -146,7 +146,7 @@ class WorkspaceInfo:
     #: registry and preserved across re-discovery, which rebuilds every
     #: other field from the directory.
     owner: Optional[str] = None
-    #: The git checkouts in the workspace (protocol 1.26) -- DERIVED from
+    #: The git checkouts in the workspace (protocol 1.27) -- DERIVED from
     #: disk by :func:`server.workspace_sources.workspace_sources` whenever
     #: the workspace is analysed, never persisted to the registry (a
     #: derived fact written down goes stale) and never declared.
@@ -743,7 +743,7 @@ class WorkspaceManager:
         one, before existence, so the refusal is not an oracle for what
         exists outside the root), then the one-flat-component naming rule,
         then existence, then ownership.  ``workspace.inspect`` and
-        ``workspace.clone`` (1.26) go through this so they cannot reach a
+        ``workspace.clone`` (1.27) go through this so they cannot reach a
         workspace the list would not show.
 
         Raises:
@@ -766,7 +766,7 @@ class WorkspaceManager:
     ):
         """Every refusal :meth:`delete_workspace` makes, without deleting.
 
-        Split out so ``workspace.delete`` with ``stop_sessions`` (1.26) can
+        Split out so ``workspace.delete`` with ``stop_sessions`` (1.27) can
         confirm the delete WOULD be allowed -- ownership, other clients'
         selections, retention -- before it stops any session: stopping
         sessions and then being refused would destroy work for nothing.
@@ -1010,7 +1010,7 @@ class WorkspaceManager:
             model: Model name (optional).
             api_key: API key (optional, for non-OAuth providers).
             name: Workspace name, or None for selected workspace.
-            key_only: Protocol 1.26 -- write ONLY the provider's API-key
+            key_only: Protocol 1.27 -- write ONLY the provider's API-key
                 variable (``api_key`` then required); ``JAATO_PROVIDER`` /
                 ``MODEL_NAME`` are left as they are.  The session picker's
                 key choice, which must not change what ``default`` means.

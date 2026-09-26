@@ -14,7 +14,7 @@
  *    but worded as the profile's gap rather than the picker's question.
  *
  * The override reaches the daemon as ``session.new --model/--provider``
- * (protocol 1.26), applied to a copy of the resolved profile, so the base
+ * (protocol 1.27), applied to a copy of the resolved profile, so the base
  * profile keeps its plugins, persona and limits and only the binding
  * changes.  ``default`` with a picked model sends no ``--profile`` at all.
  */

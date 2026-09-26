@@ -1,4 +1,4 @@
-"""``workspace.inspect``, ``workspace.clone`` and ``delete --stop_sessions`` (1.26).
+"""``workspace.inspect``, ``workspace.clone`` and ``delete --stop_sessions`` (1.27).
 
 The WS handlers are driven on a ``JaatoWSServer.__new__`` carrying a real
 ``WorkspaceManager`` and a fake session manager, so the refusals are the

@@ -3,7 +3,7 @@
  * create the workspace a session runs in, then go to the session picker.
  *
  * Drawn as a table (design 3a): one row per workspace with its SOURCES --
- * the git checkouts the daemon finds in it (protocol 1.26) -- when it was
+ * the git checkouts the daemon finds in it (protocol 1.27) -- when it was
  * last opened, and three actions: Open, Sources, Delete.  A workspace no
  * longer has a provider and model of its own (a new session gets its
  * binding from a base profile, chosen in the picker), and the table shows

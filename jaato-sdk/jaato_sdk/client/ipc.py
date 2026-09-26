@@ -248,7 +248,7 @@ def _created_session_id(event: Any) -> Optional[str]:
 def model_override_args(
     model: Optional[str], provider: Optional[str],
 ) -> List[str]:
-    """The ``session.new`` argv for a model override (protocol 1.26).
+    """The ``session.new`` argv for a model override (protocol 1.27).
 
     ``--model <m>`` and, when given, ``--provider <p>``.  A provider without
     a model names nothing to run, so it is refused here rather than sent to
@@ -1624,7 +1624,7 @@ class IPCClient:
                 provider, so the default is generous.
             model: Override the model the resolved profile (or, with no
                 profile, the workspace ``.env``) binds -- sent as
-                ``--model`` (protocol 1.26).  The daemon applies it to a
+                ``--model`` (protocol 1.27).  The daemon applies it to a
                 COPY of the profile, and a revived session keeps it.
             provider: Override the provider too (``--provider``).  Only
                 meaningful with ``model``; passing it alone raises
@@ -2602,13 +2602,13 @@ class IPCClient:
 
     MIN_DIAGNOSTICS_PROTOCOL = "1.25"
 
-    # 1.26: ``session.new --model/--provider``.  An older daemon's argv
+    # 1.27: ``session.new --model/--provider``.  An older daemon's argv
     # parser reads an unknown flag as the session NAME, so the override
     # would be silently dropped -- refused here instead.
-    MIN_MODEL_OVERRIDE_PROTOCOL = "1.26"
+    MIN_MODEL_OVERRIDE_PROTOCOL = "1.27"
 
     def _require_model_override_protocol(self, model: Optional[str]) -> None:
-        """Refuse a ``create_session(model=...)`` below 1.26 (no-op without one)."""
+        """Refuse a ``create_session(model=...)`` below 1.27 (no-op without one)."""
         if not model or _protocol_compatible(
                 self.server_protocol_version, self.MIN_MODEL_OVERRIDE_PROTOCOL):
             return

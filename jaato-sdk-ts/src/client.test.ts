@@ -590,7 +590,7 @@ describe("JaatoClient session management", () => {
     );
   });
 
-  test("createSession refuses a model override against a pre-1.26 daemon", async () => {
+  test("createSession refuses a model override against a pre-1.27 daemon", async () => {
     await assert.rejects(client.createSession({ model: "gpt-5.1" }), /1\.26/);
     assert.equal(getSent().length, 0);
   });
@@ -1799,7 +1799,7 @@ describe("JaatoClient memory verbs (protocol 1.22, #1232)", () => {
   });
 });
 
-describe("JaatoClient workspace/session pickers (1.26)", () => {
+describe("JaatoClient workspace/session pickers (1.27)", () => {
   let client: JaatoClient;
 
   beforeEach(async () => {
@@ -1814,7 +1814,7 @@ describe("JaatoClient workspace/session pickers (1.26)", () => {
     restoreWebSocket();
   });
 
-  test("createSession sends a model override as --model/--provider (1.26)", async () => {
+  test("createSession sends a model override as --model/--provider (1.27)", async () => {
     await client.createSession({
       profile: "researcher",
       model: "gpt-5.1",

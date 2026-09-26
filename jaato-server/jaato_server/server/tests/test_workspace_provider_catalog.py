@@ -135,7 +135,7 @@ def test_no_provider_sdk_is_imported_to_build_the_catalog() -> None:
 
 
 def test_a_key_only_update_writes_the_key_and_leaves_the_binding(manager: WorkspaceManager, tmp_path: Path) -> None:
-    """The session picker's key choice (protocol 1.26): the key lands where the
+    """The session picker's key choice (protocol 1.27): the key lands where the
     provider reads it, and the workspace's ``default`` binding is untouched."""
     manager.select_workspace("proj")
     manager.update_config("anthropic", model="claude-sonnet-4", api_key="sk-ant-old")

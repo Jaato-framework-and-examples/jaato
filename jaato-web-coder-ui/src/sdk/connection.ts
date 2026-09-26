@@ -283,7 +283,7 @@ export async function createWorkspace(name: string, timeoutMs = 8000): Promise<W
 /**
  * ``workspace.delete`` (protocol 1.13): the daemon answers with
  * ``workspace.deleted``, which the store also reduces.  ``stopSessions``
- * (1.26) asks the daemon to stop and delete the workspace's LOADED
+ * (1.27) asks the daemon to stop and delete the workspace's LOADED
  * sessions first instead of refusing -- what the delete panel's typed
  * confirmation has just told the person will happen.
  *
@@ -316,7 +316,7 @@ function nextRequestId(prefix: string): string {
 }
 
 /**
- * ``workspace.inspect`` (protocol 1.26): what deleting ``name`` would
+ * ``workspace.inspect`` (protocol 1.27): what deleting ``name`` would
  * lose.  Resolves with the raw ``workspace.inspected`` dict, or ``null``
  * on a timeout (an older daemon answers with an ``ErrorEvent`` nobody
  * correlates, so the timeout is what ends the wait there).
@@ -343,7 +343,7 @@ export function inspectWorkspace(name: string, timeoutMs = 20_000): Promise<Reco
 }
 
 /**
- * ``workspace.clone`` (protocol 1.26): clone ``repos`` into workspace
+ * ``workspace.clone`` (protocol 1.27): clone ``repos`` into workspace
  * ``name``, one after another.  Every ``workspace.clone_progress`` for this
  * request is handed to ``onProgress``; the returned function stops
  * listening.  Retrying a repository is a new call naming only it.

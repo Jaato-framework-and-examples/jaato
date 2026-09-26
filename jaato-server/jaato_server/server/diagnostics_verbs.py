@@ -76,8 +76,39 @@ def _runner_identity_dict(session: Any) -> Optional[Dict[str, Any]]:
         return None
 
 
+def _apparmor_grants(
+    confinement_id: str, server: Any,
+) -> Optional[Dict[str, Any]]:
+    """What the session's AppArmor profile grants, for the panel (#1326).
+
+    ``None`` when the session names no AppArmor profile.  Otherwise the
+    record :mod:`server.apparmor` kept when the profile was loaded, or
+    ``{"recorded": False}`` when it has none (loaded before this daemon
+    started, or on a path that does not record).  Either way it carries
+    ``declared_by`` and ``requested_fragments`` from the session's own
+    resolved profile, because which profile declared the fragments is a
+    fact about the session, not about the boundary it shares.
+    """
+    from jaato_server.server.apparmor import recorded_grants
+
+    if not confinement_id:
+        return None
+    grants = recorded_grants(confinement_id)
+    result: Dict[str, Any] = dict(grants) if grants else {}
+    result["recorded"] = grants is not None
+    profile = getattr(server, "_profile", None)
+    if profile is not None:
+        result["declared_by"] = getattr(profile, "apparmor_fragments_source", None)
+        if not grants:
+            requested = getattr(profile, "apparmor_fragments", None)
+            result["requested_fragments"] = (
+                None if requested is None else list(requested))
+    return result
+
+
 def _compose_result(
     request_id: str, session: Any, probe_answer: Dict[str, Any],
+    server: Any = None,
 ) -> DiagnosticsResultEvent:
     """Build the answer from the daemon's cached ``Session`` record plus
     whatever ``JaatoServer.diagnostics_probe`` returned.
@@ -94,6 +125,7 @@ def _compose_result(
     confinement_id = str(getattr(identity, "apparmor_profile", "") or "")
     sandbox_mode = getattr(session, "sandbox_mode", None)
     runner_identity = _runner_identity_dict(session)
+    apparmor_grants = _apparmor_grants(confinement_id, server)
 
     if "probe" in probe_answer:
         return DiagnosticsResultEvent(
@@ -107,6 +139,7 @@ def _compose_result(
             protocol_version=str(probe_answer.get("protocol_version") or ""),
             server_version=_daemon_version(),
             probe=probe_answer.get("probe"),
+            apparmor_grants=apparmor_grants,
         )
 
     # No runner to probe, or the runner did not answer.  The cached facts
@@ -121,6 +154,7 @@ def _compose_result(
         sandbox_mode=sandbox_mode,
         server_version=_daemon_version(),
         probe=None,
+        apparmor_grants=apparmor_grants,
         error=str(probe_answer.get("error") or ""),
         category=str(probe_answer.get("category") or "no_runner"),
     )
@@ -207,7 +241,7 @@ def answer_diagnostics_request(
         )
     else:
         probe_answer = server.diagnostics_probe()
-        result = _compose_result(event.request_id, session, probe_answer)
+        result = _compose_result(event.request_id, session, probe_answer, server)
 
     _trace_probe(user_id, session_id, allowed, result)
     return result

@@ -1,4 +1,4 @@
-"""The git checkouts a workspace holds, derived from disk (protocol 1.26).
+"""The git checkouts a workspace holds, derived from disk (protocol 1.27).
 
 A workspace does not DECLARE its sources; they are read off the tree every
 time the workspace is listed: the workspace root itself (``path == "."``)

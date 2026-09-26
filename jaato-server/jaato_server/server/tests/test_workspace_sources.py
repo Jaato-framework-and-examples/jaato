@@ -1,4 +1,4 @@
-"""``WorkspaceInfo.sources`` -- the git checkouts a workspace holds (1.26).
+"""``WorkspaceInfo.sources`` -- the git checkouts a workspace holds (1.27).
 
 Derived from ``.git/HEAD`` and ``.git/config`` read as files; no git process
 runs.  Credentials in a remote URL must never survive into a source.

@@ -216,7 +216,7 @@ export function NewSessionColumn({ onStart }: { onStart: (profile: string | null
   }, [cfg]);
   // The API key list box -- the configure form's control, kept by the
   // redesign.  A key is written to the selected workspace's .env
-  // (``config.update`` key_only, 1.26), so it is offered only where there is
+  // (``config.update`` key_only, 1.27), so it is offered only where there is
   // a workspace to write to and a daemon that writes nothing else.
   const credentialsUrl = useJaato((s) => s.credentialsUrl);
   const selectedWs = useJaato((s) => s.workspace.selected);

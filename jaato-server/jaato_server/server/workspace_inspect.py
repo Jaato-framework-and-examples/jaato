@@ -1,4 +1,4 @@
-"""What ``workspace.inspect`` reports about one workspace (protocol 1.26).
+"""What ``workspace.inspect`` reports about one workspace (protocol 1.27).
 
 Pure functions over a directory and a session listing, so the WS handler
 does only the transport half (resolve the caller's workspace, run this off

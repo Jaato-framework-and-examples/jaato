@@ -7,7 +7,7 @@
  *
  * A key reaches the daemon one way: as ``api_key`` on ``config.update``,
  * written to the selected workspace's ``.env`` under the variable the
- * provider reads.  The picker sends it ``key_only`` (protocol 1.26), which
+ * provider reads.  The picker sends it ``key_only`` (protocol 1.27), which
  * writes the key and nothing else -- the workspace's ``JAATO_PROVIDER`` /
  * ``MODEL_NAME`` stay as they are and no server is bootstrapped -- right
  * before ``session.new``, so the session it starts resolves that key.
@@ -18,7 +18,7 @@ import type { KeyChoice } from "@/components/workspace/CredentialPicker";
 import { getClient } from "@/sdk/connection";
 
 /** The protocol that knows ``config.update``'s ``key_only``. */
-export const MIN_KEY_ONLY_PROTOCOL = "1.26";
+export const MIN_KEY_ONLY_PROTOCOL = "1.27";
 
 export function servesKeyOnly(protocolVersion: string | null | undefined): boolean {
   return !!protocolVersion && isProtocolCompatible(protocolVersion, MIN_KEY_ONLY_PROTOCOL);

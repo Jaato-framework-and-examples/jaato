@@ -264,6 +264,16 @@ function answerDiagnosticsRequest(c: Client, ev: Record<string, unknown>): void 
     notebook_boundary_kind: "apparmor",
     protocol_version: "1.26",
     server_version: "mock",
+    // #1326: what the profile was provisioned with, in the shape
+    // ``apparmor.record_grants`` stores and ``recorded_grants`` returns.
+    apparmor_grants: {
+      recorded: true, template_version: 37, profile_name: `jaato-ws-mock-${c.sessionId.slice(0, 8)}`,
+      exec_scope: "scoped", requested_fragments: ["java", "curl"], declared_by: "builder",
+      fragments: [{ name: "java", tier: "workspace", path: "/ws/.jaato/apparmor-fragments/java.rules", rules: ["/usr/bin/java ix,", "/usr/bin/mvn ix,"], shadows: [] }],
+      missing_fragments: ["curl"], unreadable_fragments: [],
+      plugin_rules: [{ plugin: "cli", rules: ["/etc/os-release      r,"] }],
+      references: [],
+    },
     probe: {
       ok: true, error: "", expected_profile: `jaato-ws-mock-${c.sessionId.slice(0, 8)}`,
       current_profile: `jaato-ws-mock-${c.sessionId.slice(0, 8)}`, current_mode: "enforce",
@@ -397,7 +407,7 @@ function sessionListing(c: Client): Record<string, unknown>[] {
     // in the daemon's own spelling, because a mock that speaks the client's
     // vocabulary certifies a reading no real daemon produces.
     { id: "20260916_090000", name: "", description: "fix the budget panel", model_provider: "anthropic", model_name: "claude-sonnet-4", is_loaded: true, is_current: c.sessionId === "20260916_090000", client_count: 1, turn_count: 3, workspace_path: "/srv/workspaces/project-a", awaiting: "permission", awaiting_since: new Date(Date.now() - 4 * 60_000).toISOString(), profile: "researcher", last_activity: ts(), is_processing: true },
-    // Protocol 1.26 adds ``profile`` / ``last_activity`` / ``is_processing``.
+    // Protocol 1.27 adds ``profile`` / ``last_activity`` / ``is_processing``.
     { id: "20260914_080000", name: "", description: "idle helper", model_provider: "anthropic", model_name: "claude-sonnet-4", is_loaded: true, is_current: false, client_count: 0, turn_count: 7, workspace_path: "/srv/workspaces/project-a", profile: "", last_activity: new Date(Date.now() - 60 * 60_000).toISOString(), is_processing: false },
     { id: "20260915_170000", name: "old notes", description: "", model_provider: "", model_name: "", is_loaded: false, is_current: false, client_count: 0, turn_count: 1, workspace_path: "/srv/workspaces/project-b", profile: "", last_activity: "2026-09-15T17:00:00Z" },
     ...(c.sessionId && !c.sessionId.startsWith("2026") ? [{ id: c.sessionId, name: "mock session", description: "", model_provider: "mock", model_name: "mock-1", is_loaded: true, is_current: true, client_count: 1, turn_count: 0, workspace_path: "/work" }] : []),
@@ -751,7 +761,7 @@ wss.on("connection", (ws, req) => {
     installedIntegrations: new Set(),
     deletedWorkspaces: new Set(),
   };
-  send(c, { type: "connected", protocol_version: "1.26", server_info: { server_version: "mock-0.0.1", client_id: randomUUID(), max_message_size: MAX_MESSAGE_SIZE, stage_per_file_limit: Math.min(STAGE_PER_FILE_LIMIT, MAX_MESSAGE_SIZE), stage_total_limit: STAGE_TOTAL_LIMIT } });
+  send(c, { type: "connected", protocol_version: "1.27", server_info: { server_version: "mock-0.0.1", client_id: randomUUID(), max_message_size: MAX_MESSAGE_SIZE, stage_per_file_limit: Math.min(STAGE_PER_FILE_LIMIT, MAX_MESSAGE_SIZE), stage_total_limit: STAGE_TOTAL_LIMIT } });
 
   ws.on("message", async (raw, isBinary) => {
     if (c.staging) {
@@ -816,7 +826,7 @@ wss.on("connection", (ws, req) => {
         break;
       case "workspace.delete":
         // The daemon refuses a workspace with loaded sessions -- project-a
-        // has two -- unless ``stop_sessions`` (1.26) asks it to stop them.
+        // has two -- unless ``stop_sessions`` (1.27) asks it to stop them.
         if (ev.name === "project-a" && ev.stop_sessions !== true) send(c, { type: "workspace.deleted", name: "project-a", ok: false, error: "Workspace 'project-a' has 2 loaded session(s): 20260916_090000, 20260914_080000 -- stop them first" });
         else {
           // Per connection: a deletion is this test's, not the next one's.
@@ -825,7 +835,7 @@ wss.on("connection", (ws, req) => {
         }
         break;
       case "workspace.inspect": {
-        // Protocol 1.26: what deleting would lose.
+        // Protocol 1.27: what deleting would lose.
         const name = String(ev.name);
         const full = name === "project-a";
         send(c, {
@@ -840,7 +850,7 @@ wss.on("connection", (ws, req) => {
         break;
       }
       case "workspace.clone": {
-        // Protocol 1.26: one repository after another, queued -> cloning N%
+        // Protocol 1.27: one repository after another, queued -> cloning N%
         // -> checkout -> done.  A repository named ``*/fails`` fails at 56%
         // the first time (authentication), and succeeds on a retry.
         const repos = (ev.repos as { repo: string; branch: string }[] | undefined) ?? [];
@@ -864,7 +874,7 @@ wss.on("connection", (ws, req) => {
       case "config.update":
         // The daemon's ``ConfigUpdatedEvent`` carries what was written and
         // no status field; the UI derives the status from it.  A ``key_only``
-        // write (1.26) changes only the key, so the answer reports the
+        // write (1.27) changes only the key, so the answer reports the
         // binding the workspace still holds.
         if (ev.key_only === true) {
           const a = c.selected === "project-a";
@@ -892,7 +902,7 @@ wss.on("connection", (ws, req) => {
           await sleep(120);
           send(c, { type: "init.progress", step: "provider", status: "complete", message: "Ready", step_number: 2, total_steps: 2 });
           send(c, { type: "agent.created", agent_id: "main", agent_name: "main", agent_type: "main", profile_name: args.includes("--profile") ? args[args.indexOf("--profile") + 1] : null });
-          // ``--model`` / ``--provider`` (1.26) override the binding for this session.
+          // ``--model`` / ``--provider`` (1.27) override the binding for this session.
           const flag = (f: string) => (args.includes(f) ? args[args.indexOf(f) + 1] : undefined);
           send(c, { type: "session.info", session_name: "mock session", model_provider: flag("--provider") ?? "mock", model_name: flag("--model") ?? "mock-1", profile_name: flag("--profile") ?? null, models: ["mock-1", "mock-2"], sessions: sessionListing(c) });
           // PermissionStatusEvent, emitted by the daemon at init: effective_default + suspension_scope.

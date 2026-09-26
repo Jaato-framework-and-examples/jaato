@@ -579,7 +579,7 @@ await client.create_session(profile="researcher")
 - `session.reload_env [id]` — re-resolve a LIVE session's `.env` and credentials and rebuild its provider (see [A Credential Stored After the Runner Booted](#a-credential-stored-after-the-runner-booted))
 - `workspace.ignore <path>` — toggle one exact entry in the caller's workspace `.gitignore` (→ `WorkspaceIgnoreResultEvent`; protocol 1.12, see [A Key the Web Files Panel Did Not Have](#a-key-the-web-files-panel-did-not-have))
 - `scaffold.explain [topic] [name]` — render one `jaato-scaffold explain` topic **on the daemon**, so a CLI whose own virtualenv lacks the extension contributing it can still be told (→ `ScaffoldExplainEvent`; protocol 1.18, see [A Topic the CLI Could Not Answer and the Daemon Could](#a-topic-the-cli-could-not-answer-and-the-daemon-could))
-- `workspace.inspect` / `workspace.clone` (WS only) — a workspace's details, and cloning GitHub repos into it (→ `WorkspaceInspectEvent` / `WorkspaceCloneProgressEvent`; protocol 1.26, see [What a Picker Needs to Know About a Workspace](#what-a-picker-needs-to-know-about-a-workspace-protocol-126))
+- `workspace.inspect` / `workspace.clone` (WS only) — a workspace's details, and cloning GitHub repos into it (→ `WorkspaceInspectEvent` / `WorkspaceCloneProgressEvent`; protocol 1.27, see [What a Picker Needs to Know About a Workspace](#what-a-picker-needs-to-know-about-a-workspace-protocol-127))
 - `workspace.delete` (a `WorkspaceDeleteRequest`, WS only) — delete a workspace the caller may see: its directory, its sessions, its registry row (→ `WorkspaceDeletedEvent`; protocol 1.13, see [A Workspace Everyone Could See](#a-workspace-everyone-could-see))
 - `workspace.file.fetch` (a `WorkspaceFileFetchRequest`, WS only) — download one file from the caller's workspace (→ `WorkspaceFileContentEvent` + one binary frame; protocol 1.20, see [A File That Could Go In and Not Come Out](#a-file-that-could-go-in-and-not-come-out))
 
@@ -2414,6 +2414,29 @@ value — which is the point of routing the decision through one parser, and
 is also the limit of what was checked. `JAATO_APPARMOR_COMPLAIN` stays a
 `host`-scoped env var with no typed profile key; it is a whole-daemon
 diagnostic, not a per-session knob.
+
+### What a Profile Granted, Shown to Its Owner (#1326)
+
+The web Diagnostics panel (#1294) said whether a session was confined and
+never what the confinement allowed. When a confined command fails, the
+question is which fragment, plugin or reference granted a rule, or why none
+did; the answer lived in one daemon log line and in the rendered profile on
+the host.
+
+| Piece | Where |
+|---|---|
+| the record | `AppArmorManager._record_grants`, after a SUCCESSFUL load, keyed by the profile name the runner identity carries. Daemon-wide (`apparmor.record_grants` / `recorded_grants`), because the WS server and the IPC session manager each hold their own manager. In memory: after a daemon restart a boundary reads `recorded: false` until it is provisioned again |
+| what it holds | exec scope (`scoped` = `//child` may exec only what the fragments name, `unscoped` = the broad in-PATH set), each fragment's tier, file, rule lines and the lower tiers it shadows, fragments requested and not found or unreadable, rules per contributing plugin (`resolve_plugin_apparmor_rules` returns a `PluginRules` list carrying `by_plugin`), the template version |
+| the live part | reference grants `selectReferences` adds mid-session, listed from the boundary's refs directory when asked |
+| who declared the fragments | `SubagentProfile.apparmor_fragments_source`, a DERIVED field set by `_merge_apparmor_fragments` and persisted in the snapshot. `None` when no profile declared the list, `""` when a snapshot predates the field |
+| the wire | `DiagnosticsResultEvent.apparmor_grants`, protocol **1.26**, additive, returned only past the existing owner gate |
+| the panel | a collapsed `AppArmor grants` line in the RECORD block (`exec: scoped — N fragments (declared by X)`), contributors and rule text a click further, a missing fragment in the warning tone |
+
+It records rather than re-derives because the fragment files may have
+changed since the profile was loaded; the panel shows what the kernel was
+handed. Not covered: the flat isolated sub-runner profile, and where a
+walker-generated cache-tier fragment came from (jaato sees only the file).
+Guard: `jaato_server/shared/tests/test_diagnostics_show_apparmor_grants_1326.py`.
 
 ### Binary Media Chunks (delivery)
 
@@ -6596,7 +6619,7 @@ confirms inline before sending.
 Stated cost, unchanged in kind: the session still runs as the daemon's uid,
 so this is an entitlement boundary at the verbs, not a filesystem one.
 
-### What a Picker Needs to Know About a Workspace (protocol 1.26)
+### What a Picker Needs to Know About a Workspace (protocol 1.27)
 
 The workspace and session pickers asked for facts the daemon held and no
 verb returned. Four additions, each reusing a rule already here rather than
@@ -6630,7 +6653,7 @@ snapshot then freezes; an inline spec is rewritten too), or with no profile as
 metadata so a revive re-applies them. `--provider` alone is `InvalidSessionSpec`.
 Session rows (`session.list` and the `SessionInfoEvent` snapshot, from one
 `session_picker_fields`) gain `profile`, `last_activity`, `is_processing`,
-`created_at`. Both SDKs refuse a model override below 1.26 — an older parser
+`created_at`. Both SDKs refuse a model override below 1.27 — an older parser
 reads `--model` as the session NAME.
 
 **The web client's two screens are built on these** (design handoff
@@ -6652,10 +6675,10 @@ is free text with suggestions from profiles, sessions and the `.env`.
 The API-key list box (`CredentialPicker`: stored keys for the provider, or
 "New key…") sits under the model, for the provider the session will use;
 on Start the choice is revealed / stored and written with
-`config.update` **`key_only`** (1.26) — only the provider's key variable,
+`config.update` **`key_only`** (1.27) — only the provider's key variable,
 no `JAATO_PROVIDER` / `MODEL_NAME`, no server bootstrap, and a
 `config.updated` reporting the binding the `.env` still holds — before
-`session.new`. Offered only with a selected workspace on a 1.26 daemon: an
+`session.new`. Offered only with a selected workspace on a 1.27 daemon: an
 older one would rewrite the provider binding instead.
 
 ### A Session You Deleted, and a Listing That Was Not Yours

@@ -1,4 +1,4 @@
-"""Session-picker listing keys and ``session.new --model/--provider`` (1.26).
+"""Session-picker listing keys and ``session.new --model/--provider`` (1.27).
 
 Covers:
 

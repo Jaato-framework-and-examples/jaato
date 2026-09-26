@@ -3745,7 +3745,7 @@ class JaatoWSServer:
     async def _handle_workspace_delete(
         self, client_id: str, name: str, stop_sessions: bool = False,
     ) -> None:
-        """Handle ``workspace.delete`` (protocol 1.13; ``stop_sessions`` 1.26).
+        """Handle ``workspace.delete`` (protocol 1.13; ``stop_sessions`` 1.27).
 
         Answers with one ``WorkspaceDeletedEvent`` whatever happened.  The
         manager refuses containment, ownership and other clients' selections;
@@ -3806,7 +3806,7 @@ class JaatoWSServer:
     async def _handle_workspace_inspect(
         self, client_id: str, event: "WorkspaceInspectRequest",
     ) -> None:
-        """Handle ``workspace.inspect`` (protocol 1.26).
+        """Handle ``workspace.inspect`` (protocol 1.27).
 
         One ``WorkspaceInspectEvent`` whatever happened, echoing
         ``request_id``.  The workspace is resolved through
@@ -3846,7 +3846,7 @@ class JaatoWSServer:
     async def _handle_workspace_clone(
         self, client_id: str, event: "WorkspaceCloneRequest",
     ) -> None:
-        """Handle ``workspace.clone`` (protocol 1.26).
+        """Handle ``workspace.clone`` (protocol 1.27).
 
         Answered by a stream of ``WorkspaceCloneProgressEvent`` echoing
         ``request_id``.  A workspace the caller may not see (or a name that
@@ -4068,7 +4068,7 @@ class JaatoWSServer:
         messages.  If auto-provisioning is active, the workspace is
         provisioned first and AppArmor confinement is applied.
 
-        ``key_only`` (protocol 1.26) writes only the provider's API-key
+        ``key_only`` (protocol 1.27) writes only the provider's API-key
         variable and bootstraps nothing: it is the session picker handing a
         key to the session it is about to create with ``session.new``,
         which must neither rebind the workspace's provider nor start a

@@ -95,7 +95,6 @@ BASELINE: Dict[str, int] = {
     "jaato-sdk/jaato_sdk/doctor.py::check_session": 20,
     "jaato-server/jaato_server/server/__main__.py::JaatoDaemon.start": 25,
     "jaato-server/jaato_server/server/__main__.py::main": 33,
-    "jaato-server/jaato_server/server/apparmor.py::AppArmorManager._render_profile": 18,
     # 33 -> 30 by #812.  The two orphan-management verbs needed a branch in
     # this chain, and a baselined function may not grow -- so the six uniform
     # ``cascade.*`` arms were lifted into ``_dispatch_cascade_command``, which
@@ -461,7 +460,7 @@ BASELINE: Dict[str, int] = {
     "jaato-server/jaato_server/shared/plugins/service_connector/plugin.py::ServiceConnectorPlugin._execute_list_endpoints": 19,
     "jaato-server/jaato_server/shared/plugins/service_connector/validation.py::_validate_schema": 44,
     "jaato-server/jaato_server/shared/plugins/subagent/config.py::_discover_premium_profiles": 26,
-    "jaato-server/jaato_server/shared/plugins/subagent/config.py::_merge_profiles": 40,
+    "jaato-server/jaato_server/shared/plugins/subagent/config.py::_merge_profiles": 37,
     "jaato-server/jaato_server/shared/plugins/subagent/config.py::_scan_profiles_dir": 33,
     "jaato-server/jaato_server/shared/plugins/subagent/config.py::resolve_agent": 16,
     "jaato-server/jaato_server/shared/plugins/subagent/config.py::validate_profile": 49,

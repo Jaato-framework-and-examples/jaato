@@ -37,7 +37,7 @@ export interface SessionSummary {
   awaiting?: string;
   /** When that prompt was raised, ISO-8601 UTC.  Absent means NOT MEASURED, never "just now". */
   awaitingSince?: string;
-  /** The profile the session was created from (protocol 1.26), "" when none or not reported. */
+  /** The profile the session was created from (protocol 1.27), "" when none or not reported. */
   profile: string;
   /** Last activity, ISO-8601; "" when the daemon did not send it. */
   lastActivity: string;
