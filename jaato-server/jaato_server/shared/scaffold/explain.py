@@ -2499,6 +2499,9 @@ def sets(workspace: str) -> Rendered:
     if not data:
         return ({}, f"no profile-sets (subdirs) under {pdir}")
     lines = ["profile-sets (select with JAATO_PROFILE_SET=<name>):"]
+    lines.append("  name each set for what it binds below (provider/model), never for "
+                 "the cascade or client that selects between them — every sibling set "
+                 "is selected by that same cascade/client, so its name is not a set name")
     for sname, d in data.items():
         binds = ", ".join(f"{b['provider']}/{b['model']}" for b in d["bindings"]) \
             or "(no provider/model bound)"
