@@ -704,10 +704,10 @@ class EventType(str, Enum):
     WORKSPACE_SELECT_REQUEST = "workspace.select"  # Client -> Server
     WORKSPACE_DELETE_REQUEST = "workspace.delete"  # Client -> Server (1.13)
     WORKSPACE_DELETED = "workspace.deleted"  # Server -> Client: the answer to workspace.delete (1.13)
-    WORKSPACE_INSPECT_REQUEST = "workspace.inspect"  # Client -> Server (1.26)
-    WORKSPACE_INSPECTED = "workspace.inspected"  # Server -> Client: the answer to workspace.inspect (1.26)
-    WORKSPACE_CLONE_REQUEST = "workspace.clone"  # Client -> Server (1.26)
-    WORKSPACE_CLONE_PROGRESS = "workspace.clone_progress"  # Server -> Client: per-repo clone progress (1.26)
+    WORKSPACE_INSPECT_REQUEST = "workspace.inspect"  # Client -> Server (1.27)
+    WORKSPACE_INSPECTED = "workspace.inspected"  # Server -> Client: the answer to workspace.inspect (1.27)
+    WORKSPACE_CLONE_REQUEST = "workspace.clone"  # Client -> Server (1.27)
+    WORKSPACE_CLONE_PROGRESS = "workspace.clone_progress"  # Server -> Client: per-repo clone progress (1.27)
     CONFIG_STATUS = "config.status"  # Server -> Client (response to workspace.select)
     CONFIG_UPDATE_REQUEST = "config.update"  # Client -> Server
     CONFIG_UPDATED = "config.updated"  # Server -> Client
@@ -2475,7 +2475,7 @@ class WorkspaceInfo(BaseModel):
     # The authenticated user who created it; None = unowned (visible to all).
     # A user sees their own and the unowned workspaces, never another user's.
     owner: Optional[str] = None
-    # The git checkouts in the workspace (1.26), DERIVED from disk on every
+    # The git checkouts in the workspace (1.27), DERIVED from disk on every
     # listing, never declared: the workspace root itself (``path == "."``)
     # and each immediate child directory holding ``.git``.  Each entry is
     # ``{"forge": "github"|"gitlab"|<host>|"", "repo": "owner/name"|"",
@@ -2511,7 +2511,7 @@ class WorkspaceDeletedEvent(Event):
 
 
 class WorkspaceInspectEvent(Event):
-    """Answer to ``workspace.inspect`` (protocol 1.26).
+    """Answer to ``workspace.inspect`` (protocol 1.27).
 
     One event whatever happened.  ``ok=False`` with ``error`` when the name
     left the root, names no workspace, or belongs to another user -- the
@@ -2539,7 +2539,7 @@ class WorkspaceInspectEvent(Event):
 
 
 class WorkspaceCloneProgressEvent(Event):
-    """One step of a ``workspace.clone`` (protocol 1.26).
+    """One step of a ``workspace.clone`` (protocol 1.27).
 
     Every requested repo is first announced ``queued``; they are then cloned
     one at a time through ``cloning`` (with ``percent`` from git's own
@@ -3849,14 +3849,14 @@ class WorkspaceDeleteRequest(Event):
     """
     type: EventType = Field(default=EventType.WORKSPACE_DELETE_REQUEST)
     name: str = ""  # Workspace name (relative path from root)
-    # 1.26: delete the workspace's LOADED sessions (stopping them) first,
+    # 1.27: delete the workspace's LOADED sessions (stopping them) first,
     # instead of refusing because they are loaded.  Ownership and another
     # client's selection still refuse.
     stop_sessions: bool = False
 
 
 class WorkspaceInspectRequest(Event):
-    """Ask for a workspace's details (protocol 1.26, WS only).
+    """Ask for a workspace's details (protocol 1.27, WS only).
 
     Answered by ONE :class:`WorkspaceInspectEvent` echoing ``request_id``.
     """
@@ -3866,7 +3866,7 @@ class WorkspaceInspectRequest(Event):
 
 
 class WorkspaceCloneRequest(Event):
-    """Clone repositories into a workspace (protocol 1.26, WS only).
+    """Clone repositories into a workspace (protocol 1.27, WS only).
 
     ``repos`` entries are ``{"repo": "owner/name", "branch": "main",
     "forge": "github"}``; each lands in ``<workspace>/<name>``.  Only the
@@ -3887,7 +3887,7 @@ class ConfigUpdateRequest(Event):
     provider: str = ""  # Provider name (anthropic, google, github, etc.)
     model: Optional[str] = None  # Model name (optional, uses provider default)
     api_key: Optional[str] = None  # API key (optional, for non-OAuth providers)
-    # 1.26: write ONLY the provider's API-key variable (``api_key`` required);
+    # 1.27: write ONLY the provider's API-key variable (``api_key`` required);
     # the .env's JAATO_PROVIDER / MODEL_NAME are left alone and no server is
     # bootstrapped.  The session picker's key choice, applied before
     # ``session.new``.  Answered by ``config.updated`` carrying the binding the

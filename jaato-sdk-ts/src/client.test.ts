@@ -591,7 +591,7 @@ describe("JaatoClient session management", () => {
   });
 
   test("createSession refuses a model override against a pre-1.27 daemon", async () => {
-    await assert.rejects(client.createSession({ model: "gpt-5.1" }), /1\.26/);
+    await assert.rejects(client.createSession({ model: "gpt-5.1" }), /1\.27/);
     assert.equal(getSent().length, 0);
   });
 

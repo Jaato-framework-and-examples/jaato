@@ -24642,7 +24642,7 @@ export interface WorkspaceDeletedEvent {
   error?: Error12;
 }
 /**
- * Ask for a workspace's details (protocol 1.26, WS only).
+ * Ask for a workspace's details (protocol 1.27, WS only).
  *
  * Answered by ONE :class:`WorkspaceInspectEvent` echoing ``request_id``.
  */
@@ -24654,7 +24654,7 @@ export interface WorkspaceInspectRequest {
   request_id?: RequestId32;
 }
 /**
- * Answer to ``workspace.inspect`` (protocol 1.26).
+ * Answer to ``workspace.inspect`` (protocol 1.27).
  *
  * One event whatever happened.  ``ok=False`` with ``error`` when the name
  * left the root, names no workspace, or belongs to another user -- the
@@ -24687,7 +24687,7 @@ export interface Sessions2 {
   [k: string]: number;
 }
 /**
- * Clone repositories into a workspace (protocol 1.26, WS only).
+ * Clone repositories into a workspace (protocol 1.27, WS only).
  *
  * ``repos`` entries are ``{"repo": "owner/name", "branch": "main",
  * "forge": "github"}``; each lands in ``<workspace>/<name>``.  Only the
@@ -24705,7 +24705,7 @@ export interface WorkspaceCloneRequest {
   repos?: Repos1;
 }
 /**
- * One step of a ``workspace.clone`` (protocol 1.26).
+ * One step of a ``workspace.clone`` (protocol 1.27).
  *
  * Every requested repo is first announced ``queued``; they are then cloned
  * one at a time through ``cloning`` (with ``percent`` from git's own
