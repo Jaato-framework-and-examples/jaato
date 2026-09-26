@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional
 
 from jaato_sdk.events import Event
 from jaato_server.server.event_sink import EventSink, client_peer
-from jaato_server.server.session_manager import SessionManager
+from jaato_server.server.session_manager import SessionManager, session_picker_fields
 from jaato_server.server.session_logging import set_logging_context, clear_logging_context
 from jaato_server.shared.path_utils import describe_relative_path
 from jaato_server.shared.session_id import is_safe_session_id
@@ -226,6 +226,18 @@ def _integration_refresh_fields(result: Any) -> Dict[str, Any]:
         "text": "\n".join(str(line) for line in lines),
     }
 
+
+
+#: ``session.new`` argv flags that take exactly one value, mapped to the
+#: :meth:`SessionManager.create_session` keyword each one feeds.
+_SESSION_NEW_VALUE_FLAGS: Dict[str, str] = {
+    "--profile": "profile_name",
+    "--agent": "agent_name",
+    "--sibling-name": "sibling_name",
+    "--cascade-driver-id": "cascade_driver_id",
+    "--model": "model_override",
+    "--provider": "provider_override",
+}
 
 class CommandRouter:
     """Transport-agnostic command dispatcher for the Jaato daemon.
@@ -1030,6 +1042,12 @@ class CommandRouter:
                                         constants still reach the model.
                                         The usual choice for fitting a
                                         session into a small context window.
+            --model <name>              Override the model the resolved
+                                        profile (or workspace .env) binds
+                                        (protocol 1.26).  Applied to a COPY
+                                        of the profile.
+            --provider <name>           Override the provider too; only
+                                        with --model.
             key=value                   Agent parameters (substituted into the
                                         agent's ``{{param}}`` placeholders)
 
@@ -1051,19 +1069,21 @@ class CommandRouter:
         # correlation id (#882).
         request_id = (payload or {}).get("request_id")
         name = None
-        profile_name = None
-        agent_name = None
         system_instruction_override: Optional[str] = None
         suppress_base_instructions: bool = False
         agent_params: Dict[str, str] = {}
-        cascade_driver_id: Optional[str] = None
-        sibling_name: Optional[str] = None
+        # Flags that take one value, collected into ``opts`` by table
+        # rather than one ``elif`` each (the parse loop is on the
+        # complexity ratchet).  ``--sibling-name`` is the cascade-scoped
+        # ADDRESS for sibling messaging (design §4), validated server-side;
+        # ``--cascade-driver-id`` is the opaque cascade tenant id
+        # (docs/design/runner-cascade-sharing.md); ``--model`` /
+        # ``--provider`` (protocol 1.26) override the resolved binding.
+        opts: Dict[str, Optional[str]] = {}
         args_iter = iter(args)
         for arg in args_iter:
-            if arg == "--profile":
-                profile_name = next(args_iter, None)
-            elif arg == "--agent":
-                agent_name = next(args_iter, None)
+            if arg in _SESSION_NEW_VALUE_FLAGS:
+                opts[_SESSION_NEW_VALUE_FLAGS[arg]] = next(args_iter, None)
             elif arg == "--instructions":
                 from jaato_sdk.events import ErrorEvent
                 raw = next(args_iter, None)
@@ -1082,20 +1102,6 @@ class CommandRouter:
                     return  # error already emitted
             elif arg == "--no-instructions":
                 suppress_base_instructions = True
-            elif arg == "--sibling-name":
-                # Cascade-scoped ADDRESS for sibling messaging (design §4).
-                # Validated server-side for shape and for uniqueness within
-                # the cascade; a bad or taken name fails the create rather
-                # than silently producing an unaddressable session.
-                sibling_name = next(args_iter, None)
-            elif arg == "--cascade-driver-id":
-                # Phase 2 cascade-sharing (server 0.6.144+): opaque
-                # tenant ID identifying the cascade this session
-                # belongs to.  Subsequent sessions of the same cascade
-                # can reuse this session's pool slot (warm plugin
-                # state + warm LSP server connections) — see
-                # docs/design/runner-cascade-sharing.md.
-                cascade_driver_id = next(args_iter, None)
             elif "=" in arg:
                 key, _, value = arg.partition("=")
                 agent_params[key] = value
@@ -1111,15 +1117,14 @@ class CommandRouter:
         created_by = self._event_sink.get_client_user(client_id)
         new_session_id = self._session_manager.create_session(
             client_id, name, workspace_path=workspace_path,
-            profile_name=profile_name,
-            agent_name=agent_name,
             agent_params=agent_params if agent_params else None,
             created_by=created_by,
             system_instruction_override=system_instruction_override,
             suppress_base_instructions=suppress_base_instructions,
             inline_profile_data=inline_profile_data,
-            cascade_driver_id=cascade_driver_id,
-            sibling_name=sibling_name,
+            # profile_name, agent_name, cascade_driver_id, sibling_name,
+            # model_override, provider_override -- whichever were given.
+            **opts,
             # Correlation id from the generic payload escape hatch.  Echoed on
             # whichever event answers this create, so the caller can tell its
             # own answer from a concurrent one.
@@ -1626,6 +1631,9 @@ class CommandRouter:
             # (additive, no bump): a cold session with a pending message is
             # the one the watchdog is about to revive.
             "inbox_pending": s.inbox_pending,
+            # Session picker (protocol 1.26): profile, activity and whether
+            # the session is working, from the one shared definition.
+            **session_picker_fields(s),
         } for s in sessions]
 
         self._event_sink.send_event(client_id, SessionListEvent(sessions=session_data))

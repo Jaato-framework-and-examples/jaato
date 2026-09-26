@@ -6,7 +6,7 @@ async function openSession(page: Page) {
   await page.goto("/");
   await page.getByPlaceholder("ws://host:8080").fill(WS);
   await page.getByRole("button", { name: "Connect" }).click();
-  await page.getByRole("button", { name: /default/ }).click();
+  await page.getByRole("button", { name: /Start session/ }).click();
   await expect(page.getByText("Connected to the mock daemon")).toBeVisible();
 }
 
@@ -489,8 +489,8 @@ test("a launcher config.json pre-fills the form and connects on its own", async 
     route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ daemon: WS, autoConnect: true }) }),
   );
   await page.goto("/");
-  await expect(page.getByRole("button", { name: /default/ })).toBeVisible();
-  await page.getByRole("button", { name: /default/ }).click();
+  await expect(page.getByRole("button", { name: /Start session/ })).toBeVisible();
+  await page.getByRole("button", { name: /Start session/ }).click();
   await expect(page.getByText("Connected to the mock daemon")).toBeVisible();
 });
 
@@ -505,7 +505,7 @@ test("a ticketUrl config mints a fresh ticket per connection and connects (#1074
     return route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ticket: `t-${minted}` }) });
   });
   await page.goto("/");
-  await expect(page.getByRole("button", { name: /default/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: /Start session/ })).toBeVisible();
   expect(minted).toBe(1);
   // We are past the welcome screen: the credential was the backend's to mint.
   await expect(page.getByText(/Sign in to open your coding environment/)).toHaveCount(0);
@@ -568,10 +568,9 @@ test("workspace mode: an unconfigured workspace opens straight into the session 
   await page.getByPlaceholder("ws://host:8080").fill("ws://127.0.0.1:8098");
   await page.getByRole("button", { name: "Connect" }).click();
   await expect(page.getByText("Workspaces", { exact: true })).toBeVisible();
-  await expect(page.getByText("no provider in .env")).toBeVisible();
   // Not a provider form: the picker, exactly as for a configured one.
   await page.getByRole("button", { name: "Open workspace project-b" }).click();
-  await expect(page.getByText("New session")).toBeVisible();
+  await expect(page.getByRole("region", { name: "New session" })).toBeVisible();
   await page.getByRole("button", { name: "mock-auth login" }).click();
   const card = page.getByRole("group", { name: "Post-auth setup" });
   // A workspace exists here, so the offer can persist to its .env, on by default.
@@ -586,12 +585,16 @@ test("workspace mode: a configured workspace reopens with its sessions and no pr
   await page.getByPlaceholder("ws://host:8080").fill("ws://127.0.0.1:8098");
   await page.getByRole("button", { name: "Connect" }).click();
   await page.getByRole("button", { name: "Open workspace project-a" }).click();
-  const card = page.getByText("Workspace", { exact: false }).first();
-  await expect(card).toBeVisible();
-  await expect(page.getByText("anthropic / claude-sonnet-4").first()).toBeVisible();
-  // No sign-in row, no .env talk: the workspace already binds a provider.
-  await expect(page.getByText("No provider configured yet?")).toHaveCount(0);
-  // Its previous session is offered for resuming, and resuming replays it.
+  // The board: its sessions by state, the blocked one under "Waiting on you".
+  const waiting = page.getByRole("region", { name: "Waiting on you" });
+  await expect(waiting.getByText("20260916_090000")).toBeVisible();
+  await expect(waiting.getByText("waiting 4 min: permission")).toBeVisible();
+  await expect(page.getByRole("region", { name: "Awake" }).getByText("20260914_080000")).toBeVisible();
+  // No sign-in row: the workspace already binds a provider, and the new
+  // session's model is prefilled from it, so Start is ready.
+  await expect(page.getByLabel("Sign in to a provider")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /Start session/ })).toBeEnabled();
+  // Attaching replays the session.
   // Targeted by ROLE: the chip carried `btn btn-steel` styling as a plain
   // span for two releases, so it looked like this control and was not one.
   await page.getByRole("button", { name: "Attach session 20260916_090000" }).click();
@@ -617,38 +620,174 @@ test("workspace mode: the session picker goes back to the workspace list", async
   await expect(page.getByTestId("session-picker")).toBeVisible();
 });
 
-test("workspace mode: a workspace is deleted after confirmation, and a refusal is shown", async ({ page }) => {
+test("workspace mode: the table shows sources, not a model; delete shows its impact and wants the name typed", async ({ page }) => {
   await page.goto("/");
   await page.getByPlaceholder("ws://host:8080").fill("ws://127.0.0.1:8098");
   await page.getByRole("button", { name: "Connect" }).click();
   await expect(page.getByRole("button", { name: "Open workspace project-b" })).toBeVisible();
+  await expect(page.getByRole("columnheader")).toHaveText(["Workspace", "Sources", "Last opened", "Actions"]);
+  const rowA = page.locator("tr[data-workspace=project-a]");
+  await expect(rowA).toContainText("github: acme/claims-service@main");
+  await expect(rowA).toContainText("github: acme/email-templates@develop");
+  await expect(page.locator("tr[data-workspace=project-b]")).toContainText("— empty");
   // The daemon says who owns what it lists.
   await expect(page.getByTitle("Owned by mock:tester")).toBeVisible();
-  // Cancel leaves everything as it was.
-  await page.getByRole("button", { name: "Delete workspace project-b" }).click();
-  await page.getByRole("button", { name: "Cancel delete" }).click();
-  await expect(page.getByRole("button", { name: "Open workspace project-b" })).toBeVisible();
-  // A refusal (loaded sessions) is reported, and the row stays.
+
+  // Delete opens an impact panel under the row; Delete again closes it.
   await page.getByRole("button", { name: "Delete workspace project-a" }).click();
-  await page.getByRole("button", { name: "Confirm delete workspace project-a" }).click();
-  await expect(page.getByRole("status")).toContainText("has 1 loaded session(s)");
-  await expect(page.getByRole("button", { name: "Open workspace project-a" })).toBeVisible();
-  // The confirmed delete removes the row.
+  const panel = page.getByTestId("delete-panel");
+  await expect(panel).toContainText("2 sessions deleted");
+  await expect(panel).toContainText("Open prompts are cancelled. Running work stops.");
+  await expect(panel).toContainText("5 uncommitted files, 1 commit not pushed, lost");
+  await expect(panel).toContainText("412 MB");
+  const del = panel.getByRole("button", { name: "Delete workspace project-a permanently" });
+  await expect(del).toBeDisabled();
+  await panel.getByRole("textbox").fill("project");
+  await expect(del).toBeDisabled();
+  await panel.getByRole("textbox").fill("project-a");
+  await expect(del).toBeEnabled();
+  // Cancel leaves everything as it was.
+  await panel.getByRole("button", { name: "Cancel" }).click();
+  await expect(panel).toHaveCount(0);
+
+  // An empty workspace is one click; the row goes and the list says so.
   await page.getByRole("button", { name: "Delete workspace project-b" }).click();
-  await page.getByRole("button", { name: "Confirm delete workspace project-b" }).click();
-  await expect(page.getByRole("status")).toHaveText("Workspace project-b deleted");
+  await expect(panel).toContainText("Nothing to lose: no sessions, no repositories, no staged files.");
+  await panel.getByRole("button", { name: "Delete workspace project-b permanently" }).click();
+  await expect(page.getByRole("status")).toHaveText("Deleted project-b, its sessions and its files.");
   await expect(page.getByRole("button", { name: "Open workspace project-b" })).toHaveCount(0);
+
+  // With the name typed, loaded sessions are stopped rather than refused.
+  await page.getByRole("button", { name: "Delete workspace project-a" }).click();
+  await panel.getByRole("textbox").fill("project-a");
+  await panel.getByRole("button", { name: "Delete workspace project-a permanently" }).click();
+  await expect(page.getByRole("button", { name: "Open workspace project-a" })).toHaveCount(0);
 });
 
-test("workspace mode: the manual provider form is a disclosure, not a gate", async ({ page }) => {
+test("workspace mode: a new workspace clones its repositories before the session picker opens, and a failed clone can be retried", async ({ page }) => {
   await page.goto("/");
   await page.getByPlaceholder("ws://host:8080").fill("ws://127.0.0.1:8098");
   await page.getByRole("button", { name: "Connect" }).click();
-  await page.getByRole("button", { name: "Configure workspace project-b" }).click();
-  const form = page.getByRole("group", { name: "Manual provider configuration" }).or(page.getByLabel("Manual provider configuration"));
-  await expect(form.getByText("missing: provider, api_key")).toBeVisible();
+  const plate = page.getByTestId("new-workspace");
+  const create = plate.getByRole("button", { name: /Create empty workspace/ });
+  await expect(create).toBeDisabled(); // no name yet
+  await plate.getByLabel("New workspace name").fill("claims refactor");
+  await expect(create).toBeDisabled(); // a space is not a flat name
+  await plate.getByLabel("New workspace name").fill("claims-refactor");
+  await expect(create).toBeEnabled();
+  // No backend here: a public repository is added by typing it.
+  await plate.getByPlaceholder("owner/repo").fill("acme/claims-service");
+  await plate.getByPlaceholder("owner/repo").press("Enter");
+  await plate.getByPlaceholder("owner/repo").fill("acme/fails");
+  await plate.getByRole("button", { name: "+ Add acme/fails" }).click();
+  await expect(plate.getByTestId("picked-repo")).toHaveCount(2);
+  await expect(plate).toContainText("→ claims-refactor/claims-service");
+  await plate.getByLabel("Branch of acme/claims-service").fill("main");
+  await plate.getByLabel("Branch of acme/fails").fill("develop");
+  await plate.getByRole("button", { name: /Create and clone 2 repos/ }).click();
+
+  const progress = page.getByTestId("clone-progress");
+  await expect(progress.locator("[data-testid=clone-row][data-state=done]")).toHaveCount(1);
+  await expect(progress).toContainText("clone failed: authentication rejected for acme/fails");
+  await expect(progress).toContainText("1 of 2 repositories checked out");
+  await expect(progress.getByRole("button", { name: "Cancel and delete workspace" })).toBeVisible();
+  await progress.getByRole("button", { name: "Retry" }).click();
+  await expect(progress).toContainText("2 of 2 repositories checked out");
+  await progress.getByRole("button", { name: /Open session picker/ }).click();
+  await expect(page.getByTestId("session-picker")).toContainText("claims-refactor");
+});
+
+test("new workspace with a GitHub backend: search the listed repositories, pick a branch, and the account is bound before cloning", async ({ page }) => {
+  const order: string[] = [];
+  await page.route("**/config.json", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ daemon: "ws://127.0.0.1:8098", ticketUrl: "/api/ticket", githubUrl: "/api/github", autoConnect: true }) }),
+  );
+  await page.route("**/api/ticket", (route) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ ticket: "t-1" }) }));
+  await page.route("**/api/github/**", (route) => {
+    const url = new URL(route.request().url());
+    const leaf = url.pathname.split("/").pop();
+    order.push(leaf ?? "");
+    const json = (body: unknown) => route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
+    if (leaf === "repos") return json({ account: { id: "a1", login: "d-alonso" }, repos: [
+      { fullName: "acme/claims-service", private: true, defaultBranch: "main" },
+      { fullName: "acme/email-templates", private: true, defaultBranch: "main" },
+      { fullName: "jaato-framework/jaato", private: false, defaultBranch: "main" },
+    ] });
+    if (leaf === "branches") return json({ repo: url.searchParams.get("repo"), branches: ["main", "develop"] });
+    if (leaf === "accounts") return json({ accounts: [{ id: "a1", login: "d-alonso", name: null, noreplyEmail: "", installations: [], isDefault: true, createdAt: "", updatedAt: "" }] });
+    if (leaf === "bindings") return json({ bindings: [] });
+    if (leaf === "bind") return json({ binding: "set", envWritten: true, gitconfigSeeded: true, reloaded: 0 });
+    return route.fulfill({ status: 404, body: "{}" });
+  });
+  await page.goto("/");
+  const plate = page.getByTestId("new-workspace");
+  await expect(plate).toContainText("Find repositories on GitHub @d-alonso");
+  await plate.getByPlaceholder("owner/repo").fill("acme");
+  await expect(plate.getByRole("checkbox")).toHaveCount(2);
+  await plate.getByRole("checkbox", { name: /acme\/email-templates/ }).click();
+  await expect(plate.getByRole("checkbox", { name: /acme\/email-templates/ })).toHaveAttribute("aria-checked", "true");
+  // The branch list arrives from the backend; the default branch is preselected.
+  const branch = plate.getByLabel("Branch of acme/email-templates");
+  await expect(branch.locator("option")).toHaveCount(2);
+  await expect(branch).toHaveValue("main");
+  await branch.selectOption("develop");
+  await plate.getByPlaceholder("owner/repo").fill("zzz");
+  await expect(plate).toContainText("No repositories match.");
+  await plate.getByLabel("New workspace name").fill("claims-refactor");
+  await plate.getByRole("button", { name: /Create and clone 1 repo/ }).click();
+  await expect(page.getByTestId("clone-progress")).toContainText("1 of 1 repository checked out");
+  await expect(page.getByTestId("clone-progress")).toContainText("checked out @develop");
+  // The account was bound (writing GH_TOKEN=app://github) before the clone was asked for.
+  expect(order.indexOf("bind")).toBeGreaterThan(-1);
+});
+
+test("the session picker's New session column: a base profile's model is inherited or overridden for this session only", async ({ page }) => {
+  await page.goto("/");
+  await page.getByPlaceholder("ws://host:8080").fill("ws://127.0.0.1:8098");
+  await page.getByRole("button", { name: "Connect" }).click();
+  await page.getByRole("button", { name: "Open workspace project-b" }).click();
+  const col = page.getByRole("region", { name: "New session" });
+  const start = col.getByRole("button", { name: /Start session/ });
+  // default: a model is required, and project-b's .env binds none.
+  await expect(col.getByTestId("base-profile")).toContainText("model: you select");
+  await expect(start).toBeDisabled();
+  await expect(col).toContainText("Select a model to start");
+  // A profile with no model says so and still requires one.
+  await col.getByRole("button", { name: /more base profiles/ }).click();
+  await col.getByRole("button", { name: "Use base profile analyst" }).click();
+  await expect(col).toContainText("analyst defines none, select one");
+  await expect(start).toBeDisabled();
+  // A profile with a model inherits it; overriding it asks for a model.
+  await col.getByRole("button", { name: /more base profiles/ }).click();
+  await col.getByRole("button", { name: "Use base profile coder" }).click();
+  await expect(col).toContainText("inherited from coder");
+  await expect(start).toBeEnabled();
+  await col.getByRole("button", { name: "Override" }).click();
+  await expect(start).toBeDisabled();
+  await col.getByLabel("Provider", { exact: true }).selectOption("anthropic");
+  await col.getByLabel("Model", { exact: true }).fill("claude-sonnet-4");
+  await expect(col.getByTestId("start-summary")).toHaveText("coder · anthropic / claude-sonnet-4");
+  // Staged files stay in the browser until Start.
+  await col.getByLabel("Stage files").setInputFiles([{ name: "spec.md", mimeType: "text/markdown", buffer: Buffer.from("# spec") }]);
+  await expect(col.getByTestId("staged-file")).toHaveCount(1);
+  await expect(page.getByText("Staged into the workspace: spec.md")).toHaveCount(0);
+  await start.click();
+  await expect(page.getByText("Connected to the mock daemon")).toBeVisible();
+  await expect(page.getByText("Staged into the workspace: spec.md")).toBeVisible();
+  // The override reached session.new: the header names the session's binding.
+  await expect(page.getByText("anthropic / claude-sonnet-4")).toBeVisible();
+});
+
+test("workspace mode: the provider credential form lives under Sources, and is not a gate", async ({ page }) => {
+  await page.goto("/");
+  await page.getByPlaceholder("ws://host:8080").fill("ws://127.0.0.1:8098");
+  await page.getByRole("button", { name: "Connect" }).click();
+  await page.getByRole("button", { name: "Sources of workspace project-b" }).click();
+  const sources = page.getByRole("group", { name: "Sources of project-b" });
+  await sources.getByRole("button", { name: /Provider credentials/ }).click();
+  const form = sources.getByRole("form", { name: "Provider credentials" }).or(sources.getByLabel("Provider credentials"));
   await expect(form.locator("select option")).toHaveCount(4); // — + the daemon's three
-  await form.getByRole("button", { name: "Open session →" }).click();
+  await page.getByRole("button", { name: "Open workspace project-b" }).click();
   // The picker, headed by the workspace; unconfigured, so the sign-in row stays.
   await expect(page.getByTestId("session-picker")).toContainText("project-b");
   await expect(page.getByLabel("Sign in to a provider")).toBeVisible();
@@ -657,6 +796,12 @@ test("workspace mode: the manual provider form is a disclosure, not a gate", asy
 // ── Keys the sign-in backend remembers (the configure form's combobox) ──
 
 const WS_WORKSPACES = "ws://127.0.0.1:8098";
+
+/** Open project-b's Sources plate and its provider credential form. */
+async function openCredentials(page: import("@playwright/test").Page) {
+  await page.getByRole("button", { name: "Sources of workspace project-b" }).click();
+  await page.getByRole("button", { name: /Provider credentials/ }).click();
+}
 
 /** A backend with a key store: config.json names credentialsUrl and the routes answer for one stored key. */
 async function backendWithKeyStore(page: import("@playwright/test").Page, entries: Array<{ id: string; provider: string; label: string; hint: string }>) {
@@ -687,8 +832,8 @@ async function backendWithKeyStore(page: import("@playwright/test").Page, entrie
 test("a stored key is offered for the provider, preselected, and revealed only when applied", async ({ page }) => {
   const calls = await backendWithKeyStore(page, [{ id: "k1", provider: "anthropic", label: "work", hint: "mnop" }]);
   await page.goto("/");
-  await page.getByRole("button", { name: "Configure workspace project-b" }).click();
-  const form = page.getByLabel("Manual provider configuration");
+  await openCredentials(page);
+  const form = page.getByLabel("Provider credentials");
   await form.getByLabel("Provider").selectOption("anthropic");
   const picker = form.getByLabel("API key");
   // The newest stored key for this provider is the default; the secret never came down.
@@ -702,16 +847,15 @@ test("a stored key is offered for the provider, preselected, and revealed only w
   await form.getByLabel("Provider").selectOption("anthropic");
   await expect(picker).toHaveValue("k1");
   // Applying reveals it once and forwards it to the daemon as the api_key.
-  await form.getByRole("button", { name: "Save configuration" }).click();
-  await expect(page.getByText("configured", { exact: true })).toBeVisible();
-  expect(calls.filter((c) => c.url === "/api/credentials/k1/reveal" && c.method === "POST")).toHaveLength(1);
+  await form.getByRole("button", { name: "Save to .env" }).click();
+  await expect.poll(() => calls.filter((c) => c.url === "/api/credentials/k1/reveal" && c.method === "POST").length).toBe(1);
 });
 
 test("a new key is stored under a label before it is applied, and a stored one can be forgotten", async ({ page }) => {
   const calls = await backendWithKeyStore(page, [{ id: "k1", provider: "anthropic", label: "work", hint: "mnop" }]);
   await page.goto("/");
-  await page.getByRole("button", { name: "Configure workspace project-b" }).click();
-  const form = page.getByLabel("Manual provider configuration");
+  await openCredentials(page);
+  const form = page.getByLabel("Provider credentials");
   await form.getByLabel("Provider").selectOption("anthropic");
   await expect(form.getByLabel("API key")).toHaveValue("k1");
   await form.getByRole("button", { name: "Forget stored key work" }).click();
@@ -720,8 +864,8 @@ test("a new key is stored under a label before it is applied, and a stored one c
   await form.getByLabel("API key").selectOption("__new__");
   await form.getByLabel("New API key").fill("sk-typed-000000wxyz");
   await form.getByLabel("Key label").fill("personal");
-  await form.getByRole("button", { name: "Save configuration" }).click();
-  await expect(page.getByText("configured", { exact: true })).toBeVisible();
+  await form.getByRole("button", { name: "Save to .env" }).click();
+  await expect.poll(() => calls.some((c) => c.method === "POST" && c.url === "/api/credentials")).toBe(true);
   const stored = calls.find((c) => c.method === "POST" && c.url === "/api/credentials");
   expect(stored?.body).toEqual({ provider: "anthropic", secret: "sk-typed-000000wxyz", label: "personal" });
   // The typed key is now a stored one: the list carries it and it is the selection.
@@ -733,8 +877,8 @@ test("without a key store the configure form keeps its plain key field", async (
   await page.goto("/");
   await page.getByPlaceholder("ws://host:8080").fill(WS_WORKSPACES);
   await page.getByRole("button", { name: "Connect" }).click();
-  await page.getByRole("button", { name: "Configure workspace project-b" }).click();
-  const form = page.getByLabel("Manual provider configuration");
+  await openCredentials(page);
+  const form = page.getByLabel("Provider credentials");
   await expect(form.getByLabel("API key")).toHaveAttribute("type", "password");
   await expect(form.getByTestId("credential-picker")).toHaveCount(0);
 });
@@ -748,7 +892,7 @@ test("the status bar's Exit asks first; Detach leaves like the exit command, and
     route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ daemon: WS, autoConnect: true }) }),
   );
   await page.goto("/");
-  await page.getByRole("button", { name: /default/ }).click();
+  await page.getByRole("button", { name: /Start session/ }).click();
   await expect(page.getByText("Connected to the mock daemon")).toBeVisible();
   await page.getByRole("button", { name: EXIT }).click();
   // The TUI's question, with its idle option set, and the composer captures the answer.
@@ -762,7 +906,7 @@ test("the status bar's Exit asks first; Detach leaves like the exit command, and
   await expect(open).toBeVisible();
   await page.waitForTimeout(700);
   await expect(open).toBeVisible();
-  await expect(page.getByRole("button", { name: /default/ })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /Start session/ })).toHaveCount(0);
   // The click reconnects (the mark was spent); a fresh load would have connected on its own again.
   await open.click();
   await expect(open).toHaveCount(0);
@@ -808,7 +952,9 @@ test("End session deletes the session and, in workspace mode, lands on the works
   await page.getByPlaceholder("ws://host:8080").fill(WS_WORKSPACES);
   await page.getByRole("button", { name: "Connect" }).click();
   await page.getByRole("button", { name: "Open workspace project-b" }).click();
-  await page.getByRole("button", { name: /default/ }).click();
+  await page.getByLabel("Provider", { exact: true }).selectOption("anthropic");
+  await page.getByLabel("Model", { exact: true }).fill("claude-sonnet-4");
+  await page.getByRole("button", { name: /Start session/ }).click();
   await expect(page.getByText("Connected to the mock daemon")).toBeVisible();
   await page.getByRole("button", { name: EXIT }).click();
   await page.getByRole("group", { name: "Exit options" }).getByRole("button", { name: /End session/ }).click();
@@ -843,7 +989,7 @@ test("a new session starts on an empty pane", async ({ page }) => {
   // connection that held it is gone, so this client holds no session.
   await expect(page.getByTestId("session-picker")).toBeVisible();
   await expect(page.getByText("The command failed; see the tool block.")).toHaveCount(0);
-  await page.getByRole("button", { name: /default/ }).click();
+  await page.getByRole("button", { name: /Start session/ }).click();
   await expect(page.getByText("Connected to the mock daemon")).toBeVisible();
   await expect(page.getByRole("button", { name: /run_command/ })).toHaveCount(0);
 });
@@ -853,7 +999,7 @@ test("a reconnect re-selects the workspace, so a file attached after it still la
   await page.getByPlaceholder("ws://host:8080").fill(WS_WORKSPACES);
   await page.getByRole("button", { name: "Connect" }).click();
   await page.getByRole("button", { name: "Open workspace project-a" }).click();
-  await page.getByRole("button", { name: /default/ }).click();
+  await page.getByRole("button", { name: /Start session/ }).click();
   await expect(page.getByText("Connected to the mock daemon")).toBeVisible();
   // The socket drops.  The daemon forgets this connection's workspace and
   // detaches its session; the SDK reconnects as a new client, and the store
@@ -938,7 +1084,7 @@ test("the Instructions panel says when GC last ran, what it freed, and the polic
   await other.goto("/");
   await other.getByPlaceholder("ws://host:8080").fill(WS);
   await other.getByRole("button", { name: "Connect" }).click();
-  await other.getByRole("button", { name: "Go to the prompt without a session" }).click();
+  await other.getByRole("button", { name: /Open workspace with no session/ }).click();
   await composer(other).fill(`session attach ${sessionId}`);
   await composer(other).press("Enter");
   const otherToggle = other.getByRole("button", { name: /Open Budget/ });
@@ -1033,7 +1179,7 @@ test("dragging the boundary between two rail sections moves height between them,
   await page.reload();
   await page.getByPlaceholder("ws://host:8080").fill("ws://127.0.0.1:8097");
   await page.getByRole("button", { name: "Connect" }).click();
-  await page.getByRole("button", { name: /default/ }).click();
+  await page.getByRole("button", { name: /Start session/ }).click();
   await expect(page.getByText("Connected to the mock daemon")).toBeVisible();
   // Pin state is per session-screen mount, not remembered across a reload
   // -- only the SPLIT ratio (``ui.railSplits``) is, which is what this
@@ -1096,16 +1242,16 @@ test("a file over 1 MiB stages instead of hanging", async ({ page }) => {
   await expect(page.getByText("Staged into the workspace: report.pdf")).toBeVisible();
 });
 
-test("files attached on the session picker are in the workspace when the session opens", async ({ page }) => {
+test("files staged on the session picker are in the workspace when the session opens", async ({ page }) => {
   await page.goto("/");
   await page.getByPlaceholder("ws://host:8080").fill(WS);
   await page.getByRole("button", { name: "Connect" }).click();
-  const strip = page.getByRole("group", { name: "Attached files" });
-  await expect(strip).toBeVisible();
-  await page.getByLabel("Attach files").setInputFiles([{ name: "brief.txt", mimeType: "text/plain", buffer: Buffer.from("do the thing") }]);
-  // No workspace yet on this daemon: the file waits for the session.
-  await expect(strip.locator("li[data-status=queued]")).toHaveCount(1);
-  await page.getByRole("button", { name: /default/ }).click();
+  const staged = page.getByTestId("staged-files");
+  await expect(staged).toBeVisible();
+  await page.getByLabel("Stage files").setInputFiles([{ name: "brief.txt", mimeType: "text/plain", buffer: Buffer.from("do the thing") }]);
+  // Client-side until Start: listed, nothing sent.
+  await expect(staged.getByTestId("staged-file")).toHaveCount(1);
+  await page.getByRole("button", { name: /Start session/ }).click();
   await expect(page.getByText("Connected to the mock daemon")).toBeVisible();
   await expect(page.getByText("Staged into the workspace: brief.txt")).toBeVisible();
   await page.getByRole("button", { name: "Open Files" }).click();
@@ -1431,7 +1577,9 @@ test("a session that fails to bootstrap turns the status bar red (#1304 §6)", a
   await page.getByRole("button", { name: "Connect" }).click();
   // A status bar exists even with no session yet -- ``fault`` is what
   // turns it red, not ``sessionId``.
-  await page.getByRole("button", { name: /bootstrap-fail/ }).click();
+  await page.getByRole("button", { name: /more base profiles/ }).click();
+  await page.getByRole("button", { name: "Use base profile bootstrap-fail" }).click();
+  await page.getByRole("button", { name: /Start session/ }).click();
   const dot = page.locator(".bg-error").first();
   await expect(page.getByText("no session")).toBeVisible();
   await expect(dot).toBeVisible();

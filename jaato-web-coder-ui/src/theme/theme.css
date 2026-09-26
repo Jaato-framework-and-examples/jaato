@@ -124,6 +124,8 @@ button, input, select, textarea { border-radius: 0; font-family: inherit; }
 .surface-2 { background: var(--c-tint); }
 .hairline { border-color: var(--c-divider); }
 .tint { background: var(--c-tint); }
+/* The pale error ground a destructive confirmation sits on. */
+.tint-error { background: color-mix(in srgb, var(--c-error) 7%, var(--c-surface)); }
 
 /* ── Chrome type ─────────────────────────────────────────────────────
    Condensed, tracked, uppercase: what the INTERFACE says.  Monospace is
@@ -167,6 +169,17 @@ button, input, select, textarea { border-radius: 0; font-family: inherit; }
   .btn-danger { color: var(--c-error); }
   .btn-sm { font-size: 12px; padding: 2px 8px; font-weight: 500; }
   .btn-md { font-size: 13px; padding: 5px 12px; }
+  /* A destructive confirm: solid error fill (the delete panel, a discard). */
+  .btn-danger-solid { background: var(--c-error); color: var(--c-surface); border-color: var(--c-error); }
+  .btn-danger-solid:hover { filter: brightness(0.92); background: var(--c-error); }
+  /* A primary that is not yet possible reads as grey, not as a faded steel:
+     the Start button of the session picker says "not yet", not "broken". */
+  .btn-primary:disabled, .btn-danger-solid:disabled {
+    opacity: 1; filter: none;
+    background: color-mix(in srgb, var(--c-text) 10%, var(--c-bg));
+    color: color-mix(in srgb, var(--c-text) 55%, var(--c-bg));
+    border-color: transparent;
+  }
   .btn kbd, .btn .key { font-family: var(--font-mono); font-size: 11px; letter-spacing: 0; text-transform: none; opacity: 0.7; border: 0; padding: 0; }
   .btn-primary kbd, .btn-primary .key { color: inherit; }
 }
@@ -184,6 +197,9 @@ button, input, select, textarea { border-radius: 0; font-family: inherit; }
 .input:hover { border-color: color-mix(in srgb, var(--c-text) 45%, transparent); }
 .input:focus-visible, .input:focus { border-color: var(--c-steel); }
 .input-mono { font-family: var(--font-mono); font-size: 13px; }
+/* A field whose value is not yet acceptable (a required pick, a typed name that
+   does not match).  Beats the focus colour on purpose: the warning is the news. */
+.input.input-warn, .input.input-warn:hover, .input.input-warn:focus { border-color: var(--c-warning); }
 .field-label { display: block; font-size: 12px; margin-bottom: 4px; color: var(--c-text-muted); }
 :focus-visible { outline: 2px solid var(--c-steel); outline-offset: 2px; }
 ::selection { background: color-mix(in srgb, var(--c-steel) 30%, transparent); }

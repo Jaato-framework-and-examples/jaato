@@ -488,7 +488,21 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 # on an older daemon degrades to the 1.7 rule: the SDK refuses below
 # ``MIN_DIAGNOSTICS_PROTOCOL`` rather than waiting out a request an old
 # daemon answers "Unknown request type" to.
-PROTOCOL_VERSION = "1.25"
+# 1.26 -- the workspace and session pickers.  ``workspace.inspect`` +
+# ``WorkspaceInspectEvent`` (path, size, session counts by state, and per
+# git checkout its uncommitted / unpushed counts), ``workspace.clone`` +
+# ``WorkspaceCloneProgressEvent`` (sequential ``git clone`` of GitHub repos
+# into a workspace, streamed per repo), and ``WorkspaceDeleteRequest.
+# stop_sessions`` (delete the workspace's LOADED sessions first instead of
+# refusing).  ``WorkspaceInfo.sources`` (the git checkouts in a workspace)
+# and the session rows' ``profile`` / ``last_activity`` / ``is_processing``
+# / ``created_at`` keys are additive.  ``session.new`` accepts ``--model``
+# / ``--provider``, which an older daemon would read as the session NAME --
+# so a client gates the override on 1.26, and the two new verbs follow the
+# 1.7 rule (an older daemon answers "Unknown message type", never the
+# result).  ``stop_sessions`` on an older daemon is ignored and the delete
+# is REFUSED for the loaded sessions -- the safe direction.
+PROTOCOL_VERSION = "1.26"
 
 
 # =============================================================================
@@ -677,6 +691,10 @@ class EventType(str, Enum):
     WORKSPACE_SELECT_REQUEST = "workspace.select"  # Client -> Server
     WORKSPACE_DELETE_REQUEST = "workspace.delete"  # Client -> Server (1.13)
     WORKSPACE_DELETED = "workspace.deleted"  # Server -> Client: the answer to workspace.delete (1.13)
+    WORKSPACE_INSPECT_REQUEST = "workspace.inspect"  # Client -> Server (1.26)
+    WORKSPACE_INSPECTED = "workspace.inspected"  # Server -> Client: the answer to workspace.inspect (1.26)
+    WORKSPACE_CLONE_REQUEST = "workspace.clone"  # Client -> Server (1.26)
+    WORKSPACE_CLONE_PROGRESS = "workspace.clone_progress"  # Server -> Client: per-repo clone progress (1.26)
     CONFIG_STATUS = "config.status"  # Server -> Client (response to workspace.select)
     CONFIG_UPDATE_REQUEST = "config.update"  # Client -> Server
     CONFIG_UPDATED = "config.updated"  # Server -> Client
@@ -2427,6 +2445,14 @@ class WorkspaceInfo(BaseModel):
     # The authenticated user who created it; None = unowned (visible to all).
     # A user sees their own and the unowned workspaces, never another user's.
     owner: Optional[str] = None
+    # The git checkouts in the workspace (1.26), DERIVED from disk on every
+    # listing, never declared: the workspace root itself (``path == "."``)
+    # and each immediate child directory holding ``.git``.  Each entry is
+    # ``{"forge": "github"|"gitlab"|<host>|"", "repo": "owner/name"|"",
+    # "branch": <branch, or short sha when detached>, "path": "."|<child>}``.
+    # Read from ``.git/HEAD`` and ``.git/config`` as files (no git process);
+    # credentials in a remote URL are never echoed.
+    sources: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class WorkspaceListEvent(Event):
@@ -2452,6 +2478,57 @@ class WorkspaceDeletedEvent(Event):
     name: str = ""
     ok: bool = True
     error: str = ""
+
+
+class WorkspaceInspectEvent(Event):
+    """Answer to ``workspace.inspect`` (protocol 1.26).
+
+    One event whatever happened.  ``ok=False`` with ``error`` when the name
+    left the root, names no workspace, or belongs to another user -- the
+    same refusals ``workspace.select`` / ``workspace.delete`` give.
+
+    ``sessions`` counts the sessions in this workspace by state: ``total``,
+    ``sleeping`` (persisted, not loaded), ``awake`` (loaded, not waiting on
+    a person) and ``waiting`` (loaded and blocked on a permission or
+    clarification prompt).  ``repos`` is :attr:`WorkspaceInfo.sources` plus,
+    per checkout, ``uncommitted`` (lines of ``git status --porcelain``),
+    ``unpushed`` (commits ahead of the upstream; ``None`` when there is no
+    upstream) and ``error`` (non-empty when git could not answer; the two
+    counts are then ``None``).  ``size_bytes`` is the recursive size of the
+    tree, ``None`` when the walk was too large or too slow to finish.
+    """
+    type: EventType = Field(default=EventType.WORKSPACE_INSPECTED)
+    name: str = ""
+    request_id: str = ""
+    ok: bool = True
+    error: str = ""
+    path: str = ""
+    size_bytes: Optional[int] = None
+    sessions: Dict[str, int] = Field(default_factory=dict)
+    repos: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class WorkspaceCloneProgressEvent(Event):
+    """One step of a ``workspace.clone`` (protocol 1.26).
+
+    Every requested repo is first announced ``queued``; they are then cloned
+    one at a time through ``cloning`` (with ``percent`` from git's own
+    progress) and ``checkout`` to ``done`` or ``failed`` (with ``error``).
+    ``done`` / ``total`` count finished repos of this request, so the last
+    event of a request has ``done == total``.  A request refused as a whole
+    (workspace not visible, left the root) is ONE ``failed`` event with
+    ``repo == ""``.  A retry is a new request naming the one repo.
+    """
+    type: EventType = Field(default=EventType.WORKSPACE_CLONE_PROGRESS)
+    name: str = ""
+    request_id: str = ""
+    repo: str = ""
+    branch: str = ""
+    state: str = "queued"  # queued | cloning | checkout | done | failed
+    percent: int = 0
+    error: str = ""
+    done: int = 0
+    total: int = 0
 
 
 class WorkspaceCreatedEvent(Event):
@@ -3742,6 +3819,36 @@ class WorkspaceDeleteRequest(Event):
     """
     type: EventType = Field(default=EventType.WORKSPACE_DELETE_REQUEST)
     name: str = ""  # Workspace name (relative path from root)
+    # 1.26: delete the workspace's LOADED sessions (stopping them) first,
+    # instead of refusing because they are loaded.  Ownership and another
+    # client's selection still refuse.
+    stop_sessions: bool = False
+
+
+class WorkspaceInspectRequest(Event):
+    """Ask for a workspace's details (protocol 1.26, WS only).
+
+    Answered by ONE :class:`WorkspaceInspectEvent` echoing ``request_id``.
+    """
+    type: EventType = Field(default=EventType.WORKSPACE_INSPECT_REQUEST)
+    name: str = ""  # Workspace name (relative path from root)
+    request_id: str = ""
+
+
+class WorkspaceCloneRequest(Event):
+    """Clone repositories into a workspace (protocol 1.26, WS only).
+
+    ``repos`` entries are ``{"repo": "owner/name", "branch": "main",
+    "forge": "github"}``; each lands in ``<workspace>/<name>``.  Only the
+    ``github`` forge is supported.  Credentials are the workspace's own
+    ``GH_TOKEN``, resolved as a session in that workspace would resolve it,
+    and never sent on argv or in a URL.  Answered by a stream of
+    :class:`WorkspaceCloneProgressEvent` echoing ``request_id``.
+    """
+    type: EventType = Field(default=EventType.WORKSPACE_CLONE_REQUEST)
+    name: str = ""  # Workspace name (relative path from root)
+    request_id: str = ""
+    repos: List[Dict[str, str]] = Field(default_factory=list)
 
 
 class ConfigUpdateRequest(Event):
@@ -4711,6 +4818,10 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.WORKSPACE_CREATED.value: WorkspaceCreatedEvent,
     EventType.WORKSPACE_DELETE_REQUEST.value: WorkspaceDeleteRequest,
     EventType.WORKSPACE_DELETED.value: WorkspaceDeletedEvent,
+    EventType.WORKSPACE_INSPECT_REQUEST.value: WorkspaceInspectRequest,
+    EventType.WORKSPACE_INSPECTED.value: WorkspaceInspectEvent,
+    EventType.WORKSPACE_CLONE_REQUEST.value: WorkspaceCloneRequest,
+    EventType.WORKSPACE_CLONE_PROGRESS.value: WorkspaceCloneProgressEvent,
     EventType.WORKSPACE_SELECT_REQUEST.value: WorkspaceSelectRequest,
     EventType.CONFIG_STATUS.value: ConfigStatusEvent,
     EventType.CONFIG_UPDATE_REQUEST.value: ConfigUpdateRequest,

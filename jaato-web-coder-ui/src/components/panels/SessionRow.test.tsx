@@ -26,7 +26,7 @@ const ID = "20260919_120000";
 const sess: SessionSummary = {
   id: ID, name: "", description: "fix the budget panel", provider: "anthropic",
   model: "claude-sonnet-4", isLoaded: true, isCurrent: false, clientCount: 0,
-  turnCount: 3, workspacePath: "/ws/one",
+  turnCount: 3, workspacePath: "/ws/one", profile: "", lastActivity: "", isProcessing: false,
 };
 
 beforeEach(() => { useJaato.setState({ notes: {}, noteStatus: {} }); });

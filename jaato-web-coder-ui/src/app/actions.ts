@@ -146,10 +146,19 @@ export async function ensureSessions(): Promise<void> {
  * ``emptySessionState`` (``store/store.ts``), which is what lets the
  * picker stage files into the session it is about to open.
  */
-export async function createSession(profile: string | null): Promise<void> {
+export async function createSession(profile: string | null, model?: { provider: string; model: string }): Promise<void> {
   const st = useJaato.getState();
   st.resetSessionState();
-  await getClient().createSession(profile ? { profile } : {});
+  // ``model`` is the picker's per-session binding (protocol 1.26
+  // ``session.new --model/--provider``): applied to a copy of the base
+  // profile daemon-side, so the profile file is never changed.
+  const opts: { profile?: string; model?: string; provider?: string } = {};
+  if (profile) opts.profile = profile;
+  if (model?.model) {
+    opts.model = model.model;
+    if (model.provider) opts.provider = model.provider;
+  }
+  await getClient().createSession(opts);
 }
 
 /**

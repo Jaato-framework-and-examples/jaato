@@ -38,7 +38,7 @@ import { randomBytes } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, writeFileSync, existsSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, join, sep } from "node:path";
 import type { SecretResolveOutcome } from "@jaato/sdk";
-import { GitHubApiError, GitHubGrantRevoked, type GitHubApi, type GitHubTokenSet } from "./github-api.js";
+import { GitHubApiError, GitHubGrantRevoked, type GitHubApi, type GitHubRepo, type GitHubTokenSet } from "./github-api.js";
 import { FileGitHubStore, GitHubStoreError, type GitHubAccount, type GitHubBinding, type GrantSecret } from "./github-store.js";
 import { githubGuidanceFile } from "./github-guidance.js";
 import { removeManagedFile, writeManagedFile } from "./managed-files.js";
@@ -51,6 +51,28 @@ export const GITHUB_REFERENCE_NAME = "github";
 /** The line the workspace ``.env`` carries — a reference, never a secret. */
 export const GH_TOKEN_ENV = "GH_TOKEN";
 export const GH_TOKEN_ENV_VALUE = `app://${GITHUB_REFERENCE_NAME}`;
+
+/** How long a ``(user, account)`` repository listing is served from memory before GitHub is asked again. */
+export const REPO_LIST_CACHE_MS = 60_000;
+/** The most repositories one listing collects across all installations. */
+export const MAX_LISTED_REPOS = 1000;
+/** The most branch names one ``branches`` answer collects. */
+export const MAX_LISTED_BRANCHES = 500;
+/** ``owner/name`` as GitHub spells a repository; anything else is refused before a URL is built from it. */
+export const REPO_FULL_NAME_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+
+/** What ``GET /api/github/repos`` answers: the account used, and its reachable repositories. */
+export interface RepoListing {
+  account: { id: string; login: string };
+  repos: GitHubRepo[];
+}
+
+/** What ``GET /api/github/branches`` answers. */
+export interface BranchListing {
+  repo: string;
+  defaultBranch?: string;
+  branches: string[];
+}
 
 export class GitHubBindError extends Error {
   override name = "GitHubBindError";
@@ -146,6 +168,8 @@ export class GitHubService {
   private readonly _margin: number;
   private readonly _log: (msg: string) => void;
   private readonly _mint = new KeyedMutex();
+  /** ``owner \0 accountId`` -> the last listing and when it was taken (see {@link REPO_LIST_CACHE_MS}). */
+  private readonly _repoCache = new Map<string, { at: number; listing: RepoListing }>();
 
   constructor(opts: GitHubServiceOptions) {
     this._store = opts.store;
@@ -200,6 +224,97 @@ export class GitHubService {
     }
     await this._reload(user, `disconnect ${removed.account.login}`);
     return removed.account;
+  }
+
+  // ---- repository / branch listing (the New-workspace picker) ------------
+
+  /**
+   * The account a listing uses: ``accountId`` when given (it must be one of
+   * ``owner``'s), else the default, else the first connected one.  Throws a
+   * 404 {@link GitHubBindError} when there is none.
+   */
+  private _pickAccount(owner: string, accountId?: string | null): GitHubAccount {
+    const accounts = this._store.listAccounts(owner);
+    if (accountId) {
+      const a = accounts.find((x) => x.id === accountId);
+      if (!a) throw new GitHubBindError("no such connected account", 404);
+      return a;
+    }
+    const a = accounts.find((x) => x.isDefault) ?? accounts[0];
+    if (!a) throw new GitHubBindError("no GitHub account connected", 404);
+    return a;
+  }
+
+  /**
+   * Every repository the account's App installations let ``owner`` reach,
+   * de-duplicated by ``fullName`` and sorted most-recently-pushed first (then
+   * by name).  The installation set is the stored one UNIONED with a fresh
+   * ``/user/installations`` read, so an App installed after the connect shows
+   * up without a reconnect, and a removed installation (404) is skipped
+   * rather than failing the list.  Served from a per-``(owner, account)``
+   * cache for {@link REPO_LIST_CACHE_MS}.  The token is minted through the
+   * same per-grant lock as ``secret.resolve`` and never leaves this method.
+   *
+   * Throws {@link GitHubGrantRevoked} for a dead grant, and
+   * {@link GitHubApiError} when every installation failed transiently.
+   */
+  async listRepos(owner: string, accountId?: string | null): Promise<RepoListing> {
+    const account = this._pickAccount(owner, accountId);
+    const key = `${owner}\0${account.id}`;
+    const now = Date.now();
+    const hit = this._repoCache.get(key);
+    if (hit && now - hit.at < REPO_LIST_CACHE_MS) return hit.listing;
+    for (const [k, v] of this._repoCache) if (now - v.at >= REPO_LIST_CACHE_MS) this._repoCache.delete(k);
+
+    const { value: token } = await this._mintToken(account.id);
+    const installationIds = new Set(account.installations.map((i) => i.id));
+    try {
+      for (const i of (await this._api.fetchIdentity(token)).installations) installationIds.add(i.id);
+    } catch (e) {
+      if (e instanceof GitHubGrantRevoked) throw e;
+      this._log(`github repos: could not refresh installations for ${account.login}: ${(e as Error).message}`);
+    }
+
+    const byName = new Map<string, GitHubRepo>();
+    let failures = 0;
+    let lastError: Error | null = null;
+    for (const id of installationIds) {
+      if (byName.size >= MAX_LISTED_REPOS) break;
+      try {
+        for (const r of await this._api.listInstallationRepos(token, id, MAX_LISTED_REPOS - byName.size)) {
+          if (!byName.has(r.fullName)) byName.set(r.fullName, r);
+        }
+      } catch (e) {
+        if (e instanceof GitHubGrantRevoked) throw e;
+        failures += 1; lastError = e as Error;
+        this._log(`github repos: installation ${id} of ${account.login} skipped: ${(e as Error).message}`);
+      }
+    }
+    if (installationIds.size > 0 && failures === installationIds.size) {
+      throw new GitHubApiError(`could not list repositories: ${lastError?.message ?? "unknown error"}`);
+    }
+    const repos = [...byName.values()].slice(0, MAX_LISTED_REPOS).sort(compareRepos);
+    const listing: RepoListing = { account: { id: account.id, login: account.login }, repos };
+    this._repoCache.set(key, { at: now, listing });
+    return listing;
+  }
+
+  /**
+   * The branch names of ``repo`` (``owner/name``, validated against
+   * {@link REPO_FULL_NAME_RE}; a 400 {@link GitHubBindError} otherwise), read
+   * with the chosen account's token.  ``defaultBranch`` is filled from the
+   * cached repository listing when that repository is in it.
+   */
+  async listBranches(owner: string, repo: string, accountId?: string | null): Promise<BranchListing> {
+    if (typeof repo !== "string" || !REPO_FULL_NAME_RE.test(repo) || repo.split("/").some((p) => p === "." || p === "..")) {
+      throw new GitHubBindError("repo must be owner/name", 400);
+    }
+    const account = this._pickAccount(owner, accountId);
+    const { value: token } = await this._mintToken(account.id);
+    const [o, n] = repo.split("/") as [string, string];
+    const branches = await this._api.listBranches(token, o, n, MAX_LISTED_BRANCHES);
+    const cached = this._repoCache.get(`${owner}\0${account.id}`)?.listing.repos.find((r) => r.fullName.toLowerCase() === repo.toLowerCase());
+    return cached ? { repo, defaultBranch: cached.defaultBranch, branches } : { repo, branches };
   }
 
   // ---- bind an account to a workspace ------------------------------------
@@ -383,6 +498,16 @@ export class GitHubService {
         return { written: false };
     }
   }
+}
+
+/** Most recently pushed first; a repository with no push time after every one that has; then by name. */
+function compareRepos(a: GitHubRepo, b: GitHubRepo): number {
+  const ta = a.pushedAt ? Date.parse(a.pushedAt) : NaN;
+  const tb = b.pushedAt ? Date.parse(b.pushedAt) : NaN;
+  const ha = !Number.isNaN(ta); const hb = !Number.isNaN(tb);
+  if (ha && hb && ta !== tb) return tb - ta;
+  if (ha !== hb) return ha ? -1 : 1;
+  return a.fullName.localeCompare(b.fullName);
 }
 
 /** Real path if the entry exists, else ``null``; symlinks resolved so a planted link is judged by its target. */

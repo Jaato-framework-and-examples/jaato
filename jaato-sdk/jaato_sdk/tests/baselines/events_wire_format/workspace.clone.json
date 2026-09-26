@@ -1,7 +1,8 @@
 {
-  "type": "workspace.delete",
+  "type": "workspace.clone",
   "timestamp": "<TIMESTAMP>",
   "session_id": "",
   "name": "",
-  "stop_sessions": false
+  "request_id": "",
+  "repos": []
 }

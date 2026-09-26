@@ -19,6 +19,7 @@ import {
   MIN_WORKSPACE_IGNORE_PROTOCOL,
   MIN_SCAFFOLD_INTEGRATION_PROTOCOL,
   MIN_FILE_FETCH_PROTOCOL,
+  MIN_WORKSPACE_PICKER_PROTOCOL,
   MIN_MEMORY_VERBS_PROTOCOL,
   MIN_SESSION_MESSAGE_PROTOCOL,
   MIN_SESSION_MESSAGE_FILES_PROTOCOL,
@@ -587,6 +588,11 @@ describe("JaatoClient session management", () => {
       client.createSession({ profile: 42 as any }),
       TypeError,
     );
+  });
+
+  test("createSession refuses a model override against a pre-1.26 daemon", async () => {
+    await assert.rejects(client.createSession({ model: "gpt-5.1" }), /1\.26/);
+    assert.equal(getSent().length, 0);
   });
 
   test("attachSession sends session.attach and updates sessionId", async () => {
@@ -1790,5 +1796,76 @@ describe("JaatoClient memory verbs (protocol 1.22, #1232)", () => {
       await assert.rejects(call, /memory verbs/);
     }
     assert.equal(lastInstance!.sent.length, 0);
+  });
+});
+
+describe("JaatoClient workspace/session pickers (1.26)", () => {
+  let client: JaatoClient;
+
+  beforeEach(async () => {
+    installMockWebSocket();
+    client = new JaatoClient({ url: "ws://localhost:8080" });
+    await connectAndAck(client, MIN_WORKSPACE_PICKER_PROTOCOL);
+    if (lastInstance) lastInstance.sent = [];
+  });
+
+  afterEach(async () => {
+    await client.close();
+    restoreWebSocket();
+  });
+
+  test("createSession sends a model override as --model/--provider (1.26)", async () => {
+    await client.createSession({
+      profile: "researcher",
+      model: "gpt-5.1",
+      provider: "openai",
+    });
+    const [ev] = getSent();
+    const args = (ev as { args?: string[] }).args ?? [];
+    assert.deepEqual(args.slice(args.indexOf("--model"), args.indexOf("--model") + 2),
+      ["--model", "gpt-5.1"]);
+    assert.deepEqual(args.slice(args.indexOf("--provider"), args.indexOf("--provider") + 2),
+      ["--provider", "openai"]);
+  });
+
+  test("createSession model override without provider sends only --model", async () => {
+    await client.createSession({ model: "gpt-5.1" });
+    const [ev] = getSent();
+    assert.deepEqual((ev as { args?: string[] }).args, ["--model", "gpt-5.1"]);
+  });
+
+  test("createSession refuses a provider without a model", async () => {
+    await assert.rejects(
+      client.createSession({ provider: "openai" }),
+      TypeError,
+    );
+    assert.equal(getSent().length, 0);
+  });
+
+  test("inspectWorkspace sends workspace.inspect and resolves on its answer", async () => {
+    const pending = client.inspectWorkspace("proj");
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    const [ev] = getSent() as unknown as Array<Record<string, unknown>>;
+    assert.equal(ev.type, "workspace.inspect");
+    assert.equal(ev.name, "proj");
+    const rid = ev.request_id as string;
+    lastInstance!.emit({ type: "workspace.inspected", request_id: "other", name: "x" });
+    lastInstance!.emit({
+      type: "workspace.inspected", request_id: rid, name: "proj", ok: true,
+      sessions: { total: 2, waiting: 0, awake: 1, sleeping: 1 }, repos: [],
+    });
+    const answer = await pending;
+    assert.equal(answer.name, "proj");
+    assert.equal(answer.sessions.total, 2);
+  });
+
+  test("cloneIntoWorkspace sends the repos with a request id", async () => {
+    const rid = await client.cloneIntoWorkspace("proj", [
+      { repo: "octo/one", branch: "main" },
+    ]);
+    const [ev] = getSent() as unknown as Array<Record<string, unknown>>;
+    assert.equal(ev.type, "workspace.clone");
+    assert.equal(ev.request_id, rid);
+    assert.deepEqual(ev.repos, [{ repo: "octo/one", branch: "main", forge: "github" }]);
   });
 });

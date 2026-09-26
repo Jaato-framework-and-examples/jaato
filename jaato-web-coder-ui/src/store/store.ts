@@ -1180,7 +1180,7 @@ export function reduce(s: JaatoState, raw: JaatoEvent): JaatoState {
         list: s.workspace.list.filter((w) => w.name !== name),
         selected: s.workspace.selected === name ? undefined : s.workspace.selected,
         config: s.workspace.config?.workspace === name ? undefined : s.workspace.config,
-        notice: { text: `Workspace ${name} deleted` },
+        notice: { text: `Deleted ${name}, its sessions and its files.` },
       };
       break;
     }

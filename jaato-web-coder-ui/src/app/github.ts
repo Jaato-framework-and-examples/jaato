@@ -66,11 +66,37 @@ export interface GitHubApi {
   disconnect(id: string): Promise<{ disconnected: string; accounts: GitHubAccount[] }>;
   /** Bind an account to a workspace, or clear it with ``null``. */
   bind(workspace: string, accountId: string | null): Promise<BindResult>;
+  /**
+   * The repositories the account (default: the default account) can reach
+   * through its App installations, most recently pushed first.  The token
+   * that lists them stays in the backend.
+   */
+  listRepos(accountId?: string): Promise<RepoListing>;
+  /** A repository's branch names; ``defaultBranch`` when the backend knows it. */
+  listBranches(repo: string, accountId?: string): Promise<{ repo: string; defaultBranch?: string; branches: string[] }>;
+}
+
+/** One repository the user can pick to clone. */
+export interface GitHubRepo {
+  fullName: string;
+  private: boolean;
+  defaultBranch: string;
+  pushedAt?: string;
+}
+
+export interface RepoListing {
+  account: { id: string; login: string };
+  repos: GitHubRepo[];
 }
 
 function subUrl(base: string, leaf: string): string {
   const [path = base, query = ""] = base.split(/\?(.*)/s, 2);
   return `${path.replace(/\/$/, "")}/${leaf}${query ? `?${query}` : ""}`;
+}
+
+/** ``url`` with ``query`` appended, whether or not it already carries one. */
+function withQuery(url: string, query: string): string {
+  return query ? `${url}${url.includes("?") ? "&" : "?"}${query}` : url;
 }
 
 async function failure(res: Response, what: string): Promise<Error> {
@@ -126,6 +152,28 @@ export function githubApi(githubUrl: string, fetchImpl: typeof fetch = fetch): G
         gitconfigSeeded: !!body.gitconfigSeeded,
         reloaded: typeof body.reloaded === "number" ? body.reloaded : 0,
         note: typeof body.note === "string" ? body.note : undefined,
+      };
+    },
+    async listRepos(accountId) {
+      const res = await fetchImpl(withQuery(subUrl(githubUrl, "repos"), accountId ? `account=${encodeURIComponent(accountId)}` : ""), getInit);
+      if (!res.ok) throw await failure(res, "Listing GitHub repositories failed");
+      const body = (await res.json()) as { account?: { id?: unknown; login?: unknown }; repos?: unknown };
+      const repos = Array.isArray(body.repos)
+        ? (body.repos as GitHubRepo[]).filter((r) => r && typeof r.fullName === "string").map((r) => ({
+          fullName: r.fullName, private: r.private === true, defaultBranch: typeof r.defaultBranch === "string" ? r.defaultBranch : "", pushedAt: r.pushedAt,
+        }))
+        : [];
+      return { account: { id: String(body.account?.id ?? ""), login: String(body.account?.login ?? "") }, repos };
+    },
+    async listBranches(repo, accountId) {
+      const q = `repo=${encodeURIComponent(repo)}${accountId ? `&account=${encodeURIComponent(accountId)}` : ""}`;
+      const res = await fetchImpl(withQuery(subUrl(githubUrl, "branches"), q), getInit);
+      if (!res.ok) throw await failure(res, `Listing branches of ${repo} failed`);
+      const body = (await res.json()) as { repo?: unknown; defaultBranch?: unknown; branches?: unknown };
+      return {
+        repo: String(body.repo ?? repo),
+        defaultBranch: typeof body.defaultBranch === "string" ? body.defaultBranch : undefined,
+        branches: Array.isArray(body.branches) ? body.branches.filter((b): b is string => typeof b === "string") : [],
       };
     },
   };

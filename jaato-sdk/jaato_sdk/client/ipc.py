@@ -244,6 +244,28 @@ def _created_session_id(event: Any) -> Optional[str]:
     return value if isinstance(value, str) and value else None
 
 
+
+def model_override_args(
+    model: Optional[str], provider: Optional[str],
+) -> List[str]:
+    """The ``session.new`` argv for a model override (protocol 1.26).
+
+    ``--model <m>`` and, when given, ``--provider <p>``.  A provider without
+    a model names nothing to run, so it is refused here rather than sent to
+    a daemon that would refuse it too.
+
+    Raises:
+        ValueError: ``provider`` given without ``model``.
+    """
+    if provider and not model:
+        raise ValueError("create_session: 'provider' requires 'model'")
+    args: List[str] = []
+    if model:
+        args.extend(["--model", model])
+    if provider:
+        args.extend(["--provider", provider])
+    return args
+
 class IPCClient:
     r"""Client for connecting to Jaato server via IPC.
 
@@ -1512,6 +1534,8 @@ class IPCClient:
         cascade_driver_id: Optional[str] = None,
         sibling_name: Optional[str] = None,
         timeout: float = 60.0,
+        model: Optional[str] = None,
+        provider: Optional[str] = None,
     ) -> str:
         """Create a new session on the server.
 
@@ -1598,6 +1622,13 @@ class IPCClient:
             timeout: Maximum seconds to wait for session creation when
                 blocking.  The server may need time to initialise the
                 provider, so the default is generous.
+            model: Override the model the resolved profile (or, with no
+                profile, the workspace ``.env``) binds -- sent as
+                ``--model`` (protocol 1.26).  The daemon applies it to a
+                COPY of the profile, and a revived session keeps it.
+            provider: Override the provider too (``--provider``).  Only
+                meaningful with ``model``; passing it alone raises
+                ``ValueError`` here (the daemon refuses it as well).
 
         Returns:
             The new session ID.  Never ``None`` — a failure raises.
@@ -1618,6 +1649,8 @@ class IPCClient:
                 retrying makes a SECOND session with its own runner and pool
                 slot — check ``list_sessions()`` first.
             TypeError: If ``profile`` is not None, str, or dict.
+            ValueError: ``provider`` without ``model``, or ``model`` against
+                a daemon below :attr:`MIN_MODEL_OVERRIDE_PROTOCOL`.
 
         All three share the base ``SessionCreateFailed``; catch that to treat
         every creation failure alike, and ``.may_exist`` to branch on the only
@@ -1674,6 +1707,8 @@ class IPCClient:
             args.extend(["--cascade-driver-id", cascade_driver_id])
         if sibling_name:
             args.extend(["--sibling-name", sibling_name])
+        args.extend(model_override_args(model, provider))
+        self._require_model_override_protocol(model)
         # ``payload`` is the documented generic escape hatch; the request id
         # rides it so no new CommandRequest field is needed.
         payload = dict(payload or {})
@@ -2566,6 +2601,23 @@ class IPCClient:
     # =========================================================================
 
     MIN_DIAGNOSTICS_PROTOCOL = "1.25"
+
+    # 1.26: ``session.new --model/--provider``.  An older daemon's argv
+    # parser reads an unknown flag as the session NAME, so the override
+    # would be silently dropped -- refused here instead.
+    MIN_MODEL_OVERRIDE_PROTOCOL = "1.26"
+
+    def _require_model_override_protocol(self, model: Optional[str]) -> None:
+        """Refuse a ``create_session(model=...)`` below 1.26 (no-op without one)."""
+        if not model or _protocol_compatible(
+                self.server_protocol_version, self.MIN_MODEL_OVERRIDE_PROTOCOL):
+            return
+        spoken = self.server_protocol_version or "unknown (not connected)"
+        raise ValueError(
+            f"create_session: this daemon speaks protocol {spoken} and would "
+            f"read --model as the session name (needs >= "
+            f"{self.MIN_MODEL_OVERRIDE_PROTOCOL}).  Upgrade the daemon."
+        )
 
     def _require_diagnostics_protocol(self, method: str) -> None:
         """Refuse the diagnostics verb against a daemon that does not serve it."""

@@ -236,3 +236,51 @@ async def test_cascade_driver_id_empty_string_omits_flag():
 
     cmd = captured[0]
     assert "--cascade-driver-id" not in cmd.args
+
+
+# ── model override (protocol 1.26) ────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_model_override_sends_model_and_provider_flags():
+    """``model`` / ``provider`` ride argv as ``--model`` / ``--provider``."""
+    client, captured = _make_client_capture()
+    client._server_protocol_version = "1.26"
+
+    await client.create_session(
+        profile="researcher", model="gpt-5.1", provider="openai")
+
+    args = captured[0].args
+    assert args[args.index("--model") + 1] == "gpt-5.1"
+    assert args[args.index("--provider") + 1] == "openai"
+    assert args[args.index("--profile") + 1] == "researcher"
+
+
+@pytest.mark.asyncio
+async def test_provider_without_model_is_refused_before_sending():
+    client, captured = _make_client_capture()
+    client._server_protocol_version = "1.26"
+
+    with pytest.raises(ValueError, match="requires 'model'"):
+        await client.create_session(provider="openai")
+    assert captured == []
+
+
+@pytest.mark.asyncio
+async def test_model_override_is_refused_against_an_older_daemon():
+    """A pre-1.26 parser reads ``--model`` as the session NAME."""
+    client, captured = _make_client_capture()
+    client._server_protocol_version = "1.25"
+
+    with pytest.raises(ValueError, match="1.26"):
+        await client.create_session(model="gpt-5.1")
+    assert captured == []
+
+
+@pytest.mark.asyncio
+async def test_no_override_needs_no_new_protocol():
+    client, captured = _make_client_capture()
+    client._server_protocol_version = "1.0"
+
+    await client.create_session(profile="researcher")
+    assert "--model" not in captured[0].args

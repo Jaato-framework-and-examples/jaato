@@ -15,12 +15,14 @@ import functools
 import logging
 import os
 import shutil
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from dotenv import dotenv_values
+
+from .workspace_sources import workspace_sources
 
 logger = logging.getLogger(__name__)
 
@@ -144,9 +146,21 @@ class WorkspaceInfo:
     #: registry and preserved across re-discovery, which rebuilds every
     #: other field from the directory.
     owner: Optional[str] = None
+    #: The git checkouts in the workspace (protocol 1.26) -- DERIVED from
+    #: disk by :func:`server.workspace_sources.workspace_sources` whenever
+    #: the workspace is analysed, never persisted to the registry (a
+    #: derived fact written down goes stale) and never declared.
+    sources: List[Dict[str, str]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
+        """The row as clients see it (``workspace.list``), sources included."""
         return asdict(self)
+
+    def to_registry_dict(self) -> Dict[str, Any]:
+        """The row as the registry persists it: everything but ``sources``."""
+        row = asdict(self)
+        row.pop("sources", None)
+        return row
 
 
 class WorkspaceManager:
@@ -270,7 +284,7 @@ class WorkspaceManager:
 
             data = {
                 "root": str(self.workspace_root),
-                "workspaces": [ws.to_dict() for ws in self._workspaces.values()],
+                "workspaces": [ws.to_registry_dict() for ws in self._workspaces.values()],
             }
 
             with open(self.registry_path, "w") as f:
@@ -466,6 +480,7 @@ class WorkspaceManager:
             model=model,
             last_accessed=last_accessed,
             owner=owner,
+            sources=workspace_sources(path),
         )
 
     def _detect_provider(self, env_vars: Dict[str, Optional[str]]) -> Optional[str]:
@@ -706,15 +721,60 @@ class WorkspaceManager:
         Returns:
             The deleted workspace's info, as it stood.
         """
-        # Containment first, so a traversal is refused as one (and before
-        # existence); then the naming rule, which containment cannot check.
+        path, ws_info = self.check_deletable(
+            name, user=user, in_use_by=in_use_by, client_id=client_id)
+
+        shutil.rmtree(path)
+        self._workspaces.pop(name, None)
+        if client_id is not None and self._client_workspaces.get(client_id) == name:
+            self._client_workspaces.pop(client_id, None)
+        if self._selected_workspace == name:
+            self._selected_workspace = None
+        self._save_registry()
+
+        logger.info("Deleted workspace: %s at %s (by %s)", name, path, user or "-")
+        return ws_info
+
+    def resolve_visible(self, name: str, user: Optional[str] = None):
+        """``(path, info)`` for a workspace *user* may see, or raise.
+
+        The refusals ``select`` and ``delete`` share, in the same order and
+        with the same wording: containment first (a traversal is refused as
+        one, before existence, so the refusal is not an oracle for what
+        exists outside the root), then the one-flat-component naming rule,
+        then existence, then ownership.  ``workspace.inspect`` and
+        ``workspace.clone`` (1.26) go through this so they cannot reach a
+        workspace the list would not show.
+
+        Raises:
+            WorkspaceContainmentError, WorkspaceOwnershipError, ValueError.
+        """
         path = self._resolve_under_root(name)   # refuses the root itself
         self._check_name(name)
         if not path.exists():
             raise ValueError(f"Workspace does not exist: {name}")
-
         ws_info = self._analyze_workspace(path, name=name)
         self._check_owner(ws_info, user)
+        return path, ws_info
+
+    def check_deletable(
+        self,
+        name: str,
+        user: Optional[str] = None,
+        in_use_by: Optional[List[str]] = None,
+        client_id: Optional[str] = None,
+    ):
+        """Every refusal :meth:`delete_workspace` makes, without deleting.
+
+        Split out so ``workspace.delete`` with ``stop_sessions`` (1.26) can
+        confirm the delete WOULD be allowed -- ownership, other clients'
+        selections, retention -- before it stops any session: stopping
+        sessions and then being refused would destroy work for nothing.
+
+        Returns:
+            ``(path, ws_info)`` of the workspace.
+        """
+        path, ws_info = self.resolve_visible(name, user)
 
         if in_use_by:
             raise ValueError(
@@ -739,17 +799,7 @@ class WorkspaceManager:
         hold = workspace_retention_hold(path)
         if hold:
             raise ValueError(f"Workspace {name!r} is under retention: {hold}")
-
-        shutil.rmtree(path)
-        self._workspaces.pop(name, None)
-        if client_id is not None and self._client_workspaces.get(client_id) == name:
-            self._client_workspaces.pop(client_id, None)
-        if self._selected_workspace == name:
-            self._selected_workspace = None
-        self._save_registry()
-
-        logger.info("Deleted workspace: %s at %s (by %s)", name, path, user or "-")
-        return ws_info
+        return path, ws_info
 
     def select_workspace(
         self,

@@ -189,11 +189,21 @@ export function awaitSessionInfo(timeoutMs = 60_000): Promise<boolean> {
  */
 export async function openSessionWithQueued(open: () => Promise<void>): Promise<void> {
   const st = useJaato.getState();
-  const hasQueued = st.uploads.some((u) => u.status === "queued");
+  // ``staging`` counts too: with a workspace selected, ``attachFiles``
+  // starts sending at once, and ``stageQueued`` below waits for that batch
+  // (the chain is serialised) before the session is asked for.
+  const pending = (u: StagedUpload) => u.status === "queued" || u.status === "staging";
+  const hasQueued = st.uploads.some(pending);
   if (!hasQueued) return open();
   if (st.workspace.selected) {
+    const ids = new Set(st.uploads.filter(pending).map((u) => u.id));
     await stageQueued();
-    return open();
+    await open();
+    // Staged BEFORE ``session.new``, so the confirmation went into the pane
+    // the new session then reset: say it again in the session's own pane.
+    const landed = useJaato.getState().uploads.filter((u) => ids.has(u.id) && u.status === "staged").map((u) => u.path);
+    if (landed.length) useJaato.getState().addSystemBlock(MAIN_AGENT, `Staged into the workspace: ${landed.join(", ")}`, "info");
+    return;
   }
   const opened = awaitSessionInfo();
   await open();

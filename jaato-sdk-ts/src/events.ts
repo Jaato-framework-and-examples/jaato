@@ -105,6 +105,10 @@ export type JaatoEvents =
   | WorkspaceCreatedEvent
   | WorkspaceDeleteRequest
   | WorkspaceDeletedEvent
+  | WorkspaceInspectRequest
+  | WorkspaceInspectEvent
+  | WorkspaceCloneRequest
+  | WorkspaceCloneProgressEvent
   | WorkspaceSelectRequest
   | ConfigStatusEvent
   | ConfigUpdateRequest
@@ -248,6 +252,10 @@ export type EventType =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -396,6 +404,10 @@ export type EventType1 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -549,6 +561,10 @@ export type EventType2 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -700,6 +716,10 @@ export type EventType3 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -850,6 +870,10 @@ export type EventType4 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -1008,6 +1032,10 @@ export type EventType5 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -1163,6 +1191,10 @@ export type EventType6 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -1317,6 +1349,10 @@ export type EventType7 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -1465,6 +1501,10 @@ export type EventType8 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -1617,6 +1657,10 @@ export type EventType9 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -1768,6 +1812,10 @@ export type EventType10 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -1930,6 +1978,10 @@ export type EventType11 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -2088,6 +2140,10 @@ export type EventType12 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -2246,6 +2302,10 @@ export type EventType13 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -2406,6 +2466,10 @@ export type EventType14 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -2561,6 +2625,10 @@ export type EventType15 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -2711,6 +2779,10 @@ export type EventType16 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -2863,6 +2935,10 @@ export type EventType17 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -3015,6 +3091,10 @@ export type EventType18 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -3173,6 +3253,10 @@ export type EventType19 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -3324,6 +3408,10 @@ export type EventType20 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -3479,6 +3567,10 @@ export type EventType21 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -3629,6 +3721,10 @@ export type EventType22 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -3780,6 +3876,10 @@ export type EventType23 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -3931,6 +4031,10 @@ export type EventType24 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -4080,6 +4184,10 @@ export type EventType25 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -4234,6 +4342,10 @@ export type EventType26 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -4384,6 +4496,10 @@ export type EventType27 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -4533,6 +4649,10 @@ export type EventType28 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -4690,6 +4810,10 @@ export type EventType29 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -4841,6 +4965,10 @@ export type EventType30 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -4993,6 +5121,10 @@ export type EventType31 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -5160,6 +5292,10 @@ export type EventType32 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -5308,6 +5444,10 @@ export type EventType33 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -5473,6 +5613,10 @@ export type EventType34 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -5625,6 +5769,10 @@ export type EventType35 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -5773,6 +5921,10 @@ export type EventType36 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -5929,6 +6081,10 @@ export type EventType37 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -6081,6 +6237,10 @@ export type EventType38 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -6230,6 +6390,10 @@ export type EventType39 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -6378,6 +6542,10 @@ export type EventType40 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -6530,6 +6698,10 @@ export type EventType41 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -6684,6 +6856,10 @@ export type EventType42 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -6836,6 +7012,10 @@ export type EventType43 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -6986,6 +7166,10 @@ export type EventType44 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -7146,6 +7330,10 @@ export type EventType45 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -7316,6 +7504,10 @@ export type EventType46 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -7472,6 +7664,10 @@ export type EventType47 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -7628,6 +7824,10 @@ export type EventType48 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -7784,6 +7984,10 @@ export type EventType49 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -7937,6 +8141,10 @@ export type EventType50 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -8102,6 +8310,10 @@ export type EventType51 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -8252,6 +8464,10 @@ export type EventType52 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -8402,6 +8618,10 @@ export type EventType53 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -8550,6 +8770,10 @@ export type EventType54 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -8723,6 +8947,10 @@ export type EventType55 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -8875,6 +9103,10 @@ export type EventType56 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -9027,6 +9259,10 @@ export type EventType57 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -9177,6 +9413,10 @@ export type EventType58 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -9325,6 +9565,10 @@ export type EventType59 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -9473,6 +9717,10 @@ export type EventType60 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -9622,6 +9870,10 @@ export type EventType61 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -9774,6 +10026,10 @@ export type EventType62 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -9922,6 +10178,10 @@ export type EventType63 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -10070,6 +10330,10 @@ export type EventType64 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -10219,6 +10483,10 @@ export type EventType65 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -10372,6 +10640,10 @@ export type EventType66 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -10521,6 +10793,10 @@ export type EventType67 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -10669,6 +10945,10 @@ export type EventType68 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -10816,6 +11096,10 @@ export type EventType69 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -10966,6 +11250,10 @@ export type EventType70 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -11113,6 +11401,10 @@ export type EventType71 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -11264,6 +11556,10 @@ export type EventType72 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -11411,6 +11707,10 @@ export type EventType73 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -11559,6 +11859,10 @@ export type EventType74 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -11709,6 +12013,10 @@ export type EventType75 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -11859,6 +12167,10 @@ export type EventType76 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -12009,6 +12321,10 @@ export type EventType77 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -12157,6 +12473,10 @@ export type EventType78 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -12311,6 +12631,10 @@ export type EventType79 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -12468,6 +12792,10 @@ export type EventType80 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -12617,6 +12945,10 @@ export type EventType81 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -12765,6 +13097,10 @@ export type EventType82 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -12920,6 +13256,10 @@ export type EventType83 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -13074,6 +13414,10 @@ export type EventType84 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -13223,6 +13567,10 @@ export type EventType85 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -13373,6 +13721,10 @@ export type EventType86 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -13520,6 +13872,10 @@ export type EventType87 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -13671,6 +14027,10 @@ export type EventType88 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -13819,6 +14179,10 @@ export type EventType89 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -13968,6 +14332,10 @@ export type EventType90 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -14021,6 +14389,7 @@ export type EventType90 =
 export type Timestamp90 = string;
 export type SessionId90 = string;
 export type Name5 = string;
+export type StopSessions = boolean;
 /**
  * All event types in the protocol.
  */
@@ -14116,6 +14485,10 @@ export type EventType91 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -14266,6 +14639,10 @@ export type EventType92 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -14319,6 +14696,7 @@ export type EventType92 =
 export type Timestamp92 = string;
 export type SessionId92 = string;
 export type Name7 = string;
+export type RequestId32 = string;
 /**
  * All event types in the protocol.
  */
@@ -14414,6 +14792,10 @@ export type EventType93 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -14466,12 +14848,15 @@ export type EventType93 =
   | "gates.snapshot";
 export type Timestamp93 = string;
 export type SessionId93 = string;
-export type Workspace1 = string;
-export type Configured = boolean;
-export type Provider2 = string | null;
-export type Model2 = string | null;
-export type AvailableProviders = string[];
-export type MissingFields = string[];
+export type Name8 = string;
+export type RequestId33 = string;
+export type Ok6 = boolean;
+export type Error13 = string;
+export type Path2 = string;
+export type SizeBytes = number | null;
+export type Repos = {
+  [k: string]: unknown;
+}[];
 /**
  * All event types in the protocol.
  */
@@ -14567,6 +14952,10 @@ export type EventType94 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -14619,9 +15008,11 @@ export type EventType94 =
   | "gates.snapshot";
 export type Timestamp94 = string;
 export type SessionId94 = string;
-export type Provider3 = string;
-export type Model3 = string | null;
-export type ApiKey = string | null;
+export type Name9 = string;
+export type RequestId34 = string;
+export type Repos1 = {
+  [k: string]: string;
+}[];
 /**
  * All event types in the protocol.
  */
@@ -14717,6 +15108,10 @@ export type EventType95 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -14769,11 +15164,15 @@ export type EventType95 =
   | "gates.snapshot";
 export type Timestamp95 = string;
 export type SessionId95 = string;
-export type Workspace2 = string;
-export type Provider4 = string;
-export type Model4 = string | null;
-export type Success3 = boolean;
-export type Error13 = string | null;
+export type Name10 = string;
+export type RequestId35 = string;
+export type Repo = string;
+export type Branch = string;
+export type State = string;
+export type Percent = number;
+export type Error14 = string;
+export type Done = number;
+export type Total = number;
 /**
  * All event types in the protocol.
  */
@@ -14869,6 +15268,10 @@ export type EventType96 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -14921,11 +15324,7 @@ export type EventType96 =
   | "gates.snapshot";
 export type Timestamp96 = string;
 export type SessionId96 = string;
-export type Changes = {
-  [k: string]: string;
-}[];
-export type Seq = number | null;
-export type Epoch = string | null;
+export type Name11 = string;
 /**
  * All event types in the protocol.
  */
@@ -15021,6 +15420,10 @@ export type EventType97 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -15073,12 +15476,12 @@ export type EventType97 =
   | "gates.snapshot";
 export type Timestamp97 = string;
 export type SessionId97 = string;
-export type Files = {
-  [k: string]: string;
-}[];
-export type Total = number;
-export type Seq1 = number | null;
-export type Epoch1 = string | null;
+export type Workspace1 = string;
+export type Configured = boolean;
+export type Provider2 = string | null;
+export type Model2 = string | null;
+export type AvailableProviders = string[];
+export type MissingFields = string[];
 /**
  * All event types in the protocol.
  */
@@ -15174,6 +15577,10 @@ export type EventType98 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -15226,11 +15633,9 @@ export type EventType98 =
   | "gates.snapshot";
 export type Timestamp98 = string;
 export type SessionId98 = string;
-export type Path2 = string;
-export type Ignored = boolean;
-export type Ok6 = boolean;
-export type Error14 = string;
-export type GitignorePath = string;
+export type Provider3 = string;
+export type Model3 = string | null;
+export type ApiKey = string | null;
 /**
  * All event types in the protocol.
  */
@@ -15326,6 +15731,10 @@ export type EventType99 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -15378,14 +15787,11 @@ export type EventType99 =
   | "gates.snapshot";
 export type Timestamp99 = string;
 export type SessionId99 = string;
-export type Topic = string;
-export type Ok7 = boolean;
-export type Text4 = string;
-export type Topics = {
-  [k: string]: unknown;
-}[];
-export type Error15 = string;
-export type ServerVersion1 = string;
+export type Workspace2 = string;
+export type Provider4 = string;
+export type Model4 = string | null;
+export type Success3 = boolean;
+export type Error15 = string | null;
 /**
  * All event types in the protocol.
  */
@@ -15481,6 +15887,10 @@ export type EventType100 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -15533,22 +15943,11 @@ export type EventType100 =
   | "gates.snapshot";
 export type Timestamp100 = string;
 export type SessionId100 = string;
-export type RequestId32 = string | null;
-export type Target = string;
-export type Status3 = string;
-export type Ok8 = boolean;
-export type MessageId = string;
-export type TargetSessionId = string;
-export type SiblingName = string;
-export type GroupKey = string;
-export type Woken = boolean;
-export type Headless = boolean;
-export type Spooled = boolean;
-export type Candidates = string[];
-export type Files1 = {
-  [k: string]: unknown;
+export type Changes = {
+  [k: string]: string;
 }[];
-export type Error16 = string;
+export type Seq = number | null;
+export type Epoch = string | null;
 /**
  * All event types in the protocol.
  */
@@ -15644,6 +16043,10 @@ export type EventType101 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -15696,17 +16099,12 @@ export type EventType101 =
   | "gates.snapshot";
 export type Timestamp101 = string;
 export type SessionId101 = string;
-export type Integration = string;
-export type Ok9 = boolean;
-export type Changed = boolean;
-export type StateBefore = string;
-export type StateAfter = string;
-export type SkippedReason = string;
-export type Target1 = string;
-export type Text5 = string;
-export type Error17 = string;
-export type Available = string[];
-export type ServerVersion2 = string;
+export type Files = {
+  [k: string]: string;
+}[];
+export type Total1 = number;
+export type Seq1 = number | null;
+export type Epoch1 = string | null;
 /**
  * All event types in the protocol.
  */
@@ -15802,6 +16200,10 @@ export type EventType102 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -15854,12 +16256,11 @@ export type EventType102 =
   | "gates.snapshot";
 export type Timestamp102 = string;
 export type SessionId102 = string;
-export type WorkspaceId = string;
-export type Name8 = string;
-export type Size = number;
-export type ContentType = string | null;
-export type Mode1 = number | null;
-export type Files2 = StagedFileSpec[];
+export type Path3 = string;
+export type Ignored = boolean;
+export type Ok7 = boolean;
+export type Error16 = string;
+export type GitignorePath = string;
 /**
  * All event types in the protocol.
  */
@@ -15955,6 +16356,10 @@ export type EventType103 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -16007,11 +16412,14 @@ export type EventType103 =
   | "gates.snapshot";
 export type Timestamp103 = string;
 export type SessionId103 = string;
-export type WorkspaceId1 = string;
-export type Staged = string[];
-export type Failed = {
-  [k: string]: string;
+export type Topic = string;
+export type Ok8 = boolean;
+export type Text4 = string;
+export type Topics = {
+  [k: string]: unknown;
 }[];
+export type Error17 = string;
+export type ServerVersion1 = string;
 /**
  * All event types in the protocol.
  */
@@ -16107,6 +16515,10 @@ export type EventType104 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -16159,9 +16571,22 @@ export type EventType104 =
   | "gates.snapshot";
 export type Timestamp104 = string;
 export type SessionId104 = string;
-export type RequestId33 = string;
-export type Path3 = string;
-export type MetadataOnly = boolean;
+export type RequestId36 = string | null;
+export type Target = string;
+export type Status3 = string;
+export type Ok9 = boolean;
+export type MessageId = string;
+export type TargetSessionId = string;
+export type SiblingName = string;
+export type GroupKey = string;
+export type Woken = boolean;
+export type Headless = boolean;
+export type Spooled = boolean;
+export type Candidates = string[];
+export type Files1 = {
+  [k: string]: unknown;
+}[];
+export type Error18 = string;
 /**
  * All event types in the protocol.
  */
@@ -16257,6 +16682,10 @@ export type EventType105 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -16309,15 +16738,17 @@ export type EventType105 =
   | "gates.snapshot";
 export type Timestamp105 = string;
 export type SessionId105 = string;
-export type RequestId34 = string;
+export type Integration = string;
 export type Ok10 = boolean;
-export type Path4 = string;
-export type Name9 = string;
-export type Size1 = number;
-export type MimeType1 = string;
-export type MetadataOnly1 = boolean;
-export type Category5 = string;
-export type Error18 = string;
+export type Changed = boolean;
+export type StateBefore = string;
+export type StateAfter = string;
+export type SkippedReason = string;
+export type Target1 = string;
+export type Text5 = string;
+export type Error19 = string;
+export type Available = string[];
+export type ServerVersion2 = string;
 /**
  * All event types in the protocol.
  */
@@ -16413,6 +16844,10 @@ export type EventType106 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -16465,20 +16900,12 @@ export type EventType106 =
   | "gates.snapshot";
 export type Timestamp106 = string;
 export type SessionId106 = string;
-export type ServerId = string;
-export type ServerName = string;
-export type ServerVersion3 = string;
-export type ActiveSessions = number;
-export type ActiveAgents = number;
-export type AvailableProviders1 = string[];
-export type AvailableModels1 = string[];
-export type Tags1 = string[];
-export type CpuPercent = number;
-export type MemoryPercent = number;
-export type UptimeSeconds = number;
-export type TrustState = string;
-export type SuccessRate1H = number;
-export type EscalatedTools = number;
+export type WorkspaceId = string;
+export type Name12 = string;
+export type Size = number;
+export type ContentType = string | null;
+export type Mode1 = number | null;
+export type Files2 = StagedFileSpec[];
 /**
  * All event types in the protocol.
  */
@@ -16574,6 +17001,10 @@ export type EventType107 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -16626,17 +17057,11 @@ export type EventType107 =
   | "gates.snapshot";
 export type Timestamp107 = string;
 export type SessionId107 = string;
-export type RequestId35 = string;
-export type OriginServer = string;
-export type AgentName1 = string;
-export type Task = string;
-export type Context1 = string;
-export type ProfileJson = string;
-export type InlineConfigJson = string;
-export type WorkspaceGitUrl = string;
-export type WorkspaceBranch = string;
-export type WorkspaceCommit = string;
-export type WorkspaceTempBranch = string;
+export type WorkspaceId1 = string;
+export type Staged = string[];
+export type Failed = {
+  [k: string]: string;
+}[];
 /**
  * All event types in the protocol.
  */
@@ -16732,6 +17157,10 @@ export type EventType108 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -16784,8 +17213,9 @@ export type EventType108 =
   | "gates.snapshot";
 export type Timestamp108 = string;
 export type SessionId108 = string;
-export type RequestId36 = string;
-export type RemoteAgentId = string;
+export type RequestId37 = string;
+export type Path4 = string;
+export type MetadataOnly = boolean;
 /**
  * All event types in the protocol.
  */
@@ -16881,6 +17311,10 @@ export type EventType109 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -16933,8 +17367,15 @@ export type EventType109 =
   | "gates.snapshot";
 export type Timestamp109 = string;
 export type SessionId109 = string;
-export type RequestId37 = string;
-export type Reason1 = string;
+export type RequestId38 = string;
+export type Ok11 = boolean;
+export type Path5 = string;
+export type Name13 = string;
+export type Size1 = number;
+export type MimeType1 = string;
+export type MetadataOnly1 = boolean;
+export type Category5 = string;
+export type Error20 = string;
 /**
  * All event types in the protocol.
  */
@@ -17030,6 +17471,10 @@ export type EventType110 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -17082,10 +17527,20 @@ export type EventType110 =
   | "gates.snapshot";
 export type Timestamp110 = string;
 export type SessionId110 = string;
-export type RequestId38 = string;
-export type RemoteAgentId1 = string;
-export type Text6 = string;
-export type Source5 = string;
+export type ServerId = string;
+export type ServerName = string;
+export type ServerVersion3 = string;
+export type ActiveSessions = number;
+export type ActiveAgents = number;
+export type AvailableProviders1 = string[];
+export type AvailableModels1 = string[];
+export type Tags1 = string[];
+export type CpuPercent = number;
+export type MemoryPercent = number;
+export type UptimeSeconds = number;
+export type TrustState = string;
+export type SuccessRate1H = number;
+export type EscalatedTools = number;
 /**
  * All event types in the protocol.
  */
@@ -17181,6 +17636,10 @@ export type EventType111 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -17234,11 +17693,16 @@ export type EventType111 =
 export type Timestamp111 = string;
 export type SessionId111 = string;
 export type RequestId39 = string;
-export type RemoteAgentId2 = string;
-export type Success4 = boolean;
-export type Summary = string;
-export type Error19 = string;
-export type WorkspaceModified = boolean;
+export type OriginServer = string;
+export type AgentName1 = string;
+export type Task = string;
+export type Context1 = string;
+export type ProfileJson = string;
+export type InlineConfigJson = string;
+export type WorkspaceGitUrl = string;
+export type WorkspaceBranch = string;
+export type WorkspaceCommit = string;
+export type WorkspaceTempBranch = string;
 /**
  * All event types in the protocol.
  */
@@ -17334,6 +17798,10 @@ export type EventType112 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -17387,7 +17855,7 @@ export type EventType112 =
 export type Timestamp112 = string;
 export type SessionId112 = string;
 export type RequestId40 = string;
-export type RemoteAgentId3 = string;
+export type RemoteAgentId = string;
 /**
  * All event types in the protocol.
  */
@@ -17483,6 +17951,10 @@ export type EventType113 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -17536,7 +18008,7 @@ export type EventType113 =
 export type Timestamp113 = string;
 export type SessionId113 = string;
 export type RequestId41 = string;
-export type RemoteAgentId4 = string;
+export type Reason1 = string;
 /**
  * All event types in the protocol.
  */
@@ -17632,6 +18104,10 @@ export type EventType114 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -17684,10 +18160,10 @@ export type EventType114 =
   | "gates.snapshot";
 export type Timestamp114 = string;
 export type SessionId114 = string;
-export type GateName = string;
-export type TenantId = string;
-export type Owner = string;
-export type AnnouncedAt = string;
+export type RequestId42 = string;
+export type RemoteAgentId1 = string;
+export type Text6 = string;
+export type Source5 = string;
 /**
  * All event types in the protocol.
  */
@@ -17783,6 +18259,10 @@ export type EventType115 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -17835,14 +18315,12 @@ export type EventType115 =
   | "gates.snapshot";
 export type Timestamp115 = string;
 export type SessionId115 = string;
-export type GateName1 = string;
-export type TenantId1 = string;
-export type Owner1 = string;
-export type Outcome = {
-  [k: string]: unknown;
-} | null;
-export type ReleasedAt = string;
-export type WasAnnounced = boolean;
+export type RequestId43 = string;
+export type RemoteAgentId2 = string;
+export type Success4 = boolean;
+export type Summary = string;
+export type Error21 = string;
+export type WorkspaceModified = boolean;
 /**
  * All event types in the protocol.
  */
@@ -17938,6 +18416,10 @@ export type EventType116 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -17990,17 +18472,8 @@ export type EventType116 =
   | "gates.snapshot";
 export type Timestamp116 = string;
 export type SessionId116 = string;
-export type GateName2 = string;
-export type TenantId2 = string;
-export type State = string;
-export type Owner2 = string | null;
-export type Intent1 = {
-  [k: string]: unknown;
-} | null;
-export type AcquiredAt = string | null;
-export type ExpiresAt = string | null;
-export type Gates = GateState[];
-export type SnapshotAt = string;
+export type RequestId44 = string;
+export type RemoteAgentId3 = string;
 /**
  * All event types in the protocol.
  */
@@ -18096,6 +18569,10 @@ export type EventType117 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -18148,13 +18625,8 @@ export type EventType117 =
   | "gates.snapshot";
 export type Timestamp117 = string;
 export type SessionId117 = string;
-export type Text7 = string;
-export type SourceType = string;
-export type SourceId = string | null;
-export type Attachments1 = {
-  [k: string]: unknown;
-}[];
-export type RequestId42 = string | null;
+export type RequestId45 = string;
+export type RemoteAgentId4 = string;
 /**
  * All event types in the protocol.
  */
@@ -18250,6 +18722,10 @@ export type EventType118 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -18302,9 +18778,10 @@ export type EventType118 =
   | "gates.snapshot";
 export type Timestamp118 = string;
 export type SessionId118 = string;
-export type RequestId43 = string;
-export type Status4 = string;
-export type Detail = string | null;
+export type GateName = string;
+export type TenantId = string;
+export type Owner = string;
+export type AnnouncedAt = string;
 /**
  * All event types in the protocol.
  */
@@ -18400,6 +18877,10 @@ export type EventType119 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -18452,13 +18933,14 @@ export type EventType119 =
   | "gates.snapshot";
 export type Timestamp119 = string;
 export type SessionId119 = string;
-export type RequestId44 = string;
-export type Messages =
-  | {
-      [k: string]: unknown;
-    }[]
-  | null;
-export type TimeoutSeconds = number;
+export type GateName1 = string;
+export type TenantId1 = string;
+export type Owner1 = string;
+export type Outcome = {
+  [k: string]: unknown;
+} | null;
+export type ReleasedAt = string;
+export type WasAnnounced = boolean;
 /**
  * All event types in the protocol.
  */
@@ -18554,6 +19036,10 @@ export type EventType120 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -18606,9 +19092,17 @@ export type EventType120 =
   | "gates.snapshot";
 export type Timestamp120 = string;
 export type SessionId120 = string;
-export type RequestId45 = string;
-export type ResponseText = string;
-export type Error20 = string;
+export type GateName2 = string;
+export type TenantId2 = string;
+export type State1 = string;
+export type Owner2 = string | null;
+export type Intent1 = {
+  [k: string]: unknown;
+} | null;
+export type AcquiredAt = string | null;
+export type ExpiresAt = string | null;
+export type Gates = GateState[];
+export type SnapshotAt = string;
 /**
  * All event types in the protocol.
  */
@@ -18704,6 +19198,10 @@ export type EventType121 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -18756,10 +19254,13 @@ export type EventType121 =
   | "gates.snapshot";
 export type Timestamp121 = string;
 export type SessionId121 = string;
-export type RequestId46 = string;
-export type AfterMessage = number | null;
-export type AfterToolCall = string | null;
-export type AfterTimestamp = string | null;
+export type Text7 = string;
+export type SourceType = string;
+export type SourceId = string | null;
+export type Attachments1 = {
+  [k: string]: unknown;
+}[];
+export type RequestId46 = string | null;
 /**
  * All event types in the protocol.
  */
@@ -18855,6 +19356,10 @@ export type EventType122 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -18908,8 +19413,8 @@ export type EventType122 =
 export type Timestamp122 = string;
 export type SessionId122 = string;
 export type RequestId47 = string;
-export type ForkIndex = number;
-export type Error21 = string;
+export type Status4 = string;
+export type Detail = string | null;
 /**
  * All event types in the protocol.
  */
@@ -19005,6 +19510,10 @@ export type EventType123 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -19057,11 +19566,13 @@ export type EventType123 =
   | "gates.snapshot";
 export type Timestamp123 = string;
 export type SessionId123 = string;
-export type WakeRef = string;
-export type Outcome1 = string;
-export type Detail1 = string;
-export type ExpiresAt1 = number;
-export type Endpoint = string;
+export type RequestId48 = string;
+export type Messages =
+  | {
+      [k: string]: unknown;
+    }[]
+  | null;
+export type TimeoutSeconds = number;
 /**
  * All event types in the protocol.
  */
@@ -19157,6 +19668,10 @@ export type EventType124 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -19209,8 +19724,9 @@ export type EventType124 =
   | "gates.snapshot";
 export type Timestamp124 = string;
 export type SessionId124 = string;
-export type WakeRef1 = string;
-export type Source6 = string;
+export type RequestId49 = string;
+export type ResponseText = string;
+export type Error22 = string;
 /**
  * All event types in the protocol.
  */
@@ -19306,6 +19822,10 @@ export type EventType125 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -19358,8 +19878,10 @@ export type EventType125 =
   | "gates.snapshot";
 export type Timestamp125 = string;
 export type SessionId125 = string;
-export type Tools3 = string[];
-export type Patterns = string[];
+export type RequestId50 = string;
+export type AfterMessage = number | null;
+export type AfterToolCall = string | null;
+export type AfterTimestamp = string | null;
 /**
  * All event types in the protocol.
  */
@@ -19455,6 +19977,10 @@ export type EventType126 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -19507,8 +20033,9 @@ export type EventType126 =
   | "gates.snapshot";
 export type Timestamp126 = string;
 export type SessionId126 = string;
-export type Tools4 = string[];
-export type Patterns1 = string[];
+export type RequestId51 = string;
+export type ForkIndex = number;
+export type Error23 = string;
 /**
  * All event types in the protocol.
  */
@@ -19604,6 +20131,10 @@ export type EventType127 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -19656,9 +20187,11 @@ export type EventType127 =
   | "gates.snapshot";
 export type Timestamp127 = string;
 export type SessionId127 = string;
-export type Target2 = string;
-export type Tools5 = string[];
-export type Patterns2 = string[];
+export type WakeRef = string;
+export type Outcome1 = string;
+export type Detail1 = string;
+export type ExpiresAt1 = number;
+export type Endpoint = string;
 /**
  * All event types in the protocol.
  */
@@ -19754,6 +20287,10 @@ export type EventType128 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -19806,7 +20343,8 @@ export type EventType128 =
   | "gates.snapshot";
 export type Timestamp128 = string;
 export type SessionId128 = string;
-export type Target3 = string;
+export type WakeRef1 = string;
+export type Source6 = string;
 /**
  * All event types in the protocol.
  */
@@ -19902,6 +20440,10 @@ export type EventType129 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -19954,7 +20496,8 @@ export type EventType129 =
   | "gates.snapshot";
 export type Timestamp129 = string;
 export type SessionId129 = string;
-export type Policy = string;
+export type Tools3 = string[];
+export type Patterns = string[];
 /**
  * All event types in the protocol.
  */
@@ -20050,6 +20593,10 @@ export type EventType130 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -20102,7 +20649,8 @@ export type EventType130 =
   | "gates.snapshot";
 export type Timestamp130 = string;
 export type SessionId130 = string;
-export type RequestId48 = string;
+export type Tools4 = string[];
+export type Patterns1 = string[];
 /**
  * All event types in the protocol.
  */
@@ -20198,6 +20746,10 @@ export type EventType131 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -20250,15 +20802,9 @@ export type EventType131 =
   | "gates.snapshot";
 export type Timestamp131 = string;
 export type SessionId131 = string;
-export type RequestId49 = string;
-export type DefaultPolicy = string;
-export type SessionDefaultPolicy = string | null;
-export type WhitelistTools = string[];
-export type WhitelistPatterns = string[];
-export type BlacklistTools = string[];
-export type BlacklistPatterns = string[];
-export type SessionWhitelist = string[];
-export type SessionBlacklist = string[];
+export type Target2 = string;
+export type Tools5 = string[];
+export type Patterns2 = string[];
 /**
  * All event types in the protocol.
  */
@@ -20354,6 +20900,10 @@ export type EventType132 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -20406,10 +20956,7 @@ export type EventType132 =
   | "gates.snapshot";
 export type Timestamp132 = string;
 export type SessionId132 = string;
-export type RequestId50 = string;
-export type User = string;
-export type TtlSeconds = number;
-export type SingleUse = boolean;
+export type Target3 = string;
 /**
  * All event types in the protocol.
  */
@@ -20505,6 +21052,10 @@ export type EventType133 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -20557,13 +21108,7 @@ export type EventType133 =
   | "gates.snapshot";
 export type Timestamp133 = string;
 export type SessionId133 = string;
-export type RequestId51 = string;
-export type Status5 = string;
-export type Ticket = string;
-export type Qualified = string;
-export type AppId = string;
-export type ExpiresAt2 = string;
-export type Detail2 = string | null;
+export type Policy = string;
 /**
  * All event types in the protocol.
  */
@@ -20659,6 +21204,10 @@ export type EventType134 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -20712,8 +21261,6 @@ export type EventType134 =
 export type Timestamp134 = string;
 export type SessionId134 = string;
 export type RequestId52 = string;
-export type Ticket1 = string;
-export type User1 = string;
 /**
  * All event types in the protocol.
  */
@@ -20809,6 +21356,10 @@ export type EventType135 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -20862,9 +21413,14 @@ export type EventType135 =
 export type Timestamp135 = string;
 export type SessionId135 = string;
 export type RequestId53 = string;
-export type Status6 = string;
-export type Revoked = number;
-export type Detail3 = string | null;
+export type DefaultPolicy = string;
+export type SessionDefaultPolicy = string | null;
+export type WhitelistTools = string[];
+export type WhitelistPatterns = string[];
+export type BlacklistTools = string[];
+export type BlacklistPatterns = string[];
+export type SessionWhitelist = string[];
+export type SessionBlacklist = string[];
 /**
  * All event types in the protocol.
  */
@@ -20960,6 +21516,10 @@ export type EventType136 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -21013,9 +21573,9 @@ export type EventType136 =
 export type Timestamp136 = string;
 export type SessionId136 = string;
 export type RequestId54 = string;
-export type User2 = string;
-export type Workspace3 = string;
-export type Name10 = string;
+export type User = string;
+export type TtlSeconds = number;
+export type SingleUse = boolean;
 /**
  * All event types in the protocol.
  */
@@ -21111,6 +21671,10 @@ export type EventType137 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -21164,10 +21728,12 @@ export type EventType137 =
 export type Timestamp137 = string;
 export type SessionId137 = string;
 export type RequestId55 = string;
-export type Status7 = string;
-export type Value = string | null;
-export type ExpiresAt3 = string | null;
-export type Detail4 = string | null;
+export type Status5 = string;
+export type Ticket = string;
+export type Qualified = string;
+export type AppId = string;
+export type ExpiresAt2 = string;
+export type Detail2 = string | null;
 /**
  * All event types in the protocol.
  */
@@ -21263,6 +21829,10 @@ export type EventType138 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -21316,7 +21886,8 @@ export type EventType138 =
 export type Timestamp138 = string;
 export type SessionId138 = string;
 export type RequestId56 = string;
-export type User3 = string;
+export type Ticket1 = string;
+export type User1 = string;
 /**
  * All event types in the protocol.
  */
@@ -21412,6 +21983,10 @@ export type EventType139 =
   | "workspace.select"
   | "workspace.delete"
   | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
   | "config.status"
   | "config.update"
   | "config.updated"
@@ -21465,6 +22040,625 @@ export type EventType139 =
 export type Timestamp139 = string;
 export type SessionId139 = string;
 export type RequestId57 = string;
+export type Status6 = string;
+export type Revoked = number;
+export type Detail3 = string | null;
+/**
+ * All event types in the protocol.
+ */
+export type EventType140 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp140 = string;
+export type SessionId140 = string;
+export type RequestId58 = string;
+export type User2 = string;
+export type Workspace3 = string;
+export type Name14 = string;
+/**
+ * All event types in the protocol.
+ */
+export type EventType141 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp141 = string;
+export type SessionId141 = string;
+export type RequestId59 = string;
+export type Status7 = string;
+export type Value = string | null;
+export type ExpiresAt3 = string | null;
+export type Detail4 = string | null;
+/**
+ * All event types in the protocol.
+ */
+export type EventType142 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp142 = string;
+export type SessionId142 = string;
+export type RequestId60 = string;
+export type User3 = string;
+/**
+ * All event types in the protocol.
+ */
+export type EventType143 =
+  | "connected"
+  | "disconnected"
+  | "agent.created"
+  | "agent.output"
+  | "agent.status_changed"
+  | "agent.completed"
+  | "agent.error"
+  | "session.terminated"
+  | "slot.settled"
+  | "session.restored"
+  | "tool.call_start"
+  | "tool.call_end"
+  | "tool.output"
+  | "permission.requested"
+  | "permission.input_mode"
+  | "permission.resolved"
+  | "permission.response"
+  | "permission.status"
+  | "clarification.requested"
+  | "clarification.input_mode"
+  | "clarification.question"
+  | "clarification.resolved"
+  | "clarification.response"
+  | "clarification.batch"
+  | "clarification.batch_response"
+  | "reference_selection.requested"
+  | "reference_selection.resolved"
+  | "reference_selection.response"
+  | "workspace_mismatch.requested"
+  | "workspace_mismatch.resolved"
+  | "workspace_mismatch.response"
+  | "plan.updated"
+  | "plan.step_updated"
+  | "plan.cleared"
+  | "context.updated"
+  | "turn.completed"
+  | "turn.progress"
+  | "instruction_budget.updated"
+  | "budget.rung_fired"
+  | "incident.raised"
+  | "gc.config"
+  | "gc"
+  | "instruction_budget.request"
+  | "system.message"
+  | "help.text"
+  | "error"
+  | "init.progress"
+  | "retry"
+  | "session.list"
+  | "session.info"
+  | "session.description_updated"
+  | "memory.list"
+  | "memory.list.request"
+  | "memory.get.request"
+  | "memory.get.result"
+  | "memory.update.request"
+  | "memory.update.result"
+  | "memory.delete.request"
+  | "memory.delete.result"
+  | "session.diagnostics.request"
+  | "session.diagnostics.result"
+  | "sandbox.paths"
+  | "service.list"
+  | "message.send"
+  | "session.stop"
+  | "command.execute"
+  | "command.list_request"
+  | "command.list"
+  | "command.list_refresh"
+  | "tools.status"
+  | "tools.id_registry"
+  | "tools.disable"
+  | "tools.register_client"
+  | "tool.execute_request"
+  | "tool.execute_result"
+  | "history.request"
+  | "history"
+  | "client.config"
+  | "mid_turn_prompt.queued"
+  | "mid_turn_prompt.injected"
+  | "mid_turn_prompt.interrupt"
+  | "session.interrupted_turn_recovered"
+  | "auth.setup"
+  | "auth.setup_response"
+  | "workspace.list"
+  | "workspace.list_response"
+  | "workspace.create"
+  | "workspace.created"
+  | "workspace.select"
+  | "workspace.delete"
+  | "workspace.deleted"
+  | "workspace.inspect"
+  | "workspace.inspected"
+  | "workspace.clone"
+  | "workspace.clone_progress"
+  | "config.status"
+  | "config.update"
+  | "config.updated"
+  | "workspace.files.stage_request"
+  | "workspace.files.staged"
+  | "workspace.file.fetch"
+  | "workspace.file.content"
+  | "session.profiles"
+  | "workspace.files_changed"
+  | "workspace.files_snapshot"
+  | "workspace.ignore.result"
+  | "scaffold.explain.result"
+  | "session.message.result"
+  | "scaffold.integration.result"
+  | "event.external"
+  | "inject_prompt.request"
+  | "inject_prompt.result"
+  | "replay_messages.request"
+  | "replay_messages.result"
+  | "resolve_fork_point.request"
+  | "resolve_fork_point.result"
+  | "session.wake_bind_result"
+  | "session.woken"
+  | "permission.add_whitelist"
+  | "permission.add_blacklist"
+  | "permission.remove"
+  | "permission.clear"
+  | "permission.set_default"
+  | "permission.policy_snapshot.request"
+  | "permission.policy_snapshot"
+  | "ticket.bind"
+  | "ticket.bind.result"
+  | "ticket.revoke"
+  | "ticket.revoke.result"
+  | "secret.resolve"
+  | "secret.resolve.result"
+  | "secret.reload"
+  | "secret.reload.result"
+  | "events.subscribed"
+  | "peer.heartbeat"
+  | "peer.spawn_request"
+  | "peer.spawn_accepted"
+  | "peer.spawn_rejected"
+  | "peer.agent_output"
+  | "peer.agent_completed"
+  | "peer.stop_request"
+  | "peer.stop_acknowledged"
+  | "gate.announced"
+  | "gate.released"
+  | "gates.snapshot";
+export type Timestamp143 = string;
+export type SessionId143 = string;
+export type RequestId61 = string;
 export type Status8 = string;
 export type Reloaded = number;
 export type Detail5 = string | null;
@@ -23405,6 +24599,7 @@ export interface WorkspaceDeleteRequest {
   timestamp?: Timestamp90;
   session_id?: SessionId90;
   name?: Name5;
+  stop_sessions?: StopSessions;
 }
 /**
  * Answer to ``workspace.delete`` (protocol 1.13).
@@ -23426,21 +24621,109 @@ export interface WorkspaceDeletedEvent {
   error?: Error12;
 }
 /**
- * Client selects a workspace to use for the session.
+ * Ask for a workspace's details (protocol 1.26, WS only).
+ *
+ * Answered by ONE :class:`WorkspaceInspectEvent` echoing ``request_id``.
  */
-export interface WorkspaceSelectRequest {
+export interface WorkspaceInspectRequest {
   type?: EventType92;
   timestamp?: Timestamp92;
   session_id?: SessionId92;
   name?: Name7;
+  request_id?: RequestId32;
+}
+/**
+ * Answer to ``workspace.inspect`` (protocol 1.26).
+ *
+ * One event whatever happened.  ``ok=False`` with ``error`` when the name
+ * left the root, names no workspace, or belongs to another user -- the
+ * same refusals ``workspace.select`` / ``workspace.delete`` give.
+ *
+ * ``sessions`` counts the sessions in this workspace by state: ``total``,
+ * ``sleeping`` (persisted, not loaded), ``awake`` (loaded, not waiting on
+ * a person) and ``waiting`` (loaded and blocked on a permission or
+ * clarification prompt).  ``repos`` is :attr:`WorkspaceInfo.sources` plus,
+ * per checkout, ``uncommitted`` (lines of ``git status --porcelain``),
+ * ``unpushed`` (commits ahead of the upstream; ``None`` when there is no
+ * upstream) and ``error`` (non-empty when git could not answer; the two
+ * counts are then ``None``).  ``size_bytes`` is the recursive size of the
+ * tree, ``None`` when the walk was too large or too slow to finish.
+ */
+export interface WorkspaceInspectEvent {
+  type?: EventType93;
+  timestamp?: Timestamp93;
+  session_id?: SessionId93;
+  name?: Name8;
+  request_id?: RequestId33;
+  ok?: Ok6;
+  error?: Error13;
+  path?: Path2;
+  size_bytes?: SizeBytes;
+  sessions?: Sessions2;
+  repos?: Repos;
+}
+export interface Sessions2 {
+  [k: string]: number;
+}
+/**
+ * Clone repositories into a workspace (protocol 1.26, WS only).
+ *
+ * ``repos`` entries are ``{"repo": "owner/name", "branch": "main",
+ * "forge": "github"}``; each lands in ``<workspace>/<name>``.  Only the
+ * ``github`` forge is supported.  Credentials are the workspace's own
+ * ``GH_TOKEN``, resolved as a session in that workspace would resolve it,
+ * and never sent on argv or in a URL.  Answered by a stream of
+ * :class:`WorkspaceCloneProgressEvent` echoing ``request_id``.
+ */
+export interface WorkspaceCloneRequest {
+  type?: EventType94;
+  timestamp?: Timestamp94;
+  session_id?: SessionId94;
+  name?: Name9;
+  request_id?: RequestId34;
+  repos?: Repos1;
+}
+/**
+ * One step of a ``workspace.clone`` (protocol 1.26).
+ *
+ * Every requested repo is first announced ``queued``; they are then cloned
+ * one at a time through ``cloning`` (with ``percent`` from git's own
+ * progress) and ``checkout`` to ``done`` or ``failed`` (with ``error``).
+ * ``done`` / ``total`` count finished repos of this request, so the last
+ * event of a request has ``done == total``.  A request refused as a whole
+ * (workspace not visible, left the root) is ONE ``failed`` event with
+ * ``repo == ""``.  A retry is a new request naming the one repo.
+ */
+export interface WorkspaceCloneProgressEvent {
+  type?: EventType95;
+  timestamp?: Timestamp95;
+  session_id?: SessionId95;
+  name?: Name10;
+  request_id?: RequestId35;
+  repo?: Repo;
+  branch?: Branch;
+  state?: State;
+  percent?: Percent;
+  error?: Error14;
+  done?: Done;
+  total?: Total;
+}
+/**
+ * Client selects a workspace to use for the session.
+ */
+export interface WorkspaceSelectRequest {
+  type?: EventType96;
+  timestamp?: Timestamp96;
+  session_id?: SessionId96;
+  name?: Name11;
 }
 /**
  * Response to workspace.select - configuration status of selected workspace.
  */
 export interface ConfigStatusEvent {
-  type?: EventType93;
-  timestamp?: Timestamp93;
-  session_id?: SessionId93;
+  type?: EventType97;
+  timestamp?: Timestamp97;
+  session_id?: SessionId97;
   workspace?: Workspace1;
   configured?: Configured;
   provider?: Provider2;
@@ -23452,9 +24735,9 @@ export interface ConfigStatusEvent {
  * Client updates workspace configuration (provider, model, API key).
  */
 export interface ConfigUpdateRequest {
-  type?: EventType94;
-  timestamp?: Timestamp94;
-  session_id?: SessionId94;
+  type?: EventType98;
+  timestamp?: Timestamp98;
+  session_id?: SessionId98;
   provider?: Provider3;
   model?: Model3;
   api_key?: ApiKey;
@@ -23463,14 +24746,14 @@ export interface ConfigUpdateRequest {
  * Response to config.update - configuration was updated.
  */
 export interface ConfigUpdatedEvent {
-  type?: EventType95;
-  timestamp?: Timestamp95;
-  session_id?: SessionId95;
+  type?: EventType99;
+  timestamp?: Timestamp99;
+  session_id?: SessionId99;
   workspace?: Workspace2;
   provider?: Provider4;
   model?: Model4;
   success?: Success3;
-  error?: Error13;
+  error?: Error15;
 }
 /**
  * Incremental workspace file change notification.
@@ -23486,9 +24769,9 @@ export interface ConfigUpdatedEvent {
  *     ``"deleted"``  – file was previously tracked and is now gone.
  */
 export interface WorkspaceFilesChangedEvent {
-  type?: EventType96;
-  timestamp?: Timestamp96;
-  session_id?: SessionId96;
+  type?: EventType100;
+  timestamp?: Timestamp100;
+  session_id?: SessionId100;
   changes?: Changes;
   seq?: Seq;
   epoch?: Epoch;
@@ -23501,11 +24784,11 @@ export interface WorkspaceFilesChangedEvent {
  * replaying individual deltas.
  */
 export interface WorkspaceFilesSnapshotEvent {
-  type?: EventType97;
-  timestamp?: Timestamp97;
-  session_id?: SessionId97;
+  type?: EventType101;
+  timestamp?: Timestamp101;
+  session_id?: SessionId101;
   files?: Files;
-  total?: Total;
+  total?: Total1;
   seq?: Seq1;
   epoch?: Epoch1;
   seqs?: Seqs;
@@ -23542,13 +24825,13 @@ export interface Seqs {
  *     gitignore_path: The file that was edited, so a client can name it.
  */
 export interface WorkspaceIgnoreResultEvent {
-  type?: EventType98;
-  timestamp?: Timestamp98;
-  session_id?: SessionId98;
-  path?: Path2;
+  type?: EventType102;
+  timestamp?: Timestamp102;
+  session_id?: SessionId102;
+  path?: Path3;
   ignored?: Ignored;
-  ok?: Ok6;
-  error?: Error14;
+  ok?: Ok7;
+  error?: Error16;
   gitignore_path?: GitignorePath;
 }
 /**
@@ -23594,15 +24877,15 @@ export interface WorkspaceIgnoreResultEvent {
  *         report WHOSE install answered rather than implying its own.
  */
 export interface ScaffoldExplainEvent {
-  type?: EventType99;
-  timestamp?: Timestamp99;
-  session_id?: SessionId99;
+  type?: EventType103;
+  timestamp?: Timestamp103;
+  session_id?: SessionId103;
   topic?: Topic;
-  ok?: Ok7;
+  ok?: Ok8;
   text?: Text4;
   data?: Data1;
   topics?: Topics;
-  error?: Error15;
+  error?: Error17;
   server_version?: ServerVersion1;
 }
 export interface Data1 {
@@ -23670,13 +24953,13 @@ export interface Data1 {
  *     error: Why not, when ``ok`` is ``False``.
  */
 export interface SessionMessageResultEvent {
-  type?: EventType100;
-  timestamp?: Timestamp100;
-  session_id?: SessionId100;
-  request_id?: RequestId32;
+  type?: EventType104;
+  timestamp?: Timestamp104;
+  session_id?: SessionId104;
+  request_id?: RequestId36;
   target?: Target;
   status?: Status3;
-  ok?: Ok8;
+  ok?: Ok9;
   message_id?: MessageId;
   target_session_id?: TargetSessionId;
   sibling_name?: SiblingName;
@@ -23686,7 +24969,7 @@ export interface SessionMessageResultEvent {
   spooled?: Spooled;
   candidates?: Candidates;
   files?: Files1;
-  error?: Error16;
+  error?: Error18;
 }
 /**
  * The result of running ``jaato-scaffold integration`` on the DAEMON (1.21).
@@ -23735,18 +25018,18 @@ export interface SessionMessageResultEvent {
  *         skill.
  */
 export interface ScaffoldIntegrationEvent {
-  type?: EventType101;
-  timestamp?: Timestamp101;
-  session_id?: SessionId101;
+  type?: EventType105;
+  timestamp?: Timestamp105;
+  session_id?: SessionId105;
   integration?: Integration;
-  ok?: Ok9;
+  ok?: Ok10;
   changed?: Changed;
   state_before?: StateBefore;
   state_after?: StateAfter;
   skipped_reason?: SkippedReason;
   target?: Target1;
   text?: Text5;
-  error?: Error17;
+  error?: Error19;
   available?: Available;
   server_version?: ServerVersion2;
 }
@@ -23790,9 +25073,9 @@ export interface ScaffoldIntegrationEvent {
  * already-existing workspace mid-session.
  */
 export interface StageFilesRequest {
-  type?: EventType102;
-  timestamp?: Timestamp102;
-  session_id?: SessionId102;
+  type?: EventType106;
+  timestamp?: Timestamp106;
+  session_id?: SessionId106;
   workspace_id?: WorkspaceId;
   files?: Files2;
 }
@@ -23813,7 +25096,7 @@ export interface StageFilesRequest {
  * clients don't need a protocol bump later.
  */
 export interface StagedFileSpec {
-  name?: Name8;
+  name?: Name12;
   size?: Size;
   content_type?: ContentType;
   mode?: Mode1;
@@ -23840,9 +25123,9 @@ export interface StagedFileSpec {
  *   AppArmor refusal, ...).  ``error`` carries the OS message.
  */
 export interface StageFilesEvent {
-  type?: EventType103;
-  timestamp?: Timestamp103;
-  session_id?: SessionId103;
+  type?: EventType107;
+  timestamp?: Timestamp107;
+  session_id?: SessionId107;
   workspace_id?: WorkspaceId1;
   staged?: Staged;
   failed?: Failed;
@@ -23868,11 +25151,11 @@ export interface StageFilesEvent {
  * the model is told "no such file" instead of offering a link that fails.
  */
 export interface WorkspaceFileFetchRequest {
-  type?: EventType104;
-  timestamp?: Timestamp104;
-  session_id?: SessionId104;
-  request_id?: RequestId33;
-  path?: Path3;
+  type?: EventType108;
+  timestamp?: Timestamp108;
+  session_id?: SessionId108;
+  request_id?: RequestId37;
+  path?: Path4;
   metadata_only?: MetadataOnly;
 }
 /**
@@ -23897,18 +25180,18 @@ export interface WorkspaceFileFetchRequest {
  * - ``"io_error"`` -- the read failed; ``error`` carries the OS message.
  */
 export interface WorkspaceFileContentEvent {
-  type?: EventType105;
-  timestamp?: Timestamp105;
-  session_id?: SessionId105;
-  request_id?: RequestId34;
-  ok?: Ok10;
-  path?: Path4;
-  name?: Name9;
+  type?: EventType109;
+  timestamp?: Timestamp109;
+  session_id?: SessionId109;
+  request_id?: RequestId38;
+  ok?: Ok11;
+  path?: Path5;
+  name?: Name13;
   size?: Size1;
   mime_type?: MimeType1;
   metadata_only?: MetadataOnly1;
   category?: Category5;
-  error?: Error18;
+  error?: Error20;
 }
 /**
  * Heartbeat sent between peer servers at a configurable interval.
@@ -23918,9 +25201,9 @@ export interface WorkspaceFileContentEvent {
  * to expose cluster state to the model.
  */
 export interface PeerHeartbeatEvent {
-  type?: EventType106;
-  timestamp?: Timestamp106;
-  session_id?: SessionId106;
+  type?: EventType110;
+  timestamp?: Timestamp110;
+  session_id?: SessionId110;
   server_id?: ServerId;
   server_name?: ServerName;
   server_version?: ServerVersion3;
@@ -23945,10 +25228,10 @@ export interface PeerHeartbeatEvent {
  * this spawn lifecycle.
  */
 export interface PeerSpawnRequestEvent {
-  type?: EventType107;
-  timestamp?: Timestamp107;
-  session_id?: SessionId107;
-  request_id?: RequestId35;
+  type?: EventType111;
+  timestamp?: Timestamp111;
+  session_id?: SessionId111;
+  request_id?: RequestId39;
   origin_server?: OriginServer;
   agent_name?: AgentName1;
   task?: Task;
@@ -23967,10 +25250,10 @@ export interface PeerSpawnRequestEvent {
  * ephemeral session and is about to start processing.
  */
 export interface PeerSpawnAcceptedEvent {
-  type?: EventType108;
-  timestamp?: Timestamp108;
-  session_id?: SessionId108;
-  request_id?: RequestId36;
+  type?: EventType112;
+  timestamp?: Timestamp112;
+  session_id?: SessionId112;
+  request_id?: RequestId40;
   remote_agent_id?: RemoteAgentId;
 }
 /**
@@ -23980,10 +25263,10 @@ export interface PeerSpawnAcceptedEvent {
  * capacity limits, missing provider, unknown profile).
  */
 export interface PeerSpawnRejectedEvent {
-  type?: EventType109;
-  timestamp?: Timestamp109;
-  session_id?: SessionId109;
-  request_id?: RequestId37;
+  type?: EventType113;
+  timestamp?: Timestamp113;
+  session_id?: SessionId113;
+  request_id?: RequestId41;
   reason?: Reason1;
 }
 /**
@@ -23994,10 +25277,10 @@ export interface PeerSpawnRejectedEvent {
  * to the parent session via ``inject_prompt``.
  */
 export interface PeerAgentOutputEvent {
-  type?: EventType110;
-  timestamp?: Timestamp110;
-  session_id?: SessionId110;
-  request_id?: RequestId38;
+  type?: EventType114;
+  timestamp?: Timestamp114;
+  session_id?: SessionId114;
+  request_id?: RequestId42;
   remote_agent_id?: RemoteAgentId1;
   text?: Text6;
   source?: Source5;
@@ -24010,14 +25293,14 @@ export interface PeerAgentOutputEvent {
  * populated only when ``success`` is False.
  */
 export interface PeerAgentCompletedEvent {
-  type?: EventType111;
-  timestamp?: Timestamp111;
-  session_id?: SessionId111;
-  request_id?: RequestId39;
+  type?: EventType115;
+  timestamp?: Timestamp115;
+  session_id?: SessionId115;
+  request_id?: RequestId43;
   remote_agent_id?: RemoteAgentId2;
   success?: Success4;
   summary?: Summary;
-  error?: Error19;
+  error?: Error21;
   workspace_modified?: WorkspaceModified;
 }
 /**
@@ -24027,20 +25310,20 @@ export interface PeerAgentCompletedEvent {
  * a previously spawned remote subagent.
  */
 export interface PeerStopRequestEvent {
-  type?: EventType112;
-  timestamp?: Timestamp112;
-  session_id?: SessionId112;
-  request_id?: RequestId40;
+  type?: EventType116;
+  timestamp?: Timestamp116;
+  session_id?: SessionId116;
+  request_id?: RequestId44;
   remote_agent_id?: RemoteAgentId3;
 }
 /**
  * Confirmation that a remote peer received and processed the stop request.
  */
 export interface PeerStopAcknowledgedEvent {
-  type?: EventType113;
-  timestamp?: Timestamp113;
-  session_id?: SessionId113;
-  request_id?: RequestId41;
+  type?: EventType117;
+  timestamp?: Timestamp117;
+  session_id?: SessionId117;
+  request_id?: RequestId45;
   remote_agent_id?: RemoteAgentId4;
 }
 /**
@@ -24052,9 +25335,9 @@ export interface PeerStopAcknowledgedEvent {
  * observe the spawned session's events.
  */
 export interface GateAnnouncedEvent {
-  type?: EventType114;
-  timestamp?: Timestamp114;
-  session_id?: SessionId114;
+  type?: EventType118;
+  timestamp?: Timestamp118;
+  session_id?: SessionId118;
   gate_name?: GateName;
   tenant_id?: TenantId;
   owner?: Owner;
@@ -24074,9 +25357,9 @@ export interface Intent {
  * on TTL expiry.
  */
 export interface GateReleasedEvent {
-  type?: EventType115;
-  timestamp?: Timestamp115;
-  session_id?: SessionId115;
+  type?: EventType119;
+  timestamp?: Timestamp119;
+  session_id?: SessionId119;
   gate_name?: GateName1;
   tenant_id?: TenantId1;
   owner?: Owner1;
@@ -24092,9 +25375,9 @@ export interface GateReleasedEvent {
  * the registry replays the live state once at subscription time.
  */
 export interface GatesSnapshotEvent {
-  type?: EventType116;
-  timestamp?: Timestamp116;
-  session_id?: SessionId116;
+  type?: EventType120;
+  timestamp?: Timestamp120;
+  session_id?: SessionId120;
   gates?: Gates;
   snapshot_at?: SnapshotAt;
 }
@@ -24113,7 +25396,7 @@ export interface GatesSnapshotEvent {
 export interface GateState {
   gate_name?: GateName2;
   tenant_id?: TenantId2;
-  state?: State;
+  state?: State1;
   owner?: Owner2;
   intent?: Intent1;
   acquired_at?: AcquiredAt;
@@ -24145,14 +25428,14 @@ export interface GateState {
  * patterns via the priority dimension.
  */
 export interface InjectPromptRequest {
-  type?: EventType117;
-  timestamp?: Timestamp117;
-  session_id?: SessionId117;
+  type?: EventType121;
+  timestamp?: Timestamp121;
+  session_id?: SessionId121;
   text?: Text7;
   source_type?: SourceType;
   source_id?: SourceId;
   attachments?: Attachments1;
-  request_id?: RequestId42;
+  request_id?: RequestId46;
 }
 /**
  * Server's response to :class:`InjectPromptRequest`.
@@ -24204,10 +25487,10 @@ export interface InjectPromptRequest {
  * absence is left checkable instead of forgeable.
  */
 export interface InjectPromptResultEvent {
-  type?: EventType118;
-  timestamp?: Timestamp118;
-  session_id?: SessionId118;
-  request_id?: RequestId43;
+  type?: EventType122;
+  timestamp?: Timestamp122;
+  session_id?: SessionId122;
+  request_id?: RequestId47;
   status?: Status4;
   detail?: Detail;
 }
@@ -24226,10 +25509,10 @@ export interface InjectPromptResultEvent {
  * flows compose this with ``resolve_fork_point``.
  */
 export interface ReplayMessagesRequest {
-  type?: EventType119;
-  timestamp?: Timestamp119;
-  session_id?: SessionId119;
-  request_id?: RequestId44;
+  type?: EventType123;
+  timestamp?: Timestamp123;
+  session_id?: SessionId123;
+  request_id?: RequestId48;
   messages?: Messages;
   timeout_seconds?: TimeoutSeconds;
 }
@@ -24237,12 +25520,12 @@ export interface ReplayMessagesRequest {
  * Server's response to :class:`ReplayMessagesRequest`.
  */
 export interface ReplayMessagesResultEvent {
-  type?: EventType120;
-  timestamp?: Timestamp120;
-  session_id?: SessionId120;
-  request_id?: RequestId45;
+  type?: EventType124;
+  timestamp?: Timestamp124;
+  session_id?: SessionId124;
+  request_id?: RequestId49;
   response_text?: ResponseText;
-  error?: Error20;
+  error?: Error22;
 }
 /**
  * Resolve a fork point in the session's history to a message index.
@@ -24260,10 +25543,10 @@ export interface ReplayMessagesResultEvent {
  * tool uses internally.
  */
 export interface ResolveForkPointRequest {
-  type?: EventType121;
-  timestamp?: Timestamp121;
-  session_id?: SessionId121;
-  request_id?: RequestId46;
+  type?: EventType125;
+  timestamp?: Timestamp125;
+  session_id?: SessionId125;
+  request_id?: RequestId50;
   after_message?: AfterMessage;
   after_tool_call?: AfterToolCall;
   after_timestamp?: AfterTimestamp;
@@ -24272,12 +25555,12 @@ export interface ResolveForkPointRequest {
  * Server's response to :class:`ResolveForkPointRequest`.
  */
 export interface ResolveForkPointResultEvent {
-  type?: EventType122;
-  timestamp?: Timestamp122;
-  session_id?: SessionId122;
-  request_id?: RequestId47;
+  type?: EventType126;
+  timestamp?: Timestamp126;
+  session_id?: SessionId126;
+  request_id?: RequestId51;
   fork_index?: ForkIndex;
-  error?: Error21;
+  error?: Error23;
 }
 /**
  * Server returns the result of ``session.bind_wake`` / ``session.unbind_wake``.
@@ -24289,9 +25572,9 @@ export interface ResolveForkPointResultEvent {
  * binding's Unix expiry — the values the caller's waker keys on.
  */
 export interface WakeBindResultEvent {
-  type?: EventType123;
-  timestamp?: Timestamp123;
-  session_id?: SessionId123;
+  type?: EventType127;
+  timestamp?: Timestamp127;
+  session_id?: SessionId127;
   wake_ref?: WakeRef;
   outcome?: Outcome1;
   detail?: Detail1;
@@ -24318,9 +25601,9 @@ export interface WakeBindResultEvent {
  * notification is a signal to attach, not the untrusted payload).
  */
 export interface SessionWokenEvent {
-  type?: EventType124;
-  timestamp?: Timestamp124;
-  session_id?: SessionId124;
+  type?: EventType128;
+  timestamp?: Timestamp128;
+  session_id?: SessionId128;
   wake_ref?: WakeRef1;
   source?: Source6;
 }
@@ -24333,9 +25616,9 @@ export interface SessionWokenEvent {
  * additive.
  */
 export interface PermissionAddWhitelistRequest {
-  type?: EventType125;
-  timestamp?: Timestamp125;
-  session_id?: SessionId125;
+  type?: EventType129;
+  timestamp?: Timestamp129;
+  session_id?: SessionId129;
   tools?: Tools3;
   patterns?: Patterns;
 }
@@ -24347,9 +25630,9 @@ export interface PermissionAddWhitelistRequest {
  * both lists are additive.
  */
 export interface PermissionAddBlacklistRequest {
-  type?: EventType126;
-  timestamp?: Timestamp126;
-  session_id?: SessionId126;
+  type?: EventType130;
+  timestamp?: Timestamp130;
+  session_id?: SessionId130;
   tools?: Tools4;
   patterns?: Patterns1;
 }
@@ -24360,9 +25643,9 @@ export interface PermissionAddBlacklistRequest {
  * ``"blacklist"``.  Empty lists are no-ops.
  */
 export interface PermissionRemoveRequest {
-  type?: EventType127;
-  timestamp?: Timestamp127;
-  session_id?: SessionId127;
+  type?: EventType131;
+  timestamp?: Timestamp131;
+  session_id?: SessionId131;
   target?: Target2;
   tools?: Tools5;
   patterns?: Patterns2;
@@ -24376,9 +25659,9 @@ export interface PermissionRemoveRequest {
  * session-level overrides.
  */
 export interface PermissionClearRequest {
-  type?: EventType128;
-  timestamp?: Timestamp128;
-  session_id?: SessionId128;
+  type?: EventType132;
+  timestamp?: Timestamp132;
+  session_id?: SessionId132;
   target?: Target3;
 }
 /**
@@ -24389,19 +25672,19 @@ export interface PermissionClearRequest {
  * the base default for this session only.
  */
 export interface PermissionSetDefaultRequest {
-  type?: EventType129;
-  timestamp?: Timestamp129;
-  session_id?: SessionId129;
+  type?: EventType133;
+  timestamp?: Timestamp133;
+  session_id?: SessionId133;
   policy?: Policy;
 }
 /**
  * Request a structured snapshot of the current permission policy.
  */
 export interface PermissionPolicySnapshotRequest {
-  type?: EventType130;
-  timestamp?: Timestamp130;
-  session_id?: SessionId130;
-  request_id?: RequestId48;
+  type?: EventType134;
+  timestamp?: Timestamp134;
+  session_id?: SessionId134;
+  request_id?: RequestId52;
 }
 /**
  * Structured permission policy snapshot.
@@ -24412,10 +25695,10 @@ export interface PermissionPolicySnapshotRequest {
  * the stringly-typed ``permissions check`` command.
  */
 export interface PermissionPolicySnapshotEvent {
-  type?: EventType131;
-  timestamp?: Timestamp131;
-  session_id?: SessionId131;
-  request_id?: RequestId49;
+  type?: EventType135;
+  timestamp?: Timestamp135;
+  session_id?: SessionId135;
+  request_id?: RequestId53;
   default_policy?: DefaultPolicy;
   session_default_policy?: SessionDefaultPolicy;
   whitelist_tools?: WhitelistTools;
@@ -24464,10 +25747,10 @@ export interface PermissionPolicySnapshotEvent {
  *         socket for a side channel, and a weaker posture either way.
  */
 export interface TicketBindRequest {
-  type?: EventType132;
-  timestamp?: Timestamp132;
-  session_id?: SessionId132;
-  request_id?: RequestId50;
+  type?: EventType136;
+  timestamp?: Timestamp136;
+  session_id?: SessionId136;
+  request_id?: RequestId54;
   user?: User;
   ttl_seconds?: TtlSeconds;
   single_use?: SingleUse;
@@ -24515,10 +25798,10 @@ export interface TicketBindRequest {
  *         say — a reader of ``"unknown"`` is back where they started.
  */
 export interface TicketBindResultEvent {
-  type?: EventType133;
-  timestamp?: Timestamp133;
-  session_id?: SessionId133;
-  request_id?: RequestId51;
+  type?: EventType137;
+  timestamp?: Timestamp137;
+  session_id?: SessionId137;
+  request_id?: RequestId55;
   status?: Status5;
   ticket?: Ticket;
   qualified?: Qualified;
@@ -24555,10 +25838,10 @@ export interface TicketBindResultEvent {
  *         application instead.
  */
 export interface TicketRevokeRequest {
-  type?: EventType134;
-  timestamp?: Timestamp134;
-  session_id?: SessionId134;
-  request_id?: RequestId52;
+  type?: EventType138;
+  timestamp?: Timestamp138;
+  session_id?: SessionId138;
+  request_id?: RequestId56;
   ticket?: Ticket1;
   user?: User1;
 }
@@ -24584,10 +25867,10 @@ export interface TicketRevokeRequest {
  *         say.
  */
 export interface TicketRevokeResultEvent {
-  type?: EventType135;
-  timestamp?: Timestamp135;
-  session_id?: SessionId135;
-  request_id?: RequestId53;
+  type?: EventType139;
+  timestamp?: Timestamp139;
+  session_id?: SessionId139;
+  request_id?: RequestId57;
   status?: Status6;
   revoked?: Revoked;
   detail?: Detail3;
@@ -24629,13 +25912,13 @@ export interface TicketRevokeResultEvent {
  *         which of that user's secrets to mint.
  */
 export interface SecretResolveRequest {
-  type?: EventType136;
-  timestamp?: Timestamp136;
-  session_id?: SessionId136;
-  request_id?: RequestId54;
+  type?: EventType140;
+  timestamp?: Timestamp140;
+  session_id?: SessionId140;
+  request_id?: RequestId58;
   user?: User2;
   workspace?: Workspace3;
-  name?: Name10;
+  name?: Name14;
 }
 /**
  * The application's answer to :class:`SecretResolveRequest` (#1226).
@@ -24671,10 +25954,10 @@ export interface SecretResolveRequest {
  *         say.  Never the secret.
  */
 export interface SecretResolveResultEvent {
-  type?: EventType137;
-  timestamp?: Timestamp137;
-  session_id?: SessionId137;
-  request_id?: RequestId55;
+  type?: EventType141;
+  timestamp?: Timestamp141;
+  session_id?: SessionId141;
+  request_id?: RequestId59;
   status?: Status7;
   value?: Value;
   expires_at?: ExpiresAt3;
@@ -24699,10 +25982,10 @@ export interface SecretResolveResultEvent {
  *         ``ticket.bind`` does, so the app id is never a request field.
  */
 export interface SecretReloadRequest {
-  type?: EventType138;
-  timestamp?: Timestamp138;
-  session_id?: SessionId138;
-  request_id?: RequestId56;
+  type?: EventType142;
+  timestamp?: Timestamp142;
+  session_id?: SessionId142;
+  request_id?: RequestId60;
   user?: User3;
 }
 /**
@@ -24723,10 +26006,10 @@ export interface SecretReloadRequest {
  *     detail: Human-readable elaboration, omitted when there is nothing to say.
  */
 export interface SecretReloadResultEvent {
-  type?: EventType139;
-  timestamp?: Timestamp139;
-  session_id?: SessionId139;
-  request_id?: RequestId57;
+  type?: EventType143;
+  timestamp?: Timestamp143;
+  session_id?: SessionId143;
+  request_id?: RequestId61;
   status?: Status8;
   reloaded?: Reloaded;
   detail?: Detail5;
@@ -24843,6 +26126,10 @@ export const EventTypeValue = {
   WORKSPACE_SELECT_REQUEST: "workspace.select",
   WORKSPACE_DELETE_REQUEST: "workspace.delete",
   WORKSPACE_DELETED: "workspace.deleted",
+  WORKSPACE_INSPECT_REQUEST: "workspace.inspect",
+  WORKSPACE_INSPECTED: "workspace.inspected",
+  WORKSPACE_CLONE_REQUEST: "workspace.clone",
+  WORKSPACE_CLONE_PROGRESS: "workspace.clone_progress",
   CONFIG_STATUS: "config.status",
   CONFIG_UPDATE_REQUEST: "config.update",
   CONFIG_UPDATED: "config.updated",

@@ -16,7 +16,6 @@ import { OutputPane } from "@/components/output/OutputPane";
 import { ToolOutputPopup } from "@/components/output/ToolOutputPopup";
 import { Composer } from "@/components/input/Composer";
 import { PhaseLine } from "@/components/panels/PhaseLine";
-import { AttachStrip } from "@/components/input/AttachStrip";
 import { PermissionPrompt } from "@/components/prompts/PermissionPrompt";
 import { ExitPrompt } from "@/components/prompts/ExitPrompt";
 import { PostAuthSetupPrompt } from "@/components/prompts/PostAuthSetupPrompt";
@@ -25,7 +24,10 @@ import { ReferenceSelectionPrompt } from "@/components/prompts/ReferenceSelectio
 import { PlanPanel, planProgress } from "@/components/panels/PlanPanel";
 import { BudgetPanel } from "@/components/panels/BudgetPanel";
 import { WorkspacePanel, useVisibleWorkspaceFiles } from "@/components/panels/WorkspacePanel";
-import { SessionRow, SessionsPanel, notedSummary } from "@/components/panels/SessionsPanel";
+import { SessionsPanel, notedSummary } from "@/components/panels/SessionsPanel";
+import { SessionBoard } from "@/components/picker/SessionBoard";
+import { NewSessionColumn, stageDrafts, type StagedDraft } from "@/components/picker/NewSessionColumn";
+import type { ModelChoice } from "@/app/newSession";
 import { MemoriesPanel } from "@/components/panels/MemoriesPanel";
 import { memoriesSummary } from "@/app/memories";
 import { DiagnosticsPanel } from "@/components/panels/DiagnosticsPanel";
@@ -312,25 +314,26 @@ function authCommands(commands: { name: string; description?: string }[]): { nam
 }
 
 /**
- * What the TUI lets you do before any session exists, in one plate
- * (design frame 03): resume and start new, side by side.
+ * The session picker (design 2a / 2a′): a board, not a list.  One plate,
+ * four columns -- the workspace's existing sessions by state (Waiting on
+ * you / Awake / Sleeping, ``components/picker/SessionBoard``) and a column
+ * to start a new one (``components/picker/NewSessionColumn``).  Below
+ * ~900px the columns stack.
  *
- * A workspace opened again is not a workspace being set up: when the
- * selected workspace's ``.env`` already binds a provider, the plate offers
- * its previous sessions to resume and a new session on that binding, and
- * asks nothing about providers or sign-in.  Only a workspace with no
- * provider gets the sign-in row, after which the daemon offers to open the
- * session itself.  Nothing here is required -- the link at the foot drops
- * to the prompt, where any daemon command runs with no session, as in the
- * TUI.
+ * The workspace no longer carries a provider and model of its own: a new
+ * session's binding comes from its base profile, or is picked here for this
+ * session only.  A workspace with no provider credentials yet still gets
+ * the sign-in commands, as a quiet row at the foot, because the daemon
+ * then offers to open the session itself.  "Open workspace with no
+ * session" drops to the prompt, where any daemon command runs with no
+ * session, as in the TUI.
  */
-function ProfilePicker({ onPick, onAttach, onAuth, onSkip }: {
-  onPick: (profile: string | null) => void;
+function ProfilePicker({ onStart, onAttach, onAuth, onSkip }: {
+  onStart: (profile: string | null, model: ModelChoice | undefined, files: StagedDraft[]) => void;
   onAttach: (sessionId: string) => void;
   onAuth: (command: string) => void;
   onSkip: () => void;
 }) {
-  const profiles = useJaato((s) => s.profiles);
   const commands = useJaato((s) => s.commands);
   const ws = useJaato((s) => s.workspace);
   const setScreen = useJaato((s) => s.setScreen);
@@ -340,86 +343,41 @@ function ProfilePicker({ onPick, onAttach, onAuth, onSkip }: {
   const selected = ws.selected ? ws.list.find((w) => w.name === ws.selected) ?? { name: ws.selected } : undefined;
   const cfg = ws.config && ws.config.workspace === ws.selected ? ws.config : undefined;
   const configured = cfg?.configured === true;
-  const binding = [cfg?.provider, cfg?.model].filter(Boolean).join(" / ");
-  const resumable = selected ? sessionsInWorkspace(sessions, selected) : sessions;
-  const row = "flex gap-3 py-2.5 border-t hairline w-full text-left hover:bg-tint/60";
+  // A server-provisioned session has no workspace yet, so nothing to list.
+  const existing = selected ? sessionsInWorkspace(sessions, selected) : [];
   return (
-    <div className="h-full flex items-center justify-center p-6 sm:p-12 overflow-auto">
-      <Plate className="w-full max-w-[880px] flex flex-col" data-testid="session-picker">
-        <div className="flex items-baseline justify-between gap-4 px-5 py-4 border-b hairline">
-          <div className="flex items-baseline gap-3">
-            {/* The way back.  `WorkspaceScreen` routes FORWARD here and the
-                only routes back were ending a session or disconnecting, so a
-                workspace opened by mistake could only be left by leaving the
-                daemon.  Gated on the MODE rather than on `selected`: the
-                list's own "server-provisioned workspace" link arrives here
-                with nothing selected, and that is a state you may equally
-                want to back out of.  A bordered button, not a `.link` — what
-                was reported is that there is no button to find. */}
+    <div className="h-full flex justify-center p-4 sm:p-8 overflow-auto">
+      <Plate className="w-full max-w-[1400px] self-start flex flex-col" data-testid="session-picker">
+        <div className="flex flex-wrap items-center justify-between gap-4 px-5 py-4 border-b hairline">
+          <div className="flex items-baseline gap-3 min-w-0">
+            {/* The way back.  Gated on the MODE rather than on `selected`:
+                the list's own "server-provisioned workspace" link arrives
+                here with nothing selected, and that is a state you may
+                equally want to back out of. */}
             {ws.mode === "enabled" && (
-              <button
-                type="button"
-                onClick={() => setScreen("workspaces")}
-                title="Back to the workspace list"
-                className="btn btn-sm btn-quiet shrink-0"
-              >
+              <button type="button" onClick={() => setScreen("workspaces")} title="Back to the workspace list" className="btn btn-sm btn-quiet shrink-0">
                 <span aria-hidden="true">←</span> Workspaces
               </button>
             )}
-            {selected ? <><span className="kicker tracking-[0.16em]">Workspace</span><span className="font-mono text-[16px]">{selected.name}</span></> : <span className="display text-[20px]">New session</span>}
+            {selected
+              ? <><span className="kicker tracking-[0.16em]">Workspace</span><span className="font-mono text-[16px] truncate">{selected.name}</span></>
+              : <span className="display text-[20px]">New session</span>}
           </div>
-          {configured && <div className="font-mono text-xs text-text-muted">{binding} <span className="text-steel">from .env</span></div>}
+          <button type="button" onClick={onSkip} className="link text-[13px]">Open workspace with no session <span aria-hidden="true">→</span></button>
         </div>
-        <div className={`grid grid-cols-1 ${resumable.length > 0 ? "md:grid-cols-[1fr_1px_1fr]" : ""}`}>
-          {resumable.length > 0 && (
-            <>
-              <div className="px-5 py-4 flex flex-col gap-2.5" aria-label="Resume a session">
-                <div className="kicker kicker-muted text-[12px]">Resume</div>
-                <div className="flex flex-col max-h-72 overflow-auto">
-                  {/* Editable here too, and not read-only as first drawn: if
-                      you forgot to write a note on the way out, the picker is
-                      exactly where you notice, and attaching just to add one
-                      costs a runner spawn -- the cost going BFF-side was
-                      meant to avoid. */}
-                  {resumable.map((sess) => <SessionRow key={sess.id} sess={sess} onAttach={onAttach} />)}
-                </div>
-              </div>
-              <div className="hidden md:block bg-divider" aria-hidden="true" />
-            </>
-          )}
-          <div className="px-5 py-4 flex flex-col gap-2.5">
-            <div className="kicker kicker-muted text-[12px]">{resumable.length > 0 ? "Start new — agent profile" : "Agent profile"}</div>
-            <div className="flex flex-col max-h-80 overflow-auto">
-              <button type="button" onClick={() => onPick(null)} className={row}>
-                <span className="font-mono text-[11px] text-steel w-[22px] shrink-0 pt-0.5">01</span>
-                <span className="min-w-0"><span className="block font-mono text-[13px]">default</span><span className="block text-[13px] text-text-muted">{configured ? binding : "the workspace .env provider and model"}</span></span>
-              </button>
-              {profiles.map((p, i) => (
-                <button key={p.name} type="button" onClick={() => onPick(p.name)} className={row}>
-                  <span className="font-mono text-[11px] text-steel w-[22px] shrink-0 pt-0.5">{String(i + 2).padStart(2, "0")}</span>
-                  <span className="min-w-0"><span className="block font-mono text-[13px]">{p.name}</span><span className="block text-[13px] text-text-muted">{[p.description, [p.provider, p.model].filter(Boolean).join("/")].filter(Boolean).join(" · ")}</span></span>
-                </button>
-              ))}
-            </div>
+        <div className="grid grid-cols-1 min-[900px]:grid-cols-[repeat(4,minmax(0,1fr))] min-[900px]:min-h-[460px]">
+          <SessionBoard sessions={existing} onAttach={onAttach} />
+          <NewSessionColumn onStart={onStart} />
+        </div>
+        {auth.length > 0 && !configured && (
+          <div className="flex flex-wrap items-center gap-3 px-5 py-3 border-t hairline" aria-label="Sign in to a provider">
+            <span className="kicker kicker-muted">No credentials yet?</span>
+            {auth.map((c) => (
+              <button key={c.name} type="button" onClick={() => onAuth(`${c.name} login`)} className="font-mono text-xs border hairline px-2 py-1 hover:border-steel hover:text-steel" title={c.description}>{c.name} login</button>
+            ))}
+            <span className="text-[12px] text-text-muted">Sign in first; the daemon then offers to open the session for you.</span>
           </div>
-        </div>
-        <div className="px-5 pt-3 border-t hairline" aria-label="Files for the session">
-          <div className="kicker kicker-muted text-[12px] mb-1.5">Files for the session</div>
-          <AttachStrip always hint={selected ? "Staged into this workspace before the session opens." : "Staged into the session's workspace as soon as it is provisioned."} />
-        </div>
-        <div className="flex flex-wrap items-center gap-3 px-5 py-3 border-t hairline">
-          {auth.length > 0 && !configured && (
-            <div className="flex flex-wrap items-center gap-3" aria-label="Sign in to a provider">
-              <span className="kicker kicker-muted">Sign in first</span>
-              {auth.map((c) => (
-                <button key={c.name} type="button" onClick={() => onAuth(`${c.name} login`)} className="font-mono text-xs border hairline px-2 py-1 hover:border-steel hover:text-steel" title={c.description}>{c.name} login</button>
-              ))}
-              <span className="text-[12px] text-text-muted">No provider configured yet? Sign in first; the daemon then offers to open the session for you.</span>
-            </div>
-          )}
-          <span className="flex-1" />
-          <button type="button" onClick={onSkip} className="link text-[13px]">Go to the prompt without a session</button>
-        </div>
+        )}
       </Plate>
     </div>
   );
@@ -452,13 +410,26 @@ export function SessionScreen() {
     return unsub;
   }, []);
 
-  const startSession = async (profile: string | null) => {
+  const startSession = async (profile: string | null, model?: ModelChoice, files: StagedDraft[] = []) => {
     setPicking(false);
     setCreating(true);
     try {
+      // The picker's staged files are handed to the staging module only
+      // now -- nothing reached the workspace while they were being chosen
+      // -- and ``openSessionWithQueued`` puts them on disk before
+      // ``session.new`` when a workspace is selected.
+      stageDrafts(files);
+      // ``default`` with the workspace .env's own binding is no override:
+      // the daemon resolves exactly that from the .env.  Dropping it keeps
+      // the common case working against a daemon below 1.26, which has no
+      // ``--model`` flag.
+      const cfg = useJaato.getState().workspace.config;
+      if (!profile && model && cfg?.provider === model.provider && cfg?.model === model.model) model = undefined;
       // ``createSession`` (app/actions) rather than the SDK call: a new
       // session starts on an empty pane, as an attach always has.
-      await openSessionWithQueued(() => createSession(profile));
+      await openSessionWithQueued(() => createSession(profile, model));
+    } catch (err) {
+      useJaato.getState().addSystemBlock(selected, String(err), "error");
     } finally {
       setCreating(false);
     }
@@ -502,7 +473,7 @@ export function SessionScreen() {
     return (
       <div className="h-full flex flex-col">
         {postAuthCard}
-        <div className="flex-1 min-h-0"><ProfilePicker onPick={startSession} onAttach={resumeSession} onAuth={runAuth} onSkip={() => setPicking(false)} /></div>
+        <div className="flex-1 min-h-0"><ProfilePicker onStart={(p, m, f) => { void startSession(p, m, f); }} onAttach={resumeSession} onAuth={runAuth} onSkip={() => setPicking(false)} /></div>
         {paletteOpen && <CommandPalette />}
       </div>
     );

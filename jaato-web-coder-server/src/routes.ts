@@ -275,6 +275,16 @@ export function createRouter(deps: RouterDeps): Handler {
       if (rest.length === 1 && rest[0] === "bindings" && method === "GET") {
         return json(res, 200, { bindings: github.listBindings(s.sub) });
       }
+      // Read-only listings for the New-workspace picker.  GitHub is reached
+      // with the user's token server-side; only names and flags come back.
+      if (rest.length === 1 && rest[0] === "repos" && method === "GET") {
+        const url = new URL(req.url ?? "/", config.publicUrl);
+        return json(res, 200, await github.listRepos(s.sub, url.searchParams.get("account")));
+      }
+      if (rest.length === 1 && rest[0] === "branches" && method === "GET") {
+        const url = new URL(req.url ?? "/", config.publicUrl);
+        return json(res, 200, await github.listBranches(s.sub, url.searchParams.get("repo") ?? "", url.searchParams.get("account")));
+      }
       if (rest.length === 1 && rest[0] === "default" && method === "POST") {
         if (!sameOrigin()) return json(res, 403, { error: "cross-site request refused" });
         const body = await readJsonObject(req);
@@ -306,6 +316,8 @@ export function createRouter(deps: RouterDeps): Handler {
       return text(res, 404, "not found");
     } catch (e) {
       if (e instanceof GitHubBindError) return json(res, e.status, { error: e.message });
+      if (e instanceof GitHubGrantRevoked) return json(res, 409, { error: "the GitHub grant is no longer valid; reconnect GitHub", reconnect: true });
+      if (e instanceof GitHubApiError) { log(`github listing failed for ${s.user}: ${e.message}`); return json(res, 502, { error: "GitHub could not be reached; try again" }); }
       if (e instanceof BodyError) return json(res, 400, { error: e.message });
       throw e;
     }

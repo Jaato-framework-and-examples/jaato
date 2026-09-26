@@ -178,12 +178,17 @@ reload the user's loaded sessions so a live `gh` call then fails. Design:
 | `/api/github/default` | POST | `{id}` — make one account the default; same-origin only |
 | `/api/github/disconnect` | POST | `{id}` — delete + revoke a grant, reload the user's sessions; same-origin only |
 | `/api/github/bind` | POST | `{workspace, account_id\|null}` — bind/clear an account on a workspace; same-origin only |
+| `/api/github/repos?account=` | GET | `{account: {id, login}, repos: [{fullName, private, defaultBranch, pushedAt?}]}` — every repository the account's App installations reach (default account when `account` is omitted), de-duplicated, most recently pushed first, capped at 1000, cached 60s; 404 with no connected account |
+| `/api/github/branches?repo=owner/name&account=` | GET | `{repo, defaultBranch?, branches}` (capped at 500); 400 when `repo` is not `owner/name` |
 | everything else | GET | the bundle |
 
 The four credential routes exist only with a `credentials:` block; otherwise
 they are 404 and `config.json` names no `credentialsUrl`. The GitHub routes
 answer to a `github:` block the same way — and there is deliberately **no**
 `/api/github/<id>/reveal`: a GitHub token travels this server → daemon only.
+The two listing routes call GitHub with the user's token server-side and
+return names and flags only; a dead grant answers 409 `{reconnect: true}`,
+an unreachable GitHub 502.
 
 ## Develop
 

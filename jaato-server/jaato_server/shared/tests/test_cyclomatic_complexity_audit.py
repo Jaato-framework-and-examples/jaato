@@ -103,7 +103,6 @@ BASELINE: Dict[str, int] = {
     "jaato-server/jaato_server/server/command_router.py::CommandRouter._dispatch": 28,
     "jaato-server/jaato_server/server/command_router.py::CommandRouter._execute_daemon_command": 16,
     "jaato-server/jaato_server/server/command_router.py::CommandRouter._handle_session_bind_wake": 18,
-    "jaato-server/jaato_server/server/command_router.py::CommandRouter._handle_session_new": 18,
     "jaato-server/jaato_server/server/command_router.py::CommandRouter.get_command_list": 52,
     "jaato-server/jaato_server/server/core.py::JaatoServer._build_profile_session_kwargs": 17,
     # 92 -> 91 by #1069.  The budget-rung notification needed a branch in
