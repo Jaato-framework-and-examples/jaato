@@ -13,5 +13,6 @@
   "notebook_boundary_kind": null,
   "protocol_version": "",
   "server_version": "",
-  "probe": null
+  "probe": null,
+  "apparmor_grants": null
 }

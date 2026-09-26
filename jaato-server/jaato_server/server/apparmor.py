@@ -49,6 +49,7 @@ can confine tools without importing ``server.apparmor``.
 
 import asyncio
 import concurrent.futures
+import copy
 from concurrent.futures import ThreadPoolExecutor
 import logging
 import os
@@ -1426,10 +1427,12 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
 
         profile_name = self.profile_name_for_confinement_id(render_id)
         profile_path = self._profile_dir / profile_name
+        composition: Dict[str, Any] = {}
         profile_content = self._render_profile(
             render_id, workspace_path, config_root, env_file,
             requested_fragments=requested_fragments,
             plugin_rules=plugin_rules,
+            composition_out=composition,
         )
 
         try:
@@ -1464,7 +1467,45 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
             return False
 
         logger.info("Loaded AppArmor profile %s", profile_name)
+        self._record_grants(session_id, render_id, profile_name,
+                            requested_fragments, plugin_rules, composition)
         return True
+
+    def _record_grants(
+        self,
+        session_id: str,
+        render_id: str,
+        profile_name: str,
+        requested_fragments: Optional[List[str]],
+        plugin_rules: Optional[List[str]],
+        composition: Dict[str, Any],
+    ) -> None:
+        """Record what the profile just loaded grants, for diagnostics (#1326).
+
+        Keyed by the confinement id the session's runner identity carries.
+        Only after a successful load, so a record never describes a profile
+        the kernel refused.
+        """
+        by_plugin = getattr(plugin_rules, "by_plugin", None)
+        if by_plugin is None:
+            by_plugin = {"(unattributed)": list(plugin_rules)} if plugin_rules else {}
+        record_grants(profile_name, {
+            "template_version": self._TEMPLATE_VERSION,
+            "profile_name": profile_name,
+            # A list, even empty, opts into fragment-only exec in //child
+            # (v18); None keeps the broad in-PATH exec (v34).
+            "exec_scope": "unscoped" if requested_fragments is None else "scoped",
+            "requested_fragments": (
+                None if requested_fragments is None else list(requested_fragments)),
+            "fragments": composition.get("fragments", []),
+            "missing_fragments": composition.get("missing_fragments", []),
+            "unreadable_fragments": composition.get("unreadable_fragments", []),
+            "plugin_rules": [
+                {"plugin": name, "rules": list(rules)}
+                for name, rules in sorted(by_plugin.items()) if rules
+            ],
+            "refs_dir": str(self._refs_dir(session_id)),
+        })
 
     # ──────────────────────────────────────────────────────────────────
     # Phase 4 §4.3.4 — sub-AppArmor profile for isolated subagents
@@ -2546,52 +2587,63 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
             lines.append(f"{indent}{rule}")
         return "\n".join(lines)
 
-    def _render_profile(
+    @staticmethod
+    def _inline_fragments(
+        selected_names: List[str],
+        discovered: Dict[str, Tuple[str, Path]],
+        found_in: Dict[str, List[str]],
+    ) -> Tuple[List[str], List[Dict[str, Any]], List[str]]:
+        """Read and indent each selected fragment (phase 3 of composition).
+
+        Returns the inline chunks, a record of each fragment inlined (name,
+        tier, file, rule lines, lower tiers it shadows, #1326), and the
+        names that could not be read.
+        """
+        chunks: List[str] = []
+        composed: List[Dict[str, Any]] = []
+        unreadable: List[str] = []
+        for name in selected_names:
+            tier_label, path = discovered[name]
+            try:
+                body = path.read_text(encoding="utf-8")
+            except OSError as exc:
+                logger.warning(
+                    "Skipping unreadable AppArmor fragment %s: %s",
+                    path, exc,
+                )
+                unreadable.append(name)
+                continue
+            composed.append({
+                "name": name, "tier": tier_label, "path": str(path),
+                "rules": _rule_lines(body),
+                # Also present in a lower tier, which this one shadows.
+                "shadows": [t for t in found_in.get(name, []) if t != tier_label],
+            })
+            # Indent each line by two spaces to match the
+            # surrounding profile body's indentation.  Strip
+            # trailing whitespace per-line, preserve blanks.
+            indented = "\n".join(
+                f"  {line.rstrip()}" if line.strip() else ""
+                for line in body.splitlines()
+            )
+            chunks.append(
+                f"  # === {tier_label}/{path.name} ===\n{indented}"
+            )
+        return chunks, composed, unreadable
+
+    def _compose_extension_fragments(
         self,
         session_id: str,
         workspace_path: str,
-        config_root: Optional[str] = None,
-        env_file: Optional[str] = None,
-        requested_fragments: Optional[List[str]] = None,
-        plugin_rules: Optional[List[str]] = None,
+        requested_fragments: Optional[List[str]],
+        composition_out: Optional[Dict[str, Any]],
     ) -> str:
-        """Render the profile template with session-specific values.
+        """The extension-fragment text inlined into a rendered profile.
 
-        The template uses Python ``str.format()`` placeholders.
-        Sibling workspaces are implicitly denied by AppArmor's default-
-        deny policy — only the session's own ``workspace_path`` is in
-        the allow list.
-
-        Piece 1 (2026-05-14): ``requested_fragments`` scopes which
-        AppArmor fragments compose into the rendered profile.
-        ``None`` (default) keeps the pre-Piece-1 behaviour — every
-        fragment under the search path is composed.  A list (possibly
-        empty) restricts composition to fragments whose basename
-        matches an entry.
+        Split out of :meth:`_render_profile` (#1326), which now also fills
+        ``composition_out`` with what was inlined; the logic and its
+        comments are unchanged.
         """
-        if self._premium_root:
-            premium_rules = (
-                f"{self._premium_root}/         r,\n"
-                f"  {self._premium_root}/**       r,"
-            )
-        else:
-            premium_rules = "# (no premium package installed)"
-
-        if config_root:
-            cr = str(Path(config_root).expanduser().resolve())
-            config_root_rules = (
-                f"{cr}/         r,\n"
-                f"  {cr}/**       r,"
-            )
-        else:
-            config_root_rules = "# (no client-supplied config_root override)"
-
-        if env_file:
-            ef = str(Path(env_file).expanduser().resolve())
-            env_file_rule = f"{ef} r,"
-        else:
-            env_file_rule = "# (no client-supplied env_file)"
-
         # Inline extension-supplied fragments at render time.  Walks
         # three tiers of search paths and concatenates the contents
         # below the header in PROFILE_TEMPLATE.  Each fragment's
@@ -2641,17 +2693,20 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
         # earlier ones — cache wins over workspace wins over user.
         # The tier label is retained for the inlined comment.
         discovered: Dict[str, Tuple[str, Path]] = {}
+        found_in: Dict[str, List[str]] = {}
         for tier_label, fragments_dir in SEARCH_TIERS:
             if not fragments_dir.is_dir():
                 continue
             for path in sorted(fragments_dir.glob("*.rules")):
                 discovered[path.stem] = (tier_label, path)
+                found_in.setdefault(path.stem, []).append(tier_label)
 
         # Phase 2: decide which fragments to include.  ``None`` =
         # all discovered, in tier-iteration insertion order
         # (user → workspace → cache, alphabetical within tier).
         # Otherwise filter by basename in the operator's declaration
         # order.
+        unknown: set = set()
         if requested_fragments is None:
             selected_names = list(discovered.keys())
         else:
@@ -2682,30 +2737,73 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
         )
 
         # Phase 3: inline the selected fragments' bodies.
-        chunks: List[str] = []
-        for name in selected_names:
-            tier_label, path = discovered[name]
-            try:
-                body = path.read_text(encoding="utf-8")
-            except OSError as exc:
-                logger.warning(
-                    "Skipping unreadable AppArmor fragment %s: %s",
-                    path, exc,
-                )
-                continue
-            # Indent each line by two spaces to match the
-            # surrounding profile body's indentation.  Strip
-            # trailing whitespace per-line, preserve blanks.
-            indented = "\n".join(
-                f"  {line.rstrip()}" if line.strip() else ""
-                for line in body.splitlines()
-            )
-            chunks.append(
-                f"  # === {tier_label}/{path.name} ===\n{indented}"
-            )
+        chunks, composed, unreadable = self._inline_fragments(
+            selected_names, discovered, found_in)
         extension_fragments_inline = (
             "\n\n".join(chunks) if chunks else "  # (no extension fragments)"
         )
+        if composition_out is not None:
+            composition_out.update({
+                "fragments": composed,
+                "missing_fragments": sorted(unknown),
+                "unreadable_fragments": unreadable,
+            })
+        return extension_fragments_inline
+
+    def _render_profile(
+        self,
+        session_id: str,
+        workspace_path: str,
+        config_root: Optional[str] = None,
+        env_file: Optional[str] = None,
+        requested_fragments: Optional[List[str]] = None,
+        plugin_rules: Optional[List[str]] = None,
+        composition_out: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """Render the profile template with session-specific values.
+
+        ``composition_out``, when given, is filled with which extension
+        fragments were inlined, from which tier and file, and which were
+        requested and not found (#1326).  Filled here rather than
+        re-derived by the caller so the record matches what was rendered.
+
+        The template uses Python ``str.format()`` placeholders.
+        Sibling workspaces are implicitly denied by AppArmor's default-
+        deny policy — only the session's own ``workspace_path`` is in
+        the allow list.
+
+        Piece 1 (2026-05-14): ``requested_fragments`` scopes which
+        AppArmor fragments compose into the rendered profile.
+        ``None`` (default) keeps the pre-Piece-1 behaviour — every
+        fragment under the search path is composed.  A list (possibly
+        empty) restricts composition to fragments whose basename
+        matches an entry.
+        """
+        if self._premium_root:
+            premium_rules = (
+                f"{self._premium_root}/         r,\n"
+                f"  {self._premium_root}/**       r,"
+            )
+        else:
+            premium_rules = "# (no premium package installed)"
+
+        if config_root:
+            cr = str(Path(config_root).expanduser().resolve())
+            config_root_rules = (
+                f"{cr}/         r,\n"
+                f"  {cr}/**       r,"
+            )
+        else:
+            config_root_rules = "# (no client-supplied config_root override)"
+
+        if env_file:
+            ef = str(Path(env_file).expanduser().resolve())
+            env_file_rule = f"{ef} r,"
+        else:
+            env_file_rule = "# (no client-supplied env_file)"
+
+        extension_fragments_inline = self._compose_extension_fragments(
+            session_id, workspace_path, requested_fragments, composition_out)
 
         # Phase 0 (template v20, 2026-05-16): plugin-contribution hook.
         # Splice plugin-contributed rules into base + sub-profiles.  When
@@ -3326,6 +3424,82 @@ def _plugin_configs_with_managed_defaults(
     return configs, bool(home or venv)
 
 
+class PluginRules(list):
+    """The rules plugins contributed, flat, plus who contributed each (#1326).
+
+    A ``list`` so every caller that renders or digests the rules is
+    unchanged; ``by_plugin`` is read only by the grant record the
+    diagnostics panel shows, which is the one reader that needs to know
+    which plugin asked for a rule.  A rule two plugins contributed appears
+    once in the list and under both plugins.
+    """
+
+    def __init__(self, rules: List[str], by_plugin: Dict[str, List[str]]):
+        super().__init__(rules)
+        self.by_plugin: Dict[str, List[str]] = by_plugin
+
+
+# ------------------------------------------------------------------
+# What a provisioned profile granted (#1326)
+# ------------------------------------------------------------------
+#
+# Recorded when a profile is provisioned, keyed by confinement id, so the
+# diagnostics panel can show what the kernel was handed rather than
+# re-deriving it later from fragment files that may have changed since.
+# Daemon-wide rather than per ``AppArmorManager``, because the WS server and
+# the IPC session manager each hold their own manager and the diagnostics
+# verb is served by the session manager for both.  In memory: after a daemon
+# restart a boundary reads as "not recorded" until it is provisioned again.
+
+_GRANT_RECORDS: Dict[str, Dict[str, Any]] = {}
+_GRANT_RECORDS_LOCK = threading.Lock()
+
+
+def _rule_lines(body: str) -> List[str]:
+    """The rule lines of a fragment or rule list: no blanks, no comments."""
+    return [ln.strip() for ln in body.splitlines()
+            if ln.strip() and not ln.strip().startswith("#")]
+
+
+def record_grants(confinement_id: str, record: Dict[str, Any]) -> None:
+    """Store what the profile for *confinement_id* was provisioned with."""
+    with _GRANT_RECORDS_LOCK:
+        _GRANT_RECORDS[confinement_id] = record
+
+
+def recorded_grants(confinement_id: Optional[str]) -> Optional[Dict[str, Any]]:
+    """What *confinement_id*'s profile was provisioned with, or ``None``.
+
+    A copy, plus one live part: the reference grants ``selectReferences``
+    adds mid-session are listed from the boundary's refs directory now,
+    since they are written after provisioning.
+    """
+    if not confinement_id:
+        return None
+    with _GRANT_RECORDS_LOCK:
+        stored = _GRANT_RECORDS.get(confinement_id)
+    if stored is None:
+        return None
+    record = copy.deepcopy(stored)
+    references: List[Dict[str, Any]] = []
+    refs_dir = record.pop("refs_dir", None)
+    if refs_dir:
+        try:
+            entries = sorted(Path(refs_dir).iterdir())
+        except OSError:
+            entries = []
+        for entry in entries:
+            if not entry.is_file() or entry.suffix == ".tmp":
+                continue
+            try:
+                body = entry.read_text(encoding="utf-8")
+            except OSError:
+                body = ""
+            references.append({"ref_id": entry.name, "rules": _rule_lines(body)})
+    record["references"] = references
+    return record
+
+
 def resolve_plugin_apparmor_rules(
     server: Any,
     profile: Optional[Any],
@@ -3379,6 +3553,7 @@ def resolve_plugin_apparmor_rules(
     if profile is None and not defaulted:
         return None
     rules: List[str] = []
+    by_plugin: Dict[str, List[str]] = {}
 
     registry = getattr(server, "registry", None)
     if registry is not None:
@@ -3426,6 +3601,7 @@ def resolve_plugin_apparmor_rules(
                 continue
             if contributed:
                 rules.extend(contributed)
+                by_plugin.setdefault(plugin_name, []).extend(contributed)
 
     # Phase 3b (template v25, 2026-05-16) — gc rules.
     # gc plugins live in ``profile.gc`` (a single GCProfileConfig), not in
@@ -3436,7 +3612,9 @@ def resolve_plugin_apparmor_rules(
     if getattr(profile, "gc", None) is not None:
         try:
             from jaato_server.shared.plugins.gc import get_gc_apparmor_rules
-            rules.extend(get_gc_apparmor_rules())
+            gc_rules = get_gc_apparmor_rules()
+            rules.extend(gc_rules)
+            by_plugin.setdefault("gc", []).extend(gc_rules)
         except Exception:  # noqa: BLE001 — boundary surface
             logger.exception(
                 "gc apparmor rules failed for session %s — skipping",
@@ -3457,7 +3635,7 @@ def resolve_plugin_apparmor_rules(
                 deduped.append(r)
         rules = deduped
 
-    return rules if rules else None
+    return PluginRules(rules, by_plugin) if rules else None
 
 
 # ------------------------------------------------------------------

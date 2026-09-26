@@ -100,6 +100,31 @@ describe("the check", () => {
     expect(diag.diagnosticsSummary(d)).toBe("could not check");
   });
 
+  it("the AppArmor grants the daemon recorded reach the store (#1326)", async () => {
+    const grants = {
+      recorded: true, exec_scope: "scoped", requested_fragments: ["java"], declared_by: "builder",
+      fragments: [{ name: "java", tier: "workspace", path: "/ws/j.rules", rules: ["/usr/bin/java ix,"] }],
+      missing_fragments: [], plugin_rules: [], references: [],
+    };
+    getDiagnostics.mockResolvedValue({
+      ok: true, confinement_id: "jaato-ws-mine-abc", sandbox_mode: "apparmor", protocol_version: "1.26",
+      server_version: "0.30.0", probe: null, apparmor_grants: grants,
+    });
+    await diag.refreshDiagnostics();
+    const d = useJaato.getState().diagnostics;
+    expect(d.apparmorGrants).toEqual(grants);
+    expect(diag.grantsSummary(d.apparmorGrants!)).toBe("exec: scoped — 1 fragment (declared by builder)");
+  });
+
+  it("a daemon before 1.26 sends no grants, and the store holds none", async () => {
+    getDiagnostics.mockResolvedValue({
+      ok: true, confinement_id: "jaato-ws-mine-abc", sandbox_mode: "apparmor", protocol_version: "1.25",
+      server_version: "0.30.0", probe: null,
+    });
+    await diag.refreshDiagnostics();
+    expect(useJaato.getState().diagnostics.apparmorGrants).toBeNull();
+  });
+
   it("no runner to probe: the record still loads, probe is null", async () => {
     getDiagnostics.mockResolvedValue({
       ok: true, confinement_id: "", sandbox_mode: null, protocol_version: "1.25", server_version: "0.30.0", probe: null,

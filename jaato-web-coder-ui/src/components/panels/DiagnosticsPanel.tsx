@@ -11,6 +11,9 @@
  *     protocol/build -- in the neutral "record" tone, because these are
  *     CACHED facts the daemon stamped at spawn and never re-measures for
  *     this call;
+ *     The AppArmor grants (#1326) belong here too: what the profile was
+ *     provisioned with, recorded when it was loaded, collapsed to one line
+ *     until opened;
  *   - the LIVE RE-CHECK -- what ``probe_confinement_now`` measured on the
  *     runner's own threads at the moment of the last answer -- in its own
  *     bordered block with a distinct heading and a timestamp, so a reader
@@ -24,8 +27,8 @@
  */
 import { useEffect } from "react";
 import { useJaato } from "@/store/store";
-import type { DiagnosticsThread } from "@/store/types";
-import { refreshDiagnostics } from "@/app/diagnostics";
+import type { DiagnosticsGrants, DiagnosticsThread } from "@/store/types";
+import { grantsSummary, refreshDiagnostics } from "@/app/diagnostics";
 
 function since(ms: number | null): string {
   if (ms == null) return "";
@@ -138,6 +141,7 @@ export function DiagnosticsPanel() {
               <Row label="server" value={d.serverVersion} />
               {d.consumption && <SpendRow consumption={d.consumption} />}
             </div>
+            {d.apparmorGrants && <GrantsBlock grants={d.apparmorGrants} />}
           </section>
           <section aria-label="Live confinement check" className="border hairline p-2">
             <p className="kicker kicker-muted m-0 mb-1">Live re-check (just measured)</p>
@@ -146,6 +150,102 @@ export function DiagnosticsPanel() {
         </>
       )}
     </div>
+  );
+}
+
+function RuleList({ rules }: { rules: string[] }) {
+  if (rules.length === 0) return <p className="m-0 pl-3 text-[11px] text-text-muted">(no rules)</p>;
+  return <pre className="m-0 pl-3 whitespace-pre-wrap break-words font-mono text-[11px] text-text-muted">{rules.join("\n")}</pre>;
+}
+
+/** One contributor: its label always visible, its rule text one more click away. */
+function Contributor({ label, detail, rules }: { label: string; detail?: string; rules: string[] }) {
+  return (
+    <li>
+      <details>
+        <summary className="cursor-pointer font-mono text-[12px]">
+          {label}
+          <span className="text-text-muted">{detail ? ` · ${detail}` : ""} · {rules.length} rule{rules.length === 1 ? "" : "s"}</span>
+        </summary>
+        <RuleList rules={rules} />
+      </details>
+    </li>
+  );
+}
+
+/**
+ * What the AppArmor profile grants (#1326).  Collapsed to the exec-scope
+ * line; opened, one row per contributor (extension fragments with their
+ * tier and file, plugins, reference grants), each expanding to its rule
+ * text.  Fragments the profile asked for and did not find are listed in
+ * the warning tone, since a missing grant is the usual cause of a
+ * confined command failing.  Record tone throughout: this was recorded
+ * when the profile was loaded, not measured now.
+ */
+function GrantsBlock({ grants }: { grants: DiagnosticsGrants }) {
+  const fragments = grants.fragments ?? [];
+  const plugins = grants.plugin_rules ?? [];
+  const references = grants.references ?? [];
+  const missing = grants.missing_fragments ?? [];
+  const unreadable = grants.unreadable_fragments ?? [];
+  return (
+    <details className="mt-1.5" aria-label="AppArmor grants">
+      <summary className="cursor-pointer text-[12px]">
+        <span className="text-text-muted">AppArmor grants </span>
+        <span className="font-mono">{grantsSummary(grants)}</span>
+      </summary>
+      <div className="mt-1 flex flex-col gap-1.5 pl-2">
+        {!grants.recorded && (
+          <p className="m-0 text-[12px] text-text-muted">
+            This daemon has no record of what the profile was loaded with (it was loaded before the daemon started). What is shown is what the session's profile requested.
+          </p>
+        )}
+        {grants.recorded && grants.template_version != null && (
+          <p className="m-0 font-mono text-[11px] text-text-muted">{grants.profile_name} · template v{grants.template_version}</p>
+        )}
+        {missing.length > 0 && (
+          <p className="m-0 text-[12px] text-warning" role="status">
+            Requested and not found: <span className="font-mono">{missing.join(", ")}</span>
+          </p>
+        )}
+        {unreadable.length > 0 && (
+          <p className="m-0 text-[12px] text-warning">
+            Found but unreadable: <span className="font-mono">{unreadable.join(", ")}</span>
+          </p>
+        )}
+        {fragments.length > 0 && (
+          <div>
+            <p className="m-0 text-[11px] uppercase tracking-[0.08em] text-text-muted">Extension fragments</p>
+            <ul className="m-0 pl-0 list-none">
+              {fragments.map((f) => (
+                <Contributor
+                  key={`${f.tier}/${f.name}`}
+                  label={f.name}
+                  detail={`${f.tier} · ${f.path}${f.shadows?.length ? ` · shadows ${f.shadows.join(", ")}` : ""}`}
+                  rules={f.rules}
+                />
+              ))}
+            </ul>
+          </div>
+        )}
+        {plugins.length > 0 && (
+          <div>
+            <p className="m-0 text-[11px] uppercase tracking-[0.08em] text-text-muted">Plugin rules</p>
+            <ul className="m-0 pl-0 list-none">
+              {plugins.map((p) => <Contributor key={p.plugin} label={p.plugin} rules={p.rules} />)}
+            </ul>
+          </div>
+        )}
+        {references.length > 0 && (
+          <div>
+            <p className="m-0 text-[11px] uppercase tracking-[0.08em] text-text-muted">Reference grants (current)</p>
+            <ul className="m-0 pl-0 list-none">
+              {references.map((r) => <Contributor key={r.ref_id} label={r.ref_id} rules={r.rules} />)}
+            </ul>
+          </div>
+        )}
+      </div>
+    </details>
   );
 }
 

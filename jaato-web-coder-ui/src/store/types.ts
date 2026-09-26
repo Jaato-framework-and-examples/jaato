@@ -558,6 +558,32 @@ export interface DiagnosticsProbe {
 }
 
 /**
+ * What the session's AppArmor profile was provisioned with (#1326,
+ * ``DiagnosticsResultEvent.apparmor_grants``, protocol 1.26).  Recorded
+ * by the daemon when the profile was loaded, so it is a RECORD field:
+ * rendered in the record tone, never as something just measured.
+ * ``references`` is the one live part (listed from the boundary's refs
+ * directory at the moment of the answer).
+ */
+export interface DiagnosticsGrants {
+  /** ``false`` when the daemon has no record (the profile was loaded
+   *  before it started, or on a path that does not record). */
+  recorded: boolean;
+  template_version?: number;
+  profile_name?: string;
+  exec_scope?: "scoped" | "unscoped";
+  requested_fragments?: string[] | null;
+  /** The profile in the ``inherits:`` chain that declared
+   *  ``apparmor_fragments``: ``null`` when none did, ``""`` when unknown. */
+  declared_by?: string | null;
+  fragments?: { name: string; tier: string; path: string; rules: string[]; shadows?: string[] }[];
+  missing_fragments?: string[];
+  unreadable_fragments?: string[];
+  plugin_rules?: { plugin: string; rules: string[] }[];
+  references?: { ref_id: string; rules: string[] }[];
+}
+
+/**
  * The rail's Diagnostics section (#1294, ``app/diagnostics.ts``): the
  * caller's own attached session, self-diagnosed. Per session, and reset
  * with the rest of the session state.
@@ -592,6 +618,9 @@ export interface DiagnosticsState {
   /** The last live re-probe -- ``null`` before any successful answer, or
    *  when that session carries no runner to probe. */
   probe: DiagnosticsProbe | null;
+  /** What the AppArmor profile grants (#1326); ``null`` when the session
+   *  names no profile, or the daemon predates protocol 1.26. */
+  apparmorGrants: DiagnosticsGrants | null;
   /** ``Date.now()`` of the answer that populated the fields above --
    *  when the record was last read AND the probe was last measured, since
    *  one call answers both. */
