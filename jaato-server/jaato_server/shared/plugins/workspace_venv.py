@@ -45,11 +45,20 @@ module (``kernel_main``) run under the tool-venv interpreter.  It now gets
 ``PYTHONPATH``, so a cell's ``!python -m pytest`` starts as clean as a
 ``cli`` command does.  See ``SubprocessKernelBackend._kernel_argv``.
 
-Why those dirs are plain paths and not ``site.addsitedir``: a tool-venv
-created from the runner venv resolves its base to the system prefix, so
-``--system-site-packages`` never reaches jaato; and ``addsitedir`` would run
-every editable ``.pth`` finder in the base dir, dragging unrelated src dirs
-(jaato_premium, a client's own package) in with it.
+Why those dirs are plain paths and not ``site.addsitedir``: ``addsitedir``
+would run every editable ``.pth`` finder in the base dir, dragging unrelated
+src dirs (jaato_premium, a client's own package) in with it.
+
+``--system-site-packages`` is the other way in, and it is only safe when the
+runner is itself a venv (see :func:`_system_site_packages_are_the_runners`).
+A tool-venv made from a runner VENV resolves its base to the interpreter that
+venv was made from, so the system site holds OS packages and not jaato.  A
+runner installed straight into a base interpreter -- a container's system
+Python, a CI image -- has jaato in that interpreter's own site-packages, so
+``--system-site-packages`` would hand the tool-venv the daemon's whole
+install, the #1322 defect by another door.  In that case the flag is not
+passed, and an existing venv's ``pyvenv.cfg`` is switched off on the next
+``ensure``.
 
 Contract
 --------
@@ -297,6 +306,60 @@ def _write_pip_bridge(venv_path: str) -> None:
         f.write("".join(f"{ln}\n" for ln in lines))
 
 
+def _system_site_packages_are_the_runners(base_python: Optional[str] = None) -> bool:
+    """Whether a venv made from *base_python* would see the runner's install.
+
+    True when the interpreter is a BASE interpreter (not a venv): its own
+    site-packages are what ``--system-site-packages`` exposes, and that is
+    where the runner's jaato and dependencies live.  False when it is a venv:
+    a venv made from it resolves its system site to the interpreter IT was
+    made from, which does not hold the runner's packages (#1322).
+
+    *base_python* ``None`` (or this process's own interpreter) is answered
+    in-process; any other interpreter is asked.
+    """
+    if base_python in (None, sys.executable):
+        return sys.prefix == sys.base_prefix
+    try:
+        out = subprocess.run(
+            [base_python, "-c", "import sys; print(sys.prefix == sys.base_prefix)"],
+            capture_output=True, text=True, timeout=30, check=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return True   # unknown: the safe answer is "do not include"
+    return out.stdout.strip() == "True"
+
+
+def _exclude_system_site_packages(venv_path: str) -> None:
+    """Switch an existing venv's ``include-system-site-packages`` off.
+
+    For a venv created before #1322 by a runner whose system site holds its
+    own install.  Only ever switches it OFF: a venv someone made without the
+    system site is not given one.
+    """
+    cfg = os.path.join(venv_path, "pyvenv.cfg")
+    try:
+        with open(cfg, encoding="utf-8") as f:
+            lines = f.readlines()
+    except OSError:
+        return
+    changed = False
+    for i, line in enumerate(lines):
+        key, sep, value = line.partition("=")
+        if (sep and key.strip() == "include-system-site-packages"
+                and value.strip().lower() == "true"):
+            lines[i] = "include-system-site-packages = false\n"
+            changed = True
+    if changed:
+        try:
+            with open(cfg, "w", encoding="utf-8") as f:
+                f.writelines(lines)
+        except OSError as exc:
+            logger.warning(
+                "workspace_venv: could not stop %s seeing the runner's own "
+                "packages (%s)", venv_path, exc)
+
+
 def _venv_pip(venv_path: str) -> str:
     """Absolute path to the venv's ``pip`` console script."""
     exe = "pip.exe" if os.name == "nt" else "pip"
@@ -388,8 +451,9 @@ def pip_apparmor_rules(
 def ensure_workspace_venv(venv_path: str, base_python: Optional[str] = None) -> str:
     """Create the workspace venv if absent + materialize pip.
 
-    Creation is idempotent (an existing ``pyvenv.cfg`` short-circuits it), but
-    two fix-ups run **every** call so a venv created by another party is brought
+    Creation is idempotent (an existing ``pyvenv.cfg`` short-circuits it;
+    an existing venv whose system site is the runner's own install has that
+    switched off, #1322), but two fix-ups run **every** call so a venv created by another party is brought
     up to spec: (1) ``_ensure_venv_pip`` writes the ``<venv>/bin/pip`` shim if
     missing (so a bare ``pip`` / ``!pip`` uses the tool-venv, not system pip —
     also needs the AppArmor ``ix`` grant, see ``workspace_venv_bin_exec_rule``);
@@ -407,19 +471,25 @@ def ensure_workspace_venv(venv_path: str, base_python: Optional[str] = None) -> 
         subprocess.CalledProcessError: If ``python -m venv`` fails.
         RuntimeError: If the venv has no resolvable site-packages dir.
     """
+    leaks_runner = _system_site_packages_are_the_runners(base_python)
     if not os.path.exists(os.path.join(venv_path, "pyvenv.cfg")):
         os.makedirs(os.path.dirname(venv_path) or ".", exist_ok=True)
+        # --system-site-packages only when the system site is not the
+        # runner's own install (#1322); see the module docstring.
+        system_site = [] if leaks_runner else ["--system-site-packages"]
         subprocess.run(
             # --without-pip: venv creation runs ensurepip internally, which
             # extracts a wheel to /tmp — denied in the confined runner.  We
             # provide pip via the pip bridge (import) + a `bin/pip` shim
             # instead (_ensure_venv_pip), so the venv needs no pip of its own.
             [base_python or sys.executable, "-m", "venv",
-             "--system-site-packages", "--without-pip", venv_path],
+             *system_site, "--without-pip", venv_path],
             check=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
+    elif leaks_runner:
+        _exclude_system_site_packages(venv_path)
     _ensure_venv_pip(venv_path)
     _write_pip_bridge(venv_path)
     return venv_path

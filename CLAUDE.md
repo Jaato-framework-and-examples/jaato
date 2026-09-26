@@ -8845,7 +8845,11 @@ The kernel, the one process that IS jaato, gets those dirs in its own launch
 argv (a `-c` bootstrap, `SubprocessKernelBackend._kernel_argv`), not in
 `PYTHONPATH`, so a cell's `!python -m pytest` starts as clean as a `cli`
 command. The `.pth` keeps its old name, so an existing venv is migrated on the
-next `ensure`. What still sees the daemon's jaato: code a notebook cell runs
+next `ensure`. `--system-site-packages` was the other door: when the runner is
+installed into a BASE interpreter (a container's system Python, a CI image),
+that interpreter's own site-packages hold jaato, so the flag is passed only
+when the runner is itself a venv, and an existing venv has it switched off in
+`pyvenv.cfg` (only ever off). What still sees the daemon's jaato: code a notebook cell runs
 in-process, because the kernel imports it. Guard:
 `jaato_server/shared/tests/test_tool_venv_does_not_shadow_the_checkout_1322.py`.
 

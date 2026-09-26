@@ -23,7 +23,11 @@ launch argv.  Pinned here:
 - ``pip`` works there and does not report the daemon's packages;
 - pip installs into the venv, offline, from a wheel;
 - the notebook kernel still starts under the venv, and a process a cell
-  starts does not inherit jaato's import dirs.
+  starts does not inherit jaato's import dirs;
+- a runner installed into a BASE interpreter (a container's system Python,
+  a CI image) does not hand its install over through
+  ``--system-site-packages`` either: the flag is not passed, and an existing
+  venv has it switched off.
 """
 
 from __future__ import annotations
@@ -48,6 +52,20 @@ _VENV = "jaato-server/jaato_server/shared/plugins/workspace_venv.py"
 _KERNEL = "jaato-server/jaato_server/shared/plugins/notebook/backends/subprocess_kernel.py"
 
 REVERSIONS = [
+    Reversion(
+        target=_VENV,
+        find='        system_site = [] if leaks_runner else ["--system-site-packages"]\n',
+        replace='        system_site = ["--system-site-packages"]\n',
+        test="test_a_base_interpreter_runner_creates_no_system_site_venv",
+        because="a runner in a base interpreter hands its install over via the system site",
+    ),
+    Reversion(
+        target=_VENV,
+        find="    elif leaks_runner:\n        _exclude_system_site_packages(venv_path)\n",
+        replace="",
+        test="test_an_existing_venv_stops_seeing_a_base_runners_packages",
+        because="a venv created before #1322 keeps seeing the runner's install",
+    ),
     Reversion(
         target=_VENV,
         find="            lines.append(bridge_dir)\n",
@@ -248,3 +266,65 @@ def test_a_process_a_cell_starts_does_not_inherit_the_kernel_bridge(tmp_path):
             "kernel's bridge")
     finally:
         be.shutdown()
+
+
+# ---- a runner installed into a base interpreter --------------------------------
+
+def _created_with(monkeypatch, tmp_path, leaks_runner):
+    from jaato_server.shared.plugins import workspace_venv as wv
+    monkeypatch.setattr(wv, "_system_site_packages_are_the_runners",
+                        lambda base_python=None: leaks_runner)
+    argv = []
+    real_run = subprocess.run
+
+    def run(cmd, *a, **k):
+        if "-m" in cmd and "venv" in cmd:
+            argv.extend(cmd)
+        return real_run(cmd, *a, **k)
+
+    monkeypatch.setattr(wv.subprocess, "run", run)
+    venv = str(tmp_path / "tool-venv")
+    ensure_workspace_venv(venv)
+    return argv, venv
+
+
+def test_a_base_interpreter_runner_creates_no_system_site_venv(monkeypatch, tmp_path):
+    argv, venv = _created_with(monkeypatch, tmp_path, leaks_runner=True)
+    assert argv and "--system-site-packages" not in argv
+    cfg = open(os.path.join(venv, "pyvenv.cfg")).read()
+    assert "include-system-site-packages = false" in cfg
+
+
+def test_a_venv_runner_keeps_the_system_site(monkeypatch, tmp_path):
+    # A runner venv's system site is the OS interpreter's, not the runner's.
+    argv, _ = _created_with(monkeypatch, tmp_path, leaks_runner=False)
+    assert "--system-site-packages" in argv
+
+
+def _cfg_with(venv, value):
+    os.makedirs(os.path.join(venv, "lib", "python3.99", "site-packages"))
+    with open(os.path.join(venv, "pyvenv.cfg"), "w") as f:
+        f.write(f"home = /x\ninclude-system-site-packages = {value}\nversion = 3.99\n")
+
+
+def test_an_existing_venv_stops_seeing_a_base_runners_packages(monkeypatch, tmp_path):
+    from jaato_server.shared.plugins import workspace_venv as wv
+    monkeypatch.setattr(wv, "_system_site_packages_are_the_runners",
+                        lambda base_python=None: True)
+    venv = str(tmp_path / "old-venv")
+    _cfg_with(venv, "true")
+    ensure_workspace_venv(venv)
+    cfg = open(os.path.join(venv, "pyvenv.cfg")).read()
+    assert "include-system-site-packages = false" in cfg
+    assert "home = /x" in cfg and "version = 3.99" in cfg
+
+
+def test_an_existing_venv_is_never_switched_on(monkeypatch, tmp_path):
+    from jaato_server.shared.plugins import workspace_venv as wv
+    monkeypatch.setattr(wv, "_system_site_packages_are_the_runners",
+                        lambda base_python=None: False)
+    venv = str(tmp_path / "old-venv")
+    _cfg_with(venv, "false")
+    ensure_workspace_venv(venv)
+    assert "include-system-site-packages = false" in open(
+        os.path.join(venv, "pyvenv.cfg")).read()
