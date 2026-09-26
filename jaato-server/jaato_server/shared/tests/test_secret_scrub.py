@@ -7,18 +7,14 @@ own os.environ — and the #863 grammar layered on it: ``default`` / ``none`` /
 resolver the plugins go through.
 """
 
-import json
 import logging
-import os
 
 import pytest
 
 from jaato_server.shared.secret_scrub import (
     DEFAULT_SECRET_ENV_PATTERNS,
     SCRUB_SURFACES,
-    WORKSPACE_SCRUB_CONFIG_RELPATH,
     is_scrub_disabled,
-    load_workspace_scrub_override,
     matches_secret,
     normalize_scrub_patterns,
     resolve_scrub_patterns,
@@ -222,61 +218,3 @@ def test_run_command_exemption_survives_the_glob(monkeypatch):
     r = run_command('sh -c \'echo "${MYAPP_TOKEN:-EMPTY}"\'',
                     scrub_env=["*_TOKEN", "!MYAPP_TOKEN"])
     assert "tok" in r.stdout
-
-
-# ---- workspace-level scrub override file (#1305 follow-up) ----------------
-#
-# A bare web-coder workspace (``.env`` only, no ``.jaato/profiles/*.yaml``)
-# never reaches ``inject_scrub_secret_env`` — there is no profile object to
-# call it with — so it had no way to declare the ``!GH_TOKEN`` exemption
-# ``jaato-scaffold validate``'s own ``gh_token_scrubbed_inert`` finding asks
-# for.  ``.jaato/scrub_secret_env.json`` closes that, the same way
-# ``.jaato/gc.json`` closes the equivalent gap for GC strategy.
-
-def _write_scrub_config(workspace: str, value) -> None:
-    path = os.path.join(workspace, WORKSPACE_SCRUB_CONFIG_RELPATH)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as handle:
-        json.dump({"scrub_secret_env": value}, handle)
-
-
-def test_load_workspace_scrub_override_missing_file_is_none(tmp_path):
-    assert load_workspace_scrub_override(str(tmp_path)) is None
-
-
-def test_load_workspace_scrub_override_no_workspace_is_none():
-    assert load_workspace_scrub_override(None) is None
-    assert load_workspace_scrub_override("") is None
-
-
-def test_load_workspace_scrub_override_reads_the_declared_value(tmp_path):
-    _write_scrub_config(str(tmp_path), ["default", "!GH_TOKEN"])
-    assert load_workspace_scrub_override(str(tmp_path)) == ["default", "!GH_TOKEN"]
-
-
-def test_load_workspace_scrub_override_malformed_json_is_none(tmp_path, caplog):
-    path = os.path.join(str(tmp_path), WORKSPACE_SCRUB_CONFIG_RELPATH)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as handle:
-        handle.write("{not json")
-    with caplog.at_level(logging.WARNING, logger="jaato_server.shared.secret_scrub"):
-        assert load_workspace_scrub_override(str(tmp_path)) is None
-    assert any("could not be read as JSON" in r.message for r in caplog.records)
-
-
-def test_load_workspace_scrub_override_non_object_top_level_is_none(tmp_path, caplog):
-    path = os.path.join(str(tmp_path), WORKSPACE_SCRUB_CONFIG_RELPATH)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as handle:
-        json.dump(["default", "!GH_TOKEN"], handle)
-    with caplog.at_level(logging.WARNING, logger="jaato_server.shared.secret_scrub"):
-        assert load_workspace_scrub_override(str(tmp_path)) is None
-    assert any("must be a JSON object" in r.message for r in caplog.records)
-
-
-def test_load_workspace_scrub_override_no_key_is_none(tmp_path):
-    _write_scrub_config_raw = os.path.join(str(tmp_path), WORKSPACE_SCRUB_CONFIG_RELPATH)
-    os.makedirs(os.path.dirname(_write_scrub_config_raw), exist_ok=True)
-    with open(_write_scrub_config_raw, "w", encoding="utf-8") as handle:
-        json.dump({"unrelated": True}, handle)
-    assert load_workspace_scrub_override(str(tmp_path)) is None

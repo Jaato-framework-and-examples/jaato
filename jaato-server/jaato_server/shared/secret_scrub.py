@@ -70,10 +70,8 @@ scrub.
 from __future__ import annotations
 
 import fnmatch
-import json
 import logging
-import os
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -281,62 +279,3 @@ def resolve_scrub_patterns(value: Any, *, surface: str) -> Tuple[str, ...]:
             surface, surface, SCRUB_HINT,
         )
     return patterns
-
-
-#: The workspace-level file a session with NO profile at all can still use to
-#: declare an exemption (#1305 follow-up).  ``inject_scrub_secret_env`` folds a
-#: PROFILE's ``scrub_secret_env`` into each enabled surface, but a web-coder
-#: workspace created bare (``.env`` + no ``.jaato/profiles/*.yaml``) never
-#: reaches that function at all — there is no profile object to call it with.
-#: A workspace whose GitHub account is bound this way (``GH_TOKEN=app://github``
-#: in ``.env``, #1226) would have the token resolved into the runner's own
-#: environment and then silently stripped again by the default-on scrub
-#: (#863) before any ``cli`` / ``interactive_shell`` subprocess — ``gh``,
-#: ``git`` — ever saw it, with no profile anywhere to declare the
-#: ``!GH_TOKEN`` exemption ``jaato-scaffold validate``'s own
-#: ``gh_token_scrubbed_inert`` finding already asks for.
-#:
-#: This file closes that gap the same way ``.jaato/gc.json`` closes the
-#: equivalent one for GC strategy: read only when NEITHER a per-surface
-#: ``plugin_configs.<surface>.scrub_secret_env`` NOR a profile-level
-#: ``scrub_secret_env`` declared anything (``PluginRegistry._augment_plugin_config``
-#: applies it via ``setdefault``, so an explicit value at either of those
-#: layers still wins outright).
-WORKSPACE_SCRUB_CONFIG_RELPATH = os.path.join(".jaato", "scrub_secret_env.json")
-
-
-def load_workspace_scrub_override(workspace_path: Optional[str]) -> Any:
-    """The raw ``scrub_secret_env`` value declared in a workspace's own file.
-
-    Reads ``<workspace_path>/.jaato/scrub_secret_env.json``'s
-    ``"scrub_secret_env"`` key and returns it UNNORMALIZED — the caller
-    (``_augment_plugin_config``) only ever uses it as a ``setdefault`` value
-    that eventually reaches :func:`resolve_scrub_patterns`, which is the one
-    place that normalizes and fails closed.  Returns ``None`` — "nothing
-    declared here" — for a missing file, an unreadable one, a file that is
-    not a JSON object, or one that carries no ``scrub_secret_env`` key.  A
-    malformed value under that key (wrong type, bad glob shape) is NOT
-    caught here: it is handed through as-is, so it fails closed exactly the
-    way a malformed profile value does, at the one door
-    :func:`resolve_scrub_patterns` already guards.
-    """
-    if not workspace_path:
-        return None
-    path = os.path.join(workspace_path, WORKSPACE_SCRUB_CONFIG_RELPATH)
-    try:
-        with open(path, "r", encoding="utf-8") as handle:
-            data = json.load(handle)
-    except FileNotFoundError:
-        return None
-    except (OSError, ValueError) as exc:
-        logger.warning(
-            "%s: could not be read as JSON (%s) — ignoring, as though the "
-            "file were absent", path, exc,
-        )
-        return None
-    if not isinstance(data, dict):
-        logger.warning(
-            "%s: top level must be a JSON object; ignoring", path,
-        )
-        return None
-    return data.get("scrub_secret_env")
