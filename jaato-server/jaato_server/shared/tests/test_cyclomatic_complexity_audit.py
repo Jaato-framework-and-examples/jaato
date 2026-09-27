@@ -115,7 +115,6 @@ BASELINE: Dict[str, int] = {
     # express those.
     "jaato-server/jaato_server/server/core.py::JaatoServer._build_send_message_notification_handler._handle": 58,
     "jaato-server/jaato_server/server/core.py::JaatoServer._check_auth_completion": 17,
-    "jaato-server/jaato_server/server/core.py::JaatoServer._emit_conversation_replay": 19,
     "jaato-server/jaato_server/server/core.py::JaatoServer._setup_permission_hooks.on_permission_requested": 35,
     # ``_start_model_thread.model_thread`` was here at 40 (36 -> 41 by #654's
     # completion-gap predicate, 41 -> 40 by #877 lifting the continuation
@@ -193,7 +192,7 @@ BASELINE: Dict[str, int] = {
     "jaato-server/jaato_server/server/tests/test_the_heal_path_says_what_it_did.py::test_every_cache_writer_either_logs_or_is_named_here": 17,
     "jaato-server/jaato_server/server/tests/test_transport_timeout_does_not_kill_the_session.py::test_the_terminal_assignment_is_unreachable_for_transport_timeouts": 16,
     "jaato-server/jaato_server/server/wake_ingress.py::process_wake": 19,
-    "jaato-server/jaato_server/server/websocket.py::JaatoWSServer._handle_message": 30,
+    "jaato-server/jaato_server/server/websocket.py::JaatoWSServer._handle_message": 16,
     "jaato-server/jaato_server/server/websocket.py::JaatoWSServer._handle_message_daemon": 35,
     "jaato-server/jaato_server/server/websocket.py::JaatoWSServer._register_client_tools": 25,
     "jaato-server/jaato_server/server/websocket.py::JaatoWSServer.set_command_router._apparmor_pre_init_hook": 17,

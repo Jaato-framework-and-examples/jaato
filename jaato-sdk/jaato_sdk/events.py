@@ -515,7 +515,20 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 # ``MODEL_NAME``, no server bootstrap -- so the session picker can hand a
 # key to the session it is about to start.  An older daemon ignores the
 # field and rewrites the provider binding, so a client gates it on 1.27.
-PROTOCOL_VERSION = "1.27"
+# 1.28 -- paged, rendered history (``history.page.request`` +
+# ``HistoryPageEvent``).  The transcript as renderable UNITS -- a user
+# prompt, a segment of model text formatted by the output pipeline, a
+# reasoning part, one message's tool calls -- cut into pages from the END,
+# never splitting a fenced block, a table or a notebook cell.  A cursor
+# (``"<index>:<digest>"``) walks older; a cursor the history no longer
+# contains answers ``stale`` rather than some other page.
+# ``PresentationContext.history_replay`` (``full`` / ``paged`` / ``none``)
+# picks what an ATTACH sends; ``paged`` replaces the full event replay with
+# the latest page.  The full replay now goes through the formatter pipeline
+# too.  A NEW verb (the 1.7 rule): both SDKs refuse below
+# ``MIN_HISTORY_PAGE_PROTOCOL``.  ``history_replay`` sent to an older daemon
+# is ignored and it replays the old way -- safe, merely unpaged.
+PROTOCOL_VERSION = "1.28"
 
 
 # =============================================================================
@@ -680,6 +693,8 @@ class EventType(str, Enum):
     # History (Client <-> Server)
     HISTORY_REQUEST = "history.request"
     HISTORY = "history"
+    HISTORY_PAGE_REQUEST = "history.page.request"  # Client -> Server (1.28)
+    HISTORY_PAGE = "history.page"  # Server -> Client: one page of rendered units (1.28)
 
     # Client configuration (Client -> Server)
     CLIENT_CONFIG = "client.config"
@@ -3223,6 +3238,77 @@ class HistoryEvent(Event):
     # alone even though the messages validated fine.
 
 
+class HistoryPageRequest(Event):
+    """Ask for one page of the rendered transcript, newest first (1.28).
+
+    Pages are cut from the END of the history: an empty ``before`` asks
+    for the most recent page, and each answer's ``before`` cursor asks for
+    the page just older than it.  The daemon never splits a renderable
+    unit (a fenced block, a table, a notebook cell, one message's tool
+    calls) across two pages, so ``max_lines`` is a target, not a cap: a
+    single unit taller than it is a page by itself.
+
+    Attributes:
+        agent_id: Whose transcript.
+        before: A cursor from a previous :class:`HistoryPageEvent`;
+            ``""`` for the latest page.
+        max_lines: Page budget in rendered lines; ``0`` = the daemon's
+            default (120), capped at 2000.
+        request_id: Echoed on the answer.
+    """
+    type: EventType = Field(default=EventType.HISTORY_PAGE_REQUEST)
+    agent_id: str = "main"
+    before: str = ""
+    max_lines: int = 0
+    request_id: str = ""
+
+
+class HistoryPageEvent(Event):
+    """One page of the transcript as renderable units (1.28).
+
+    The answer to :class:`HistoryPageRequest`, and -- request_id ``""`` --
+    what an attach sends INSTEAD of the full event replay when the
+    client's presentation asks for ``history_replay: "paged"``.
+
+    Each entry of ``units`` is, oldest first::
+
+        {"id": "<cursor>", "kind": "user"|"model"|"thinking"|"tools",
+         "group": "<id>", "turn": <int>, "lines": <int>,
+         "text": "...",                       # all kinds but tools
+         "tools": [{"call_id", "tool_name", "tool_args",
+                    "tool_class", "success"}]}  # tools only
+
+    ``model`` text has been through the output formatter pipeline, exactly
+    as the live stream is (``<j-code>``, ``<j-table>``...).  Consecutive
+    units sharing a ``group`` are segments of ONE text part -- join them
+    into one block.  ``success`` is ``null`` for a call no result was
+    recorded for.
+
+    Attributes:
+        agent_id: Whose transcript.
+        request_id: The request this answers; ``""`` for the attach page.
+        units: The page, oldest first.
+        before: Cursor for the next OLDER page; ``""`` when none.
+        has_more: ``before`` is non-empty.
+        total_units: Units in the whole history.
+        stale: The requested cursor no longer names any unit (the history
+            was rewritten under it); ``units`` is empty -- re-request the
+            latest page.
+        ok: ``False`` when no page could be produced; see ``error``.
+        error: Why, when ``ok`` is ``False``.
+    """
+    type: EventType = Field(default=EventType.HISTORY_PAGE)
+    agent_id: str = "main"
+    request_id: str = ""
+    units: List[Dict[str, Any]] = Field(default_factory=list)
+    before: str = ""
+    has_more: bool = False
+    total_units: int = 0
+    stale: bool = False
+    ok: bool = True
+    error: str = ""
+
+
 # =============================================================================
 # SDK Feature Parity — Session-primitive verbs (Client <-> Server)
 #
@@ -4192,6 +4278,20 @@ class PresentationContext(BaseModel):
     # all others → NARRATIVE.  Clients may override explicitly.
     communication_style: Optional['CommunicationStyle'] = None
 
+    # ── History replay on attach (1.28) ─────────────────────────
+    # How an ATTACH shows this client the conversation so far:
+    #   "full"  -- replay the whole transcript as output events, top to
+    #              bottom (the TUI's redraw);
+    #   "paged" -- send only the most recent page as a HistoryPageEvent;
+    #              older pages on demand via HistoryPageRequest;
+    #   "none"  -- replay nothing (a surface whose history is already on
+    #              screen, e.g. Telegram).
+    # ``None`` keeps the historical default: CHAT -> "none", every other
+    # client type -> "full".
+    history_replay: Optional[str] = None
+    # Line budget for the attach page under "paged"; ``None`` = default.
+    history_page_lines: Optional[int] = None
+
     # ──────────────────────────────────────────────────────────
 
     def can_render_media(self, mime_type: Optional[str]) -> bool:
@@ -4840,6 +4940,8 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.TOOL_EXECUTE_RESULT.value: ToolExecuteResultEvent,
     EventType.HISTORY_REQUEST.value: HistoryRequest,
     EventType.HISTORY.value: HistoryEvent,
+    EventType.HISTORY_PAGE_REQUEST.value: HistoryPageRequest,
+    EventType.HISTORY_PAGE.value: HistoryPageEvent,
     EventType.CLIENT_CONFIG.value: ClientConfigRequest,
     EventType.MID_TURN_PROMPT_QUEUED.value: MidTurnPromptQueuedEvent,
     EventType.MID_TURN_PROMPT_INJECTED.value: MidTurnPromptInjectedEvent,

@@ -107,6 +107,11 @@ INTENTIONALLY_ABSENT = {
         "protocol 1.24); the recovery wrapper forwards the METHOD and lets "
         "the inner client refuse a daemon that would deliver the text "
         "without the files -- same reasoning as MIN_SESSION_MESSAGE_PROTOCOL",
+    "MIN_HISTORY_PAGE_PROTOCOL":
+        "class constant on IPCClient gating request_history_page (paged "
+        "rendered history, protocol 1.28); the recovery wrapper forwards the "
+        "METHOD and lets the inner client refuse a daemon too old to serve "
+        "it -- same reasoning as MIN_MEMORY_VERBS_PROTOCOL above",
     "MIN_DIAGNOSTICS_PROTOCOL":
         "class constant on IPCClient gating get_diagnostics (#1294, "
         "protocol 1.25); the recovery wrapper forwards the METHOD via "

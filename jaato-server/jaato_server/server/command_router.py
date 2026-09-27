@@ -36,6 +36,15 @@ _SESSION_MESSAGING_VERBS = {
     "session.message": "_handle_session_message",
 }
 
+#: The two history requests, by class name.  A table rather than a second
+#: ``isinstance`` branch for the same reason as the verb table above, and so
+#: ``_handle_history_request`` keeps its no-silent-exit shape (every guard
+#: has an ``else``) rather than growing an early return for the page verb.
+_HISTORY_HANDLERS = {
+    "HistoryRequest": "_handle_history_request",
+    "HistoryPageRequest": "_handle_history_page_request",
+}
+
 
 def _mapping_attachments(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
     """The ``attachments`` a payload carries, mapping entries only.
@@ -557,10 +566,11 @@ class CommandRouter:
             self._handle_workspace_mismatch_response(client_id, event)
             return
 
-        # Handle HistoryRequest
-        from jaato_sdk.events import HistoryRequest, HistoryEvent
-        if isinstance(event, HistoryRequest):
-            self._handle_history_request(client_id, event)
+        # Handle HistoryRequest / HistoryPageRequest (1.28)
+        from jaato_sdk.events import HistoryRequest, HistoryPageRequest
+        if isinstance(event, (HistoryRequest, HistoryPageRequest)):
+            getattr(self, _HISTORY_HANDLERS[type(event).__name__])(
+                client_id, event)
             return
 
         # Handle daemon-level plugin commands (session-independent plugins).
@@ -2451,6 +2461,30 @@ class CommandRouter:
     # ------------------------------------------------------------------
     # History
     # ------------------------------------------------------------------
+
+    def _handle_history_page_request(self, client_id: str, event) -> None:
+        """Answer ``HistoryPageRequest`` with one ``HistoryPageEvent`` (1.28).
+
+        Always answers, echoing ``request_id``: with the page, or with
+        ``ok=False`` and the reason when this connection has no session --
+        a paging client must never wait out a page that will not come.
+        """
+        from jaato_sdk.events import HistoryPageEvent
+        session = self._session_manager.get_client_session(client_id)
+        server = getattr(session, "server", None) if session else None
+        if server is None:
+            answer = HistoryPageEvent(
+                agent_id=event.agent_id, request_id=event.request_id,
+                ok=False,
+                error="history is unavailable: this connection has no "
+                      "session attached.",
+            )
+        else:
+            answer = server.history_page(
+                event.agent_id, before=event.before,
+                max_lines=event.max_lines, request_id=event.request_id,
+            )
+        self._event_sink.send_event(client_id, answer)
 
     def _handle_history_request(self, client_id: str, event) -> None:
         """Handle ``HistoryRequest``."""

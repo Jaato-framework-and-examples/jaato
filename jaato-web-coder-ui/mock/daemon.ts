@@ -102,6 +102,10 @@ interface Client {
    *  an older daemon's ``undefined``, which is what the store's
    *  ``?? null`` fallback exists to preserve. */
   policy: { effective_default: string; suspension_scope: string | null; auto_allow_housekeeping: boolean };
+  /** ``PresentationContext.history_replay`` from this connection's
+   *  ``client.config`` (protocol 1.28): ``paged`` makes an attach answer with
+   *  the latest ``history.page`` instead of waiting for ``history.request``. */
+  historyReplay?: string;
   /**
    * A ``workspace.files.stage_request`` in progress: the daemon reads one
    * BINARY frame per declared file, in order, before answering with
@@ -427,6 +431,63 @@ const HISTORIES: Record<string, Record<string, unknown>[]> = {
     { role: "model", parts: [{ type: "text", text: "Noted." }] },
   ],
 };
+
+/**
+ * A long conversation for scroll-back (protocol 1.28): forty turns, the
+ * last one carrying a table in the daemon's RENDERED form -- which is what
+ * a history page's ``model`` units hold, since the daemon runs them through
+ * its output formatter.
+ */
+HISTORIES["20260913_070000"] = Array.from({ length: 40 }, (_, i) => [
+  { role: "user", parts: [{ type: "text", text: `question number ${i + 1}` }] },
+  { role: "model", parts: [{ type: "text", text: i === 39 ? "The latest answer:\n\n<j-table>\n<j-thead><j-tr><j-th>k</j-th><j-th>v</j-th></j-tr></j-thead>\n<j-tr><j-td>a</j-td><j-td>1</j-td></j-tr>\n</j-table>\n" : `answer number ${i + 1}` }] },
+]).flat();
+
+/** ``HistoryPageEvent.units`` for a history above, in the daemon's shape. */
+function historyUnits(history: Record<string, unknown>[]): Record<string, unknown>[] {
+  const outcomes = new Map<string, boolean>();
+  for (const m of history) for (const p of (m.parts as Record<string, unknown>[]) ?? []) {
+    if (p.type === "function_response") outcomes.set(String(p.call_id), p.is_error !== true);
+  }
+  const units: Record<string, unknown>[] = [];
+  let turn = -1;
+  history.forEach((m, mi) => {
+    const parts = (m.parts as Record<string, unknown>[]) ?? [];
+    if (m.role === "user") {
+      turn += 1;
+      const text = parts.map((p) => String(p.text ?? "")).join("");
+      units.push({ kind: "user", group: `m${mi}`, turn, text, lines: text.split("\n").length });
+    } else if (m.role === "model") {
+      parts.forEach((p, pi) => {
+        if (p.type === "text") units.push({ kind: "model", group: `m${mi}p${pi}`, turn, text: String(p.text), lines: String(p.text).split("\n").length });
+      });
+      const calls = parts.filter((p) => p.type === "function_call");
+      if (calls.length) units.push({ kind: "tools", group: `m${mi}c`, turn, lines: calls.length, tools: calls.map((p) => ({ call_id: p.id, tool_name: p.name, tool_args: p.args ?? {}, success: outcomes.get(String(p.id)) ?? null })) });
+    }
+  });
+  return units.map((u, i) => ({ ...u, id: `${i}:u${i}` }));
+}
+
+/** One page, cut from the END by a line budget -- the daemon's ``paginate``. */
+function historyPage(c: Client, before: string, maxLines: number, requestId: string): Record<string, unknown> {
+  const units = historyUnits((c.sessionId && HISTORIES[c.sessionId]) || []);
+  const budget = maxLines > 0 ? maxLines : 120;
+  let end = units.length;
+  if (before) {
+    end = units.findIndex((u) => u.id === before);
+    if (end < 0) return { type: "history.page", agent_id: "main", request_id: requestId, units: [], before: "", has_more: false, total_units: units.length, stale: true, ok: true, error: "" };
+  }
+  let start = end;
+  let used = 0;
+  while (start > 0) {
+    const cost = Math.max(1, Number(units[start - 1]!.lines ?? 1));
+    if (start < end && used + cost > budget) break;
+    used += cost;
+    start -= 1;
+  }
+  const cursor = start > 0 ? String(units[start]!.id) : "";
+  return { type: "history.page", agent_id: "main", request_id: requestId, units: units.slice(start, end), before: cursor, has_more: !!cursor, total_units: units.length, stale: false, ok: true, error: "" };
+}
 
 function send(c: Client, ev: Record<string, unknown>): void {
   if (c.ws.readyState !== c.ws.OPEN) return;
@@ -761,7 +822,7 @@ wss.on("connection", (ws, req) => {
     installedIntegrations: new Set(),
     deletedWorkspaces: new Set(),
   };
-  send(c, { type: "connected", protocol_version: "1.27", server_info: { server_version: "mock-0.0.1", client_id: randomUUID(), max_message_size: MAX_MESSAGE_SIZE, stage_per_file_limit: Math.min(STAGE_PER_FILE_LIMIT, MAX_MESSAGE_SIZE), stage_total_limit: STAGE_TOTAL_LIMIT } });
+  send(c, { type: "connected", protocol_version: "1.28", server_info: { server_version: "mock-0.0.1", client_id: randomUUID(), max_message_size: MAX_MESSAGE_SIZE, stage_per_file_limit: Math.min(STAGE_PER_FILE_LIMIT, MAX_MESSAGE_SIZE), stage_total_limit: STAGE_TOTAL_LIMIT } });
 
   ws.on("message", async (raw, isBinary) => {
     if (c.staging) {
@@ -775,7 +836,14 @@ wss.on("connection", (ws, req) => {
     try { ev = JSON.parse(String(raw)); } catch { return; }
     const type = String(ev.type);
     switch (type) {
-      case "client.config": break;
+      case "client.config": {
+        const pres = (ev.presentation as Record<string, unknown> | undefined) ?? {};
+        c.historyReplay = typeof pres.history_replay === "string" ? pres.history_replay : undefined;
+        break;
+      }
+      case "history.page.request":
+        send(c, historyPage(c, String(ev.before ?? ""), Number(ev.max_lines ?? 0), String(ev.request_id ?? "")));
+        break;
       case "workspace.files.stage_request": {
         const specs = ((ev.files as { name: string; size: number }[] | undefined) ?? []).map((f) => ({ name: String(f.name ?? ""), size: Number(f.size ?? 0) }));
         const workspaceId = String(ev.workspace_id ?? "");
@@ -967,6 +1035,9 @@ wss.on("connection", (ws, req) => {
           // policy so the plate goes on agreeing with the bar.
           c.policy = { effective_default: "allow", suspension_scope: null, auto_allow_housekeeping: false };
           send(c, { type: "permission.status", ...c.policy });
+          // Protocol 1.28: a client that declared ``history_replay: "paged"``
+          // gets the latest page with the attach, instead of a full replay.
+          if (c.historyReplay === "paged") send(c, historyPage(c, "", 12, ""));
         } else if (cmd === "session.profiles") {
           // ``bootstrap-fail`` is a scenario profile (#1304 §6): picking it
           // exercises the RunnerBootstrapFailed path above instead of a

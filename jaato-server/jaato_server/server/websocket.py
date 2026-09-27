@@ -2670,41 +2670,59 @@ class JaatoWSServer:
                 session_env=session_env,
             )
 
-        # Route by event type
-        if isinstance(event, SendMessageRequest):
-            # Capture context for thread (ContextVars don't propagate to threads)
-            if self._jaato_server and self._workspace_manager:
-                selected = self._workspace_manager.get_selected_workspace(client_id=client_id)
-                ctx_workspace = selected.path if selected else None
-                ctx_session_env = self._jaato_server.get_all_session_env()
-                ctx_session_id = selected.name if selected else "websocket"
-                ctx_client_id = client_id
+        await self._handle_message_standalone(client_id, event)
 
-                def run_with_context():
-                    set_logging_context(
-                        session_id=ctx_session_id,
-                        client_id=ctx_client_id,
-                        workspace_path=ctx_workspace,
-                        session_env=ctx_session_env,
-                    )
-                    try:
-                        self._jaato_server.send_message(
-                            event.text,
-                            event.attachments if event.attachments else None
-                        )
-                    finally:
-                        clear_logging_context()
+    async def _standalone_send_message(self, client_id: str, event) -> None:
+        """Run a ``SendMessageRequest`` on the standalone server, off-loop.
 
-                await asyncio.get_event_loop().run_in_executor(None, run_with_context)
-            else:
-                # Fallback without context
-                await asyncio.get_event_loop().run_in_executor(
-                    None,
-                    lambda: self._jaato_server.send_message(
+        Carries the logging context into the executor thread (ContextVars do
+        not propagate to threads).
+        """
+        # Capture context for thread (ContextVars don't propagate to threads)
+        if self._jaato_server and self._workspace_manager:
+            selected = self._workspace_manager.get_selected_workspace(client_id=client_id)
+            ctx_workspace = selected.path if selected else None
+            ctx_session_env = self._jaato_server.get_all_session_env()
+            ctx_session_id = selected.name if selected else "websocket"
+            ctx_client_id = client_id
+
+            def run_with_context():
+                set_logging_context(
+                    session_id=ctx_session_id,
+                    client_id=ctx_client_id,
+                    workspace_path=ctx_workspace,
+                    session_env=ctx_session_env,
+                )
+                try:
+                    self._jaato_server.send_message(
                         event.text,
                         event.attachments if event.attachments else None
                     )
+                finally:
+                    clear_logging_context()
+
+            await asyncio.get_event_loop().run_in_executor(None, run_with_context)
+        else:
+            # Fallback without context
+            await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: self._jaato_server.send_message(
+                    event.text,
+                    event.attachments if event.attachments else None
                 )
+            )
+
+    async def _handle_message_standalone(self, client_id: str, event) -> None:
+        """Dispatch one event to the standalone server by type.
+
+        Lifted out of :meth:`_handle_message` so the per-type table can grow
+        (``HistoryPageRequest``, 1.28) without that frozen dispatcher growing
+        with it.
+        """
+        from jaato_sdk.events import HistoryPageRequest
+        # Route by event type
+        if isinstance(event, SendMessageRequest):
+            await self._standalone_send_message(client_id, event)
 
         elif isinstance(event, PermissionResponseRequest):
             self._jaato_server.respond_to_permission(
@@ -2753,6 +2771,14 @@ class JaatoWSServer:
                         style="info",
                     )
                 )
+
+        elif isinstance(event, HistoryPageRequest):
+            # Paged, rendered history (1.28).  In daemon mode this goes
+            # through the CommandRouter; standalone has one server.
+            await self._send_to_client(client_id, self._jaato_server.history_page(
+                event.agent_id, before=event.before,
+                max_lines=event.max_lines, request_id=event.request_id,
+            ))
 
         else:
             await self._send_error(client_id, f"Unknown request type: {event.type}")

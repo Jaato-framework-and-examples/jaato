@@ -24,6 +24,7 @@ import { useJaato } from "@/store/store";
 import type { WorkspaceInfo } from "@/store/types";
 import { wireDownloadTool } from "@/app/downloads";
 import { wireMemoryRail } from "@/app/memories";
+import { HISTORY_PAGE_LINES } from "@/app/historyPaging";
 
 export interface ConnectOptions {
   url: string;
@@ -102,6 +103,12 @@ export function presentationContext(): Record<string, unknown> {
     supports_mermaid: false,
     supports_expandable_content: true,
     renderable_media: ["image/*", "audio/*"],
+    // Protocol 1.28: an attach sends the most recent history PAGE instead
+    // of replaying the whole conversation; older pages are fetched on
+    // scroll-up (``app/historyPaging.ts``).  An older daemon ignores both
+    // keys and replays the old way.
+    history_replay: "paged",
+    history_page_lines: HISTORY_PAGE_LINES,
   };
 }
 
