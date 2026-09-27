@@ -74,8 +74,9 @@ defaults are:
 | scanning a workspace's files for markers | BFF | it has filesystem access under its configured `workspace_root` |
 | installing a toolchain | BFF | outside the confined runner, with the user's consent, as the same process that already writes `.env` and `.gitconfig` |
 | writing `.lsp.json`, instruction files, the environment manifest | BFF | managed files (§6) |
-| telling live sessions | BFF (reload) + framework (self-description) | §7 |
-| hiding idle LSP tools, the self-description block, `AGENTS.md` | **framework** | every client benefits (§8) |
+| telling the agent what is installed | BFF (the `45-environment.md` managed file) | §6 |
+| answering what can run *now* | framework (`get_environment(aspect="runtime")`) | §8 |
+| hiding idle LSP tools, the `runtime` aspect, `AGENTS.md` | **framework** | every client benefits (§8) |
 
 ## 4. Toolchain binding
 
@@ -182,7 +183,7 @@ version changes, **never** clobber a copy whose marker the user deleted).
 |---|---|---|
 | `<ws>/.home/.config/mise/config.toml` | the bound tools | `# jaato-managed: toolchains vN` (TOML comment) |
 | `<ws>/.lsp.json` | the servers for the bound toolchains | `"_jaato_managed"` key; the module gains a JSON variant |
-| `<ws>/.jaato/instructions/45-environment.md` | what is installed, and how to add more | first-line HTML comment, as today |
+| `<ws>/.jaato/instructions/45-environment.md` | what is installed, how to add more, and a pointer to `get_environment(aspect="runtime")` for what is runnable now | first-line HTML comment, as today |
 | `<ws>/.jaato/instructions/30-repo-guidance.md` | a pointer to the repo's own guidance (§7) | first-line HTML comment |
 | `<ws>/.jaato/environment.json` | the machine-readable manifest §8 reads | `"_jaato_managed"` key |
 
@@ -232,20 +233,47 @@ Three pieces help every client, not only the web coder:
    exposed and answer "No LSP servers connected". That costs tokens on every
    request and misleads the model. The plugin should expose them only when
    its resolved server table is non-empty.
-2. **A "what can I run here" block.** A short standing section in the system
-   prompt, read live, so it also covers a revived session:
-   - the exec scope (#1326's record);
-   - the tool-venv;
-   - HOME;
+2. **A `runtime` aspect on `get_environment`.** The managed
+   `45-environment.md` file already tells the agent what the web coder
+   installed. It cannot say three things:
+   - **what confinement lets run.** The BFF knows what it installed, not the
+     exec scope or which fragments grant what. #1342 was coreutils that were
+     installed and not runnable;
+   - **what changed since the prompt was rendered.** A session's system
+     prompt is rendered once and persisted, and a revived session keeps it,
+     so a binding made mid-session is not in the text the model reads
+     (#1291 is the same staleness);
+   - **anything, for a client that is not the web coder.** A TUI or SDK user
+     has no BFF writing files.
+
+   All three are answered better by something the model asks for than by
+   something it is always told. `get_environment` already has aspects (`os`,
+   `shell`, `arch`, `cwd`, `network`, …) and nothing about what can run. A
+   `runtime` aspect reports, live:
+   - the exec scope and granted binaries (#1326's record);
+   - the effective subprocess `PATH`, the tool-venv and HOME;
    - the toolchains in `<ws>/.jaato/environment.json` when present.
 
-   It is the durable way a session learns about a mid-session binding. It
-   would also have stopped the assessing agent from inventing a
-   "command-name blocklist" for what was #1342.
+   It costs nothing per request, is always current (a revived session
+   included), and serves every client. The managed instruction file ends
+   with one line pointing at it.
+
+   A standing block in the system prompt was the earlier idea. It is not
+   worth its per-request cost when an instruction file plus a pull-based
+   aspect covers the same facts.
 3. **`AGENTS.md` in a checkout the user opened themselves.** The same pointer
    as §7, produced by the framework for any workspace whose root holds one.
    The web coder's version covers cloned subdirectories; this covers the TUI
    user in their own repo. If the framework does it, the BFF skips the root.
+
+**A related idea, not part of this design:** explain a denial when it
+happens. When a command fails with `Permission denied`, neither an
+instruction file nor the `runtime` aspect connects that failure to the
+environment. `cli` could, for example by adding "`/usr/bin/ls` resolves to
+`/usr/lib/cargo/bin/coreutils/ls`, which this profile does not allow" to the
+failed result. That is what would have stopped the assessing agent from
+inventing a "command-name blocklist" for what was #1342. It is a framework
+change of its own, independent of the bootstrap.
 
 ## 9. Detection and consent
 
@@ -273,7 +301,7 @@ A detection never installs anything by itself.
 | 1 | framework: hide idle LSP tools; `AGENTS.md` pointer (§8.1, §8.3) | independent of everything below |
 | 2 | BFF: basedpyright into the tool-venv, a managed `.lsp.json`, the repo-guidance pointer | Python LSP with no toolchain work |
 | 3 | BFF + page: toolchain binding, install with progress, the environment manifest, the clone-time chip | the §4 flow |
-| 4 | framework: the self-description block reading the manifest (§8.2); page: the mid-session chip | mid-session bindings |
+| 4 | framework: the `runtime` aspect reading the manifest (§8.2); page: the mid-session chip | mid-session bindings |
 | 5 | the shared cache and operator fragment (§4.3) | disk use |
 
 ## 11. Risks and open questions
