@@ -2581,6 +2581,56 @@ here was run against an enforcing kernel. Guard:
 `jaato_server/shared/tests/test_a_refused_command_names_its_cause_1348.py`,
 ten reversions.
 
+### Three Things a Fresh Workspace Told the Model Wrongly (#1357, #1358, #1359)
+
+Found by an assessment run in a new web-coder workspace (MiniMax-M3). Each
+made the model draw a false conclusion about the environment.
+
+**The notebook notice named the wrong tier (#1357).** `bootstrap_session`
+built the session, which renders the system prompt, before step 4 installed
+the `//child` transition on the executor. So `SubprocessKernelBackend
+.boundary_kind()` answered without it, and on every confined session the
+prompt said "audit tier, `import ctypes` is refused" while the kernel then ran
+in `//child` and reported the AppArmor tier. The model concluded numeric work
+could not use the notebook. Step 2d, `_prearm_child_callback`, now hands the
+callback to the registry's plugins before `_build_session`; step 4 installs
+the same callable on the executor. The rendered prompt is persisted for
+revive (#787), which is why the order matters and a later fix-up would not.
+
+**String arguments where the schema declares another type (#1358).** Some
+models send `"operations": "[{...}]"` or `"max_results": "5"`. Each plugin met
+it differently: `multiFileEdit` refused, `web_search` divided by it inside
+`ddgs`, `store_memory` iterated the string and called every tag too short
+(the model read that as a rule against hyphens).
+`jaato_server/shared/tool_arg_coercion.py` converts a top-level argument in
+`ToolExecutor._execute_impl`, before the permission gate, so a policy judges
+what will run:
+
+| Declared | Converted from |
+|---|---|
+| `integer` / `number` | a numeric string |
+| `boolean` | `"true"` / `"false"` |
+| `array` / `object` | a string that parses as JSON **of that type** |
+
+Nothing else changes: a parameter that also accepts `string` is left alone,
+a string that does not convert reaches the plugin as before, nested values
+are not touched. The schema is read from the owning plugin and cached per
+tool name (types do not change per exposure; descriptions and enums may).
+Each conversion traces `[TOOL_RUNNER] coerce: tool=… args=name:str->type`.
+`store_memory` also answers a plain-text `tags` with "tags must be an array
+of strings". Client-registered and core tools are not coerced.
+
+**A subshell before `&&` was refused (#1359).** `analyze_command` treated
+the segment after `)` as empty, so `(cd x && make) && echo OK`, `(a) || b`
+and `(a) | b` were "chain operator without a preceding command", and `cli`
+refused them before they ran. A closed subshell that contained a command now
+counts as one; `() && x`, `(a); && x` and a newline before `&&` stay refused,
+as bash refuses them.
+
+Guards: `test_the_notebook_notice_names_the_tier_it_gets_1357.py`,
+`test_string_arguments_follow_the_schema_1358.py`,
+`test_a_subshell_is_a_command_1359.py`, nine reversions between them.
+
 ### Binary Media Chunks (delivery)
 
 Binary content (audio, images, PDFs) moves in three directions, and they are

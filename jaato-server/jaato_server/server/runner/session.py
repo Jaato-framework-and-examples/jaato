@@ -1199,8 +1199,52 @@ def _stamp_daemon_identity(envelope: SessionInitEnvelope, session: Any) -> None:
         session.set_client_user_id(created_by)
 
 
+def _prearm_child_callback(
+    envelope: SessionInitEnvelope, runtime: Any,
+) -> Optional[Callable[[], None]]:
+    """Hand the //child transition to the registry's plugins early (#1357).
+
+    The session's executor, which :func:`_maybe_install_child_callback`
+    installs the callback on, is created by ``_build_session``, and that
+    same call renders the system prompt.  A plugin whose instructions
+    depend on the transition (the notebook's boundary notice) was
+    therefore asked before it had one.  This forwards the callback to
+    every exposed plugin that accepts it before the session is built;
+    step 4 then installs the same callable on the executor.
+
+    Best-effort: a failure here is logged and step 4, which fails the
+    bootstrap audibly, decides.  Only the main-runner case builds a
+    callback (see :func:`_maybe_install_child_callback`'s matrix).
+
+    Returns:
+        The callback, or ``None`` when this session installs none.
+    """
+    runner_profile = (envelope.profile_name or "").strip()
+    if not runner_profile or "//" in runner_profile:
+        return None
+    try:
+        from jaato_server.server.apparmor import make_child_transition_callback
+        child_cb = make_child_transition_callback(runner_profile)
+        registry = getattr(runtime, "_registry", None)
+        for name in (registry.list_exposed() if registry else ()):
+            plugin = registry.get_plugin(name)
+            if plugin is not None and hasattr(
+                plugin, "set_apparmor_child_transition_callback",
+            ):
+                plugin.set_apparmor_child_transition_callback(child_cb)
+        return child_cb
+    except Exception:  # noqa: BLE001 — step 4 is the audible install
+        logger.warning(
+            "runner-session bootstrap: could not pre-arm the //child "
+            "transition for profile=%s; step 4 installs it",
+            runner_profile, exc_info=True,
+        )
+        return None
+
+
 def _maybe_install_child_callback(
     envelope: SessionInitEnvelope, session: Any,
+    child_cb: Optional[Callable[[], None]] = None,
 ) -> None:
     """Install the AppArmor //child transition callback on the
     session's executor (Phase 5 §5.10c).
@@ -1247,6 +1291,13 @@ def _maybe_install_child_callback(
        of e805e4d0, same audible-failure rule that fixed Phase 4
        §4.3 PR #57 silent-isolation-downgrade).
 
+    Args:
+        envelope: The bootstrap envelope; ``profile_name`` picks the case.
+        session: The built session, whose executor receives the callback.
+        child_cb: The callable :func:`_prearm_child_callback` already
+            handed to the registry's plugins (#1357), so both get the same
+            object.  ``None`` builds one here.
+
     Raises:
         BootstrapError: case 3 hit but executor lacks
             ``set_apparmor_child_transition_callback`` OR the setter
@@ -1275,8 +1326,9 @@ def _maybe_install_child_callback(
 
     # Case 3: main runner, install required + audibly failing.
     try:
-        from jaato_server.server.apparmor import make_child_transition_callback
-        child_cb = make_child_transition_callback(runner_profile)
+        if child_cb is None:
+            from jaato_server.server.apparmor import make_child_transition_callback
+            child_cb = make_child_transition_callback(runner_profile)
         executor = getattr(session, "_executor", None)
         if executor is None or not hasattr(
             executor, "set_apparmor_child_transition_callback",
@@ -1507,6 +1559,16 @@ def bootstrap_session(
             )
             raise BootstrapError("plugins", str(exc)) from exc
 
+    # ---- 2d. Arm the //child transition on the registry's plugins
+    # BEFORE the session is configured (#1357).  ``configure()`` renders
+    # the system prompt, and the notebook's execution-boundary notice
+    # (#1012) asks its backend which tier a kernel will get — which
+    # depends on whether the transition is wired.  Installed only at
+    # step 4 (the executor does not exist until ``_build_session``), the
+    # notice described the audit tier ("import ctypes is refused") on
+    # every confined session while the kernel then ran in ``//child``.
+    child_cb = _prearm_child_callback(envelope, runtime)
+
     # ---- 3. Construct + configure the session ----
     try:
         session = _build_session(runtime, envelope)
@@ -1563,7 +1625,7 @@ def bootstrap_session(
 
     # ---- 4. Phase 5 §5.10c — install AppArmor child-profile
     # transition callback on subprocess-spawning plugins.
-    _maybe_install_child_callback(envelope, session)
+    _maybe_install_child_callback(envelope, session, child_cb)
 
     logger.info(
         "runner-session bootstrap ready: session_id=%s profile=%s "
