@@ -2485,8 +2485,8 @@ class JaatoWSServer:
 
         if not event.user or not event.workspace or not os.path.isabs(event.workspace):
             return answer("denied", detail="workspace.app_write needs a user and an absolute workspace path")
-        qualified = f"{app_id}:{event.user}"
-        if self._owner_for_workspace_path(event.workspace) != qualified:
+        owner = f"{app_id}:{event.user}"
+        if self._owner_for_workspace_path(event.workspace) != owner:
             return answer("not_found", detail="no such workspace for this user")
         try:
             env_actions, file_actions = apply_request(event.workspace, event.env, event.files)

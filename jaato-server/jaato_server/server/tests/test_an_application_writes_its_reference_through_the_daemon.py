@@ -52,7 +52,7 @@ REVERSIONS = [
     ),
     Reversion(
         target=_WS,
-        find="        if self._owner_for_workspace_path(event.workspace) != qualified:\n",
+        find="        if self._owner_for_workspace_path(event.workspace) != owner:\n",
         replace="        if False:\n",
         test="test_only_the_owner_may_write",
         because="one application writes into another's workspace",
