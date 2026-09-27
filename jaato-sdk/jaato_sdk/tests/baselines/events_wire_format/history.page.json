@@ -1,0 +1,14 @@
+{
+  "type": "history.page",
+  "timestamp": "<TIMESTAMP>",
+  "session_id": "",
+  "agent_id": "main",
+  "request_id": "",
+  "units": [],
+  "before": "",
+  "has_more": false,
+  "total_units": 0,
+  "stale": false,
+  "ok": true,
+  "error": ""
+}

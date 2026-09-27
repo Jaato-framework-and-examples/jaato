@@ -115,7 +115,6 @@ BASELINE: Dict[str, int] = {
     # express those.
     "jaato-server/jaato_server/server/core.py::JaatoServer._build_send_message_notification_handler._handle": 58,
     "jaato-server/jaato_server/server/core.py::JaatoServer._check_auth_completion": 17,
-    "jaato-server/jaato_server/server/core.py::JaatoServer._emit_conversation_replay": 19,
     "jaato-server/jaato_server/server/core.py::JaatoServer._setup_permission_hooks.on_permission_requested": 35,
     # ``_start_model_thread.model_thread`` was here at 40 (36 -> 41 by #654's
     # completion-gap predicate, 41 -> 40 by #877 lifting the continuation

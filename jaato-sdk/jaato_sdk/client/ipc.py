@@ -74,6 +74,8 @@ from jaato_sdk.events import (
     ConnectedEvent,
     ErrorEvent,
     HistoryRequest,
+    HistoryPageRequest,
+    HistoryPageEvent,
     HistoryEvent,
     ClientConfigRequest,
     ClientType,
@@ -2483,7 +2485,17 @@ class IPCClient:
         remembered".
         """
         self._require_memory_verbs_protocol(method)
-        request_id = f"mem_{uuid.uuid4().hex[:16]}"
+        return await self._correlated_request(method, event, timeout, "mem")
+
+    async def _correlated_request(
+        self, method: str, event: Event, timeout: float, prefix: str,
+    ) -> Event:
+        """Send ``event`` with a fresh ``request_id`` and await its answer.
+
+        The mechanics :meth:`_memory_request` documents, without the
+        protocol gate (each caller checks its own floor first).
+        """
+        request_id = f"{prefix}_{uuid.uuid4().hex[:16]}"
         event.request_id = request_id  # type: ignore[attr-defined]
         q = self._subscribe_events()
         incidental: list = []
@@ -3241,6 +3253,47 @@ class IPCClient:
             agent_id: Which agent's history to request.
         """
         await self._send_event(HistoryRequest(agent_id=agent_id))
+
+    MIN_HISTORY_PAGE_PROTOCOL = "1.28"
+
+    async def request_history_page(
+        self,
+        agent_id: str = "main",
+        *,
+        before: str = "",
+        max_lines: int = 0,
+        timeout: float = 30.0,
+    ) -> HistoryPageEvent:
+        """Fetch one page of the RENDERED transcript, newest first (1.28).
+
+        Call with no ``before`` for the most recent page, then pass each
+        answer's ``before`` to walk older -- the shape a chat client's
+        scroll-up wants.  Units are never split across pages (a fenced
+        block, a table, one message's tool calls), so ``max_lines`` is a
+        target; model text arrives formatted by the output pipeline, as it
+        did live.  ``stale=True`` means the cursor no longer names anything
+        (the history was rewritten): re-request the latest page.
+
+        Raises:
+            ValueError: Against a daemon below
+                :attr:`MIN_HISTORY_PAGE_PROTOCOL`, which would answer
+                "Unknown request type" and never the page.
+            TimeoutError / ConnectionError: No answer arrived.
+        """
+        if not _protocol_compatible(
+                self.server_protocol_version, self.MIN_HISTORY_PAGE_PROTOCOL):
+            spoken = self.server_protocol_version or "unknown (not connected)"
+            raise ValueError(
+                f"request_history_page: this daemon speaks protocol {spoken} "
+                f"and does not serve paged history (needs >= "
+                f"{self.MIN_HISTORY_PAGE_PROTOCOL}).  Use request_history()."
+            )
+        return await self._correlated_request(  # type: ignore[return-value]
+            "request_history_page",
+            HistoryPageRequest(agent_id=agent_id, before=before,
+                               max_lines=max_lines),
+            timeout, "hist",
+        )
 
     # =========================================================================
     # SDK feature parity — session-primitive verbs

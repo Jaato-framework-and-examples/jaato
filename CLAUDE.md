@@ -576,6 +576,7 @@ await client.create_session(profile="researcher")
 - `session.orphans` — list LOADED sessions with no client attached
   (→ `SessionListEvent`; see [A Session Nobody Was Watching](#a-session-nobody-was-watching-812))
 - `session.stop <id>` — stop ANY loaded session by id, not just the caller's own
+- `history.page.request` (a `HistoryPageRequest`) — one page of the rendered transcript, newest first (→ `HistoryPageEvent`; protocol 1.28, see [A Transcript Replayed Whole, and Raw](#a-transcript-replayed-whole-and-raw-protocol-128))
 - `session.reload_env [id]` — re-resolve a LIVE session's `.env` and credentials and rebuild its provider (see [A Credential Stored After the Runner Booted](#a-credential-stored-after-the-runner-booted))
 - `workspace.ignore <path>` — toggle one exact entry in the caller's workspace `.gitignore` (→ `WorkspaceIgnoreResultEvent`; protocol 1.12, see [A Key the Web Files Panel Did Not Have](#a-key-the-web-files-panel-did-not-have))
 - `scaffold.explain [topic] [name]` — render one `jaato-scaffold explain` topic **on the daemon**, so a CLI whose own virtualenv lacks the extension contributing it can still be told (→ `ScaffoldExplainEvent`; protocol 1.18, see [A Topic the CLI Could Not Answer and the Daemon Could](#a-topic-the-cli-could-not-answer-and-the-daemon-could))
@@ -763,6 +764,59 @@ comes from. It joins the post-connect block that must not raise, and
 therefore joins its rule: a failure is counted onto
 `jaato.tier.context_limit_refresh_failures`, beside its two siblings —
 best-effort blocks are not the problem, unobservable ones are.
+
+### A Transcript Replayed Whole, and Raw (protocol 1.28)
+
+A client that attaches to a session it does not have on screen (a
+reconnect, a second tab, a session switch) is shown the conversation so
+far by `emit_current_state`. That replay walked the stored history top to
+bottom and re-emitted it as ONE stream of output events, and it had two
+defects:
+
+| | Before | Now |
+|---|---|---|
+| shape | the whole transcript or, for a CHAT client, nothing | `full`, `paged` or `none`, chosen by the client |
+| rendering | model text sent **raw** — never through the output formatter pipeline, so fenced code arrived as backticks rather than `<j-code>`, tables as pipes rather than `<j-table>` | every model-text unit goes through a formatter pipeline built like the live one |
+
+`jaato_server/server/history_pages.py` is the one conversion both shapes
+read. `build_units` turns a history into **renderable units** — a user
+prompt, a segment of model text (formatted), a reasoning part, one model
+message's tool calls with their recorded outcome — and `paginate` cuts them
+into pages from the END by a line budget.
+
+- **A page boundary never splits a unit, and a unit never splits a
+  renderable.** Model text is segmented at blank lines OUTSIDE a fence
+  (the code-block formatter's own `open_fence` / `Fence.closes`, imported
+  so the two cannot disagree) and outside quoted `<notebook-cell>` /
+  `<j-*>` markup; a table is consecutive `|` lines, so it stays whole by
+  construction. Segments of one text part share a `group` and keep their
+  trailing blank lines, so joining a group reproduces the part. A unit
+  taller than the budget is a page by itself: the budget is a target, the
+  unit boundary is the rule.
+- **Cursors are `"<index>:<digest>"`, the digest over RAW content** (never
+  the formatted text, which depends on formatter config). A digest
+  mismatch — GC dropped messages from the front — is resolved to the
+  matching unit nearest the recorded index; a cursor matching nothing
+  answers `stale=True` with no units, never some other page.
+- **The replay pipeline is its own.** An agent's pipeline is stateful and
+  may be mid-stream for a running turn, so `_format_replay_text` uses a
+  dedicated one, serialised by a lock and `reset()` in `finally`.
+
+| Surface | |
+|---|---|
+| `HistoryPageRequest(agent_id, before, max_lines, request_id)` → `HistoryPageEvent(units, before, has_more, total_units, stale, ok, error)` | the verb; always answered (no session → `ok=False`), `request_id` echoed |
+| `PresentationContext.history_replay` = `full` / `paged` / `none`, plus `history_page_lines` | what an ATTACH sends. Unset keeps the old default (CHAT → `none`, else `full`); an unknown value reads as the default, never as `none` |
+| `IPCClient.request_history_page()` / `requestHistoryPage()` | both SDKs, refused below `MIN_HISTORY_PAGE_PROTOCOL` (1.28, the 1.7 missing-verb rule) |
+
+Not carried, as before: a tool's streamed OUTPUT (`ToolOutputEvent`,
+e.g. a notebook cell's rendered result). It is display-only and never
+entered the history the replay reads; a `tools` unit carries the call, its
+arguments and whether a result was recorded (`success: null` when none).
+The web client does not consume the verb yet.
+
+Guard: `jaato_server/server/tests/test_history_pages.py` (including one
+case against the shipped default formatter pipeline) and
+`jaato_sdk/tests/test_history_page_client.py`.
 
 ### Session Revive (waking a persisted session)
 

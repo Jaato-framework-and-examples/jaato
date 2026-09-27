@@ -1108,6 +1108,10 @@ class JaatoServer:
         # Initialized in _setup_formatter_pipeline() after registry is available
         # The pipeline handles buffering internally for streaming
         self._formatter_pipeline = None
+        # The replay formatter pipeline (paged / full history replay); built
+        # lazily by _get_replay_pipeline, serialised by its lock.
+        self._replay_pipeline = None
+        self._replay_pipeline_lock = threading.Lock()
 
     # =========================================================================
     # Workspace Management
@@ -2511,28 +2515,12 @@ class JaatoServer:
                 session_id=self._session_id or "",
             ))
 
-        # Replay conversation history as output events so reconnecting clients
-        # can populate their output panels with the conversation content.
-        # This must happen after AgentCreatedEvent (so client buffers exist)
-        # and before status events (so tool trees get finalized properly).
-        #
-        # SKIP for chat-type clients: their conversation is already
-        # persistently on-screen (Telegram, Slack, …), so replaying it as
-        # OUTPUT events makes the client render the whole history as the answer
-        # to the user's NEXT message.  Replay is a redraw concept — it applies
-        # only to ephemeral display surfaces (terminal / web).  Gated on the
-        # session's presentation ``client_type`` (set via ClientConfigRequest);
-        # when the presentation context is unknown, default to replaying (the
-        # prior behavior, correct for the TUI).
-        from jaato_sdk.events import ClientType
-        pres = self._presentation_context
-        if pres is None or pres.client_type != ClientType.CHAT:
-            self._emit_conversation_replay(emit)
-        else:
-            logger.info(
-                "  skipping conversation replay for chat-type client "
-                "(persistent history)"
-            )
+        # Show a reconnecting client the conversation so far.  This must
+        # happen after AgentCreatedEvent (so client buffers exist) and before
+        # status events (so tool trees get finalized properly).  HOW is the
+        # client's choice (``PresentationContext.history_replay``): the full
+        # event replay, the latest page only, or nothing.
+        self._emit_history_on_attach(emit)
 
         # Emit agent status. For idle agents, this triggers stop_spinner() on
         # the client which finalizes any replayed tool trees. For non-idle
@@ -2673,101 +2661,192 @@ class JaatoServer:
                         budget_snapshot=session.instruction_budget.snapshot(),
                     ))
 
+    def history_replay_mode(self) -> str:
+        """What an attach shows this session's client: full / paged / none.
+
+        Read from ``PresentationContext.history_replay`` when the client
+        declared it.  Otherwise the historical default: a CHAT client
+        (Telegram, Slack...) replays nothing -- its conversation is already
+        persistently on screen, and replayed OUTPUT events would render as
+        the answer to its NEXT message -- and every other client, or an
+        unknown presentation, gets the full replay (correct for the TUI).
+        An unrecognised value reads as the default rather than as "none",
+        so a typo cannot silently blank a transcript.
+        """
+        from jaato_sdk.events import ClientType
+        pres = self._presentation_context
+        declared = getattr(pres, "history_replay", None) if pres else None
+        if declared in ("full", "paged", "none"):
+            return declared
+        if pres is not None and pres.client_type == ClientType.CHAT:
+            return "none"
+        return "full"
+
+    def _emit_history_on_attach(self, emit: EventCallback) -> None:
+        """Apply :meth:`history_replay_mode` for one attaching client.
+
+        ``paged`` sends one :class:`HistoryPageEvent` per agent -- the most
+        recent page -- instead of the full event replay; the client asks
+        for older pages with ``HistoryPageRequest``.
+        """
+        mode = self.history_replay_mode()
+        if mode == "full":
+            self._emit_conversation_replay(emit)
+        elif mode == "paged":
+            lines = getattr(self._presentation_context,
+                            "history_page_lines", None)
+            for agent_id in list(self._agents.keys()):
+                page = self.history_page(agent_id, max_lines=lines)
+                if page.units or not page.ok:
+                    emit(page)
+        else:
+            logger.info("  skipping conversation replay (history_replay=none)")
+
+    def _format_replay_text(self, text: str) -> str:
+        """Render one model-text segment the way the live stream renders it.
+
+        Uses a pipeline of its OWN, never an agent's: the agent pipelines
+        are stateful across chunks and may be mid-stream for a running
+        turn, and feeding replay text through one would corrupt both.  The
+        lock serialises two clients paging at once over the one replay
+        pipeline, and ``reset()`` runs in ``finally`` so a formatter that
+        raised cannot leak half a fence into the next segment.
+        """
+        pipeline = self._get_replay_pipeline()
+        if pipeline is None:
+            return text
+        lock = getattr(self, "_replay_pipeline_lock", None)
+        if lock is None:
+            lock = self._replay_pipeline_lock = threading.Lock()
+        with lock:
+            try:
+                out = list(pipeline.process_chunk(text))
+                out.extend(pipeline.flush())
+                return "".join(o for o in out if o)
+            finally:
+                pipeline.reset()
+
+    def _get_replay_pipeline(self) -> Optional[Any]:
+        """The replay formatter pipeline, built on first use.
+
+        Same registry, config file and width as the per-agent pipelines
+        (:meth:`_get_agent_pipeline`); ``None`` when the session has no
+        formatter pipeline at all, in which case replay text stays raw.
+        """
+        if getattr(self, "_replay_pipeline", None) is not None:
+            return self._replay_pipeline
+        if not getattr(self, "_formatter_pipeline", None):
+            return None
+        from jaato_server.shared.plugins.formatter_pipeline import create_registry
+        formatter_registry = create_registry()
+        formatter_registry.discover()
+        if self.registry:
+            formatter_registry.set_tool_registry(self.registry)
+        project_config = os.path.join(
+            self._workspace_path or "", ".jaato/formatters.json")
+        if not (formatter_registry.load_config(project_config)
+                or formatter_registry.load_config(
+                    os.path.expanduser("~/.jaato/formatters.json"))):
+            formatter_registry.use_defaults()
+        pipeline = formatter_registry.create_pipeline(self._terminal_width)
+        if self._workspace_path:
+            pipeline.set_workspace_path(self._workspace_path)
+        self._replay_pipeline = pipeline
+        return pipeline
+
+    def history_units(self, agent_id: str) -> list:
+        """An agent's history as rendered :class:`ReplayUnit` objects.
+
+        The one conversion both replay shapes read -- the full event
+        replay and the paged ``HistoryPageEvent`` -- so the two cannot
+        render one transcript differently.
+        """
+        from jaato_server.server.history_pages import build_units
+        history = self.get_history(agent_id)
+        if not history:
+            return []
+        return build_units(history, self._format_replay_text, classify_tool)
+
+    def history_page(
+        self, agent_id: str, before: str = "",
+        max_lines: Optional[int] = None, request_id: str = "",
+    ) -> "HistoryPageEvent":
+        """One page of ``agent_id``'s rendered transcript, newest first.
+
+        Never raises: a history that could not be read answers
+        ``ok=False`` with the reason, so a client paging back is told why
+        rather than waiting for a page that will not come.
+        """
+        from jaato_sdk.events import HistoryPageEvent
+        from jaato_server.server.history_pages import paginate
+        try:
+            units = self.history_units(agent_id)
+        except Exception as exc:  # noqa: BLE001 -- answer, don't raise
+            logger.warning(f"history_page({agent_id}) failed: {exc}")
+            return HistoryPageEvent(
+                agent_id=agent_id, request_id=request_id, ok=False,
+                error=f"history unavailable: {exc}",
+            )
+        page = paginate(units, before=before, max_lines=max_lines)
+        return HistoryPageEvent(
+            agent_id=agent_id,
+            request_id=request_id,
+            units=[u.to_dict(i) for i, u in page.units],
+            before=page.before,
+            has_more=page.has_more,
+            total_units=page.total,
+            stale=page.stale,
+        )
+
     def _emit_conversation_replay(self, emit: EventCallback) -> None:
-        """Replay conversation history as output events for reconnecting clients.
+        """Replay the whole conversation as output events, top to bottom.
 
-        Iterates over stored conversation history for each agent and emits
-        AgentOutputEvent, ToolCallStartEvent, and ToolCallEndEvent events so
-        the client's output buffer gets populated with the full conversation
-        content from before the reconnect.
+        The ``full`` attach shape (the TUI's redraw).  Reads
+        :meth:`history_units`, so model text arrives FORMATTED by the
+        output pipeline exactly as it did live -- it used to be sent raw,
+        losing every code block and table.  Per unit kind:
 
-        The events are emitted in chronological order matching the original
-        conversation flow:
-        - User messages → AgentOutputEvent(source="user")
-        - Model text → AgentOutputEvent(source="model")
-        - Model thinking → AgentOutputEvent(source="thinking")
-        - Tool calls → ToolCallStartEvent (all) then ToolCallEndEvent (all)
-        - Tool response messages are skipped (shown via tool tree)
-
-        Args:
-            emit: Event callback to use for emission.
+        - ``user`` -> ``AgentOutputEvent(source="user", mode="write")``
+        - ``thinking`` -> ``AgentOutputEvent(source="thinking", mode="write")``
+        - ``model`` -> ``AgentOutputEvent(source="model")``: ``write`` for the
+          first segment of a text part, ``append`` for the rest of its group,
+          so one part lands in one client block
+        - ``tools`` -> every ``ToolCallStartEvent``, then every
+          ``ToolCallEndEvent`` (mirrors parallel execution), with the
+          recorded outcome; a call with no recorded result is reported
+          successful, as before
         """
         for agent_id in list(self._agents.keys()):
-            # Read via get_history so the MAIN agent's transcript comes from
-            # the runner (authoritative post-seat-flip) — the daemon-side
-            # agent.history is empty for a cold-restored runner session, which
-            # is why reconnecting clients saw a blank panel.
-            history = self.get_history(agent_id)
-            if not history:
+            units = self.history_units(agent_id)
+            if not units:
                 continue
+            logger.info(f"  replaying {len(units)} history units for agent {agent_id}")
+            previous_group = None
+            for unit in units:
+                self._emit_replay_unit(emit, agent_id, unit, previous_group)
+                previous_group = unit.group
 
-            logger.info(
-                f"  replaying {len(history)} history messages "
-                f"for agent {agent_id}"
-            )
-
-            for msg in history:
-                role = msg.role
-                # Compare by value to avoid import dependency on Role enum
-                role_value = role.value if hasattr(role, 'value') else str(role)
-
-                if role_value == "user":
-                    # Emit user prompt text
-                    text = msg.text  # Message.text property concatenates text parts
-                    if text:
-                        emit(AgentOutputEvent(
-                            agent_id=agent_id,
-                            source="user",
-                            text=text,
-                            mode="write",
-                        ))
-
-                elif role_value == "model":
-                    # Emit text and thinking parts first
-                    for part in (msg.parts or []):
-                        if part.thought:
-                            emit(AgentOutputEvent(
-                                agent_id=agent_id,
-                                source="thinking",
-                                text=part.thought,
-                                mode="write",
-                            ))
-                        # Not ``elif``: a part may carry reasoning AND
-                        # text, and a restored session keeps both (#1290).
-                        if part.text:
-                            emit(AgentOutputEvent(
-                                agent_id=agent_id,
-                                source="model",
-                                text=part.text,
-                                mode="write",
-                            ))
-
-                    # Emit tool calls as start+end pairs (they're already completed)
-                    function_calls = [
-                        p.function_call
-                        for p in (msg.parts or [])
-                        if p.function_call
-                    ]
-                    if function_calls:
-                        # Start all tools first (mirrors parallel execution)
-                        for fc in function_calls:
-                            emit(ToolCallStartEvent(
-                                agent_id=agent_id,
-                                tool_name=fc.name,
-                                tool_args=fc.args or {},
-                                call_id=fc.id,
-                                tool_class=classify_tool(fc.name),
-                            ))
-                        # Then complete all tools
-                        for fc in function_calls:
-                            emit(ToolCallEndEvent(
-                                agent_id=agent_id,
-                                tool_name=fc.name,
-                                call_id=fc.id,
-                                success=True,
-                            ))
-
-                # Skip "tool" role messages — their content is shown via tool tree
+    @staticmethod
+    def _emit_replay_unit(emit: EventCallback, agent_id: str, unit: Any,
+                          previous_group: Optional[str]) -> None:
+        """Emit one :class:`ReplayUnit` as the live stream would have."""
+        if unit.kind != "tools":
+            mode = "append" if (unit.kind == "model"
+                                and unit.group == previous_group) else "write"
+            emit(AgentOutputEvent(agent_id=agent_id, source=unit.kind,
+                                  text=unit.text, mode=mode))
+            return
+        for t in unit.tools:
+            emit(ToolCallStartEvent(
+                agent_id=agent_id, tool_name=t["tool_name"],
+                tool_args=t["tool_args"], call_id=t["call_id"],
+                tool_class=t.get("tool_class"),
+            ))
+        for t in unit.tools:
+            emit(ToolCallEndEvent(
+                agent_id=agent_id, tool_name=t["tool_name"],
+                call_id=t["call_id"], success=t["success"] is not False,
+            ))
 
     def _emit_clear_stale_requests(self, emit: EventCallback) -> None:
         """Emit "resolved" events to clear stale pending requests on clients.

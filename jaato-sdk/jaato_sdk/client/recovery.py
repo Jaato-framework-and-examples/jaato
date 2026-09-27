@@ -1172,6 +1172,19 @@ class IPCRecoveryClient:
         if self._client:
             await self._client.request_history(agent_id)
 
+    async def request_history_page(
+        self,
+        agent_id: str = "main",
+        *,
+        before: str = "",
+        max_lines: int = 0,
+        timeout: float = 30.0,
+    ):
+        """See :meth:`IPCClient.request_history_page`."""
+        return await self._memory_client(
+            "request_history_page").request_history_page(
+                agent_id, before=before, max_lines=max_lines, timeout=timeout)
+
     # =========================================================================
     # SDK feature parity — session-primitive verbs
     # =========================================================================

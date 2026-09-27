@@ -50,6 +50,7 @@ import {
   type ReferenceSelectionResponseRequest,
   type CommandListRequest,
   type HistoryRequest,
+  type HistoryPageEvent,
   type ToolDisableRequest,
   type ToolsRegisterClientRequest,
   type ToolExecuteResultEvent,
@@ -175,6 +176,13 @@ export const MIN_SCAFFOLD_INTEGRATION_PROTOCOL = "1.21";
  * than left to time out.
  */
 export const MIN_MEMORY_VERBS_PROTOCOL = "1.22";
+
+/**
+ * Protocol floor for {@link JaatoClient.requestHistoryPage} (1.28).  A new
+ * VERB: an older daemon answers ``ErrorEvent("Unknown request type")`` and
+ * never the page, so the call is refused below this version.
+ */
+export const MIN_HISTORY_PAGE_PROTOCOL = "1.28";
 
 /**
  * Protocol floor for {@link JaatoClient.sendSessionMessage}.  Same rule as
@@ -1742,6 +1750,41 @@ export class JaatoClient {
       type: EventTypeValue.HISTORY_REQUEST,
       agent_id: agentId,
     } as HistoryRequest);
+  }
+
+  /**
+   * Fetch one page of the RENDERED transcript, newest first (protocol 1.28).
+   *
+   * Call with no ``before`` for the most recent page, then pass each
+   * answer's ``before`` to walk older -- a chat client's scroll-up.  Units
+   * are never split across pages (a fenced block, a table, one message's
+   * tool calls), so ``maxLines`` is a target; ``model`` text arrives
+   * formatted by the output pipeline, as it did live.  Consecutive units
+   * sharing a ``group`` are one text part.  ``stale`` means the cursor no
+   * longer names anything: re-request the latest page.
+   */
+  async requestHistoryPage(
+    options: {
+      agentId?: string;
+      before?: string;
+      maxLines?: number;
+      timeoutMs?: number;
+    } = {},
+  ): Promise<HistoryPageEvent> {
+    return this._quietRequest<HistoryPageEvent>(
+      "requestHistoryPage",
+      {
+        type: EventTypeValue.HISTORY_PAGE_REQUEST,
+        agent_id: options.agentId ?? "main",
+        before: options.before ?? "",
+        max_lines: options.maxLines ?? 0,
+      },
+      EventTypeValue.HISTORY_PAGE,
+      options.timeoutMs ?? 30_000,
+      MIN_HISTORY_PAGE_PROTOCOL,
+      "paged history (upgrade the daemon, or use requestHistory)",
+      "hist",
+    );
   }
 
   async registerClientTools(
