@@ -2678,6 +2678,36 @@ Guards: `test_the_notebook_notice_names_the_tier_it_gets_1357.py`,
 `test_string_arguments_follow_the_schema_1358.py`,
 `test_a_subshell_is_a_command_1359.py`, nine reversions between them.
 
+### Two More: A Doctor That Crashed, and a /tmp Nothing Granted (#1360, #1361)
+
+**`jaato-doctor` died on the environment it was asked to diagnose (#1360).**
+A confined session's profile may let the runner stat an editable install's
+`pyproject.toml` and refuse the read, and `dependencies.dist_state` read it
+with no `try`. `_source_version` now answers `(None, reason)` and
+`dist_state` carries it as `source_unreadable`. `explain dependencies` says
+"source version unknown … skew was not checked", and the doctor's dependency
+check is WARN rather than PASS, because the comparison was not made. Every
+check in `run_checks` also runs through `_guarded`, so a check that raises
+is reported as a WARN under its own name and the rest still run. The call
+sites stay `check_x(...)` inside a lambda, which the AST preflight guards
+(#823, the release check, the stop button, #1079) still read.
+
+**`/tmp` was allowed by the pre-flight and refused by the kernel (#1361).**
+`sandbox_utils` allowed the whole of `/tmp`, and a confined profile grants
+only the session tmpdir (#1171). So `cat > /tmp/x` passed `cli`'s check and
+then failed with `Permission denied`. `_pin_session_tmpdir` now calls
+`sandbox_utils.narrow_temp_roots(path)` on a confined runner and
+`restore_temp_roots()` on an unconfined one, so the allowance never depends
+on an earlier session in the same process. This narrows `cli`,
+`interactive_shell`, `filesystem_query` and `ast_search`. The permission
+plugin's opt-in `sanitization.path_scope` keeps its own `/tmp` list. The
+`runtime` aspect reports `tmpdir`, and the `cli` description tells the model
+to use `$TMPDIR` or `mktemp`. The suite-wide conftest restores the roots
+after each test.
+
+Guards: `test_doctor_survives_an_unreadable_source_1360.py` and
+`test_tmp_allowance_matches_the_profile_1361.py`, six reversions.
+
 ### Binary Media Chunks (delivery)
 
 Binary content (audio, images, PDFs) moves in three directions, and they are

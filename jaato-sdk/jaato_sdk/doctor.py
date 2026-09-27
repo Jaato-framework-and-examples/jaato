@@ -49,7 +49,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 # Import the SDK's own path constants so the doctor diagnoses exactly the
 # files the real client uses — never a re-declared copy that could drift.
@@ -249,9 +249,9 @@ def _premium_pyproject_reactors(spec) -> Optional[List[str]]:
         return None
     # <repo>/jaato_premium/  ->  <repo>/pyproject.toml
     pyproject = Path(locs[0]).parent / "pyproject.toml"
-    if not pyproject.is_file():
-        return None
     try:
+        if not pyproject.is_file():
+            return None
         import tomllib
         data = tomllib.loads(pyproject.read_text())
     except Exception:  # noqa: BLE001 — best-effort diagnostic, never crash
@@ -289,7 +289,7 @@ def check_dependency_coherence() -> List[Check]:
     # and jaato-server come from different checkouts (#823) — a doctor that
     # raises on the skewed install is a doctor nobody can run.
     listing = getattr(_deps, "framework_dists", None)
-    skewed, seen = [], []
+    skewed, seen, unread = [], [], []
     for name in (listing() if listing else _deps.JAATO_DISTS):
         st = _deps.dist_state(name)
         if not st["installed"]:
@@ -298,6 +298,8 @@ def check_dependency_coherence() -> List[Check]:
         if st["skew"]:
             skewed.append(f"{name}: metadata {st['installed']} vs source "
                           f"{st['source_version']}")
+        elif st.get("source_unreadable"):
+            unread.append(f"{name} ({st['source_unreadable']})")
     if not seen:
         return [Check("dependency coherence", WARN, "no jaato distributions found")]
     if skewed:
@@ -307,6 +309,12 @@ def check_dependency_coherence() -> List[Check]:
                       "<source>`) so version-derived answers stop naming a build "
                       "that is not running. `jaato-scaffold explain dependencies` "
                       "shows the full picture.")]
+    if unread:
+        # Not a PASS: the comparison was not made.  Typical in a confined
+        # session, whose profile may stat an editable source it cannot read.
+        return [Check("dependency coherence", WARN,
+                      ", ".join(seen) + " — cannot read the editable source of "
+                      + ", ".join(unread) + ", so skew was not checked")]
     return [Check("dependency coherence", PASS,
                   ", ".join(seen) + " — metadata agrees with sources")]
 
@@ -1719,32 +1727,61 @@ def run_checks(
     release_timeout: float = _releases.DEFAULT_TIMEOUT,
     refresh_releases: bool = False,
 ) -> List[Check]:
-    """Run every check and return the flat result list (in display order)."""
+    """Run every check and return the flat result list (in display order).
+
+    Each check runs through :func:`_guarded`, so one that raises becomes a
+    WARN naming the exception and the rest still run (#1360).
+    """
     info = probe_daemon(socket_path, pidfile)
     checks: List[Check] = []
-    checks += check_python_env()
-    checks += check_premium_reactors()
-    checks += check_package_layout()
-    checks += check_dependency_coherence()
-    checks += check_package_releases(timeout=release_timeout,
-                                     refresh=refresh_releases,
-                                     enabled=release_check)
-    checks += check_integrations()
-    checks += check_mcp_sdk()
-    checks += check_socket(info, auto_start=auto_start)
-    checks += check_daemon_identity(info)
-    checks += check_oversight(info, socket_path, pidfile)
+    checks += _guarded(lambda: check_python_env())
+    checks += _guarded(lambda: check_premium_reactors())
+    checks += _guarded(lambda: check_package_layout())
+    checks += _guarded(lambda: check_dependency_coherence())
+    checks += _guarded(lambda: check_package_releases(timeout=release_timeout,
+                                                      refresh=refresh_releases,
+                                                      enabled=release_check))
+    checks += _guarded(lambda: check_integrations())
+    checks += _guarded(lambda: check_mcp_sdk())
+    checks += _guarded(lambda: check_socket(info, auto_start=auto_start))
+    checks += _guarded(lambda: check_daemon_identity(info))
+    checks += _guarded(lambda: check_oversight(info, socket_path, pidfile))
     if web_socket:
-        checks += check_websocket(web_socket, info, ws_token_file=ws_token_file)
-    checks += check_home_match(info)
-    checks += check_checkout_skew(info)
-    checks += check_daemon_env(info, load_known_env_vars())
-    checks += check_secret(info, secret)
-    checks += check_env_file(env_file, workspace)
-    checks += check_workspace(workspace, config_root)
-    checks += check_secret_scrub(workspace, config_root)
-    checks += check_driver(workspace)
+        checks += _guarded(lambda: check_websocket(web_socket, info,
+                                                   ws_token_file=ws_token_file))
+    checks += _guarded(lambda: check_home_match(info))
+    checks += _guarded(lambda: check_checkout_skew(info))
+    checks += _guarded(lambda: check_daemon_env(info, load_known_env_vars()))
+    checks += _guarded(lambda: check_secret(info, secret))
+    checks += _guarded(lambda: check_env_file(env_file, workspace))
+    checks += _guarded(lambda: check_workspace(workspace, config_root))
+    checks += _guarded(lambda: check_secret_scrub(workspace, config_root))
+    checks += _guarded(lambda: check_driver(workspace))
     return checks
+
+
+def _guarded(step: Callable[[], List[Check]]) -> List[Check]:
+    """Run one check; an exception becomes a WARN instead of a traceback.
+
+    Doctor is the first thing an agent is told to run, often in a confined
+    session whose profile refuses reads the check did not anticipate (#1360).
+    A check that raises has answered nothing, so it is reported under its
+    own name and the remaining checks still run.  WARN, not FAIL: the
+    failure is the check's, not evidence about the environment.
+
+    ``step`` is a lambda so that its arguments are evaluated inside the
+    guard too, and so that ``run_checks`` still reads as a list of calls
+    (the preflight guards look for them by AST).  The label is the
+    ``check_*`` name the lambda calls.
+    """
+    try:
+        return step()
+    except Exception as exc:  # noqa: BLE001 -- a diagnostic must not crash
+        called = [n for n in step.__code__.co_names if n.startswith("check_")]
+        label = called[0][len("check_"):] if called else "check"
+        return [Check(label.replace("_", " "), WARN,
+                      f"the check itself failed ({type(exc).__name__}: {exc}); "
+                      f"nothing was concluded")]
 
 
 _REUSE_ADVICE = (

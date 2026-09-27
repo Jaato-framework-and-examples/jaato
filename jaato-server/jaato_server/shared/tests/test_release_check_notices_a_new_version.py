@@ -68,9 +68,9 @@ REVERSIONS = [
     ),
     Reversion(
         target="jaato-sdk/jaato_sdk/doctor.py",
-        find="""    checks += check_package_releases(timeout=release_timeout,
-                                     refresh=refresh_releases,
-                                     enabled=release_check)""",
+        find="""    checks += _guarded(lambda: check_package_releases(timeout=release_timeout,
+                                                      refresh=refresh_releases,
+                                                      enabled=release_check))""",
         replace="    checks += []",
         test="test_the_preflight_actually_runs_the_check",
         because="a correct check nothing calls, which notifies nobody",

@@ -755,6 +755,10 @@ directly — do NOT attempt to echo, print, or retrieve their values:
 The user manages which env vars are set. If a command fails due to a missing
 variable, report which variable is needed so the user can set it.
 
+TEMPORARY FILES: write scratch files under `$TMPDIR` (or use `mktemp`, which
+honours it). It is this session's own temp directory. In a confined session it
+is the only writable place under /tmp, and other /tmp paths are refused.
+
 IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid truncation:
 - Use filters (grep, awk) to narrow results
 - Use head/tail to limit output lines

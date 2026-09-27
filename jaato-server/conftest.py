@@ -306,3 +306,23 @@ def isolated_home() -> Path:
 def credential_env_vars() -> tuple:
     """Credential env vars cleared for every test (see module docstring)."""
     return CREDENTIAL_ENV_VARS
+
+
+@pytest.fixture(autouse=True)
+def restore_sandbox_temp_roots():
+    """Undo a runner bootstrap's narrowing of the sandbox temp roots.
+
+    A confined ``bootstrap_session`` narrows
+    ``sandbox_utils.SYSTEM_TEMP_PATHS`` to its session tmpdir (#1361).  In a
+    runner that is the point; in the suite it would leak into every later
+    test that expects ``/tmp`` to be allowed.
+    """
+    try:
+        from jaato_server.shared.plugins import sandbox_utils
+    except Exception:  # pragma: no cover - defensive
+        yield
+        return
+    saved = sandbox_utils.SYSTEM_TEMP_PATHS
+    yield
+    sandbox_utils.SYSTEM_TEMP_PATHS = saved
+
