@@ -222,7 +222,15 @@ test("attaching shows the latest history page and scrolling up loads older ones 
     await expect(page.getByText("question number 1", { exact: true })).toBeVisible({ timeout: 300 });
   }).toPass({ timeout: 20_000 });
   // Every page arrived once: the oldest turn is drawn once, not per page.
-  await expect(page.getByText("question number 1", { exact: true })).toHaveCount(1);
+  // The pane is virtualised, so a row off screen is not in the DOM at all:
+  // the shift that keeps the reader's place after the last prepend (and
+  // the virtualizer re-measuring the rows above the view) can move turn 1
+  // out of the rendered window after it was seen.  Count it at the top,
+  // where it is.
+  await expect(async () => {
+    await pane.evaluate((el) => { el.scrollTop = 0; el.dispatchEvent(new Event("scroll")); });
+    await expect(page.getByText("question number 1", { exact: true })).toHaveCount(1, { timeout: 300 });
+  }).toPass({ timeout: 10_000 });
   await expect(page.getByTestId("history-older")).toHaveCount(0);
 });
 
