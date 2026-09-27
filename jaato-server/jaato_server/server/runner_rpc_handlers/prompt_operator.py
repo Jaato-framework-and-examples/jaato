@@ -35,7 +35,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Any, Awaitable, Callable, Dict, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from jaato_sdk.events import PermissionInputModeEvent, PermissionRequestedEvent
 
@@ -120,7 +120,30 @@ class PromptOperatorHandler:
         # already establishes for a fact that belongs to one in-flight
         # request.
         self._raised_at: Dict[str, float] = {}
+        # request_id -> the events this ASK was announced with, in emit
+        # order.  A client that ATTACHES while the ASK is pending (a
+        # reconnect, a second tab, a session switch) never received them,
+        # and without a copy the prompt was unanswerable from it: the
+        # session sat blocked with the question on no screen.  Same
+        # lifetime as the future.  See :meth:`pending_events`.
+        self._events: Dict[str, Tuple[Any, ...]] = {}
         self._closed = False
+
+    def pending_events(self) -> List[Any]:
+        """The events of every ASK still waiting, oldest first, for replay.
+
+        Called by ``JaatoServer.emit_current_state`` so an attaching client
+        is shown the prompt it would otherwise never see.  Re-sending to a
+        client that already has it is harmless: clients key a prompt by
+        ``request_id``.  A snapshot, for the reason :meth:`pending_since`
+        gives.
+        """
+        pending = [(self._raised_at.get(rid, 0.0), rid)
+                   for rid, fut in list(self._pending.items()) if not fut.done()]
+        out: List[Any] = []
+        for _, rid in sorted(pending):
+            out.extend(self._events.get(rid, ()))
+        return out
 
     def has_pending_prompt(self) -> bool:
         """Whether any permission ASK relayed through here is unanswered."""
@@ -238,6 +261,7 @@ class PromptOperatorHandler:
             self._pending.pop(payload.request_id, None)
             self._raised_at.pop(payload.request_id, None)
             raise
+        self._events[payload.request_id] = (event, input_mode_event)
 
         try:
             if self._prompt_timeout is not None:
@@ -248,6 +272,7 @@ class PromptOperatorHandler:
         finally:
             self._pending.pop(payload.request_id, None)
             self._raised_at.pop(payload.request_id, None)
+            self._events.pop(payload.request_id, None)
 
     def resolve_response(
         self,
@@ -303,6 +328,7 @@ class PromptOperatorHandler:
             return
         self._closed = True
         self._raised_at.clear()
+        self._events.clear()
         for request_id, fut in list(self._pending.items()):
             if not fut.done():
                 fut.set_exception(

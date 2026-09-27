@@ -513,7 +513,7 @@ function reduceHistoryPage(s: JaatoState, ev: AnyEvent): void {
     s.historyPaging = { ...s.historyPaging, [id]: paging };
     return;
   }
-  const page = historyPageBlocks(ev.units, id, nextId, s.ui.showTools);
+  const page = historyPageBlocks(ev.units, id, nextId, s.ui.showTools, attachPage);
   setBlocks(s, id, attachPage ? page : [...page, ...(s.blocks[id] ?? [])]);
   paging.before = String(ev.before ?? "");
   paging.hasMore = ev.has_more === true && !!paging.before;

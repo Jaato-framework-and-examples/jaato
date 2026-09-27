@@ -125,7 +125,24 @@ class ClarificationRelayHandler:
         # Same lifetime as the future and as ``_question_counts`` above --
         # registered on the next line, dropped in the same ``finally``.
         self._raised_at: Dict[str, float] = {}
+        # request_id -> the batch event it was announced with, so a client
+        # that attaches while it is pending can be shown it
+        # (:meth:`pending_events`).  Same lifetime as the future.
+        self._events: Dict[str, Any] = {}
         self._closed = False
+
+    def pending_events(self) -> List[Any]:
+        """The batch events still waiting for answers, oldest first.
+
+        Replayed by ``JaatoServer.emit_current_state`` to an attaching
+        client, which otherwise never received the only delivery this relay
+        makes (``batch_only``).  A snapshot, for the reason
+        :meth:`pending_since` gives.
+        """
+        pending = [(self._raised_at.get(rid, 0.0), rid)
+                   for rid, fut in list(self._pending.items()) if not fut.done()]
+        events = self._events
+        return [events[rid] for _, rid in sorted(pending) if rid in events]
 
     def has_pending_prompt(self) -> bool:
         """Whether any clarification batch relayed here is unanswered."""
@@ -203,6 +220,7 @@ class ClarificationRelayHandler:
             self._question_counts.pop(request_id, None)
             self._raised_at.pop(request_id, None)
             raise
+        self._events[request_id] = event
 
         try:
             if self._prompt_timeout is not None:
@@ -214,6 +232,7 @@ class ClarificationRelayHandler:
             self._pending.pop(request_id, None)
             self._question_counts.pop(request_id, None)
             self._raised_at.pop(request_id, None)
+            self._events.pop(request_id, None)
 
     def pending_question_count(self, request_id: str) -> Optional[int]:
         """How many questions the pending batch *request_id* asked.
@@ -284,6 +303,7 @@ class ClarificationRelayHandler:
         self._closed = True
         self._question_counts.clear()
         self._raised_at.clear()
+        self._events.clear()
         for request_id, fut in list(self._pending.items()):
             if not fut.done():
                 fut.set_exception(

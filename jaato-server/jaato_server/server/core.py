@@ -2597,6 +2597,47 @@ class JaatoServer:
         if clear_stale_pending_requests:
             self._emit_clear_stale_requests(emit)
 
+        # A permission ASK or a clarification still waiting for an answer.
+        # LAST, after the clear above, so a client arriving now ends up
+        # holding the prompt rather than a clear that follows it.
+        self._replay_pending_prompts(emit)
+
+    def _pending_relays(self) -> List[Any]:
+        """The runner-path prompt relays of this server, where they exist.
+
+        ``permission`` and ``clarification`` are runner-tier plugins, so on
+        the default path an unanswered prompt lives in these two handlers,
+        never in the daemon-local ``_pending_*_request_id`` fields.
+        """
+        return [h for h in (getattr(self, "_prompt_operator_handler", None),
+                            getattr(self, "_clarification_relay_handler", None))
+                if h is not None]
+
+    def _replay_pending_prompts(self, emit: EventCallback) -> None:
+        """Re-send every prompt still waiting for a person to *emit*.
+
+        A client that attaches while the session is blocked on a permission
+        ASK or a clarification (a reconnect, a second tab, a return from
+        the session picker) never received the prompt events: they were
+        emitted once, to whoever was attached then.  So the session sat
+        blocked on a question no screen could answer, while the transcript
+        showed the call that raised it.  Each relay keeps the events it
+        sent while its future is pending (``pending_events``), and they
+        are sent again here.  A client that already holds the prompt keys
+        it by ``request_id``, so a second copy changes nothing.
+
+        Best effort: a failure is logged and the rest of the attach goes on.
+        """
+        for relay in self._pending_relays():
+            try:
+                events = relay.pending_events()
+            except Exception:  # noqa: BLE001 -- a replay must not break attach
+                logger.warning("pending prompt replay: %s raised",
+                               type(relay).__name__, exc_info=True)
+                continue
+            for event in events:
+                emit(event)
+
     def _emit_subagent_state(self, emit: EventCallback) -> None:
         """Emit state for subagents from SubagentPlugin._active_sessions.
 
@@ -2860,8 +2901,14 @@ class JaatoServer:
             emit: Event callback to use for emission.
         """
         # If no permission request is pending on server, emit a clear event
-        # The client will ignore this if it has no pending request
-        if not self._pending_permission_request_id:
+        # The client will ignore this if it has no pending request.  "Pending
+        # on the server" includes the runner-path relays: those never set
+        # the daemon-local ids, so reading only the ids cleared a prompt
+        # that was really waiting.
+        ask_relay = getattr(self, "_prompt_operator_handler", None)
+        clar_relay = getattr(self, "_clarification_relay_handler", None)
+        if (not self._pending_permission_request_id
+                and not (ask_relay is not None and ask_relay.has_pending_prompt())):
             emit(PermissionResolvedEvent(
                 agent_id=self._main_agent_id,
                 request_id="",  # Empty - client clears any pending request
@@ -2872,7 +2919,8 @@ class JaatoServer:
             logger.debug("Emitted PermissionResolvedEvent to clear stale client state")
 
         # Same for clarification requests
-        if not self._pending_clarification_request_id:
+        if (not self._pending_clarification_request_id
+                and not (clar_relay is not None and clar_relay.has_pending_prompt())):
             emit(ClarificationResolvedEvent(
                 agent_id=self._main_agent_id,
                 request_id="",

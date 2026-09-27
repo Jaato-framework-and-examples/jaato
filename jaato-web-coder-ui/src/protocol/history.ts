@@ -126,11 +126,20 @@ export interface HistoryUnit {
  * finished tool block per call; ``success: null`` (no result recorded, e.g.
  * a call cancelled mid-batch) is drawn as success, as the live tree draws a
  * call that ended without an error.
+ *
+ * Except at the very END of the ``newest`` page: a call there with no
+ * result is one the session is still inside -- typically a permission ASK
+ * or a ``request_clarification`` waiting for the person who just attached.
+ * Drawing it with a check read as "already answered" while the session sat
+ * blocked on it, so it is drawn ``running``; the call's live end, which
+ * carries the same ``call_id``, finishes it.
  */
-export function historyPageBlocks(units: unknown, agentId: string, nextId: () => string, toolsExpanded: boolean): OutputBlock[] {
+export function historyPageBlocks(units: unknown, agentId: string, nextId: () => string, toolsExpanded: boolean, newest: boolean = false): OutputBlock[] {
   const out: OutputBlock[] = [];
   let lastGroup: string | null = null;
-  for (const u of (Array.isArray(units) ? units : []) as HistoryUnit[]) {
+  const list = (Array.isArray(units) ? units : []) as HistoryUnit[];
+  const last = list[list.length - 1];
+  for (const u of list) {
     const kind = String(u.kind ?? "");
     const group = String(u.group ?? "");
     const text = typeof u.text === "string" ? u.text : "";
@@ -144,13 +153,15 @@ export function historyPageBlocks(units: unknown, agentId: string, nextId: () =>
         out.push({ id: nextId(), kind: "text", agentId, source: kind, text });
       }
     } else if (kind === "tools") {
+      const open = newest && u === last;
       for (const t of u.tools ?? []) {
         const ok = t.success !== false;
+        const pending = open && (t.success === null || t.success === undefined);
         const block: ToolBlock = {
           id: nextId(), kind: "tool", agentId, callId: String(t.call_id ?? nextId()),
           toolName: String(t.tool_name ?? "tool"),
           args: (t.tool_args as Record<string, unknown> | undefined) ?? {},
-          status: ok ? "success" : "error", startedAt: 0, output: "", media: [],
+          status: pending ? "running" : ok ? "success" : "error", startedAt: 0, output: "", media: [],
           expanded: toolsExpanded || !ok,
           toolClass: (t.tool_class as ToolBlock["toolClass"] | undefined) ?? null,
         };
