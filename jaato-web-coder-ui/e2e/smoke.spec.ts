@@ -254,6 +254,27 @@ test("permission prompt shows the diff and the typed key answers it", async ({ p
   await expect(page.getByText("+ session.log")).toBeVisible();
 });
 
+test("files panel: show .jaato/ shows what the agent wrote there, and keeps showing it", async ({ page }) => {
+  // Hidden by default, but an agent may write profiles or personas under
+  // ``.jaato/`` as part of its task, and the person has to see them.
+  await openSession(page);
+  await composer(page).fill("permit");
+  await composer(page).press("Enter");
+  await expect(page.getByText("Permission requested for")).toBeVisible();
+  await composer(page).fill("y");
+  await composer(page).press("Enter");
+  await expect(page.getByText("Written (you answered")).toBeVisible();
+  await page.getByRole("button", { name: "Open Files" }).click();
+  const panel = page.getByRole("region", { name: "Files" });
+  await expect(panel.getByText("+ session.log")).toHaveCount(0);
+  await panel.getByRole("button", { name: "show .jaato/", exact: true }).click();
+  // Not dimmed: shown, not merely revealed as hidden.
+  await expect(panel.getByText("+ session.log")).toBeVisible();
+  await expect(panel.locator("[data-hidden]")).toHaveCount(0);
+  await panel.getByRole("button", { name: "hide .jaato/", exact: true }).click();
+  await expect(panel.getByText("+ session.log")).toHaveCount(0);
+});
+
 test("files panel: hide drops an entry from the view, show-hidden brings it back, ignore toggles .gitignore", async ({ page }) => {
   await openSession(page);
   await composer(page).fill("permit");

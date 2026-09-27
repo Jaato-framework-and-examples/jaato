@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { countFiles, countHiddenFiles, effectiveHidden, entryId, hideToggleId, isDefaultHidden, isHidden } from "./WorkspacePanel";
+import { countFiles, countHiddenFiles, effectiveHidden, entryId, hideToggleId, isDefaultHidden, isHidden, jaatoFiles } from "./WorkspacePanel";
 
 describe("Files panel hide set", () => {
   it("uses the TUI's entry ids: a directory carries a trailing slash", () => {
@@ -55,5 +55,24 @@ describe("Files panel collapse", () => {
     const sub = { children: new Map([["x", leaf], ["y", leaf]]) };
     const dir = { children: new Map<string, unknown>([["a", leaf], ["sub", sub]]) };
     expect(countFiles(dir as never)).toBe(3);
+  });
+});
+
+describe("showing .jaato/ shows what is in it", () => {
+  it("an exemption on the directory reaches its subtree", () => {
+    const hidden = ["!.jaato/"];
+    expect(effectiveHidden(".jaato/", hidden)).toBe(false);
+    expect(effectiveHidden(".jaato/profiles/worker.yaml", hidden)).toBe(false);
+    expect(effectiveHidden(".jaato/profiles/worker.yaml", [])).toBe(true);
+  });
+  it("an explicit hide beneath a shown .jaato/ still wins, and the row's toggle hides", () => {
+    const hidden = ["!.jaato/", ".jaato/sessions/"];
+    expect(effectiveHidden(".jaato/sessions/1.json", hidden)).toBe(true);
+    expect(hideToggleId(".jaato/profiles/worker.yaml", ["!.jaato/"])).toBe(".jaato/profiles/worker.yaml");
+  });
+  it("jaatoFiles counts the files under .jaato/ and says whether it is shown", () => {
+    const files = { ".jaato/profiles/a.yaml": "created", ".jaato/agents/b.md": "created", "src/x.py": "modified" };
+    expect(jaatoFiles(files, [])).toEqual({ count: 2, shown: false });
+    expect(jaatoFiles(files, ["!.jaato/"])).toEqual({ count: 2, shown: true });
   });
 });
