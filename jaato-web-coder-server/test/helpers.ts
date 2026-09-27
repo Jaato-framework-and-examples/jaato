@@ -26,13 +26,15 @@ export interface MockDaemon {
   /** Answer the next bind with this status instead of "bound". */
   nextBindStatus: string | null;
   authHeaders: Array<string | undefined>;
+  /** ``workspace -> user`` this daemon records as owning it, for ``workspace.app_write`` (1.30). */
+  owners: Map<string, string>;
   /** Send a ``secret.resolve`` down the app-credential connection and await its ``secret.resolve.result``. */
   askSecretResolve(req: { request_id: string; user: string; workspace: string; name: string }): Promise<Record<string, unknown>>;
   close(): Promise<void>;
 }
 
 /** A daemon that accepts an app-credential bind channel and mints "ticket-N". */
-export async function startMockDaemon(): Promise<MockDaemon> {
+export async function startMockDaemon(opts: { protocolVersion?: string } = {}): Promise<MockDaemon> {
   const wss = new WebSocketServer({ host: "127.0.0.1", port: 0 });
   await new Promise<void>((r) => wss.on("listening", r));
   const port = (wss.address() as { port: number }).port;
@@ -41,7 +43,7 @@ export async function startMockDaemon(): Promise<MockDaemon> {
   const resolvePending = new Map<string, (ev: Record<string, unknown>) => void>();
   const d: MockDaemon = {
     url: `ws://127.0.0.1:${port}`, port, binds: [], revokes: [], reloads: [], nextReloadCount: 0,
-    nextBindStatus: null, authHeaders: [],
+    nextBindStatus: null, authHeaders: [], owners: new Map(),
     askSecretResolve(reqEv) {
       if (!appSock) return Promise.reject(new Error("no app-credential connection to ask"));
       return new Promise((resolve) => {
@@ -56,7 +58,7 @@ export async function startMockDaemon(): Promise<MockDaemon> {
     d.authHeaders.push(auth);
     const isApp = auth === `Bearer ${APP_CREDENTIAL}`;
     if (isApp) appSock = sock;
-    sock.send(JSON.stringify({ type: "connected", timestamp: new Date().toISOString(), protocol_version: "1.10", server_info: { client_id: "client_1", server_version: "0.9.0" } }));
+    sock.send(JSON.stringify({ type: "connected", timestamp: new Date().toISOString(), protocol_version: opts.protocolVersion ?? "1.10", server_info: { client_id: "client_1", server_version: "0.9.0" } }));
     sock.on("message", (raw) => {
       const ev = JSON.parse(String(raw));
       if (ev.type === "ticket.bind") {
@@ -76,6 +78,11 @@ export async function startMockDaemon(): Promise<MockDaemon> {
         d.reloads.push(ev.user);
         const reloaded = d.nextReloadCount; d.nextReloadCount = 0;
         return sock.send(JSON.stringify({ type: "secret.reload.result", request_id: ev.request_id, status: "ok", reloaded }));
+      }
+      // Only the ownership half of workspace.app_write: an empty request writes nothing.
+      if (ev.type === "workspace.app_write" && isApp) {
+        const owned = d.owners.get(ev.workspace) === ev.user;
+        return sock.send(JSON.stringify({ type: "workspace.app_write.result", request_id: ev.request_id, status: owned ? "ok" : "not_found", env: {}, files: [] }));
       }
       // The application's answer to a daemon-initiated secret.resolve.
       if (ev.type === "secret.resolve.result") {

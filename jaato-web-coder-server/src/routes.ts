@@ -24,6 +24,13 @@
  * | ``/api/github/default`` | POST | ``{id}`` — make one account the default (same-origin only) |
  * | ``/api/github/disconnect`` | POST | ``{id}`` — delete + revoke a grant and reload the user's sessions (same-origin only) |
  * | ``/api/github/bind`` | POST | ``{workspace, account_id\|null}`` — bind/clear an account on a workspace (same-origin only) |
+ * | ``/api/environment?workspace=`` | GET | bound toolchains, the operator's allow-list, proposals from the workspace's files, the running install |
+ * | ``/api/environment/bind`` | POST | ``{workspace, tool, version}`` — start an install (same-origin only) |
+ * | ``/api/environment/unbind`` | POST | ``{workspace, tool}`` — remove a binding's links and files (same-origin only) |
+ * | ``/api/environment/decline`` | POST | ``{workspace, tool}`` — "not now" for a proposal (same-origin only) |
+ * | ``/api/environment/refresh`` | POST | ``{workspace}`` — rewrite the repository-guidance pointer after a clone or pull (same-origin only) |
+ * | ``/api/environment/jobs/<id>`` | GET | one install's progress |
+ * | ``/api/environment/jobs/<id>/cancel`` | POST | cancel it (same-origin only) |
  * | anything else | GET | the bundle (``@jaato/web-coder-ui``'s static handler) |
  *
  * The four credential routes exist only when the config carries a
@@ -49,6 +56,8 @@ import { BindChannel, BindRefusedError, BindUnavailableError } from "./bind-chan
 import { CredentialError, type CredentialStore, validateProvider } from "./credentials.js";
 import { NoteError, type NoteStore, validateSessionId } from "./notes.js";
 import { GitHubApiError, GitHubBindError, GitHubGrantRevoked, type GitHubService } from "./github.js";
+import { EnvironmentError, type EnvironmentService } from "./environment/service.js";
+import { isToolId } from "./environment/catalog.js";
 import { type IdentityProvider, SignInRefusedError } from "./auth/identity.js";
 import { parseCookies, sessionCookie, SessionStore } from "./session.js";
 
@@ -63,6 +72,8 @@ export interface RouterDeps {
   notes?: NoteStore;
   /** The per-user GitHub connect service; absent = the ``/auth/github`` / ``/api/github`` routes do not exist. */
   github?: GitHubService;
+  /** The environment bootstrap; absent = the ``/api/environment`` routes do not exist. */
+  environment?: EnvironmentService;
   /** Serve the bundle from here; defaults to the installed @jaato/web-coder-ui dist. */
   distDir?: string;
   log?: (msg: string) => void;
@@ -135,7 +146,7 @@ async function readJsonObject(req: IncomingMessage): Promise<Record<string, unkn
 }
 
 export function createRouter(deps: RouterDeps): Handler {
-  const { config, idp, sessions, bind, credentials, notes, github } = deps;
+  const { config, idp, sessions, bind, credentials, notes, github, environment } = deps;
   const log = deps.log ?? (() => undefined);
   const secure = config.publicUrl.startsWith("https://");
   const pendingLogins = new Map<string, PendingLogin>();
@@ -156,6 +167,8 @@ export function createRouter(deps: RouterDeps): Handler {
       // Named only when the service exists, so the follow-up UI knows whether
       // to offer "Connect GitHub" and the workspace account dropdown at all.
       ...(github ? { githubUrl: "./api/github", githubLoginUrl: "./auth/github/login" } : {}),
+      // Named only when the bootstrap is configured, so the page offers toolchain chips iff it can act on them.
+      ...(environment ? { environmentUrl: "./api/environment" } : {}),
     },
     allowedHosts: null,
   }) as Handler;
@@ -323,6 +336,59 @@ export function createRouter(deps: RouterDeps): Handler {
     }
   };
 
+  /**
+   * ``/api/environment`` and below.  The cookie for every route, same-origin
+   * for the mutating ones.  Declines are per OIDC ``sub``; ownership is asked
+   * of the daemon for the daemon-facing ``user`` (the service does both).
+   */
+  const handleEnvironment = async (req: IncomingMessage, res: ServerResponse, url: URL, method: string, rest: string[]): Promise<void> => {
+    if (!environment) return text(res, 404, "not found");
+    const s = sessions.resolve(parseCookies(req.headers.cookie).get(cookieName));
+    if (!s) return json(res, 401, { error: "not signed in", loginUrl: "./auth/login" });
+    const sameOrigin = () => isSameOrigin(req, config.publicUrl);
+    try {
+      if (rest.length === 0 && method === "GET") {
+        return json(res, 200, await environment.status(s.sub, s.user, url.searchParams.get("workspace") ?? ""));
+      }
+      if (rest.length === 2 && rest[0] === "jobs" && method === "GET") {
+        const job = environment.job(s.sub, rest[1]!);
+        return job ? json(res, 200, { job }) : json(res, 404, { error: "no such job" });
+      }
+      if (rest.length === 3 && rest[0] === "jobs" && rest[2] === "cancel" && method === "POST") {
+        if (!sameOrigin()) return json(res, 403, { error: "cross-site request refused" });
+        const job = environment.cancel(s.sub, rest[1]!);
+        if (job) log(`environment install cancelled by ${s.user}: job=${job.id}`);
+        return job ? json(res, 200, { job }) : json(res, 404, { error: "no such job" });
+      }
+      if (rest.length === 1 && method === "POST" && ["bind", "unbind", "decline", "refresh"].includes(rest[0]!)) {
+        if (!sameOrigin()) return json(res, 403, { error: "cross-site request refused" });
+        const body = await readJsonObject(req);
+        const workspace = typeof body.workspace === "string" ? body.workspace : "";
+        if (!workspace) return json(res, 400, { error: "workspace required" });
+        if (rest[0] === "refresh") return json(res, 200, await environment.refreshGuidance(s.sub, s.user, workspace));
+        if (!isToolId(body.tool)) return json(res, 400, { error: "tool must be one of the known toolchains" });
+        if (rest[0] === "decline") {
+          await environment.decline(s.sub, s.user, workspace, body.tool);
+          return json(res, 200, { declined: body.tool });
+        }
+        if (rest[0] === "unbind") {
+          const r = await environment.unbind(s.sub, s.user, workspace, body.tool);
+          log(`environment unbind for ${s.user}: workspace=${workspace} tool=${body.tool}`);
+          return json(res, 200, r);
+        }
+        if (typeof body.version !== "string" || !body.version) return json(res, 400, { error: "version required" });
+        const job = await environment.bind(s.sub, s.user, workspace, body.tool, body.version);
+        log(`environment bind for ${s.user}: workspace=${workspace} tool=${body.tool}@${body.version} job=${job.id}`);
+        return json(res, 202, { job });
+      }
+      return text(res, 404, "not found");
+    } catch (e) {
+      if (e instanceof EnvironmentError) return json(res, e.status, { error: e.message });
+      if (e instanceof BodyError) return json(res, 400, { error: e.message });
+      throw e;
+    }
+  };
+
   const currentSession = (req: IncomingMessage) => sessions.resolve(parseCookies(req.headers.cookie).get(cookieName));
   const clearCookie = () => sessionCookie(cookieName, "", { secure, maxAgeSeconds: 0 });
 
@@ -458,6 +524,10 @@ export function createRouter(deps: RouterDeps): Handler {
 
       if (path === "/api/github" || path.startsWith("/api/github/")) {
         return await handleGitHub(req, res, method, path.slice("/api/github".length).split("/").filter(Boolean));
+      }
+
+      if (path === "/api/environment" || path.startsWith("/api/environment/")) {
+        return await handleEnvironment(req, res, url, method, path.slice("/api/environment".length).split("/").filter(Boolean));
       }
 
       if (path.startsWith("/api/") || path.startsWith("/auth/")) return text(res, 404, "not found");

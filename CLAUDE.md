@@ -1917,6 +1917,28 @@ the prompt it was rendered with (#787). Guard:
 `jaato_server/shared/tests/test_repo_guidance_pointer_1347.py`, four
 reversions.
 
+### Toolchains a Workspace Owner Binds (#1344)
+
+The rest of the epic is application-side, in the web coder: the framework
+already runs what lands under `<ws>/.home` (#1225, #1273/#1274, v38), so the
+BFF installs there, with the owner's consent. Off unless the BFF config has
+an `environment:` block; design and departures in
+[Web Coder Environment Bootstrap](docs/design/web-coder-environment-bootstrap.md).
+
+| Piece | Where |
+|---|---|
+| detection (markers in the root and each clone; proposes only) | `jaato-web-coder-server/src/environment/detect.ts` |
+| install: `mise install` with every mise dir under `.home`, a clean env, `MISE_CEILING_PATHS` so a repo's `mise.toml` cannot choose downloads; relative links into `.home/.local/bin`; the pinned server | `src/environment/installer.ts` |
+| the four managed files (`.jaato/environment.json` for the `runtime` aspect, the mise config, `.lsp.json` for #1345, `45-environment.md`) and the `30-repo-guidance.md` pointer | `src/environment/files.ts`, `guidance.ts` |
+| operator allow-list of pinned versions; one job per workspace; ownership asked of the daemon with an EMPTY `workspace.app_write` (1.30), refused when it cannot answer | `src/environment/service.ts`, `src/config.ts`, `BindChannel.owns` |
+| the clone-time chip, the rail's Toolchains section, the mid-session `command not found` chip | `jaato-web-coder-ui/src/components/workspace/EnvironmentPanel.tsx`, `app/environment.ts` |
+
+`managed-files.ts` now spells its marker per type (`html`, `hash` for TOML,
+a `_jaato_managed` JSON key) and gains `generated`: a derived file refreshes
+when its content differs. Not verified on an enforcing kernel (phase 0), and
+no shared toolchain cache (phase 5). Guards: `test/environment.test.ts`,
+`test/environment-routes.test.ts`, `EnvironmentPanel.test.tsx`.
+
 ### Pre-warm Runner Pool
 
 Sessions consume a pre-warm runner subprocess from a pool instead of cold-spawning one each time.  Cuts per-session bootstrap from ~30s (with full plugin discovery + imports) to ~7s on cascade workloads.
@@ -11411,6 +11433,6 @@ This is not optional cleanup — treat missing or inaccurate docstrings as a def
 - [EU AI Act](docs/design/eu-ai-act.md) - What Regulation (EU) 2024/1689 asks of a jaato *application* (the AI system is the profile + persona + tools + model binding; jaato is a component supplier under Art. 25(4), and BUSL-1.1 is not a free and open-source licence, so neither Art. 2(12) nor the 25(4) carve-out applies), which obligations bind when after the Digital Omnibus (Art. 50 disclosure and marking since 2 Aug 2026; Annex III high-risk from 2 Dec 2027), and the mechanisms in order. Every mechanism it names is shipped: the `regulatory:` profile block, the `disclosure` piece and the first-interaction announcement, `generated_by` plus the `TRAIT_OUTPUT_MARKER` hook, one audit-record contract with `record_keeping:` retention and a sha256 chain, the incident register, memory provenance, and the Annex IV dossier generator with its `jaato-eval` accuracy section. What remains is recorded there as a decision rather than a gap. See [EU AI Act Mechanisms](#eu-ai-act-mechanisms).
 - [Per-User GitHub Credentials](docs/design/per-user-github-credentials.md) - Proposed (#1225–#1228): how a multi-user web deployment on a root daemon gives each session its WUI user's GitHub token. The BFF holds the grant (GitHub App, refresh token encrypted per OIDC `sub`) and binds an account per workspace; the workspace `.env` carries only a reference (`GH_TOKEN=app://github`), which the daemon resolves at every spawn by asking the owning application over its bind channel, so cascade, wake and revived sessions get it too and nothing resolved is persisted. Includes the per-workspace `.home/` for model-driven subprocesses.
 - [GitHub Workspace Guidance](docs/design/github-workspace-guidance.md) - Proposed (#1240, docs-only, application-scoped): how the web coder ships the "use `gh` safely in a shared workspace" rule-set into every workspace it binds a GitHub account to, as application-managed files (no daemon change). The BFF writes `.jaato/instructions/40-github.md` at bind time beside the `.env`/`.gitconfig` it already seeds, so cascade/wake/revive sessions get the rules as they get the token; the UI refreshes on session start. Recommends BFF-as-primary-writer, one gitconfig source of commit identity, a force-push permission blacklist (enforced) plus prose (judgement), helper+prose worktree cleanup, and a generic managed-file mechanism GitLab can later reuse.
-- [Web Coder Environment Bootstrap](docs/design/web-coder-environment-bootstrap.md) - Proposed, application-scoped: the web coder, not the framework, bootstraps a workspace's toolchains, language servers and pointers to the repo's own guidance (`AGENTS.md`, `CONTRIBUTING.md`, …). The user binds a toolchain, or accepts a proposal the page raises from clone-time markers or a `not found` exit. The BFF installs it with mise into `<ws>/.home`, where binaries already run under confinement (#1273/#1274, template v38), and writes the results as managed files. Framework-side it asks only for three client-neutral pieces: hide LSP tools when no server can attach, a `get_environment(aspect="runtime")` the model asks for what can run now, and an `AGENTS.md` pointer for a checkout the user opened themselves.
+- [Web Coder Environment Bootstrap](docs/design/web-coder-environment-bootstrap.md) - Built except phase 0 (verification on a confined host) and phase 5 (a shared cache); application-scoped: the web coder, not the framework, bootstraps a workspace's toolchains, language servers and pointers to the repo's own guidance (`AGENTS.md`, `CONTRIBUTING.md`, …). The user binds a toolchain, or accepts a proposal the page raises from clone-time markers or a `not found` exit. The BFF installs it with mise into `<ws>/.home`, where binaries already run under confinement (#1273/#1274, template v38), and writes the results as managed files. Framework-side it asks only for three client-neutral pieces: hide LSP tools when no server can attach, a `get_environment(aspect="runtime")` the model asks for what can run now, and an `AGENTS.md` pointer for a checkout the user opened themselves.
 - [AppArmor Setup](docs/apparmor-setup.md) - Kernel-enforced workspace isolation. WS deployments confine automatically when AppArmor is available; IPC clients opt in via `IPCClient(..., apparmor=True)` (defaults to `False`).
 - [GCP Setup Guide](docs/gcp-setup.md) - Setting up GCP project for Vertex AI

@@ -108,6 +108,13 @@ refused, not read):
 | `github.workspace_root` | optional: the root managed workspaces live under, when THIS server can write there. Set = the bind writes `GH_TOKEN=app://github`, `.home/.gitconfig` and the GitHub guidance itself, contained within it (symlinks resolved). Unset, or a workspace outside it = the **daemon** writes them (`workspace.app_write`, daemon protocol 1.30), which is the only way when this server runs as an account that cannot reach the daemon's workspaces. The `.env` line is not optional: the daemon resolves `app://github` only when it finds it there, so a binding with no line gives sessions no `GH_TOKEN`. Every recorded binding is re-written when the bind channel (re)connects, so a binding made while no write was possible is repaired without picking the account again |
 | `github.oauth_base_url`, `api_base_url` | optional: point at a GitHub Enterprise host (default `https://github.com` / `https://api.github.com`) |
 | `github.noreply_domain` | optional: the commit-email domain seeded into `.gitconfig` (default `users.noreply.github.com`) |
+| `environment.workspace_root` | optional block, **required key**: the root managed workspaces live under. The toolchain routes install into a workspace, so THIS server must reach it; the daemon does not install on its behalf. Absent block = off: `config.json` names no `environmentUrl` and the page shows no toolchain chips |
+| `environment.tools` | the operator's allow-list: toolchain → versions, e.g. `node: ["22", "20"]`, `go: ["1.23"]`, `bun: ["1.2"]`. Only `node`, `go` and `bun` can be listed (Rust and Java are not supported, see below). A major-only entry installs mise's latest of that line at bind time; list an exact version to pin it |
+| `environment.lsp` | pinned language-server versions: `basedpyright` (also what makes the `python` toolchain bindable), `typescript-language-server` (needs `typescript_version`), `gopls` (e.g. `v0.20.0`). An unpinned server is never installed |
+| `environment.mise`, `python` | the binaries used to install (default `mise` / `python3` on `PATH`) |
+| `environment.paranoid` | `true` sets `MISE_PARANOID=1` for installs (stricter verification; default `false`, mise's own checksum verification still applies) |
+| `environment.install_timeout` | per-step deadline (default `15m`) |
+| `environment.state_file` | where "Not now" answers are remembered per user and workspace (default `environment-state.json`, 0600) |
 
 ### Keys a user has used before
 
@@ -157,6 +164,77 @@ reload the user's loaded sessions so a live `gh` call then fails. Design:
 > dropdown) and the pasted fine-grained-PAT fallback are follow-ups; this
 > server exposes the endpoints the UI will call.
 
+### Toolchains, language servers and repository guidance (#1344)
+
+With an `environment:` block, a workspace owner can bind toolchains to a
+workspace from the page. Detection only proposes: after a New workspace's
+clones are checked out, the page asks this server to scan them for markers
+(`.nvmrc`, `package.json` engines, `go.mod`, `.tool-versions`,
+`pyproject.toml`, …) and shows *"Node 22 detected (from `api/.nvmrc`). Bind
+it?"*; mid-session, a command that failed with `<name>: command not found`
+raises the same chip in the rail's Toolchains section. Nothing is installed
+without a click, and "Not now" is remembered.
+
+```yaml
+environment:
+  workspace_root: /srv/jaato/workspaces
+  tools:
+    node: ["22", "20"]
+    go: ["1.23"]
+  lsp:
+    basedpyright: "1.31.6"
+    typescript-language-server: "4.4.0"
+    gopls: "v0.20.0"
+  typescript_version: "5.9.3"
+```
+
+A bind runs, as THIS process and never inside a confined session:
+
+1. `mise install <tool>@<version>` with HOME, XDG and mise's directories
+   under `<ws>/.home`, a clean environment (only proxy and CA variables pass
+   through), and `MISE_CEILING_PATHS=<ws>/.home` so a repository's own
+   `mise.toml` cannot choose what is downloaded;
+2. relative symlinks from the install's `bin/` into `<ws>/.home/.local/bin`,
+   which is on every command's `PATH` and granted exec under confinement
+   (#1273/#1274). A file there that is not one of these links is never
+   replaced;
+3. the pinned language server: basedpyright into its own venv under
+   `.home/.local/share/jaato-lsp/` (not the model's tool-venv, which may not
+   exist yet and is the model's to change), typescript-language-server with
+   the linked `npm` (started through the linked `node`, so its `.mjs` entry is
+   read rather than exec'd), gopls with `GOBIN=.home/.local/bin`;
+4. four managed files: `.jaato/environment.json` (read by
+   `get_environment(aspect="runtime")`), `.home/.config/mise/config.toml`,
+   `.lsp.json` (read by the `lsp` plugin, whose tools appear once a server is
+   configured, #1345) and `.jaato/instructions/45-environment.md`. A file whose
+   `jaato-managed` marker the user removed is left alone and reported.
+
+**Ownership, not only containment.** Every route asks the daemon, over the
+bind channel, whether the signed-in user owns the workspace (an empty
+`workspace.app_write`, daemon protocol 1.30). A daemon that cannot answer
+refuses the request.
+
+**The uid layout matters and is not checked for you.** Installs are written
+by this server's account and run by the runner's. If they differ, `.home`
+must be writable here and the installed files readable and executable
+there; the runner's profile grants no `dac_override`, so even a root runner
+is bound by file permissions. A BFF that runs as an account which cannot
+reach the daemon's workspaces (the `workspace.app_write` deployment above)
+cannot use this feature.
+
+**Unbind** removes the links, the server's binaries and the tool's entry in
+the managed files; the download under `.home/.local/share/mise` is kept, so a
+rebind is quick. Not supported: Rust (rustup keeps its homes outside mise and
+its proxies need `RUSTUP_HOME` at run time), Java (until #806), a shared
+read-only toolchain cache (phase 5 of #1344; it needs an operator-installed
+AppArmor user-tier fragment granting `r`/`ix` on the cache directory).
+
+The repository-guidance pointer is written on the same scan:
+`.jaato/instructions/30-repo-guidance.md` names each cloned repository's
+`AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING.md`, `.github/copilot-instructions.md`
+and `.cursor/rules`, never their contents. The workspace root's own files are
+the framework's (#1347).
+
 ## Routes
 
 | Route | Method | |
@@ -168,6 +246,9 @@ reload the user's loaded sessions so a live `gh` call then fails. Design:
 | `/api/session` | GET | `{user, expiresAt}` or 401 |
 | `/api/ticket` | POST | one single-use ticket; same-origin only (`Sec-Fetch-Site` / `Origin`) |
 | `/api/logout` | GET | ends the session, revokes, redirects through the issuer's logout |
+| `/api/environment?workspace=` | GET | bound toolchains, the allow-list, proposals and the latest install (`environment:` only) |
+| `/api/environment/bind`, `unbind`, `decline`, `refresh` | POST | `{workspace, tool[, version]}`; same-origin only |
+| `/api/environment/jobs/<id>` | GET | one install's progress; `…/cancel` (POST) stops it |
 | `/api/credentials?provider=` | GET | the user's stored keys for a provider: `{entries: [{id, provider, label, hint, createdAt}]}` |
 | `/api/credentials` | POST | store `{provider, secret, label?}` → 201 `{entry}`; same-origin only |
 | `/api/credentials/<id>/reveal` | POST | `{secret}`; same-origin only |

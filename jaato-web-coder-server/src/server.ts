@@ -15,6 +15,8 @@ import { GitHubService } from "./github.js";
 import { type IdentityProvider } from "./auth/identity.js";
 import { OidcProvider } from "./auth/oidc.js";
 import { createRouter } from "./routes.js";
+import { EnvironmentService } from "./environment/service.js";
+import { FileEnvironmentStore } from "./environment/store.js";
 import { SessionStore } from "./session.js";
 
 export interface RunningServer {
@@ -78,7 +80,23 @@ export async function startServer(config: ServerConfig, opts: StartOptions = {})
     log("github connect not configured (no github: block)");
   }
 
-  const server = createServer(createRouter({ config, idp, sessions, bind, credentials, notes, github, distDir: opts.distDir, log }));
+  // Opt-in: the environment bootstrap (#1344).  Every operation asks the
+  // daemon, over this bind channel, whether the user owns the workspace.
+  let environment: EnvironmentService | undefined;
+  if (config.environment) {
+    const env = config.environment;
+    environment = new EnvironmentService({
+      workspaceRoot: env.workspaceRoot, tools: env.tools, lsp: env.lsp, typescriptVersion: env.typescriptVersion,
+      mise: env.mise, python: env.python, paranoid: env.paranoid, installTimeoutMs: env.installTimeoutSeconds * 1000,
+      store: new FileEnvironmentStore(env.stateFile), ownership: bind, log,
+    });
+    const offered = environment.allowedTools().map((t) => `${t.tool}[${t.versions.join(",")}]${t.server ? `+${t.server.id}` : ""}`);
+    log(`environment bootstrap enabled under ${env.workspaceRoot}: ${offered.length ? offered.join(" ") : "no toolchain allowed yet (environment.tools / environment.lsp are empty)"}`);
+  } else {
+    log("environment bootstrap not configured (no environment: block)");
+  }
+
+  const server = createServer(createRouter({ config, idp, sessions, bind, credentials, notes, github, environment, distDir: opts.distDir, log }));
   await new Promise<void>((ok, fail) => server.once("error", fail).listen(config.listen.port, config.listen.host, ok));
   const addr = server.address();
   log(`listening on ${typeof addr === "string" ? addr : `${addr?.address}:${addr?.port}`}; public URL ${config.publicUrl}; browsers connect to ${config.daemon.url}`);

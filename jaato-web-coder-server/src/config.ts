@@ -14,6 +14,7 @@
 import { readFileSync, statSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
+import { LANGUAGE_SERVERS, TOOLCHAINS, isToolId, type ServerId, type ToolId } from "./environment/catalog.js";
 
 export class ConfigError extends Error {
   override name = "ConfigError";
@@ -79,6 +80,27 @@ export interface ServerConfig {
     apiBaseUrl?: string;
     noreplyDomain?: string;
     workspaceRoot?: string;
+  };
+  /**
+   * The environment bootstrap (``src/environment/``, #1344): toolchains,
+   * language servers and the repository-guidance pointer.  Absent = the
+   * feature is off: ``config.json`` names no ``environmentUrl`` and the
+   * ``/api/environment`` routes answer 404.  ``workspace_root`` is required:
+   * an install writes and runs files in the workspace, so this process must
+   * reach it (the daemon cannot install on its behalf).  ``tools`` is the
+   * operator's allow-list of pinned versions per toolchain; ``lsp`` pins
+   * each language server's version (an unpinned server is never installed).
+   */
+  environment?: {
+    workspaceRoot: string;
+    stateFile: string;
+    tools: Partial<Record<ToolId, string[]>>;
+    lsp: Partial<Record<ServerId, string>>;
+    typescriptVersion?: string;
+    mise: string;
+    python: string;
+    paranoid: boolean;
+    installTimeoutSeconds: number;
   };
 }
 
@@ -240,6 +262,8 @@ export function configFromObject(raw: unknown, baseDir: string): ServerConfig {
     github = { file, key, clientId, clientSecret, oauthBaseUrl, apiBaseUrl, noreplyDomain, workspaceRoot };
   }
 
+  const environment = parseEnvironment(o.environment, baseDir);
+
   return {
     listen: parseListen(o.listen),
     publicUrl,
@@ -251,6 +275,61 @@ export function configFromObject(raw: unknown, baseDir: string): ServerConfig {
     credentials,
     notes,
     github,
+    environment,
+  };
+}
+
+/** A version string safe to hand to mise / pip / npm / go as one argument. */
+const VERSION_RE = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$/;
+
+/** The ``environment:`` block, or ``undefined`` when absent. */
+export function parseEnvironment(raw: unknown, baseDir: string): ServerConfig["environment"] {
+  if (raw === undefined || raw === null) return undefined;
+  if (typeof raw !== "object" || Array.isArray(raw)) throw new ConfigError("environment must be a mapping");
+  const e = raw as Record<string, any>;
+  const workspaceRoot = resolve(baseDir, str(req(e.workspace_root, "environment.workspace_root"), "environment.workspace_root"));
+  const stateFile = resolve(baseDir, e.state_file ? str(e.state_file, "environment.state_file") : "environment-state.json");
+  const tools: Partial<Record<ToolId, string[]>> = {};
+  if (e.tools !== undefined && e.tools !== null) {
+    if (typeof e.tools !== "object" || Array.isArray(e.tools)) throw new ConfigError("environment.tools must map a toolchain to a list of versions");
+    for (const [name, versions] of Object.entries(e.tools as Record<string, unknown>)) {
+      if (!isToolId(name) || name === "python" || !TOOLCHAINS[name].mise) {
+        throw new ConfigError(`environment.tools.${name}: not a toolchain this server can install (one of ${Object.keys(TOOLCHAINS).filter((t) => t !== "python").join(", ")})`);
+      }
+      const list = Array.isArray(versions) ? versions : [versions];
+      const clean = list.map((v, i) => {
+        const s = typeof v === "number" ? String(v) : str(v, `environment.tools.${name}[${i}]`);
+        if (!VERSION_RE.test(s)) throw new ConfigError(`environment.tools.${name}[${i}]: '${s}' is not a version`);
+        return s;
+      });
+      if (clean.length) tools[name] = clean;
+    }
+  }
+  const lsp: Partial<Record<ServerId, string>> = {};
+  if (e.lsp !== undefined && e.lsp !== null) {
+    if (typeof e.lsp !== "object" || Array.isArray(e.lsp)) throw new ConfigError("environment.lsp must map a language server to a pinned version");
+    for (const [name, version] of Object.entries(e.lsp as Record<string, unknown>)) {
+      if (!(name in LANGUAGE_SERVERS)) throw new ConfigError(`environment.lsp.${name}: not a language server this server can install (one of ${Object.keys(LANGUAGE_SERVERS).join(", ")})`);
+      const s = typeof version === "number" ? String(version) : str(version, `environment.lsp.${name}`);
+      if (!VERSION_RE.test(s)) throw new ConfigError(`environment.lsp.${name}: '${s}' is not a version`);
+      lsp[name as ServerId] = s;
+    }
+  }
+  let typescriptVersion: string | undefined;
+  if (e.typescript_version !== undefined && e.typescript_version !== null) {
+    typescriptVersion = str(String(e.typescript_version), "environment.typescript_version");
+    if (!VERSION_RE.test(typescriptVersion)) throw new ConfigError(`environment.typescript_version: '${typescriptVersion}' is not a version`);
+  }
+  if (lsp["typescript-language-server"] && !typescriptVersion) {
+    throw new ConfigError("environment.typescript_version is required with environment.lsp.typescript-language-server (the server needs a pinned typescript beside it)");
+  }
+  const timeout = parseDuration(e.install_timeout ?? "15m", "environment.install_timeout");
+  return {
+    workspaceRoot, stateFile, tools, lsp, typescriptVersion,
+    mise: e.mise ? str(e.mise, "environment.mise") : "mise",
+    python: e.python ? str(e.python, "environment.python") : "python3",
+    paranoid: e.paranoid === undefined ? false : e.paranoid === true,
+    installTimeoutSeconds: timeout,
   };
 }
 
