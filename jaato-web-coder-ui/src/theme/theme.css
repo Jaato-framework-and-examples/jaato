@@ -343,3 +343,14 @@ kbd { font-family: var(--font-mono); font-size: 0.75rem; border: 1px solid var(-
 @media (prefers-reduced-motion: reduce) {
   .palette-backdrop, .palette-panel { animation: none; }
 }
+
+/* The conversation minimap rail (MinimapRail.tsx) replaces the pane's
+   native scrollbar, which is too thin to grab on a touch tablet.  The
+   scrollbar is hidden only where the rail is shown; wheel, touch and
+   keys still scroll the pane itself.  In the components layer so a
+   utility can still override either rule. */
+@layer components {
+  .minimap-rail { background: color-mix(in srgb, var(--c-text) 5%, var(--c-bg)); }
+  .no-scrollbar { scrollbar-width: none; }
+  .no-scrollbar::-webkit-scrollbar { display: none; }
+}
