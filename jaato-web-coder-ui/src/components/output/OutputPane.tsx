@@ -12,12 +12,23 @@
  * that outlives this component's renders, one per agent, so "Thought
  * for Ns" keeps counting from when a reasoning block was first seen
  * rather than restarting on every commit.
+ *
+ * Scroll-back (protocol 1.28): an attach shows only the most recent page
+ * of the history.  Reaching the top of the pane -- or a pane too short to
+ * scroll at all -- fetches the next older page (``app/historyPaging.ts``),
+ * which the store prepends; the scroll position is then shifted by the
+ * height the prepended rows added, so the rows the reader was looking at
+ * stay where they were.
  */
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { selectBlocks, useJaato } from "@/store/store";
 import { buildTranscript, type ThinkingClock } from "@/store/transcript";
 import { BlockView } from "./Blocks";
+import { loadOlderHistory } from "@/app/historyPaging";
+
+/** How close to the top (px) counts as "reached the top" for scroll-back. */
+const LOAD_OLDER_THRESHOLD = 80;
 
 export function OutputPane({ agentId }: { agentId: string }) {
   const blocks = useJaato(selectBlocks(agentId));
@@ -25,6 +36,9 @@ export function OutputPane({ agentId }: { agentId: string }) {
   const parentRef = useRef<HTMLDivElement>(null);
   const [follow, setFollow] = useState(true);
   const thinkingClock = useRef<ThinkingClock>(new Map());
+  const paging = useJaato((s) => s.historyPaging[agentId]);
+  const agentRef = useRef(agentId);
+  agentRef.current = agentId;
 
   const items = useMemo(() => buildTranscript(blocks, toolIdNames, thinkingClock.current), [blocks, toolIdNames]);
 
@@ -51,12 +65,37 @@ export function OutputPane({ agentId }: { agentId: string }) {
     }
   }, [blocks.length, tailSig, follow]);
 
+  // Keep the reader's place when an older page is PREPENDED: the first
+  // block changes while the old first block is still in the list, so the
+  // rows above it are new and the scroll offset grows by their height.
+  const firstId = blocks[0]?.id ?? null;
+  const lastFirstId = useRef<string | null>(firstId);
+  const lastTotal = useRef(0);
+  const total = virtualizer.getTotalSize();
+  useLayoutEffect(() => {
+    const el = parentRef.current;
+    const prevFirst = lastFirstId.current;
+    const prepended = !!el && prevFirst !== null && firstId !== prevFirst && blocks.some((b, i) => i > 0 && b.id === prevFirst);
+    if (prepended && el) el.scrollTop += total - lastTotal.current;
+    lastFirstId.current = firstId;
+    lastTotal.current = total;
+  }, [firstId, total, blocks]);
+
+  // A page too short to scroll can never reach "the top" by scrolling, so
+  // keep fetching older pages until the pane fills or the history ends.
+  useEffect(() => {
+    const el = parentRef.current;
+    if (!el || !paging?.hasMore || paging.loading) return;
+    if (el.scrollHeight <= el.clientHeight + LOAD_OLDER_THRESHOLD) void loadOlderHistory(agentId);
+  }, [paging?.hasMore, paging?.loading, blocks.length, agentId]);
+
   useEffect(() => {
     const el = parentRef.current;
     if (!el) return;
     const onScroll = () => {
       const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
       setFollow(atBottom);
+      if (el.scrollTop < LOAD_OLDER_THRESHOLD) void loadOlderHistory(agentRef.current);
     };
     el.addEventListener("scroll", onScroll, { passive: true });
     return () => el.removeEventListener("scroll", onScroll);
@@ -89,6 +128,22 @@ export function OutputPane({ agentId }: { agentId: string }) {
     // empty one -- costs no layout jump when the pill appears.
     <div className="relative flex-1 flex flex-col min-h-0">
       <div ref={parentRef} className="flex-1 overflow-y-auto px-5 py-3" data-testid="output-pane">
+        {(paging?.hasMore || paging?.error) && (
+          <div className="flex justify-center pb-2" data-testid="history-older">
+            {paging.error ? (
+              <span className="text-xs text-text-muted">{paging.error}</span>
+            ) : (
+              <button
+                type="button"
+                className="btn btn-sm text-text-muted"
+                disabled={paging.loading}
+                onClick={() => void loadOlderHistory(agentId)}
+              >
+                {paging.loading ? "loading earlier…" : "↑ load earlier"}
+              </button>
+            )}
+          </div>
+        )}
         {items.length === 0 && (
           <div className="h-full flex items-center justify-center text-text-muted text-sm select-none">
             <div className="text-center max-w-[52ch] space-y-2">

@@ -812,11 +812,29 @@ Not carried, as before: a tool's streamed OUTPUT (`ToolOutputEvent`,
 e.g. a notebook cell's rendered result). It is display-only and never
 entered the history the replay reads; a `tools` unit carries the call, its
 arguments and whether a result was recorded (`success: null` when none).
-The web client does not consume the verb yet.
+
+**WS clients reach it in both WS modes.** Daemon mode routes the frame
+through `CommandRouter` like IPC does; standalone mode has its own per-type
+dispatch, now `JaatoWSServer._handle_message_standalone` (lifted out of the
+baselined `_handle_message`, 30 → 16), which answers from its one server.
+
+**The web coder uses it.** It declares `history_replay: "paged"` (150
+lines), so an attach answers with the latest page and the client no longer
+also sends `history.request` against a 1.28 daemon — which also stops the
+old shape drawing an attached transcript twice (the full event replay
+*plus* blocks rebuilt from `HistoryEvent`). The store's `HISTORY_PAGE`
+reducer REPLACES the transcript with an attach page (`request_id == ""`,
+so a bare re-attach after a reconnect redraws rather than duplicates) and
+PREPENDS an answered one; `app/historyPaging.ts::loadOlderHistory` asks on
+scroll-to-top (or while the pane is too short to scroll), and the pane
+shifts its scroll offset by the prepended height so the reader keeps their
+place. Against a daemon below 1.28 the old path runs unchanged. The mock
+daemon speaks 1.28 in the daemon's shape.
 
 Guard: `jaato_server/server/tests/test_history_pages.py` (including one
-case against the shipped default formatter pipeline) and
-`jaato_sdk/tests/test_history_page_client.py`.
+case against the shipped default formatter pipeline and the standalone WS
+dispatch), `jaato_sdk/tests/test_history_page_client.py`, the web client's
+`app/historyPaging.test.ts`, and the e2e scroll-back case.
 
 ### Session Revive (waking a persisted session)
 

@@ -14,7 +14,7 @@ import { mergeCommandSpecs, type CommandSpec } from "@/protocol/commands";
 import { normalizeClarificationQuestion } from "@/protocol/clarification";
 import { summarizeToolCalls } from "@/protocol/turnStats";
 import { formatSessionList, normalizeSessionList, type SessionSummary } from "@/protocol/sessions";
-import { formatHistoryListing, historyBlocks } from "@/protocol/history";
+import { formatHistoryListing, historyBlocks, historyPageBlocks } from "@/protocol/history";
 import { clampRailWidth, loadRailWidth, saveRailWidth } from "@/store/railWidth";
 import { loadRailSplits, sanitizeSplits, saveRailSplits, type RailSplits } from "@/store/railSplits";
 import { applyChanged, applySnapshot, markReset, type WorkspaceReset } from "@/store/workspaceView";
@@ -158,6 +158,16 @@ export interface JaatoState {
    * after ``session attach``).
    */
   historyMode: "listing" | "replay";
+  /**
+   * Scroll-back through the daemon's paged history (protocol 1.28), per
+   * agent.  ``before`` is the cursor for the next OLDER page, ``hasMore``
+   * whether there is one; ``loading`` guards against asking twice while a
+   * page is in flight.  Written by the ``HISTORY_PAGE`` reducer (the
+   * answer) and ``setHistoryPaging`` (the request's own bookkeeping,
+   * ``app/actions.ts::loadOlderHistory``).  Absent for an agent means the
+   * daemon never sent a page -- an older daemon, or a full replay.
+   */
+  historyPaging: Record<string, HistoryPaging>;
   initProgress?: InitProgress | null;
 
   agents: Record<string, Agent>;
@@ -389,6 +399,8 @@ export interface JaatoState {
   /** Add (``+1``, before a silent request) or give back (``-1``, when it failed to send) one silent reply. */
   setSessionListSilent: (delta: 1 | -1) => void;
   setHistoryMode: (mode: JaatoState["historyMode"]) => void;
+  /** Merge into one agent's scroll-back state (see ``historyPaging``). */
+  setHistoryPaging: (agentId: string, patch: Partial<HistoryPaging>) => void;
   /** Show or hide one budget source's children. */
   toggleBudgetSource: (source: string) => void;
   toggleWorkspaceHidden: (entryId: string) => void;
@@ -432,6 +444,7 @@ const emptySessionState = () => ({
   selectedAgentId: MAIN_AGENT,
   blocks: { [MAIN_AGENT]: [] } as Record<string, OutputBlock[]>,
   toolOwner: {} as Record<string, string>,
+  historyPaging: {} as Record<string, HistoryPaging>,
   permissions: [] as PendingPermission[],
   clarifications: [] as PendingClarification[],
   referenceSelections: [] as PendingReferenceSelection[],
@@ -462,6 +475,51 @@ const emptySessionState = () => ({
   diagnostics: emptyDiagnostics(),
   lastEventAt: {} as Record<string, number>,
 });
+
+/** Scroll-back through the daemon's paged history, for one agent (1.28). */
+export interface HistoryPaging {
+  before: string;
+  hasMore: boolean;
+  loading: boolean;
+  error: string | null;
+}
+
+export function emptyPaging(): HistoryPaging {
+  return { before: "", hasMore: false, loading: false, error: null };
+}
+
+/**
+ * Fold one ``HistoryPageEvent`` into the transcript (protocol 1.28).
+ *
+ * The ATTACH page (``request_id === ""``) is the most recent page of a
+ * session this client has just bound to: it REPLACES the agent's blocks,
+ * so a bare re-attach after a reconnect redraws the transcript rather than
+ * drawing it twice.  An answer to ``loadOlderHistory`` (a request id) is
+ * older than everything on screen and is PREPENDED.  A ``stale`` answer
+ * means the history was rewritten under the cursor: scroll-back stops and
+ * says so rather than splicing in a page from somewhere else.
+ */
+function reduceHistoryPage(s: JaatoState, ev: AnyEvent): void {
+  const id = String(ev.agent_id ?? s.selectedAgentId);
+  ensureAgent(s, id);
+  // A page is the answer to "show me the conversation": a HistoryEvent
+  // still owed to an older attach path must not be drawn on top of it.
+  s.historyMode = "listing";
+  const attachPage = !ev.request_id;
+  const paging = { ...emptyPaging(), ...s.historyPaging[id], loading: false };
+  if (ev.ok === false || ev.stale === true) {
+    paging.error = ev.stale === true ? "The history changed; reattach to reload it." : String(ev.error ?? "history unavailable");
+    paging.hasMore = false;
+    s.historyPaging = { ...s.historyPaging, [id]: paging };
+    return;
+  }
+  const page = historyPageBlocks(ev.units, id, nextId, s.ui.showTools);
+  setBlocks(s, id, attachPage ? page : [...page, ...(s.blocks[id] ?? [])]);
+  paging.before = String(ev.before ?? "");
+  paging.hasMore = ev.has_more === true && !!paging.before;
+  paging.error = null;
+  s.historyPaging = { ...s.historyPaging, [id]: paging };
+}
 
 /** The Memories section before anything was asked (and after a session change). */
 export function emptyMemories(): MemoriesState {
@@ -851,6 +909,9 @@ export function reduce(s: JaatoState, raw: JaatoEvent): JaatoState {
       setBlocks(s, id, [...(s.blocks[id] ?? []), { id: nextId(), kind: "system", agentId: id, text: formatSessionList(list, s.notes), style: "help" }]);
       break;
     }
+    case EventTypeValue.HISTORY_PAGE:
+      reduceHistoryPage(s, ev);
+      break;
     case EventTypeValue.HISTORY: {
       const id = String(ev.agent_id ?? s.selectedAgentId);
       ensureAgent(s, id);
@@ -1370,6 +1431,8 @@ export const useJaato = create<JaatoState>()((set, get) => ({
   })),
   setSessionListSilent: (delta) => set((st) => ({ sessionListSilent: Math.max(0, st.sessionListSilent + delta) })),
   setHistoryMode: (mode) => set({ historyMode: mode }),
+  setHistoryPaging: (agentId, patch) =>
+    set((st) => ({ historyPaging: { ...st.historyPaging, [agentId]: { ...emptyPaging(), ...st.historyPaging[agentId], ...patch } } })),
   toggleBudgetSource: (source) => set((st) => ({
     budgetExpanded: st.budgetExpanded.includes(source)
       ? st.budgetExpanded.filter((k) => k !== source)

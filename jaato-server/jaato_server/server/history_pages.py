@@ -154,6 +154,40 @@ def _count_lines(text: str) -> int:
     return stripped.count("\n") + 1 if stripped else 1
 
 
+class _BlockState:
+    """Whether the segmenter is inside a fence or quoted markup."""
+
+    __slots__ = ("fence", "markup_close")
+
+    def __init__(self) -> None:
+        self.fence = None
+        self.markup_close: Optional[str] = None
+
+    @property
+    def inside(self) -> bool:
+        return self.fence is not None or self.markup_close is not None
+
+    def advance(self, body: str) -> None:
+        """Update the state for one complete line (no newline)."""
+        if self.fence is not None:
+            if self.fence.closes(body):
+                self.fence = None
+            return
+        if self.markup_close is not None:
+            if self.markup_close in body:
+                self.markup_close = None
+            return
+        opened = open_fence(body)
+        if opened is not None:
+            self.fence = opened[1]
+            return
+        m = _MARKUP_OPEN_RE.search(body)
+        if m:
+            close = _MARKUP_CLOSE_TMPL.format(tag=m.group(1))
+            if close not in body[m.end():]:
+                self.markup_close = close
+
+
 def segment_text(text: str) -> List[str]:
     """Split model text into unbreakable segments.
 
@@ -167,45 +201,21 @@ def segment_text(text: str) -> List[str]:
     Returns:
         The segments, in order; ``[]`` for empty text.
     """
-    if not text:
-        return []
     segments: List[str] = []
     current: List[str] = []
-    fence = None
-    markup_close: Optional[str] = None
+    state = _BlockState()
     pending_break = False
 
-    lines = text.splitlines(keepends=True)
-    for line in lines:
+    for line in (text or "").splitlines(keepends=True):
         body = line.rstrip("\n").rstrip("\r")
         blank = not body.strip()
-        inside = fence is not None or markup_close is not None
-
-        if not inside and not blank and pending_break and current:
+        if pending_break and not blank and not state.inside and current:
             segments.append("".join(current))
             current = []
-        pending_break = False
-
+        was_inside = state.inside
         current.append(line)
-
-        if fence is not None:
-            if fence.closes(body):
-                fence = None
-        elif markup_close is not None:
-            if markup_close in body:
-                markup_close = None
-        else:
-            opened = open_fence(body)
-            if opened is not None:
-                fence = opened[1]
-            else:
-                m = _MARKUP_OPEN_RE.search(body)
-                if m:
-                    close = _MARKUP_CLOSE_TMPL.format(tag=m.group(1))
-                    if close not in body[m.end():]:
-                        markup_close = close
-            if blank:
-                pending_break = True
+        state.advance(body)
+        pending_break = blank and not was_inside
 
     if current:
         segments.append("".join(current))
@@ -225,6 +235,76 @@ def _tool_outcomes(history: Sequence[Any]) -> Dict[str, bool]:
             fr = getattr(part, "function_response", None)
             if fr is not None and getattr(fr, "call_id", None):
                 out[fr.call_id] = not bool(getattr(fr, "is_error", False))
+    return out
+
+
+def _user_unit(msg: Any, group: str, turn: int) -> Optional[ReplayUnit]:
+    text = _HIDDEN_RE.sub("", getattr(msg, "text", None) or "")
+    if not text.strip():
+        return None
+    return ReplayUnit(kind="user", text=text, raw=text, group=group,
+                      turn=turn, lines=_count_lines(text))
+
+
+def _render(seg: str, format_text: Optional[Callable[[str], str]]) -> str:
+    """``format_text(seg)``, or ``seg`` when there is none or it raised."""
+    if format_text is None:
+        return seg
+    try:
+        return format_text(seg)
+    except Exception:  # noqa: BLE001 -- keep the text rather than lose it
+        return seg
+
+
+def _part_units(part: Any, group: str, turn: int,
+                format_text: Optional[Callable[[str], str]]) -> List[ReplayUnit]:
+    """The ``thinking`` and ``model`` units of one model part."""
+    out: List[ReplayUnit] = []
+    thought = getattr(part, "thought", None)
+    if thought:
+        out.append(ReplayUnit(kind="thinking", text=thought, raw=thought,
+                              group=group + "t", turn=turn,
+                              lines=_count_lines(thought)))
+    # Not ``elif``: a part may carry reasoning AND text (#1290).
+    for seg in segment_text(getattr(part, "text", None) or ""):
+        rendered = _render(seg, format_text)
+        out.append(ReplayUnit(kind="model", text=rendered, raw=seg,
+                              group=group, turn=turn,
+                              lines=_count_lines(rendered)))
+    return out
+
+
+def _tool_entry(fc: Any, outcomes: Dict[str, bool],
+                classify: Optional[Callable[[str], Any]]) -> Dict[str, Any]:
+    entry: Dict[str, Any] = {
+        "call_id": fc.id,
+        "tool_name": fc.name,
+        "tool_args": dict(fc.args or {}),
+        # An unanswered call (cancelled mid-batch) reads as success=None:
+        # the replay does not claim an outcome it never recorded.
+        "success": outcomes.get(fc.id),
+    }
+    if classify is not None:
+        try:
+            entry["tool_class"] = classify(fc.name)
+        except Exception:  # noqa: BLE001
+            pass
+    return entry
+
+
+def _model_units(msg: Any, mi: int, turn: int, outcomes: Dict[str, bool],
+                 format_text: Optional[Callable[[str], str]],
+                 classify: Optional[Callable[[str], Any]]) -> List[ReplayUnit]:
+    """Every unit of one model message: its parts, then its tool calls."""
+    parts = getattr(msg, "parts", None) or []
+    out: List[ReplayUnit] = []
+    for pi, part in enumerate(parts):
+        out.extend(_part_units(part, f"m{mi}p{pi}", turn, format_text))
+    calls = [p.function_call for p in parts if getattr(p, "function_call", None)]
+    if calls:
+        tools = [_tool_entry(fc, outcomes, classify) for fc in calls]
+        out.append(ReplayUnit(kind="tools", group=f"m{mi}c", turn=turn,
+                              tools=tools, raw="", lines=len(tools)))
     return out
 
 
@@ -252,75 +332,16 @@ def build_units(
     outcomes = _tool_outcomes(history)
     units: List[ReplayUnit] = []
     turn = -1
-
     for mi, msg in enumerate(history):
         role = _role(msg)
-        parts = getattr(msg, "parts", None) or []
-
         if role == "user":
-            text = getattr(msg, "text", None) or ""
-            text = _HIDDEN_RE.sub("", text)
-            if not text.strip():
-                continue
-            turn += 1
-            units.append(ReplayUnit(
-                kind="user", text=text, raw=text, group=f"m{mi}",
-                turn=turn, lines=_count_lines(text),
-            ))
-            continue
-
-        if role != "model":
-            continue
-
-        for pi, part in enumerate(parts):
-            thought = getattr(part, "thought", None)
-            if thought:
-                units.append(ReplayUnit(
-                    kind="thinking", text=thought, raw=thought,
-                    group=f"m{mi}p{pi}t", turn=turn,
-                    lines=_count_lines(thought),
-                ))
-            # Not ``elif``: a part may carry reasoning AND text (#1290).
-            ptext = getattr(part, "text", None)
-            if ptext:
-                for seg in segment_text(ptext):
-                    rendered = seg
-                    if format_text is not None:
-                        try:
-                            rendered = format_text(seg)
-                        except Exception:  # noqa: BLE001 -- keep the text
-                            rendered = seg
-                    units.append(ReplayUnit(
-                        kind="model", text=rendered, raw=seg,
-                        group=f"m{mi}p{pi}", turn=turn,
-                        lines=_count_lines(rendered),
-                    ))
-
-        calls = [p.function_call for p in parts
-                 if getattr(p, "function_call", None)]
-        if calls:
-            tools = []
-            for fc in calls:
-                entry: Dict[str, Any] = {
-                    "call_id": fc.id,
-                    "tool_name": fc.name,
-                    "tool_args": dict(fc.args or {}),
-                    # An unanswered call (cancelled mid-batch) reads as
-                    # success=None: the replay does not claim an outcome
-                    # it never recorded.
-                    "success": outcomes.get(fc.id),
-                }
-                if classify is not None:
-                    try:
-                        entry["tool_class"] = classify(fc.name)
-                    except Exception:  # noqa: BLE001
-                        pass
-                tools.append(entry)
-            units.append(ReplayUnit(
-                kind="tools", group=f"m{mi}c", turn=turn, tools=tools,
-                raw="", lines=len(tools),
-            ))
-
+            unit = _user_unit(msg, f"m{mi}", turn + 1)
+            if unit is not None:
+                turn += 1
+                units.append(unit)
+        elif role == "model":
+            units.extend(_model_units(msg, mi, turn, outcomes,
+                                      format_text, classify))
     return units
 
 

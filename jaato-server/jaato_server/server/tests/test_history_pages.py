@@ -317,3 +317,23 @@ def test_the_real_default_pipeline_renders_fences_and_tables_per_unit():
     assert any(t.startswith("<j-code") and "</j-code>" in t for t in rendered)
     assert any(t.startswith("<j-table>") and "</j-table>" in t for t in rendered)
     assert not any("```" in t for t in rendered)
+
+
+def test_standalone_ws_mode_answers_a_page_request():
+    """WS clients (the web coder) reach the verb in BOTH WS modes: daemon mode
+    goes through the CommandRouter (covered above); standalone has its own
+    per-type dispatch, which must know the verb too."""
+    import asyncio
+    from jaato_sdk.events import HistoryPageRequest
+    from jaato_server.server.websocket import JaatoWSServer
+
+    sent = []
+    ws = JaatoWSServer.__new__(JaatoWSServer)
+    ws._jaato_server = _server(_history())
+
+    async def fake_send(cid, ev):
+        sent.append(ev)
+    ws._send_to_client = fake_send
+    asyncio.run(ws._handle_message_standalone(
+        "c1", HistoryPageRequest(request_id="w", max_lines=5)))
+    assert sent and sent[0].request_id == "w" and sent[0].units

@@ -202,6 +202,30 @@ test("`session list` prints the daemon's listing; `session attach` completes ids
   await expect(page.getByTestId("permission-status")).toHaveText(/permissions\s+allow/);
 });
 
+test("attaching shows the latest history page and scrolling up loads older ones (protocol 1.28)", async ({ page }) => {
+  // The client declares ``history_replay: "paged"``: the attach answers with
+  // the most recent page only -- rendered, so the table arrives as a table
+  // -- and older turns load as the reader scrolls to the top.
+  await openSession(page);
+  await composer(page).fill("session attach 20260913_070000");
+  await composer(page).press("Enter");
+  await expect(page.getByText("question number 40")).toBeVisible();
+  await expect(page.locator("table").filter({ hasText: "k" })).toBeVisible();
+  await expect(page.getByText("question number 1", { exact: true })).toHaveCount(0);
+
+  const pane = page.getByTestId("output-pane");
+  // Each prepended page shifts the view down by its own height (the pane
+  // keeps the reader's place), so reaching the start takes one scroll-to-top
+  // per page: retry until the first turn is on screen.
+  await expect(async () => {
+    await pane.evaluate((el) => { el.scrollTop = 0; el.dispatchEvent(new Event("scroll")); });
+    await expect(page.getByText("question number 1", { exact: true })).toBeVisible({ timeout: 300 });
+  }).toPass({ timeout: 20_000 });
+  // Every page arrived once: the oldest turn is drawn once, not per page.
+  await expect(page.getByText("question number 1", { exact: true })).toHaveCount(1);
+  await expect(page.getByTestId("history-older")).toHaveCount(0);
+});
+
 test("permission prompt shows the diff and the typed key answers it", async ({ page }) => {
   await openSession(page);
   await composer(page).fill("permit");

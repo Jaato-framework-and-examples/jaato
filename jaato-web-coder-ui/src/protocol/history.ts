@@ -101,3 +101,63 @@ export function formatHistoryListing(history: unknown, turnAccounting: unknown):
   });
   return lines.join("\n");
 }
+
+/**
+ * One unit of a ``HistoryPageEvent`` (protocol 1.28): the daemon's
+ * rendered transcript, cut into pieces a page boundary never splits.
+ * ``model`` text has already been through the daemon's output formatter
+ * (``<j-code>``, ``<j-table>``...), exactly as the live stream is.
+ */
+export interface HistoryUnit {
+  id?: string;
+  kind?: string;
+  group?: string;
+  turn?: number;
+  text?: string;
+  tools?: Array<Record<string, unknown>>;
+}
+
+/**
+ * Rebuild one history PAGE as output blocks, oldest first.
+ *
+ * Consecutive ``model`` units sharing a ``group`` are segments of ONE text
+ * part and are joined back into one text block, so a reply split across
+ * units renders as the single answer it was.  A ``tools`` unit becomes one
+ * finished tool block per call; ``success: null`` (no result recorded, e.g.
+ * a call cancelled mid-batch) is drawn as success, as the live tree draws a
+ * call that ended without an error.
+ */
+export function historyPageBlocks(units: unknown, agentId: string, nextId: () => string, toolsExpanded: boolean): OutputBlock[] {
+  const out: OutputBlock[] = [];
+  let lastGroup: string | null = null;
+  for (const u of (Array.isArray(units) ? units : []) as HistoryUnit[]) {
+    const kind = String(u.kind ?? "");
+    const group = String(u.group ?? "");
+    const text = typeof u.text === "string" ? u.text : "";
+    const prev = out[out.length - 1];
+    if (kind === "user") {
+      out.push({ id: nextId(), kind: "user", agentId, text, echoed: true });
+    } else if (kind === "model" || kind === "thinking") {
+      if (kind === "model" && prev && prev.kind === "text" && prev.source === "model" && group && group === lastGroup) {
+        out[out.length - 1] = { ...prev, text: prev.text + text };
+      } else {
+        out.push({ id: nextId(), kind: "text", agentId, source: kind, text });
+      }
+    } else if (kind === "tools") {
+      for (const t of u.tools ?? []) {
+        const ok = t.success !== false;
+        const block: ToolBlock = {
+          id: nextId(), kind: "tool", agentId, callId: String(t.call_id ?? nextId()),
+          toolName: String(t.tool_name ?? "tool"),
+          args: (t.tool_args as Record<string, unknown> | undefined) ?? {},
+          status: ok ? "success" : "error", startedAt: 0, output: "", media: [],
+          expanded: toolsExpanded || !ok,
+          toolClass: (t.tool_class as ToolBlock["toolClass"] | undefined) ?? null,
+        };
+        out.push(block);
+      }
+    }
+    lastGroup = group;
+  }
+  return out;
+}

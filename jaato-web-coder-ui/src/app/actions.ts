@@ -23,6 +23,7 @@ import { noteAuthKeyCommand } from "./authKeyCapture";
 import { markExited } from "./exitIntent";
 import { answerExit, requestExit } from "./exitChoice";
 import { deleteSession, isGone } from "./sessionDelete";
+import { pagedHistorySupported } from "./historyPaging";
 
 export const inputHistory: string[] = [];
 
@@ -171,8 +172,15 @@ export async function createSession(profile: string | null, model?: { provider: 
 export async function attachSession(sessionId: string): Promise<void> {
   const st = useJaato.getState();
   st.resetSessionState();
-  st.setHistoryMode("replay");
   const client = getClient();
+  // A 1.28 daemon answers the attach itself with the most recent history
+  // page (this client declared ``history_replay: "paged"``); asking for
+  // ``history.request`` as well would draw the conversation a second time.
+  if (pagedHistorySupported()) {
+    await client.attachSession(sessionId);
+    return;
+  }
+  st.setHistoryMode("replay");
   try {
     await client.attachSession(sessionId);
     await client.requestHistory(MAIN_AGENT);
