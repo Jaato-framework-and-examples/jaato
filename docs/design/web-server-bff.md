@@ -361,14 +361,16 @@ between users. Every session still runs as the daemon's uid, as #1074's
 
 The server package depends on `@jaato/sdk` (protocol 1.10 events and
 the token provider) and on `@jaato/web-coder-ui` (the bundle and its static
-server) **from npm**, so the first publish of each has to happen in this
-order: **SDK, then UI, then server**. Until the SDK's first publish,
-`npx @jaato/web-coder-ui` cannot work at all (its `npx` has nothing to
-fetch), and the server can only be built from a checkout. The server's
-publish workflow enforces the order: its checkout links the siblings with
-`file:` for development, `scripts/prepare-publish.mjs` rewrites them to
-caret ranges at publish time, and the workflow refuses to publish unless
-both exact versions are already on the registry.
+server) **from npm**, so the server goes **after both**. The SDK and the
+UI have no order between them: the UI compiles `@jaato/sdk` into its
+bundle (a dev dependency), its published manifest declares no
+dependencies, and its `npx` entry point imports only Node built-ins.
+Until the server's siblings are on npm, the server can only be built
+from a checkout. The server's publish workflow enforces the order: its
+checkout links the siblings with `file:` for development,
+`scripts/prepare-publish.mjs` rewrites them to caret ranges at publish
+time, and the workflow refuses to publish unless both exact versions are
+already on the registry.
 
 All three workflows **stage** rather than publish: the `@jaato` token is
 a "Read and write (stage only)" granular token, because npm is retiring
@@ -376,7 +378,7 @@ direct publish by token in January 2027, and `npm stage publish` uploads
 the version non-public until a maintainer with 2FA approves it (`npm stage
 approve <stage-id>`, or on npmjs.com). A staged version does
 not answer the "is it on npm" probe, so the order above now includes the
-approvals: stage the SDK, approve, stage the UI, approve, stage the server,
+approvals: stage the SDK and the UI, approve both, stage the server,
 approve.
 
 One exception, measured on the UI's first run: npm refuses to stage a

@@ -50,8 +50,9 @@ declares and drops `private`, and **stages** the version (`npm stage
 publish`; the `@jaato` token is stage-only, so a maintainer with 2FA
 promotes it with `npm stage approve <stage-id>`). It
 **refuses** unless both of those exact versions are already on npm — a
-staged-but-unapproved sibling is not — so the order SDK → UI → server is
-enforced rather than remembered, approval included.
+staged-but-unapproved sibling is not — so the server goes after the SDK
+and the UI (which have no order between them), enforced rather than
+remembered, approval included.
 
 npm cannot stage a package it has never seen, so the **first** version has
 to be published directly by a maintainer with 2FA, from a checkout at the
