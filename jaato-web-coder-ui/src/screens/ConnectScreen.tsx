@@ -135,6 +135,8 @@ export function ConnectScreen() {
       // the two URLs together gate the "Connect GitHub" entry and the
       // workspace account dropdown. Absent = neither appears.
       useJaato.getState().setGithubUrls({ githubUrl: cfg.githubUrl ?? null, githubLoginUrl: cfg.githubLoginUrl ?? null });
+      // And the environment bootstrap: the Toolchains rail and clone-time chips.
+      useJaato.getState().setEnvironmentUrl(cfg.environmentUrl ?? null);
       if (!cfg.daemon && !cfg.token && !cfg.ticketUrl) return;
       const nextUrl = cfg.daemon ?? url;
       setUrl(nextUrl);

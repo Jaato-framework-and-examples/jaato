@@ -30,6 +30,7 @@ import { NewSessionColumn, stageDrafts, type SessionKey, type StagedDraft } from
 import { applySessionKey, resolveKeyChoice } from "@/app/sessionKey";
 import type { ModelChoice } from "@/app/newSession";
 import { MemoriesPanel } from "@/components/panels/MemoriesPanel";
+import { EnvironmentPanel } from "@/components/workspace/EnvironmentPanel";
 import { memoriesSummary } from "@/app/memories";
 import { DiagnosticsPanel } from "@/components/panels/DiagnosticsPanel";
 import { diagnosticsSummary } from "@/app/diagnostics";
@@ -152,6 +153,31 @@ function MemoriesBadgeIcon() {
   );
 }
 
+/** Toolchains: a wrench. */
+function ToolchainsBadgeIcon() {
+  return (
+    <svg {...RAIL_ICON_PROPS}>
+      <path d="M11.5 2.25a3.75 3.75 0 0 0-3.4 5.3L2.75 12.9a1.6 1.6 0 0 0 2.3 2.3l5.35-5.35a3.75 3.75 0 0 0 5.3-3.4l-2.2 2.2-2.1-.55-.55-2.1Z" />
+    </svg>
+  );
+}
+
+/**
+ * The Toolchains section (#1344): the session's workspace, resolved from the
+ * selected workspace's row, else the current session's own path.  Nothing
+ * to show without the backend's ``environmentUrl`` or a known path.
+ */
+function ToolchainsRailPanel() {
+  const url = useJaato((s) => s.environmentUrl);
+  const path = useJaato((s) => s.workspace.list.find((w) => w.name === s.workspace.selected)?.path
+    ?? s.sessions.find((x) => x.isCurrent)?.workspacePath ?? "");
+  const hint = useJaato((s) => s.environmentHint);
+  const setHint = useJaato((s) => s.setEnvironmentHint);
+  if (!url) return null;
+  if (!path) return <div className="px-3.5 py-3 text-[13px] text-text-muted">The daemon has not said which workspace this session runs in.</div>;
+  return <EnvironmentPanel key={path} url={url} workspace={path} hint={hint} onHintDone={() => setHint(null)} />;
+}
+
 /** Diagnostics: a shield with a checkmark. */
 function DiagnosticsBadgeIcon() {
   return (
@@ -188,6 +214,7 @@ const RAIL_BADGES: { id: RailPanelId; title: string; Icon: () => React.ReactElem
   { id: "sessions", title: "Sessions", Icon: SessionsBadgeIcon },
   { id: "memories", title: "Memories", Icon: MemoriesBadgeIcon },
   { id: "diagnostics", title: "Diagnostics", Icon: DiagnosticsBadgeIcon },
+  { id: "environment", title: "Toolchains", Icon: ToolchainsBadgeIcon },
 ];
 
 function RailPanelSection({ id, title, share, showHeader, children }: { id: RailPanelId; title: string; share?: number; showHeader: boolean; children: React.ReactNode }) {
@@ -232,6 +259,8 @@ function Rail({ agentId }: { agentId: string }) {
   const notes = useJaato((s) => s.notes);
   const memories = useJaato((s) => s.memories);
   const diagnostics = useJaato((s) => s.diagnostics);
+  const environmentUrl = useJaato((s) => s.environmentUrl);
+  const environmentHint = useJaato((s) => s.environmentHint);
   const budget = ctx?.usage.cost_usd != null ? `$${Number(ctx.usage.cost_usd).toFixed(4)}` : ctx?.percentUsed != null ? `${ctx.percentUsed.toFixed(0)}%` : null;
 
   const values: Record<RailPanelId, string | null> = {
@@ -241,6 +270,7 @@ function Rail({ agentId }: { agentId: string }) {
     sessions: notedSummary(sessions, notes),
     memories: memoriesSummary(memories),
     diagnostics: diagnosticsSummary(diagnostics),
+    environment: environmentHint ? "!" : null,
   };
   const panels: Record<RailPanelId, React.ReactNode> = {
     plan: <PlanPanel agentId={agentId} />,
@@ -249,7 +279,10 @@ function Rail({ agentId }: { agentId: string }) {
     sessions: <SessionsPanel />,
     memories: <MemoriesPanel />,
     diagnostics: <DiagnosticsPanel />,
+    environment: <ToolchainsRailPanel />,
   };
+  // The Toolchains badge exists only when the backend can install something.
+  const badges = RAIL_BADGES.filter((b) => b.id !== "environment" || environmentUrl);
 
   const active = ui.activePanel;
   const showPlanPinned = ui.pinnedPlan && active !== null && active !== "plan";
@@ -281,7 +314,7 @@ function Rail({ agentId }: { agentId: string }) {
         )}
       </div>
       <div className="w-14 shrink-0 border-l hairline flex flex-col items-stretch py-1" role="toolbar" aria-label="Panels">
-        {RAIL_BADGES.map((b) => {
+        {badges.map((b) => {
           const open = active === b.id;
           const isPinnedPlan = b.id === "plan" && ui.pinnedPlan && !open;
           return (
