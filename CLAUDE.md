@@ -9254,6 +9254,47 @@ the rules of the plugins the runner loads either way.
 Not verified here: no AppArmor kernel. The exec grants and the resolved-path
 reasoning are exercised as rendered strings, not against an enforcing host.
 
+### Asking What a Session Can Run (#1346)
+
+An agent in a confined session found out what it could run by probing, and
+drew wrong conclusions: a "command-name blocklist" that was #1342, a
+"missing" `which` that was an unreadable script, a git that "needed"
+`GIT_CONFIG_GLOBAL=/dev/null` (#1338 + #1339). The facts were all
+runner-side. `get_environment(aspect="runtime")` reports them, live
+(`jaato_server/shared/plugins/environment/runtime.py`):
+
+| Field | Read from |
+|---|---|
+| `confinement.tier` | the calling thread's label, through `apparmor_label`: `apparmor`, `apparmor-complain`, `apparmor-<mode>`, or `unconfined` |
+| `profile`, `exec_scope`, `exec_roots`, `exec_denied` | the `//child` grant record the runner holds (#1348, `confinement_grants()` + `parse_rules`): the globs of rules whose mode includes `x`. Nothing is derived from the template |
+| `subprocess.path`, `home`, `xdg`, `virtual_env`, `tool_venv` | `CLIToolPlugin._build_subprocess_env()` on the session's own `cli` instance, reached through the registry |
+| `toolchains` | `<workspace>/.jaato/environment.json` (#1344), `absent` / `unreadable` / `present` |
+
+Rules the report holds to:
+
+- **The PATH is cli's, not a copy.** It is the value the next command runs
+  with. A second assembly is how the report and the command would start to
+  disagree (#1171).
+- **Unconfined is said, never "unknown".** An unreadable label, or one with
+  no AppArmor mode (a host whose LSM reports a bare `kernel`), is
+  `unconfined` with the label quoted: no boundary is claimed without
+  evidence. A confined session with no grant record says
+  `grant_record: absent` and leaves the exec fields out.
+- **No cli, no PATH.** A session whose `plugins:` leaves `cli` out reports
+  `cli: not loaded` rather than the runner's own PATH.
+- **`aspect="all"` gets one line per field**, the `consumption` rule. A
+  direct query gets the full report; `detail` does not apply to it.
+
+Pull-based rather than a prompt block (design
+`web-coder-environment-bootstrap.md` §8): it costs nothing per request and
+stays current after a mid-session change or a revive. Reading the aspect
+calls `_build_subprocess_env`, whose one write is the jaato-tools symlink
+directory in the session tmpdir, as for any cli command.
+
+Not verified here: no AppArmor kernel. Labels and grant records are
+fabricated in the guard, `test_runtime_aspect_reports_what_can_run_1346.py`
+(seven reversions).
+
 ### WebMCP Plugin (`jaato_server/shared/plugins/webmcp/`)
 
 Invokes the tools a **web page** declares for agents via

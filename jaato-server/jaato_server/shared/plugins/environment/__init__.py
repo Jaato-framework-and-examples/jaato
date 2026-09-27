@@ -3,7 +3,8 @@
 """Environment awareness plugin for querying execution environment details.
 
 This plugin provides the `get_environment` tool that returns OS, shell,
-architecture, and working directory information.
+architecture and working directory information, context and spend, and
+(``aspect="runtime"``, #1346) what the session can actually run.
 """
 
 from .plugin import EnvironmentPlugin, create_plugin
