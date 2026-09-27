@@ -8643,6 +8643,36 @@ Guard: `jaato_server/shared/tests/test_a_tool_runs_once_1338.py`, three
 reversions. Every test passes a real `CancelToken`, and one drives the real
 cli plugin and counts the lines its command appends to a file.
 
+### Coreutils a Confined Session Could Not Run (#1342)
+
+On an Ubuntu 26.04 host, every confined session's `cli` failed `ls`, `head`,
+`sleep`, `id` and the rest of coreutils with `Permission denied`, and `which`
+with `cannot open /usr/bin/which`. The session's own agent read this as a
+command-name blocklist. The kernel log showed the real cause:
+
+```
+apparmor="DENIED" operation="exec" profile="…//child" name="/usr/lib/cargo/bin/coreutils/ls"  requested_mask="x"
+apparmor="DENIED" operation="open" profile="…//child" name="/usr/bin/which.debianutils"      requested_mask="r"
+```
+
+- **Rust coreutils.** Ubuntu 25.10+ makes `/usr/bin/<util>` a symlink into
+  `/usr/lib/cargo/bin/coreutils/`. AppArmor checks the resolved path, which
+  `/usr/bin/** ix` does not cover and `/usr/lib/** rm` cannot exec.
+- **Script commands.** A script's interpreter must open it for reading, and
+  no body granted `r` on `/usr/bin/**`.
+
+Template **v38** adds `/usr/lib/cargo/bin/** ix`, and `r` beside the
+existing `ix` on `/usr/bin/**`, `/usr/local/bin/**` and `/bin/**`, in base,
+`tool_hat` and a non-scoping `//child`. The cargo directory holds only what
+PATH already exposes, the reason v36 gave for granting git's helper
+directory and never `/usr/lib/**`. A scoped `//child` is unchanged: its
+fragments must name the resolved target (`/usr/lib/cargo/bin/coreutils/ls`),
+not `/usr/bin/ls`.
+
+Guard: `jaato_server/shared/tests/test_coreutils_run_confined_1342.py`, two
+reversions. Where `apparmor_parser` is installed it also compiles the
+rendered profile. Not verified on an enforcing kernel.
+
 ### A Failure While Reporting a Failure, Discarded (#1077)
 
 The daemon's model thread wound its turn down inside a `finally` holding
