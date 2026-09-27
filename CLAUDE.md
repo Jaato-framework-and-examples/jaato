@@ -8620,9 +8620,19 @@ auto-background tests never passed one, which is why none of them caught it.
 
 What it cost: every side effect happened twice (`git commit`, `rm`,
 `pip install`, a POST). Clients got both outputs interleaved. And the two
-copies ran in different environments, because the synchronous path drops the
-workspace HOME (#1339). One copy wrote into the daemon's HOME, and a git probe
-reported two contradictory failures from a single call.
+copies ran in different environments, because the synchronous path dropped
+the workspace HOME (#1339). One copy wrote into the daemon's HOME, and a git
+probe reported two contradictory failures from a single call.
+
+#1339 was a hand-kept list. `_execute` passes `run_command` an `extra_env`
+merged over `os.environ`, and that list named `PATH`, `VIRTUAL_ENV` and
+`PYTHONPATH` only. It predated #1225, so `HOME` and `XDG_*` never reached a
+synchronously run command. `_env_changes` now derives it from the keys the
+builder actually changed. A key the builder scrubbed is absent from the
+built env, so it is never carried back in, and `run_command` scrubs again
+anyway. Guard: `test_both_cli_paths_see_the_workspace_home_1339.py`, two
+reversions, which runs one command through both paths and compares what it
+saw.
 
 | Change | Where |
 |---|---|
