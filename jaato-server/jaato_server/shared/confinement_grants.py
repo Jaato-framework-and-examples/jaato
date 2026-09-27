@@ -77,6 +77,49 @@ def profile_body_rules(profile_text: str, body: str = "child") -> List[str]:
 # ---------------------------------------------------------------------------
 
 
+def _glob_wildcard(glob: str, i: int) -> Optional[Tuple[str, int]]:
+    """The regex for a wildcard starting at *glob[i]*, and where it ends.
+
+    ``None`` when *glob[i]* starts no wildcard.  A malformed one (an
+    unclosed ``@{`` or ``[``) answers ``("", -1)``.
+    """
+    ch = glob[i]
+    if glob.startswith("@{", i):
+        end = glob.find("}", i)
+        return (".*", end + 1) if end >= 0 else ("", -1)
+    if glob.startswith("**", i):
+        return ".*", i + 2
+    if ch == "*":
+        return "[^/]*", i + 1
+    if ch == "?":
+        return "[^/]", i + 1
+    if ch == "[":
+        end = glob.find("]", i + 1)
+        if end < 0:
+            return "", -1
+        body = glob[i + 1:end]
+        negated = body.startswith("^")
+        body = (body[1:] if negated else body).replace("\\", "\\\\")
+        return f"[{'^' if negated else ''}{body}]", end + 1
+    return None
+
+
+def _glob_literal(glob: str, i: int, depth: int) -> Tuple[str, int, int]:
+    """The regex for a non-wildcard at *glob[i]*: an alternation piece,
+    an escape or a literal.  Returns the piece, the next index and the
+    alternation depth after it."""
+    ch = glob[i]
+    if ch == "{":
+        return "(?:", i + 1, depth + 1
+    if ch == "}" and depth:
+        return ")", i + 1, depth - 1
+    if ch == "," and depth:
+        return "|", i + 1, depth
+    if ch == "\\" and i + 1 < len(glob):
+        return re.escape(glob[i + 1]), i + 2, depth
+    return re.escape(ch), i + 1, depth
+
+
 def glob_to_regex(glob: str) -> Optional[Pattern[str]]:
     """Compile an AppArmor path glob, or ``None`` when it cannot be read.
 
@@ -89,53 +132,16 @@ def glob_to_regex(glob: str) -> Optional[Pattern[str]]:
     """
     out: List[str] = []
     depth = 0
-    i, n = 0, len(glob)
-    while i < n:
-        ch = glob[i]
-        if ch == "@" and glob.startswith("@{", i):
-            end = glob.find("}", i)
-            if end < 0:
+    i = 0
+    while i < len(glob):
+        wildcard = _glob_wildcard(glob, i)
+        if wildcard is not None:
+            piece, i = wildcard
+            if i < 0:
                 return None
-            out.append(".*")
-            i = end + 1
-            continue
-        if ch == "*":
-            if glob.startswith("**", i):
-                out.append(".*")
-                i += 2
-            else:
-                out.append("[^/]*")
-                i += 1
-            continue
-        if ch == "?":
-            out.append("[^/]")
-        elif ch == "[":
-            end = glob.find("]", i + 1)
-            if end < 0:
-                return None
-            body = glob[i + 1:end]
-            if body.startswith("^"):
-                body = "^" + body[1:].replace("\\", "\\\\")
-            else:
-                body = body.replace("\\", "\\\\")
-            out.append(f"[{body}]")
-            i = end + 1
-            continue
-        elif ch == "{":
-            depth += 1
-            out.append("(?:")
-        elif ch == "}" and depth:
-            depth -= 1
-            out.append(")")
-        elif ch == "," and depth:
-            out.append("|")
-        elif ch == "\\" and i + 1 < n:
-            out.append(re.escape(glob[i + 1]))
-            i += 2
-            continue
         else:
-            out.append(re.escape(ch))
-        i += 1
+            piece, i, depth = _glob_literal(glob, i, depth)
+        out.append(piece)
     if depth:
         return None
     try:
