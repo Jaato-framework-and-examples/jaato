@@ -692,6 +692,22 @@ test("workspace mode: the session picker goes back to the workspace list", async
   await expect(page.getByTestId("session-picker")).toBeVisible();
 });
 
+test("workspace mode: a long source wraps instead of scrolling the table sideways", async ({ page }) => {
+  // Reported with a screenshot: one ``owner/repo@branch`` longer than its
+  // column pushed the table past its plate and drew a horizontal scrollbar.
+  await page.setViewportSize({ width: 1100, height: 800 });
+  await page.goto("/");
+  await page.getByPlaceholder("ws://host:8080").fill("ws://127.0.0.1:8098");
+  await page.getByRole("button", { name: "Connect" }).click();
+  const rowA = page.locator("tr[data-workspace=project-a]");
+  await expect(rowA).toContainText("github: Jaato-framework-and-examples/jaato@chore/normalise-line-endings-lf");
+  const scroll = await page.locator("table").first().evaluate((t) => {
+    const box = t.parentElement!;
+    return { scroll: box.scrollWidth, client: box.clientWidth };
+  });
+  expect(scroll.scroll).toBeLessThanOrEqual(scroll.client);
+});
+
 test("workspace mode: the table shows sources, not a model; delete shows its impact and wants the name typed", async ({ page }) => {
   await page.goto("/");
   await page.getByPlaceholder("ws://host:8080").fill("ws://127.0.0.1:8098");

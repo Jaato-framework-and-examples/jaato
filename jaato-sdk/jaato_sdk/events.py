@@ -540,7 +540,13 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 # ``session.delete`` to END a session (the web client did) switches to
 # ``session.end`` there and keeps ``session.delete`` for "remove it".  Below
 # 1.29 ``session.end`` marks nothing, so such a client keeps deleting.
-PROTOCOL_VERSION = "1.29"
+# 1.30 -- ``workspace.app_write`` on the bind channel: an application asks the
+# daemon to write the ``app://`` reference line into a workspace ``.env`` (and
+# a small allow-list of home / instruction files) when the application cannot
+# reach the workspace itself.  A NEW verb: an older daemon answers it with an
+# error frame and never the result, so an application checks the daemon's
+# protocol before relying on it.
+PROTOCOL_VERSION = "1.30"
 
 
 # =============================================================================
@@ -819,6 +825,12 @@ class EventType(str, Enum):
     # session.reload_env the owner's loaded sessions, scoped by ownership.
     SECRET_RELOAD_REQUEST = "secret.reload"            # Application -> Server
     SECRET_RELOAD_RESULT = "secret.reload.result"      # Server -> Application
+    # The application asks the daemon to write the files a binding needs into
+    # a workspace the application cannot reach itself (1.30): the ``app://``
+    # reference line in ``.env`` and a small allow-list of home/instruction
+    # files.  Same bind channel, same app-credential-only rule.
+    WORKSPACE_APP_WRITE_REQUEST = "workspace.app_write"            # Application -> Server
+    WORKSPACE_APP_WRITE_RESULT = "workspace.app_write.result"      # Server -> Application
 
     # Event subscription notifications (Server -> Client)
     EVENTS_SUBSCRIBED = "events.subscribed"
@@ -3918,6 +3930,80 @@ class SecretReloadResultEvent(Event):
     detail: Optional[str] = None
 
 
+class WorkspaceAppWriteRequest(Event):
+    """The application asks the daemon to write a binding's files into a workspace (1.30).
+
+    A workspace bound to an application-held secret needs its ``.env`` to carry
+    the REFERENCE (``GH_TOKEN=app://github``): the daemon resolves only
+    references it finds there, and a binding with no line is inert.  The
+    application normally writes that line itself, and cannot when it runs as a
+    user that has no access to the daemon's workspace root (a BFF running as an
+    ordinary account beside a root daemon).  This verb has the daemon, which
+    owns the workspaces, do the write instead.
+
+    Sent application -> daemon on the bind channel, like ``secret.reload``, and
+    refused on any other connection.  The daemon enforces what may be written,
+    so the request cannot be used to plant a secret or reach outside the
+    workspace:
+
+    * ``workspace`` must be a known workspace OWNED by ``app_id:user`` (the
+      ownership ``app://`` resolution itself uses).  Anything else answers
+      ``not_found``, the same words an unknown path gets.
+    * every ``env`` value is an ``app://`` reference or ``None`` (remove).  A
+      literal value is refused, so no secret is ever written to disk.  Removal
+      leaves a line whose current value is not an ``app://`` reference alone.
+    * ``files`` paths are an allow-list: ``.home/.gitconfig``, and one
+      ``.md`` file directly under ``.jaato/instructions/``.  A path is resolved
+      with symlinks followed and must stay inside the workspace.
+
+    Attributes:
+        request_id: Correlates with :class:`WorkspaceAppWriteResultEvent`.
+        user: The **unqualified** identity; the daemon qualifies it with the
+            connection's app id, so one application cannot write into
+            another's workspace.
+        workspace: The absolute workspace path.
+        env: ``{NAME: "app://<name>" | None}``.
+        files: ``[{"path": str, "content": str | None, "managed_by": str |
+            None}]``.  ``content`` ``None`` removes.  ``managed_by`` makes the
+            write conditional on ownership: the file is written when absent or
+            when its first line is a ``jaato-managed: <managed_by>`` marker,
+            and left alone (``skipped-user-file``) otherwise, which is how a
+            copy the user made their own survives.  A removal requires it.
+    """
+    type: EventType = Field(default=EventType.WORKSPACE_APP_WRITE_REQUEST)
+    request_id: str = ""
+    user: str = ""
+    workspace: str = ""
+    env: Dict[str, Optional[str]] = Field(default_factory=dict)
+    files: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class WorkspaceAppWriteResultEvent(Event):
+    """The daemon's answer to :class:`WorkspaceAppWriteRequest` (1.30).
+
+    ``status`` is one of ``"ok"`` (the request was valid and applied; each
+    item's own outcome is in ``env`` / ``files``), ``"not_found"`` (the
+    workspace is unknown or not owned by this application's ``user``),
+    ``"denied"`` (not an app-credential connection, or a value or path the
+    rules refuse; nothing was written) or ``"error"``.
+
+    Attributes:
+        env: ``{NAME: action}``, action one of ``written``, ``unchanged``,
+            ``removed``, ``absent``, ``kept-literal`` (a removal that found a
+            non-reference value and left it), ``error``.
+        files: ``[{"path", "action", "detail"}]``, action one of ``written``,
+            ``unchanged``, ``removed``, ``absent``, ``skipped-user-file``,
+            ``error``.
+        detail: Human-readable elaboration.
+    """
+    type: EventType = Field(default=EventType.WORKSPACE_APP_WRITE_RESULT)
+    request_id: str = ""
+    status: str = ""
+    env: Dict[str, str] = Field(default_factory=dict)
+    files: List[Dict[str, Any]] = Field(default_factory=list)
+    detail: Optional[str] = None
+
+
 # =============================================================================
 # Workspace Management Requests (Client -> Server)
 # =============================================================================
@@ -5028,6 +5114,8 @@ _EVENT_CLASSES: Dict[str, type] = {
     EventType.SECRET_RESOLVE_RESULT.value: SecretResolveResultEvent,
     EventType.SECRET_RELOAD_REQUEST.value: SecretReloadRequest,
     EventType.SECRET_RELOAD_RESULT.value: SecretReloadResultEvent,
+    EventType.WORKSPACE_APP_WRITE_REQUEST.value: WorkspaceAppWriteRequest,
+    EventType.WORKSPACE_APP_WRITE_RESULT.value: WorkspaceAppWriteResultEvent,
 }
 
 

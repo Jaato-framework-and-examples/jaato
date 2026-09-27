@@ -21,7 +21,9 @@ import {
   ConnectionState,
   EventTypeValue,
   JaatoClient,
+  MIN_WORKSPACE_APP_WRITE_PROTOCOL,
   SecretResolveResponder,
+  isProtocolCompatible,
   type JaatoEvent,
   type SecretResolveHandler,
 } from "@jaato/sdk";
@@ -36,6 +38,20 @@ export class BindRefusedError extends Error {
   constructor(public readonly status: string, detail?: string | null) {
     super(`ticket.bind ${status}${detail ? `: ${detail}` : ""}`);
   }
+}
+
+/** A ``workspace.app_write`` body: ``env`` values are ``app://`` references or ``null`` (remove). */
+export interface WorkspaceWriteRequest {
+  env: Record<string, string | null>;
+  files: Array<{ path: string; content: string | null; managed_by?: string | null }>;
+}
+
+/** The daemon's answer: a status, then one action per env name and per file. */
+export interface WorkspaceWriteAnswer {
+  status: string;
+  env: Record<string, string>;
+  files: Array<{ path: string; action: string; detail?: string }>;
+  detail?: string;
 }
 
 export interface BoundTicket {
@@ -105,12 +121,43 @@ export class BindChannel {
     this._client.onStatus((s) => handler(String(s.state)));
   }
 
+  /** Call ``handler`` each time the channel (re)connects — after the daemon's protocol is known. */
+  onConnected(handler: () => void): void {
+    this._client.onStatus((s) => { if (s.state === ConnectionState.CONNECTED) handler(); });
+  }
+
+  /**
+   * Whether the daemon answers ``workspace.app_write`` (protocol 1.30).  An
+   * older daemon replies to it with an error frame and never the result, so
+   * the request would only time out; the caller checks this instead.
+   */
+  canWriteWorkspaces(): boolean {
+    const v = this._client.serverProtocolVersion;
+    return this.connected && typeof v === "string" && isProtocolCompatible(v, MIN_WORKSPACE_APP_WRITE_PROTOCOL);
+  }
+
+  /**
+   * Ask the daemon to write a binding's files into ``workspace`` (1.30): the
+   * ``app://`` reference in ``.env`` and allow-listed home / instruction
+   * files.  For a deployment where this application cannot reach the
+   * daemon's workspaces (it runs as another account).  The daemon checks
+   * that ``user`` of this application owns the workspace and refuses a
+   * literal secret or a path off its allow-list; per-item outcomes come back.
+   */
+  async writeWorkspace(user: string, workspace: string, request: WorkspaceWriteRequest): Promise<WorkspaceWriteAnswer> {
+    const ev = await this._request({ type: EventTypeValue.WORKSPACE_APP_WRITE_REQUEST, user, workspace, env: request.env, files: request.files });
+    const files = Array.isArray(ev.files) ? (ev.files as WorkspaceWriteAnswer["files"]) : [];
+    const env = ev.env && typeof ev.env === "object" ? (ev.env as Record<string, string>) : {};
+    return { status: String(ev.status ?? "unknown"), env, files, detail: typeof ev.detail === "string" ? ev.detail : undefined };
+  }
+
   private _onEvent(ev: Record<string, unknown>): void {
     const type = ev.type;
     if (
       type !== EventTypeValue.TICKET_BIND_RESULT &&
       type !== EventTypeValue.TICKET_REVOKE_RESULT &&
-      type !== EventTypeValue.SECRET_RELOAD_RESULT
+      type !== EventTypeValue.SECRET_RELOAD_RESULT &&
+      type !== EventTypeValue.WORKSPACE_APP_WRITE_RESULT
     ) return;
     const id = typeof ev.request_id === "string" ? ev.request_id : "";
     const p = this._pending.get(id);

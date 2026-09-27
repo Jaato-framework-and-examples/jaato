@@ -60,9 +60,20 @@ export async function startServer(config: ServerConfig, opts: StartOptions = {})
       clientId: gh.clientId, clientSecret: gh.clientSecret,
       oauthBaseUrl: gh.oauthBaseUrl, apiBaseUrl: gh.apiBaseUrl, noreplyDomain: gh.noreplyDomain,
     });
-    github = new GitHubService({ store, api, reloader: bind, workspaceRoot: gh.workspaceRoot, log });
-    bind.attachSecretResolver(github.resolveSecret);
-    log(`github connect enabled (store ${gh.file}; secret.resolve answering on the bind channel${gh.workspaceRoot ? `; workspace writes contained to ${gh.workspaceRoot}` : "; workspace .env writes disabled (no workspace_root)"})`);
+    const svc = new GitHubService({ store, api, reloader: bind, workspaceRoot: gh.workspaceRoot, workspaceWriter: bind, log });
+    github = svc;
+    bind.attachSecretResolver(svc.resolveSecret);
+    const via = gh.workspaceRoot
+      ? `written here under ${gh.workspaceRoot}, else by the daemon`
+      : bind.canWriteWorkspaces()
+        ? "written by the daemon (workspace.app_write)"
+        : "NOT written: no workspace_root and the daemon does not accept workspace.app_write (protocol 1.30), so bound workspaces get no GH_TOKEN";
+    log(`github connect enabled (store ${gh.file}; secret.resolve answering on the bind channel; workspace .env references ${via})`);
+    // A binding recorded while no write was possible gets its .env line the
+    // first time one is: now, and on every reconnect of the bind channel.
+    const resync = () => { svc.resyncWorkspaces().catch((e) => log(`github resync failed: ${(e as Error).message}`)); };
+    resync();
+    bind.onConnected(resync);
   } else {
     log("github connect not configured (no github: block)");
   }

@@ -7181,6 +7181,42 @@ loaded until then (plus the unload grace).
 Guard: `server/tests/test_a_finished_session_says_so.py`, four reversions;
 `SessionBoard.test.tsx`, `sessionEnd.test.ts`, two e2e cases.
 
+### A Binding the Daemon Never Saw (protocol 1.30)
+
+Reported from a deployment with GitHub connected, ten workspaces bound, and
+no session holding `GH_TOKEN`. The daemon resolves `app://github` only for a
+reference it finds in the workspace `.env`, so a binding with no
+`GH_TOKEN=app://github` line is inert. The BFF writes that line, and only
+when `github.workspace_root` resolves the workspace. Here the BFF ran as an
+ordinary account beside a root daemon, so `/root/.jaato/workspaces` was out
+of its reach: every bind recorded the binding, skipped the file, and
+returned a note claiming "the browser config.update path writes it instead".
+No such path exists, and auto-bind at workspace creation discarded the note.
+
+`workspace.app_write` (application -> daemon on the bind channel,
+app-credential connections only) has the daemon, which owns the workspaces,
+write them. `server/workspace_app_write.py` holds the rules:
+
+| Rule | Why |
+|---|---|
+| the workspace must be known and owned by `app_id:user` | the ownership `app://` resolution already uses. Anything else answers `not_found`, the words an unknown path gets |
+| an `env` value is an `app://` reference or `null` | the verb can never write a secret to disk. A removal leaves a literal value alone (`kept-literal`) |
+| a file path is on an allow-list: `.home/.gitconfig`, or one `.md` directly under `.jaato/instructions/` | nothing else is needed, and the daemon writes as root |
+| paths are resolved component by component, and every existing one must stay inside the workspace | a workspace is model-writable, so a planted symlink must not carry a root write out |
+| a `managed_by` file is written only when absent or carrying that owner's marker, and removed only then | a copy the user made their own survives, the managed-files rule |
+| validation is all-or-nothing, before any write | a refused request leaves the workspace untouched |
+
+BFF side (`jaato-web-coder-server`): `GitHubService` writes locally when
+`workspace_root` reaches the workspace, else through the daemon, else it
+says sessions there will not get `GH_TOKEN`. On every bind-channel
+(re)connect it re-writes every recorded binding and reloads the sessions of
+users whose `.env` changed, so existing bindings are repaired without picking
+the account again. The web client shows the bind note at workspace
+creation, and says so when it cannot bind at all. `MIN_WORKSPACE_APP_WRITE_PROTOCOL`
+in the TS SDK. Guard:
+`server/tests/test_an_application_writes_its_reference_through_the_daemon.py`,
+five reversions.
+
 ### A Key Typed Once Per Workspace
 
 The web client's configure form asked for the provider's API key on every

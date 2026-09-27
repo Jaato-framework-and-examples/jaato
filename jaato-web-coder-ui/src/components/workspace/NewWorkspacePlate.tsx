@@ -150,9 +150,15 @@ export function NewWorkspacePlate({ githubUrl, onCreated, onOpen, onNotice }: {
       onCreated();
       // Bind before cloning: the clone's credential is resolved from the
       // workspace .env, which the bind is what writes.
-      if (githubUrl && info.path) {
-        try { await autoBindDefaultGitHubAccount(githubApi(githubUrl), info.path); }
-        catch (err) { onNotice(`Workspace created, but binding your GitHub account failed: ${err instanceof Error ? err.message : String(err)}`, true); }
+      // The bind's own note is shown, never dropped: it is what says a
+      // workspace was bound but will not get GH_TOKEN.
+      if (githubUrl && !info.path) {
+        onNotice(`Workspace created, but the daemon did not report its path, so your GitHub account was not bound. Pick it in the workspace's Sources.`, true);
+      } else if (githubUrl && info.path) {
+        try {
+          const bound = await autoBindDefaultGitHubAccount(githubApi(githubUrl), info.path);
+          if (bound?.result.note) onNotice(`GitHub @${bound.login}: ${bound.result.note}`, !bound.result.envWritten);
+        } catch (err) { onNotice(`Workspace created, but binding your GitHub account failed: ${err instanceof Error ? err.message : String(err)}`, true); }
       }
       if (picked.length === 0) { onOpen(n); return; }
       const batch = queuedRows(picked);

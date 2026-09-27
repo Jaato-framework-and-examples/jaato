@@ -93,6 +93,8 @@ from jaato_sdk.events import (
     SecretResolveResultEvent,
     SecretReloadRequest,
     SecretReloadResultEvent,
+    WorkspaceAppWriteRequest,
+    WorkspaceAppWriteResultEvent,
 )
 from .app_secret import AppSecretAnswer, AppSecretResolver
 from .workspace_manager import WorkspaceManager
@@ -670,9 +672,13 @@ TICKET_VERBS = frozenset({
 #: and ``secret.reload`` (the app asking the daemon to re-resolve an owner's
 #: sessions).  Routed like ``TICKET_VERBS`` — refused for any connection that
 #: is not an app credential — so the "bind-only" boundary covers them too.
+#: ``workspace.app_write`` (1.30) rides the same route: the application asking
+#: the daemon to write a binding's ``app://`` reference into a workspace it
+#: cannot reach itself.
 SECRET_BIND_VERBS = frozenset({
     EventType.SECRET_RESOLVE_RESULT.value,
     EventType.SECRET_RELOAD_REQUEST.value,
+    EventType.WORKSPACE_APP_WRITE_REQUEST.value,
 })
 
 
@@ -2429,6 +2435,12 @@ class JaatoWSServer:
                 await self._send_to_client(
                     client_id, self._secret_reload_denied(message)
                 )
+            elif verb == EventType.WORKSPACE_APP_WRITE_REQUEST.value:
+                await self._send_to_client(client_id, WorkspaceAppWriteResultEvent(
+                    request_id=_peek_request_id(message), status="denied",
+                    detail="workspace.app_write requires a connection "
+                           "authenticated by an application credential",
+                ))
             else:
                 logger.debug(
                     "dropping %s from non-app connection %s", verb, client_id,
@@ -2447,7 +2459,48 @@ class JaatoWSServer:
                 client_id, self._reload_owner_sessions(app_id, event)
             )
             return
+        if isinstance(event, WorkspaceAppWriteRequest):
+            answer = await asyncio.to_thread(
+                self._apply_workspace_app_write, app_id, event)
+            await self._send_to_client(client_id, answer)
+            return
         await self._send_error(client_id, f"Unhandled secret verb: {verb}")
+
+    def _apply_workspace_app_write(
+        self, app_id: str, event: "WorkspaceAppWriteRequest"
+    ) -> "WorkspaceAppWriteResultEvent":
+        """Write a binding's files into a workspace the application owns (1.30).
+
+        The workspace must be one this daemon knows and ``app_id:user`` owns,
+        the ownership ``app://`` resolution uses; anything else answers
+        ``not_found``, the same words an unknown path gets, so the verb is not
+        an oracle for other applications' workspaces.  What may be written is
+        :mod:`server.workspace_app_write`'s to decide.
+        """
+        from .workspace_app_write import AppWriteRefused, apply_request
+
+        def answer(status: str, **kw: Any) -> "WorkspaceAppWriteResultEvent":
+            return WorkspaceAppWriteResultEvent(
+                request_id=event.request_id, status=status, **kw)
+
+        if not event.user or not event.workspace or not os.path.isabs(event.workspace):
+            return answer("denied", detail="workspace.app_write needs a user and an absolute workspace path")
+        owner = f"{app_id}:{event.user}"
+        if self._owner_for_workspace_path(event.workspace) != owner:
+            return answer("not_found", detail="no such workspace for this user")
+        try:
+            env_actions, file_actions = apply_request(event.workspace, event.env, event.files)
+        except AppWriteRefused as exc:
+            return answer("denied", detail=str(exc))
+        except OSError as exc:
+            logger.warning("workspace.app_write %s failed: %s", event.workspace, exc)
+            return answer("error", detail=exc.strerror or str(exc))
+        logger.info(
+            "workspace.app_write: app=%s user=%s workspace=%s env=%s files=%s",
+            app_id, event.user, event.workspace, env_actions,
+            [(f["path"], f["action"]) for f in file_actions],
+        )
+        return answer("ok", env=env_actions, files=file_actions)
 
     def _secret_reload_denied(self, message: str) -> "SecretReloadResultEvent":
         """Build the ``denied`` answer for a ``secret.reload`` from a non-app connection."""
