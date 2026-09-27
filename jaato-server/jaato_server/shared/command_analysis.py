@@ -318,6 +318,13 @@ class _ShellLexer:
         self._pending_redirect: Optional[Tuple[str, Optional[str]]] = None
         self._pending_heredocs: List[Tuple[str, bool]] = []
         self._open_chain: Optional[str] = None
+        # A subshell ``( ... )`` is a command in its own right, so a chain
+        # operator right after its ``)`` has a preceding command even though
+        # the segment the lexer is building is empty (#1359).  Each ``(``
+        # records how many segments existed when it opened; the ``)`` that
+        # closes it sets ``_after_subshell`` when a command was lexed inside.
+        self._subshell_marks: List[int] = []
+        self._after_subshell = False
 
     # --- word accumulation -------------------------------------------------
 
@@ -494,16 +501,36 @@ class _ShellLexer:
         """Consume a control operator and start a new segment."""
         two = self.src[self.i:self.i + 2]
         op = two if two in ("&&", "||", ";;", "|&") else self.src[self.i]
-        if op in _CHAIN_OPERATORS and self._cur.is_empty() and not self._word_started:
+        if (op in _CHAIN_OPERATORS and self._cur.is_empty()
+                and not self._word_started and not self._after_subshell):
             raise UnanalyzableCommand(
                 f"chain operator {op!r} without a preceding command"
             )
         self._close_segment()
+        self._track_subshell(op)
         self.i += len(op)
         if op in _CHAIN_OPERATORS:
             self._open_chain = op
         if op == "\n":
             self._consume_heredocs()
+
+    def _track_subshell(self, op: str) -> None:
+        """Record whether the operator just read closed a non-empty subshell.
+
+        Called after the segment before ``op`` was closed.  ``(`` remembers
+        the segment count; the matching ``)`` compares against it, so
+        ``(true) && x`` counts ``(true)`` as the preceding command while
+        ``() && x`` -- a syntax error in bash too -- still does not.  Any
+        other operator clears the flag: ``(true); && x`` stays refused.
+        """
+        if op == "(":
+            self._subshell_marks.append(len(self.segments))
+            self._after_subshell = False
+        elif op == ")":
+            start = self._subshell_marks.pop() if self._subshell_marks else None
+            self._after_subshell = start is not None and len(self.segments) > start
+        else:
+            self._after_subshell = False
 
     def _consume_heredocs(self) -> None:
         """Skip heredoc bodies queued by ``<<``/``<<-`` on the previous line.

@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 from jaato_server.shared.trace import trace as _trace_write
 from jaato_server.shared.token_accounting import TokenLedger
 from jaato_server.shared.secret_redaction import current_redactor
+from jaato_server.shared.tool_arg_coercion import coerce_args_to_schema
 from jaato_sdk.plugins.base import OutputCallback
 from jaato_sdk.plugins.model_provider.types import (
     CancelledException,
@@ -416,6 +417,8 @@ class ToolExecutor:
         # the rest stay unchanged).  See
         # docs/design/phase5_5_10_apparmor_child_subprofile_audit.md.
         self._apparmor_child_transition: Optional[Callable[[], None]] = None
+        # Parameter schemas by tool name, for #1358's argument coercion.
+        self._parameter_schemas: Dict[str, Dict[str, Any]] = {}
 
         # Zero-arg event-snapshot callable for cgroup.events (oom_kill,
         # populated, ...).  Used by ``execute()`` to take before/after
@@ -981,6 +984,49 @@ class ToolExecutor:
                 max_workers=self._auto_background_pool_size
             )
         return self._auto_background_pool
+
+    def _parameter_schema(self, tool_name: str) -> Optional[Dict[str, Any]]:
+        """The parameter schema of a plugin tool, or ``None`` when unknown.
+
+        Read from the owning plugin's ``get_tool_schemas()`` and cached per
+        tool name: a schema's descriptions and enums may be rebuilt per
+        exposure, its parameter TYPES are not, and types are all
+        :meth:`_coerce_to_schema` reads.  A lookup that finds nothing is not
+        cached, so a tool exposed later is found then.
+        """
+        cached = self._parameter_schemas.get(tool_name)
+        if cached is not None or not self._registry:
+            return cached
+        try:
+            plugin = self._registry.get_plugin_for_tool(tool_name)
+            schemas = plugin.get_tool_schemas() if plugin is not None else []
+        except Exception:  # noqa: BLE001 - a missing schema means "do not coerce"
+            logger.debug("no parameter schema for %s", tool_name, exc_info=True)
+            return None
+        for schema in schemas or []:
+            if getattr(schema, "name", None) == tool_name:
+                params = getattr(schema, "parameters", None)
+                if isinstance(params, dict):
+                    self._parameter_schemas[tool_name] = params
+                    return params
+        return None
+
+    def _coerce_to_schema(
+        self, tool_name: str, args: Dict[str, Any], call_id: Optional[str],
+    ) -> Dict[str, Any]:
+        """Convert string arguments to the types the tool's schema declares.
+
+        See :mod:`jaato_server.shared.tool_arg_coercion` (#1358).  Each
+        conversion is traced, so a provider that sends JSON as strings stays
+        visible rather than being papered over.
+        """
+        args, changes = coerce_args_to_schema(args, self._parameter_schema(tool_name))
+        if changes:
+            _trace_runner(
+                f"coerce: tool={tool_name} call_id={call_id} "
+                f"args={','.join(changes)}"
+            )
+        return args
 
     def _get_plugin_for_tool(self, tool_name: str) -> Optional['BackgroundCapable']:
         """Get the BackgroundCapable plugin that provides a tool.
@@ -1632,6 +1678,11 @@ class ToolExecutor:
                 print(f"[ai_tool_runner] no executor resolvable for {name}, "
                       f"skipping permission check")
             return False, {'error': f'No executor registered for {name}'}
+
+        # A string where the schema declares another type is converted
+        # before anything reads the arguments (#1358), so the permission
+        # gate judges what the executor will run.
+        args = self._coerce_to_schema(name, args, call_id)
 
         # Run the permission gate.  Shared verbatim with every caller that
         # executes a tool by another route (#797) — see

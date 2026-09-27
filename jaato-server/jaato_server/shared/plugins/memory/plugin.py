@@ -1586,6 +1586,20 @@ class MemoryPlugin(RunnerForwardingMixin):
 
         # Validate and normalize tags: strip whitespace, reject single-char tags
         raw_tags = args.get("tags", [])
+        if isinstance(raw_tags, str):
+            # Iterating a string yields characters, every one of which
+            # failed the length check below, and the model read that as a
+            # rule about the characters in its tags (#1358).  A JSON-array
+            # string was already converted by the executor; what reaches
+            # here is plain text.
+            return {
+                "status": "error",
+                "error": (
+                    "tags must be an array of strings, e.g. "
+                    '["sandbox", "circuit-breaker"]; received the string '
+                    f"{raw_tags!r}"
+                ),
+            }
         valid_tags = [
             tag.strip() for tag in raw_tags
             if isinstance(tag, str) and len(tag.strip()) >= 2
