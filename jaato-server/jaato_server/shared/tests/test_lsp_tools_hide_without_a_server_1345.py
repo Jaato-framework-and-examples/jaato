@@ -28,6 +28,7 @@ from typing import Any, Dict, Optional, Set
 import pytest
 
 from jaato_server.shared.jaato_session import JaatoSession
+from jaato_server.shared.plugins.introspection import plugin as _introspection_module
 from jaato_server.shared.plugins.introspection.plugin import IntrospectionPlugin
 from jaato_server.shared.plugins.lsp.plugin import LSP_TOOL_NAMES, LSPToolPlugin
 from jaato_server.shared.plugins.registry import PluginRegistry
@@ -116,6 +117,12 @@ def _make(
     """A real registry with ``lsp`` and ``introspection`` exposed."""
     # No background thread: nothing is spawned, nothing connects.
     monkeypatch.setattr(LSPToolPlugin, "_ensure_thread", lambda self: None)
+    # Introspection keeps its session in a MODULE-level thread-local, so a
+    # session an earlier test left there would restrict ``list_tools`` to
+    # that session's plugins.  Clear it for this test; monkeypatch restores.
+    monkeypatch.setattr(
+        _introspection_module._thread_local, "session", None, raising=False,
+    )
     registry = PluginRegistry()
     lsp = LSPToolPlugin()
     config = {"workspace_path": str(workspace)}
