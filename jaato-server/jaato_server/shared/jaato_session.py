@@ -81,6 +81,7 @@ from jaato_sdk.events import MODEL_MEDIA_CALL_ID       # noqa: F401  (re-export)
 from .ai_tool_runner import ToolExecutor
 from .runtime_limits import DEFAULT_MAX_PARALLEL_TOOLS, RuntimeLimits
 from .session_context import set_current_session
+from .tool_visibility import filter_visible_tool_schemas
 from .tool_id_map import StreamScrubber
 from .retry_utils import with_retry, RequestPacer, RetryCallback, RetryConfig, is_context_limit_error
 from .token_accounting import TokenLedger
@@ -3975,6 +3976,13 @@ class JaatoSession:
         tools); a sensible default is ``return True`` for unknown
         names so other plugins' tools flow through unchanged.
 
+        The filter itself lives in
+        :func:`jaato_server.shared.tool_visibility.filter_visible_tool_schemas`,
+        which ``introspection``'s ``list_tools`` / ``get_tool_schemas``
+        call too (#1345), so the catalog never offers a tool this
+        array withholds.  ``lsp`` uses it to hide its tools while no
+        language server is configured.
+
         Returns:
             Tools to pass, or empty list if provider manages its own.
         """
@@ -3997,20 +4005,6 @@ class JaatoSession:
         if registry is None:
             return scoped
 
-        # Collect plugins that opt in to visibility gating.  Walk
-        # ``list_exposed`` (rather than ``_plugins.keys()``) so
-        # un-exposed plugins don't get consulted.
-        try:
-            exposed_names = registry.list_exposed()
-        except Exception:
-            return scoped
-        filters = []
-        for name in exposed_names:
-            plugin = registry.get_plugin(name)
-            if plugin is not None and hasattr(plugin, 'is_tool_visible'):
-                filters.append(plugin)
-        if not filters:
-            return scoped
         # The predicates answer for "the current session", and a plugin
         # instance is shared by every session on the registry (#1195: the
         # todo plugin's per-session predefined plan).  This thread is
@@ -4019,24 +4013,15 @@ class JaatoSession:
         # state left behind on this thread.
         set_current_session(self)
 
-        visible: List['ToolSchema'] = []
-        for tool in scoped:
-            hidden = False
-            for plugin in filters:
-                try:
-                    if not plugin.is_tool_visible(tool.name):
-                        hidden = True
-                        break
-                except Exception:
-                    # A buggy predicate must not break the turn — log
-                    # and treat as visible (fail-open).
-                    self._trace(
-                        f"is_tool_visible raised for tool={tool.name!r} "
-                        f"plugin={plugin.name!r}; treating as visible"
-                    )
-            if not hidden:
-                visible.append(tool)
-        return visible
+        # One filter, shared with ``list_tools`` / ``get_tool_schemas``
+        # (#1345), so the catalog and the wire cannot disagree.
+        def _on_error(tool_name: str, plugin_name: str, exc: Exception) -> None:
+            self._trace(
+                f"is_tool_visible raised for tool={tool_name!r} "
+                f"plugin={plugin_name!r}; treating as visible"
+            )
+
+        return filter_visible_tool_schemas(registry, scoped, on_error=_on_error)
 
     def _apply_tool_scopes(
         self, schemas: List['ToolSchema']

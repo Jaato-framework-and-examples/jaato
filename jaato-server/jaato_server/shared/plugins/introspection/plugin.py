@@ -20,6 +20,7 @@ from jaato_sdk.plugins.model_provider.types import (
 )
 from jaato_server.shared.plugins.runner_forwarding import RunnerForwardingMixin
 from jaato_server.shared.tool_id_map import name_to_id
+from jaato_server.shared.tool_visibility import filter_visible_tool_schemas
 from ..streaming import StreamingCapable
 
 # Thread-local storage for session reference per agent context
@@ -371,8 +372,40 @@ class IntrospectionPlugin(RunnerForwardingMixin):
         session has no plugin restriction (``_tool_plugins is None``), all
         globally-exposed schemas are returned.
 
+        Either way the result then passes through the plugins'
+        ``is_tool_visible`` predicates — the same filter
+        ``JaatoSession._get_tools_for_provider`` applies to the wire —
+        so ``list_tools`` never catalogs, and ``get_tool_schemas`` never
+        activates, a tool the provider call would withhold (#1345: the
+        ``lsp`` tools in a workspace with no language server).  This
+        runs inside a tool executor, after ``_execute_single_tool`` set
+        the session ContextVar, so each predicate answers for the
+        calling session.
+
         Returns:
             Filtered list of ToolSchema objects visible to the current session.
+        """
+        return filter_visible_tool_schemas(
+            self._registry, self._get_session_plugin_schemas()
+        )
+
+    def _visible_exposed_schemas(self) -> List[ToolSchema]:
+        """Every exposed schema, minus those an ``is_tool_visible`` hides.
+
+        The GLOBAL set ``list_tools`` counts and lists (tools from plugins
+        outside the session's profile appear with ``available=False``).
+        Filtered like the session set, so a hidden tool is neither counted
+        in a category nor listed with an ``activate_with`` hint (#1345).
+        """
+        return filter_visible_tool_schemas(
+            self._registry, self._registry.get_exposed_tool_schemas()
+        )
+
+    def _get_session_plugin_schemas(self) -> List[ToolSchema]:
+        """Exposed schemas, restricted to the session's allowed plugins.
+
+        The plugin-list half of :meth:`_get_session_allowed_schemas`,
+        before the visibility predicates are applied.
         """
         all_schemas = self._registry.get_exposed_tool_schemas()
 
@@ -590,7 +623,7 @@ class IntrospectionPlugin(RunnerForwardingMixin):
         # and track which plugins contribute to each category.
         global_counts: Dict[str, int] = {}
         category_plugins: Dict[str, Set[str]] = {}
-        for schema in self._registry.get_exposed_tool_schemas():
+        for schema in self._visible_exposed_schemas():
             cat = schema.category or "uncategorized"
             global_counts[cat] = global_counts.get(cat, 0) + 1
             plugin = self._registry.get_plugin_for_tool(schema.name)
@@ -689,7 +722,7 @@ class IntrospectionPlugin(RunnerForwardingMixin):
         if self._session is not None:
             preloaded_plugins = getattr(self._session, "_preloaded_plugins", None) or set()
             if preloaded_plugins and self._registry is not None:
-                for tool_schema in self._registry.get_exposed_tool_schemas():
+                for tool_schema in self._visible_exposed_schemas():
                     plugin = self._registry.get_plugin_for_tool(tool_schema.name)
                     if plugin and plugin.name in preloaded_plugins:
                         preloaded_tools_hint.append(tool_schema.name)
@@ -704,7 +737,7 @@ class IntrospectionPlugin(RunnerForwardingMixin):
 
         # Build the set of all known categories.
         global_cats: Set[str] = set(category_hints.keys())
-        for schema in self._registry.get_exposed_tool_schemas():
+        for schema in self._visible_exposed_schemas():
             global_cats.add(schema.category or "uncategorized")
 
         # Build reverse lookup: category hash ID → category name.
@@ -740,7 +773,7 @@ class IntrospectionPlugin(RunnerForwardingMixin):
         # this session's profile are still listed (with an availability
         # note).  This matches the summary which also uses global counts.
         tools = []
-        for schema in self._registry.get_exposed_tool_schemas():
+        for schema in self._visible_exposed_schemas():
             # Apply category filter (treat None as "uncategorized")
             schema_category = schema.category or "uncategorized"
             if schema_category != category:

@@ -1793,6 +1793,33 @@ Model uses `list_tools()` → `get_tool_schemas()` workflow to discover tools.
 - Enabled by default (`JAATO_DEFERRED_TOOLS=true`)
 - Core tools: introspection, file_edit, cli, filesystem_query, todo, clarification
 
+### LSP Tools With No Language Server (#1345)
+
+In a workspace with no `plugin_configs.lsp.languageServers` and no
+`.lsp.json`, every `lsp_*` call answers "No LSP servers configured". The
+tools are deferred, so they cost nothing in the initial schema; their cost
+was the catalog. `list_tools` listed them, `get_tool_schemas` activated
+them, and an agent spent calls finding out they could not work.
+
+`LSPToolPlugin.is_tool_visible` hides the nine `lsp_*` tools while the
+RESOLVED server table is empty. Configured is enough: a server that failed
+to start keeps the tools visible, so the model can report the failure. The
+`lsp` user command stays.
+
+| Piece | Where |
+|---|---|
+| the predicate | `is_tool_visible` / `_has_configured_servers` in `plugins/lsp/plugin.py`. A profile-declared table is the whole answer; otherwise the `.lsp.json` candidates are `stat`ed on every call and the table is reloaded only when their `(mtime, size)` changed, so a `.lsp.json` written mid-session (the web coder's managed file, #1344) shows the tools on the next turn and gets the same connect retry `set_workspace_path` sends |
+| one filter for the wire and the catalog | `shared/tool_visibility.py::filter_visible_tool_schemas`, called by `JaatoSession._get_tools_for_provider` and by `introspection`'s session and global schema walks. Before this, `list_tools` and `get_tool_schemas` consulted no predicate at all, so `todo`'s and `telepathy`'s hidden tools were catalogued too |
+| the prompt section | `get_system_instructions` returns `None` with no server. It is read when the session assembles its prompt, so a `.lsp.json` that appears later brings the tools back through `list_tools` but not the prompt section |
+
+The predicate reads the plugin instance's table, which is the table the
+tools themselves use; it keeps no per-session state.
+
+Guard: `jaato_server/shared/tests/test_lsp_tools_hide_without_a_server_1345.py`,
+five reversions. It drives a real `PluginRegistry` with the real `lsp` and
+`introspection` plugins, and the lsp background thread switched off so no
+server is spawned.
+
 ### Pre-warm Runner Pool
 
 Sessions consume a pre-warm runner subprocess from a pool instead of cold-spawning one each time.  Cuts per-session bootstrap from ~30s (with full plugin discovery + imports) to ~7s on cascade workloads.

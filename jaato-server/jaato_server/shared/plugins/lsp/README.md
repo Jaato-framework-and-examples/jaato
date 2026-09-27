@@ -781,7 +781,13 @@ The tools return 1-indexed values for human readability (matching editor display
 
 ## Error Handling
 
-If no LSP servers are connected, tools return:
+If no LSP server is **configured** (no `plugin_configs.lsp.languageServers`
+and no `.lsp.json`), the `lsp_*` tools are hidden from the model: they are
+absent from the provider's tool array and from `list_tools`, and the plugin
+contributes no system-prompt section (#1345). They reappear on the next turn
+once a `.lsp.json` is written. The `lsp` user command is always available.
+
+If servers are configured but none is connected, tools return:
 ```json
 {"error": "No LSP servers connected. Use 'lsp connect <server>' first."}
 ```
