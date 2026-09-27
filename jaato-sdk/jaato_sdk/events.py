@@ -528,7 +528,19 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 # too.  A NEW verb (the 1.7 rule): both SDKs refuse below
 # ``MIN_HISTORY_PAGE_PROTOCOL``.  ``history_replay`` sent to an older daemon
 # is ignored and it replays the old way -- safe, merely unpaged.
-PROTOCOL_VERSION = "1.28"
+# 1.29 -- FINISHED sessions.  A session the person ended (``session.end``),
+# whose agent completed (``natural``) or whose budget stopped it
+# (``budget_exhausted``) is marked on its record (2.11) and the session rows
+# of ``session.list`` and the ``SessionInfoEvent`` snapshot carry
+# ``ended_at`` (ISO-8601 UTC) and ``end_reason``, both ``null`` for a session
+# that has not finished.  The mark is cleared when a turn starts in the
+# session again.  Additive keys on a free-form dict: an older client ignores
+# them.  What changes is what a client may do with ``session.end``: against a
+# 1.29 daemon it leaves the session listed as finished, so a client that used
+# ``session.delete`` to END a session (the web client did) switches to
+# ``session.end`` there and keeps ``session.delete`` for "remove it".  Below
+# 1.29 ``session.end`` marks nothing, so such a client keeps deleting.
+PROTOCOL_VERSION = "1.29"
 
 
 # =============================================================================

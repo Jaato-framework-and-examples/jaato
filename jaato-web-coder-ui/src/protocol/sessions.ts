@@ -43,6 +43,15 @@ export interface SessionSummary {
   lastActivity: string;
   /** A turn is running right now (loaded sessions only). */
   isProcessing: boolean;
+  /**
+   * When the session FINISHED, ISO-8601 UTC (protocol 1.29): the person
+   * ended it, its agent completed, or its budget stopped it.  Absent for a
+   * session that has not finished, and always absent below 1.29.  The
+   * daemon clears it when a turn starts in the session again.
+   */
+  endedAt?: string;
+  /** Why it finished: ``client_request`` / ``stopped`` / ``natural`` / ``budget_exhausted``. */
+  endReason?: string;
 }
 
 export function normalizeSessionSummary(raw: unknown): SessionSummary | null {
@@ -67,6 +76,8 @@ export function normalizeSessionSummary(raw: unknown): SessionSummary | null {
     profile: typeof o.profile === "string" ? o.profile : "",
     lastActivity: typeof o.last_activity === "string" ? o.last_activity : "",
     isProcessing: o.is_processing === true,
+    endedAt: typeof o.ended_at === "string" && o.ended_at ? o.ended_at : undefined,
+    endReason: typeof o.end_reason === "string" && o.end_reason ? o.end_reason : undefined,
   };
 }
 
@@ -92,6 +103,7 @@ export function formatSessionList(sessions: SessionSummary[], notes: Record<stri
     const parts = [
       `  ${status} ${s.id}${desc && desc !== s.id ? ` - ${desc}` : ""}`,
       s.awaiting ? ` [waiting: ${s.awaiting}]` : "",
+      s.endedAt ? ` [finished: ${endReasonLabel(s.endReason)}]` : "",
       s.provider ? ` [${s.provider}/${s.model}]` : "",
       s.clientCount ? `, ${s.clientCount} client(s)` : "",
       s.turnCount ? `, ${s.turnCount} turns` : "",
@@ -161,17 +173,21 @@ export function sessionsInWorkspace(
 }
 
 /**
- * The session picker's three columns of existing sessions (design 2a).
+ * The session picker's four columns of existing sessions (design 2a).
  *
  * ``waiting`` — a prompt is open (the daemon's ``awaiting``, protocol 1.17);
  * ``awake`` — loaded in the daemon; ``sleeping`` — saved on disk only,
- * where attaching wakes it.  A session waiting on a person is loaded by
- * construction, so the waiting test comes first.
+ * where attaching wakes it; ``finished`` — ended by the person, completed
+ * by its agent, or stopped by its budget (``ended_at``, protocol 1.29).
+ * A session waiting on a person is loaded by construction, so the waiting
+ * test comes first; a finished session is finished whether or not it is
+ * still loaded (it stays loaded for the unload grace after End).
  */
-export type SessionColumn = "waiting" | "awake" | "sleeping";
+export type SessionColumn = "waiting" | "awake" | "sleeping" | "finished";
 
 export function sessionColumn(s: SessionSummary): SessionColumn {
   if (s.awaiting) return "waiting";
+  if (s.endedAt) return "finished";
   return s.isLoaded ? "awake" : "sleeping";
 }
 
@@ -183,15 +199,32 @@ function time(iso: string | undefined): number {
 /**
  * Sessions grouped by column, ordered the way each column is read:
  * longest waiting first (an unmeasured wait sorts last, since nothing says
- * it is old), then most recent activity first.  Ids break ties -- they are
+ * it is old), then most recent activity first, and Finished most recently
+ * ended first.  Ids break ties -- they are
  * timestamps, so the fallback is still recency.
  */
 export function sessionBoard(sessions: SessionSummary[]): Record<SessionColumn, SessionSummary[]> {
-  const out: Record<SessionColumn, SessionSummary[]> = { waiting: [], awake: [], sleeping: [] };
+  const out: Record<SessionColumn, SessionSummary[]> = { waiting: [], awake: [], sleeping: [], finished: [] };
   for (const s of sessions) out[sessionColumn(s)].push(s);
   out.waiting.sort((a, b) => (time(a.awaitingSince) || Infinity) - (time(b.awaitingSince) || Infinity) || b.id.localeCompare(a.id));
   const recent = (a: SessionSummary, b: SessionSummary) => time(b.lastActivity) - time(a.lastActivity) || b.id.localeCompare(a.id);
   out.awake.sort(recent);
   out.sleeping.sort(recent);
+  out.finished.sort((a, b) => time(b.endedAt) - time(a.endedAt) || b.id.localeCompare(a.id));
   return out;
+}
+
+/** What a finished session's card says about why it ended. */
+export function endReasonLabel(reason: string | undefined): string {
+  switch (reason) {
+    case "client_request":
+    case "stopped":
+      return "ended by you";
+    case "natural":
+      return "completed";
+    case "budget_exhausted":
+      return "stopped by its budget";
+    default:
+      return "ended";
+  }
 }

@@ -316,8 +316,8 @@ function authCommands(commands: { name: string; description?: string }[]): { nam
 
 /**
  * The session picker (design 2a / 2a′): a board, not a list.  One plate,
- * four columns -- the workspace's existing sessions by state (Waiting on
- * you / Awake / Sleeping, ``components/picker/SessionBoard``) and a column
+ * five columns -- the workspace's existing sessions by state (Waiting on
+ * you / Awake / Sleeping / Finished, ``components/picker/SessionBoard``) and a column
  * to start a new one (``components/picker/NewSessionColumn``).  Below
  * ~900px the columns stack.
  *
@@ -367,7 +367,7 @@ function ProfilePicker({ onStart, onAttach, onAuth, onSkip }: {
           <button type="button" onClick={onSkip} className="link text-[13px]">Open workspace with no session <span aria-hidden="true">→</span></button>
         </div>
         {ws.notice?.error && <div role="alert" className="px-5 py-2 border-b hairline tint-error text-[13px] text-error">{ws.notice.text}</div>}
-        <div className="grid grid-cols-1 min-[900px]:grid-cols-[repeat(4,minmax(0,1fr))] min-[900px]:min-h-[460px]">
+        <div className="grid grid-cols-1 min-[900px]:grid-cols-[repeat(5,minmax(0,1fr))] min-[900px]:min-h-[460px]">
           <SessionBoard sessions={existing} onAttach={onAttach} />
           <NewSessionColumn onStart={onStart} />
         </div>

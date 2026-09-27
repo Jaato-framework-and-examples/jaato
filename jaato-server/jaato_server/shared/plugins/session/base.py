@@ -353,6 +353,20 @@ class SessionState:
     restored values.
     """
 
+    ended_at: Optional[str] = None
+    """When the session FINISHED, ISO-8601 UTC (record 2.11).
+
+    Set when a ``SessionTerminatedEvent`` names a finishing reason
+    (``server.session_finished.FINISHED_REASONS``: the person ended it, the
+    agent completed, or its budget stopped it), cleared when a turn starts
+    in it again.  ``None`` for a session that has not finished and for a
+    record predating the field.
+    """
+
+    end_reason: Optional[str] = None
+    """The ``SessionTerminatedEvent.reason`` that finished it, beside
+    ``ended_at`` (record 2.11).  ``None`` exactly when ``ended_at`` is."""
+
 
 @dataclass
 class SessionInfo:
@@ -402,6 +416,14 @@ class SessionInfo:
     ``None`` for a record predating the field or an unauthenticated
     creator -- and a ``None`` owner joins no user group, the safe direction.
     """
+
+    ended_at: Optional[str] = None
+    """When the session finished (record 2.11), carried on the LISTING so
+    the session picker can show a cold finished session without loading
+    it.  See ``SessionState.ended_at``."""
+
+    end_reason: Optional[str] = None
+    """Why it finished, beside ``ended_at``."""
 
     def display_name(self) -> str:
         """Return a display-friendly name for the session."""

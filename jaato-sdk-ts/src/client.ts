@@ -185,6 +185,16 @@ export const MIN_MEMORY_VERBS_PROTOCOL = "1.22";
 export const MIN_HISTORY_PAGE_PROTOCOL = "1.28";
 
 /**
+ * The first protocol in which {@link JaatoClient.endSession} leaves the
+ * session listed as FINISHED (1.29): the daemon marks the record and the
+ * session rows carry ``ended_at`` / ``end_reason``.  Nothing is refused
+ * below it -- ``session.end`` has always existed -- but a client that means
+ * "end, and keep it listed" needs to know whether the daemon will keep it:
+ * below 1.29 an ended session is indistinguishable from a sleeping one.
+ */
+export const MIN_SESSION_FINISH_PROTOCOL = "1.29";
+
+/**
  * Protocol floor for {@link JaatoClient.sendSessionMessage}.  Same rule as
  * {@link MIN_WORKSPACE_IGNORE_PROTOCOL}: an older daemon ignores
  * ``session.message`` silently, and a client that then reported the message

@@ -432,6 +432,15 @@ function finishStaging(c: Client): void {
  */
 const deletedSessions = new Set<string>();
 
+/**
+ * Sessions that FINISHED (protocol 1.29): ended with ``session.end`` here.
+ * The real daemon keeps the record and marks it, and the next listing
+ * carries ``ended_at`` / ``end_reason`` on its row until a turn starts in
+ * it again -- so this map outlives the connection that ended the session,
+ * and ``message.send`` in it removes the entry.
+ */
+const endedSessions = new Map<string, { at: string; reason: string; workspacePath: string }>();
+
 /** What ``session.list`` answers: the daemon's free-form per-session dicts. */
 function sessionListing(c: Client): Record<string, unknown>[] {
   return ([
@@ -443,7 +452,10 @@ function sessionListing(c: Client): Record<string, unknown>[] {
     // Protocol 1.27 adds ``profile`` / ``last_activity`` / ``is_processing``.
     { id: "20260914_080000", name: "", description: "idle helper", model_provider: "anthropic", model_name: "claude-sonnet-4", is_loaded: true, is_current: false, client_count: 0, turn_count: 7, workspace_path: "/srv/workspaces/project-a", profile: "", last_activity: new Date(Date.now() - 60 * 60_000).toISOString(), is_processing: false },
     { id: "20260915_170000", name: "old notes", description: "", model_provider: "", model_name: "", is_loaded: false, is_current: false, client_count: 0, turn_count: 1, workspace_path: "/srv/workspaces/project-b", profile: "", last_activity: "2026-09-15T17:00:00Z" },
-    ...(c.sessionId && !c.sessionId.startsWith("2026") ? [{ id: c.sessionId, name: "mock session", description: "", model_provider: "mock", model_name: "mock-1", is_loaded: true, is_current: true, client_count: 1, turn_count: 0, workspace_path: "/work" }] : []),
+    // Protocol 1.29: a session the daemon's own record says has finished.
+    { id: "20260912_110000", name: "", description: "migrated the parser", model_provider: "anthropic", model_name: "claude-sonnet-4", is_loaded: false, is_current: false, client_count: 0, turn_count: 12, workspace_path: "/srv/workspaces/project-a", profile: "", last_activity: "2026-09-12T12:00:00Z", ended_at: "2026-09-12T12:00:00Z", end_reason: "natural" },
+    ...(c.sessionId && !c.sessionId.startsWith("2026") && !endedSessions.has(c.sessionId) ? [{ id: c.sessionId, name: "mock session", description: "", model_provider: "mock", model_name: "mock-1", is_loaded: true, is_current: true, client_count: 1, turn_count: 0, workspace_path: "/work" }] : []),
+    ...[...endedSessions].map(([id, e]) => ({ id, name: "mock session", description: "", model_provider: "mock", model_name: "mock-1", is_loaded: true, is_current: id === c.sessionId, client_count: 0, turn_count: 0, workspace_path: e.workspacePath, profile: "", last_activity: e.at, ended_at: e.at, end_reason: e.reason })),
   ] as Record<string, unknown>[]).filter((s) => !deletedSessions.has(String(s.id)));
 }
 
@@ -858,7 +870,7 @@ wss.on("connection", (ws, req) => {
     installedIntegrations: new Set(),
     deletedWorkspaces: new Set(),
   };
-  send(c, { type: "connected", protocol_version: "1.28", server_info: { server_version: "mock-0.0.1", client_id: randomUUID(), max_message_size: MAX_MESSAGE_SIZE, stage_per_file_limit: Math.min(STAGE_PER_FILE_LIMIT, MAX_MESSAGE_SIZE), stage_total_limit: STAGE_TOTAL_LIMIT } });
+  send(c, { type: "connected", protocol_version: "1.29", server_info: { server_version: "mock-0.0.1", client_id: randomUUID(), max_message_size: MAX_MESSAGE_SIZE, stage_per_file_limit: Math.min(STAGE_PER_FILE_LIMIT, MAX_MESSAGE_SIZE), stage_total_limit: STAGE_TOTAL_LIMIT } });
 
   ws.on("message", async (raw, isBinary) => {
     if (c.staging) {
@@ -1046,6 +1058,15 @@ wss.on("connection", (ws, req) => {
           } else {
             send(c, { type: "system.message", message: `Session '${target}' not found.`, style: "warning" });
           }
+        } else if (cmd === "session.end") {
+          // The daemon stops the session, marks it finished (1.29) and
+          // answers with ``session.terminated``; the session stays listed.
+          if (c.sessionId) {
+            const id = c.sessionId;
+            endedSessions.set(id, { at: new Date().toISOString(), reason: "client_request", workspacePath: c.selected ? `/srv/workspaces/${c.selected}` : "/work" });
+            send(c, { type: "session.terminated", session_id: id, agent_id: "main", reason: "client_request" });
+            send(c, { type: "system.message", message: "[SESSION_TERMINATED]", style: "system" });
+          }
         } else if (cmd === "session.list") {
           send(c, { type: "session.list", sessions: sessionListing(c) });
         } else if (cmd === "session.attach") {
@@ -1184,6 +1205,8 @@ wss.on("connection", (ws, req) => {
         break;
       }
       case "message.send":
+        // A turn starting reopens a finished session (1.29).
+        if (c.sessionId) endedSessions.delete(c.sessionId);
         turn(c, String(ev.text ?? "")).catch(() => undefined);
         break;
       case "auth.setup_response": {
