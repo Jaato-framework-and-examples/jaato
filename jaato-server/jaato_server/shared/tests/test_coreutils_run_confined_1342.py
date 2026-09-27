@@ -56,14 +56,18 @@ REVERSIONS = [
     ),
 ]
 
-_WS = "/root/.jaato/workspaces/Test env"
+def _bodies(root: Path, requested_fragments: Optional[List[str]]) -> Dict[str, str]:
+    """Render a profile for a workspace under *root* and split its bodies.
 
-
-def _bodies(requested_fragments: Optional[List[str]]) -> Dict[str, str]:
-    """Render a profile and split it into its three bodies."""
-    manager = AppArmorManager(workspace_root="/root/.jaato/workspaces")
+    The workspace name keeps a space, the #1305 shape.  It lives under a
+    test directory, never ``/root``: CI does not run as root, and the
+    renderer stats the workspace's fragment directory.
+    """
+    workspace = root / "Test env"
+    workspace.mkdir(parents=True, exist_ok=True)
+    manager = AppArmorManager(workspace_root=str(root))
     text = manager._render_profile(
-        "sid", _WS, requested_fragments=requested_fragments,
+        "sid", str(workspace), requested_fragments=requested_fragments,
         plugin_rules=['"/usr/bin/python3.14" ix,'],
     )
     hat = text.index("profile tool_hat {")
@@ -90,14 +94,14 @@ def test_the_template_version_moved():
     assert AppArmorManager._TEMPLATE_VERSION >= 38
 
 
-def test_every_broad_body_can_exec_rust_coreutils():
-    bodies = _bodies(None)
+def test_every_broad_body_can_exec_rust_coreutils(tmp_path):
+    bodies = _bodies(tmp_path, None)
     for name in ("base", "tool_hat", "child"):
         assert _grants(bodies[name])["cargo"], f"{name} cannot exec rust coreutils"
 
 
-def test_every_broad_body_can_read_script_commands():
-    bodies = _bodies(None)
+def test_every_broad_body_can_read_script_commands(tmp_path):
+    bodies = _bodies(tmp_path, None)
     for name in ("base", "tool_hat", "child"):
         g = _grants(bodies[name])
         assert g["usr_bin_r"] and g["usr_local_bin_r"] and g["bin_r"], (
@@ -105,8 +109,8 @@ def test_every_broad_body_can_read_script_commands():
         )
 
 
-def test_a_scoped_child_keeps_fragment_only_exec():
-    bodies = _bodies([])
+def test_a_scoped_child_keeps_fragment_only_exec(tmp_path):
+    bodies = _bodies(tmp_path, [])
     assert not any(_grants(bodies["child"]).values()), (
         "a scoped //child must get no broad exec or read (v18)"
     )
@@ -120,7 +124,7 @@ def test_a_scoped_child_keeps_fragment_only_exec():
 @pytest.mark.parametrize("fragments", [None, []], ids=["unscoped", "scoped"])
 def test_the_render_compiles(tmp_path: Path, fragments):
     profile = tmp_path / "profile"
-    profile.write_text(_bodies(fragments)["_all"])
+    profile.write_text(_bodies(tmp_path / "ws", fragments)["_all"])
     result = subprocess.run(
         ["apparmor_parser", "-Q", "-K", str(profile)],
         capture_output=True, text=True,
