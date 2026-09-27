@@ -19,6 +19,12 @@
  * which the store prepends; the scroll position is then shifted by the
  * height the prepended rows added, so the rows the reader was looking at
  * stay where they were.
+ *
+ * The transcript scrolls under a minimap rail (``MinimapRail``) rather
+ * than a native scrollbar: a miniature of every loaded item, virtualised
+ * ones included, with a frame for what is on screen, that a finger can
+ * tap or drag to scroll. It only sets ``scrollTop``, so following and
+ * paging react to it through the scroll handler below.
  */
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
@@ -26,6 +32,7 @@ import { selectBlocks, useJaato } from "@/store/store";
 import { buildTranscript, type ThinkingClock } from "@/store/transcript";
 import { BlockView } from "./Blocks";
 import { loadOlderHistory } from "@/app/historyPaging";
+import { MinimapRail } from "./MinimapRail";
 
 /** How close to the top (px) counts as "reached the top" for scroll-back. */
 const LOAD_OLDER_THRESHOLD = 80;
@@ -34,6 +41,7 @@ export function OutputPane({ agentId }: { agentId: string }) {
   const blocks = useJaato(selectBlocks(agentId));
   const toolIdNames = useJaato((s) => s.toolIdNames);
   const parentRef = useRef<HTMLDivElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
   const [follow, setFollow] = useState(true);
   const thinkingClock = useRef<ThinkingClock>(new Map());
   const paging = useJaato((s) => s.historyPaging[agentId]);
@@ -118,6 +126,7 @@ export function OutputPane({ agentId }: { agentId: string }) {
   }, []);
 
   const virtualItems = virtualizer.getVirtualItems();
+  const showRail = items.length > 0;
   return (
     // ``flex-col`` between the scroll area and the follow pill's own row
     // is what keeps the pill from covering the transcript's last rows,
@@ -127,7 +136,8 @@ export function OutputPane({ agentId }: { agentId: string }) {
     // list, centred above the composer.  A dedicated row -- even an
     // empty one -- costs no layout jump when the pill appears.
     <div className="relative flex-1 flex flex-col min-h-0">
-      <div ref={parentRef} className="flex-1 overflow-y-auto px-5 py-3" data-testid="output-pane">
+      <div className="flex-1 flex min-h-0">
+      <div ref={parentRef} className={`flex-1 min-w-0 overflow-y-auto px-5 py-3 ${showRail ? "no-scrollbar" : ""}`} data-testid="output-pane">
         {(paging?.hasMore || paging?.error) && (
           <div className="flex justify-center pb-2" data-testid="history-older">
             {paging.error ? (
@@ -153,7 +163,7 @@ export function OutputPane({ agentId }: { agentId: string }) {
             </div>
           </div>
         )}
-        <div style={{ height: virtualizer.getTotalSize(), position: "relative", width: "100%" }}>
+        <div ref={listRef} style={{ height: virtualizer.getTotalSize(), position: "relative", width: "100%" }}>
           {virtualItems.map((vi) => {
             const item = items[vi.index]!;
             return (
@@ -168,6 +178,16 @@ export function OutputPane({ agentId }: { agentId: string }) {
             );
           })}
         </div>
+      </div>
+      {showRail && (
+        <MinimapRail
+          scrollerRef={parentRef}
+          listRef={listRef}
+          items={items}
+          slots={virtualizer.measurementsCache}
+          hasMore={!!paging?.hasMore}
+        />
+      )}
       </div>
       {!follow && items.length > 0 && (
         <div className="flex justify-center border-t hairline py-1.5 shrink-0">

@@ -1815,3 +1815,62 @@ test("code viewer: a JSON file is syntax-highlighted with line numbers", async (
   await expect(code.locator(".hljs-number")).toHaveText("3");
   await expect(code.locator(".hljs-literal")).toHaveText("true");
 });
+
+test("minimap rail: draws the transcript, tap and drag scrub with a turn label, and scrubbing to the top loads history", async ({ page }) => {
+  await openSession(page);
+  await composer(page).fill("session attach 20260913_070000");
+  await composer(page).press("Enter");
+  await expect(page.getByText("question number 40")).toBeVisible();
+
+  const pane = page.getByTestId("output-pane");
+  const rail = page.getByTestId("minimap-rail");
+  await expect(rail).toBeVisible();
+  const box = (await rail.boundingBox())!;
+  expect(Math.round(box.width)).toBe(64);
+  // The native scrollbar is hidden where the rail stands in for it.
+  await expect(pane).toHaveClass(/no-scrollbar/);
+  // Something was painted: the canvas holds non-transparent pixels.
+  await expect.poll(() => rail.locator("canvas").evaluate((c: HTMLCanvasElement) => {
+    const ctx = c.getContext("2d");
+    if (!ctx || !c.width || !c.height) return 0;
+    const d = ctx.getImageData(0, 0, c.width, c.height).data;
+    let n = 0;
+    for (let i = 3; i < d.length; i += 4) if (d[i]! > 0) n += 1;
+    return n;
+  })).toBeGreaterThan(50);
+
+  // Tapping the middle jumps there (off the bottom, so following stops),
+  // and while the pointer is down a label names the turn under it.
+  const before = await pane.evaluate((el) => el.scrollTop);
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  await expect(page.getByTestId("minimap-label")).toHaveText(/^\d\d question number \d+$/);
+  const mid = await pane.evaluate((el) => el.scrollTop);
+  expect(mid).toBeLessThan(before);
+  // Dragging scrubs continuously.
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height * 0.8, { steps: 4 });
+  const lower = await pane.evaluate((el) => el.scrollTop);
+  expect(lower).toBeGreaterThan(mid);
+  await page.mouse.up();
+  await expect(page.getByTestId("minimap-label")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "↓ follow output" })).toBeVisible();
+
+  // The viewport frame follows the pane: Ctrl+End (focus stays in the
+  // composer, the rail never takes it) puts it at the bottom of the track.
+  await page.keyboard.press("Control+End");
+  await expect.poll(async () => {
+    const v = (await page.getByTestId("minimap-viewport").boundingBox())!;
+    return Math.round(box.y + box.height - (v.y + v.height));
+  }).toBeLessThanOrEqual(8);
+
+  // Scrubbing to the top loads older pages; the rail re-maps, and the
+  // oldest turn is reachable from it.  (Earlier scrubs may already have
+  // loaded some pages, so the "more" rule is asserted only at the end.)
+  await expect(async () => {
+    await page.mouse.move(box.x + box.width / 2, box.y + 2);
+    await page.mouse.down();
+    await page.mouse.up();
+    await expect(page.getByText("question number 1", { exact: true })).toBeVisible({ timeout: 300 });
+  }).toPass({ timeout: 20_000 });
+  await expect(page.getByTestId("minimap-more")).toHaveCount(0);
+});
