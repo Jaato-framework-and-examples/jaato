@@ -41,7 +41,8 @@ import type { SecretResolveOutcome } from "@jaato/sdk";
 import { GitHubApiError, GitHubGrantRevoked, type GitHubApi, type GitHubRepo, type GitHubTokenSet } from "./github-api.js";
 import { FileGitHubStore, GitHubStoreError, type GitHubAccount, type GitHubBinding, type GrantSecret } from "./github-store.js";
 import { githubGuidanceFile } from "./github-guidance.js";
-import { removeManagedFile, writeManagedFile } from "./managed-files.js";
+import { managedContent, removeManagedFile, writeManagedFile } from "./managed-files.js";
+import type { WorkspaceWriteAnswer, WorkspaceWriteRequest } from "./bind-channel.js";
 
 /** A user token minted this far before its expiry is refreshed rather than reused (the #683 / JAATO_OAUTH_REFRESH_MARGIN default). */
 export const TOKEN_REFRESH_MARGIN_SECONDS = 300;
@@ -103,20 +104,46 @@ export interface SessionReloader {
   reloadUser(user: string): Promise<{ status: string; reloaded: number }>;
 }
 
+/**
+ * The daemon doing the workspace writes this application cannot do itself
+ * (``workspace.app_write``, protocol 1.30).  The bind channel implements it.
+ */
+export interface WorkspaceWriter {
+  canWriteWorkspaces(): boolean;
+  writeWorkspace(user: string, workspace: string, request: WorkspaceWriteRequest): Promise<WorkspaceWriteAnswer>;
+}
+
+/** What writing one binding's files did; shared by {@link GitHubService.bind} and the resync. */
+interface BindingWrite {
+  envWritten: boolean;
+  /** ``true`` only when the ``.env`` actually changed (the resync reloads on this). */
+  envChanged: boolean;
+  gitconfigSeeded: boolean;
+  guidanceWritten: boolean;
+  notes: string[];
+}
+
 export interface GitHubServiceOptions {
   store: FileGitHubStore;
   api: GitHubApi;
   reloader: SessionReloader;
   /**
-   * The root every managed workspace lives under.  When set, ``.env`` /
-   * ``.gitconfig`` writes are contained within it (symlinks resolved before
-   * comparing, the daemon's own rule); when unset, those writes are SKIPPED
-   * — the binding is still recorded, so a split-host deployment where the
-   * daemon owns the workspace filesystem can drive the ``.env`` write through
-   * the browser's ``config.update`` instead.  Never a silent skip: the bind
-   * result carries a ``note``.
+   * The root every managed workspace lives under, when THIS process can write
+   * there.  When set, ``.env`` / ``.gitconfig`` / guidance writes happen here,
+   * contained within it (symlinks resolved before comparing, the daemon's own
+   * rule).  When unset, or for a workspace outside it, the writes go through
+   * {@link GitHubServiceOptions.workspaceWriter} (the daemon, which owns the
+   * workspaces), and only when neither can write is the write skipped, with a
+   * ``note`` saying sessions there will not get ``GH_TOKEN``.
    */
   workspaceRoot?: string;
+  /**
+   * The daemon's ``workspace.app_write`` (1.30), for a deployment where this
+   * application runs as an account that cannot reach the workspaces (a BFF
+   * beside a root daemon).  A binding is inert without the ``.env`` line:
+   * the daemon resolves only references it finds there.
+   */
+  workspaceWriter?: WorkspaceWriter;
   marginSeconds?: number;
   log?: (msg: string) => void;
 }
@@ -165,6 +192,7 @@ export class GitHubService {
   private readonly _api: GitHubApi;
   private readonly _reloader: SessionReloader;
   private readonly _workspaceRoot?: string;
+  private readonly _writer?: WorkspaceWriter;
   private readonly _margin: number;
   private readonly _log: (msg: string) => void;
   private readonly _mint = new KeyedMutex();
@@ -176,6 +204,7 @@ export class GitHubService {
     this._api = opts.api;
     this._reloader = opts.reloader;
     this._workspaceRoot = (opts.workspaceRoot ? realpathSafe(opts.workspaceRoot) : null) ?? undefined;
+    this._writer = opts.workspaceWriter;
     this._margin = opts.marginSeconds ?? TOKEN_REFRESH_MARGIN_SECONDS;
     this._log = opts.log ?? (() => undefined);
   }
@@ -334,28 +363,108 @@ export class GitHubService {
     try { this._store.bind(owner, user, workspace, accountId); }
     catch (e) { if (e instanceof GitHubStoreError) throw new GitHubBindError(e.message, e.status === 404 ? 404 : 400); throw e; }
 
-    let envWritten = false;
-    let gitconfigSeeded = false;
-    let guidanceWritten = false;
-    const notes: string[] = [];
-    const resolved = this._resolveWorkspace(workspace);
-    if (resolved === null) {
-      notes.push(this._workspaceRoot
-        ? "workspace is outside the configured workspace_root or does not exist; GH_TOKEN not written to .env (nor the GitHub guidance file)"
-        : "no workspace_root configured; GH_TOKEN not written to .env (the browser config.update path writes it instead); the GitHub guidance file is not written here either");
-    } else {
-      envWritten = this._writeEnv(resolved, accountId !== null);
-      if (accountId !== null && account) gitconfigSeeded = this._seedGitConfig(resolved, account);
-      const g = this._applyGuidance(resolved, accountId !== null);
-      guidanceWritten = g.written;
-      if (g.note) notes.push(g.note);
-    }
+    const w = await this._writeBindingFiles(user, workspace, account);
 
     const { reloaded } = await this._reload(user, accountId === null ? `unbind ${workspace}` : `bind ${account!.login} -> ${workspace}`);
     return {
       binding: accountId === null ? "cleared" : "set",
-      envWritten, gitconfigSeeded, guidanceWritten, reloaded,
-      note: notes.length ? notes.join("; ") : undefined,
+      envWritten: w.envWritten, gitconfigSeeded: w.gitconfigSeeded, guidanceWritten: w.guidanceWritten, reloaded,
+      note: w.notes.length ? w.notes.join("; ") : undefined,
+    };
+  }
+
+  /**
+   * Re-write every recorded binding's files, and reload the sessions of each
+   * user whose ``.env`` changed.  Run when the bind channel (re)connects: a
+   * binding recorded while no write was possible (no ``workspace_root`` and
+   * a daemon below 1.30, or the channel down) gets its ``.env`` line the
+   * first time a write is possible, without the user picking the account
+   * again.  Every write is idempotent, so resyncing a healthy store changes
+   * nothing.
+   */
+  async resyncWorkspaces(): Promise<{ bindings: number; changed: number; notes: string[] }> {
+    const all = this._store.allBindings();
+    const changedUsers = new Set<string>();
+    const notes: string[] = [];
+    let changed = 0;
+    for (const b of all) {
+      const account = this._store.accountById(b.grantId);
+      if (!account) continue;
+      const w = await this._writeBindingFiles(b.user, b.workspace, account);
+      if (w.envChanged) { changed += 1; changedUsers.add(b.user); }
+      for (const n of w.notes) notes.push(`${b.workspace}: ${n}`);
+    }
+    for (const user of changedUsers) await this._reload(user, "resync");
+    this._log(`github resync: ${all.length} binding(s), ${changed} workspace .env updated${notes.length ? `; ${notes.join("; ")}` : ""}`);
+    return { bindings: all.length, changed, notes };
+  }
+
+  /**
+   * Write (``account``) or remove (``null``) one binding's files: the
+   * ``GH_TOKEN=app://github`` line, the seeded ``.home/.gitconfig`` and the
+   * GitHub guidance.  Here when this process can reach the workspace, else
+   * through the daemon, else not at all, and never silently.
+   */
+  private async _writeBindingFiles(user: string, workspace: string, account: GitHubAccount | null): Promise<BindingWrite> {
+    const present = account !== null;
+    const resolved = this._resolveWorkspace(workspace);
+    if (resolved !== null) {
+      const notes: string[] = [];
+      const before = readEnvSafe(resolved);
+      const envWritten = this._writeEnv(resolved, present);
+      const gitconfigSeeded = account ? this._seedGitConfig(resolved, account) : false;
+      const g = this._applyGuidance(resolved, present);
+      if (g.note) notes.push(g.note);
+      return { envWritten, envChanged: readEnvSafe(resolved) !== before, gitconfigSeeded, guidanceWritten: g.written, notes };
+    }
+    if (this._writer?.canWriteWorkspaces()) return this._writeThroughDaemon(user, workspace, account);
+    const why = this._workspaceRoot
+      ? "the workspace is outside this server's workspace_root"
+      : "this server has no workspace_root";
+    return {
+      envWritten: false, envChanged: false, gitconfigSeeded: false, guidanceWritten: false,
+      notes: [`GH_TOKEN was not written to the workspace .env: ${why}, and the daemon does not accept workspace.app_write (it needs protocol 1.30 and a connected bind channel); sessions in this workspace will not get GH_TOKEN`],
+    };
+  }
+
+  /** {@link _writeBindingFiles} through the daemon's ``workspace.app_write``. */
+  private async _writeThroughDaemon(user: string, workspace: string, account: GitHubAccount | null): Promise<BindingWrite> {
+    const present = account !== null;
+    const guidance = githubGuidanceFile();
+    const files: WorkspaceWriteRequest["files"] = [];
+    if (account) {
+      files.push({ path: ".home/.gitconfig", content: renderGitConfig({ name: account.name || account.login, email: account.noreplyEmail, gitHost: this._api.gitHost }) });
+    }
+    files.push({ path: guidance.relativePath, content: present ? managedContent(guidance) : null, managed_by: guidance.markerId });
+    const none: BindingWrite = { envWritten: false, envChanged: false, gitconfigSeeded: false, guidanceWritten: false, notes: [] };
+    let ans: WorkspaceWriteAnswer;
+    try {
+      ans = await this._writer!.writeWorkspace(user, workspace, { env: { [GH_TOKEN_ENV]: present ? GH_TOKEN_ENV_VALUE : null }, files });
+    } catch (e) {
+      return { ...none, notes: [`the daemon could not be asked to write the workspace: ${(e as Error).message}; sessions there will not get GH_TOKEN`] };
+    }
+    if (ans.status !== "ok") {
+      return { ...none, notes: [`the daemon did not write the workspace (${ans.status}${ans.detail ? `: ${ans.detail}` : ""}); sessions there will not get GH_TOKEN`] };
+    }
+    const notes: string[] = [];
+    const envAction = ans.env[GH_TOKEN_ENV] ?? "error";
+    if (envAction === "kept-literal") notes.push("left the GH_TOKEN value already in .env in place (it is not an app:// reference)");
+    if (envAction === "error") notes.push("the daemon could not update the workspace .env");
+    const outcome = (path: string) => ans.files.find((f) => f.path === path);
+    const git = outcome(".home/.gitconfig");
+    const guide = outcome(guidance.relativePath);
+    if (guide?.action === "skipped-user-file") {
+      notes.push(present
+        ? `kept your own ${guidance.relativePath} (its jaato-managed marker was removed); the shipped GitHub guidance was not written`
+        : `left your own ${guidance.relativePath} in place (its jaato-managed marker was removed)`);
+    }
+    for (const f of ans.files) if (f.action === "error") notes.push(`could not write ${f.path}${f.detail ? `: ${f.detail}` : ""}`);
+    return {
+      envWritten: present ? envAction === "written" || envAction === "unchanged" : envAction === "removed",
+      envChanged: envAction === "written" || envAction === "removed",
+      gitconfigSeeded: git?.action === "written" || git?.action === "unchanged",
+      guidanceWritten: guide?.action === "written",
+      notes,
     };
   }
 
@@ -508,6 +617,11 @@ function compareRepos(a: GitHubRepo, b: GitHubRepo): number {
   if (ha && hb && ta !== tb) return tb - ta;
   if (ha !== hb) return ha ? -1 : 1;
   return a.fullName.localeCompare(b.fullName);
+}
+
+/** A workspace's ``.env`` body, ``""`` when absent or unreadable. */
+function readEnvSafe(workspace: string): string {
+  try { return readFileSync(join(workspace, ".env"), "utf8"); } catch { return ""; }
 }
 
 /** Real path if the entry exists, else ``null``; symlinks resolved so a planted link is judged by its target. */

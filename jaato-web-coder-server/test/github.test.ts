@@ -5,16 +5,16 @@ import { join } from "node:path";
 import { describe, test } from "node:test";
 import { FileGitHubStore } from "../src/github-store.js";
 import { GitHubService, GH_TOKEN_ENV_VALUE, upsertEnvLine, renderGitConfig, tokenSetToSecret } from "../src/github.js";
-import { FakeGitHubApi, FakeReloader } from "./github-fakes.js";
+import { FakeGitHubApi, FakeReloader, FakeWorkspaceWriter } from "./github-fakes.js";
 
 const KEY = "g".repeat(40);
 const storePath = () => join(mkdtempSync(join(tmpdir(), "jwcs-ghsvc-")), "github.json");
 
-function service(opts: { workspaceRoot?: string } = {}) {
+function service(opts: { workspaceRoot?: string; writer?: FakeWorkspaceWriter } = {}) {
   const store = new FileGitHubStore(storePath(), KEY);
   const api = new FakeGitHubApi();
   const reloader = new FakeReloader();
-  const svc = new GitHubService({ store, api, reloader, workspaceRoot: opts.workspaceRoot, marginSeconds: 300 });
+  const svc = new GitHubService({ store, api, reloader, workspaceRoot: opts.workspaceRoot, workspaceWriter: opts.writer, marginSeconds: 300 });
   return { store, api, reloader, svc };
 }
 
@@ -226,7 +226,77 @@ describe("github service — bind writes the workspace", () => {
     const account = await svc.completeConnect("sub-alice", "alice", "code", "https://app/cb");
     const result = await svc.bind("sub-alice", "alice", dir, account.id);
     assert.equal(result.envWritten, false);
-    assert.ok(result.note && /no workspace_root configured/.test(result.note));
+    assert.ok(result.note && /no workspace_root/.test(result.note));
+    assert.match(result.note!, /will not get GH_TOKEN/, "the note says what the skip costs");
+    assert.doesNotMatch(result.note!, /config\.update/, "no promise of a write path that does not exist");
     assert.ok(!existsSync(join(dir, ".env")));
+  });
+});
+
+describe("github service — the daemon writes what this server cannot reach", () => {
+  test("with no workspace_root, bind asks the daemon for the reference, the gitconfig and the guidance", async () => {
+    const writer = new FakeWorkspaceWriter();
+    const { svc } = service({ writer });
+    const account = await svc.completeConnect("sub-alice", "alice", "code", "https://app/cb");
+    const result = await svc.bind("sub-alice", "alice", "/root/.jaato/workspaces/proj", account.id);
+    assert.equal(writer.calls.length, 1);
+    const call = writer.calls[0]!;
+    assert.equal(call.user, "alice");
+    assert.equal(call.workspace, "/root/.jaato/workspaces/proj");
+    assert.deepEqual(call.request.env, { GH_TOKEN: GH_TOKEN_ENV_VALUE });
+    assert.deepEqual(call.request.files.map((f) => f.path), [".home/.gitconfig", ".jaato/instructions/40-github.md"]);
+    assert.equal(call.request.files[1]!.managed_by, "github-guidance");
+    assert.equal(result.envWritten, true);
+    assert.equal(result.gitconfigSeeded, true);
+    assert.equal(result.note, undefined);
+  });
+
+  test("bind-to-none asks the daemon to remove the reference and the managed guidance", async () => {
+    const writer = new FakeWorkspaceWriter();
+    const { svc, store } = service({ writer });
+    const account = await svc.completeConnect("sub-alice", "alice", "code", "https://app/cb");
+    store.bind("sub-alice", "alice", "/w", account.id);
+    const result = await svc.bind("sub-alice", "alice", "/w", null);
+    const req = writer.calls[0]!.request;
+    assert.deepEqual(req.env, { GH_TOKEN: null });
+    assert.deepEqual(req.files, [{ path: ".jaato/instructions/40-github.md", content: null, managed_by: "github-guidance" }]);
+    assert.equal(result.envWritten, true);
+  });
+
+  test("a daemon refusal is a note, never a silent success", async () => {
+    const writer = new FakeWorkspaceWriter();
+    writer.answer = { status: "not_found", env: {}, files: [], detail: "no such workspace for this user" };
+    const { svc } = service({ writer });
+    const account = await svc.completeConnect("sub-alice", "alice", "code", "https://app/cb");
+    const result = await svc.bind("sub-alice", "alice", "/w", account.id);
+    assert.equal(result.envWritten, false);
+    assert.match(result.note!, /not_found: no such workspace for this user/);
+  });
+
+  test("a daemon below 1.30 is not asked, and the note says so", async () => {
+    const writer = new FakeWorkspaceWriter();
+    writer.supported = false;
+    const { svc } = service({ writer });
+    const account = await svc.completeConnect("sub-alice", "alice", "code", "https://app/cb");
+    const result = await svc.bind("sub-alice", "alice", "/w", account.id);
+    assert.equal(writer.calls.length, 0);
+    assert.match(result.note!, /workspace\.app_write/);
+  });
+
+  test("resync writes every recorded binding and reloads only the users whose .env changed", async () => {
+    const writer = new FakeWorkspaceWriter();
+    const { svc, store, reloader } = service({ writer });
+    const account = await svc.completeConnect("sub-alice", "alice", "code", "https://app/cb");
+    store.bind("sub-alice", "alice", "/w1", account.id);
+    store.bind("sub-alice", "alice", "/w2", account.id);
+    const first = await svc.resyncWorkspaces();
+    assert.equal(first.bindings, 2);
+    assert.equal(first.changed, 2);
+    assert.deepEqual(writer.calls.map((c) => c.workspace), ["/w1", "/w2"]);
+    assert.deepEqual(reloader.calls, ["alice"], "one reload per user, not per workspace");
+    writer.answer = { status: "ok", env: { GH_TOKEN: "unchanged" }, files: [], detail: undefined };
+    const again = await svc.resyncWorkspaces();
+    assert.equal(again.changed, 0);
+    assert.deepEqual(reloader.calls, ["alice"], "an unchanged resync reloads nothing");
   });
 });

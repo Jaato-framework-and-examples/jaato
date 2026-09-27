@@ -931,7 +931,7 @@ wss.on("connection", (ws, req) => {
       case "workspace.list":
         if (!WORKSPACES) send(c, { type: "error", error: "Workspace mode not enabled", error_type: "WorkspaceModeDisabled", recoverable: true });
         else send(c, { type: "workspace.list_response", root: "/srv/workspaces", workspaces: [
-          { name: "project-a", path: "/srv/workspaces/project-a", owner: "mock:tester", configured: true, provider: "anthropic", model: "claude-sonnet-4", last_accessed: ts(), sources: [{ forge: "github", repo: "acme/claims-service", branch: "main", path: "claims-service" }, { forge: "github", repo: "acme/email-templates", branch: "develop", path: "email-templates" }] },
+          { name: "project-a", path: "/srv/workspaces/project-a", owner: "mock:tester", configured: true, provider: "anthropic", model: "claude-sonnet-4", last_accessed: ts(), sources: [{ forge: "github", repo: "acme/claims-service", branch: "main", path: "claims-service" }, { forge: "github", repo: "acme/email-templates", branch: "develop", path: "email-templates" }, { forge: "github", repo: "Jaato-framework-and-examples/jaato", branch: "chore/normalise-line-endings-lf", path: "jaato" }] },
           { name: "project-b", path: "/srv/workspaces/project-b", configured: false, sources: [] },
           ...[...CREATED_WORKSPACES].map((n) => ({ name: n, path: `/srv/workspaces/${n}`, configured: false, owner: "mock:tester", last_accessed: ts(), sources: [] })),
         ].filter((w) => !c.deletedWorkspaces.has(w.name)) });

@@ -6,7 +6,8 @@
  */
 import type { GitHubApi, GitHubIdentity, GitHubRepo, GitHubTokenSet } from "../src/github-api.js";
 import { GitHubApiError, GitHubGrantRevoked } from "../src/github-api.js";
-import type { SessionReloader } from "../src/github.js";
+import type { SessionReloader, WorkspaceWriter } from "../src/github.js";
+import type { WorkspaceWriteAnswer, WorkspaceWriteRequest } from "../src/bind-channel.js";
 
 export class FakeGitHubApi implements GitHubApi {
   readonly gitHost = "github.com";
@@ -77,5 +78,23 @@ export class FakeReloader implements SessionReloader {
   async reloadUser(user: string): Promise<{ status: string; reloaded: number }> {
     this.calls.push(user);
     return this.answer;
+  }
+}
+
+/** A stand-in for the daemon's ``workspace.app_write``: records each call and answers ``answer``. */
+export class FakeWorkspaceWriter implements WorkspaceWriter {
+  supported = true;
+  calls: Array<{ user: string; workspace: string; request: WorkspaceWriteRequest }> = [];
+  /** ``null`` = answer as a daemon that wrote everything it was asked to. */
+  answer: WorkspaceWriteAnswer | null = null;
+
+  canWriteWorkspaces(): boolean { return this.supported; }
+
+  async writeWorkspace(user: string, workspace: string, request: WorkspaceWriteRequest): Promise<WorkspaceWriteAnswer> {
+    this.calls.push({ user, workspace, request });
+    if (this.answer) return this.answer;
+    const env: Record<string, string> = {};
+    for (const [k, v] of Object.entries(request.env)) env[k] = v === null ? "removed" : "written";
+    return { status: "ok", env, files: request.files.map((f) => ({ path: f.path, action: f.content === null ? "removed" : "written" })) };
   }
 }

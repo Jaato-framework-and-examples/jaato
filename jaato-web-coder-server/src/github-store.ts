@@ -286,6 +286,11 @@ export class FileGitHubStore {
       .map((b) => ({ workspace: b.workspace, accountId: b.grantId }));
   }
 
+  /** Every recorded binding, for the resync that re-writes their workspace files. */
+  allBindings(): Array<{ user: string; workspace: string; grantId: string }> {
+    return this._bindings.map((b) => ({ user: b.user, workspace: b.workspace, grantId: b.grantId }));
+  }
+
   /** The grant id bound to a workspace for the DAEMON-facing ``user``, or ``null``. */
   bindingFor(user: string, workspace: string): string | null {
     const b = this._bindings.find((x) => x.user === user && x.workspace === workspace);

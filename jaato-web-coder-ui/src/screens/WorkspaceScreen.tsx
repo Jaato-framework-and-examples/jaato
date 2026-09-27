@@ -39,6 +39,17 @@ import { useJaato } from "@/store/store";
 const TH = "px-3.5 py-2 text-left font-medium border-b hairline kicker kicker-muted";
 const TD = "px-3.5 py-2.5 border-b hairline align-middle";
 
+/**
+ * A source line with a break opportunity after each ``/`` and ``@``, so a
+ * long ``owner/repo@branch`` wraps at its own separators instead of widening
+ * the table past its plate (which drew a horizontal scrollbar).  The cell's
+ * ``overflow-wrap: anywhere`` is the fallback for one segment that is still
+ * too long.
+ */
+function breakable(text: string): React.ReactNode[] {
+  return text.split(/(?<=[/@])/).flatMap((part, i) => (i === 0 ? [part] : [<wbr key={i} />, part]));
+}
+
 function when(iso: string | null | undefined): string {
   if (!iso) return "—";
   const d = new Date(iso);
@@ -255,7 +266,11 @@ export function WorkspaceScreen() {
           </Plate>
         )}
 
-        <Plate className="overflow-x-auto">
+        {/* The scroll box is INSIDE the plate: the plate's corner marks sit
+            outside its border box, and on the scrolling element itself they
+            counted as overflow and drew a scrollbar whatever the table's width. */}
+        <Plate>
+          <div className="overflow-x-auto">
           <table className="w-full border-collapse text-sm">
             <thead>
               <tr>
@@ -281,7 +296,7 @@ export function WorkspaceScreen() {
                       <td className={`${TD} align-top`}>
                         {sources.length === 0
                           ? <span className="text-text-muted">— empty</span>
-                          : sources.map((src) => <div key={src.path} className="whitespace-nowrap">{formatSource(src)}</div>)}
+                          : sources.map((src) => <div key={src.path} className="[overflow-wrap:anywhere]">{breakable(formatSource(src))}</div>)}
                       </td>
                       <td className={`${TD} align-top text-text-muted whitespace-nowrap`}>{when(w.last_accessed)}</td>
                       <td className={`${TD} align-top text-right whitespace-nowrap`}>
@@ -313,6 +328,7 @@ export function WorkspaceScreen() {
               })}
             </tbody>
           </table>
+          </div>
         </Plate>
 
         {sourcesRow && <SourcesPlate key={sourcesRow.name} w={sourcesRow} onClose={() => setSourcesOf(null)} />}

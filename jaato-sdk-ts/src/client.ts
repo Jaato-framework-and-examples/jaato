@@ -195,6 +195,15 @@ export const MIN_HISTORY_PAGE_PROTOCOL = "1.28";
 export const MIN_SESSION_FINISH_PROTOCOL = "1.29";
 
 /**
+ * The first protocol whose daemon answers ``workspace.app_write`` (1.30): an
+ * application asking, over its bind channel, for a binding's ``app://``
+ * reference to be written into a workspace it cannot reach itself.  An older
+ * daemon answers the verb with an error frame and never its result, so an
+ * application checks this before sending it.
+ */
+export const MIN_WORKSPACE_APP_WRITE_PROTOCOL = "1.30";
+
+/**
  * Protocol floor for {@link JaatoClient.sendSessionMessage}.  Same rule as
  * {@link MIN_WORKSPACE_IGNORE_PROTOCOL}: an older daemon ignores
  * ``session.message`` silently, and a client that then reported the message
