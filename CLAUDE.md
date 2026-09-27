@@ -8606,6 +8606,73 @@ gated call, so the cancelled call is provably still queued; wire ordering is
 established by a control-lane probe rather than by polling. It fails
 `unknown=1, tripped=0` against the old registration site, deterministically.
 
+### A Command That Ran Twice (#1338)
+
+From 3 September until this fix, almost every `cli_based_tool` call ran its
+command **twice, concurrently**. `ToolExecutor._execute_with_auto_background`
+starts a BackgroundCapable tool as a background task and polls it. The poll
+called `cancel_token.is_cancelled()`, but `CancelToken.is_cancelled` is a
+property, so every poll raised `TypeError`. One `except` covered both the
+start and the wait, read the error as "the background start failed", and ran
+the tool again through `_execute_sync` while the first copy was still running.
+Every session passes a cancel token, so no real call escaped it. The
+auto-background tests never passed one, which is why none of them caught it.
+
+What it cost: every side effect happened twice (`git commit`, `rm`,
+`pip install`, a POST). Clients got both outputs interleaved. And the two
+copies ran in different environments, because the synchronous path dropped
+the workspace HOME (#1339). One copy wrote into the daemon's HOME, and a git
+probe reported two contradictory failures from a single call.
+
+#1339 was a hand-kept list. `_execute` passes `run_command` an `extra_env`
+merged over `os.environ`, and that list named `PATH`, `VIRTUAL_ENV` and
+`PYTHONPATH` only. It predated #1225, so `HOME` and `XDG_*` never reached a
+synchronously run command. `_env_changes` now derives it from the keys the
+builder actually changed. A key the builder scrubbed is absent from the
+built env, so it is never carried back in, and `run_command` scrubs again
+anyway. Guard: `test_both_cli_paths_see_the_workspace_home_1339.py`, two
+reversions, which runs one command through both paths and compares what it
+saw.
+
+| Change | Where |
+|---|---|
+| read the property, not call it | `_wait_for_background_task` |
+| only a failed `start_background` falls back to a synchronous run; a failure after the start is the call's error, with the `task_id`, and the tool is not re-run | `_execute_with_auto_background`, which now delegates the wait to `_await_background_task` |
+
+Guard: `jaato_server/shared/tests/test_a_tool_runs_once_1338.py`, three
+reversions. Every test passes a real `CancelToken`, and one drives the real
+cli plugin and counts the lines its command appends to a file.
+
+### Coreutils a Confined Session Could Not Run (#1342)
+
+On an Ubuntu 26.04 host, every confined session's `cli` failed `ls`, `head`,
+`sleep`, `id` and the rest of coreutils with `Permission denied`, and `which`
+with `cannot open /usr/bin/which`. The session's own agent read this as a
+command-name blocklist. The kernel log showed the real cause:
+
+```
+apparmor="DENIED" operation="exec" profile="…//child" name="/usr/lib/cargo/bin/coreutils/ls"  requested_mask="x"
+apparmor="DENIED" operation="open" profile="…//child" name="/usr/bin/which.debianutils"      requested_mask="r"
+```
+
+- **Rust coreutils.** Ubuntu 25.10+ makes `/usr/bin/<util>` a symlink into
+  `/usr/lib/cargo/bin/coreutils/`. AppArmor checks the resolved path, which
+  `/usr/bin/** ix` does not cover and `/usr/lib/** rm` cannot exec.
+- **Script commands.** A script's interpreter must open it for reading, and
+  no body granted `r` on `/usr/bin/**`.
+
+Template **v38** adds `/usr/lib/cargo/bin/** ix`, and `r` beside the
+existing `ix` on `/usr/bin/**`, `/usr/local/bin/**` and `/bin/**`, in base,
+`tool_hat` and a non-scoping `//child`. The cargo directory holds only what
+PATH already exposes, the reason v36 gave for granting git's helper
+directory and never `/usr/lib/**`. A scoped `//child` is unchanged: its
+fragments must name the resolved target (`/usr/lib/cargo/bin/coreutils/ls`),
+not `/usr/bin/ls`.
+
+Guard: `jaato_server/shared/tests/test_coreutils_run_confined_1342.py`, two
+reversions. Where `apparmor_parser` is installed it also compiles the
+rendered profile. Not verified on an enforcing kernel.
+
 ### A Failure While Reporting a Failure, Discarded (#1077)
 
 The daemon's model thread wound its turn down inside a `finally` holding
@@ -10976,5 +11043,6 @@ This is not optional cleanup — treat missing or inaccurate docstrings as a def
 - [EU AI Act](docs/design/eu-ai-act.md) - What Regulation (EU) 2024/1689 asks of a jaato *application* (the AI system is the profile + persona + tools + model binding; jaato is a component supplier under Art. 25(4), and BUSL-1.1 is not a free and open-source licence, so neither Art. 2(12) nor the 25(4) carve-out applies), which obligations bind when after the Digital Omnibus (Art. 50 disclosure and marking since 2 Aug 2026; Annex III high-risk from 2 Dec 2027), and the mechanisms in order. Every mechanism it names is shipped: the `regulatory:` profile block, the `disclosure` piece and the first-interaction announcement, `generated_by` plus the `TRAIT_OUTPUT_MARKER` hook, one audit-record contract with `record_keeping:` retention and a sha256 chain, the incident register, memory provenance, and the Annex IV dossier generator with its `jaato-eval` accuracy section. What remains is recorded there as a decision rather than a gap. See [EU AI Act Mechanisms](#eu-ai-act-mechanisms).
 - [Per-User GitHub Credentials](docs/design/per-user-github-credentials.md) - Proposed (#1225–#1228): how a multi-user web deployment on a root daemon gives each session its WUI user's GitHub token. The BFF holds the grant (GitHub App, refresh token encrypted per OIDC `sub`) and binds an account per workspace; the workspace `.env` carries only a reference (`GH_TOKEN=app://github`), which the daemon resolves at every spawn by asking the owning application over its bind channel, so cascade, wake and revived sessions get it too and nothing resolved is persisted. Includes the per-workspace `.home/` for model-driven subprocesses.
 - [GitHub Workspace Guidance](docs/design/github-workspace-guidance.md) - Proposed (#1240, docs-only, application-scoped): how the web coder ships the "use `gh` safely in a shared workspace" rule-set into every workspace it binds a GitHub account to, as application-managed files (no daemon change). The BFF writes `.jaato/instructions/40-github.md` at bind time beside the `.env`/`.gitconfig` it already seeds, so cascade/wake/revive sessions get the rules as they get the token; the UI refreshes on session start. Recommends BFF-as-primary-writer, one gitconfig source of commit identity, a force-push permission blacklist (enforced) plus prose (judgement), helper+prose worktree cleanup, and a generic managed-file mechanism GitLab can later reuse.
+- [Web Coder Environment Bootstrap](docs/design/web-coder-environment-bootstrap.md) - Proposed, application-scoped: the web coder, not the framework, bootstraps a workspace's toolchains, language servers and pointers to the repo's own guidance (`AGENTS.md`, `CONTRIBUTING.md`, …). The user binds a toolchain, or accepts a proposal the page raises from clone-time markers or a `not found` exit. The BFF installs it with mise into `<ws>/.home`, where binaries already run under confinement (#1273/#1274, template v38), and writes the results as managed files. Framework-side it asks only for three client-neutral pieces: hide LSP tools when no server can attach, a `get_environment(aspect="runtime")` the model asks for what can run now, and an `AGENTS.md` pointer for a checkout the user opened themselves.
 - [AppArmor Setup](docs/apparmor-setup.md) - Kernel-enforced workspace isolation. WS deployments confine automatically when AppArmor is available; IPC clients opt in via `IPCClient(..., apparmor=True)` (defaults to `False`).
 - [GCP Setup Guide](docs/gcp-setup.md) - Setting up GCP project for Vertex AI

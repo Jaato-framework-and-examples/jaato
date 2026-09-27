@@ -592,7 +592,20 @@ class AppArmorManager:
     #       stays absent from ``//child``.  The notebook plugin also
     #       contributes an ``ix`` grant on the resolved interpreter, so a
     #       fragment-scoped ``//child`` can start the kernel at all.
-    _TEMPLATE_VERSION = 37
+    #   v38 (#1342): Ubuntu 25.10+ ships Rust coreutils. ``/usr/bin/ls``
+    #       is a symlink into ``/usr/lib/cargo/bin/coreutils/``, and
+    #       AppArmor checks the resolved path, which ``/usr/lib/** rm``
+    #       cannot exec, so no coreutils command ran in any confined
+    #       session.  ``/usr/lib/cargo/bin/** ix`` covers them.  Only
+    #       that directory, for the reason v36 gives: these are exactly
+    #       the binaries PATH already exposes as ``/usr/bin/<name>``.
+    #       Script commands in ``/usr/bin`` (``which`` resolves to
+    #       ``which.debianutils``, a shell script) must also be READ by
+    #       their interpreter, so the in-PATH directories also get ``r``.
+    #       These files are world-readable.  Base, ``tool_hat`` and a
+    #       non-scoping ``//child``; a SCOPED ``//child`` is unchanged,
+    #       and its fragments must name the resolved target.
+    _TEMPLATE_VERSION = 38
 
     # AppArmor profile template.  Placeholders are filled per-session by
     # ``_render_profile()``.
@@ -769,10 +782,17 @@ profile jaato-ws-{session_id} flags=({profile_flags}) {{
   /usr/bin/**          ix,
   /usr/local/bin/**    ix,
   /bin/**              ix,
+  # Script commands (v38, #1342): the interpreter must OPEN the script.
+  /usr/bin/**          r,
+  /usr/local/bin/**    r,
+  /bin/**              r,
   # git's own helpers (v36, #1321): git-remote-https & co. live on git's
   # exec path, not on PATH, and ``/usr/lib/**`` below is ``rm`` only.
   /usr/lib/git-core/*      ix,
   /usr/libexec/git-core/*  ix,
+  # Rust coreutils (v38, #1342): on Ubuntu 25.10+ ``/usr/bin/ls`` is a
+  # symlink into this directory, and AppArmor checks the resolved path.
+  /usr/lib/cargo/bin/**    ix,
   /usr/lib/**          rm,
   /lib/**              rm,
   /etc/ld.so.cache     r,
@@ -3000,8 +3020,12 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
     /usr/bin/**          ix,
     /usr/local/bin/**    ix,
     /bin/**              ix,
+    /usr/bin/**          r,
+    /usr/local/bin/**    r,
+    /bin/**              r,
     /usr/lib/git-core/*      ix,
     /usr/libexec/git-core/*  ix,
+    /usr/lib/cargo/bin/**    ix,
     /usr/lib/**          rm,
     /lib/**              rm,
     /etc/ld.so.cache     r,
@@ -3142,8 +3166,12 @@ profile "{sub_profile_name}" flags=(attach_disconnected) {{
                 "    /usr/bin/**          ix,\n"
                 "    /usr/local/bin/**    ix,\n"
                 "    /bin/**              ix,\n"
+                "    /usr/bin/**          r,\n"
+                "    /usr/local/bin/**    r,\n"
+                "    /bin/**              r,\n"
                 "    /usr/lib/git-core/*      ix,\n"
-                "    /usr/libexec/git-core/*  ix,"
+                "    /usr/libexec/git-core/*  ix,\n"
+                "    /usr/lib/cargo/bin/**    ix,"
             )
         else:
             child_system_exec = (

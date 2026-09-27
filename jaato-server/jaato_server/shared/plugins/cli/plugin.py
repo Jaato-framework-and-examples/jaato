@@ -103,6 +103,28 @@ SHELL_METACHAR_PATTERN = re.compile(
 )
 
 
+def _env_changes(env: Dict[str, str]) -> Optional[Dict[str, str]]:
+    """The keys of *env* that differ from ``os.environ``, for ``run_command``.
+
+    ``CLIToolPlugin._build_subprocess_env`` starts from a copy of
+    ``os.environ`` and changes some keys.  ``run_command`` starts from
+    ``os.environ`` again and merges ``extra_env`` on top, so passing exactly
+    the changed keys reproduces the built environment.  A key the builder
+    REMOVED (the secret scrub) is absent here and is removed again by
+    ``run_command``'s own scrub, so no secret is re-added.
+
+    Derived rather than listed: the hand-kept list this replaced predated
+    #1225 and silently dropped ``HOME`` / ``XDG_*`` (#1339).
+
+    Returns:
+        The changed keys, or ``None`` when nothing changed.
+    """
+    return {
+        key: value for key, value in env.items()
+        if os.environ.get(key) != value
+    } or None
+
+
 class CLIToolPlugin(BackgroundCapableMixin, RunnerForwardingMixin):
     """Plugin that provides CLI command execution capability.
 
@@ -1530,19 +1552,16 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
                 )
 
             # run_command starts from os.environ + extra_env and scrubs
-            # itself, so hand it only the keys the environment builder
-            # changes: PATH (extra_paths appended, venv bin prepended — the
-            # SAME value containment just judged) and the venv's
-            # VIRTUAL_ENV / PYTHONPATH.  Everything else it re-derives from
-            # os.environ identically.  Carrying the full env over would
-            # re-add, then re-strip, the scrubbed keys for nothing.
+            # itself, so hand it exactly the keys the environment builder
+            # CHANGED: PATH (the SAME value containment just judged), the
+            # venv's VIRTUAL_ENV / PYTHONPATH, the workspace HOME + XDG_*
+            # (#1225), and whatever the builder sets next.  Everything else
+            # it re-derives from os.environ identically.  Derived, never
+            # listed: a hand-kept list predated #1225 and silently dropped
+            # HOME, so this path ran with the daemon's HOME (#1339).
             if venv_path:
                 ensure_workspace_venv(venv_path)
-            extra_env: Optional[Dict[str, str]] = {
-                key: env[key]
-                for key in ('PATH', 'VIRTUAL_ENV', 'PYTHONPATH')
-                if key in env
-            } or None
+            extra_env = _env_changes(env)
 
             # Resolve streaming callback
             effective_callback = self._get_effective_output_callback()
