@@ -2510,6 +2510,50 @@ handed. Not covered: the flat isolated sub-runner profile, and where a
 walker-generated cache-tier fragment came from (jaato sees only the file).
 Guard: `jaato_server/shared/tests/test_diagnostics_show_apparmor_grants_1326.py`.
 
+### A Refusal That Named Its Cause (#1348)
+
+A command the `//child` profile refused printed `Permission denied`, the
+same words a missing mode bit prints. The model retried, tried another
+path to the same file, or decided the file was broken; only
+`journalctl -k` said which profile refused what. The grant record #1326
+keeps daemon-side is enough to tell the two apart, so the runner now gets
+a copy.
+
+| Piece | Where |
+|---|---|
+| the rules | `_record_grants` keeps `child_rules`, the rule lines of the rendered `//child` body. `recorded_grants` drops them, so the diagnostics wire does not grow |
+| the wire | `SessionInitEnvelope.confinement_grants` (`{profile_name, exec_scope, rules}`, from `apparmor.envelope_grants`). Additive, no version bump; `None` when unconfined or when no record exists (a daemon restart) |
+| the runner | `_install_confinement_grants` at bootstrap, for every session, so a pool slot never judges one session by another's grants. An empty `profile_name` installs none |
+| the matcher | `jaato_server/shared/confinement_grants.py`, stdlib-only: AppArmor globs (`*`, `**`, `?`, `[...]`, `{a,b}`; a variable such as `@{HOME}` matches anything, which can only withhold a hint) and a three-way verdict (granted, not granted, unknown) |
+| the hint | `cli`'s `_with_denial_hint`, wrapped around both paths (`_execute_sync`, `_execute_streaming_run`): `denial_hint` on the result, naming the profile and the resolved path |
+
+A hint needs positive evidence, and every rule has a reversion:
+
+- the command ran in `//child` (the child transition is installed) and
+  the session has a record;
+- the failure's own words name the path: a shell's line (`bash: line 1:
+  X: Permission denied`, `sh: 1: X: ...`), an exec errno, or an
+  interpreter that could not open its script. `cat: X: Permission denied`
+  is a program reading data and is never judged;
+- the name resolves, through the PATH the command ran with and
+  `realpath`, to a file (the #1342 shape: `/usr/bin/ls` is named by
+  what it links to);
+- `os.access` allows it, so the cause is not a mode bit;
+- the rules do not grant it, or deny it outright. A rule the matcher
+  cannot read, or a matching `owner deny`, makes the verdict unknown.
+
+A read is judged only in the script case: the profile lets the session
+exec the file but not read it. Reference selections add read grants after
+provisioning and are not in the record, so a path the registry says a
+reference authorized is never judged, and nothing is judged where the
+registry cannot be asked. The `cli` tool description now tells the model
+that a `denial_hint` means do not retry or route around it.
+
+Not covered: `interactive_shell` and `notebook` (follow-ups), and nothing
+here was run against an enforcing kernel. Guard:
+`jaato_server/shared/tests/test_a_refused_command_names_its_cause_1348.py`,
+ten reversions.
+
 ### Binary Media Chunks (delivery)
 
 Binary content (audio, images, PDFs) moves in three directions, and they are

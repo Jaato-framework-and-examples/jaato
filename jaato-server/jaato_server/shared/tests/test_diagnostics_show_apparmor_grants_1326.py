@@ -52,7 +52,8 @@ REVERSIONS = [
         target=_AA,
         find=(
             "        self._record_grants(session_id, render_id, profile_name,\n"
-            "                            requested_fragments, plugin_rules, composition)\n"
+            "                            requested_fragments, plugin_rules, composition,\n"
+            "                            profile_content)\n"
         ),
         replace="",
         test="test_provisioning_records_what_the_profile_grants",

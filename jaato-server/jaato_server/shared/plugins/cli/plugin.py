@@ -39,6 +39,7 @@ from jaato_server.shared.cli_path_policy import (
     precheck_cli_args,
 )
 from jaato_server.shared.trace import trace as _trace_write
+from jaato_server.shared.confinement_grants import explain_denial
 from jaato_server.shared.command_analysis import UnanalyzableCommand, analyze_command
 from ..command_containment import (
     EXEC_MODE,
@@ -724,7 +725,7 @@ Use the returned stdout_offset for subsequent calls to get only new output.
 ERROR HANDLING:
 - A non-zero returncode indicates the command failed - always check stderr for details
 - "File exists" or "Directory exists" errors mean the goal is already achieved - consider the step successful and continue
-- "Permission denied" - try an alternative approach (different path, sudo if appropriate) or report as a blocker
+- "Permission denied" - if the result carries a denial_hint, the session's AppArmor profile refused it: do not retry or route around it, report what was refused. Otherwise try an alternative approach (different path, sudo if appropriate) or report as a blocker
 - "Command not found" - check if the required tool is installed, or try an alternative command
 - "No such file or directory" - the path genuinely does not exist (the sandbox never reports a refusal this way) - verify the path before operating on it
 - "cli containment (workspace boundary): ..." - the SANDBOX refused the command before anything ran; the path was not checked and may well exist. Do not conclude a file or binary is missing. Work inside the workspace, run programs by bare name (an absolute path is accepted only when its directory is on PATH), and if a directory outside the workspace is genuinely needed, report that the operator must add it to plugin_configs.cli.extra_paths (binaries) or grant the path with `sandbox add` (files)
@@ -850,6 +851,23 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
         return None
 
     def _execute_streaming(
+        self,
+        args: Dict[str, Any],
+        on_stdout: Callable[[bytes], None],
+        on_stderr: Callable[[bytes], None],
+        on_returncode: Callable[[int], None]
+    ) -> Dict[str, Any]:
+        """Run :meth:`_execute_streaming_run` and explain an AppArmor refusal (#1348).
+
+        The streamed stderr is unchanged; ``denial_hint`` is added to the
+        final result only.  See :meth:`_with_denial_hint`.
+        """
+        return self._with_denial_hint(
+            self._execute_streaming_run(args, on_stdout, on_stderr, on_returncode),
+            args,
+        )
+
+    def _execute_streaming_run(
         self,
         args: Dict[str, Any],
         on_stdout: Callable[[bytes], None],
@@ -1485,6 +1503,53 @@ IMPORTANT: Large outputs are truncated to prevent context overflow. To avoid tru
     # --- End path sandboxing implementation ---
 
     def _execute(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Run :meth:`_execute_sync` and explain an AppArmor refusal (#1348).
+
+        See :meth:`_with_denial_hint`.
+        """
+        return self._with_denial_hint(self._execute_sync(args), args)
+
+    def _with_denial_hint(
+        self, result: Dict[str, Any], args: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Add ``denial_hint`` when the session's AppArmor profile refused the command (#1348).
+
+        ``Permission denied`` reads the same whether a mode bit or the
+        kernel's profile refused it, and only the kernel log says which.
+        The runner holds what the session's ``//child`` profile grants
+        (``confinement_grants``, from the session envelope), so a failure
+        whose own words name a path is checked against it; see
+        :func:`~jaato_server.shared.confinement_grants.explain_denial` for
+        the rules, all of which need positive evidence.
+
+        Only a command that ran in ``//child`` is judged: without the
+        child-profile transition no profile refused it.  The PATH is the
+        one the command ran with (:meth:`_build_subprocess_env`, which
+        creates nothing).  The result is otherwise untouched.
+        """
+        if self._apparmor_child_transition is None or not isinstance(result, dict):
+            return result
+        returncode = result.get('returncode')
+        output = f"{result.get('stderr') or ''}\n{result.get('error') or ''}"
+        if "Permission denied" not in output and returncode != 126:
+            return result
+        registry = self._plugin_registry
+        hint = explain_denial(
+            command=str(args.get('command') or ''),
+            output=output,
+            returncode=returncode,
+            search_path=self._build_subprocess_env()[0].get('PATH'),
+            cwd=self._workspace_root,
+            maybe_authorized=(
+                None if registry is None
+                else (lambda path: registry.is_path_authorized(path, "read"))
+            ),
+        )
+        if hint:
+            result['denial_hint'] = hint
+        return result
+
+    def _execute_sync(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute a CLI command in-process.
 
         Exactly one of the following forms should be provided:
