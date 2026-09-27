@@ -267,6 +267,22 @@ def isolated_session_context():
         yield
 
 
+@pytest.fixture(autouse=True)
+def isolated_secret_redactor():
+    """Keep one test's installed secret redactor out of the next one (#1215).
+
+    ``bootstrap_session`` installs a process-wide value redactor built from
+    the envelope's ``session_env``, and dozens of runner tests bootstrap with
+    fixture envelopes.  Without a reset, a later test in the same worker
+    would see its output rewritten because of a value another test declared.
+    """
+    from jaato_server.shared.secret_redaction import reset_redaction_sources
+
+    reset_redaction_sources()
+    yield
+    reset_redaction_sources()
+
+
 @pytest.fixture(scope="session")
 def real_home() -> Path:
     """The home directory of whoever is running the suite.

@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 from jaato_server.shared.trace import trace as _trace_write
 from jaato_server.shared.token_accounting import TokenLedger
+from jaato_server.shared.secret_redaction import current_redactor
 from jaato_sdk.plugins.base import OutputCallback
 from jaato_sdk.plugins.model_provider.types import (
     CancelledException,
@@ -1490,6 +1491,13 @@ class ToolExecutor:
         # transform) what the tool returned before it reaches the
         # session's history-append path or its caller.
         result = self._apply_result_transformers(name, result)
+
+        # #1215: replace any credential value this process holds (a key a
+        # command printed out of ``.env``, say) with its marker.  This is
+        # the result that enters history, so the model, every later request
+        # and the provider trace see the marker.  An empty redactor -- every
+        # process but a runner -- returns the result unchanged.
+        result = current_redactor().redact(result)
 
         # Compute event-counter deltas and inject into result's
         # ``_telemetry`` dict.  The session's tool span already

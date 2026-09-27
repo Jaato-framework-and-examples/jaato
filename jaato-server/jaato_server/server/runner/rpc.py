@@ -78,6 +78,8 @@ from jaato_sdk.plugins.model_provider.types import (
     DISCOVERABILITY_DEFERRED,
 )
 
+from jaato_server.shared.secret_redaction import StreamCarry, current_redactor
+
 from .json_codec import dumps as _json_dumps, frame_size, loads as _json_loads
 
 from .envelope import (
@@ -406,6 +408,13 @@ class RunnerRPC:
         }
         self._closed = False
 
+        # #1215: per-stream carry-over for the value redactor, so a
+        # credential split across two output chunks is still caught.  Keys
+        # are ``("stream", request_id, source)`` for stream frames and
+        # ``("tool", request_id, agent_id, call_id)`` for ``tool_output``
+        # notifications; see :meth:`_release_held`.
+        self._carry = StreamCarry()
+
         # Phase 3 §3.2: runner → daemon outgoing-call bookkeeping.
         # ``_outgoing_calls`` is keyed by request-id and holds a
         # ``concurrent.futures.Future`` (NOT asyncio.Future — the
@@ -560,6 +569,13 @@ class RunnerRPC:
             ``True`` when the frame reached the socket, ``False`` when
             it was dropped (oversized) or the peer is gone.
         """
+        # #1215: every frame the daemon fans out -- to clients, the session
+        # record, its traces and telemetry -- passes here, so credential
+        # values are replaced here.  Requests are the runner asking the
+        # daemon to run a forwarded tool; their results come back through
+        # ``ToolExecutor.execute``, which redacts them.
+        if payload.get("kind") != KIND_REQUEST:
+            payload = current_redactor().redact(payload)
         encoded = _json_dumps(payload)
         size = frame_size(encoded)
         if size > MAX_MESSAGE_SIZE:
@@ -609,6 +625,11 @@ class RunnerRPC:
         drop is already logged at ERROR by :meth:`_write` with the call id,
         which is where an operator looks for it.
         """
+        redactor = current_redactor()
+        if redactor.active:
+            text = self._carry_stream_text(redactor, request_id, source, text, mode)
+            if text is None:
+                return
         frame = StreamFrame(
             id=request_id,
             source=source,
@@ -617,6 +638,83 @@ class RunnerRPC:
             channel=STREAM_CHANNEL_DISPLAY,
         )
         self._write(frame.to_dict())
+
+    def _carry_stream_text(
+        self, redactor: Any, request_id: int, source: str, text: str,
+        mode: Optional[str],
+    ) -> Optional[str]:
+        """Redact one stream chunk through the carry-over (#1215).
+
+        Model output streams token by token, so a credential the model
+        echoes arrives split across many chunks: the tail that could still
+        be the start of one is held back until the next chunk decides.  A
+        chunk that is not an ``append`` starts a new block (``write``) or
+        flushes the pipeline (``flush``), so what the earlier block held is
+        released FIRST, as its own ``append``, and never joined to text it
+        does not belong to.
+
+        Returns:
+            The text to emit, or ``None`` when an ``append`` chunk was held
+            back entirely (nothing to emit yet).
+        """
+        key = ("stream", request_id, source)
+        if mode == "flush":
+            self._release_held(request_id, lambda k: True)
+        elif mode not in (None, "append"):
+            self._release_held(request_id, lambda k: k == key)
+        out = self._carry.feed(redactor, key, text or "")
+        if not out and mode in (None, "append"):
+            return None
+        return out
+
+    def _release_held(self, request_id: int, predicate: Callable[[Any], bool]) -> None:
+        """Emit what the carry-over is holding for *request_id* (#1215).
+
+        Called when a stream ends: before the call's response, when a
+        stream frame starts a new block, and before a ``tool_call_end``.
+        Held text is by construction not a complete credential, so it is
+        written as-is (``_write`` still redacts the frame).
+        """
+        released = self._carry.flush_where(
+            lambda k: k[1] == request_id and predicate(k),
+        )
+        for key, held in released:
+            if key[0] == "stream":
+                frame = StreamFrame(
+                    id=request_id, source=key[2], text=held, mode="append",
+                    channel=STREAM_CHANNEL_DISPLAY,
+                )
+            else:
+                frame = NotificationFrame(
+                    id=request_id, event_type=self._NOTIF_TOOL_OUTPUT,
+                    payload={"agent_id": key[2], "call_id": key[3], "chunk": held},
+                )
+            self._write(frame.to_dict())
+
+    def _carry_notification(
+        self, redactor: Any, request_id: int, event_type: str,
+        payload: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """Route a ``tool_output`` text chunk through the carry-over (#1215).
+
+        A command's output is read in buffers, so a printed credential can
+        straddle two chunks.  Media chunks (``data_b64``) are never held.  A
+        ``tool_call_end`` releases what its call was holding first, so the
+        tail reaches the tool row before the row closes.
+
+        Returns:
+            The payload to emit, or ``None`` when the whole chunk was held.
+        """
+        call = ("tool", request_id, payload.get("agent_id", ""), payload.get("call_id", ""))
+        if event_type == self._NOTIF_TOOL_CALL_END:
+            self._release_held(request_id, lambda k: k[0] == "tool" and k[3] == call[3])
+            return payload
+        if event_type != self._NOTIF_TOOL_OUTPUT or payload.get("data_b64"):
+            return payload
+        chunk = self._carry.feed(redactor, call, str(payload.get("chunk") or ""))
+        if not chunk:
+            return None
+        return {**payload, "chunk": chunk}
 
     def emit_notification(
         self,
@@ -652,10 +750,16 @@ class RunnerRPC:
             payload: Event-type-specific dict.  Defaults to empty
                 dict for parameter-less notifications.
         """
+        body = dict(payload or {})
+        redactor = current_redactor()
+        if redactor.active:
+            body = self._carry_notification(redactor, request_id, event_type, body)
+            if body is None:
+                return
         frame = NotificationFrame(
             id=request_id,
             event_type=event_type,
-            payload=dict(payload or {}),
+            payload=body,
         )
         self._write(frame.to_dict())
 
@@ -681,6 +785,9 @@ class RunnerRPC:
         # forwarder).  Post-seat-flip cleanup will retire the
         # re-injection once consumers read ``envelope.telemetry``
         # directly.
+        # #1215: a stream held back by the redactor's carry-over ends with
+        # its call; release it before the response closes the call.
+        self._release_held(request_id, lambda k: True)
         telemetry: Dict[str, Any] = {}
         if isinstance(result, dict) and "_telemetry" in result:
             lifted = result.pop("_telemetry")
@@ -1960,6 +2067,7 @@ class RunnerRPC:
             with ``stage`` in ``no_host`` / ``no_session`` / ``busy`` /
             ``provider`` otherwise.
         """
+        from jaato_server.shared.secret_redaction import configure_redaction_sources
         from jaato_server.shared.session_envelope import env_name_list
 
         from .session import apply_session_env
@@ -1985,6 +2093,10 @@ class RunnerRPC:
             session._session_env = dict(applied)
         except Exception:  # noqa: BLE001 -- best-effort attribute set
             logger.debug("session.reload_env: could not attach _session_env")
+        # #1215: the redactor describes this env and is replaced with it.
+        # Rebuilt BEFORE the provider, so a credential the reload supplied
+        # is redacted even if the provider then fails to rebuild.
+        configure_redaction_sources(applied)
         try:
             info = session.reload_provider()
         except Exception as exc:  # noqa: BLE001 -- reported, not raised

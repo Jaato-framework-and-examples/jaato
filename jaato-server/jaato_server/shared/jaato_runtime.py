@@ -1646,6 +1646,13 @@ class JaatoRuntime:
         provider.connect(model, skip_model_test=skip_model_test)
         connect_ms = (time.perf_counter() - t1) * 1000
 
+        # #1215: whatever credential this provider resolved is a value the
+        # runner must redact from output.  No-op outside a runner.
+        from .secret_redaction import note_provider_credential
+        note_provider_credential(
+            provider, effective_provider, getattr(config, "api_key", None),
+        )
+
         total_ms = load_ms + connect_ms
         if total_ms > 10.0:
             logger.debug(

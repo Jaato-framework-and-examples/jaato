@@ -701,6 +701,40 @@ def apply_session_env(
     return applied
 
 
+def _configure_output_redaction(
+    envelope: SessionInitEnvelope, session_env: Dict[str, str],
+) -> None:
+    """Install the value redactor for this session (#1215).
+
+    Records the sources -- the resolved session env, ``plugin_configs``
+    (per-surface ``scrub_secret_env`` and literal provider keys), the
+    provider name and the directories a stored ``<provider>_auth.json``
+    lives in -- and installs the redactor built from them.  The
+    ``session.reload_env`` handler rebuilds it through the same module;
+    a provider created later adds its credential through
+    ``JaatoRuntime.create_provider``.  See
+    :mod:`jaato_server.shared.secret_redaction`.
+
+    Never raises: a session whose redactor could not be built is logged
+    at ERROR and keeps the previous one, rather than failing bootstrap.
+    """
+    from jaato_server.shared.secret_redaction import configure_redaction_sources
+
+    try:
+        configure_redaction_sources(
+            session_env,
+            plugin_configs=dict(envelope.plugin_configs or {}),
+            provider_name=envelope.provider_name,
+            workspace_path=envelope.workspace_path,
+            config_root=envelope.config_root,
+        )
+    except Exception:  # noqa: BLE001 -- boundary, reported
+        logger.exception(
+            "runner-session bootstrap: secret redactor could not be built; "
+            "credentials printed by tools will NOT be redacted (#1215)",
+        )
+
+
 def _pin_session_tmpdir(envelope: SessionInitEnvelope) -> None:
     """Point this runner's temp files at the directory its profile grants.
 
@@ -1341,6 +1375,9 @@ def bootstrap_session(
     # ``shared/session_envelope.py:SessionInitEnvelope.session_env``
     # docstring for the full security contract.
     resolved_session_env: Dict[str, str] = _apply_envelope_session_env(envelope)
+    # #1215: build the output redactor from the same env, before any
+    # plugin runs a tool that could print a value out of it.
+    _configure_output_redaction(envelope, resolved_session_env)
     if resolved_session_env:
         logger.info(
             "runner-session bootstrap: applied %d session env keys "
